@@ -8,6 +8,10 @@
 //   HEADER: <file>   commits the file through a commit object with an extra header holding that
 //                    token (git hash-object), and moves HEAD to it
 //   SLOW: <file>     waits 3 seconds, then commits the file
+//   FOLDER           commits hello.txt in a folder named `<that token> b/y`, which git's
+//                    `diff --git a/… b/…` header can't be split back into
+//   ORPHAN           merges in an unrelated history whose only (root) commit adds root.txt with
+//                    the made-up AWS key id in it
 //   the publish gate's fix prompt ("secret scan blocked publishing … commit <sha>"): takes the key
 //                    out with `git commit --fixup=<sha>`, autosquashes onto the base the prompt
 //                    names, and ends the turn with what it was told
@@ -45,6 +49,8 @@ rl.on("line", (line) => {
   const author = prompt.match(/AUTHOR: (\S+)/);
   const header = prompt.match(/HEADER: (\S+)/);
   const slow = prompt.match(/SLOW: (\S+)/);
+  const folder = prompt.includes("FOLDER");
+  const orphan = prompt.includes("ORPHAN");
   try {
     if (fix) {
       const file = git("show", "--name-only", "--format=", fix[1]).trim().split("\n")[0];
@@ -75,6 +81,21 @@ rl.on("line", (line) => {
       git("update-ref", "--no-deref", "HEAD", commit);
       git("reset", "-q");
       result(`Added ${header[1]}.`);
+    } else if (folder) {
+      const dir = `${MADE_UP} b/y`;
+      execFileSync("mkdir", ["-p", dir]);
+      writeFileSync(`${dir}/hello.txt`, "hello\n");
+      git("add", "--", `${dir}/hello.txt`);
+      git("commit", "-q", "-m", "Add hello.txt");
+      result("Added hello.txt.");
+    } else if (orphan) {
+      writeFileSync(".obi-root", `aws_key_id ${KEY}\n`);
+      const blob = git("hash-object", "-w", ".obi-root").trim();
+      execFileSync("rm", [".obi-root"]);
+      const tree = execFileSync("git", ["mktree"], { input: `100644 blob ${blob}\troot.txt\n`, encoding: "utf8" }).trim();
+      const root = git("commit-tree", tree, "-m", "Root").trim();
+      git("merge", "-q", "--no-edit", "--allow-unrelated-histories", root);
+      result("Merged the root in.");
     } else if (slow) {
       setTimeout(() => {
         writeFileSync(slow[1], "hello\n");

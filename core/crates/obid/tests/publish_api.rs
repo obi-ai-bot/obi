@@ -697,3 +697,169 @@ fn a_base_that_cant_be_fetched_sends_nothing() {
     assert_eq!(job["outgoing"], json!([]));
     assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
 }
+
+/// The made-up GitHub token the stand-in agent uses (`AUTHOR:`, `HEADER:`, `FOLDER`), put together
+/// here so this file holds none.
+fn made_up_token() -> String {
+    ["gh", "p_", "Zq8LmN2pR4sT6uV8wX0yA1bC3dE5fG7hJ9kM"].concat()
+}
+
+/// A token in a folder's name is found, however git writes the name in a diff's header (here one
+/// holding " b/", which the header can't be split back into), and it is never repeated: not in
+/// the job, its summary, the API, or obid's log.
+#[test]
+fn a_token_in_a_folders_name_is_found_and_never_repeated() {
+    let folder = Folder::new("publish-folder");
+    let bin = fake_gh(&folder.0);
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "FOLDER"}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
+    let summary = job["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("Not published: possible secret in a file whose name obid won't show"),
+        "{summary}"
+    );
+    assert!(summary.contains("GitHub token in a name"), "{summary}");
+    let token = made_up_token();
+    let api = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).text;
+    assert!(!api.contains(&token), "{api}");
+    assert!(!obid.log().contains(&token), "{}", obid.log());
+    assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
+}
+
+/// The owner's own git configuration can't narrow the scan: with `log.showRoot = false` in the
+/// global configuration of obid's `HOME`, a root commit merged in from an unrelated history still
+/// has its files read.
+#[test]
+fn the_owners_git_configuration_cant_hide_a_root_commit() {
+    let folder = Folder::new("publish-showroot");
+    let bin = fake_gh(&folder.0);
+    std::fs::create_dir_all(folder.0.join("env-home")).unwrap();
+    std::fs::write(
+        folder.0.join("env-home/.gitconfig"),
+        "[log]\n\tshowRoot = false\n",
+    )
+    .unwrap();
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "ORPHAN"}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
+    let summary = job["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("Not published: possible secret in root.txt:1 (AWS access key"),
+        "{summary}"
+    );
+    assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
+}
+
+/// Publishing by hand publishes the run that was approved: the sentence names the branch, not its
+/// commits, so a job that ran again after obid gave its sentence is refused, and the owner asks
+/// again. While a hand publish runs, the job can't be dismissed.
+#[test]
+fn a_hand_publish_is_for_the_run_that_was_approved() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = Folder::new("publish-run");
+    let bin = fake_gh(&folder.0);
+    let broken = folder.0.join("broken");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/bin-broken-gitleaks/gitleaks"),
+        broken.join("gitleaks"),
+    )
+    .unwrap();
+    std::fs::copy(bin.join("gh"), broken.join("gh")).unwrap();
+    let (mut obid, remote, config) = obid_with(&folder, &broken);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "COMMIT: hello.txt"}),
+    );
+    assert!(ended(&obid, &id)["publishError"].is_string());
+    std::fs::write(obid.home.join("pairing"), "").unwrap();
+    let (key, public) = device(9);
+    let device_id = call(
+        &obid,
+        "POST",
+        "/v1/devices",
+        Some(&json!({"name": "Test iPhone", "publicKey": public})),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sentence = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None).body["action"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The job runs again, and its own publish fails again: the same sentence, other commits.
+    let told = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "COMMIT: second.txt"})),
+    );
+    assert_eq!(told.status, 200, "{}", told.text);
+    let again = ended(&obid, &id);
+    assert_eq!(again["commits"], 2);
+    let now = obi_protocol::time::now();
+    let stale = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/publish"),
+        Some(&approval(&key, &device_id, &id, &sentence, now)),
+    );
+    assert_eq!(stale.status, 409, "{}", stale.text);
+    assert_eq!(
+        stale.body["error"],
+        "The job ran again since it was approved. Approve it again."
+    );
+    assert_eq!(remote_branch(&remote, &format!("oby/fix-{id}")), None);
+
+    // A gitleaks that takes its time holds the hand publish open: no dismissing it meanwhile.
+    obid.stop();
+    std::fs::write(bin.join("gitleaks"), "#!/bin/sh\nsleep 2\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("gitleaks"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let obid = start(&folder.0, &config, Some(&bin));
+    let offered = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None);
+    assert_eq!(offered.body["action"], sentence.as_str());
+    let good = approval(
+        &key,
+        &device_id,
+        &id,
+        &sentence,
+        obi_protocol::time::now() + 1,
+    );
+    std::thread::scope(|scope| {
+        let publishing = scope.spawn(|| {
+            call(
+                &obid,
+                "POST",
+                &format!("/v1/jobs/{id}/publish"),
+                Some(&good),
+            )
+        });
+        within(30, "the hand publish is under way", || {
+            let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+            (job["publishStep"] == "scan").then_some(())
+        });
+        let dismissed = call(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None);
+        assert_eq!(dismissed.status, 409, "{}", dismissed.text);
+        assert!(
+            dismissed.body["error"]
+                .as_str()
+                .unwrap()
+                .contains("publishing")
+        );
+        let published = publishing.join().unwrap();
+        assert_eq!(published.status, 200, "{}", published.text);
+    });
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["dismissed"], Value::Null);
+    assert_eq!(job["pushed"], 2);
+}

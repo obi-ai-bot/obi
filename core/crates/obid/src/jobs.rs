@@ -156,6 +156,9 @@ struct State {
     apple_logs: HashMap<String, String>,
     /// The jobs publishing now: one publish at a time per job.
     publishing: std::collections::HashSet<String>,
+    /// For each job obid last said what publishing it by hand would do (`GET …/publish`): when
+    /// its last run had ended then. A job that ended another run since was approved unseen.
+    offered: HashMap<String, Option<i64>>,
     /// When obid last tried to read each published pull request, and which one: an unavailable
     /// GitHub isn't asked again on every pass.
     followed: HashMap<String, (String, i64)>,
@@ -230,6 +233,7 @@ impl Jobs {
                 asks: HashMap::new(),
                 apple_logs: HashMap::new(),
                 publishing: std::collections::HashSet::new(),
+                offered: HashMap::new(),
                 followed: HashMap::new(),
             }),
             changed: Notify::new(),
@@ -1765,18 +1769,34 @@ impl Jobs {
     }
 
     /// Lets go of a job that needs the owner. `Err` when it doesn't need them.
+    /// Checked and changed under one lock: a job being published by hand isn't dismissed.
     pub fn dismiss(&self, id: &str) -> Option<Result<Job, Refused>> {
-        let job = self.get(id)?;
-        if job.dismissed.is_some() {
-            return Some(Ok(job));
+        let dismissed = {
+            let mut state = self.lock();
+            let publishing = state.publishing.contains(id);
+            let job = state.jobs.get_mut(id)?;
+            if job.dismissed.is_some() {
+                return Some(Ok(job.clone()));
+            }
+            if publishing {
+                return Some(Err(Refused(
+                    "obid is publishing it: there's nothing to dismiss until that's done.".into(),
+                )));
+            }
+            if !job.needs_you() {
+                return Some(Err(Refused(
+                    "This job doesn't need you: there's nothing to dismiss.".into(),
+                )));
+            }
+            job.dismissed = Some(obi_protocol::time::now());
+            job.clone()
+        };
+        if let Err(e) = self.store.save(&dismissed) {
+            tracing::error!("can't keep job {id}: {e}");
         }
-        if !job.needs_you() {
-            return Some(Err(Refused(
-                "This job doesn't need you: there's nothing to dismiss.".into(),
-            )));
-        }
-        self.update(id, |job| job.dismissed = Some(obi_protocol::time::now()))
-            .map(Ok)
+        self.events.send("job", dismissed.to_json());
+        self.changed.notify_waiters();
+        Some(Ok(dismissed))
     }
 
     /// The job once it has ended (done, failed, stopped or interrupted), or `None` for one obid
@@ -3221,22 +3241,45 @@ impl Jobs {
         Some(publish_action_of(&self.get(id)?))
     }
 
+    /// [`Jobs::publish_action`], said to a device that will ask its owner to approve it: obid
+    /// remembers which run of the job it described.
+    pub fn offer_publish(&self, id: &str) -> Option<Result<(String, String), String>> {
+        let mut state = self.lock();
+        let job = state.jobs.get(id)?.clone();
+        let answer = publish_action_of(&job);
+        if answer.is_ok() {
+            state.offered.insert(id.to_owned(), job.finished);
+        }
+        Some(answer)
+    }
+
     /// The approvals devices give to publish by hand.
     pub fn approvals(&self) -> &crate::approval::Approvals {
         &self.approvals
     }
 
-    /// Publishes the job `id` by hand, once a device approved `action`: only when that is still
-    /// obid's own sentence for it. Answers the pull request's URL, or the line saying why not.
-    /// Never a merge.
+    /// Publishes the job `id` by hand, once a device approved `action` at `signed_at`: only when
+    /// that is still obid's own sentence for it, and the job ended no run since the device signed
+    /// it or since obid last described it (the sentence names the branch, not its commits).
+    /// Answers the pull request's URL, or the line saying why not. Never a merge.
     pub async fn publish_by_hand(
         self: &Arc<Self>,
         id: &str,
         action: &str,
+        signed_at: i64,
     ) -> Result<String, String> {
         use crate::publish::Failure;
-        // Still obid's own sentence for it, checked as it's claimed for publishing.
+        let offered = self.lock().offered.get(id).copied();
+        // Still obid's own sentence for the run that was approved, checked as it's claimed.
         let may = |job: &Job| match publish_action_of(job) {
+            Ok(_)
+                if job.finished.is_some_and(|ended| ended > signed_at)
+                    || offered.is_some_and(|seen| seen != job.finished) =>
+            {
+                Err(Failure::Refused(
+                    "The job ran again since it was approved. Approve it again.".into(),
+                ))
+            }
             Ok((now, _)) if now == action => Ok(()),
             Ok(_) => Err(Failure::Refused(
                 "The job changed since it was approved. Approve it again.".into(),

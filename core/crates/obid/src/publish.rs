@@ -124,9 +124,9 @@ impl Found {
 
 impl Found {
     /// The agent can rewrite what holds it with a fixup round: a file or a commit's message, not
-    /// who the commit says made it.
+    /// who the commit says made it, nor a file obid won't name.
     pub fn fixable(&self) -> bool {
-        self.file != "commit author"
+        self.file != "commit author" && self.file != scan::HIDDEN_NAME
     }
 }
 
@@ -457,24 +457,51 @@ const DIFF: &[&str] = &[
 async fn git_in(clone: &Path, args: &[&str]) -> Result<String, String> {
     let mut all = vec!["--no-replace-objects", "-c", "core.quotePath=false"];
     all.extend_from_slice(args);
-    git::git(clone, &all).await.map_err(|e| e.0)
+    let all: Vec<&std::ffi::OsStr> = all.iter().map(std::ffi::OsStr::new).collect();
+    git::run(clone, &all, SCAN_ENV).await.map_err(|e| e.0)
 }
+
+/// What the scan's git reads with: only obid's clone's own configuration, never the system's or
+/// the person's (a `log.showRoot = false` there would hide a root commit's files from the scan).
+const SCAN_ENV: &[(&str, &str)] = &[
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+];
 
 /// The `-c` settings that let a push or `ls-remote` to an `https` remote sign in with the owner's
 /// `gh` (its own login; git hears the credential on a pipe, never in an argument).
-fn credentials(remote: &str, gh: Option<&Path>) -> Vec<String> {
+fn credentials(remote: &str, gh: Option<&Path>, unset: &[String]) -> Vec<String> {
+    let quote = |text: &str| format!("'{}'", text.replace('\'', r"'\''"));
     let mut args = vec!["-c".to_owned(), "credential.helper=".to_owned()];
     if remote.starts_with("https://")
         && let Some(gh) = gh
     {
-        let quoted = gh.to_string_lossy().replace('\'', r"'\''");
+        // As `crate::github` runs it: with none of the variables obid keeps from agents and from
+        // gh (`GH_TOKEN`, `GITHUB_TOKEN`, …), always those two, and the others obid has.
+        let unset: String = unset
+            .iter()
+            .map(|name| format!(" -u {}", quote(name)))
+            .collect();
         args.push("-c".into());
-        // As `crate::github` runs it: with no token from obid's environment.
         args.push(format!(
-            "credential.helper=!env -u GH_TOKEN -u GITHUB_TOKEN '{quoted}' auth git-credential"
+            "credential.helper=!env{unset} {} auth git-credential",
+            quote(&gh.to_string_lossy())
         ));
     }
     args
+}
+
+/// The variables in obid's environment that never reach gh (`crate::process::is_forbidden`),
+/// `GH_TOKEN` and `GITHUB_TOKEN` always among them: names only, never their values.
+fn forbidden_names() -> Vec<String> {
+    let mut names = vec!["GH_TOKEN".to_owned(), "GITHUB_TOKEN".to_owned()];
+    for (name, _) in std::env::vars_os() {
+        let name = name.to_string_lossy().into_owned();
+        if crate::process::is_forbidden(&name) && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// Publishes `job` from `target`: the gate, then the push of one pinned commit, then the pull
@@ -718,19 +745,62 @@ async fn scan_changes(
     scratch: &Path,
 ) -> Result<Vec<Found>, Failure> {
     let range = format!("{since}..{head}");
+    let unreadable = |e: String| {
+        Failure::Failed(format!(
+            "Not published: the secret scan couldn't read the changes ({e})."
+        ))
+    };
+    // The names first: a finding anywhere else in a file whose name is flagged never shows it.
+    let pushed = pushed_objects(clone, &range).await.map_err(unreadable)?;
+    let mut found: Vec<Found> = scan::in_names(&pushed.names)
+        .into_iter()
+        .map(|f| Found::of(f, None))
+        .collect();
+    let numbered: Vec<(String, usize, String)> = pushed
+        .names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (i.to_string(), 1, name.clone()))
+        .collect();
+    let mut hidden: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for leak in scan::gitleaks_lines(&numbered, scratch)
+        .await
+        .map_err(|why| could_not_run(&why))?
+    {
+        let name = leak
+            .name
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| pushed.names.get(i));
+        if let Some(name) = name {
+            hidden.insert(name);
+        }
+        found.push(Found::of(
+            Finding {
+                name: scan::HIDDEN_NAME.into(),
+                line: None,
+                rule: format!("{} in a name", leak.rule),
+            },
+            None,
+        ));
+    }
+    let shown = |path: &str| -> String {
+        if path.split('/').any(|part| hidden.contains(part)) {
+            scan::HIDDEN_NAME.into()
+        } else {
+            scan::shown_name(path)
+        }
+    };
     let mut log_args = vec![
         "log",
         "-p",
+        "--root",
         "--diff-merges=remerge",
         "--format=__OBID_COMMIT__%H",
     ];
     log_args.extend_from_slice(DIFF);
     log_args.push(&range);
-    let log = git_in(clone, &log_args).await.map_err(|e| {
-        Failure::Failed(format!(
-            "Not published: the secret scan couldn't read the changes ({e})."
-        ))
-    })?;
+    let log = git_in(clone, &log_args).await.map_err(unreadable)?;
     let mut commits: Vec<(String, Vec<&str>)> = Vec::new();
     for line in log.split('\n') {
         match line.strip_prefix("__OBID_COMMIT__") {
@@ -746,12 +816,7 @@ async fn scan_changes(
     let mut diff_args = vec!["diff"];
     diff_args.extend_from_slice(DIFF);
     diff_args.push(&tip_range);
-    let at_tip = scan::in_diff(&git_in(clone, &diff_args).await.map_err(|e| {
-        Failure::Failed(format!(
-            "Not published: the secret scan couldn't read the changes ({e})."
-        ))
-    })?);
-    let mut found = Vec::new();
+    let at_tip = scan::in_diff(&git_in(clone, &diff_args).await.map_err(unreadable)?);
     for (commit, lines) in &commits {
         let diff = lines.join("\n");
         for finding in scan::in_diff(&diff) {
@@ -759,39 +824,46 @@ async fn scan_changes(
             finding.history_only = !at_tip
                 .iter()
                 .any(|t| t.name == finding.file && t.rule == finding.rule);
+            if finding.file != scan::HIDDEN_NAME && shown(&finding.file) == scan::HIDDEN_NAME {
+                finding.file = scan::HIDDEN_NAME.into();
+            }
             found.push(finding);
         }
-        // The lines it adds, and the names of the files it touches, as line 0 of each.
-        let (names, added) = scan::parse_diff(&diff);
-        let added: Vec<(String, usize, String)> = names
+        let added: Vec<(String, usize, String)> = scan::parse_diff(&diff)
+            .1
             .into_iter()
-            .map(|name| (name.clone(), 0, name))
-            .chain(added.into_iter().map(|a| (a.file, a.number, a.text)))
+            .map(|a| (a.file, a.number, a.text))
             .collect();
         if !added.is_empty() {
             let leaked = scan::gitleaks_lines(&added, scratch)
                 .await
                 .map_err(|why| could_not_run(&why))?;
-            let secrets = crate::secrets::known();
             found.extend(leaked.into_iter().map(|mut f| {
-                f.name = secrets.redact(&f.name);
-                // Line 0 is the file's name.
-                f.line = f.line.filter(|l| *l > 0);
+                f.name = shown(&f.name);
                 Found::of(f, Some(commit))
             }));
         }
     }
-    found.extend(
-        known_secrets_in_files(clone, &range)
-            .await
-            .map_err(|e| {
-                Failure::Failed(format!(
-                    "Not published: the secret scan couldn't read the commits' files ({e})."
-                ))
-            })?
-            .into_iter()
-            .map(|f| Found::of(f, None)),
-    );
+    for (path, bytes) in &pushed.files {
+        found.extend(
+            scan::known_secrets_in_file(&String::from_utf8_lossy(bytes), path)
+                .into_iter()
+                .map(|mut f| {
+                    f.name = shown(path);
+                    Found::of(f, None)
+                }),
+        );
+    }
+    found.extend(pushed.too_big.iter().map(|path| {
+        Found::of(
+            Finding {
+                name: shown(path),
+                line: None,
+                rule: "too big for the vault scan".into(),
+            },
+            None,
+        )
+    }));
     let mut seen = std::collections::HashSet::new();
     found.retain(|f| seen.insert(f.clone()));
     Ok(found)
@@ -801,85 +873,134 @@ async fn scan_changes(
 /// it isn't pushed unscanned.
 const BIGGEST_BLOB: usize = 32 << 20;
 
-/// The secrets obid holds in every file the push sends that the base doesn't have, each read
-/// whole (every version, in every commit, merges too). Errs when git can't say.
-async fn known_secrets_in_files(clone: &Path, range: &str) -> Result<Vec<Finding>, String> {
-    if crate::secrets::known().is_empty() {
-        return Ok(Vec::new());
-    }
-    // "<sha> <path>" for every tree and file; a commit has no path.
+/// What a push sends besides its commits, read from the objects themselves.
+struct Pushed {
+    /// Every entry's own name in every tree the push sends (a file's, a folder's, a
+    /// submodule's), each once: read from the raw tree objects, so no name can hide in how git
+    /// quotes or splits paths.
+    names: Vec<String>,
+    /// Every file the push sends, by a path it has, read whole, when obid holds secrets to look
+    /// for in it; none otherwise.
+    files: Vec<(String, Vec<u8>)>,
+    /// The files too big to read whole for those secrets.
+    too_big: Vec<String>,
+}
+
+/// The objects `range` sends that the base doesn't have (every version, in every commit, merges
+/// too): their names, and the files to read whole. Errs when git can't say.
+async fn pushed_objects(clone: &Path, range: &str) -> Result<Pushed, String> {
+    // "<id> <path>" for every tree and file, "<id>" for a commit. A path is only a label here
+    // (one with a newline in it splits the line): the names come from the trees themselves.
     let listed = git_in(clone, &["rev-list", "--objects", range]).await?;
     let mut paths: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut order: Vec<String> = Vec::new();
     for line in listed.lines() {
-        let Some((sha, path)) = line.split_once(' ') else {
-            continue;
-        };
-        if !path.is_empty() && !paths.contains_key(sha) {
-            paths.insert(sha.to_owned(), path.to_owned());
-            order.push(sha.to_owned());
+        let (id, path) = line.split_once(' ').unwrap_or((line, ""));
+        if git::is_sha(id) && !paths.contains_key(id) {
+            paths.insert(id.to_owned(), path.to_owned());
+            order.push(id.to_owned());
         }
     }
-    if order.is_empty() {
-        return Ok(Vec::new());
-    }
-    let batch = |format: &'static str| -> Vec<&'static std::ffi::OsStr> {
-        vec![
-            std::ffi::OsStr::new("--no-replace-objects"),
-            std::ffi::OsStr::new("cat-file"),
-            std::ffi::OsStr::new(format),
-        ]
+    let mut pushed = Pushed {
+        names: Vec::new(),
+        files: Vec::new(),
+        too_big: Vec::new(),
     };
-    let input = format!("{}\n", order.join("\n")).into_bytes();
-    let checked = git::run_bytes(
+    if order.is_empty() {
+        return Ok(pushed);
+    }
+    let checked = cat_file(
         clone,
-        &batch("--batch-check=%(objectname) %(objecttype) %(objectsize)"),
-        &[],
-        Some(input),
+        "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        &order,
     )
-    .await
-    .map_err(|e| e.0)?;
-    let mut found = Vec::new();
+    .await?;
+    let mut trees = Vec::new();
     let mut blobs = Vec::new();
     for line in String::from_utf8_lossy(&checked).lines() {
         let parts: Vec<&str> = line.split(' ').collect();
-        let [sha, "blob", size] = parts[..] else {
-            continue;
-        };
-        let (Ok(size), Some(path)) = (size.parse::<usize>(), paths.get(sha)) else {
-            continue;
-        };
-        if size > BIGGEST_BLOB {
-            found.push(Finding {
-                name: crate::secrets::known().redact(path),
-                line: None,
-                rule: "too big for the vault scan".into(),
-            });
-        } else {
-            blobs.push(sha.to_owned());
+        match parts[..] {
+            [id, "tree", _] => trees.push(id.to_owned()),
+            [id, "blob", size] => {
+                let size: usize = size
+                    .parse()
+                    .map_err(|_| format!("git cat-file answered {line:?}"))?;
+                if size > BIGGEST_BLOB {
+                    pushed
+                        .too_big
+                        .push(paths.get(id).cloned().unwrap_or_default());
+                } else {
+                    blobs.push(id.to_owned());
+                }
+            }
+            [_, "commit", _] => {}
+            _ => return Err(format!("git cat-file answered {line:?}")),
         }
     }
-    if blobs.is_empty() {
-        return Ok(found);
+    let mut names = std::collections::BTreeSet::new();
+    if !trees.is_empty() {
+        let read = cat_file(clone, "--batch", &trees).await?;
+        for (id, tree) in batch_objects(&read)? {
+            // An id's bytes: 20 for SHA-1, 32 for SHA-256.
+            names.extend(tree_names(tree, id.len() / 2)?);
+        }
     }
-    let read = git::run_bytes(
+    pushed.names = names.into_iter().collect();
+    if crate::secrets::known().is_empty() {
+        pushed.too_big.clear();
+        return Ok(pushed);
+    }
+    if !blobs.is_empty() {
+        let read = cat_file(clone, "--batch", &blobs).await?;
+        for (id, bytes) in batch_objects(&read)? {
+            let path = paths
+                .get(&id)
+                .ok_or("git cat-file answered an object obid didn't ask for")?;
+            pushed.files.push((path.clone(), bytes.to_vec()));
+        }
+    }
+    Ok(pushed)
+}
+
+/// `git cat-file <how>` on `ids`, read as they are and with only the clone's own configuration.
+async fn cat_file(clone: &Path, how: &str, ids: &[String]) -> Result<Vec<u8>, String> {
+    let args = [
+        std::ffi::OsStr::new("--no-replace-objects"),
+        std::ffi::OsStr::new("cat-file"),
+        std::ffi::OsStr::new(how),
+    ];
+    git::run_bytes(
         clone,
-        &batch("--batch"),
-        &[],
-        Some(format!("{}\n", blobs.join("\n")).into_bytes()),
+        &args,
+        SCAN_ENV,
+        Some(format!("{}\n", ids.join("\n")).into_bytes()),
     )
     .await
-    .map_err(|e| e.0)?;
-    for (sha, bytes) in batch_objects(&read)? {
-        let path = paths
-            .get(&sha)
-            .ok_or("git cat-file answered an object obid didn't ask for")?;
-        found.extend(scan::known_secrets_in_file(
-            &String::from_utf8_lossy(bytes),
-            path,
-        ));
+    .map_err(|e| e.0)
+}
+
+/// The names in a raw tree object: each entry is `<mode> <name>\0<id>`, the id `id_len` bytes.
+/// Errs on a tree that doesn't read that way.
+fn tree_names(mut tree: &[u8], id_len: usize) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    while !tree.is_empty() {
+        let space = tree
+            .iter()
+            .position(|b| *b == b' ')
+            .ok_or("a tree entry has no mode")?;
+        let nul = tree
+            .iter()
+            .position(|b| *b == 0)
+            .filter(|nul| *nul > space)
+            .ok_or("a tree entry has no name")?;
+        names.push(String::from_utf8_lossy(&tree[space + 1..nul]).into_owned());
+        let rest = &tree[nul + 1..];
+        if rest.len() < id_len {
+            return Err("a tree entry's id is cut short".into());
+        }
+        tree = &rest[id_len..];
     }
-    Ok(found)
+    Ok(names)
 }
 
 /// Every commit the push sends, read as git keeps it (`cat-file`), not as `git log` shows it: its
@@ -899,18 +1020,10 @@ async fn scan_commits(clone: &Path, range: &str, scratch: &Path) -> Result<Vec<F
     if commits.is_empty() {
         return Ok(Vec::new());
     }
-    let args: Vec<&std::ffi::OsStr> = ["--no-replace-objects", "cat-file", "--batch"]
-        .iter()
-        .map(std::ffi::OsStr::new)
-        .collect();
-    let raw = git::run_bytes(
-        clone,
-        &args,
-        &[],
-        Some(format!("{}\n", commits.join("\n")).into_bytes()),
-    )
-    .await
-    .map_err(|e| unreadable(e.0))?;
+    let commits: Vec<String> = commits.into_iter().map(str::to_owned).collect();
+    let raw = cat_file(clone, "--batch", &commits)
+        .await
+        .map_err(unreadable)?;
     let mut found = Vec::new();
     for (commit, object) in batch_objects(&raw).map_err(unreadable)? {
         let (texts, refused) = commit_texts(&commit, object);
@@ -1004,7 +1117,7 @@ fn commit_texts(commit: &str, object: &[u8]) -> (Vec<(String, String)>, Option<S
 
 /// The commit the job's branch has on the remote, or none when it has no such branch yet.
 async fn remote_head(job: &Job, target: &Target) -> Result<Option<String>, Failure> {
-    let mut args = credentials(&target.remote, target.gh.as_deref());
+    let mut args = credentials(&target.remote, target.gh.as_deref(), &forbidden_names());
     args.extend([
         "ls-remote".into(),
         "--heads".into(),
@@ -1068,7 +1181,7 @@ async fn push(head: &str, job: &Job, target: &Target, lease: Option<&str>) -> Re
             job.branch
         )));
     }
-    let mut args = credentials(&target.remote, target.gh.as_deref());
+    let mut args = credentials(&target.remote, target.gh.as_deref(), &forbidden_names());
     args.extend([
         "push".into(),
         "--no-follow-tags".into(),
@@ -1294,18 +1407,22 @@ mod tests {
     #[test]
     fn credentials_come_from_gh_only_for_https() {
         let gh = Path::new("/opt/it's/gh");
+        let unset = ["GH_TOKEN".to_owned(), "ANTHROPIC_API_KEY".to_owned()];
         assert_eq!(
-            credentials("https://github.com/o/r.git", Some(gh)),
+            credentials("https://github.com/o/r.git", Some(gh), &unset),
             [
                 "-c",
                 "credential.helper=",
                 "-c",
-                r"credential.helper=!env -u GH_TOKEN -u GITHUB_TOKEN '/opt/it'\''s/gh' auth git-credential"
+                r"credential.helper=!env -u 'GH_TOKEN' -u 'ANTHROPIC_API_KEY' '/opt/it'\''s/gh' auth git-credential"
             ]
         );
         assert_eq!(
-            credentials("file:///tmp/r.git", Some(gh)),
+            credentials("file:///tmp/r.git", Some(gh), &unset),
             ["-c", "credential.helper="]
         );
+        let names = forbidden_names();
+        assert!(names.starts_with(&["GH_TOKEN".to_owned(), "GITHUB_TOKEN".to_owned()]));
+        assert!(names.iter().all(|n| crate::process::is_forbidden(n)));
     }
 }

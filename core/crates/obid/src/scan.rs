@@ -572,6 +572,22 @@ pub fn parse_diff(diff: &str) -> (Vec<String>, Vec<Added>) {
             };
             files.push(file.clone());
             in_hunk = false;
+        } else if !in_hunk && let Some(name) = line.strip_prefix("+++ ") {
+            // The new file's name as git writes it on its own line: exact, where the header's
+            // `a/… b/…` can't be split when a name holds " b/". Quoted when it holds a tab, a
+            // newline, a quote or a backslash; a tab after it when it holds a space.
+            let name = name.strip_suffix('\t').unwrap_or(name);
+            let name = if name.starts_with('"') {
+                unquoted(name)
+            } else {
+                name.to_owned()
+            };
+            if let Some(name) = name.strip_prefix("b/") {
+                file = name.to_owned();
+                if let Some(last) = files.last_mut() {
+                    *last = file.clone();
+                }
+            }
         } else if let Some(captures) = cached!(r"^@@ -\d+(?:,\d+)? \+(\d+)").captures(line) {
             number = captures[1].parse().unwrap_or(0);
             in_hunk = true;
@@ -654,34 +670,12 @@ pub fn secret_file(path: &str) -> Option<&'static str> {
     None
 }
 
-/// What the built-in rules and the secrets obid holds find in a diff, each place once: in the
-/// lines it adds (at their line in the new file, runs of encoded lines joined), and in the names of
-/// the files it touches. A file's name with a secret in it is given with the secret taken out.
+/// What the built-in rules and the secrets obid holds find in the lines a diff adds, each place
+/// once, at their line in the new file, runs of encoded lines joined. Each is named by its file,
+/// as [`shown_name`] shows it. The names themselves are [`in_names`]'.
 pub fn in_diff(diff: &str) -> Vec<Finding> {
-    let (files, added) = parse_diff(diff);
+    let (_, added) = parse_diff(diff);
     let mut all = Vec::new();
-    for file in &files {
-        if let Some(rule) = secret_file(file) {
-            all.push(Finding {
-                name: file.clone(),
-                line: None,
-                rule: rule.into(),
-            });
-        }
-        if holds_known_secret(file) {
-            all.push(Finding {
-                name: file.clone(),
-                line: None,
-                rule: "vault secret in the file's name".into(),
-            });
-        }
-        // A name goes out as it is: the rules read it as they read a line.
-        all.extend(line_rules(file).into_iter().map(|rule| Finding {
-            name: file.clone(),
-            line: None,
-            rule: format!("{rule} in the file's name"),
-        }));
-    }
     let lines: Vec<Line<'_>> = added
         .iter()
         .map(|a| Line {
@@ -705,9 +699,59 @@ pub fn in_diff(diff: &str) -> Vec<Finding> {
         }
     }
     all.extend(wrapped(&lines));
-    let secrets = crate::secrets::known();
     for finding in &mut all {
-        finding.name = secrets.redact(&finding.name);
+        finding.name = shown_name(&finding.name);
+    }
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|f| seen.insert(f.clone()));
+    all
+}
+
+/// What a finding in a file is called: the file's path, unless the path itself holds a possible
+/// secret (by the rules, or one obid holds): then never the path, which is what would leak.
+pub fn shown_name(path: &str) -> String {
+    if risky_name(path) {
+        HIDDEN_NAME.into()
+    } else {
+        path.to_owned()
+    }
+}
+
+/// What a file whose name holds a possible secret is called, wherever obid says where it found one.
+pub const HIDDEN_NAME: &str = "a file whose name obid won't show";
+
+/// Whether a name holds what the rules or the secrets obid holds flag.
+pub fn risky_name(name: &str) -> bool {
+    !line_rules(name).is_empty() || holds_known_secret(name)
+}
+
+/// What the rules find in the names a push sends (each entry of every tree it sends: a file's or a
+/// folder's own name): a name that holds secrets by itself (`.env`, a private key's file), the
+/// built-in rules on it as on a line, and the secrets obid holds. A finding is named by the entry,
+/// or [`HIDDEN_NAME`] when the name is the secret.
+pub fn in_names(names: &[String]) -> Vec<Finding> {
+    let mut all = Vec::new();
+    for name in names {
+        let shown = shown_name(name);
+        if let Some(rule) = secret_file(name) {
+            all.push(Finding {
+                name: shown.clone(),
+                line: None,
+                rule: rule.into(),
+            });
+        }
+        if holds_known_secret(name) {
+            all.push(Finding {
+                name: shown.clone(),
+                line: None,
+                rule: "vault secret in a name".into(),
+            });
+        }
+        all.extend(line_rules(name).into_iter().map(|rule| Finding {
+            name: shown.clone(),
+            line: None,
+            rule: format!("{rule} in a name"),
+        }));
     }
     let mut seen = std::collections::HashSet::new();
     all.retain(|f| seen.insert(f.clone()));
@@ -720,7 +764,7 @@ pub fn known_secrets_in_file(text: &str, name: &str) -> Vec<Finding> {
     if crate::secrets::known().is_empty() {
         return Vec::new();
     }
-    let name = crate::secrets::known().redact(name);
+    let name = shown_name(name);
     text.split('\n')
         .enumerate()
         .filter(|(_, line)| holds_known_secret(line))
@@ -1137,47 +1181,44 @@ exit 99"#,
         let _ = std::fs::remove_dir_all(&folder);
     }
 
-    /// Engine/Publish.swift's `parse`: the lines a diff adds, at their line in the new file, and
-    /// the names it touches, quoted ones too.
+    /// Engine/Publish.swift's `parse`: the lines a diff adds, at their line in the new file, under
+    /// the name its `+++` line gives, quoted ones and ones holding " b/" too.
     #[test]
-    fn a_diff_is_read_as_its_added_lines_and_names() {
+    fn a_diff_is_read_as_its_added_lines() {
         let aws = format!("{}{}", "AKIA", "ABCDEFGHIJKLMNOP");
         let diff = format!(
-            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +10,4 @@ fn x\n context\n-gone\n+let key = \"{aws}\";\n context\n+added\ndiff --git \"a/t\\tb\\303\\251\" \"b/t\\tb\\303\\251\"\n@@ -0,0 +1 @@\n+hello\ndiff --git a/config/.env b/config/.env\n"
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +10,4 @@ fn x\n context\n-gone\n+let key = \"{aws}\";\n context\n+added\ndiff --git \"a/t\\tb\\303\\251\" \"b/t\\tb\\303\\251\"\n--- /dev/null\n+++ \"b/t\\tb\\303\\251\"\n@@ -0,0 +1 @@\n+hello\ndiff --git a/x b/y b/x b/y\n--- /dev/null\n+++ b/x b/y\t\n@@ -0,0 +1 @@\n+hi\n"
         );
         let (files, added) = parse_diff(&diff);
-        assert_eq!(files, ["src/a.rs", "t\tbé", "config/.env"]);
+        assert_eq!(files, ["src/a.rs", "t\tbé", "x b/y"]);
         assert_eq!(
             added
                 .iter()
                 .map(|a| (a.file.as_str(), a.number))
                 .collect::<Vec<_>>(),
-            [("src/a.rs", 11), ("src/a.rs", 13), ("t\tbé", 1)]
+            [
+                ("src/a.rs", 11),
+                ("src/a.rs", 13),
+                ("t\tbé", 1),
+                ("x b/y", 1)
+            ]
         );
         let found = in_diff(&diff);
-        assert!(
-            found.contains(&Finding {
+        assert_eq!(
+            found,
+            [Finding {
                 name: "src/a.rs".into(),
                 line: Some(11),
                 rule: "AWS access key".into()
-            }),
-            "{found:?}"
+            }]
         );
-        assert!(
-            found.contains(&Finding {
-                name: "config/.env".into(),
-                line: None,
-                rule: ".env file".into()
-            }),
-            "{found:?}"
-        );
-        assert_eq!(found.len(), 2, "{found:?}");
         assert_eq!(secret_file("keys/id_ed25519"), Some("private key file"));
         assert_eq!(secret_file(".env.example"), None);
     }
 
     /// A key split over added lines in base64 is found at the run's first line, and a secret obid
-    /// holds is found in a file's name, which is given with it taken out.
+    /// holds is found in a name, which is never shown: not in the name's finding, not in a
+    /// finding in the file's content.
     #[test]
     fn a_diff_hides_nothing_in_wrapped_lines_or_names() {
         let b64 =
@@ -1201,36 +1242,54 @@ exit 99"#,
         let vault = format!("vaultname{}", "d".repeat(16));
         crate::secrets::known().learn("scan-diff-test", &vault);
         let _forget = Forget;
-        let named = in_diff(&format!("diff --git a/{vault}.txt b/{vault}.txt\n"));
+        let named = in_names(&[format!("{vault}.txt")]);
         assert_eq!(named.len(), 1, "{named:?}");
-        assert_eq!(named[0].rule, "vault secret in the file's name");
-        assert!(!named[0].name.contains(&vault), "{named:?}");
+        assert_eq!(named[0].rule, "vault secret in a name");
+        assert_eq!(named[0].name, HIDDEN_NAME);
         let whole = known_secrets_in_file(&format!("one\nx = {vault}\n"), "f.txt");
         assert_eq!(whole.len(), 1);
         assert_eq!(whole[0].line, Some(2));
+        let content = in_diff(&format!(
+            "diff --git a/{vault}/k b/{vault}/k\n--- /dev/null\n+++ b/{vault}/k\n@@ -0,0 +1 @@\n+{}{}\n",
+            "AKIA", "ABCDEFGHIJKLMNOP"
+        ));
+        assert_eq!(content.len(), 1, "{content:?}");
+        assert_eq!(content[0].name, HIDDEN_NAME);
     }
 
-    /// A file's name goes out as it is: the rules read it like a line. And the names of this
-    /// repository's own files are clean.
+    /// A name goes out as it is: the rules read it like a line, and the finding never repeats it.
+    /// The names of this repository's own files are clean.
     #[test]
-    fn a_token_in_a_files_name_is_found() {
+    fn a_token_in_a_name_is_found_and_never_shown() {
         let token = format!("ghp_{}", "e".repeat(36));
-        let found = in_diff(&format!("diff --git a/x/{token}.txt b/x/{token}.txt\n"));
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].rule, "GitHub token in the file's name");
-        assert_eq!(found[0].line, None);
+        let found = in_names(&[format!("{token}.txt"), ".env".into()]);
+        assert_eq!(
+            found,
+            [
+                Finding {
+                    name: HIDDEN_NAME.into(),
+                    line: None,
+                    rule: "GitHub token in a name".into()
+                },
+                Finding {
+                    name: ".env".into(),
+                    line: None,
+                    rule: ".env file".into()
+                }
+            ]
+        );
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let files = std::process::Command::new("git")
             .args(["ls-files"])
             .current_dir(&root)
             .output()
             .unwrap();
-        let diff: String = String::from_utf8_lossy(&files.stdout)
+        let names: Vec<String> = String::from_utf8_lossy(&files.stdout)
             .lines()
-            .map(|f| format!("diff --git a/{f} b/{f}\n"))
+            .flat_map(|f| f.split('/').map(str::to_owned).collect::<Vec<_>>())
             .collect();
-        let found = in_diff(&diff);
-        assert!(found.is_empty(), "{found:?}");
+        let found = in_names(&names);
+        assert!(found.iter().all(|f| f.rule.ends_with("file")), "{found:?}");
     }
 
     #[test]

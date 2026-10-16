@@ -539,7 +539,7 @@ pub async fn publish_action(
     State(shared): State<Arc<Shared>>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    match shared.jobs.publish_action(&id) {
+    match shared.jobs.offer_publish(&id) {
         None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
         Some(Err(why)) => Err(ApiError::new(StatusCode::CONFLICT, why)),
         Some(Ok((action, base))) => Ok(json(
@@ -583,7 +583,9 @@ pub async fn publish(
             obi_protocol::time::now(),
         )
         .map_err(|why| ApiError::new(StatusCode::FORBIDDEN, why))?;
-    match shared.jobs.publish_by_hand(&id, &action).await {
+    // Checked fresh by `check` above.
+    let signed_at = obi_protocol::time::parse(&approval.signed_at).unwrap_or(i64::MAX);
+    match shared.jobs.publish_by_hand(&id, &action, signed_at).await {
         Ok(url) => Ok(json(StatusCode::OK, json!({"url": url}))),
         Err(why) => Err(ApiError::new(StatusCode::CONFLICT, why)),
     }
