@@ -9,7 +9,7 @@ Oby with no Apple device (#492).
 npm ci
 npm run build       # into dist/, which obid serves at /app/
 npm run typecheck
-npm test            # vitest: the client, the event stream, jobs as tasks, what events own
+npm test            # vitest: the client, the event stream, jobs as tasks, what events own, connectors
 ```
 
 ## Opening it
@@ -37,7 +37,7 @@ From Sangam's renderer, with `tokens.css` and `app.css` as they were. The Electr
 own pointer instead, which `character/` follows once #499 lands (until then Oby watches the pointer
 only over its own frame). Screens with no backend in obid yet stay hidden behind Settings ›
 General › "Show screens still being built", and say so when shown: the Obysphere (#497) and its
-knowledge (#495), Connectors (#498), and the list of conversations, which comes next. obid keeps
+knowledge (#495), and the list of conversations, which comes next. obid keeps
 many conversations (#493); the page shows the latest, sends its words to that one, and keeps
 turns of the others out. Nothing shows made-up data.
 
@@ -61,7 +61,10 @@ GroupView.tsx       one kind of work's cards, Running or Completed
 TaskView.tsx        one task on its own page; TaskCard.tsx draws its card and its decision
 ChatView.tsx        the conversation with Oby, or a task's own thread
 SettingsView.tsx    Settings' pages: General (this browser's), Runner, Accounts and Models (obid's
-                    status, read-only), Connectors (with the setting on, empty)
+                    status, read-only), Connectors
+connectors.ts       what Connectors lists, from obid's status, plug-ins and connections: Connected
+                    only of what was checked, the reason when it doesn't work, and the search
+ConnectorsView.tsx  the Connectors page, read-only: each one says where it's changed (#518)
 KnowledgeView.tsx   the Obysphere's knowledge (with the setting on, empty)
 ArchiveView.tsx     done tasks that left Home, as a page
 Composer.tsx        the message box (MessageEditor.tsx is its Lexical text, textTokens.ts what it

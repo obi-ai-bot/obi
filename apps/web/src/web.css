@@ -34,3 +34,6 @@
 .sign-in input:focus { outline: none; border-color: var(--line-focus); }
 .sign-in button { padding: 9px 16px; border: 0; border-radius: 10px; background: var(--ink); color: var(--bg); font: inherit; font-weight: 600; cursor: pointer; }
 .sign-in .sign-in-problem { color: var(--danger); margin: 12px 0 0; }
+
+/* Settings › Connectors: a list obid couldn't read, said under the groups */
+.set-foot.set-problem { color: var(--danger); }
