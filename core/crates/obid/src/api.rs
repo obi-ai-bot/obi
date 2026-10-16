@@ -1,7 +1,7 @@
 //! The runner API (docs/runner-api.md) as obid serves it: the gate every request goes through,
 //! `GET /v1/status`, the jobs (`/v1/jobs…`, their messages, `POST /v1/stop-all`), `POST
 //! /v1/clear`, `POST /v1/devices`, `GET /v1/checks/next`, `/v1/settings/jobs` and the event
-//! stream. The rest of the API joins the same router.
+//! stream, plans and conversation. The rest of the API joins the same router.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,6 +36,8 @@ pub struct Shared {
     pub devices: crate::devices::Devices,
     pub jobs: Arc<Jobs>,
     pub events: Events,
+    /// The conversation shared by every device and plan request.
+    pub conversation: crate::conversation::Conversation,
     /// Its Sphere: membership, exchanges, the inbox and decisions.
     pub link: Arc<crate::sphere::Link>,
     /// The plug-in host (`GET` and `PUT /v1/obid/plugins`).
@@ -118,6 +120,8 @@ pub fn router(shared: Arc<Shared>) -> Router {
             get(crate::routes::job_settings).put(crate::routes::set_job_settings),
         )
         .route("/v1/events", get(crate::routes::events))
+        .route("/v1/conversation", get(crate::conversation::get))
+        .route("/v1/plans", post(crate::brain::plan))
         .route("/v1/inbox", get(crate::sphere::routes::inbox))
         .route("/v1/inbox/{id}/answer", post(crate::sphere::routes::answer))
         .route("/v1/obid/sphere", get(crate::sphere::routes::membership))

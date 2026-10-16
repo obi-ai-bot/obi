@@ -267,6 +267,7 @@ fn new_job(job: &Map<String, Value>) -> Result<NewJob, String> {
         check: text("check")?,
         model: text("model")?,
         files,
+        attachments: None,
         mode: text("mode")?,
     })
 }

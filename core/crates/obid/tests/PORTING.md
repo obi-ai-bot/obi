@@ -4,13 +4,17 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 
 **API-level** means the test asks the runner through its HTTP API (`client.execute` on the router, or the API's own handlers), or checks what the API puts on the wire (a job's or account's JSON, the gate in front of every request). obid is checked the same way: the real binary, asked over HTTP (tests/*.rs), or a unit test of the same rule where the Swift test was one. Everything else is **Swift-internal**: it drives Swift types (Desk, the brain, the agent fakes, the stores), so it doesn't carry over; obid's own behaviour behind those is covered by its own tests.
 
-994 tests in all: **36 API-level and ported**, **39 API-level and not ported** (their endpoint or feature isn't in obid yet), **919 Swift-internal and dropped**.
+994 tests in all: **40 API-level and ported**, **35 API-level and not ported** (their endpoint or feature isn't in obid yet), **919 Swift-internal and dropped**.
 
 ## API-level, ported
 
 | Swift test | obid test | Note |
 |---|---|---|
-| ClaimTests.aClientMayClaimFilesAtDispatch | runner_api.rs `a_client_may_claim_files_at_dispatch` | its dispatch half; the plan half needs `POST /v1/plans` (#442) |
+| ClaimTests.aClientMayClaimFilesAtDispatch | runner_api.rs `a_client_may_claim_files_at_dispatch`; plans_api.rs `plans_map_replies_questions_none_and_dispatched_jobs` | dispatch and plan paths are checked over HTTP |
+| AttachmentTests.plansRefuseAttachmentsOutsideTheAppsFolder | plans_api.rs `plans_refuse_attachments_outside_the_apps_folder` |  |
+| ConversationTests.theConversationEndpointPagesTheThreadAndItsEventFollowsIt | plans_api.rs `plan_uses_recent_turns_and_conversation_paginates` | event stream, recent-first paging and unknown cursor behavior |
+| ConversationTests.thePlanEndpointTakesRecentTurns | plans_api.rs `plan_uses_recent_turns_and_conversation_paginates` |  |
+| RunnerTests.plansMapToTheirKinds | plans_api.rs `plans_map_replies_questions_none_and_dispatched_jobs` |  |
 | ClearTests.everyAppFollowingEventsHearsAClear | runner_api.rs `clear_done_is_kept_said_and_heard` |  |
 | ClearTests.statusSaysNullUntilTheFirstClearThenTheTime | runner_api.rs `clear_done_is_kept_said_and_heard` |  |
 | ClearTests.theClearSurvivesARestartAndNeverGoesBack | runner_api.rs `clear_done_is_kept_said_and_heard` | the restart through the API; the clock going back in src/clear.rs `the_clear_survives_a_restart_and_never_goes_back` |
@@ -74,11 +78,8 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 | Swift test | Needs | Issue |
 |---|---|---|
 | AppleCheckTests.ObyCheckAppleWaitsForTheMacAndPrintsTheCompilersErrorsAndFailingTests | `/v1/agent/apple-check`, `/v1/checks/…` (Apple checks) | #443 |
-| AttachmentTests.plansRefuseAttachmentsOutsideTheAppsFolder | `POST /v1/plans` | #442 |
 | CheckTests.theAPIHandsOutChecksTakesTheirResultsAndTellsEveryApp | Mac checks queued, `/v1/checks/{id}/result` (obid serves `GET /v1/checks/next`, which answers `{"check": null}`: it queues none; runner_api.rs `a_mac_asking_for_a_check_hears_none_waits`) | #443 |
 | ConnectionTests.agentsUseConnectedAppsWithoutEverSeeingTheLogin | `/v1/connections`, `/v1/me`, `/v1/agent/mcp/…` | #444 |
-| ConversationTests.theConversationEndpointPagesTheThreadAndItsEventFollowsIt | `GET /v1/conversation` (obid has no brain; the Mac app reads its 404 as an empty thread) | #442 |
-| ConversationTests.thePlanEndpointTakesRecentTurns | `POST /v1/plans` | #442 |
 | FailureTests.theAPIListsFailuresAndFixesThem | `/v1/failures…` | #445 |
 | GatewayTests.gatewayForwardsTheRunnersTokenToTheMacRunner | the LAN gateway | #446 |
 | GatewayTests.gatewayRouterRedactsSecretsInFiniteAndSSEResponses | the LAN gateway | #446 |
@@ -94,7 +95,6 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 | ResearchTests.theReportIsStoredAndServed | `GET /v1/jobs/{id}/report` | #449 |
 | ReserveTests.theAPILiftsAndRestoresTheReserve | `POST /v1/accounts/{id}/reserve` | #450 |
 | ReviewTests.theAPIShowsTheReviewAndTheReviewJob | Oby's review of a published job (`reviewing`, `review`): obid publishes nothing yet | #451 |
-| RunnerTests.plansMapToTheirKinds | `POST /v1/plans` (its answer's shape) | #442 |
 | RunnerTests.theAppHandsOverItsDeviceToken | `POST /v1/activities`, `POST /v1/notifications` | #452 |
 | RunnerTests.withoutAKeyThereIsNoPush | `POST /v1/activities` | #452 |
 | SpeechTests.endpointIsOwnerGatedAndValidatesBinaryRequests | `POST /v1/speech` | #453 |

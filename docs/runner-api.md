@@ -447,7 +447,7 @@ One turn of the conversation with Oby: words become work that starts, a question
 {"said": "Review oby PR #33"}
 ```
 
-`attachments`, when present, is a list of file paths in the runner's own attachments folder. The runner resolves `..` and symlinks before accepting them; a path outside that folder returns `422` naming the refused file. Accepted paths are checked again before they are copied into the job's `.oby/inputs`, including jobs restored after a restart.
+`attachments`, when present, is a list of file paths in the runner's own attachments folder. The runner resolves `..` and symlinks before accepting them; a path outside that folder returns `422` naming the refused file. Accepted paths are checked again before they are copied into the job's input folder, including jobs restored after a restart: `.oby/inputs` on the Swift runner and `.obi/inputs` on `obid`.
 
 To answer the brain's question, send the original words with the answer:
 
@@ -533,6 +533,8 @@ Every Lead turn is logged on the runner (the words, the plan or why it was refus
 ### `GET /v1/conversation?before=&limit=`
 
 One thread for every device (#11): the conversation the runner keeps, which every `POST /v1/plans` joins, whichever app sent it. The runner keeps the last 500 turns in `oby.sqlite`, the oldest pruned; the brain reads the last 50 of them. Answers one page, oldest first:
+
+obid keeps the same 500-turn thread in its private `home/conversation.json`; its API and events have the same shape.
 
 ```json
 [{"id": "7c1e2f30-…", "who": "user", "text": "Review oby PR #33", "at": "2026-10-11T09:12:00Z", "jobs": []},
