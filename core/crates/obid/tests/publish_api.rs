@@ -559,3 +559,39 @@ fn someone_elses_push_is_never_overwritten() {
     );
     assert_eq!(remote_branch(&remote, &branch), Some(their_commit));
 }
+
+/// Stopped while it publishes: nothing more goes out. A gitleaks that takes its time holds the
+/// scan open; the job is stopped then, and no push or pull request follows.
+#[test]
+fn a_job_stopped_while_it_publishes_sends_nothing_more() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = Folder::new("publish-stop");
+    let bin = fake_gh(&folder.0);
+    std::fs::write(bin.join("gitleaks"), "#!/bin/sh\nsleep 2\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("gitleaks"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: hello.txt"}),
+    );
+    let publishing = within(60, "the job publishes", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["step"] == "Publishing").then_some(job)
+    });
+    assert_eq!(publishing["status"], "running");
+    assert_eq!(publishing["publishStep"], "scan");
+    assert_eq!(stage(&publishing, "publish")["state"], "current");
+    assert_eq!(stage(&publishing, "publish")["detail"], "Secret scan");
+    let stopped = call(&obid, "POST", &format!("/v1/jobs/{id}/stop"), None);
+    assert_eq!(stopped.status, 200, "{}", stopped.text);
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "stopped", "{job}");
+    // Long enough for a publish that didn't stop to have pushed and opened its pull request.
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["status"], "stopped", "{job}");
+    assert_eq!(job["outgoing"], json!([]));
+    assert_eq!(job["published"], Value::Null);
+    assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
+    assert!(!calls_now(&folder.0).contains("pr create"));
+}

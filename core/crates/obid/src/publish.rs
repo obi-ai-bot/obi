@@ -93,7 +93,7 @@ impl Outgoing {
     }
 }
 
-/// What a published job's `reviewError` says until obid runs Oby's review of it (#451).
+/// What a published job's `reviewError` says until obid runs Oby's review of it (#525).
 pub const NOT_REVIEWED: &str =
     "obid doesn't run Oby's review yet: a person reviews the pull request on GitHub.";
 
@@ -140,6 +140,8 @@ pub enum Failure {
     AlreadyOnBase(String),
     /// The job was stopped while it published: nothing more goes out.
     Stopped,
+    /// Another publish of the same job is under way: this one sent nothing and changes nothing.
+    Busy,
     /// Anything else, as one line a person can read.
     Failed(String),
 }
@@ -153,6 +155,7 @@ impl Failure {
                 format!("Not published: its commits are already on {base}.")
             }
             Failure::Stopped => "Not published: the job was stopped.".into(),
+            Failure::Busy => "obid is publishing it already.".into(),
             Failure::Failed(why) => why.clone(),
         }
     }
@@ -454,7 +457,10 @@ fn credentials(remote: &str, gh: Option<&Path>) -> Vec<String> {
     {
         let quoted = gh.to_string_lossy().replace('\'', r"'\''");
         args.push("-c".into());
-        args.push(format!("credential.helper=!'{quoted}' auth git-credential"));
+        // As `crate::github` runs it: with no token from obid's environment.
+        args.push(format!(
+            "credential.helper=!env -u GH_TOKEN -u GITHUB_TOKEN '{quoted}' auth git-credential"
+        ));
     }
     args
 }
@@ -1118,7 +1124,7 @@ mod tests {
                 "-c",
                 "credential.helper=",
                 "-c",
-                r"credential.helper=!'/opt/it'\''s/gh' auth git-credential"
+                r"credential.helper=!env -u GH_TOKEN -u GITHUB_TOKEN '/opt/it'\''s/gh' auth git-credential"
             ]
         );
         assert_eq!(

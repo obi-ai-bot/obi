@@ -3079,7 +3079,8 @@ impl Jobs {
                     ));
                 }
                 Err(Failure::Stopped) => return Ok(()),
-                Err(Failure::Failed(why)) => {
+                Err(failure @ (Failure::Failed(_) | Failure::Busy)) => {
+                    let why = failure.line();
                     self.end_done(id, commits, pushed, |job| job.publish_error = Some(why));
                 }
             }
@@ -3165,7 +3166,7 @@ impl Jobs {
             .clone()
             .ok_or_else(|| Failure::Failed("Nothing to publish: it has no base.".into()))?;
         if !self.lock().publishing.insert(id.to_owned()) {
-            return Err(Failure::Failed("obid is publishing it already.".into()));
+            return Err(Failure::Busy);
         }
         let outcome = match self.publish_target(&job) {
             Ok(target) => {
@@ -3253,6 +3254,8 @@ impl Jobs {
                 });
                 Err(line)
             }
+            // The publish under way says how it went: this one changes nothing.
+            Err(Failure::Busy) => Err(Failure::Busy.line()),
             Err(failure) => {
                 let line = failure.line();
                 self.update(id, |job| {

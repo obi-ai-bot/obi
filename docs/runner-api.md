@@ -1145,7 +1145,7 @@ The Rust daemon `obid` (`core/`, docs/ARCHITECTURE.md) serves this whole API, so
 - `mergeError` is always null, `mergeNeedsYou` always false, and `macCheck.tries` is never sent. No `merge` inbox item and no `Not merged:` alert is ever made.
 - The `merged` pipeline stage is `upcoming` until `pullRequest.state` is `MERGED` (a person merged it), then `done`. Its `current` titles about merging (`Mac check passed · merging`, `Ready to merge`) read `Mac check passed · ready for you to merge` and `Ready for you to merge`.
 - Deskree's promotion rules (Xcode Cloud waits, `dev` into `main`, the three-review escalation) are configuration that changes what `obid` checks and reports, never something that merges.
-- Oby's review isn't run by `obid` yet (#451, its second part): `reviewing`, `review` and `reviewOf` are null, a published job's `reviewError` is `obid doesn't run Oby's review yet: a person reviews the pull request on GitHub.`, and its Review stage reads `Waiting for review · ` and that line until GitHub has a decision. No `Oby review` check run is written, and no Mac check is queued by a review.
+- Oby's review isn't run by `obid` yet (#525): `reviewing`, `review` and `reviewOf` are null, a published job's `reviewError` is `obid doesn't run Oby's review yet: a person reviews the pull request on GitHub.`, and its Review stage reads `Waiting for review · ` and that line until GitHub has a decision. No `Oby review` check run is written, and no Mac check is queued by a review.
 - The Watch API's `POST /v1/jobs/{id}/publish` isn't served (#454).
 
 ### obid only: publishing the owner's work

@@ -18,7 +18,7 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 | RunnerTests.plansMapToTheirKinds | plans_api.rs `plans_map_replies_questions_none_and_dispatched_jobs` |  |
 | ClearTests.everyAppFollowingEventsHearsAClear | runner_api.rs `clear_done_is_kept_said_and_heard` |  |
 | ClearTests.statusSaysNullUntilTheFirstClearThenTheTime | runner_api.rs `clear_done_is_kept_said_and_heard` |  |
-| CheckTests.theAPIHandsOutChecksTakesTheirResultsAndTellsEveryApp | runner_api.rs `the_api_hands_out_checks_takes_their_results_and_tells_every_app` | an existing queued merge check is handed out and its result is sent to every app; obid publishes now, but queues a merge check only once Oby's review approves, which is #451's second part |
+| CheckTests.theAPIHandsOutChecksTakesTheirResultsAndTellsEveryApp | runner_api.rs `the_api_hands_out_checks_takes_their_results_and_tells_every_app` | an existing queued merge check is handed out and its result is sent to every app; obid publishes now, but queues a merge check only once Oby's review approves, which is #525 |
 | ClearTests.theClearSurvivesARestartAndNeverGoesBack | runner_api.rs `clear_done_is_kept_said_and_heard` | the restart through the API; the clock going back in src/clear.rs `the_clear_survives_a_restart_and_never_goes_back` |
 | DismissTests.theAPIDismissesAndSaysWhenItCant | jobs_api.rs `nothing_committed_fails_and_dismiss_lets_it_go` | its last line, `GET /v1/jobs/{id}/publish` answering 409 for a dismissed job, in runner_api.rs `publish_by_hand_is_off_a_dismissed_job` (a dismissed job has nothing to publish: `409`, saying so) |
 | InboxTests.theAPIListsAnswersAndTellsEveryApp | sphere_api.rs `the_inbox_lists_answers_and_tells_every_app` | with an `obiRequest` item, the only kind obid makes so far |
@@ -68,7 +68,7 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 - #448 A job's question: `question` on a job and its inbox item
 - #449 Research jobs: reads, reports and filed proposals
 - #450 Usage and reserves: POST /v1/accounts/{id}/reserve
-- #451 Publishing the owner's work and Oby's review of it
+- #451 Publishing the owner's work (its endpoints and following are served now; no RunnerTests test is left on it)
 - #452 Pushes: POST /v1/activities and POST /v1/notifications
 - #453 Speech: POST /v1/speech
 - #454 The Watch API and /v1/watches
@@ -76,6 +76,7 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 - #456 Self-update: status.update
 - #457 The vault
 - #458 Xcode Cloud: following builds, stages and the API
+- #525 Oby's review of the owner's published work (split out of #451)
 
 | Swift test | Needs | Issue |
 |---|---|---|
@@ -94,7 +95,7 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 | ResearchTests.proposalsFileOnlyOnTapAndAreScanned | `POST /v1/jobs/{id}/proposals/{index}/file` | #449 |
 | ResearchTests.theReportIsStoredAndServed | `GET /v1/jobs/{id}/report` | #449 |
 | ReserveTests.theAPILiftsAndRestoresTheReserve | `POST /v1/accounts/{id}/reserve` | #450 |
-| ReviewTests.theAPIShowsTheReviewAndTheReviewJob | Oby's review of a published job (`reviewing`, `review`, the review job's `reviewOf`): obid publishes its owner's work now (tests/publish_api.rs), and Oby's review of it is #451's second part | #451 |
+| ReviewTests.theAPIShowsTheReviewAndTheReviewJob | Oby's review of a published job (`reviewing`, `review`, the review job's `reviewOf`): obid publishes its owner's work now (tests/publish_api.rs), and Oby's review of it is #525 | #525 |
 | RunnerTests.theAppHandsOverItsDeviceToken | `POST /v1/activities`, `POST /v1/notifications` | #452 |
 | RunnerTests.withoutAKeyThereIsNoPush | `POST /v1/activities` | #452 |
 | SpeechTests.endpointIsOwnerGatedAndValidatesBinaryRequests | `POST /v1/speech` | #453 |

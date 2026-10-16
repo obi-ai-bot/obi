@@ -5,7 +5,8 @@
 //! (`GET /v1/status` says `"github": "owner"`).
 //!
 //! `gh` signs in with its own login: obid never reads, holds or passes a token. Its environment is
-//! obid's, with prompts, colour and update checks off; nothing it is given is a secret (titles and
+//! obid's without `GH_TOKEN`, `GITHUB_TOKEN` or the agents' variables, with prompts, colour and
+//! update checks off; nothing it is given is a secret (titles and
 //! descriptions went through the secret scan first). What `gh` prints is never logged whole and
 //! never reaches an agent: an error keeps its last line, with the secrets obid holds taken out.
 
@@ -95,6 +96,13 @@ pub fn pull_request_number(url: &str, repo: &str) -> Option<u64> {
 /// Runs `gh` with `args`: its stdout, trimmed, or the last line it said on stderr.
 async fn run(gh: &Path, args: &[&str]) -> Result<String, String> {
     let mut command = tokio::process::Command::new(gh);
+    // gh signs in with its own login only: a token that found its way into obid's environment
+    // (`GH_TOKEN`, `GITHUB_TOKEN`, the agents' variables) never reaches it.
+    for (name, _) in std::env::vars_os() {
+        if crate::process::is_forbidden(&name.to_string_lossy()) {
+            command.env_remove(name);
+        }
+    }
     command
         .args(args)
         .env("PATH", crate::process::tools_path())
