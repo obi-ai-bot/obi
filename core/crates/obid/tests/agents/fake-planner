@@ -11,6 +11,8 @@ case "$current" in
   *none-case*) plan='{"action":"ignore","reply":"","dispatches":[],"question":null}' ;;
   *question-case*) plan='{"action":"ask_user","reply":"","dispatches":[],"question":{"text":"Which repository?","options":["obi-e2e/fixture-app"],"recommended":0}}' ;;
   *176*198*) plan='{"action":"dispatch","reply":"On it.","question":null,"dispatches":[{"repo":"obi-e2e/fixture-app","kind":"fix","task":"Fix #176","agent":"auto","account":"auto","issue":176,"rounds":1},{"repo":"obi-e2e/fixture-app","kind":"fix","task":"Fix #198","agent":"auto","account":"auto","issue":198,"rounds":1}]}' ;;
+  *unsupported-case*) plan='{"action":"merge","reply":"","dispatches":[],"question":null}' ;;
+  *slow-case*) sleep 3; plan='{"action":"reply_only","reply":"Late.","dispatches":[],"question":null}' ;;
   *) plan='{"action":"reply_only","reply":"Fine.","dispatches":[],"question":null}' ;;
 esac
 printf '{"structured_output":%s}\n' "$plan"

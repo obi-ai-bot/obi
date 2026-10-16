@@ -16,8 +16,12 @@ use std::sync::Mutex;
 
 /// The turns kept per conversation, the oldest pruned.
 const KEPT: usize = 500;
+/// The conversations kept: past it, starting one forgets the oldest that isn't pinned.
+pub const CONVERSATIONS: usize = 200;
 /// The longest title a rename may set.
 const TITLE: usize = 100;
+/// Where the thread of obid before #493 is kept once it's a conversation, for a rollback.
+const PRE_493: &str = "conversation.json.pre-493";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Turn {
@@ -41,7 +45,8 @@ struct Thread {
     pinned: bool,
     created: String,
     /// Raised on every turn, so the latest conversation is known to more than the second
-    /// (`at` and `created` are whole seconds).
+    /// (`at` and `created` are whole seconds). Each is one more than the highest kept, so no
+    /// two conversations share one.
     sequence: u64,
     turns: Vec<Turn>,
 }
@@ -49,6 +54,14 @@ struct Thread {
 impl Thread {
     fn last_activity(&self) -> &str {
         self.turns.last().map_or(&self.created, |t| &t.at)
+    }
+
+    /// Where it stands in the list: pinned first, then the latest turn first.
+    fn key(&self) -> Cursor {
+        Cursor {
+            pinned: self.pinned,
+            sequence: self.sequence,
+        }
     }
 
     /// As `GET /v1/conversations` lists it and the `conversation` event sends it.
@@ -59,7 +72,41 @@ impl Thread {
             "pinned": self.pinned,
             "created": self.created,
             "lastActivity": self.last_activity(),
+            "cursor": self.key().to_string(),
         })
+    }
+}
+
+/// A conversation's place in the list, as `after` takes it: `1-42` (pinned, sequence 42) or
+/// `0-42`. Ordered as the list is, first to last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cursor {
+    pinned: bool,
+    sequence: u64,
+}
+
+impl Cursor {
+    fn parse(text: &str) -> Option<Cursor> {
+        let (pinned, sequence) = text.split_once('-')?;
+        Some(Cursor {
+            pinned: match pinned {
+                "1" => true,
+                "0" => false,
+                _ => return None,
+            },
+            sequence: sequence.parse().ok()?,
+        })
+    }
+
+    /// True when a conversation at `self` is listed after one at `other`.
+    fn after(self, other: Cursor) -> bool {
+        (self.pinned, self.sequence) < (other.pinned, other.sequence)
+    }
+}
+
+impl std::fmt::Display for Cursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}", u8::from(self.pinned), self.sequence)
     }
 }
 
@@ -70,6 +117,15 @@ pub enum Target {
     /// A new one, titled from the user's words.
     New,
     Id(String),
+}
+
+/// Where a plan request's words went.
+pub struct Begun {
+    pub conversation: String,
+    /// Its turns before them, oldest first.
+    pub before: Vec<Turn>,
+    /// True when the words started it.
+    pub started: bool,
 }
 
 #[derive(Debug)]
@@ -109,13 +165,14 @@ pub struct Conversations {
 
 impl Conversations {
     /// The conversations in `home/conversations`, after moving the single thread of obid before
-    /// #493 (`home/conversation.json`) into the first of them.
+    /// #493 (`home/conversation.json`) into the first of them, and forgetting the oldest past
+    /// [`CONVERSATIONS`].
     pub fn open(home: &Path, events: Events) -> Conversations {
         let dir = home.join("conversations");
         if let Err(e) = crate::store::make_private_dir(&dir) {
             tracing::warn!("can't make {}: {e}", dir.display());
         }
-        let threads = crate::store::load_dir::<Thread>(&dir)
+        let threads: Vec<Thread> = crate::store::load_dir::<Thread>(&dir)
             .into_iter()
             .filter(|t| {
                 let named = is_id(&t.id) && dir.join(format!("{}.json", t.id)).is_file();
@@ -133,15 +190,18 @@ impl Conversations {
             threads: Mutex::new(threads),
             events,
         };
-        conversations.migrate(&home.join("conversation.json"));
+        conversations.migrate(home);
+        conversations.prune(&mut conversations.lock());
         conversations
     }
 
-    /// The thread obid kept before #493 becomes a conversation, with all its turns, and its file
-    /// goes. The conversation is named after the thread's first turn, so a move cut short (the
+    /// The thread obid kept before #493 (`home/conversation.json`) becomes a conversation, with
+    /// all its turns, and its file is kept as `home/conversation.json.pre-493`. The conversation
+    /// is named after the thread's first turn when obid made that id, so a move cut short (the
     /// conversation written, the old file still there) isn't made twice.
-    fn migrate(&self, old: &Path) {
-        let Ok(bytes) = std::fs::read(old) else {
+    fn migrate(&self, home: &Path) {
+        let old = home.join("conversation.json");
+        let Ok(bytes) = std::fs::read(&old) else {
             return;
         };
         let Ok(mut turns) = serde_json::from_slice::<Vec<Turn>>(&bytes) else {
@@ -172,7 +232,8 @@ impl Conversations {
                     id,
                     turns,
                 };
-                if let Err(e) = self.write(&thread) {
+                // The conversation's name in its folder must be on disk before the old file goes.
+                if let Err(e) = self.write(&thread).and_then(|()| sync_dir(&self.dir)) {
                     tracing::warn!("can't move {} into a conversation: {e}", old.display());
                     return;
                 }
@@ -184,8 +245,8 @@ impl Conversations {
                 threads.push(thread);
             }
         }
-        if let Err(e) = std::fs::remove_file(old) {
-            tracing::warn!("can't remove {}: {e}", old.display());
+        if let Err(e) = std::fs::rename(&old, home.join(PRE_493)) {
+            tracing::warn!("can't move {} aside: {e}", old.display());
         }
     }
 
@@ -200,9 +261,8 @@ impl Conversations {
         )
     }
 
-    /// The user's words join `target` (made first when it's new): its id, and its turns before
-    /// them, oldest first.
-    pub fn begin(&self, target: Target, said: String) -> Result<(String, Vec<Turn>), Error> {
+    /// The user's words join `target` (made first when it's new).
+    pub fn begin(&self, target: Target, said: String) -> Result<Begun, Error> {
         let mut threads = self.lock();
         let found = match target {
             Target::Id(id) => Some(
@@ -226,22 +286,21 @@ impl Conversations {
             threads.len() - 1
         });
         let before = threads[index].turns.clone();
-        let turn = match self.add(&mut threads, index, "user", said, vec![]) {
-            Ok(turn) => turn,
-            Err(e) => {
-                if found.is_none() {
-                    threads.remove(index);
-                }
-                return Err(e);
+        if let Err(e) = self.add(&mut threads, index, "user", said, vec![]) {
+            if found.is_none() {
+                threads.remove(index);
             }
-        };
-        // A new conversation is announced before its first turn.
-        if found.is_none() {
-            self.events.send("conversation", threads[index].summary());
+            return Err(e);
         }
-        self.events
-            .send("turn", serde_json::to_value(&turn).unwrap_or_default());
-        Ok((threads[index].id.clone(), before))
+        let conversation = threads[index].id.clone();
+        if found.is_none() {
+            self.prune(&mut threads);
+        }
+        Ok(Begun {
+            conversation,
+            before,
+            started: found.is_none(),
+        })
     }
 
     /// Adds a turn to the conversation `id`.
@@ -257,13 +316,10 @@ impl Conversations {
             .iter()
             .position(|t| t.id == id)
             .ok_or(Error::NoConversation)?;
-        let turn = self.add(&mut threads, index, who, text, jobs)?;
-        self.events
-            .send("turn", serde_json::to_value(&turn).unwrap_or_default());
-        Ok(turn)
+        self.add(&mut threads, index, who, text, jobs)
     }
 
-    /// The turn, kept and written; its event is the caller's.
+    /// The turn, kept, written and announced: the conversation as it is now, then the turn.
     fn add(
         &self,
         threads: &mut [Thread],
@@ -287,7 +343,30 @@ impl Conversations {
         thread.turns.drain(..excess);
         thread.sequence = sequence;
         self.write(thread).map_err(Error::Io)?;
+        self.events.send("conversation", thread.summary());
+        self.events
+            .send("turn", serde_json::to_value(&turn).unwrap_or_default());
         Ok(turn)
+    }
+
+    /// Past [`CONVERSATIONS`], forgets the oldest that are neither pinned nor the latest.
+    fn prune(&self, threads: &mut Vec<Thread>) {
+        while threads.len() > CONVERSATIONS {
+            let newest = threads.iter().map(|t| t.sequence).max().unwrap_or(0);
+            let Some(oldest) = threads
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.pinned && t.sequence != newest)
+                .min_by_key(|(_, t)| t.sequence)
+                .map(|(i, _)| i)
+            else {
+                return;
+            };
+            if let Err(e) = self.forget(threads, oldest) {
+                tracing::warn!("can't forget an old conversation: {e:?}");
+                return;
+            }
+        }
     }
 
     /// Up to `limit` turns, oldest first, ending before the turn `before` (or at the latest):
@@ -324,33 +403,21 @@ impl Conversations {
         Ok(thread.turns[end.saturating_sub(limit)..end].to_vec())
     }
 
-    /// Up to `limit` conversations after the one `after` (or from the first): the pinned ones,
-    /// then the rest, each newest first.
-    fn list(&self, after: Option<&str>, limit: usize) -> Result<Vec<Value>, Error> {
+    /// Up to `limit` conversations listed after `after` (or from the first): the pinned ones,
+    /// then the rest, each newest first. A cursor is a place, not a conversation, so one that
+    /// moved since is skipped or listed again, never anything else.
+    fn list(&self, after: Option<Cursor>, limit: usize) -> Vec<Value> {
         let threads = self.lock();
-        let mut order: Vec<&Thread> = threads.iter().collect();
+        let mut order: Vec<&Thread> = threads
+            .iter()
+            .filter(|t| after.is_none_or(|cursor| t.key().after(cursor)))
+            .collect();
         order.sort_by(|a, b| {
-            b.pinned
-                .cmp(&a.pinned)
-                .then(b.sequence.cmp(&a.sequence))
+            (b.pinned, b.sequence)
+                .cmp(&(a.pinned, a.sequence))
                 .then_with(|| a.id.cmp(&b.id))
         });
-        let start = match after {
-            None => 0,
-            Some(id) => {
-                order
-                    .iter()
-                    .position(|t| t.id == id)
-                    .ok_or(Error::NoConversation)?
-                    + 1
-            }
-        };
-        Ok(order
-            .iter()
-            .skip(start)
-            .take(limit)
-            .map(|t| t.summary())
-            .collect())
+        order.iter().take(limit).map(|t| t.summary()).collect()
     }
 
     /// Renames or pins the conversation `id`.
@@ -382,12 +449,17 @@ impl Conversations {
     }
 
     /// Forgets the conversation `id` and its turns. The jobs it started stay, with its id.
-    fn delete(&self, id: &str) -> Result<(), Error> {
+    pub fn delete(&self, id: &str) -> Result<(), Error> {
         let mut threads = self.lock();
         let index = threads
             .iter()
             .position(|t| t.id == id)
             .ok_or(Error::NoConversation)?;
+        self.forget(&mut threads, index)
+    }
+
+    fn forget(&self, threads: &mut Vec<Thread>, index: usize) -> Result<(), Error> {
+        let id = threads[index].id.clone();
         match std::fs::remove_file(self.dir.join(format!("{id}.json"))) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -421,11 +493,29 @@ fn is_id(id: &str) -> bool {
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'-'))
 }
 
+/// Writes the folder's own entries (the names in it) to the disk.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// Ends a line: what `lines()` reads, and the Unicode line and paragraph separators.
+fn breaks_line(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
+}
+
 /// A conversation's title from the user's first words, as Sangam's design names them
 /// (design/app/src/renderer/src/chats.ts, `titled`): the first line, at most 48 characters
-/// (45 and `…` when longer), its first letter upper-case.
+/// (45 and `…` when longer), its first letter upper-case. Other control characters are spaces.
 pub fn titled(text: &str) -> String {
-    let line = text.trim().lines().next().unwrap_or("").trim();
+    let line: String = text
+        .trim()
+        .split(breaks_line)
+        .next()
+        .unwrap_or("")
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let line = line.trim();
     let short = if line.chars().count() > 48 {
         format!("{}…", line.chars().take(45).collect::<String>().trim_end())
     } else {
@@ -485,7 +575,16 @@ pub async fn list(
     Query(query): Query<ListPage>,
 ) -> Result<Response, ApiError> {
     let limit = limit(query.limit.as_deref())?;
-    let list = shared.conversations.list(query.after.as_deref(), limit)?;
+    let after = match query.after.as_deref() {
+        None => None,
+        Some(text) => Some(Cursor::parse(text).ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "after is the cursor of a conversation the list gave.",
+            )
+        })?),
+    };
+    let list = shared.conversations.list(after, limit);
     Ok((StatusCode::OK, axum::Json(json!(list))).into_response())
 }
 
@@ -505,7 +604,7 @@ pub async fn update(
     let change: Change = serde_json::from_slice(&body).map_err(|_| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
-            "The body is {\"title\": …, \"pinned\": …}.",
+            "The body is {\"title\": \"…\", \"pinned\": true or false}.",
         )
     })?;
     if change.title.is_none() && change.pinned.is_none() {
@@ -515,10 +614,11 @@ pub async fn update(
         ));
     }
     let title = change.title.map(|t| t.trim().to_owned());
-    if title
-        .as_ref()
-        .is_some_and(|t| t.is_empty() || t.chars().count() > TITLE || t.contains('\n'))
-    {
+    if title.as_ref().is_some_and(|t| {
+        t.is_empty()
+            || t.chars().count() > TITLE
+            || t.chars().any(|c| c.is_control() || breaks_line(c))
+    }) {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "title is one line of 1 to 100 characters.",
@@ -539,7 +639,7 @@ pub async fn remove(
 
 #[cfg(test)]
 mod tests {
-    use super::titled;
+    use super::{Cursor, titled};
 
     #[test]
     fn titles_are_the_first_line_as_the_design_cuts_it() {
@@ -557,5 +657,20 @@ mod tests {
         );
         assert_eq!(titled("éclair"), "Éclair");
         assert_eq!(titled(" \n "), "New conversation");
+        assert_eq!(titled("one\r\ntwo"), "One");
+        assert_eq!(titled("one\u{2028}two"), "One");
+        assert_eq!(titled("tab\there"), "Tab here");
+    }
+
+    #[test]
+    fn cursors_read_back_and_order_as_the_list() {
+        let pinned = Cursor::parse("1-3").unwrap();
+        let older = Cursor::parse("0-7").unwrap();
+        let newer = Cursor::parse("0-9").unwrap();
+        assert_eq!(pinned.to_string(), "1-3");
+        assert!(older.after(newer) && newer.after(pinned) && !pinned.after(older));
+        for bad in ["", "2-1", "1-", "-1", "1-x", "1-2-3", "a"] {
+            assert_eq!(Cursor::parse(bad), None, "{bad}");
+        }
     }
 }
