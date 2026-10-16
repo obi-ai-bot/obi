@@ -5,7 +5,23 @@ import { useLive, type Live } from './live';
 // Tasks are obid's jobs (and the inbox's decisions that belong to no job) as Home shows them.
 // Each belongs to a kind of work (the chips on Home, the groups in the side panel) and is running,
 // needs you, or done. fresh: arrived since the page opened and not opened yet, the only tasks
-// with a blue dot.
+// with a blue dot. who: the teammate whose Oby asked for it, shown before its title.
+//
+// The rules of #496, which the Mac's side panel follows too (apps/shared, SwiftUI):
+// - Kind of work, from fields obid sends, in this order: Review PR (`kind` review), Issues (an
+//   `issue`), one group per teammate whose Oby asked you for something (a job's `obi.fromOwner`,
+//   or an open `obiRequest` item's), Tasks (the rest), and Inbox (decisions that belong to no job
+//   and no teammate: a plug-in's event, an audit). A teammate's request is theirs even when it's a
+//   review. No group comes from a title or other words. Routines have no group: obid has no
+//   routines yet (#395).
+// - Status: needs you (an open inbox item, or failed or interrupted and not let go), running
+//   (queued or running), done.
+// - Group by Type (the default) or Status (Needs you, Running, Completed), remembered in this
+//   browser. A group lists everything open, then its latest 3 done (5 in Completed), then Show
+//   more; its count is its open tasks (by status, all of them); an orange dot when anything in
+//   it needs you. Groups with nothing on Home aren't shown.
+// - One mark per row (markOf): new, needs you, working, queued, done.
+// - A chip: a blue dot while it holds a new task, an orange one while something in it needs you.
 export type Status = 'running' | 'needs' | 'done';
 export type TaskType = { id: string; label: string };
 
@@ -58,15 +74,21 @@ export type JobView = {
 };
 export type Task = { id: string; type: string; title: string; who?: string; brand: Brand; status: Status; fresh: boolean; job: JobView; answer?: string };
 
-// The kinds of work, until #496 groups them as Sangam's design does: reviews, issues, the rest;
-// and decisions in the inbox that belong to no job.
-const ALL_TYPES: TaskType[] = [
-  { id: 'review', label: 'Reviews' },
+// The kinds of work, as Sangam's design has them (design/app tasks.ts), each teammate's group
+// between Issues and Tasks
+const KINDS: TaskType[] = [
+  { id: 'review', label: 'Review PR' },
   { id: 'issues', label: 'Issues' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'inbox', label: 'Inbox' },
 ];
-const typeOf = (j: Job) => (j.kind === 'review' ? 'review' : j.issue != null ? 'issues' : 'tasks');
+const TEAMMATE = 'from:';
+const teammate = (owner: string): TaskType => ({ id: `${TEAMMATE}${owner}`, label: owner });
+const ownerOf = (who: string | undefined | null) => (who && who.trim() ? who.trim() : undefined);
+const typeOf = (j: Job) => {
+  const owner = ownerOf(j.obi?.fromOwner);
+  return owner ? teammate(owner).id : j.kind === 'review' ? 'review' : j.issue != null ? 'issues' : 'tasks';
+};
 
 const minutesAgo = (iso: string | null | undefined, now: number) => (iso ? Math.max(0, (now - Date.parse(iso)) / 60_000) : undefined);
 const accountName = (s: Live, j: Job) => s.status?.accounts.find((a) => a.id === j.account)?.name ?? j.account;
@@ -100,16 +122,18 @@ export function toTask(s: Live, j: Job, now = Date.now()): Task {
     request: j.request, notes: j.notes ?? [], created: minutesAgo(j.created, now)!, finished: minutesAgo(j.finished, now),
   };
   return {
-    id: j.id, type: typeOf(j), title: j.title, brand: AGENTS[j.agent]?.brand ?? BRANDS.claude, status,
+    id: j.id, type: typeOf(j), title: j.title, who: ownerOf(j.obi?.fromOwner), brand: AGENTS[j.agent]?.brand ?? BRANDS.claude, status,
     fresh: !s.firstJobs.has(j.id) && !s.seen.has(j.id), job: view, answer: s.answering[j.id],
   };
 }
 
-// An inbox decision that belongs to no job (another Oby's request, a plug-in's event)
+// An inbox decision that belongs to no job: another Oby's request (its teammate's group), a
+// plug-in's event (Inbox)
 function itemTask(s: Live, i: InboxItem, now: number): Task {
+  const owner = i.kind === 'obiRequest' ? ownerOf(i.obi?.fromOwner) : undefined;
   return {
     // (no agent's mark: it shows Oby's, TaskMark)
-    id: `inbox:${i.id}`, type: 'inbox', title: i.headline ?? i.title, brand: BRANDS.github, status: 'needs',
+    id: `inbox:${i.id}`, type: owner ? teammate(owner).id : 'inbox', title: i.headline ?? i.title, who: owner, brand: BRANDS.github, status: 'needs',
     fresh: false, answer: s.answering[`inbox:${i.id}`],
     job: {
       id: i.id, agent: null, account: '', model: '', repo: '', branch: '—', base: '—', status: 'queued', step: '', stages: [],
@@ -152,13 +176,15 @@ export function setArchiveAfter(id: string) {
 }
 export const onArchiveAfter = (l: () => void) => { archiveListeners.add(l); return () => { archiveListeners.delete(l); }; };
 
+// every task, as of `now` (the page's own clock unless a test gives one)
+const all = (s: Live, now?: number) => (now === undefined ? derive(s) : tasksFrom(s, now));
 const archived = (s: Live, t: Task) => {
   if (t.status !== 'done') return false;
   const job = s.jobs[t.id];
   if (s.clearedAt && job?.finished && job.finished <= s.clearedAt) return true;
   return (t.job.finished ?? t.job.created) > (ARCHIVE_AFTER.find((a) => a.id === archiveAfter)?.min ?? Infinity);
 };
-const onHome = (s: Live) => derive(s).filter((t) => !archived(s, t));
+const onHome = (s: Live, now?: number) => all(s, now).filter((t) => !archived(s, t));
 
 // The archive: done tasks that have left Home, most recently done first
 export type Archived = { id: string; type: string; title: string; agent: Agent | null; finished: number };
@@ -170,16 +196,73 @@ export const archivedTasks = (s: Live): Archived[] => derive(s).filter((t) => ar
 // after, newest first.
 const rank = (t: Task) => (t.fresh ? 0 : t.status === 'needs' ? 1 : t.job.status === 'queued' ? 2 : 3);
 const ranked = (list: Task[]) => list.map((t, i) => [t, i] as const).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(([t]) => t);
-export const tasksWith = (s: Live, status: Status) => ranked(onHome(s).filter((t) => t.status === status));
-export const tasksOf = (s: Live, type: string) => ranked(onHome(s).filter((t) => t.type === type));
+export const tasksWith = (s: Live, status: Status, now?: number) => ranked(onHome(s, now).filter((t) => t.status === status));
+export const tasksOf = (s: Live, type: string, now?: number) => ranked(onHome(s, now).filter((t) => t.type === type));
 export const countOf = (s: Live, status: Status, type?: string) => onHome(s).filter((t) => t.status === status && (!type || t.type === type)).length;
 // a kind of work's count: its tasks not done yet, running or needing you
 export const openOf = (s: Live, type: string) => countOf(s, 'running', type) + countOf(s, 'needs', type);
 export const hasFresh = (s: Live, type: string) => tasksOf(s, type).some((t) => t.fresh);
-// the kinds with anything on Home, in their order
-export const typesOn = (s: Live) => ALL_TYPES.filter((t) => onHome(s).some((k) => k.type === t.id));
-export const typeLabel = (id: string) => ALL_TYPES.find((t) => t.id === id)?.label ?? 'Tasks';
-export const typeById = (id: string): TaskType => ALL_TYPES.find((t) => t.id === id) ?? ALL_TYPES[2];
+// the kinds with anything on Home, in their order: the teammates' groups (by name) after Issues
+export const typesOn = (s: Live, now?: number): TaskType[] => {
+  const on = new Set(onHome(s, now).map((t) => t.type));
+  const mates = [...on].filter((id) => id.startsWith(TEAMMATE)).sort((a, b) => a.localeCompare(b)).map((id) => typeById(id));
+  const kinds = KINDS.filter((t) => on.has(t.id));
+  const at = kinds.findIndex((t) => t.id === 'tasks' || t.id === 'inbox');
+  return at < 0 ? [...kinds, ...mates] : [...kinds.slice(0, at), ...mates, ...kinds.slice(at)];
+};
+export const typeById = (id: string): TaskType =>
+  id.startsWith(TEAMMATE) && id.length > TEAMMATE.length ? teammate(id.slice(TEAMMATE.length)) : KINDS.find((t) => t.id === id) ?? KINDS[2];
+export const typeLabel = (id: string) => typeById(id).label;
+
+// The side panel's groups: by kind of work, or by status. count: a kind's open tasks, or all of a
+// status's; needs: how many need you (its orange dot)
+export type GroupBy = 'type' | 'status';
+export type Group = { id: string; label: string; tasks: Task[]; count: number; countLabel: 'open' | 'tasks'; needs: number };
+const STATUSES = [['needs', 'Needs you'], ['running', 'Running'], ['done', 'Completed']] as const;
+export function groupsOf(s: Live, by: GroupBy, now?: number): Group[] {
+  const groups: Group[] = by === 'type'
+    ? typesOn(s, now).map((t) => {
+      const list = tasksOf(s, t.id, now);
+      return { id: t.id, label: t.label, tasks: list, count: list.filter((k) => k.status !== 'done').length, countLabel: 'open', needs: list.filter((k) => k.status === 'needs').length };
+    })
+    : STATUSES.map(([id, label]) => {
+      const list = tasksWith(s, id, now);
+      return { id: `status:${id}`, label, tasks: list, count: list.length, countLabel: 'tasks', needs: id === 'needs' ? list.length : 0 };
+    });
+  return groups.filter((g) => g.tasks.length > 0);
+}
+// A group's rows: everything still open, then its done tasks, most recently done first: the latest
+// 3 (5 in Completed) unless it shows them all (Show more); hidden: how many Show more adds
+export function shownOf(g: { id: string; tasks: Task[] }, all: boolean): { rows: Task[]; hidden: number } {
+  const open = g.tasks.filter((t) => t.status !== 'done');
+  const done = g.tasks.filter((t) => t.status === 'done').map((t, i) => [t, i] as const)
+    .sort(([a, i], [b, k]) => (a.job.finished ?? a.job.created) - (b.job.finished ?? b.job.created) || i - k).map(([t]) => t);
+  const keep = g.id === 'status:done' ? 5 : 3;
+  return { rows: all ? [...open, ...done] : [...open, ...done.slice(0, keep)], hidden: Math.max(0, done.length - keep) };
+}
+
+// A task's one mark, wherever it's listed: new (blue, until opened), needs you (orange), working,
+// queued (no mark: being listed unstarted says it), done (a check). live: where you're looking
+// at it already, so not new.
+export type Mark = 'new' | 'needs' | 'working' | 'queued' | 'done';
+export const markOf = (t: Task, live = false): Mark =>
+  !live && t.fresh ? 'new' : t.status === 'needs' ? 'needs' : t.status === 'done' ? 'done' : t.job.status === 'queued' ? 'queued' : 'working';
+// A kind's chip on Home: a blue dot while it holds a new task, an orange one while anything in it
+// needs you; both can show
+export const chipOf = (s: Live, type: string) => ({ fresh: hasFresh(s, type), needs: countOf(s, 'needs', type) > 0 });
+
+// Group by, from Home's ⋮: Type unless Status was picked, remembered in this browser
+const GROUP_BY = 'oby.groupBy';
+export const readGroupBy = (): GroupBy => { try { return localStorage.getItem(GROUP_BY) === 'status' ? 'status' : 'type'; } catch { return 'type'; } };
+let groupBy = readGroupBy();
+const groupByListeners = new Set<() => void>();
+export const getGroupBy = () => groupBy;
+export function setGroupBy(by: GroupBy) {
+  groupBy = by;
+  try { localStorage.setItem(GROUP_BY, by); } catch { /* not remembered, that's all */ }
+  groupByListeners.forEach((l) => l());
+}
+export const onGroupBy = (l: () => void) => { groupByListeners.add(l); return () => { groupByListeners.delete(l); }; };
 // A kind of work's two tabs: Running holds everything not done, what needs you included; and Done.
 export type Tab = 'running' | 'done';
 const tabOf = (t: Task): Tab => (t.status === 'done' ? 'done' : 'running');

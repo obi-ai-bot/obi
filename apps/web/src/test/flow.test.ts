@@ -85,7 +85,7 @@ describe('following obid', () => {
   });
 
   it('what came meanwhile wins over the snapshot, in the order it came', () => {
-    const s = synced(state({ status: null }), { status: state().status!, jobs: [job({ status: 'queued' })], inbox: [], turns: [] }, [
+    const s = synced(state({ status: null }), { status: state().status!, jobs: [job({ status: 'queued' })], inbox: [], turns: [], conversations: [] }, [
       { kind: 'job', job: job({ status: 'running' }) },
       { kind: 'job', job: job({ status: 'done' }) },
     ]);

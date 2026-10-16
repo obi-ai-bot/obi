@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import ObyFaceLive from './ObyFaceLive';
 import StatusDot from './StatusDot';
@@ -7,8 +7,8 @@ import { useScrollThumb } from './useScrollThumb';
 import Composer, { typingIn } from './Composer';
 import Formatted from './Formatted';
 import { tokenize } from './textTokens';
-import { answerQuestion, ask, loadOlder, markSeen, tellJob, useLive, type Live } from './live';
-import { startOf, toMessage, useChat, type Message } from './chats';
+import { answerQuestion, ask, loadOlder, markSeen, openConversation, tellJob, useLive, type Live } from './live';
+import { isNew, layerOf, startOf, toMessage, useChat, type Message } from './chats';
 import { AGENTS, metaOf, useTasks, type Task } from './tasks';
 
 // how long the way out takes (the sink animation in app.css)
@@ -42,9 +42,9 @@ function threadOf(s: Live, t: Task): Message[] {
   return out;
 }
 
-// A conversation. kind 'oby': the one with Oby (chats.ts), opened from the side panel or started
-// on Home: what you asked, Oby's answers with the tasks they started as cards under them; the
-// message box carries it on (POST /v1/plans). kind 'task': a task's own thread (threadOf), and
+// A conversation. kind 'oby': one with Oby (chats.ts), `id` (or NEW, one its first words start),
+// opened from the side panel or a task, or started on Home: what you asked, Oby's answers with
+// the tasks they started as cards under them; the message box carries it on (POST /v1/plans). kind 'task': a task's own thread (threadOf), and
 // its agent's live line while it works; the message box tells the agent. Whatever is happening
 // now comes last. It lies over what was open; back (in the title bar, or Esc) returns to it.
 export default function ChatView({ id, kind = 'task', leaving, covered = false, onBack, onGone, onOpenTask }: {
@@ -66,14 +66,28 @@ export default function ChatView({ id, kind = 'task', leaving, covered = false, 
   const j = task?.job;
   const { list, onScroll, thumbProps } = useScrollThumb<HTMLElement>();
   const agent = j?.agent ? AGENTS[j.agent].name : 'Oby';
+  // The conversation this layer is for: `id`, shown again when it's on top again after another
+  // was opened over it (nothing of that other one meanwhile). NEW until its words start one, which
+  // it then is; deleted (here or elsewhere), NEW again, so the next words start one shown here.
+  const [own, setOwn] = useState(id);
+  const listed = live.conversations.some((c) => c.id === own);
+  useEffect(() => {
+    if (kind !== 'oby' || covered || leaving) return;
+    const next = layerOf(own, live.shown, listed);
+    if (next !== own) setOwn(next);
+    else if (!isNew(own) && listed) void openConversation(own);
+  }, [kind, own, covered, leaving, listed, live.shown]);
+  const mine = kind === 'oby' && (isNew(own) || live.shown === own);
+  // Oby's question back, when it asked it in this conversation
+  const waiting = !task && mine && live.waiting && live.waiting.conversation === live.shown ? live.waiting : null;
   // a task's: what came before, the decision (if any) where things stand
   const before = task ? threadOf(live, task) : [];
   const thread: Entry[] = task ? [
     ...before,
     ...(task.status === 'needs' && j!.ask ? [{ id: 'ask' as const, who: 'oby' as const, ask: true as const }] : []),
-  ] : chat.said;
+  ] : mine ? chat.said : [];
   // Oby at work on an answer, and what it's on
-  const typing = !task && chat.typing, step = !task ? chat.step : undefined;
+  const typing = !task && mine && chat.typing, step = !task && mine ? chat.step : undefined;
   // the first message of the run at the end, if it's Oby's: its face is live while Oby still
   // works on that turn
   let head = -1;
@@ -107,7 +121,7 @@ export default function ChatView({ id, kind = 'task', leaving, covered = false, 
 
   const send = (text: string) => {
     if (task) void tellJob(task.id, text);
-    else if (live.waiting) answerQuestion(text);
+    else if (waiting) answerQuestion(text);
     else void ask(text);
   };
 
@@ -116,7 +130,7 @@ export default function ChatView({ id, kind = 'task', leaving, covered = false, 
       <div className="chat-scroll">
         <section ref={list} className="chat" aria-label={task ? `Conversation about ${task.title}` : chat.title} onScroll={onScroll}>
           <div className="chat-column">
-            {!task && live.older && (
+            {!task && mine && live.older && (
               <button className="chat-older" onClick={() => void loadOlder()}>Earlier messages</button>
             )}
             {!task && !thread.length && !typing && (
@@ -189,14 +203,14 @@ export default function ChatView({ id, kind = 'task', leaving, covered = false, 
 
       {/* Oby asking you something back (POST /v1/plans answered with a question): held over
           the message box until you answer, with a pick or in your own words below */}
-      {!task && live.waiting && !live.thinking && (
+      {waiting && !live.thinking && (
         <div className="chat-ask" role="group" aria-label="Oby is asking">
           <div className="chat-ask-card">
             <span className="tc-ask-kind">Question</span>
-            <p className="tc-ask-head">{live.waiting.question.text}</p>
+            <p className="tc-ask-head">{waiting.question.text}</p>
             <div className="tc-options">
-              {live.waiting.question.options.map((o, i) => (
-                <button key={o} className={`tc-option${i === live.waiting!.question.recommended ? ' is-primary' : ''}`} onClick={() => answerQuestion(o)}>{o}</button>
+              {waiting.question.options.map((o, i) => (
+                <button key={o} className={`tc-option${i === waiting.question.recommended ? ' is-primary' : ''}`} onClick={() => answerQuestion(o)}>{o}</button>
               ))}
             </div>
             <p className="chat-ask-hint">Or answer in your own words below</p>
@@ -206,7 +220,7 @@ export default function ChatView({ id, kind = 'task', leaving, covered = false, 
       {(!task || j?.agent) && (
         <Composer
           style={{ '--i': 2 } as React.CSSProperties}
-          placeholder={!task ? (live.waiting ? 'Answer Oby…' : 'Reply to Oby…') : task.status === 'done' ? 'Ask its agent for more…' : `Tell ${agent}…`}
+          placeholder={!task ? (waiting ? 'Answer Oby…' : live.shown ? 'Reply to Oby…' : 'What do you want me to work on?') : task.status === 'done' ? 'Ask its agent for more…' : `Tell ${agent}…`}
           label={task ? `Tell the agent about ${task.title}` : 'Reply to Oby'}
           busy={!task && live.thinking}
           onSend={send}
