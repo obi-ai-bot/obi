@@ -543,54 +543,46 @@ fn apps_that_send_no_conversation_keep_one_thread() {
     assert_eq!(ids(&conversations(&obid, "")), [&newer, &id]);
 }
 
+/// A plan obid refuses twice is never a `422` any more (#546): rules stand in, and they never
+/// act on the user's first words. The conversation keeps the words and Oby's answer.
 #[test]
-fn a_refused_plan_leaves_no_conversation_of_its_own() {
+fn a_plan_refused_twice_falls_back_to_rules_which_never_act() {
     let folder = Folder::new("conversation-refused");
     let (obid, _) = obid(&folder);
-    let events = follow_events(&obid);
-    let refused = |body: Value| {
-        let answer = call(&obid, "POST", "/v1/plans", Some(&body));
-        assert_eq!(answer.status, 422, "{}", answer.text);
-        assert!(
-            answer.text.contains("unsupported action"),
-            "{}",
-            answer.text
-        );
-    };
-
-    // The words would have started it, whether they asked for a new one or there was none.
-    refused(json!({"said": "unsupported-case first try", "new": true}));
-    refused(json!({"said": "unsupported-case again"}));
-    assert!(conversations(&obid, "").is_empty());
-    assert_eq!(
-        std::fs::read_dir(obid.home.join("conversations"))
-            .unwrap()
-            .count(),
-        0
+    // The fake planner answers an action that doesn't exist, twice: rules would start a job on
+    // the fixture's issue, which obid refuses to guess.
+    let answer = plan(
+        &obid,
+        json!({"said": "unsupported-case: fix fixture-app #3", "new": true}),
     );
-    let heard = events_named(&events, "conversation", 10, |got| {
-        got.iter().filter(|c| c["deleted"] == true).count() == 2
-    });
-    let started: Vec<&Value> = heard.iter().filter(|c| c["title"].is_string()).collect();
-    assert_eq!(started.len(), 2, "{heard:?}");
-    assert_eq!(started[0]["title"], "Unsupported-case first try");
+    assert_eq!(
+        answer["text"], "Oby couldn't think that through: say it again",
+        "{answer}"
+    );
+    assert_eq!(answer["jobs"], json!([]));
+    let id = answer["conversation"].as_str().unwrap().to_owned();
     assert!(
-        heard
-            .iter()
-            .any(|c| c == &json!({"id": started[0]["id"], "deleted": true}))
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
-
-    // One that was there stays, with what the user said in it.
-    let kept = plan(&obid, json!({"said": "hello", "new": true}))["conversation"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    refused(json!({"said": "unsupported-case here", "conversation": kept}));
-    assert_eq!(ids(&conversations(&obid, "")), [&kept]);
     assert_eq!(
-        texts(&turns(&obid, &format!("?id={kept}"))),
-        ["hello", "Fine.", "unsupported-case here"]
+        texts(&turns(&obid, &format!("?id={id}"))),
+        [
+            "unsupported-case: fix fixture-app #3",
+            "Oby couldn't think that through: say it again"
+        ]
     );
+    // Words naming no repository: rules ask which.
+    let asked = plan(
+        &obid,
+        json!({"said": "unsupported-case again", "conversation": id}),
+    );
+    assert_eq!(asked["kind"], "question", "{asked}");
+    assert_eq!(asked["question"]["text"], "Which repository?");
+    assert_eq!(ids(&conversations(&obid, "")), [&id]);
 }
 
 #[test]

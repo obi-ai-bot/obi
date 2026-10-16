@@ -190,3 +190,207 @@ fn conversation_turns_are_kept_between_runner_restarts() {
             .is_file()
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The brain (#546): the plan, its checks, retries and fallbacks.
+
+/// The fake planner's own folder: its account's (`configDir`), where it keeps its queue of
+/// plans and what each call got.
+fn brain(obid: &Obid) -> PathBuf {
+    obid.home.join("accounts/stub")
+}
+
+/// What the fake planner answers next, one line per call.
+fn queue(obid: &Obid, lines: &[String]) {
+    std::fs::create_dir_all(brain(obid)).unwrap();
+    std::fs::write(brain(obid).join("plans"), lines.join("\n") + "\n").unwrap();
+}
+
+/// Each call the brain got, in order: its folder of `args`, `input`, `pwd` and `work.md`.
+fn calls(obid: &Obid) -> Vec<PathBuf> {
+    let mut calls: Vec<(u32, PathBuf)> = std::fs::read_dir(brain(obid).join("calls"))
+        .map(|dir| {
+            dir.flatten()
+                .filter_map(|e| Some((e.file_name().to_str()?.parse().ok()?, e.path())))
+                .collect()
+        })
+        .unwrap_or_default();
+    calls.sort();
+    calls.into_iter().map(|(_, path)| path).collect()
+}
+
+fn read(path: PathBuf) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// The brain's turns, as obid keeps them.
+fn records(obid: &Obid) -> Vec<serde_json::Value> {
+    read(obid.home.join("brain-turns.jsonl"))
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn reply(text: &str) -> String {
+    json!({"action": "reply_only", "reply": text, "dispatches": [], "question": null, "jobs": []})
+        .to_string()
+}
+
+fn started(folder: &Folder) -> Obid {
+    let remote = fixture(&folder.0.join("fixture"));
+    let config = config(&folder.0, &remote, &planner());
+    start(&folder.0, &config, Some(planner().parent().unwrap()))
+}
+
+fn said(obid: &Obid, words: &str) -> serde_json::Value {
+    let answer = call(obid, "POST", "/v1/plans", Some(&json!({"said": words})));
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    answer.body
+}
+
+/// BrainRetryTests.emptyExit15RecoversBeforeRulesPlan: one transient failure recovers on the
+/// one retry.
+#[test]
+fn an_empty_exit_15_recovers_before_rules_plan() {
+    let folder = Folder::new("brain-exit-15");
+    let obid = started(&folder);
+    queue(&obid, &["EXIT 15".into(), reply("Ready")]);
+    assert_eq!(said(&obid, "hello")["text"], "Ready");
+    assert_eq!(calls(&obid).len(), 2);
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["by"], "claude");
+    assert_eq!(record["refused"], json!([]));
+}
+
+/// BrainRetryTests.exhaustedRetriesKeepExitAndStderrInFallbackEvidence
+#[test]
+fn exhausted_retries_keep_exit_and_stderr_in_fallback_evidence() {
+    let folder = Folder::new("brain-exhausted");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &["EXIT 15 failure 1".into(), "EXIT 15 failure 2".into()],
+    );
+    // Rules stand in: "hello" names no repository, so they ask.
+    let answer = said(&obid, "hello");
+    assert_eq!(answer["kind"], "question", "{answer}");
+    assert_eq!(answer["question"]["text"], "Which repository?");
+    assert_eq!(calls(&obid).len(), 2);
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["by"], "rules");
+    let refused = record["refused"].as_array().unwrap();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    for attempt in 1..=2 {
+        let evidence = format!("attempt {attempt}: exit code 15, stderr: failure {attempt}");
+        assert!(
+            refused[0].as_str().unwrap().contains(&evidence),
+            "{refused:?}"
+        );
+    }
+}
+
+/// BrainRetryTests.retriesAreLimitedToTransientEmptyFailures: an empty answer is tried again
+/// once; an answer that says something else isn't.
+#[test]
+fn retries_are_limited_to_transient_empty_failures() {
+    let folder = Folder::new("brain-retries");
+    let obid = started(&folder);
+    queue(&obid, &["EXIT 0".into(), "EXIT 0".into()]);
+    assert_eq!(said(&obid, "hello")["kind"], "question");
+    assert_eq!(calls(&obid).len(), 2);
+    let refused = records(&obid).pop().unwrap()["refused"].to_string();
+    assert!(
+        refused.contains("attempt 2: empty, stderr: <empty>"),
+        "{refused}"
+    );
+
+    queue(
+        &obid,
+        &["FAIL 1 Please sign in".into(), reply("Never asked.")],
+    );
+    assert_eq!(said(&obid, "hello")["kind"], "question");
+    assert_eq!(calls(&obid).len(), 3);
+    let refused = records(&obid).pop().unwrap()["refused"].to_string();
+    assert!(
+        refused.contains("attempt 1: exit code 1, stderr: <empty>"),
+        "{refused}"
+    );
+    assert!(!refused.contains("attempt 2"), "{refused}");
+}
+
+/// #546's acceptance: a plan naming an unknown job is refused, retried with the reason, and the
+/// second plan is used.
+#[test]
+fn a_plan_naming_an_unknown_job_is_refused_and_retried_with_the_reason() {
+    let folder = Folder::new("brain-refused");
+    let obid = started(&folder);
+    let stop = json!({"action": "stop_agent", "reply": "", "dispatches": [], "question": null,
+                      "jobs": ["zz"], "all": false});
+    queue(
+        &obid,
+        &[stop.to_string(), reply("Nothing of that name runs.")],
+    );
+    assert_eq!(
+        said(&obid, "stop the zz job")["text"],
+        "Nothing of that name runs."
+    );
+    let calls = calls(&obid);
+    assert_eq!(calls.len(), 2);
+    assert!(!read(calls[0].join("input")).contains("Your last plan was refused"));
+    assert!(
+        read(calls[1].join("input"))
+            .trim_end()
+            .ends_with("Your last plan was refused: zz isn't a job Oby can stop. Make a new one."),
+        "{}",
+        read(calls[1].join("input"))
+    );
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["by"], "claude");
+    assert!(
+        record["refused"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("claude plan refused (zz isn't a job Oby can stop): {"),
+        "{record}"
+    );
+}
+
+/// BrainSteadyTests, through the process: quick questions think with Haiku, long requests with
+/// Sonnet, and with nothing to read the brain has no tool at all.
+#[test]
+fn the_brain_thinks_with_haiku_and_long_requests_with_sonnet() {
+    let folder = Folder::new("brain-models");
+    let obid = started(&folder);
+    said(&obid, "how is it going?");
+    said(&obid, &"x".repeat(700));
+    let calls = calls(&obid);
+    let first = read(calls[0].join("args"));
+    assert!(first.contains("--model\nclaude-haiku-5-5\n"), "{first}");
+    assert!(
+        first.contains("--tools\n\n--strict-mcp-config\n"),
+        "{first}"
+    );
+    assert!(!first.contains("--max-turns"), "{first}");
+    assert!(read(calls[1].join("args")).contains("--model\nclaude-sonnet-5-5\n"));
+}
+
+/// Codex plans when Claude can't, with the same schema and checks.
+#[test]
+fn codex_plans_when_claude_cannot() {
+    let folder = Folder::new("brain-codex");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    let agents = planner().parent().unwrap().to_path_buf();
+    config["agents"]["codex"] = json!({"bin": agents.join("fake-codex"), "accounts": []});
+    let obid = start(&folder.0, &config, Some(&agents));
+    queue(&obid, &["EXIT 15".into(), "EXIT 15".into()]);
+    assert_eq!(said(&obid, "how is it going?")["text"], "From Codex.");
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["by"], "codex");
+    assert!(
+        record["refused"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("claude failed: claude returned no plan after retry")
+    );
+}

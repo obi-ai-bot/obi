@@ -2182,6 +2182,91 @@ impl Jobs {
         })
     }
 
+    /// The brain's command line when it may read its quoted file (#65): boxed like a job's agent,
+    /// so all it sees is `dir` (its working directory, `work.md` in it) and its account's login.
+    /// `flags` follow Claude Code's binary; Codex runs `app-server`. The brain thinks with the
+    /// tool's first account. Throws why it can't run.
+    pub fn brain_launch(
+        &self,
+        tool: Tool,
+        dir: &Path,
+        flags: Vec<OsString>,
+    ) -> Result<Launch, String> {
+        let sandbox = self
+            .sandbox
+            .as_ref()
+            .map_err(|why| format!("obid can't box the brain: {why}"))?;
+        let bin = self
+            .agent_bin(tool)
+            .ok_or_else(|| format!("obid can't find {}'s binary.", tool.name()))?;
+        let account = self
+            .accounts(tool)
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("{} has no account.", tool.name()))?;
+        let temp = dir.join("home");
+        store::make_private_dir(&temp)
+            .map_err(|e| format!("obid can't make the brain's folder: {e}"))?;
+        let mut hidden = vec![self.config.home.clone()];
+        hidden.extend(person_homes());
+        let mut read_only = sandbox::tool_roots(
+            &process::tools_path(),
+            &hidden,
+            std::slice::from_ref(&self.config.home),
+        );
+        read_only.extend(sandbox::install_root(
+            &bin,
+            &hidden,
+            std::slice::from_ref(&self.config.home),
+        ));
+        read_only.push(bin.clone());
+        let mut spec = Spec {
+            worktree: dir.to_path_buf(),
+            git_admin: None,
+            git_common: None,
+            commits: false,
+            temp: temp.clone(),
+            accounts: Vec::new(),
+            read_only,
+            hidden,
+            network: true,
+        };
+        let mut extra: Vec<(&str, OsString)> = Vec::new();
+        match &account.config_dir {
+            Some(folder) => {
+                std::fs::create_dir_all(folder)
+                    .map_err(|e| format!("obid can't make the account's folder: {e}"))?;
+                spec.accounts.push(folder.clone());
+                extra.push(match tool {
+                    Tool::Codex => ("CODEX_HOME", folder.clone().into_os_string()),
+                    _ => ("CLAUDE_CONFIG_DIR", folder.clone().into_os_string()),
+                });
+            }
+            None => {
+                // The tool's own login, copied into the brain's folder as a job's is.
+                let login = dir.join("login");
+                let names = copy_login(login_home().as_deref(), &login, tool)
+                    .map_err(|e| format!("obid can't copy {}'s login: {e}", tool.name()))?;
+                for name in names {
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(login.join(name), temp.join(name))
+                        .map_err(|e| format!("obid can't show the brain its login: {e}"))?;
+                }
+                spec.accounts.push(login);
+            }
+        }
+        let argv: Vec<OsString> = match tool {
+            Tool::Codex => codex::argv(bin),
+            _ => std::iter::once(bin.into_os_string()).chain(flags).collect(),
+        };
+        Ok(Launch {
+            argv: sandbox.wrap(&spec, &argv),
+            env: process::sandbox_env(&process::tools_path(), &spec.temp, &extra),
+            cwd: dir.to_path_buf(),
+            stderr: dir.join("stderr.log"),
+        })
+    }
+
     /// Runs one turn of the job's tool and follows it on the job: its session and steps.
     async fn turn(
         &self,
