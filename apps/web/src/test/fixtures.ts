@@ -33,7 +33,7 @@ export function state(over: Partial<Live> = {}): Live {
       models: { claude: { model: 'claude-opus-5-5' } },
       accounts: [{ id: 'stub', agent: 'claude', name: 'Stub', label: null, signedIn: true, fiveHour: null, sevenDay: null, fiveHourResets: null, sevenDayResets: null, running: 1 }],
     },
-    jobs: {}, firstJobs: new Set(), seen: new Set(), inbox: [], turns: [], older: false, thinking: false, steps: [], waiting: null,
+    jobs: {}, firstJobs: new Set(), seen: new Set(), inbox: [], turns: [], shown: null, older: false, thinking: false, steps: [], waiting: null,
     answering: {}, clearedAt: null, ...over,
   };
 }

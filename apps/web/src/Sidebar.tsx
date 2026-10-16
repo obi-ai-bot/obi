@@ -223,11 +223,11 @@ export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenCha
           </button>
         )}
 
-        {/* the conversation with Oby: one for now; many come with #493 */}
+        {/* the conversation with Oby this page shows: obid keeps many (#493); their list comes next */}
         {section === 'conversations' && (
           <div className="sidebar-plain">
             {convoRow}
-            <p className="sidebar-empty">One conversation for now: many, sharing one memory, come with #493.</p>
+            <p className="sidebar-empty">obid keeps all your conversations; this page shows the latest. Their list comes next.</p>
           </div>
         )}
         {/* Home: the conversation, then each kind of work folds open to its tasks

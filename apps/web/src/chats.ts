@@ -1,10 +1,12 @@
 import type { Turn } from './api';
 import { useLive, type Live } from './live';
 
-// The conversation with Oby: obid keeps one thread for every device (GET /v1/conversation),
-// which every message from Home's box joins (POST /v1/plans). Many conversations sharing one
-// memory come with #493; until then this is the one, and the side panel's list of conversations
-// stays behind Settings › General › "Show screens still being built".
+// The conversation with Oby. obid keeps many (#493, "obid only: conversations" in runner-api.md),
+// and this page shows one: the latest when it opened (GET /v1/conversation), or the first its words
+// start. Its words go to that one (POST /v1/plans with `conversation`), and turns of the others
+// stay out (live.ts). The list of conversations is the next step (wave 2); until then the side
+// panel's Conversations, behind Settings › General › "Show screens still being built", has this
+// one row.
 //
 // A message in a thread: who said it ('you', 'oby', or where a task came in from), what, and how
 // many minutes ago (none: not known, as for what you told a job's agent). id: what it is in the

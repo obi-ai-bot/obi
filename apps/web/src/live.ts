@@ -14,7 +14,9 @@ export type Live = {
   firstJobs: Set<string>;      // the jobs the page found on opening: never "new"
   seen: Set<string>;           // jobs opened since
   inbox: InboxItem[];          // open and put-off items
-  turns: Turn[];               // the conversation, oldest first
+  turns: Turn[];               // the conversation it shows, oldest first
+  shown: string | null;        // which conversation that is: the latest when the page opened, or
+                               // the first it starts; null before there is one
   older: boolean;              // turns before the first one shown
   thinking: boolean;           // a plan from this page is under way
   steps: Step[];               // what the turn under way is doing
@@ -26,7 +28,7 @@ export type Live = {
 const PAGE = 100;
 let state: Live = {
   signedIn: !!token(), connection: 'connecting', problem: null, status: null, jobs: {}, firstJobs: new Set(), seen: new Set(),
-  inbox: [], turns: [], older: false, thinking: false, steps: [], waiting: null, answering: {}, clearedAt: null,
+  inbox: [], turns: [], shown: null, older: false, thinking: false, steps: [], waiting: null, answering: {}, clearedAt: null,
 };
 const listeners = new Set<() => void>();
 const set = (patch: Partial<Live>) => { state = { ...state, ...patch }; listeners.forEach((l) => l()); };
@@ -54,9 +56,17 @@ export function apply(s: Live, e: Event): Live {
       return { ...s, inbox: settled ? rest : [...rest, e.item].sort((a, b) => a.created.localeCompare(b.created)), answering };
     }
     case 'turn': {
+      // obid keeps many conversations (#493) and this page shows one: a turn of another
+      // (someone else started it) stays out of it. With none shown yet, the first one is it.
+      const from = e.turn.conversation;
+      if (from && s.shown && from !== s.shown) return s;
       const rest = s.turns.filter((t) => t.id !== e.turn.id);
-      return { ...s, turns: [...rest, e.turn].sort(byAt) };
+      return { ...s, shown: s.shown ?? from ?? null, turns: [...rest, e.turn].sort(byAt) };
     }
+    case 'conversationGone':
+      // the conversation it shows was deleted elsewhere: nothing to show, and the next words start
+      // or join the latest
+      return e.id === s.shown ? { ...s, shown: null, turns: [], older: false } : s;
     case 'step':
       if (!s.thinking) return s;
       return { ...s, steps: [...s.steps.filter((x) => !(x.turn === e.step.turn && x.index === e.step.index)), e.step] };
@@ -85,6 +95,7 @@ export function synced(s: Live, snap: Snapshot, meanwhile: Event[]): Live {
     firstJobs: s.status ? s.firstJobs : new Set(snap.jobs.map((j) => j.id)),
     jobs: { ...s.jobs, ...Object.fromEntries(snap.jobs.map((j) => [j.id, j])) },
     inbox: snap.inbox.filter(isOpen), turns: [...snap.turns].sort(byAt), older: snap.turns.length >= PAGE,
+    shown: snap.turns[0]?.conversation ?? s.shown,
   };
   for (const e of meanwhile) next = apply(next, e);
   return next;
@@ -139,7 +150,7 @@ async function follow(control: AbortController) {
 
 async function sync() {
   try {
-    const [status, jobs, inbox, turns] = await Promise.all([api.status(), api.jobs(PAGE), api.inbox(), api.conversation({ limit: PAGE })]);
+    const [status, jobs, inbox, turns] = await Promise.all([api.status(), api.jobs(PAGE), api.inbox(), shownTurns()]);
     const meanwhile = pending ?? [];
     pending = null;
     retry = 0;
@@ -199,6 +210,17 @@ const failed = (e: unknown) => {
   else say(e instanceof Error ? e.message : String(e));
 };
 
+// The turns of the conversation the page shows, or, with none (or it's gone), of the latest
+async function shownTurns() {
+  if (state.shown) {
+    try { return await api.conversation({ id: state.shown, limit: PAGE }); } catch (e) {
+      if (!(e instanceof ApiError && e.status === 404)) throw e;
+      set({ shown: null });
+    }
+  }
+  return api.conversation({ limit: PAGE });
+}
+
 // --- What the page does
 
 // Words to Oby (POST /v1/plans): a reply, a question back, or work that starts. Your words and
@@ -208,12 +230,19 @@ export async function ask(said: string, answer?: { question: string; option: str
   if (!words || state.thinking) return;
   set({ thinking: true, steps: [], waiting: null });
   try {
-    const a = await api.plan(words, answer);
+    // in the conversation the page shows, so its words never land in another
+    const a = await api.plan(words, answer, state.shown ?? undefined);
     set(withNew(state, a.jobs));
     if (a.kind === 'question') set({ waiting: { said: a.said, question: a.question } });
-    // the stream down meanwhile: the conversation as it is now
-    if (state.connection !== 'live') set({ turns: (await api.conversation({ limit: PAGE })).sort(byAt) });
+    // the first conversation, which the page now shows; or the stream down meanwhile: the
+    // conversation as it is now
+    if ((!state.shown && a.conversation) || state.connection !== 'live') {
+      if (!state.shown && a.conversation) set({ shown: a.conversation });
+      set({ turns: (await shownTurns()).sort(byAt) });
+    }
   } catch (e) {
+    // the conversation it showed is gone: the latest from now on
+    if (e instanceof ApiError && e.status === 404 && state.shown) set({ shown: null, turns: [], older: false });
     failed(e);
   } finally {
     set({ thinking: false, steps: [] });

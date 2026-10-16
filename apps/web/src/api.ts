@@ -67,7 +67,9 @@ export type InboxItem = {
 };
 
 // "GET /v1/conversation"
-export type Turn = { id: string; who: 'user' | 'oby'; text: string; at: string; jobs: string[]; details?: string | null };
+// conversation: the one it's in (obid keeps many since #493, "obid only: conversations"); runners
+// from before send none
+export type Turn = { id: string; who: 'user' | 'oby'; text: string; at: string; jobs: string[]; details?: string | null; conversation?: string };
 
 // "Account" and "GET /v1/status", the keys this app reads
 export type Account = {
@@ -94,10 +96,12 @@ export type Status = {
 
 // "POST /v1/plans"
 export type Question = { text: string; options: string[]; recommended: number | null };
-export type PlanAnswer =
+// conversation: the one the words joined
+export type PlanAnswer = (
   | { kind: 'reply'; text: string; details?: string | null; jobs: Job[] }
   | { kind: 'question'; said: string; question: Question; jobs: Job[] }
-  | { kind: 'none'; jobs: Job[] };
+  | { kind: 'none'; jobs: Job[] }
+) & { conversation?: string };
 
 // "GET /v1/events": a step of the turn under way
 export type Step = { turn: string; index: number; action: string; text: string; state: 'running' | 'done' | 'failed'; at: string };
@@ -109,7 +113,8 @@ export type Event =
   | { kind: 'turn'; turn: Turn }
   | { kind: 'step'; step: Step }
   | { kind: 'accounts'; accounts: Account[] }
-  | { kind: 'clear'; clearedAt: string };
+  | { kind: 'clear'; clearedAt: string }
+  | { kind: 'conversationGone'; id: string };
 
 // {"error": "One line a person can read."} with its status
 export class ApiError extends Error {
@@ -179,9 +184,11 @@ export const api = {
   inbox: () => call<InboxItem[]>('GET', '/v1/inbox'),
   answer: (id: string, body: { answer: string } | { done: true } | { later: string }) =>
     call<InboxItem>('POST', `/v1/inbox/${encodeURIComponent(id)}/answer`, body),
-  conversation: (opts: { before?: string; limit?: number } = {}) => call<Turn[]>('GET', `/v1/conversation${q(opts)}`),
-  plan: (said: string, answer?: { question: string; option: string }) =>
-    call<PlanAnswer>('POST', '/v1/plans', answer ? { said, answer } : { said }),
+  // one conversation's turns: `id`'s, or the one `before` is in, or with neither the latest
+  conversation: (opts: { id?: string; before?: string; limit?: number } = {}) => call<Turn[]>('GET', `/v1/conversation${q(opts)}`),
+  // words to Oby, in `conversation` (left out: the latest)
+  plan: (said: string, answer?: { question: string; option: string }, conversation?: string) =>
+    call<PlanAnswer>('POST', '/v1/plans', { said, ...(answer ? { answer } : {}), ...(conversation ? { conversation } : {}) }),
 };
 
 // The event stream (GET /v1/events), with the token in its header, which EventSource can't send:
@@ -235,8 +242,10 @@ export function parseEvent(name: string, data: string): Event | null {
     case 'step': return typeof v.text === 'string' ? { kind: 'step', step: value as Step } : null;
     case 'accounts': return Array.isArray(value) ? { kind: 'accounts', accounts: value as Account[] } : null;
     case 'clear': return typeof v.clearedAt === 'string' ? { kind: 'clear', clearedAt: v.clearedAt } : null;
+    // of the conversation events, only one that was deleted or forgotten matters to this page
+    case 'conversation': return typeof v.id === 'string' && v.deleted === true ? { kind: 'conversationGone', id: v.id } : null;
     default: return null;
   }
 }
 
-export const EVENT_NAMES = ['job', 'inbox', 'turn', 'step', 'accounts', 'clear'] as const;
+export const EVENT_NAMES = ['job', 'inbox', 'turn', 'step', 'accounts', 'clear', 'conversation'] as const;

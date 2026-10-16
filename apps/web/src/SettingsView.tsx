@@ -95,7 +95,7 @@ function General() {
         <Select value={archiveAfter} onChange={setArchiveAfter} label="Archive completed" options={ARCHIVE_AFTER.map((a) => [a.id, a.label] as const)} />
       </Row>
     </Group>
-    <Group i={2} footer="The Obysphere (#497), its knowledge (#495), Connectors (#498) and many conversations (#493) have no backend in obid yet. Shown, each says so and shows nothing made up.">
+    <Group i={2} footer="The Obysphere (#497), its knowledge (#495) and Connectors (#498) have no backend in obid yet, and the list of your conversations is still to come (obid keeps them since #493; this page shows the latest). Shown, each says so and shows nothing made up.">
       <Row label="Show screens still being built"><Switch on={preview} onChange={setPreview} label="Show screens still being built" /></Row>
     </Group>
     <Group i={3} footer="This tab keeps obid's token until it closes, signs out, or obid's token changes. Other tabs ask for it again.">

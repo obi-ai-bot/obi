@@ -37,7 +37,9 @@ From Sangam's renderer, with `tokens.css` and `app.css` as they were. The Electr
 own pointer instead, which `character/` follows once #499 lands (until then Oby watches the pointer
 only over its own frame). Screens with no backend in obid yet stay hidden behind Settings ›
 General › "Show screens still being built", and say so when shown: the Obysphere (#497) and its
-knowledge (#495), Connectors (#498) and many conversations (#493). Nothing shows made-up data.
+knowledge (#495), Connectors (#498), and the list of conversations, which comes next. obid keeps
+many conversations (#493); the page shows the latest, sends its words to that one, and keeps
+turns of the others out. Nothing shows made-up data.
 
 ```
 api.ts              the runner API's types and calls, each with the token: status, jobs, the inbox,
@@ -49,7 +51,7 @@ live.ts             what obid has, kept live: the events first, then the status,
 SignIn.tsx          the page asking for the token, when this tab holds none or obid refused it
 tasks.ts            jobs (and the inbox's decisions that belong to no job) as Home's tasks: kind of
                     work, running / needs you / done, new, archived
-chats.ts            the conversation with Oby, and where a job was started in it
+chats.ts            the conversation with Oby the page shows, and where a job was started in it
 preview.ts          the "Show screens still being built" setting
 Home.tsx            the window: Oby's stage, the chips, the title bar and its trail
 Sidebar.tsx         the side panel: the conversation and Home's tasks (its foot opens Archived),
