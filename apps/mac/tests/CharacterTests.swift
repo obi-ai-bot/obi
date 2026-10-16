@@ -1,5 +1,7 @@
+import AppKit
 import CoreGraphics
 import Foundation
+import SwiftUI
 import Testing
 import WebKit
 @testable import Oby
@@ -41,25 +43,42 @@ struct CharacterTests {
         _ = try await Self.js(page, "oby.setState('loading', { now: true })")
         #expect(try await Self.js(page, "return oby.playing") as? String == "Loading")
         // The answer landed: Oby's next mood starts once Loading has run back together, not mid-melt.
-        _ = try await Self.js(page, ObyCharacter.switching(from: "loading"), ["state": "idle"])
+        _ = try await Self.js(page, ObyCharacter.switching(from: "loading", to: "idle"), ["state": "idle"])
         #expect(try await Self.js(page, "return oby.state") as? String == "idle")
         #expect(try await Self.js(page, "return oby.playing") as? String == "Loading")
         // Any other mood switches at once.
-        _ = try await Self.js(page, ObyCharacter.switching(from: "idle"), ["state": "working"])
+        _ = try await Self.js(page, ObyCharacter.switching(from: "idle", to: "working"), ["state": "working"])
         #expect(try await Self.js(page, "return oby.state") as? String == "working")
         #expect(try await Self.js(page, "return oby.playing") as? String != "Loading")
     }
 
-    @Test func readyArrivesWithTheFirstFrame() {
-        #expect(CharacterEvents.name(["oby": "ready"]) == "ready")
-        #expect(CharacterEvents.name(["oby": "poke", "count": 2]) == "poke")
-        #expect(CharacterEvents.name("ready") == nil)
+    @Test func talkingWhileItThinksListensAtOnce() async throws {
+        let page = try await Self.page()
+        _ = try await Self.js(page, "oby.setState('loading', { now: true })")
+        #expect(try await Self.js(page, "return oby.playing") as? String == "Loading")
+        // You hold the talk key while Oby thinks: it listens now, not after its dots run back together.
+        _ = try await Self.js(page, ObyCharacter.switching(from: "loading", to: "listening"), ["state": "listening"])
+        #expect(try await Self.js(page, "return oby.state") as? String == "listening")
+        #expect(try await Self.js(page, "return oby.playing") as? String == "Listening")
+    }
+
+    /// The notch keeps Oby's frame transparent until the page says it has drawn, so the bundled
+    /// page has to say it. Hosted as the notch hosts it: in an ordered-front borderless panel, the
+    /// web view at opacity 0 (hidden, it would draw nothing and never be ready).
+    @Test func bundledPageSaysReadyOnceItDraws() async throws {
         let character = ObyCharacter()
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 136, height: 136), styleMask: [.borderless, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.ignoresMouseEvents = true
+        panel.contentView = NSHostingView(rootView: WebView(character.page).webViewContentBackground(.hidden).opacity(0).frame(width: 136, height: 136))
+        panel.orderFrontRegardless()
+        defer { panel.orderOut(nil) }
         #expect(!character.ready)
-        character.events.received("state")
-        #expect(!character.ready)
-        character.events.received("ready")
-        #expect(character.ready)
+        let deadline = Date.now.addingTimeInterval(15)
+        while !character.ready, Date.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(character.ready, "the bundled page never sent ready")
     }
 
     @Test func notchShowsLoadingWhileTheBrainThinks() throws {
