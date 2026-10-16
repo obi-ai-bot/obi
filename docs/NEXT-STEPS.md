@@ -19,6 +19,10 @@ Oby is being set up as an open-source experiment. We want to test two hypotheses
 | Tetrix | One plug-in among equals | Oby works fully on its own. Tetrix adds richer memory for those who want it. |
 | Visibility | Repos stay private until launch | We launch when the Sphere works end to end, not before. |
 | Deskree's pipeline rules | Xcode Cloud, dev-to-main promotion and three-review escalation move to configuration, not product code | They are how Deskree works, not how every team works. |
+| The app's screens | Sangam's React screens (#491) become `apps/web`, served by `obid` (#492). The Mac window takes the same design in SwiftUI (#270). Electron isn't shipped. | The screens already exist, and they fit (f) as they are. UI shells stay native, as the Languages row says. |
+| Conversations | Many conversations with Oby, sharing one memory (#493) | One thread grows until the brain forgets (#379), and most questions are quick ones that bury the work. |
+| Oby to Oby | Still typed actions: `question` and `answer` join the spec, with their words as quoted data, and the apps show the exchanges as conversations (#494) | H2 needs more than review requests. Words between people's machines must stay data, never instructions. |
+| Shared knowledge | An Obysphere picks the sources and tools; each member signs in with their own account (#495) | No secret is shared or kept in the Sphere, and each person's own access applies. |
 
 ## 3. The two hypotheses and how we measure them
 
@@ -78,7 +82,7 @@ Each one has an owner. All owners are TBD.
    - Done when: Deskree's own five Obys run on it, and the launch demo works: Ernesto's Oby asks Wellington's Oby for a review over the real protocol.
    - Owner: TBD.
 6. **(f) Web client inside the daemon.**
-   - What: `apps/web`, served by `obid`, so the launch is not Mac-only.
+   - What: `apps/web`, served by `obid`, so the launch is not Mac-only. It starts from Sangam's screens in `design/app` (#491), wired to the runner API (#492).
    - Done when: a Linux user with no Apple device can set a goal, watch jobs and answer the inbox from a browser.
    - Owner: TBD.
 7. **(g) Plug-in model.**
