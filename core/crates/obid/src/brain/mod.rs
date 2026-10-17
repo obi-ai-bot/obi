@@ -581,6 +581,7 @@ fn validate_turns(input: Option<Vec<InputTurn>>) -> Result<Option<Vec<Turn>>, Ap
             at: String::new(),
             jobs: vec![],
             conversation: String::new(),
+            ended: false,
         });
     }
     Ok(Some(out))

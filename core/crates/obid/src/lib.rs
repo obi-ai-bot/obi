@@ -272,6 +272,8 @@ pub async fn serve(
     // Jobs that were queued or running when obid last stopped carry on, and so does its Sphere.
     jobs.resume();
     link.start();
+    // A job a conversation started tells it how it ended (#351).
+    conversation::report_job_ends(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
     brain::orchestrator::spawn(shared);
     // Every event a plug-in emits becomes a `pluginEvent` inbox item. The receiver ends once

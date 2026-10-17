@@ -146,6 +146,7 @@ mod tests {
                         at: "2026-10-01T00:00:00Z".into(),
                         jobs: vec![],
                         conversation: "c1".into(),
+                        ended: false,
                     },
                 )
             })

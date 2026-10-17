@@ -375,7 +375,7 @@ fn jobs_and_their_events_land_in_the_conversation_that_started_them() {
     };
     let heard = heard_until(&events, 30, |heard| {
         job_ids.iter().all(|id| failed_at_last(heard, id))
-            && heard.iter().filter(|(name, _)| name == "turn").count() == 6
+            && heard.iter().filter(|(name, _)| name == "turn").count() == 8
     });
     let theirs: Vec<&Value> = heard
         .iter()
@@ -389,10 +389,35 @@ fn jobs_and_their_events_land_in_the_conversation_that_started_them() {
     );
     let places: Vec<&str> = heard
         .iter()
-        .filter(|(name, _)| name == "turn")
+        .filter(|(name, turn)| name == "turn" && turn.get("ended").is_none())
         .map(|(_, turn)| turn["conversation"].as_str().unwrap())
         .collect();
     assert_eq!(places, [&other, &other, &started, &started, &other, &other]);
+
+    // Each job's end comes back to the conversation that started it (#351): one Oby turn per
+    // job, naming it, in obid's words first.
+    let reports: Vec<&Value> = heard
+        .iter()
+        .filter(|(name, turn)| name == "turn" && turn["ended"] == true)
+        .map(|(_, turn)| turn)
+        .collect();
+    assert_eq!(reports.len(), 2, "{heard:?}");
+    for job in &ended {
+        let id = job["id"].as_str().unwrap();
+        let report = reports
+            .iter()
+            .find(|turn| turn["jobs"] == json!([id]))
+            .unwrap_or_else(|| panic!("no turn for {id}: {reports:?}"));
+        assert_eq!(report["who"], "oby");
+        assert_eq!(report["conversation"], started.as_str());
+        let title = job["title"].as_str().unwrap();
+        let text = report["text"].as_str().unwrap();
+        assert!(text.starts_with(&format!("{title} failed.")), "{text}");
+    }
+    let thread = turns(&obid, &format!("?id={started}"));
+    assert_eq!(thread.len(), 4, "{thread:?}");
+    assert!(thread[2..].iter().all(|t| t["ended"] == true), "{thread:?}");
+    assert_eq!(turns(&obid, &format!("?id={other}")).len(), 4);
 
     // A job dispatched whole (`POST /v1/jobs`) belongs to no conversation.
     let whole = call(
@@ -405,6 +430,14 @@ fn jobs_and_their_events_land_in_the_conversation_that_started_them() {
     );
     assert_eq!(whole.status, 201, "{}", whole.text);
     assert_eq!(whole.body["conversation"], Value::Null);
+    // It says nothing in any conversation when it ends.
+    let id = whole.body["id"].as_str().unwrap();
+    let waited = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None);
+    assert_eq!(waited.status, 200, "{}", waited.text);
+    assert!(!waited.body["status"].as_str().unwrap().is_empty());
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert_eq!(turns(&obid, &format!("?id={started}")).len(), 4);
+    assert_eq!(turns(&obid, &format!("?id={other}")).len(), 4);
 
     // Deleting the conversation keeps its jobs, which still say where they started.
     assert_eq!(
