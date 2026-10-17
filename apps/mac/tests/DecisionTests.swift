@@ -113,6 +113,24 @@ struct DecisionTests {
         #expect(feed.kind(of: feed.inbox[0]) == "confirm" && feed.kind(of: feed.inbox[1]) == "question")
     }
 
+    /// Nor can it settle one, or start one as a job, named by its id: refused before anything
+    /// reaches the runner. An item that isn't one goes on to the runner (here, none is set up).
+    @Test func theBrainCantActOnAConfirmItem() async throws {
+        let feed = RunnerFeed()
+        let data = Data(Self.confirm.utf8)
+        feed.apply(try #require(InboxItem.runner(data)), words: try Runner.decoder.decode(InboxWords.self, from: data))
+        feed.apply(InboxItem(id: "q", kind: .question, job: "j", title: "Job", text: "Which?", options: ["A"], created: .now))
+        #expect(feed.runner == nil)
+        for remote: Desk.Remote in [.settle(item: "confirm-0a1b2c3d4e5f", words: "Confirm"), .startNow(job: "confirm-0a1b2c3d4e5f")] {
+            await #expect(throws: RunnerError.self) { try await feed.act(remote) }
+            do { try await feed.act(remote) } catch { #expect(error.localizedDescription.contains("your own Confirm")) }
+        }
+        do { try await feed.act(.settle(item: "q", words: "A")); Issue.record("no runner, yet it went through") } catch {
+            #expect(error.localizedDescription == "The runner isn't set up.")
+        }
+        #expect(feed.inbox.first?.done == nil)
+    }
+
     @Test func statusCarriesTheDefaultMode() throws {
         let status = #"{"runner": {"version": "0.2.0", "host": "tetrix-lab"}, "accounts": [], "models": {"claude": {"model": "claude-opus-5-5", "effort": "xhigh"}, "codex": {"model": "gpt-6-sol", "effort": "high"}}, "permissions": {"mode": "acceptEdits"}}"#
         #expect(RunnerMode(try Runner.decoder.decode(RunnerStatus.self, from: Data(status.utf8)).permissions?.mode) == .acceptEdits)

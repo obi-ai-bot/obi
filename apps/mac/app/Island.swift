@@ -257,19 +257,8 @@ final class IslandController {
         // "Try it again", "let it go", "answer the merge item: try again" and "start it now" reach the
         // runner's jobs and inbox as the apps' own buttons do (#300).
         desk.actElsewhere = { [weak self] remote in
-            guard let self, let runner = feed.runner else { throw RunnerError(message: "The runner isn't set up.") }
-            switch remote {
-            case .settle(let item, let words):
-                // A confirm item (#546) is the user's own call: never the brain's, even named by id.
-                if feed.inboxWords[item]?.confirm != nil || feed.inbox.contains(where: { $0.id == item && self.feed.isConfirm($0) }) {
-                    throw RunnerError(message: "That waits for your own Confirm in the inbox: Oby doesn't answer it for you.")
-                }
-                try await feed.settle(item, answer: words)
-            case .tell(let job, let words): feed.apply(try await feed.about(job) { try await $0.tell(job, words) })
-            case .dismiss(let job): feed.apply(try await feed.about(job) { try await $0.dismiss(job) })
-            case .startNow(let job): feed.apply(try await feed.about(job) { try await $0.startNow(job) })
-            case .liftReserve(let account): _ = try await runner.liftReserve(account, true)
-            }
+            guard let self else { throw RunnerError(message: "The runner isn't set up.") }
+            try await feed.act(remote)
         }
         desk.onReply = { [weak self] text, spoken in self?.replied(text, spoken: spoken) }
         desk.plansElsewhere = { [weak self] in self?.feed.local ?? false }

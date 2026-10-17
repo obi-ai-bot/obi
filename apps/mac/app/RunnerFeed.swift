@@ -428,6 +428,30 @@ final class RunnerFeed {
         defaultMode = mode
     }
 
+    /// Whether `id` names a confirm item, open or settled.
+    func isConfirm(id: String) -> Bool {
+        inboxWords[id]?.confirm != nil || (inbox + inboxHistory).contains { $0.id == id && isConfirm($0) }
+    }
+
+    /// What the brain asks of the runner's jobs and inbox (`Desk.actElsewhere`), as the apps' own
+    /// buttons do (#300). A confirm item (#546) is the user's own call, never the brain's, even
+    /// named by id: it's refused before anything reaches the runner.
+    func act(_ remote: Desk.Remote) async throws {
+        switch remote {
+        case .settle(let id, _), .startNow(let id):
+            if isConfirm(id: id) { throw RunnerError(message: "That waits for your own Confirm in the inbox: Oby doesn't answer it for you.") }
+        case .tell, .dismiss, .liftReserve: break
+        }
+        guard let runner else { throw RunnerError(message: "The runner isn't set up.") }
+        switch remote {
+        case .settle(let item, let words): try await settle(item, answer: words)
+        case .tell(let job, let words): apply(try await about(job) { try await $0.tell(job, words) })
+        case .dismiss(let job): apply(try await about(job) { try await $0.dismiss(job) })
+        case .startNow(let job): apply(try await about(job) { try await $0.startNow(job) })
+        case .liftReserve(let account): _ = try await runner.liftReserve(account, true)
+        }
+    }
+
     /// An inbox item as the runner last said it, with its words (an `inbox` event's).
     func apply(_ item: InboxItem, words: InboxWords?) {
         if let words { inboxWords[item.id] = words }
