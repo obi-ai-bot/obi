@@ -14,22 +14,24 @@ use crate::jobs::NewJob;
 use crate::sphere::inbox::{Confirmed, Item, action};
 
 /// How an action that changes something ended: what Oby says about it, and whether it happened.
-/// A failed one ends the turn, and the user hears why.
+/// One that didn't happen ends the turn, and the user hears why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Done(String),
     Failed(String),
+    /// Nothing happened because the plan didn't say which job or item: the user is asked to.
+    NeedsWhich(String),
 }
 
 impl Outcome {
     pub fn text(&self) -> &str {
         match self {
-            Outcome::Done(text) | Outcome::Failed(text) => text,
+            Outcome::Done(text) | Outcome::Failed(text) | Outcome::NeedsWhich(text) => text,
         }
     }
 
     pub fn failed(&self) -> bool {
-        matches!(self, Outcome::Failed(_))
+        !matches!(self, Outcome::Done(_))
     }
 }
 
@@ -377,7 +379,7 @@ pub async fn act(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
 fn on_jobs(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     let ids = plan.named();
     if ids.is_empty() {
-        return Outcome::Failed("Say which job.".into());
+        return Outcome::NeedsWhich("Say which job.".into());
     }
     let mut lines: Vec<String> = vec![];
     let mut any = false;
@@ -449,7 +451,7 @@ fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
 /// (`Desk.answerInbox`).
 async fn answer_inbox(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     let Some(id) = plan.item.as_deref() else {
-        return Outcome::Failed("Say which inbox item to answer.".into());
+        return Outcome::NeedsWhich("Say which inbox item to answer.".into());
     };
     let Some(item) = shared.link.item(id) else {
         return Outcome::Failed("That inbox item isn't here any more.".into());
@@ -676,7 +678,7 @@ fn set_setting(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
 fn stop(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     let named = plan.named();
     if named.is_empty() && plan.all != Some(true) {
-        return Outcome::Failed("Say which job to stop, or “stop everything”.".into());
+        return Outcome::NeedsWhich("Say which job to stop, or “stop everything”.".into());
     }
     if named.is_empty() {
         let stopped = shared.jobs.stop_all();
@@ -707,7 +709,7 @@ fn stop(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
 /// "Stop asking on the Watch job": a running job's mode, as `POST /v1/jobs/{id}/mode` sets it.
 fn set_mode(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     let Some(mode) = plan.mode else {
-        return Outcome::Failed("Say which mode.".into());
+        return Outcome::NeedsWhich("Say which mode.".into());
     };
     let mode = mode.to_permissions();
     // Bypass stops a job asking anything: it widens what the agent may do, so only the user's
@@ -769,7 +771,7 @@ fn set_mode(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
 /// the job the conversation is about.
 fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     let (Some(id), Some(decision)) = (plan.named().first(), plan.decision) else {
-        return Outcome::Failed("Say which job to answer.".into());
+        return Outcome::NeedsWhich("Say which job to answer.".into());
     };
     let Some(job) = shared.jobs.get(id) else {
         return Outcome::Done("That job isn't waiting for your OK any more.".into());
