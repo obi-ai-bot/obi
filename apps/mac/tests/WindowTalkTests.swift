@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import Oby
@@ -25,6 +26,16 @@ struct WindowTalkTests {
             #expect(!TalkStage.shows(stage, windowShowsTalk: true))
         }
         #expect(!TalkStage.shows(nil, windowShowsTalk: false))
+    }
+
+    /// A regular Mac app (#528): a Dock icon, and its own menus while its window is in front, with
+    /// Edit (the composer's Undo, Cut, Copy, Paste) and Window (Minimize, Zoom, Oby's window).
+    @Test func obyIsARegularAppWithItsOwnMenus() {
+        #expect(NSApp.activationPolicy() == .regular)
+        let menus = NSApp.mainMenu?.items.map(\.title) ?? []
+        #expect(menus.contains("Edit") && menus.contains("Window"), "\(menus)")
+        let edit = NSApp.mainMenu?.items.first { $0.title == "Edit" }?.submenu?.items.map(\.title) ?? []
+        for item in ["Undo", "Redo", "Cut", "Copy", "Paste", "Select All"] { #expect(edit.contains(item), "\(item) in \(edit)") }
     }
 
     @Test func theMenuBarSaysWhatWorksAndWhatNeedsYou() {
