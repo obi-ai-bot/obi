@@ -142,6 +142,8 @@ pub async fn answer(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    // A tap is the owner back (#594): after a while away, it gets a recap.
+    crate::brain::recap::tapped(&shared);
     Ok(json(StatusCode::OK, shared.link.answer(&id, &body).await?))
 }
 

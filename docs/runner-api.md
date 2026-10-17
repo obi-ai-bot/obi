@@ -508,6 +508,14 @@ The answer is one of:
 {"kind": "none", "jobs": [], "drafts": []}
 ```
 
+**What happened while you were away (#594, obid only).** obid keeps the time of the owner's last message (`POST /v1/plans`) or tap (`POST /v1/inbox/{id}/answer`: an answer, done or later), in memory: after obid starts, the first one is a first sight. The first of them after more than 30 minutes away gets a recap: obid lists what changed since (inbox items waiting, first; jobs done, failed or stopped; pull requests merged; accounts a job found out of usage), quoted and passed through the vault, and one background call with the first Claude account's quick model (one attempt, at most 15 seconds, never Codex) turns it into one to three sentences that end with the one thing that needs the owner, if any. Nothing happened, no Claude account, a failed call or an answer that isn't a short recap: no recap, and the answer is the same as without it. The recap is written while the brain thinks, goes out as a `recap` event, and is the first line of the conversation's next answer that has words: it leads `text` on a `reply` and `said` on a `question`, separated by a blank line, is kept as part of Oby's turn (never as a turn the user wrote) and comes alone as `recap`:
+
+```json
+{"kind": "reply", "text": "Two jobs are done: Login redirect and CSV export. Pick a base branch for the release needs you.\n\nReady.", "recap": "Two jobs are done: Login redirect and CSV export. Pick a base branch for the release needs you.", "jobs": [], "drafts": [], "conversation": "c1"}
+```
+
+An answer with no words (`none`), and a tap, keep the recap for the next answer. The Swift runner sends no recap.
+
 **Planned work starts at once (#269).** A plan that dispatches work starts its jobs right there, as the Lead does: each routed to an account (Routing, under Account; a job that names an account or waits on one runs there), its issue's files claimed, its `startWhen` set, nothing to confirm. The reply says what started, in Oby's voice (`"On it. Claude Code is fixing oby #12 (Login screen) on Deskree."`; a job that waits says so), and `jobs` holds the started jobs in full, the same `Job` as `GET /v1/jobs/{id}`, in the plan's order: show each as a job card under Oby's words, with Stop. They come as `job` events too. `jobs` is always a list, empty on a question, on a reply that started nothing and on `none`. `drafts` is always empty, for clients from before: a `plan` with no drafts.
 
 When rules guessed the plan (`by` is `rules` in the runner's log), or the brain requested work after a research step, nothing starts: each job waits as a `start` inbox item (the research item says "Oby looked into it first"), with `Start` recommended and `Cancel`, which the thread shows as a decision card. `Start` queues the job as planned and adds an Oby turn with its card; `Cancel`, `done` or `later` start nothing. A plan whose repository is unclear is still a `question`.
@@ -741,6 +749,9 @@ data: { …Turn }
 
 event: conversation
 data: { …Conversation }
+
+event: recap
+data: {"text": "Two jobs are done. Pick a base branch needs you.", "since": "2026-10-17T08:10:00Z", "at": "2026-10-17T09:02:00Z"}
 ```
 
 - A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`, `dismissed`, `macCheck`, `mergeError`, a move to another account. The app replaces the job with that `id`.
@@ -750,6 +761,7 @@ data: { …Conversation }
   obid sends the item as it is when the event goes out, one event at a time, so the events for one item never go back to an older state and the last one is the item as `GET /v1/inbox` lists it (the same goes for `exchange` events, obid only: Obi-to-Obi exchanges, below). Two changes close together can come as two events that both carry the newer state: an item answered as soon as it arrives may never be seen `open`.
 - `check` comes when a Mac check or an Apple check (below) is queued, taken by a Mac or ends. A Mac that runs checks asks for one (`GET /v1/checks/next`) when one is `queued`; other apps can ignore it, since the job's own event carries `macCheck` and `appleCheck` too.
 - `turn` comes with every turn of the conversation that's added, from any app, and again when one changes (its `jobs`): the turn as `GET /v1/conversation` lists it. Replace the turn with that `id`, or add it in `at` order. Older runners don't send it.
+- `recap` (obid only) comes when the owner is back after more than 30 minutes away and the recap is written (`POST /v1/plans`, "What happened while you were away"): `text` is one to three sentences, `since` when the owner was last seen, `at` when they came back. It isn't a turn; the next answer starts with it. Older runners don't send it.
 - `conversation` (obid only) comes whenever one of obid's conversations starts, gets a turn, is renamed, pinned or deleted: obid only: conversations, below. The Swift runner doesn't send it.
 - Settled jobs, failed checks, review errors and studied failures wake Oby's orchestrator. Events arriving within 30 seconds are handled in one turn. Event summaries are written by Oby; the brain must read the related job before acting, and agent/check output remains quoted evidence.
 - A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop. Fetch what you show (`GET /v1/status`, `GET /v1/jobs`, `GET /v1/inbox`; a runner older than the inbox answers `404` there, which means an empty inbox, and any other failure means try again) only once the events' response has arrived, and apply the events that came meanwhile over it: the runner follows a connection before it answers, so nothing that changes in between is lost.

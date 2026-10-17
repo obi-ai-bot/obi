@@ -221,6 +221,7 @@ pub async fn serve(
         events,
         conversations,
         turns: brain::turn::Turns::default(),
+        presence: brain::recap::Presence::default(),
         link: link.clone(),
         plugins: plugins.clone(),
         pages: web::Sessions::default(),
