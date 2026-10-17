@@ -525,8 +525,10 @@ impl PluginHost {
 }
 
 impl Drop for PluginHost {
-    /// A host dropped without [`PluginHost::shutdown`] still tells every plug-in to stop; their
-    /// processes end with the runtime at the latest (they are killed on drop).
+    /// A host dropped without [`PluginHost::shutdown`] still tells every plug-in to stop. A
+    /// plug-in whose stop the runtime doesn't let finish (it ends first) is ended when its
+    /// supervisor is dropped: its process group is killed, and on macOS its sandbox reaped
+    /// ([`Started`]).
     fn drop(&mut self) {
         for plugin in self.inner.plugins.values() {
             if let Ok(supervisor) = plugin.supervisor.try_lock()
@@ -772,12 +774,54 @@ async fn remember_failed(inner: Arc<Inner>, plugin: Arc<Plugin>, resolved: u64) 
     }
 }
 
+/// A plug-in's process that `run_once` started and hasn't ended yet. Dropped so (the
+/// supervisor's task dropped mid-run, with its runtime), it kills the process group and, on
+/// macOS, reaps the sandbox, without awaiting anything: the child itself is only killed on drop,
+/// which on Linux would leave slirp4netns, and on macOS what left the watcher's group.
+struct Started<'a> {
+    pgid: Option<u32>,
+    watcher: bool,
+    launch: &'a Launch,
+}
+
+impl Drop for Started<'_> {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.pgid.take() {
+            sandbox::kill_group(pgid);
+            if self.watcher {
+                sandbox::reap_sandbox(&self.launch.obid_home, &self.launch.data_dir);
+            }
+        }
+    }
+}
+
+/// Starts the plug-in once and runs it until it stops or fails, everything it started ended
+/// either way.
 async fn run_once(
     inner: &Inner,
     plugin: &Plugin,
     sandbox: &Sandbox,
     launch: &Launch,
     stop: &mut watch::Receiver<bool>,
+) -> Outcome {
+    let mut started = Started {
+        pgid: None,
+        watcher: sandbox.has_watcher(),
+        launch,
+    };
+    let outcome = run_started(inner, plugin, sandbox, launch, stop, &mut started).await;
+    // Ended by `end` on every way out of it.
+    started.pgid = None;
+    outcome
+}
+
+async fn run_started(
+    inner: &Inner,
+    plugin: &Plugin,
+    sandbox: &Sandbox,
+    launch: &Launch,
+    stop: &mut watch::Receiver<bool>,
+    started: &mut Started<'_>,
 ) -> Outcome {
     let failed = |reason: String, pinged: bool| Outcome::Failed { reason, pinged };
     let options = &inner.options;
@@ -786,6 +830,7 @@ async fn run_once(
         Err(error) => return failed(format!("can't start it: {error}"), false),
     };
     let pgid = child.id().unwrap_or(0);
+    started.pgid = Some(pgid);
     let (Some(stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
@@ -922,7 +967,7 @@ async fn end(
     if sandbox.has_watcher() {
         match child.try_wait() {
             Ok(None) => {
-                sandbox::tell_watcher(pgid).await;
+                sandbox::tell_watcher(pgid);
                 let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
             }
             Ok(Some(status)) => {
@@ -938,9 +983,10 @@ async fn end(
         }
     }
     let _ = child.start_kill();
-    // Before it is waited for, so the group's id can't be another's yet. On Linux the group is
-    // also the launcher's slirp4netns, which outlives a launcher that is killed.
-    sandbox::kill_group(pgid).await;
+    // The whole group, also when the child was already waited for (a plug-in that stopped by
+    // itself): while anything is left in the group, its id is still that group's. On Linux the
+    // group is the launcher, bubblewrap and slirp4netns.
+    sandbox::kill_group(pgid);
     if sandbox.has_watcher() {
         sandbox::reap_sandbox(&launch.obid_home, &launch.data_dir);
     }

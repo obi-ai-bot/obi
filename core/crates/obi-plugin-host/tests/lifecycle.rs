@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use common::{
-    Home, assert_no_slirp4netns_left, beats, id, options, sandbox_made, status, wait_for_state,
-    wait_until,
+    Home, assert_no_slirp4netns_left, beats, id, options, sandbox_made, slirp4netns_left, status,
+    wait_for_state, wait_until,
 };
 use obi_plugin_api::{Kind, PluginState};
 use obi_plugin_host::{Options, PluginHost};
@@ -557,6 +557,56 @@ async fn without_a_sandbox_a_plugin_with_a_process_is_not_started() {
     assert_eq!(status(&host, "mcp-only").kinds, [Kind::AgentMcp]);
     host.shutdown().await;
     assert_no_slirp4netns_left(&home).await;
+}
+
+/// A host dropped without `shutdown` while its runtime ends (obid's `main` returning when
+/// `shutdown` ran past its time) leaves nothing the plug-in's sandbox was given running: the
+/// launcher is killed on drop, alone, and what it started ends with it.
+#[test]
+fn a_host_dropped_with_its_runtime_leaves_nothing_running() {
+    let home = Home::new("dropped");
+    home.install("context-test", "context-test");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let host = runtime.block_on(async {
+        let host = host_with(&home, options()).await;
+        let ready = host
+            .set_enabled(&id("context-test"), true, Some(json!({"spawnChild": true})))
+            .await
+            .unwrap();
+        (sandbox_made(&ready), host)
+    });
+    let (made, host) = host;
+    if !made {
+        return;
+    }
+    // The plug-in's child is running; the host and its runtime go without a `shutdown`.
+    let started = Instant::now();
+    while beats(&home, "context-test") == 0 && started.elapsed() < LONG {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(beats(&home, "context-test") > 0);
+    drop(host);
+    drop(runtime);
+    let started = Instant::now();
+    while !slirp4netns_left(&home).is_empty() && started.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let left = slirp4netns_left(&home);
+    assert!(left.is_empty(), "slirp4netns still running: pids {left:?}");
+    // What the plug-in started ends too, within a few seconds: its beats stop for good.
+    let stopped = (0..10).any(|_| {
+        let before = beats(&home, "context-test");
+        std::thread::sleep(Duration::from_millis(500));
+        beats(&home, "context-test") == before
+    });
+    assert!(stopped, "the plug-in's child still runs");
+    let before = beats(&home, "context-test");
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(
+        beats(&home, "context-test"),
+        before,
+        "the plug-in's child still runs"
+    );
 }
 
 /// The child the test plug-in started has stopped appending to `beats`.

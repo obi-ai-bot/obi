@@ -92,7 +92,7 @@ bpid=$!
 children=/proc/$bpid/task/$bpid/children
 child=
 i=0
-while [ -z "$child" ] && [ "$i" -lt 50 ]; do
+while [ -z "$child" ] && [ "$i" -lt 200 ]; do
   i=$((i + 1))
   if [ -r "$children" ]; then
     read -r child _ 2>/dev/null <"$children"
@@ -116,7 +116,11 @@ if [ -z "$child" ]; then
   wait "$bpid" 2>/dev/null
   exit 1
 fi
-slirp4netns --configure --mtu=65520 --userns-path="/proc/$child/ns/user" "$child" tap0 >"$ready.log" 2>&1 &
+# Killed with this launcher, however it ends (also SIGKILL, which runs nothing of it), where
+# setpriv can say so: --pdeathsig survives the exec into slirp4netns.
+tied=
+command -v setpriv >/dev/null 2>&1 && tied="setpriv --pdeathsig KILL"
+$tied slirp4netns --configure --mtu=65520 --userns-path="/proc/$child/ns/user" "$child" tap0 >"$ready.log" 2>&1 &
 slirp=$!
 i=0
 while [ "$i" -lt 50 ]; do
@@ -584,10 +588,19 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 }
 
 /// Ends the process group `pgid` (the plug-in's first process and whatever it started that
-/// stayed in its group), with `kill -s KILL -- -<pgid>` run by `/bin/sh`.
-pub(crate) async fn kill_group(pgid: u32) {
-    if pgid > 1 {
-        signal(&format!("-{pgid}"), "KILL").await;
+/// stayed in its group): `SIGKILL` to the group. A plain system call, so it also runs where
+/// nothing can be awaited (a supervisor dropped with its runtime, `crate::Started`).
+pub(crate) fn kill_group(pgid: u32) {
+    if let Ok(pgid) = i32::try_from(pgid)
+        && pgid > 1
+    {
+        signal(
+            nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pgid),
+                nix::sys::signal::Signal::SIGKILL,
+            ),
+            "the plug-in's process group",
+        );
     }
 }
 
@@ -659,28 +672,24 @@ fn may_read(pid: u32, path: &std::ffi::CString) -> bool {
 
 /// Sends `SIGTERM` to the watcher `pid` ([`WATCHER`]), which then ends everything in its
 /// sandbox.
-pub(crate) async fn tell_watcher(pid: u32) {
-    if pid > 1 {
-        signal(&pid.to_string(), "TERM").await;
+pub(crate) fn tell_watcher(pid: u32) {
+    if let Ok(pid) = i32::try_from(pid)
+        && pid > 1
+    {
+        signal(
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGTERM,
+            ),
+            "the plug-in's watcher",
+        );
     }
 }
 
-/// `kill -s <signal> -- <target>`, run by `/bin/sh`: POSIX's form, the one dash (Debian's and
-/// Ubuntu's `/bin/sh`) takes too; its `kill -<signal> -- <target>` is an error.
-async fn signal(target: &str, signal: &str) {
-    let mut kill = Command::new("/bin/sh");
-    kill.args([
-        "-c",
-        "kill -s \"$1\" -- \"$2\" 2>/dev/null",
-        "sh",
-        signal,
-        target,
-    ])
-    .env_clear()
-    .env("PATH", DEFAULT_PATH)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .kill_on_drop(true);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), kill.status()).await;
+/// Logs a signal that couldn't be sent, but to what is already gone.
+fn signal(sent: nix::Result<()>, to: &str) {
+    match sent {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+        Err(error) => tracing::warn!(target: "obi_plugin", "can't signal {to}: {error}"),
+    }
 }
