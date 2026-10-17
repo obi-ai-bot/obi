@@ -452,15 +452,17 @@ impl Store for FileStore {
 ///
 /// Measured on a Mac (2026-10-17): another program of the same user reads and updates these items
 /// without being asked (macOS adds it to the item's access list), so against such a program the
-/// Keychain holds them no better than the file does; only the program that made an item may delete
-/// it; and obid doesn't set `kSecAttrAccessible` (the Swift runner sets
-/// `WhenUnlockedThisDeviceOnly`).
+/// Keychain holds them no better than the file does (#577); only the program that made an item may
+/// delete it, and every new build of obid that reads one is added to its access list again.
 #[cfg(target_os = "macos")]
 mod keychain {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
+    use core_foundation::base::TCFType as _;
     use core_foundation::data::CFData;
+    use core_foundation::dictionary::CFMutableDictionary;
+    use core_foundation::string::CFString;
     use security_framework::item::{
         ItemAddOptions, ItemAddValue, ItemClass, ItemSearchOptions, ItemUpdateOptions,
         ItemUpdateValue, Limit, Location, SearchResult,
@@ -581,7 +583,7 @@ mod keychain {
         }
 
         /// An item already there gets the new value and keeps its attributes; a new one is made
-        /// with the Swift runner's label.
+        /// with the Swift runner's label and accessibility.
         fn save(&self, value: &str, name: &str) -> Result<(), String> {
             let data = CFData::from_buffer(value.as_bytes());
             let saved = if self.items(Some(name))?.is_empty() {
@@ -593,7 +595,16 @@ mod keychain {
                     .set_account_name(name)
                     .set_label(format!("Oby vault: {name}"))
                     .set_location(Location::FileKeychain(self.login()?));
-                add.add()
+                // kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly, as the Swift
+                // runner sets it ("pdmn" and "aku" are those constants' values). ItemAddOptions
+                // can't carry it, so its query is added to by hand (the deprecated way in).
+                let accessible = CFString::from_static_string("pdmn");
+                let when_unlocked = CFString::from_static_string("aku");
+                #[allow(deprecated)]
+                let mut query = CFMutableDictionary::from(&add.to_dictionary());
+                query.set(accessible.as_CFTypeRef(), when_unlocked.as_CFTypeRef());
+                #[allow(deprecated)]
+                security_framework::item::add_item(query.to_immutable())
             } else {
                 let mut update = ItemUpdateOptions::new();
                 update.set_value(ItemUpdateValue::Data(data));
