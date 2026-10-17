@@ -374,6 +374,7 @@ impl Jobs {
         if let Err(e) = self.store.save(&job) {
             tracing::error!("can't keep job {id}: {e}");
         }
+        crate::failures::observe(&self.config.home, &job);
         self.events.send("job", job.to_json());
         self.changed.notify_waiters();
         Some(job)
