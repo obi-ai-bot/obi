@@ -226,6 +226,8 @@ pub async fn run(
     let deadline = Instant::now() + shared.config.turn_budget;
     let live = || control.live();
     let halted = || !control.live();
+    // The turn's own word, which fences everything quoted for the brain.
+    let nonce = super::briefing::nonce();
     let mut done: Vec<String> = vec![];
     let mut taken: HashSet<String> = HashSet::new();
     let mut request = said.to_owned();
@@ -240,7 +242,7 @@ pub async fn run(
             done.push(AS_FAR_AS.into());
             break;
         }
-        let mut context = super::context(shared, given);
+        let mut context = super::context(shared, given, &nonce);
         context.turn_step = step;
         context.turn_length = Some(said.chars().count());
         let planner = Planner {

@@ -89,10 +89,12 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
             Target::Id(id) => Some(id.clone()),
             _ => None,
         };
-        shared.turns.stop(named.as_deref());
-        let conversation = named
-            .or_else(|| shared.turns.latest_conversation())
-            .or_else(|| shared.conversations.latest_id());
+        // The turn under way in the conversation the words name, else in the latest one.
+        let underway = named.or_else(|| shared.turns.latest_conversation());
+        if let Some(id) = &underway {
+            shared.turns.stop(Some(id));
+        }
+        let conversation = underway.or_else(|| shared.conversations.latest_id());
         return Ok((
             StatusCode::OK,
             axum::Json(
@@ -134,18 +136,46 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
     })?
 }
 
-/// `POST /v1/conversation/stop`: the turn under way ends after the action it's doing, and its
-/// `POST /v1/plans` answers with what it did.
-pub async fn stop(State(shared): State<Arc<Shared>>) -> Response {
-    shared.turns.stop(None);
-    (StatusCode::OK, axum::Json(json!({"stopped": true}))).into_response()
+/// Which conversation's turn Stop or cancel is for: `{"conversation": "<id>"}`, or, with no
+/// body (the apps from before #493), the conversation of the latest turn under way.
+fn underway(shared: &Shared, body: &Bytes) -> Result<Option<String>, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Which {
+        conversation: Option<String>,
+    }
+    let named = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        serde_json::from_slice::<Which>(body)
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "The body is {\"conversation\": \"<id>\"}, or nothing.",
+                )
+            })?
+            .conversation
+    };
+    Ok(named.or_else(|| shared.turns.latest_conversation()))
 }
 
-/// `POST /v1/plans/cancel`: the turn under way is dropped: what its plan would do doesn't
-/// happen, and its answer is `none`. What it did already stays done.
-pub async fn cancel(State(shared): State<Arc<Shared>>) -> Response {
-    shared.turns.cancel(None);
-    (StatusCode::OK, axum::Json(json!({"cancelled": true}))).into_response()
+/// `POST /v1/conversation/stop`: the turn under way in one conversation ends after the action
+/// it's doing, and its `POST /v1/plans` answers with what it did. Turns in other conversations
+/// go on.
+pub async fn stop(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
+    if let Some(id) = underway(&shared, &body)? {
+        shared.turns.stop(Some(&id));
+    }
+    Ok((StatusCode::OK, axum::Json(json!({"stopped": true}))).into_response())
+}
+
+/// `POST /v1/plans/cancel`: the turn under way in one conversation is dropped: what its plan
+/// would do doesn't happen, and its answer is `none`. What it did already stays done.
+pub async fn cancel(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
+    if let Some(id) = underway(&shared, &body)? {
+        shared.turns.cancel(Some(&id));
+    }
+    Ok((StatusCode::OK, axum::Json(json!({"cancelled": true}))).into_response())
 }
 
 /// The answer, as `POST /v1/plans` sends it, once Oby's words joined the conversation.
@@ -200,7 +230,7 @@ fn respond(
 
 /// What the brain may choose from (`Desk.brainContext`): the accounts, the repositories, the ids
 /// each action may name, and the briefing with `turns` as the conversation so far.
-pub(super) fn context(shared: &Shared, turns: &[Turn]) -> Context {
+pub(super) fn context(shared: &Shared, turns: &[Turn], nonce: &str) -> Context {
     let config = &shared.config;
     let now = obi_protocol::time::now();
     let tools = tool_accounts(config);
@@ -252,6 +282,7 @@ pub(super) fn context(shared: &Shared, turns: &[Turn]) -> Context {
         accounts: told,
         max_running: shared.jobs.max_running(),
         now,
+        nonce: nonce.to_owned(),
     };
     Context {
         accounts,
@@ -263,7 +294,13 @@ pub(super) fn context(shared: &Shared, turns: &[Turn]) -> Context {
         models,
         move_accounts,
         permissions: briefing.permissions(),
-        inbox: briefing.inbox.iter().map(|i| i.id.clone()).collect(),
+        // A confirm item waits for the user's own answer: the brain may never answer it.
+        inbox: briefing
+            .inbox
+            .iter()
+            .filter(|i| i.kind != "confirm")
+            .map(|i| i.id.clone())
+            .collect(),
         ..Context::default()
     }
 }

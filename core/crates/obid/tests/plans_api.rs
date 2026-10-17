@@ -982,3 +982,220 @@ fn a_plan_that_comes_after_the_turn_budget_does_nothing() {
         "{refused}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// What persists or widens trust waits for the owner's own Confirm (#546, the owner's decision of
+// 2026-10-16): the brain never does it itself, however it was talked into it.
+
+/// A job from `POST /v1/jobs` in `mode`, running `task`.
+fn job_in(obid: &Obid, title: &str, task: &str, mode: &str) -> String {
+    let answer = call(
+        obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task,
+                             "title": title, "mode": mode}}),
+        ),
+    );
+    assert!(
+        answer.status == 200 || answer.status == 201,
+        "{}",
+        answer.text
+    );
+    answer.body["id"].as_str().unwrap().to_owned()
+}
+
+/// The open inbox items of `kind`.
+fn items_of(obid: &Obid, kind: &str) -> Vec<serde_json::Value> {
+    call(obid, "GET", "/v1/inbox", None)
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == kind)
+        .cloned()
+        .collect()
+}
+
+/// The owner's own answer, with the API token.
+fn owner_answers(obid: &Obid, item: &str, answer: &str) -> Answer {
+    call(
+        obid,
+        "POST",
+        &format!("/v1/inbox/{item}/answer"),
+        Some(&json!({"answer": answer})),
+    )
+}
+
+/// answer_permission with always saves no rule: a confirm item waits, and the owner's Confirm
+/// saves the rule and answers the agent.
+#[test]
+fn always_allowing_waits_for_the_owners_confirm() {
+    let folder = Folder::new("brain-confirm-always");
+    let obid = started(&folder);
+    let id = job_in(
+        &obid,
+        "Vault secrets",
+        r#"ASKS: [{"tool": "Bash", "input": {"command": "make lint"}}]"#,
+        "ask",
+    );
+    within(30, "a permission waits", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        job["permission"].is_object().then_some(())
+    });
+    let always = json!({"action": "answer_permission", "reply": "", "dispatches": [], "question": null,
+                        "jobs": [id], "decision": "always", "message": null});
+    queue(&obid, &[always.to_string(), reply("")]);
+    let answer = said(&obid, "how is the vault job going?");
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("confirm it in your inbox"),
+        "{answer}"
+    );
+    // Nothing changed: no rule, the agent still waits.
+    assert_eq!(
+        call(&obid, "GET", "/v1/permissions/rules", None).body,
+        json!([])
+    );
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert!(job["permission"].is_object(), "{job}");
+    let confirms = items_of(&obid, "confirm");
+    assert_eq!(confirms.len(), 1, "{confirms:?}");
+    assert_eq!(confirms[0]["options"], json!(["Confirm", "Cancel"]));
+    assert_eq!(
+        confirms[0]["title"],
+        "Always allow Bash(make lint:*) in obi-e2e/fixture-app"
+    );
+    // The owner's own Confirm does it.
+    let confirmed = owner_answers(&obid, confirms[0]["id"].as_str().unwrap(), "Confirm");
+    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    let rules = call(&obid, "GET", "/v1/permissions/rules", None).body;
+    assert_eq!(rules.as_array().unwrap().len(), 1, "{rules}");
+    assert_eq!(rules[0]["rule"], "Bash(make lint:*)");
+    within(30, "the agent hears it", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["status"] == "done").then_some(())
+    });
+}
+
+/// set_mode bypass leaves the mode as it is: a confirm item waits, and the owner's Confirm sets
+/// it. Other modes are set at once.
+#[test]
+fn bypass_mode_waits_for_the_owners_confirm() {
+    let folder = Folder::new("brain-confirm-bypass");
+    let obid = started(&folder);
+    let id = job_in(&obid, "Vault secrets", "SLEEP", "ask");
+    within(30, "the job runs", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["status"] == "running").then_some(())
+    });
+    let mode = |mode: &str| {
+        json!({"action": "set_mode", "reply": "", "dispatches": [], "question": null,
+               "jobs": [id], "mode": mode})
+        .to_string()
+    };
+    queue(&obid, &[mode("bypass"), reply("")]);
+    let answer = said(&obid, "stop asking on the vault job");
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("confirm it in your inbox"),
+        "{answer}"
+    );
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["mode"], "ask");
+    let confirms = items_of(&obid, "confirm");
+    assert_eq!(confirms.len(), 1, "{confirms:?}");
+    assert_eq!(
+        confirms[0]["title"],
+        "Stop asking on Vault secrets: Bypass mode"
+    );
+    // Cancel does nothing; a second card's Confirm does it.
+    assert_eq!(
+        owner_answers(&obid, confirms[0]["id"].as_str().unwrap(), "Cancel").status,
+        200
+    );
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["mode"],
+        "ask"
+    );
+    queue(&obid, &[mode("bypass"), reply("")]);
+    said(&obid, "stop asking on the vault job");
+    let confirm = items_of(&obid, "confirm").pop().unwrap();
+    assert_eq!(
+        owner_answers(&obid, confirm["id"].as_str().unwrap(), "Confirm").status,
+        200
+    );
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["mode"],
+        "bypass"
+    );
+    // Asking more is done at once.
+    queue(&obid, &[mode("plan"), reply("")]);
+    assert_eq!(
+        said(&obid, "plan first on the vault job")["text"],
+        "Vault secrets is in Plan mode now."
+    );
+}
+
+/// Stop and cancel reach the turn under way in one conversation, not the others (review on #551).
+#[test]
+fn stop_reaches_only_its_own_conversation() {
+    let folder = Folder::new("brain-stop-scope");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &[
+            format!("SLEEP 2 {}", reply("First.")),
+            format!("SLEEP 2 {}", reply("Second.")),
+        ],
+    );
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            call(
+                &obid,
+                "POST",
+                "/v1/plans",
+                Some(&json!({"said": "one", "new": true})),
+            )
+            .body
+        });
+        within(5, "the first turn thinks", || {
+            (calls(&obid).len() == 1).then_some(())
+        });
+        let second = scope.spawn(|| {
+            call(
+                &obid,
+                "POST",
+                "/v1/plans",
+                Some(&json!({"said": "two", "new": true})),
+            )
+            .body
+        });
+        within(5, "the second turn thinks", || {
+            (calls(&obid).len() == 2).then_some(())
+        });
+        let conversations = call(&obid, "GET", "/v1/conversations", None).body;
+        let one = conversations
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["title"] == "One")
+            .unwrap()["id"]
+            .clone();
+        let stopped = call(
+            &obid,
+            "POST",
+            "/v1/conversation/stop",
+            Some(&json!({"conversation": one})),
+        );
+        assert_eq!(stopped.body, json!({"stopped": true}));
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    assert_eq!(first["kind"], "none", "{first}");
+    assert_eq!(second["text"], "Second.", "{second}");
+}

@@ -2387,6 +2387,85 @@ impl Link {
         Value::Array(items.into_iter().map(Item::to_json).collect())
     }
 
+    /// Something Oby's brain planned that persists or widens trust waits in the inbox for the
+    /// owner's own `Confirm` (#546): the brain never carries it out itself.
+    pub fn add_confirm(&self, item: Item) -> Item {
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        item
+    }
+
+    /// `POST /v1/inbox/{id}/answer` on a `confirm` item: `Confirm` carries out what its title
+    /// says; `Cancel`, done or later do nothing.
+    async fn answer_confirm(
+        self: &Arc<Self>,
+        mut item: Item,
+        answer: Option<String>,
+        later: Option<i64>,
+    ) -> Result<Value, ApiError> {
+        if let Some(at) = later {
+            item.later = Some(at);
+        } else {
+            if let Some(answer) = &answer {
+                if answer != inbox::CONFIRM && answer != inbox::CANCEL {
+                    return Err(api(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("The answer is {} or {}.", inbox::CONFIRM, inbox::CANCEL),
+                    ));
+                }
+                if answer == inbox::CONFIRM {
+                    self.carry_out(item.confirm.clone().unwrap_or_default())
+                        .await?;
+                }
+            }
+            item.done = Some(time::now());
+            item.answer = answer;
+        }
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        Ok(item.to_json())
+    }
+
+    /// What a confirmed `confirm` item does.
+    async fn carry_out(self: &Arc<Self>, action: Value) -> Result<(), ApiError> {
+        let text = |key: &str| action[key].as_str().unwrap_or("").to_owned();
+        match action["do"].as_str() {
+            Some("answer_permission") => {
+                use crate::jobs::PermissionRefused;
+                match self.jobs.answer_permission(
+                    &text("job"),
+                    &text("permission"),
+                    crate::permissions::Decision::Always,
+                    None,
+                ) {
+                    Ok(_) => Ok(()),
+                    Err(PermissionRefused::NoJob) => {
+                        Err(api(StatusCode::CONFLICT, "Its job is gone."))
+                    }
+                    Err(PermissionRefused::NotWaiting(why)) => Err(api(StatusCode::CONFLICT, why)),
+                    Err(PermissionRefused::Refused(why)) => {
+                        Err(api(StatusCode::UNPROCESSABLE_ENTITY, why))
+                    }
+                }
+            }
+            Some("set_mode") => {
+                let mode = crate::permissions::Mode::parse(&text("mode"))
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "That mode isn't one obid knows."))?;
+                for job in action["jobs"].as_array().into_iter().flatten() {
+                    let job = job.as_str().unwrap_or("");
+                    self.jobs
+                        .set_mode(job, mode)
+                        .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone."))?;
+                }
+                Ok(())
+            }
+            _ => Err(api(
+                StatusCode::CONFLICT,
+                "obid doesn't know what this item does.",
+            )),
+        }
+    }
+
     /// The items waiting for the owner now (not done, and not put off past `now`), in the order
     /// they came: what the brain is told about the inbox (#546).
     pub fn waiting_items(&self, now: i64) -> Vec<Item> {
@@ -2439,6 +2518,20 @@ impl Link {
             }
             _ => return Err(api(StatusCode::UNPROCESSABLE_ENTITY, one_of)),
         };
+        // What Oby's brain planned that only the owner may do: carried out on their Confirm.
+        let confirm = self
+            .lock()
+            .inbox
+            .get(id)
+            .filter(|i| i.done.is_none() && i.kind == "confirm")
+            .cloned();
+        if let Some(item) = confirm {
+            return match given {
+                Given::Answer(answer) => self.answer_confirm(item, Some(answer), None).await,
+                Given::Done => self.answer_confirm(item, None, None).await,
+                Given::Later(at) => self.answer_confirm(item, None, Some(at)).await,
+            };
+        }
         // A question's item, answered or declined: the words pass the publish gate first, with
         // no lock held.
         let question = self

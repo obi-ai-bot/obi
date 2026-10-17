@@ -231,6 +231,36 @@ fn set_mode(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
         return Outcome::Failed("Say which mode.".into());
     };
     let mode = mode.to_permissions();
+    // Bypass stops a job asking anything: it widens what the agent may do, so only the user's
+    // own Confirm sets it (#546). The other modes ask more, or as much, and are done at once.
+    if mode == crate::permissions::Mode::Bypass {
+        let jobs: Vec<crate::job::Job> = plan
+            .named()
+            .iter()
+            .filter_map(|id| shared.jobs.get(id))
+            .filter(|j| j.status.is_active())
+            .collect();
+        if jobs.is_empty() {
+            return Outcome::Done("That job isn't running any more.".into());
+        }
+        let names: Vec<String> = jobs.iter().map(crate::job::Job::short_title).collect();
+        let ids: Vec<&str> = jobs.iter().map(|j| j.id.as_str()).collect();
+        let title = format!("Stop asking on {}: Bypass mode", names.join(", "));
+        confirm(
+            shared,
+            if ids.len() == 1 { ids[0] } else { "" },
+            title,
+            format!(
+                "Oby's brain planned Bypass mode for {}: obid answers everything by its rules, and the job stops asking you. It happens only if you confirm.",
+                names.join(", ")
+            ),
+            serde_json::json!({"do": "set_mode", "jobs": ids, "mode": mode.as_str()}),
+        );
+        return Outcome::Done(format!(
+            "Bypass mode stops {} asking you, so it waits for your OK: confirm it in your inbox.",
+            names.join(", ")
+        ));
+    }
     let mut done: Vec<String> = vec![];
     for id in plan.named() {
         if shared.jobs.get(id).is_some_and(|j| j.status.is_active())
@@ -268,6 +298,29 @@ fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
         .as_deref()
         .map(str::trim)
         .filter(|m| !m.is_empty());
+    // Always saves a rule every later prompt of the repository's jobs follows: only the user's
+    // own Confirm saves it (#546). Allow once and no are done at once.
+    if decision == super::plan::Decision::Always {
+        let (Some(rule), Some(always)) = (&permission.rule, &permission.always) else {
+            return Outcome::Failed(format!(
+                "Couldn't answer {name}: This one has no rule to save: allow it once instead."
+            ));
+        };
+        confirm(
+            shared,
+            id,
+            format!("Always allow {rule} in {}", job.repo),
+            format!(
+                "Oby's brain planned to answer {name}'s permission with always: {always}. It saves the rule {rule} for {}, and happens only if you confirm.",
+                job.repo
+            ),
+            serde_json::json!({"do": "answer_permission", "job": id, "permission": permission.id}),
+        );
+        return Outcome::Done(format!(
+            "Always allowing saves a rule for {}, so it waits for your OK: confirm it in your inbox.",
+            job.repo_name()
+        ));
+    }
     use crate::jobs::PermissionRefused;
     match shared
         .jobs
@@ -295,6 +348,14 @@ fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
             Outcome::Failed(format!("Couldn't answer {name}: {why}"))
         }
     }
+}
+
+/// Puts what the brain planned, which only the user may do, in the inbox as a `confirm` item:
+/// carried out only on their own Confirm (`POST /v1/inbox/{id}/answer`).
+fn confirm(shared: &Shared, job: &str, title: String, text: String, action: serde_json::Value) {
+    let item =
+        crate::sphere::inbox::confirm_item(job, title, text, action, obi_protocol::time::now());
+    shared.link.add_confirm(item);
 }
 
 /// What a step event says the action does (`Desk.stepText`).

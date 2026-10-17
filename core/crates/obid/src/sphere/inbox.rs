@@ -2,8 +2,9 @@
 //! as obid keeps it: one file per item in `home/inbox/` (0600). obid makes three kinds so far:
 //! `obiRequest` (runner-api.md, "obid only: Obi-to-Obi requests in the inbox"), a request from
 //! another Obi that no remembered decision covers; `permission`, a job's agent waiting for the
-//! owner's OK (runner-api.md, "Permission modes"); and `pluginEvent`, an event a plug-in emitted
-//! (runner-api.md, "obid only: plug-ins").
+//! owner's OK (runner-api.md, "Permission modes"); `pluginEvent`, an event a plug-in emitted
+//! (runner-api.md, "obid only: plug-ins"); and `confirm`, something Oby's brain planned that
+//! persists or widens trust, which only the owner's own answer carries out (#546).
 //!
 //! An item's `title` and `text` are built from the request's or the event's typed fields only;
 //! every data field is quoted, unchanged, under `obi.quoted` or `plugin.quoted`.
@@ -22,6 +23,39 @@ pub const ACCEPT_REMEMBER: &str = "Accept, and remember for this repo";
 pub const DECLINE: &str = "Decline";
 pub const DECLINE_REMEMBER: &str = "Decline, and remember for this repo";
 pub const OBI_OPTIONS: [&str; 4] = [ACCEPT, ACCEPT_REMEMBER, DECLINE, DECLINE_REMEMBER];
+
+/// The two answers to a `confirm` item.
+pub const CONFIRM: &str = "Confirm";
+pub const CANCEL: &str = "Cancel";
+
+/// A `confirm` item: `title` says exactly what `Confirm` does, `action` is what obid carries out
+/// then. No option is recommended: it's the owner's call.
+pub fn confirm_item(job: &str, title: String, text: String, action: Value, now: i64) -> Item {
+    Item {
+        id: format!(
+            "confirm-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ),
+        kind: "confirm".into(),
+        job: job.into(),
+        details: Some(vec![
+            format!("{title}."),
+            "Does nothing: Oby's plan is dropped.".into(),
+        ]),
+        title,
+        text,
+        options: vec![CONFIRM.into(), CANCEL.into()],
+        recommended: None,
+        created: now,
+        done: None,
+        later: None,
+        answer: None,
+        obi: None,
+        plugin: None,
+        arrived: Some(arrival()),
+        confirm: Some(action),
+    }
+}
 
 /// An inbox item as obid keeps it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,6 +84,10 @@ pub struct Item {
     /// made in the same second. Kept, never shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrived: Option<u64>,
+    /// On a `confirm` item: what Oby's brain planned that only the owner may do, carried out on
+    /// their `Confirm` (#546). Kept, never shown: the item's title says it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<Value>,
 }
 
 /// Now in nanoseconds since the epoch, strictly later than any earlier answer in this process:
@@ -242,6 +280,7 @@ pub fn review_request_item(
         })),
         plugin: None,
         arrived: None,
+        confirm: None,
     }
 }
 
@@ -334,6 +373,7 @@ pub fn question_item(
         })),
         plugin: None,
         arrived: Some(arrival()),
+        confirm: None,
     }
 }
 
@@ -367,6 +407,7 @@ pub fn permission_item(
         obi: None,
         plugin: None,
         arrived: None,
+        confirm: None,
     }
 }
 
@@ -436,6 +477,7 @@ pub fn plugin_event_item(event: &obi_plugin_api::PluginEvent, now: i64) -> Item 
             "quoted": {"actor": ev.actor, "title": ev.data.title, "url": ev.data.url},
         })),
         arrived: Some(arrival()),
+        confirm: None,
     }
 }
 

@@ -1238,6 +1238,17 @@ fn dispatch_problems(dispatch: &Dispatch, context: &Context) -> Vec<String> {
     {
         problems.push(format!("input {unknown} doesn't exist"));
     }
+    // What obid's jobs can't carry yet is refused, never dropped (#546).
+    if dispatch.epic.is_some() {
+        problems.push(
+            "epic is null: obid can't make one job per sub-issue yet; name the issues instead"
+                .into(),
+        );
+    }
+    if dispatch.reads.as_ref().is_some_and(|r| !r.is_empty()) {
+        problems
+            .push("reads is null: obid's research jobs can't read other repositories yet".into());
+    }
     // obid can't hold a job until something happens yet (#455).
     if dispatch.start_when.as_ref().is_some_and(|c| !c.is_empty()) {
         problems.push("start_when is empty: obid can't wait to start a job yet".into());
@@ -1301,7 +1312,8 @@ pub fn schema(context: &Context) -> Value {
             "base_branch": {"type": ["string", "null"]},
             "pr": {"type": ["integer", "null"]},
             "issue": {"type": ["integer", "null"]},
-            "epic": {"type": ["integer", "null"]},
+            // obid can't make one job per sub-issue, or let a job read other repositories, yet.
+            "epic": {"type": "null"},
             "complexity": {"enum": ["routine", "complex"]},
             "rounds": {"type": "integer", "minimum": 1, "maximum": 10},
             "check": {"type": ["string", "null"], "maxLength": 200},
@@ -1313,7 +1325,7 @@ pub fn schema(context: &Context) -> Value {
             // obid can't hold a job until something happens yet (#455).
             "start_when": {"type": "array", "maxItems": 0},
             "mode": nullable(json!({"enum": modes})),
-            "reads": nullable(json!({"type": "array", "items": {"enum": context.repos}, "maxItems": 5})),
+            "reads": {"type": "null"},
         },
     });
     let question = json!({
@@ -1681,6 +1693,33 @@ mod tests {
         );
         assert!(is_https("https://docs.rs/serde?x=1"));
         assert!(!is_https("https://user:pw@example.com/"));
+    }
+
+    /// What obid's jobs can't carry is refused, never dropped (review on #551).
+    #[test]
+    fn epics_and_reads_are_refused_not_dropped() {
+        let context = context();
+        let mut plan = Plan::of(Action::Dispatch, "");
+        plan.dispatches = vec![
+            serde_json::from_value(json!({
+            "agent": "claude", "account": "default", "repo": "deskree-inc/oby", "epic": 30,
+            "kind": "build", "task": "Work on epic #30"}))
+            .unwrap(),
+        ];
+        assert_eq!(
+            plan.problems(&context, "zq9"),
+            ["epic is null: obid can't make one job per sub-issue yet; name the issues instead"]
+        );
+        plan.dispatches = vec![serde_json::from_value(json!({
+            "agent": "claude", "account": "default", "repo": "deskree-inc/oby", "reads": ["deskree-inc/oby"],
+            "kind": "research", "task": "Compare"}))
+        .unwrap()];
+        assert!(plan.problems(&context, "zq9").contains(
+            &"reads is null: obid's research jobs can't read other repositories yet".to_owned()
+        ));
+        let dispatch = &schema(&context)["properties"]["dispatches"]["items"]["properties"];
+        assert_eq!(dispatch["epic"], json!({"type": "null"}));
+        assert_eq!(dispatch["reads"], json!({"type": "null"}));
     }
 
     #[test]
