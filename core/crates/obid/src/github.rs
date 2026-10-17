@@ -94,7 +94,7 @@ pub fn pull_request_number(url: &str, repo: &str) -> Option<u64> {
 }
 
 /// Runs `gh` with `args`: its stdout, trimmed, or the last line it said on stderr.
-async fn run(gh: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) async fn run(gh: &Path, args: &[&str]) -> Result<String, String> {
     let mut command = tokio::process::Command::new(gh);
     // gh signs in with its own login only: a token that found its way into obid's environment
     // (`GH_TOKEN`, `GITHUB_TOKEN`, the agents' variables) never reaches it.

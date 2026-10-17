@@ -70,6 +70,7 @@ struct File {
     /// How long one conversation turn may act, in seconds: 1 to 110, 110 when left out.
     #[serde(default)]
     turn_budget: Option<u64>,
+    orchestrator_delay: Option<u64>,
     /// Where the vault is (crate::vault): `{"store": "file"}` or `{"store": "keychain", "service":
     /// "…"}`; left out, [`crate::vault::Location::default_for`].
     #[serde(default)]
@@ -158,6 +159,9 @@ pub struct Config {
     /// How long one conversation turn may plan and act (`Desk.turnBudget`): 110 seconds unless
     /// `turnBudget` says less, under the apps' 120-second wait.
     pub turn_budget: std::time::Duration,
+    /// How long the event orchestrator waits for nearby events to come together before its
+    /// turn (#590): 30 seconds unless `orchestratorDelay` says otherwise (1 to 600).
+    pub orchestrator_delay: std::time::Duration,
 }
 
 /// Where the plug-ins obid ships are when the configuration doesn't say: the `plugins/` folder
@@ -326,6 +330,13 @@ impl Config {
             ));
         }
 
+        let orchestrator_delay = file.orchestrator_delay.unwrap_or(30);
+        if !(1..=600).contains(&orchestrator_delay) {
+            return invalid(format!(
+                "orchestratorDelay is {orchestrator_delay}: it is 1 to 600 seconds."
+            ));
+        }
+
         Ok(Config {
             listen,
             home: file.home,
@@ -338,6 +349,7 @@ impl Config {
             telemetry: file.telemetry,
             vault,
             turn_budget: std::time::Duration::from_secs(turn_budget),
+            orchestrator_delay: std::time::Duration::from_secs(orchestrator_delay),
         })
     }
 }
@@ -543,6 +555,22 @@ mod tests {
         for wrong in [0, 111] {
             let text = with(serde_json::json!({"turnBudget": wrong}));
             assert!(problem(&text).contains("turnBudget"), "{wrong}");
+        }
+    }
+
+    /// The event orchestrator waits 30 seconds for nearby events, or 1 to 600 as configured.
+    #[test]
+    fn the_orchestrator_delay_is_1_to_600_seconds() {
+        let config = Config::parse(&with(serde_json::json!({}))).unwrap();
+        assert_eq!(
+            config.orchestrator_delay,
+            std::time::Duration::from_secs(30)
+        );
+        let config = Config::parse(&with(serde_json::json!({"orchestratorDelay": 1}))).unwrap();
+        assert_eq!(config.orchestrator_delay, std::time::Duration::from_secs(1));
+        for wrong in [0, 601] {
+            let text = with(serde_json::json!({"orchestratorDelay": wrong}));
+            assert!(problem(&text).contains("orchestratorDelay"), "{wrong}");
         }
     }
 
