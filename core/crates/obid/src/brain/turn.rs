@@ -19,7 +19,7 @@ use super::actions::{self, Asked, Outcome, Talk};
 use super::find::{self, Finds};
 use super::orchestrator::{self, Orchestration};
 use super::plan::{Action, Plan};
-use super::planner::{Planner, Record, Room};
+use super::planner::{LEAST, Planner, Record, Room};
 use super::read::{self, JobReads};
 use super::research;
 use super::rules::{self, Number};
@@ -60,15 +60,49 @@ impl Control {
     }
 }
 
+/// What a conversation's last turn looked up, for a "continue" to pick up (#632).
+#[derive(Debug, Clone)]
+pub struct Carried {
+    /// The words the lookups were for.
+    pub said: String,
+    pub entries: Vec<(String, super::plan::Lookup, research::Found)>,
+}
+
+/// The most conversations whose last research is kept.
+const CARRIED: usize = 20;
+
 /// The turns under way.
 #[derive(Debug, Default)]
 pub struct Turns {
     underway: Mutex<Vec<Arc<Control>>>,
+    // ponytail: in memory, so a restart forgets it; "continue" then looks things up again.
+    carried: Mutex<Vec<(String, Carried)>>,
 }
 
 impl Turns {
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Arc<Control>>> {
         self.underway.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Keeps what `conversation`'s turn looked up, or forgets it when it looked nothing up.
+    fn carry(&self, conversation: &str, carried: Option<Carried>) {
+        let mut kept = self.carried.lock().unwrap_or_else(|e| e.into_inner());
+        kept.retain(|(id, _)| id != conversation);
+        if let Some(carried) = carried {
+            kept.push((conversation.to_owned(), carried));
+        }
+        if kept.len() > CARRIED {
+            kept.remove(0);
+        }
+    }
+
+    fn carried(&self, conversation: &str) -> Option<Carried> {
+        self.carried
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(id, _)| id == conversation)
+            .map(|(_, carried)| carried.clone())
     }
 
     /// A new turn in `conversation`: it replaces the one under way there, whose plan, when it
@@ -143,18 +177,6 @@ impl Turns {
 /// "forget it", with any punctuation after them (`Conversation.cancels`). They never reach the
 /// brain, so no job stops on a bare word: "stop the vault job" or "stop everything" do that.
 pub fn cancels(said: &str) -> bool {
-    let lower = said.to_lowercase();
-    let cleaned: String = lower
-        .chars()
-        .map(|c| {
-            if c.is_ascii_lowercase() || c == '\'' || c == ' ' {
-                c
-            } else {
-                ' '
-            }
-        })
-        .collect();
-    let words = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     [
         "never mind",
         "nevermind",
@@ -167,7 +189,36 @@ pub fn cancels(said: &str) -> bool {
         "nothing",
         "leave it",
     ]
-    .contains(&words.as_str())
+    .contains(&plain(said).as_str())
+}
+
+/// Words that ask Oby to pick up its last turn (#632): "continue", "go on", "keep going".
+pub fn continues(said: &str) -> bool {
+    [
+        "continue",
+        "continue please",
+        "please continue",
+        "go on",
+        "keep going",
+        "carry on",
+    ]
+    .contains(&plain(said).as_str())
+}
+
+/// `said` in lower-case words, with no punctuation.
+fn plain(said: &str) -> String {
+    let cleaned: String = said
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c == '\'' || c == ' ' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The user's words, with what Oby did so far this turn, for the brain's next step.
@@ -201,12 +252,61 @@ pub fn after(done: &[String], talk: Talk) -> Talk {
     }
 }
 
-/// What a turn ended with when it said nothing more: what it did, or nothing.
-fn finish(done: &[String]) -> Talk {
-    if done.is_empty() {
+/// How a turn that looked things up says what's left (#615).
+const PICK_UP: &str = "say “continue” to pick up from there.";
+
+/// What a turn ended with when the brain's words didn't end it (#615): what it did, else what it
+/// `looked` at, then what's left. A cancelled turn says nothing, and so does one stopped before it
+/// did or looked at anything.
+fn finish(end: &End, done: &[String], looked: &[String]) -> Talk {
+    if *end == End::Cancelled {
+        return Talk::None;
+    }
+    let mut words = done.join(" ");
+    if words.is_empty() && !looked.is_empty() {
+        let looked = format!("Oby {}", listed(looked));
+        words = match end {
+            End::Stopped => format!("{looked}, then stopped."),
+            End::BrainFailed => format!("{looked}, then couldn't think it through: {PICK_UP}"),
+            End::Repeated => format!("{looked}, then kept going over the same ground: {PICK_UP}"),
+            _ => format!("{looked}."),
+        };
+    } else if words.is_empty() && *end == End::BrainFailed {
+        words = "Oby couldn't think that through: say it again.".into();
+    }
+    if matches!(end, End::BudgetSpent | End::MostSteps) {
+        words = format!("{words} {AS_FAR_AS}").trim_start().to_owned();
+    }
+    if words.is_empty() {
         Talk::None
     } else {
-        Talk::reply(done.join(" "))
+        Talk::reply(words)
+    }
+}
+
+/// Adds what the turn looked at, once; an event turn, which `speaks` to no one, keeps none.
+fn look(looked: &mut Vec<String>, speaks: bool, words: String) {
+    if speaks && !looked.contains(&words) {
+        looked.push(words);
+    }
+}
+
+/// Counts a read or lookup the brain asked for again: the second one ends the turn (#632), the
+/// first having told it to answer from what's in work.md.
+fn repeated(repeats: &mut usize) -> bool {
+    *repeats += 1;
+    *repeats >= 2
+}
+
+/// "a", "a and b", "a, b and c", "a, b, c, d and 2 more lookups".
+fn listed(things: &[String]) -> String {
+    let mut shown: Vec<String> = things.iter().take(4).cloned().collect();
+    if things.len() > 4 {
+        shown.push(format!("{} more lookups", things.len() - 4));
+    }
+    match shown.as_slice() {
+        [rest @ .., last] if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => shown.concat(),
     }
 }
 
@@ -625,14 +725,34 @@ async fn run_with(
     // The turn's own word, which fences everything quoted for the brain.
     let nonce = super::briefing::nonce();
     let mut done: Vec<String> = vec![];
+    // What the turn looked at, in Oby's words, for an end the brain didn't answer (#615). An
+    // event turn keeps none: its answer is for the log.
+    let mut looked: Vec<String> = vec![];
+    let speaks = orchestration.is_none();
+    // Reads and lookups the brain asked for again: the second time, the turn ends (#632).
+    let mut repeats = 0;
     let mut taken: HashSet<String> = HashSet::new();
-    let mut request = said.to_owned();
     let mut details: Option<String> = None;
     let mut reads = JobReads::default();
     let mut finds = Finds::default();
     // The jobs this turn read, which an event turn must have done before it acts (#590).
     let mut read_ids: HashSet<String> = HashSet::new();
     let mut research = research::Log::default();
+    // "continue" picks up what the last turn looked up, quoted again (#632).
+    let mut asked_for_words = said.to_owned();
+    let mut told = said.to_owned();
+    if orchestration.is_none()
+        && continues(said)
+        && let Some(carried) = shared.turns.carried(&control.conversation)
+    {
+        told = format!(
+            "{said}\n\n(What Oby looked up for “{}” last turn is quoted in work.md: go on from it, and look up only what's still missing.)",
+            carried.said
+        );
+        research = research::Log::carry(carried.entries);
+        asked_for_words = carried.said;
+    }
+    let mut request = told.clone();
     let tools = research::Tools::new(shared.jobs.clone());
     // Work the brain wants after looking things up waits for the user's Start.
     let mut researched = false;
@@ -650,15 +770,14 @@ async fn run_with(
         let (end, talk) = 'step: {
             // A stop is checked before the brain is asked for another action.
             if control.stopped() {
-                break 'step (End::Stopped, finish(&done));
+                break 'step (End::Stopped, finish(&End::Stopped, &done, &looked));
             }
             // The completion check's one extra step may come after the eighth.
             if step >= MOST_STEPS && !checking {
-                break 'step (End::MostSteps, finish(&done));
+                break 'step (End::MostSteps, finish(&End::MostSteps, &done, &looked));
             }
             if Instant::now() >= deadline {
-                done.push(AS_FAR_AS.into());
-                break 'step (End::BudgetSpent, finish(&done));
+                break 'step (End::BudgetSpent, finish(&End::BudgetSpent, &done, &looked));
             }
             let mut context = super::context(shared, given, &nonce);
             context.turn_step = step;
@@ -708,7 +827,7 @@ async fn run_with(
                 if control.cancelled() {
                     break 'step (End::Cancelled, Talk::None);
                 }
-                break 'step (End::Stopped, finish(&done));
+                break 'step (End::Stopped, finish(&End::Stopped, &done, &looked));
             }
             // The turn's budget ran out while the brain thought: its plan does nothing.
             if Instant::now() >= deadline {
@@ -716,8 +835,7 @@ async fn run_with(
                     .refused
                     .push("the plan came after the turn's budget: nothing done".into());
                 Record::new(&request, &planned).of(control, step).keep(home);
-                done.push(AS_FAR_AS.into());
-                break 'step (End::BudgetSpent, finish(&done));
+                break 'step (End::BudgetSpent, finish(&End::BudgetSpent, &done, &looked));
             }
             Record::new(&request, &planned).of(control, step).keep(home);
             if let Some(refusal) = super::rules::acting_refusal(&planned, step) {
@@ -730,9 +848,16 @@ async fn run_with(
                 break 'step (End::CouldNot, after(&done, talk));
             }
             // Rules only stand in for the brain on the user's own words: a later step they planned
-            // is a guess.
+            // is a guess. With too little time left for any brain to think, it's the budget that
+            // ended the turn, not the brain (#615).
             if step > 0 && planned.by == "rules" {
-                break 'step (End::BrainFailed, finish(&done));
+                let end = if deadline.saturating_duration_since(Instant::now()) <= LEAST {
+                    End::BudgetSpent
+                } else {
+                    End::BrainFailed
+                };
+                let talk = finish(&end, &done, &looked);
+                break 'step (end, talk);
             }
             let plan = &planned.plan;
             let index = step + 1;
@@ -764,40 +889,58 @@ async fn run_with(
             }
             let so_far = || {
                 if done.is_empty() {
-                    said.to_owned()
+                    told.clone()
                 } else {
-                    continued(said, &done)
+                    continued(&told, &done)
                 }
             };
             // The chat reads before it answers (#302): what's read is in the next step's file.
             if plan.action == Action::ReadJob {
+                let id = plan.named().first().map(String::as_str);
+                let again = id.is_some_and(|id| reads.sections.iter().any(|(r, _)| r == id));
                 read_ids.extend(plan.named().iter().cloned());
-                reads.read(plan.named().first().map(String::as_str), |id| {
+                let before = reads.sections.len();
+                reads.read(id, |id| {
                     shared
                         .jobs
                         .get(id)
                         .map(|job| read::section(&job, &shared.config.home))
                 });
+                let title = id
+                    .and_then(|id| shared.jobs.get(id))
+                    .and_then(|job| job.title.filter(|t| !t.trim().is_empty()));
+                if reads.sections.len() > before {
+                    let job = title
+                        .clone()
+                        .unwrap_or_else(|| format!("job {}", id.unwrap_or("")));
+                    look(&mut looked, speaks, format!("read {job}"));
+                }
                 if Instant::now() >= deadline {
-                    break 'step (End::BudgetSpent, finish(&done));
+                    break 'step (End::BudgetSpent, finish(&End::BudgetSpent, &done, &looked));
                 }
                 if checking {
-                    break 'step (End::Checked, finish(&done));
+                    break 'step (End::Checked, finish(&End::Checked, &done, &looked));
                 }
-                thought = plan
-                    .named()
-                    .first()
-                    .and_then(|id| shared.jobs.get(id))
-                    .and_then(|job| job.title.filter(|t| !t.trim().is_empty()))
-                    .map_or_else(
-                        || "Looking at the jobs".to_owned(),
-                        |t| format!("Looking at {t}"),
-                    );
+                if again && repeated(&mut repeats) {
+                    break 'step (End::Repeated, finish(&End::Repeated, &done, &looked));
+                }
+                thought = title.map_or_else(
+                    || "Looking at the jobs".to_owned(),
+                    |t| format!("Looking at {t}"),
+                );
                 request = finds.continued(&reads.continued(&so_far()));
                 continue 'turn;
             }
             // The chat finds past conversations before it answers (#593), never the one asking.
             if plan.action == Action::FindConversation {
+                let again = finds.has(plan.message.as_deref());
+                if let Some(words) = plan.message.as_deref().filter(|w| !w.trim().is_empty()) {
+                    look(
+                        &mut looked,
+                        speaks,
+                        format!("searched past conversations for “{}”", words.trim()),
+                    );
+                }
                 finds.find(plan.message.as_deref(), |words| {
                     shared.conversations.search(
                         words,
@@ -807,10 +950,13 @@ async fn run_with(
                     )
                 });
                 if Instant::now() >= deadline {
-                    break 'step (End::BudgetSpent, finish(&done));
+                    break 'step (End::BudgetSpent, finish(&End::BudgetSpent, &done, &looked));
                 }
                 if checking {
-                    break 'step (End::Checked, finish(&done));
+                    break 'step (End::Checked, finish(&End::Checked, &done, &looked));
+                }
+                if again && repeated(&mut repeats) {
+                    break 'step (End::Repeated, finish(&End::Repeated, &done, &looked));
                 }
                 thought = "Going over past conversations".to_owned();
                 request = finds.continued(&reads.continued(&so_far()));
@@ -833,9 +979,14 @@ async fn run_with(
                     &text,
                     State::Running,
                 );
+                let again = research.has_all(&lookups);
                 // Stopped or cancelled: no lookup runs.
                 if control.live() && Instant::now() < deadline {
+                    let before = research.entries.len();
                     research.run(&lookups, &tools, said).await;
+                    for (_, lookup, _) in &research.entries[before..] {
+                        look(&mut looked, speaks, research::looked(lookup));
+                    }
                 }
                 let cut = if control.cancelled() {
                     Some(End::Cancelled)
@@ -853,10 +1004,14 @@ async fn run_with(
                 };
                 step_event(shared, control, index, Action::Research, &text, state);
                 if let Some(end) = cut {
-                    break 'step (end, finish(&done));
+                    let talk = finish(&end, &done, &looked);
+                    break 'step (end, talk);
                 }
                 if checking {
-                    break 'step (End::Checked, finish(&done));
+                    break 'step (End::Checked, finish(&End::Checked, &done, &looked));
+                }
+                if again && repeated(&mut repeats) {
+                    break 'step (End::Repeated, finish(&End::Repeated, &done, &looked));
                 }
                 thought = "Going over what it found".to_owned();
                 request = research.continued(&finds.continued(&reads.continued(&so_far())));
@@ -868,7 +1023,7 @@ async fn run_with(
             let acting = plan.action.acts();
             // The same action twice in one turn: it's done; the brain only repeated itself.
             if acting && !taken.insert(plan.signature()) {
-                break 'step (End::Repeated, finish(&done));
+                break 'step (End::Repeated, finish(&End::Repeated, &done, &looked));
             }
             if !acting {
                 // The reply goes out as soon as the plan is checked, before its jobs are made
@@ -903,17 +1058,17 @@ async fn run_with(
             }
             // An action that didn't happen ends the turn: the user hears why.
             if let (_, Some(end)) = settle(&outcome) {
-                break 'step (end, finish(&done));
+                let talk = finish(&end, &done, &looked);
+                break 'step (end, talk);
             }
             if Instant::now() >= deadline {
-                done.push(AS_FAR_AS.into());
-                break 'step (End::BudgetSpent, finish(&done));
+                break 'step (End::BudgetSpent, finish(&End::BudgetSpent, &done, &looked));
             }
             if checking {
-                break 'step (End::Checked, finish(&done));
+                break 'step (End::Checked, finish(&End::Checked, &done, &looked));
             }
             thought = "Deciding what's next".to_owned();
-            request = finds.continued(&reads.continued(&continued(said, &done)));
+            request = finds.continued(&reads.continued(&continued(&told, &done)));
             continue 'turn;
         };
         // Before Oby answers, everything the user named was handled (#539): what's left goes
@@ -929,7 +1084,7 @@ async fn run_with(
                     earlier.extend(jobs);
                     done = if text.is_empty() { vec![] } else { vec![text] };
                 }
-                request = finds.continued(&reads.continued(&unfinished(said, &done, &missing)));
+                request = finds.continued(&reads.continued(&unfinished(&told, &done, &missing)));
                 thought = "Checking nothing was missed".to_owned();
                 checking = true;
                 continue 'turn;
@@ -952,6 +1107,13 @@ async fn run_with(
     } else {
         (end, talk)
     };
+    if speaks {
+        let carried = (!research.entries.is_empty()).then_some(Carried {
+            said: asked_for_words,
+            entries: research.entries,
+        });
+        shared.turns.carry(&control.conversation, carried);
+    }
     tracing::info!("turn {} ended: {}", control.turn, end.as_str());
     Answered { talk, details, end }
 }
@@ -1055,6 +1217,53 @@ mod tests {
             Some("maxRunning goes from 1 to 20".into())
         );
         assert_eq!(setting_refusal(&["claude failed: x".into()]), None);
+    }
+
+    /// #615: every end a user hears says what was done, else what was looked at, and what's left.
+    #[test]
+    fn a_turn_the_brain_did_not_answer_still_says_something() {
+        let done = vec!["Stopped Vault secrets.".to_owned()];
+        let looked: Vec<String> = ["searched oby for “gateway”", "read src/gateway.rs"]
+            .map(String::from)
+            .into();
+        let said = |end: End, done: &[String], looked: &[String]| match finish(&end, done, looked) {
+            Talk::Reply { text, .. } => text,
+            other => format!("{other:?}"),
+        };
+        assert_eq!(
+            said(End::BudgetSpent, &[], &looked),
+            format!("Oby searched oby for “gateway” and read src/gateway.rs. {AS_FAR_AS}")
+        );
+        assert_eq!(
+            said(End::BudgetSpent, &done, &looked),
+            format!("Stopped Vault secrets. {AS_FAR_AS}")
+        );
+        assert_eq!(said(End::BudgetSpent, &[], &[]), AS_FAR_AS);
+        assert_eq!(
+            said(End::MostSteps, &done, &[]),
+            format!("Stopped Vault secrets. {AS_FAR_AS}")
+        );
+        assert_eq!(
+            said(End::BrainFailed, &[], &[]),
+            "Oby couldn't think that through: say it again."
+        );
+        assert_eq!(said(End::BrainFailed, &done, &looked), done[0]);
+        assert_eq!(
+            said(End::Checked, &[], &looked[..1]),
+            "Oby searched oby for “gateway”."
+        );
+        assert_eq!(finish(&End::Stopped, &[], &[]), Talk::None);
+        assert_eq!(finish(&End::Cancelled, &done, &looked), Talk::None);
+        let many: Vec<String> = (1..=6).map(|n| format!("read f{n}")).collect();
+        assert_eq!(
+            listed(&many),
+            "read f1, read f2, read f3, read f4 and 2 more lookups"
+        );
+        assert!(
+            continues("Continue.")
+                && continues("keep going")
+                && !continues("continue the vault job")
+        );
     }
 
     /// #538's acceptance: what an action's step and the turn do comes from its outcome. Reworded
