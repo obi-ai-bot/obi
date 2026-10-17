@@ -79,6 +79,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var moves: [Move]?
     /// What a queued job waits for (#238), or nil: getting ready, about to start, not queued, or an older runner.
     var waiting: Waiting?
+    /// The conversation whose words started it (obid only, #493), or nil.
+    var conversation: String?
 
     /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
     /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
@@ -107,7 +109,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
-             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report
+             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
+             conversation
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -123,6 +126,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var cloudNeedsYou: Bool { dismissed == nil && stoppedCloud == true }
 
     var isActive: Bool { status == .queued || status == .running }
+    /// How many rounds it may take and the one it's on, as Engine's Job says them.
+    var maxRounds: Int { rounds ?? 1 }
+    var currentRound: Int { round ?? 1 }
     /// Queued behind something (`waiting`): listed under Waiting, not counted as working (#238).
     var isWaiting: Bool { status == .queued && waiting != nil }
     /// Running, or getting ready to: what every app counts as an agent working (as Engine's).
@@ -420,6 +426,65 @@ nonisolated enum PlanResult: Decodable, Equatable, Sendable {
     }
 }
 
+/// What `POST /v1/plans` answers, with the conversation the words joined (obid only, #493).
+nonisolated struct PlannedTurn: Decodable, Equatable, Sendable {
+    var result: PlanResult
+    var conversation: String?
+
+    private enum Keys: String, CodingKey { case conversation }
+
+    init(from decoder: any Decoder) throws {
+        result = try PlanResult(from: decoder)
+        conversation = try? decoder.container(keyedBy: Keys.self).decodeIfPresent(String.self, forKey: .conversation)
+    }
+}
+
+/// One of obid's conversations (docs/runner-api.md, "obid only: conversations"), as its list and
+/// its event send it. Tolerant: a key missing or unreadable takes a plain default, so a newer
+/// obid's still reads. `deleted`: the event saying it's gone.
+nonisolated struct RunnerConversation: Decodable, Identifiable, Equatable, Sendable {
+    /// What a search found in it: the latest turn that holds the words.
+    struct Match: Decodable, Equatable, Sendable {
+        var who: String?
+        var text: String
+    }
+
+    var id: String
+    var title: String
+    var pinned: Bool
+    var created: Date?
+    var lastActivity: Date?
+    var deleted: Bool
+    var turn: Match?
+
+    private enum Keys: String, CodingKey { case id, title, pinned, created, lastActivity, deleted, turn }
+
+    init(id: String, title: String, pinned: Bool = false, created: Date? = nil, lastActivity: Date? = nil,
+         deleted: Bool = false, turn: Match? = nil) {
+        self.id = id
+        self.title = title
+        self.pinned = pinned
+        self.created = created
+        self.lastActivity = lastActivity
+        self.deleted = deleted
+        self.turn = turn
+    }
+
+    init(from decoder: any Decoder) throws {
+        let keys = try decoder.container(keyedBy: Keys.self)
+        id = try keys.decode(String.self, forKey: .id)
+        title = (try? keys.decodeIfPresent(String.self, forKey: .title)) ?? ""
+        pinned = (try? keys.decodeIfPresent(Bool.self, forKey: .pinned)) ?? false
+        created = try? keys.decodeIfPresent(Date.self, forKey: .created)
+        lastActivity = try? keys.decodeIfPresent(Date.self, forKey: .lastActivity)
+        deleted = (try? keys.decodeIfPresent(Bool.self, forKey: .deleted)) ?? false
+        turn = try? keys.decodeIfPresent(Match.self, forKey: .turn)
+    }
+
+    /// When it last moved: its latest turn, else when it started.
+    var latest: Date { lastActivity ?? created ?? .distantPast }
+}
+
 nonisolated struct ModelChoice: Codable, Equatable, Sendable {
     var model: String
     var effort: String
@@ -575,6 +640,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     case turn(Turn)
     /// One step of Oby's turn began, went on or ended (#304). Runners from before the step event never send it.
     case step(TurnStep)
+    /// One of obid's conversations started, got a turn, was renamed, pinned or deleted (#493).
+    case conversation(RunnerConversation)
 }
 
 #if os(iOS) || os(watchOS)
@@ -594,9 +661,11 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     var voice: Bool?
     /// Longer Markdown answer beneath Oby's short spoken reply; nil on older turns.
     var details: String?
+    /// The conversation it's in (obid only, #493), or nil from a runner with one thread.
+    var conversation: String?
 
     init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String,
-         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil) {
+         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil, conversation: String? = nil) {
         self.id = id
         self.date = date
         self.who = who
@@ -604,6 +673,7 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
         self.jobs = jobs
         self.voice = voice
         self.details = details
+        self.conversation = conversation
     }
 }
 #endif
@@ -617,10 +687,17 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
     var at: Date
     var jobs: [String]?
     var details: String?
+    /// obid only (#493): the conversation it's in.
+    var conversation: String?
 
     var turn: Turn {
+        #if os(macOS)
         Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text,
              jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details)
+        #else
+        Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text,
+             jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details, conversation: conversation)
+        #endif
     }
 }
 
@@ -640,19 +717,22 @@ nonisolated struct TurnStep: Codable, Identifiable, Equatable, Sendable {
     var text: String
     var state: State
     var at: Date?
+    /// The conversation its turn is in (obid only, #493), or nil.
+    var conversation: String?
 
     var id: String { "\(turn)#\(index)" }
 
-    init(turn: String, index: Int, action: String? = nil, text: String, state: State, at: Date? = nil) {
+    init(turn: String, index: Int, action: String? = nil, text: String, state: State, at: Date? = nil, conversation: String? = nil) {
         self.turn = turn
         self.index = index
         self.action = action
         self.text = text
         self.state = state
         self.at = at
+        self.conversation = conversation
     }
 
-    private enum CodingKeys: String, CodingKey { case turn, index, action, text, state, at }
+    private enum CodingKeys: String, CodingKey { case turn, index, action, text, state, at, conversation }
 
     /// Tolerant of what a newer runner adds: a state this app doesn't know reads as done, and a
     /// time that doesn't parse is left out, so the step still shows.
@@ -664,6 +744,7 @@ nonisolated struct TurnStep: Codable, Identifiable, Equatable, Sendable {
         text = try c.decode(String.self, forKey: .text)
         state = (try? c.decode(String.self, forKey: .state)).flatMap(State.init(rawValue:)) ?? .done
         at = try? c.decodeIfPresent(Date.self, forKey: .at)
+        conversation = try? c.decodeIfPresent(String.self, forKey: .conversation)
     }
 }
 
@@ -907,9 +988,44 @@ nonisolated struct Runner: Sendable {
     static let planTimeout: TimeInterval = 120
 
     func plan(_ said: String, answer: (question: String, option: String)? = nil, attachments: [String] = []) async throws -> PlanResult {
+        try await planned(said, answer: answer, attachments: attachments).result
+    }
+
+    /// The same, in one of obid's conversations (#493): `conversation` names the one the words
+    /// join, `new` starts one; neither, the latest. The answer says which they joined (nil from a
+    /// runner with one thread).
+    func planned(_ said: String, answer: (question: String, option: String)? = nil, attachments: [String] = [],
+                 conversation: String? = nil, new: Bool = false) async throws -> PlannedTurn {
         struct Answer: Encodable { var question: String; var option: String }
-        struct Body: Encodable { var said: String; var answer: Answer?; var attachments: [String] }
-        return try await call("POST", "v1/plans", body: Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }, attachments: attachments), timeout: Self.planTimeout)
+        struct Body: Encodable { var said: String; var answer: Answer?; var attachments: [String]; var conversation: String?; var new: Bool? }
+        let body = Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }, attachments: attachments,
+                        conversation: conversation, new: new ? true : nil)
+        return try await call("POST", "v1/plans", body: body, timeout: Self.planTimeout)
+    }
+
+    // MARK: Conversations (obid only, #493)
+
+    /// obid's conversations, pinned first, then newest; with `query`, the ones that hold its words.
+    /// Nil from a runner that keeps one thread (it doesn't know the path).
+    func conversations(query: String? = nil, limit: Int = 100) async throws -> [RunnerConversation]? {
+        var path = "v1/conversations?limit=\(limit)"
+        if let query, let q = query.addingPercentEncoding(withAllowedCharacters: .alphanumerics) { path += "&q=\(q)" }
+        do {
+            return try await call("GET", path)
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// Renames or pins a conversation (nil keeps either); obid answers with it.
+    func updateConversation(_ id: String, title: String? = nil, pinned: Bool? = nil) async throws -> RunnerConversation {
+        struct Body: Encodable { var title: String?; var pinned: Bool? }
+        return try await call("PATCH", "v1/conversations/\(id)", body: Body(title: title, pinned: pinned))
+    }
+
+    /// Forgets a conversation and its turns; the jobs it started stay.
+    func deleteConversation(_ id: String) async throws {
+        try await send("DELETE", "v1/conversations/\(id)")
     }
 
     /// Stop: the turn Oby is working on ends where it is (`POST /v1/conversation/stop`, #304). A
@@ -1185,8 +1301,10 @@ nonisolated struct Runner: Sendable {
 
     /// One page of the runner's conversation, oldest first (#11): the latest `limit` turns, or the
     /// ones before the turn `before` names. A runner older than the thread has none.
-    func conversation(before: String? = nil, limit: Int = 50) async throws -> [Turn] {
+    /// On obid, `id` names the conversation; without it, the latest.
+    func conversation(id: String? = nil, before: String? = nil, limit: Int = 50) async throws -> [Turn] {
         var query = "limit=\(limit)"
+        if let id, let id = id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) { query += "&id=\(id)" }
         if let before, let id = before.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) { query += "&before=\(id)" }
         do {
             let turns: [RunnerTurn] = try await call("GET", "v1/conversation?\(query)")
@@ -1343,6 +1461,7 @@ nonisolated struct EventParser {
             #endif
             case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn) }
             case "step": return (try? Runner.decoder.decode(TurnStep.self, from: json)).map(RunnerEvent.step)
+            case "conversation": return (try? Runner.decoder.decode(RunnerConversation.self, from: json)).map(RunnerEvent.conversation)
             default: return nil
             }
         }
