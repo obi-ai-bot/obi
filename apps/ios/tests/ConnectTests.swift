@@ -62,6 +62,14 @@ struct ConnectTests {
         }
     }
 
+    /// The background wait for a job's end carries the device token, as every gateway call does:
+    /// without it the gateway answers 401 and the Lock Screen never hears the job ended.
+    @Test func theBackgroundWaitCarriesTheDeviceToken() {
+        let url = URL(string: "https://mac.tail0000.ts.net:8443/v1/jobs/j1/wait")!
+        #expect(JobWaiter.request(url, token: "tok-1").value(forHTTPHeaderField: "Authorization") == "Bearer tok-1")
+        #expect(JobWaiter.request(url, token: nil).value(forHTTPHeaderField: "Authorization") == nil)
+    }
+
     @Test func aTypedCodeIsSixDigits() {
         #expect(PairingCode.normalized("123456") == "123456")
         #expect(PairingCode.normalized(" 123 456 ") == "123456")

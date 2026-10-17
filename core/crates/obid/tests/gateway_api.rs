@@ -423,3 +423,93 @@ fn only_a_phone_redeems_an_invitation() {
         obid.log()
     );
 }
+
+/// Reads from `stream` until `done` says so, the connection closes or `seconds` pass: what came.
+fn read_until(stream: &mut TcpStream, seconds: u64, done: impl Fn(&str) -> bool) -> (String, bool) {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let give_up = std::time::Instant::now() + Duration::from_secs(seconds);
+    let mut seen = Vec::new();
+    let mut buffer = [0u8; 4096];
+    while std::time::Instant::now() < give_up {
+        match stream.read(&mut buffer) {
+            Ok(0) => return (String::from_utf8_lossy(&seen).into_owned(), true),
+            Ok(n) => seen.extend_from_slice(&buffer[..n]),
+            Err(_) => {}
+        }
+        if done(&String::from_utf8_lossy(&seen)) {
+            break;
+        }
+    }
+    (String::from_utf8_lossy(&seen).into_owned(), false)
+}
+
+fn open(obid: &Obid, token: &str, target: &str) -> TcpStream {
+    let mut stream = TcpStream::connect(("127.0.0.1", obid.gateway.unwrap())).unwrap();
+    stream
+        .write_all(format!("GET {target} HTTP/1.1\r\nHost: mac.tail0000.ts.net\r\nAuthorization: Bearer {token}\r\n\r\n").as_bytes())
+        .unwrap();
+    stream
+}
+
+/// A phone revoked while it follows the event stream hears nothing more: its stream ends at the
+/// next event.
+#[test]
+fn a_revoked_phone_loses_its_event_stream() {
+    let folder = Folder::new("gateway-revoke-stream");
+    let obid = started(&folder);
+    let token = paired(&obid);
+    let mut events = open(&obid, &token, "/v1/events");
+    let (head, _) = read_until(&mut events, 10, |seen| seen.contains("\r\n\r\n"));
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let id = call(&obid, "GET", "/v1/pairing/devices", None).body[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        call(&obid, "DELETE", &format!("/v1/pairing/devices/{id}"), None).status,
+        204
+    );
+    assert_eq!(call(&obid, "POST", "/v1/clear", None).status, 200);
+    // The stream's last chunk (`0`) ends it; the connection itself may stay open for another request.
+    let (after, closed) = read_until(&mut events, 10, |seen| seen.contains("0\r\n\r\n"));
+    assert!(
+        closed || after.contains("0\r\n\r\n"),
+        "the stream still runs: {after}"
+    );
+    assert!(
+        !after.contains("clear"),
+        "an event reached a revoked phone: {after}"
+    );
+}
+
+/// `GET /v1/jobs/{id}/wait` goes through as obid sends it, a space at once and the job at its end,
+/// so a phone's wait doesn't time out on a long job.
+#[test]
+fn a_wait_through_the_gateway_starts_at_once() {
+    let folder = Folder::new("gateway-wait");
+    let obid = started(&folder);
+    let token = paired(&obid);
+    let job = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(&json!({"job": {
+        "repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "SLEEP"}})),
+    );
+    assert_eq!(job.status, 201, "{}", job.text);
+    let id = job.body["id"].as_str().unwrap().to_owned();
+    let mut wait = open(&obid, &token, &format!("/v1/jobs/{id}/wait"));
+    let (head, _) = read_until(&mut wait, 5, |seen| seen.contains("\r\n\r\n"));
+    assert!(
+        head.starts_with("HTTP/1.1 200"),
+        "no answer within 5 s: {head:?}"
+    );
+    assert_eq!(
+        call(&obid, "POST", &format!("/v1/jobs/{id}/stop"), None).status,
+        200
+    );
+    let (rest, _) = read_until(&mut wait, 20, |seen| seen.contains(&id));
+    assert!(rest.contains(&id), "{rest}");
+}

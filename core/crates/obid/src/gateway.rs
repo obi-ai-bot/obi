@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use axum::Router;
-use axum::body::{Body, Bytes};
+use axum::body::{Body, Bytes, HttpBody as _};
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -62,6 +62,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/jobs/*"),
     ("GET", "/v1/jobs/*/wait"),
     ("GET", "/v1/jobs/*/report"),
+    ("POST", "/v1/jobs/*/proposals/*/file"),
     ("POST", "/v1/jobs/*/stop"),
     ("POST", "/v1/stop-all"),
     ("POST", "/v1/jobs/*/dismiss"),
@@ -484,10 +485,15 @@ async fn forward(State(through): State<Through>, request: Request) -> Response {
     let scrubber = Scrubber {
         homes: homes(&through.shared.config),
     };
-    scrubbed(response, scrubber).await
+    let token = token.unwrap_or_default().to_owned();
+    let shared = through.shared.clone();
+    scrubbed(response, scrubber, move || {
+        shared.gateway.accepts(&token, SystemTime::now())
+    })
+    .await
 }
 
-/// The accounts' own folders, which never leave in an answer.
+/// The accounts' own folders, and the jobs' copies of their logins, which never leave in an answer.
 fn homes(config: &crate::config::Config) -> Vec<String> {
     [
         &config.agents.claude,
@@ -497,27 +503,44 @@ fn homes(config: &crate::config::Config) -> Vec<String> {
     .into_iter()
     .flatten()
     .flat_map(|agent| &agent.accounts)
-    .filter_map(|account| account.config_dir.as_ref())
+    .filter_map(|account| account.config_dir.clone())
+    // Where obid copies a job's login for its agent (crate::jobs, `login_home`).
+    .chain([config.home.join("logins")])
     .map(|dir| dir.to_string_lossy().into_owned())
     .filter(|dir| !dir.is_empty())
     .collect()
 }
 
 /// The API's answer, with its status and content type only, scrubbed: whole when it has a known
-/// length, chunk by chunk for an event stream (obid writes each event in one chunk, as
-/// crate::vault::answers relies on too).
-async fn scrubbed(response: Response, scrubber: Scrubber) -> Response {
+/// length, chunk by chunk otherwise (obid writes each event in one chunk, as crate::vault::answers
+/// relies on too, and `/wait` a space at once and the job in one chunk at its end). A stream stops
+/// at the first chunk after its device was revoked, before that chunk goes out.
+async fn scrubbed(
+    response: Response,
+    scrubber: Scrubber,
+    still_paired: impl Fn() -> bool + Send + 'static,
+) -> Response {
     let (parts, body) = response.into_parts();
     let kind = parts.headers.get(header::CONTENT_TYPE).cloned();
     let events = kind
         .as_ref()
         .and_then(|k| k.to_str().ok())
         .is_some_and(|k| k.to_ascii_lowercase().starts_with("text/event-stream"));
-    let mut out = if events {
-        let frames = body.into_data_stream().map(move |chunk| {
-            chunk.map(|bytes| Bytes::from(scrubber.frame(&String::from_utf8_lossy(&bytes))))
-        });
-        Response::new(Body::from_stream(frames))
+    let mut out = if events || body.size_hint().exact().is_none() {
+        let chunks = body
+            .into_data_stream()
+            .take_while(move |_| std::future::ready(still_paired()))
+            .map(move |chunk| {
+                chunk.map(|bytes| {
+                    let text = String::from_utf8_lossy(&bytes);
+                    Bytes::from(if events {
+                        scrubber.frame(&text)
+                    } else {
+                        scrubber.document(&text)
+                    })
+                })
+            });
+        Response::new(Body::from_stream(chunks))
     } else {
         let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
             return error(
