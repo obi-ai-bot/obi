@@ -32,6 +32,19 @@ struct ConnectTests {
         #expect(throws: RunnerError.self) { try GatewayEnvelope.decode("https://example.com/menu") }
     }
 
+    /// obid's gateway behind `tailscale serve` (docs/runner-api.md, "obid only: the gateway"): the
+    /// Mac's Tailscale name with its port is a link, kept across launches, reached over HTTPS.
+    @Test func aTailscaleNameIsALink() throws {
+        let text = #"{"url":"https://mac.tail0000.ts.net:8443","link":{"hostname":"mac.tail0000.ts.net:8443","name":"My Mac"},"secret":"one-time"}"#
+        let envelope = try GatewayEnvelope.decode(text)
+        let kept = try MacLink.paired(try envelope.link.encoded())
+        #expect(kept.tunnelURL.absoluteString == "https://mac.tail0000.ts.net:8443")
+        #expect(MacLink.hostname(from: "https://Mac.tail0000.ts.net:8443/") == "mac.tail0000.ts.net:8443")
+        for wrong in ["ts.net", "mac.ts.net", "mac.tail0000.ts.net.evil.com", "mac.tail0000.ts.net:", "evil.com:8443"] {
+            #expect(!MacLink.isHostname(wrong), Comment(rawValue: wrong))
+        }
+    }
+
     @Test func aTypedCodeIsSixDigits() {
         #expect(PairingCode.normalized("123456") == "123456")
         #expect(PairingCode.normalized(" 123 456 ") == "123456")

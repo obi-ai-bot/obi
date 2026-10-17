@@ -43,6 +43,12 @@ struct ConnectScreen: View {
             }
             Section {
                 Button("Scan QR code") { scanning = true }
+                // The QR code's text, copied from wherever the Mac's invitation was sent: pairing
+                // from away, with no Mac screen to scan.
+                PasteButton(payloadType: String.self) { values in
+                    guard let value = values.first else { return }
+                    Task { await pair(value) }
+                }
                 Button(enteringCode ? "Hide code entry" : "Enter code") { enteringCode.toggle() }
                 if enteringCode {
                     TextField("Six-digit code", text: $code, prompt: Text("123456"))

@@ -19,6 +19,7 @@ pub mod conversation;
 pub mod devices;
 pub mod events;
 pub mod failures;
+pub mod gateway;
 pub mod git;
 pub mod github;
 pub mod job;
@@ -149,6 +150,15 @@ pub async fn serve(
     let bound = listener
         .local_addr()
         .map_err(|source| StartError::Listen { address, source })?;
+    // The gateway's address is taken now too, so a busy one stops obid before anything starts.
+    let gateway = match config.gateway {
+        Some(address) => Some(
+            tokio::net::TcpListener::bind(address)
+                .await
+                .map_err(|source| StartError::Listen { address, source })?,
+        ),
+        None => None,
+    };
     let host = gethostname::gethostname().to_string_lossy().into_owned();
     let home = config.home.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -201,6 +211,7 @@ pub async fn serve(
     jobs.use_plugins(plugins.clone());
     let cleared = clear::Cleared::open(&config.home);
     let devices = devices::Devices::open(&config.home);
+    let paired = gateway::Gateway::open(&config.home);
     let broker_host = if cfg!(target_os = "linux") {
         format!("http://10.0.2.2:{}", bound.port())
     } else {
@@ -216,6 +227,7 @@ pub async fn serve(
         cleanup,
         cleared,
         devices,
+        gateway: paired,
         connections,
         jobs: jobs.clone(),
         events,
@@ -229,11 +241,34 @@ pub async fn serve(
     });
     let app = api::router(shared.clone());
 
-    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+    let server = axum::serve(listener, app.clone()).with_graceful_shutdown(async move {
         stop.await;
         let _ = stopping_tx.send(true);
     });
     ready(bound);
+    // The gateway (crate::gateway): paired phones' calls, forwarded to the same router.
+    if let Some(listener) = gateway {
+        let address = listener.local_addr().map_err(StartError::Serve)?;
+        println!("obid gateway listening on http://{address}");
+        tracing::info!(%address, "obid gateway listening");
+        let app = gateway::router(shared.clone(), app.clone());
+        let mut stopping = stopping_rx.clone();
+        tokio::spawn(async move {
+            let stopped = async move {
+                while !*stopping.borrow() {
+                    if stopping.changed().await.is_err() {
+                        return;
+                    }
+                }
+            };
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(stopped)
+                .await
+            {
+                tracing::error!("the gateway stopped: {e}");
+            }
+        });
+    }
     // Jobs that were queued or running when obid last stopped carry on, and so does its Sphere.
     jobs.resume();
     link.start();
