@@ -34,6 +34,9 @@ pub const QUOTED_FILE: &str = "work.md";
 /// think and answer (#535: three left it no room after a read).
 pub const READ_TURNS: &str = "6";
 
+/// How long a background call may take (#537), one attempt: Haiku answers in 3 to 4 seconds.
+pub const BACKGROUND_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Whether the turn the plan is for was stopped or cancelled meanwhile: then nothing starts again.
 pub type Halted<'a> = &'a (dyn Fn() -> bool + Send + Sync);
 
@@ -88,9 +91,12 @@ impl Adapter {
         calls: &mut Vec<Call>,
     ) -> Result<String, Failure> {
         match self {
+            // The planner plans the conversation's own turn: someone waits on it.
             Adapter::Claude(claude) => {
                 claude
-                    .complete(model, system, user, quoted, schema, timeout, halted, calls)
+                    .complete(
+                        model, system, user, quoted, schema, timeout, true, halted, calls,
+                    )
                     .await
             }
             Adapter::Codex(codex) => {
@@ -148,6 +154,43 @@ struct Output {
 }
 
 impl ClaudeBrain {
+    /// A side call nobody waits on (#537): a title, a summary, a rewrite, a memory. Every model call
+    /// that isn't the conversation's own turn goes here: one attempt with the quick model, at most
+    /// [`BACKGROUND_TIMEOUT`], never Codex, so during an outage it adds no load on the account the
+    /// user's turn needs. Like the turn, it goes through the vault first, and a vault that can't be
+    /// read runs nothing (#570). The call is added to `calls` either way; when it fails the caller
+    /// shows what it had without the model's words.
+    pub async fn background(
+        &self,
+        system: &str,
+        user: &str,
+        quoted: Option<&str>,
+        schema: &str,
+        calls: &mut Vec<Call>,
+    ) -> Result<String, Failure> {
+        let (system, user, schema, quoted) = for_brain(system, user, schema, quoted)
+            .map_err(|why| Failure::Failed(format!("the vault can't be read: {why}")))?;
+        let result = self
+            .complete(
+                QUICK_MODEL,
+                &system,
+                &user,
+                quoted.as_deref(),
+                &schema,
+                BACKGROUND_TIMEOUT,
+                false,
+                &|| false,
+                calls,
+            )
+            .await;
+        if let (Err(_), Some(call)) = (&result, calls.last()) {
+            tracing::warn!("brain: a background call failed: {}", call.line());
+        }
+        result
+    }
+
+    /// The plan as JSON. `foreground` (someone waits on it, #537): a transient failure is tried
+    /// once more within `timeout`; in the background there's one attempt.
     #[allow(clippy::too_many_arguments)]
     async fn complete(
         &self,
@@ -157,6 +200,7 @@ impl ClaudeBrain {
         quoted: Option<&str>,
         schema: &str,
         timeout: Duration,
+        foreground: bool,
         halted: Halted<'_>,
         calls: &mut Vec<Call>,
     ) -> Result<String, Failure> {
@@ -229,7 +273,8 @@ impl ClaudeBrain {
         let input = secrets.redact(user);
         let deadline = Instant::now() + timeout;
         let mut failures: Vec<String> = vec![];
-        for attempt in 1..=2 {
+        let attempts = if foreground { 2 } else { 1 };
+        for attempt in 1..=attempts {
             if halted() {
                 return Err(Failure::Halted);
             }
@@ -238,7 +283,7 @@ impl ClaudeBrain {
                 break;
             }
             // Half of the budget is kept for the one retry when the first process times out.
-            let limit = if attempt == 1 {
+            let limit = if attempt < attempts {
                 remaining / 2
             } else {
                 remaining
@@ -292,15 +337,20 @@ impl ClaudeBrain {
                 secrets.redact(&err)
             ));
             // One retry covers empty answers, Claude's exit 15, and a process that timed out.
-            if !(attempt == 1 && (text.is_empty() || result.status == Some(15) || result.timed_out))
+            if !(attempt < attempts
+                && (text.is_empty() || result.status == Some(15) || result.timed_out))
             {
                 break;
             }
         }
-        Err(Failure::Failed(format!(
-            "claude returned no plan after retry: {}",
-            failures.join("; ")
-        )))
+        Err(Failure::Failed(if foreground {
+            format!(
+                "claude returned no plan after retry: {}",
+                failures.join("; ")
+            )
+        } else {
+            format!("claude returned no answer: {}", failures.join("; "))
+        }))
     }
 }
 
@@ -1098,6 +1148,81 @@ pub mod tests {
         next.turn_length = Some(20);
         planner(&fake).plan("what now?", &next, &going).await;
         assert_eq!(*fake.models.lock().unwrap(), [DEEP_MODEL, QUICK_MODEL]);
+    }
+
+    /// A Claude Code that exits 15 every time, counting its launches in its account's folder, in
+    /// a folder of its own under the system's temporary one.
+    fn exiting_claude(name: &str) -> (ClaudeBrain, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("obid-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let account = root.join("account");
+        std::fs::create_dir_all(&account).unwrap();
+        let bin = root.join("claude");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho launch >> \"$CLAUDE_CONFIG_DIR/launches\"\nexit 15\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"),
+                                "owner": "wellington"})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = crate::jobs::Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let brain = ClaudeBrain {
+            bin,
+            home: Some(account.clone()),
+            room: Room {
+                root: root.join("plans"),
+                jobs,
+            },
+        };
+        (brain, account.join("launches"))
+    }
+
+    fn launches(file: &Path) -> usize {
+        std::fs::read_to_string(file)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
+    /// #537's acceptance: a Claude Code that exits 15 is tried twice by a brain turn, the
+    /// conversation's own, and once by a background call, whose failed call is recorded.
+    #[tokio::test]
+    async fn only_the_turn_the_user_waits_for_retries() {
+        let (brain, file) = exiting_claude("foreground");
+        let turn = Planner {
+            adapters: vec![Adapter::Claude(brain)],
+            falls_back_to_rules: true,
+            deadline: None,
+        };
+        let planned = turn.plan("hello", &context(), &going).await;
+        assert_eq!(planned.by, "rules");
+        assert_eq!(launches(&file), 2);
+        assert_eq!(planned.calls.len(), 2);
+
+        let (brain, file) = exiting_claude("background");
+        let mut calls = vec![];
+        let answer = brain
+            .background("Rewrite it.", "The item.", None, "{}", &mut calls)
+            .await;
+        assert!(
+            matches!(&answer, Err(Failure::Failed(why)) if why.contains("attempt 1: exit code 15") && !why.contains("attempt 2")),
+            "{answer:?}"
+        );
+        assert_eq!(launches(&file), 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].outcome, CallOutcome::Failed);
+        assert_eq!(calls[0].model.as_deref(), Some(QUICK_MODEL));
     }
 
     /// #536: Haiku thinks at low effort, Sonnet at medium, any other model at the CLI's default.
