@@ -54,8 +54,9 @@ enum Gate<'a> {
     Owner { mcp: &'a [String] },
 }
 
-/// A job the owner describes whole (`POST /v1/jobs`), checked.
-#[derive(Debug, Clone, Default)]
+/// A job the owner describes whole (`POST /v1/jobs`), checked. A confirm item keeps one until
+/// the owner says so.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct NewJob {
     pub repo: String,
     pub kind: String,

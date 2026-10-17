@@ -414,11 +414,11 @@ pub fn nonce() -> String {
 /// One quoted block, between `<<<quoted-<nonce>` and `quoted-<nonce>>>>`, with every copy of
 /// the nonce taken out of the data: nothing quoted can close the block or fake another (#546).
 pub fn fence(nonce: &str, data: &str) -> String {
-    let data = if nonce.is_empty() {
-        data.to_owned()
-    } else {
-        data.replace(nonce, "")
-    };
+    // Again until none is left: taking one copy out can join two halves into another.
+    let mut data = data.to_owned();
+    while !nonce.is_empty() && data.contains(nonce) {
+        data = data.replace(nonce, "");
+    }
     format!("<<<quoted-{nonce}\n{data}\nquoted-{nonce}>>>")
 }
 
@@ -812,6 +812,16 @@ mod tests {
             "{quoted}"
         );
         assert!(fence("n0nce", "a\nb").ends_with("\nb\nquoted-n0nce>>>"));
+    }
+
+    /// Data that rebuilds the nonce when one copy is taken out loses every copy (review on #551).
+    #[test]
+    fn a_nonce_rebuilt_inside_the_data_is_taken_out_too() {
+        let nonce = "n0nce";
+        let data = format!("x {}{nonce}{} y", &nonce[..2], &nonce[2..]);
+        let fenced = fence(nonce, &data);
+        assert_eq!(fenced.matches(nonce).count(), 2, "{fenced}");
+        assert!(fenced.starts_with("<<<quoted-n0nce\n") && fenced.ends_with("\nquoted-n0nce>>>"));
     }
 
     #[test]

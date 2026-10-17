@@ -11,6 +11,7 @@ use super::planner::Planned;
 use crate::api::Shared;
 use crate::job::Job;
 use crate::jobs::NewJob;
+use crate::sphere::inbox::{Confirmed, action};
 
 /// How an action that changes something ended: what Oby says about it, and whether it happened.
 /// A failed one ends the turn, and the user hears why.
@@ -119,6 +120,8 @@ async fn dispatch(
     }
     let mut jobs = vec![];
     let mut started: Vec<Job> = vec![];
+    // Jobs that would start in Bypass mode, waiting for the owner's Confirm.
+    let mut waiting: Vec<String> = vec![];
     for (d, files) in plan.dispatches.iter().zip(files) {
         // An issue and a pull request is the issue's work started from the pull request (#219):
         // obid has no `fromPR` yet, so the job is the issue's, from its repository's base.
@@ -145,6 +148,26 @@ async fn dispatch(
             mode: d.mode.map(|m| m.as_str().to_owned()),
             ..NewJob::default()
         };
+        // A job that would never ask the owner anything widens trust: only their own Confirm
+        // starts it (the owner's decision of 2026-10-16; review on #551).
+        if new.mode.as_deref() == Some("bypass") {
+            let what = describe(&new);
+            confirm(
+                shared,
+                "",
+                format!("Start {what}"),
+                format!(
+                    "Oby's brain planned a job that never asks you anything: {what}. It starts only if you confirm."
+                ),
+                Confirmed {
+                    action: action::START_JOB.into(),
+                    target: asked.conversation.to_owned(),
+                    payload: serde_json::json!({"job": new}),
+                },
+            );
+            waiting.push(what);
+            continue;
+        }
         match shared.jobs.create(new) {
             Ok(job) => {
                 jobs.push(job.to_json());
@@ -160,12 +183,56 @@ async fn dispatch(
             }
         }
     }
-    let text = if plan.reply.is_empty() {
-        started_line(&started)
-    } else {
-        plan.reply.clone()
+    let mut text = match (started.is_empty(), plan.reply.is_empty()) {
+        (true, _) => String::new(),
+        (false, true) => started_line(&started),
+        (false, false) => plan.reply.clone(),
     };
+    if !waiting.is_empty() {
+        let line = format!(
+            "Starting {} in Bypass mode waits for your OK: confirm it in your inbox.",
+            waiting.len().to_string() + if waiting.len() == 1 { " job" } else { " jobs" }
+        );
+        text = if text.is_empty() {
+            line
+        } else {
+            format!("{text} {line}")
+        };
+    }
     Talk::Reply { text, jobs }
+}
+
+/// A planned job in obid's own words, for confirm and start items: what, where, how it asks,
+/// on which tool and account, and its check. "fix fixture-app #12 (Login screen) in Bypass
+/// mode, on Claude Code · Personal, check node --test".
+pub fn describe(new: &NewJob) -> String {
+    let repo = new.repo.rsplit('/').next().unwrap_or(&new.repo);
+    let mut what = format!("{} {repo}", new.kind);
+    if let Some(issue) = new.issue {
+        what.push_str(&format!(" #{issue}"));
+    } else if let Some(pr) = new.pr {
+        what.push_str(&format!(" PR #{pr}"));
+    }
+    if let Some(title) = new.title.as_deref().filter(|t| !t.trim().is_empty()) {
+        what.push_str(&format!(" ({})", super::briefing::line(title, 60)));
+    }
+    if let Some(mode) = new
+        .mode
+        .as_deref()
+        .and_then(crate::permissions::Mode::parse)
+    {
+        what.push_str(&format!(" in {} mode", mode.title()));
+    }
+    let agent = new.agent.as_deref().unwrap_or("auto");
+    let agent = crate::agent::Tool::from_id(agent).map_or(agent, |t| t.name());
+    what.push_str(&format!(
+        ", on {agent} · {}",
+        super::briefing::line(new.account.as_deref().unwrap_or("auto"), 40)
+    ));
+    if let Some(check) = new.check.as_deref().filter(|c| !c.trim().is_empty()) {
+        what.push_str(&format!(", check {}", super::briefing::line(check, 120)));
+    }
+    what
 }
 
 /// "Started 2 jobs: Vault secrets, Watch home."
@@ -232,7 +299,8 @@ fn set_mode(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     };
     let mode = mode.to_permissions();
     // Bypass stops a job asking anything: it widens what the agent may do, so only the user's
-    // own Confirm sets it (#546). The other modes ask more, or as much, and are done at once.
+    // own Confirm sets it (#546). The other modes are done at once: ask and plan, and
+    // acceptEdits, which still asks before every command (the owner's choice).
     if mode == crate::permissions::Mode::Bypass {
         let jobs: Vec<crate::job::Job> = plan
             .named()
@@ -254,8 +322,8 @@ fn set_mode(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
                 format!(
                     "Oby's brain planned Bypass mode for {name}: obid answers everything by its rules, and the job stops asking you. It happens only if you confirm."
                 ),
-                crate::sphere::inbox::Confirmed {
-                    action: crate::sphere::inbox::action::SET_MODE_BYPASS.into(),
+                Confirmed {
+                    action: action::SET_MODE_BYPASS.into(),
                     target: job.id.clone(),
                     payload: serde_json::Value::Null,
                 },
@@ -319,8 +387,8 @@ fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
                 "Oby's brain planned to answer {name}'s permission with always: {always}. It saves the rule {rule} for {}, and happens only if you confirm.",
                 job.repo
             ),
-            crate::sphere::inbox::Confirmed {
-                action: crate::sphere::inbox::action::ALWAYS_ALLOW.into(),
+            Confirmed {
+                action: action::ALWAYS_ALLOW.into(),
                 target: id.clone(),
                 payload: serde_json::json!({"permission": permission.id}),
             },

@@ -1080,6 +1080,10 @@ fn always_allowing_waits_for_the_owners_confirm() {
     let rules = call(&obid, "GET", "/v1/permissions/rules", None).body;
     assert_eq!(rules.as_array().unwrap().len(), 1, "{rules}");
     assert_eq!(rules[0]["rule"], "Bash(make lint:*)");
+    assert!(
+        items_of(&obid, "confirm").is_empty(),
+        "closed once confirmed"
+    );
     within(30, "the agent hears it", || {
         let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
         (job["status"] == "done").then_some(())
@@ -1143,7 +1147,11 @@ fn bypass_mode_waits_for_the_owners_confirm() {
         call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["mode"],
         "bypass"
     );
-    // Asking more is done at once.
+    assert!(
+        items_of(&obid, "confirm").is_empty(),
+        "closed once confirmed"
+    );
+    // The other modes are done in the turn.
     queue(&obid, &[mode("plan"), reply("")]);
     assert_eq!(
         said(&obid, "plan first on the vault job")["text"],
@@ -1207,4 +1215,126 @@ fn stop_reaches_only_its_own_conversation() {
     });
     assert_eq!(first["kind"], "none", "{first}");
     assert_eq!(second["text"], "Second.", "{second}");
+}
+
+/// A brain dispatch can't start a job in Bypass mode: it waits as a confirm item whose title,
+/// made by obid from the job, says so; the owner's Confirm starts it (review on #551, N1).
+#[test]
+fn a_bypass_dispatch_waits_for_the_owners_confirm() {
+    let folder = Folder::new("brain-confirm-dispatch");
+    let obid = started(&folder);
+    let bypass = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "fix", "title": "Greeting fix",
+         "task": "Fix the greeting", "rounds": 1, "check": "node --test", "mode": "bypass"}]});
+    queue(&obid, &[bypass.to_string()]);
+    let answer = said(&obid, "fix the greeting, don't ask me anything");
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("confirm it in your inbox"),
+        "{answer}"
+    );
+    assert_eq!(answer["jobs"], json!([]));
+    assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
+    let confirm = items_of(&obid, "confirm").pop().unwrap();
+    assert_eq!(
+        confirm["title"],
+        "Start fix fixture-app (Greeting fix) in Bypass mode, on auto · auto, check node --test"
+    );
+    assert_eq!(confirm["confirm"]["action"], "start_job");
+    let confirmed = owner_answers(&obid, confirm["id"].as_str().unwrap(), "Confirm");
+    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
+    assert_eq!(jobs[0]["mode"], "bypass");
+    assert_eq!(jobs[0]["title"], "Greeting fix");
+    // The item is closed once confirmed.
+    assert!(items_of(&obid, "confirm").is_empty());
+}
+
+/// A confirm item whose target moved on is closed with why, not left open (review on #551).
+#[test]
+fn a_stale_confirm_item_is_closed_with_why() {
+    let folder = Folder::new("brain-confirm-stale");
+    let obid = started(&folder);
+    // A permission answered by the owner meanwhile.
+    let asks = job_in(
+        &obid,
+        "Vault secrets",
+        r#"ASKS: [{"tool": "Bash", "input": {"command": "make lint"}}, {"tool": "Bash", "input": {"command": "make test"}}]"#,
+        "ask",
+    );
+    let permission = within(30, "a permission waits", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{asks}"), None).body;
+        job["permission"]["id"].as_str().map(str::to_owned)
+    });
+    let always = json!({"action": "answer_permission", "reply": "", "dispatches": [], "question": null,
+                        "jobs": [asks], "decision": "always", "message": null});
+    queue(&obid, &[always.to_string(), reply("")]);
+    said(&obid, "always allow that");
+    let confirm = items_of(&obid, "confirm").pop().unwrap();
+    let answered = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{asks}/permission"),
+        Some(&json!({"id": permission, "decision": "allow"})),
+    );
+    assert_eq!(answered.status, 200, "{}", answered.text);
+    let late = owner_answers(&obid, confirm["id"].as_str().unwrap(), "Confirm");
+    assert_eq!(late.status, 409, "{}", late.text);
+    assert!(
+        items_of(&obid, "confirm").is_empty(),
+        "the stale item stays open"
+    );
+    assert_eq!(
+        call(&obid, "GET", "/v1/permissions/rules", None).body,
+        json!([])
+    );
+
+    // Bypass for a job that stopped meanwhile.
+    let sleeping = job_in(&obid, "Watch home", "SLEEP", "ask");
+    within(30, "the job runs", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{sleeping}"), None).body;
+        (job["status"] == "running").then_some(())
+    });
+    let bypass = json!({"action": "set_mode", "reply": "", "dispatches": [], "question": null,
+                        "jobs": [sleeping], "mode": "bypass"});
+    queue(&obid, &[bypass.to_string(), reply("")]);
+    said(&obid, "stop asking on the watch job");
+    let confirm = items_of(&obid, "confirm").pop().unwrap();
+    assert_eq!(
+        call(&obid, "POST", &format!("/v1/jobs/{sleeping}/stop"), None).status,
+        200
+    );
+    let late = owner_answers(&obid, confirm["id"].as_str().unwrap(), "Confirm");
+    assert_eq!(late.status, 409, "{}", late.text);
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/jobs/{sleeping}"), None).body["mode"],
+        "ask"
+    );
+    assert!(items_of(&obid, "confirm").is_empty());
+}
+
+/// A bare "stop" said to start a new conversation stops no turn elsewhere (review on #551).
+#[test]
+fn a_bare_stop_in_a_new_conversation_stops_nothing_elsewhere() {
+    let folder = Folder::new("brain-stop-new");
+    let obid = started(&folder);
+    queue(&obid, &[format!("SLEEP 2 {}", reply("Still here."))]);
+    let answer = std::thread::scope(|scope| {
+        let asking = scope.spawn(|| said(&obid, "how is it going?"));
+        within(5, "the turn thinks", || {
+            (calls(&obid).len() == 1).then_some(())
+        });
+        let stop = call(
+            &obid,
+            "POST",
+            "/v1/plans",
+            Some(&json!({"said": "stop", "new": true})),
+        );
+        assert_eq!(stop.body["kind"], "none", "{}", stop.text);
+        asking.join().unwrap()
+    });
+    assert_eq!(answer["text"], "Still here.", "{answer}");
 }

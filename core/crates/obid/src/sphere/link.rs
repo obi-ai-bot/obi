@@ -2414,10 +2414,20 @@ impl Link {
                     ));
                 }
                 if answer == inbox::CONFIRM {
-                    let confirmed = item.confirm.clone().map(|c| *c).ok_or_else(|| {
-                        api(StatusCode::CONFLICT, "That item says nothing to do.")
-                    })?;
-                    self.carry_out(confirmed).await?;
+                    let done = match item.confirm.clone() {
+                        Some(confirmed) => self.carry_out(*confirmed).await,
+                        None => Err(api(StatusCode::CONFLICT, "That item says nothing to do.")),
+                    };
+                    // What it was for moved on (the permission was answered, the job ended): the
+                    // item is closed with why, never left open to fail again.
+                    if let Err(why) = done {
+                        item.done = Some(time::now());
+                        item.answer = Some(answer.clone());
+                        item.text = format!("{} It couldn't happen: {}", item.text, why.message);
+                        self.lock().inbox.insert(item.id.clone(), item.clone());
+                        self.save_item(&item);
+                        return Err(why);
+                    }
                 }
             }
             item.done = Some(time::now());
@@ -2451,11 +2461,27 @@ impl Link {
                     }
                 }
             }
-            inbox::action::SET_MODE_BYPASS => self
-                .jobs
-                .set_mode(target, crate::permissions::Mode::Bypass)
-                .map(|_| ())
-                .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone.")),
+            inbox::action::SET_MODE_BYPASS => {
+                if !self.jobs.get(target).is_some_and(|j| j.status.is_active()) {
+                    return Err(api(
+                        StatusCode::CONFLICT,
+                        "That job isn't running any more.",
+                    ));
+                }
+                self.jobs
+                    .set_mode(target, crate::permissions::Mode::Bypass)
+                    .map(|_| ())
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone."))
+            }
+            inbox::action::START_JOB => {
+                let new: crate::jobs::NewJob =
+                    serde_json::from_value(confirmed.payload["job"].clone())
+                        .map_err(|_| api(StatusCode::CONFLICT, "That job's plan was lost."))?;
+                self.jobs
+                    .create(new)
+                    .map(|_| ())
+                    .map_err(|e| api(StatusCode::UNPROCESSABLE_ENTITY, e.0))
+            }
             other => Err(api(
                 StatusCode::CONFLICT,
                 format!("obid doesn't know the action {other:?}."),

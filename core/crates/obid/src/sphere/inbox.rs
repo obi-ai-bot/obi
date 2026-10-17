@@ -49,6 +49,9 @@ pub mod action {
     pub const ALWAYS_ALLOW: &str = "always_allow";
     /// Put a running job in Bypass mode: `target` the job.
     pub const SET_MODE_BYPASS: &str = "set_mode_bypass";
+    /// Start a job the brain planned in Bypass mode: `target` the conversation that planned it,
+    /// `payload` `{"job": <the job as POST /v1/jobs takes it>}`.
+    pub const START_JOB: &str = "start_job";
 }
 
 /// A `confirm` item: `title` says exactly what `Confirm` does, `confirmed` is what obid carries

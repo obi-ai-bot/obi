@@ -85,12 +85,13 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
     // A bare "never mind", "stop" or "cancel" never reaches the brain: it stops the turn under
     // way, after the action it's doing, and is answered with nothing (no job stops on a word).
     if req.answer.is_none() && turn::cancels(words) {
-        let named = match &target {
+        // The turn under way in the conversation the words name, else in the latest one; words
+        // that start a new conversation have no turn to stop.
+        let underway = match &target {
             Target::Id(id) => Some(id.clone()),
-            _ => None,
+            Target::Latest => shared.turns.latest_conversation(),
+            Target::New => None,
         };
-        // The turn under way in the conversation the words name, else in the latest one.
-        let underway = named.or_else(|| shared.turns.latest_conversation());
         if let Some(id) = &underway {
             shared.turns.stop(Some(id));
         }
