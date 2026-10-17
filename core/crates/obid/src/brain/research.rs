@@ -863,6 +863,23 @@ impl Log {
                 .any(|(_, _, found)| found.text.contains(url))
     }
 
+    /// What the turn's lookups showed, where a finding's path must appear (#540): each lookup's
+    /// path, title and result, leaving out the ones that failed or were refused.
+    pub fn found(&self) -> String {
+        self.entries
+            .iter()
+            .filter(|(_, _, found)| matches!(found.status, Status::Ok | Status::Empty))
+            .flat_map(|(_, lookup, found)| {
+                [
+                    lookup.path.clone().unwrap_or_default(),
+                    found.title.clone(),
+                    found.text.clone(),
+                ]
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// The request for the brain's next step, with what the lookups did.
     pub fn continued(&self, request: &str) -> String {
         if self.notes.is_empty() {

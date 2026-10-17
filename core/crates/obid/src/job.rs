@@ -80,6 +80,26 @@ pub struct ObiRef {
     pub request_id: String,
 }
 
+/// One thing Oby found before the job started (#540): a file a lookup showed, the lines, and
+/// what Oby saw there or ruled out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finding {
+    pub path: String,
+    #[serde(default)]
+    pub lines: Option<String>,
+    pub note: String,
+}
+
+/// What the brain's research handed the job (#540): where to look and what done means. Written
+/// from what repositories, GitHub and the web said, so its agent reads it as quoted data.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Brief {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<Finding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done: Option<String>,
+}
+
 /// A job as obid keeps it (`home/jobs/<id>.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -194,6 +214,9 @@ pub struct Job {
     /// committed. Never in the API's job.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub asked: bool,
+    /// What Oby found before it started, for the first prompt (#540). Never in the API's job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<Brief>,
 }
 
 impl Job {
@@ -265,6 +288,7 @@ impl Job {
             heard: Vec::new(),
             offers: Vec::new(),
             asked: false,
+            brief: None,
         }
     }
 

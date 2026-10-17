@@ -211,6 +211,8 @@ pub fn plan(said: &str, context: &Context) -> Plan {
         start_when: None,
         mode: None,
         reads: None,
+        findings: None,
+        done: None,
     };
     let dispatch = |reply: String, dispatches: Vec<Dispatch>| {
         let mut plan = Plan::of(Action::Dispatch, &reply);
