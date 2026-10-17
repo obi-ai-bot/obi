@@ -685,6 +685,7 @@ Returns the `Job`, with the next waiting permission or null. `404` for an unknow
 ### Permission modes
 
 How much a job asks, like Claude Code's modes. Each job has its `mode`; new jobs get Settings › Permissions' default (`bypass` on the Swift runner, as before modes; `sandbox` on obid, below).
+On obid, a saved Bypass mode now also asks before touching secrets, logins or the vault (#614).
 
 | Mode | Reads | File edits in the worktree | Commands and everything else |
 |---|---|---|---|
