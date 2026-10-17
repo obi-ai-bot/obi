@@ -40,6 +40,11 @@ pub struct Turn {
     /// The conversation it's in. Turns kept before #493 have none until they're migrated.
     #[serde(default)]
     pub conversation: String,
+    /// True on the turn that tells its conversation how a job it started ended (#351). Its first
+    /// line is obid's own words; the second, when there is one, is the first line of the job's
+    /// summary, which its agent may have written: the brain's briefing reads only the first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ended: bool,
 }
 
 /// One conversation as obid keeps it.
@@ -306,7 +311,7 @@ impl Conversations {
             threads.len() - 1
         });
         let before = threads[index].turns.clone();
-        let turn = match self.add(&mut threads, index, "user", said, vec![]) {
+        let turn = match self.add(&mut threads, index, "user", said, vec![], false) {
             Ok(turn) => turn.id,
             Err(e) => {
                 if found.is_none() {
@@ -341,12 +346,28 @@ impl Conversations {
         text: String,
         jobs: Vec<String>,
     ) -> Result<Turn, Error> {
+        self.append_as(id, who, text, jobs, false)
+    }
+
+    /// Oby's turn telling the conversation `id` how the job `job` ended ([`job_report`], #351).
+    pub fn job_ended(&self, id: &str, text: String, job: String) -> Result<Turn, Error> {
+        self.append_as(id, "oby", text, vec![job], true)
+    }
+
+    fn append_as(
+        &self,
+        id: &str,
+        who: &str,
+        text: String,
+        jobs: Vec<String>,
+        ended: bool,
+    ) -> Result<Turn, Error> {
         let mut threads = self.lock();
         let index = threads
             .iter()
             .position(|t| t.id == id)
             .ok_or(Error::NoConversation)?;
-        self.add(&mut threads, index, who, text, jobs)
+        self.add(&mut threads, index, who, text, jobs, ended)
     }
 
     /// The turn, kept, written and announced: the conversation as it is now, then the turn.
@@ -357,6 +378,7 @@ impl Conversations {
         who: &str,
         text: String,
         jobs: Vec<String>,
+        ended: bool,
     ) -> Result<Turn, Error> {
         let sequence = next_sequence(threads);
         let thread = &mut threads[index];
@@ -368,6 +390,7 @@ impl Conversations {
             at: obi_protocol::time::format(obi_protocol::time::now()),
             jobs,
             conversation: thread.id.clone(),
+            ended,
         };
         thread.turns.push(turn.clone());
         let excess = thread.turns.len().saturating_sub(KEPT);
@@ -544,6 +567,89 @@ impl Conversations {
             .send("conversation", json!({"id": id, "deleted": true}));
         Ok(())
     }
+}
+
+/// What Oby tells a conversation when a job its plan started ends (#351), from the job as its
+/// `job` event sends it: the conversation and the turn's text, or none for a job no conversation
+/// started, one that was dismissed, or one that hasn't ended. The first line is obid's own words:
+/// the job's title, how it ended, its pull request or why it wasn't published. The first line of
+/// its summary, which its agent may have written, follows on a line of its own. Every secret obid
+/// holds is taken out.
+pub fn job_report(job: &Value) -> Option<(String, String)> {
+    let conversation = job["conversation"].as_str()?;
+    if !job["dismissed"].is_null() {
+        return None;
+    }
+    let first_line = |key: &str| {
+        job[key]
+            .as_str()?
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| crate::brain::briefing::line(l, 300))
+    };
+    let title = crate::brain::briefing::line(job["title"].as_str().unwrap_or("A job"), 80);
+    let said = match job["status"].as_str()? {
+        "done" => match (job["published"].as_str(), first_line("publishError")) {
+            (Some(url), _) => format!("{title} is done: {url}"),
+            (None, Some(why)) => format!("{title} is done, but it wasn't published: {why}"),
+            (None, None) => format!("{title} is done."),
+        },
+        "failed" => format!("{title} failed."),
+        "stopped" => format!("{title} was stopped."),
+        "interrupted" => format!("{title} was interrupted."),
+        _ => return None,
+    };
+    let text = match first_line("summary") {
+        Some(summary) => format!("{said}\n{summary}"),
+        None => said,
+    };
+    Some((
+        conversation.to_owned(),
+        crate::secrets::known().redact(&text),
+    ))
+}
+
+/// Follows obid's job events (#351): when a job a conversation's plan started goes from queued or
+/// running to an end, that conversation gets one Oby turn saying how ([`job_report`]), with the
+/// job's card. What had ended when obid started says nothing, and neither does a dismissed job or
+/// one that no conversation started.
+pub fn report_job_ends(shared: std::sync::Arc<Shared>) {
+    let mut bus = shared.events.subscribe();
+    let mut stopping = shared.stopping.clone();
+    let mut active: std::collections::HashMap<String, bool> = shared
+        .jobs
+        .list(usize::MAX)
+        .iter()
+        .map(|j| (j.id.clone(), j.status.is_active()))
+        .collect();
+    tokio::spawn(async move {
+        loop {
+            let event = tokio::select! {
+                got = bus.recv() => match got {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return,
+                },
+                _ = stopping.changed() => return,
+            };
+            let Some(id) = event.data["id"].as_str().filter(|_| event.name == "job") else {
+                continue;
+            };
+            let now = matches!(event.data["status"].as_str(), Some("queued" | "running"));
+            if active.insert(id.to_owned(), now) != Some(true) || now {
+                continue;
+            }
+            let Some((conversation, text)) = job_report(&event.data) else {
+                continue;
+            };
+            if let Err(e) = shared
+                .conversations
+                .job_ended(&conversation, text, id.to_owned())
+            {
+                tracing::info!("job {id} ended; conversation {conversation} wasn't told: {e:?}");
+            }
+        }
+    });
 }
 
 /// The conversations as the list orders them, after `after` (or from the first): the pinned
@@ -796,7 +902,62 @@ pub async fn remove(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cursor, titled};
+    use super::{Cursor, job_report, titled};
+    use serde_json::json;
+
+    /// A job a conversation started says how it ended, in obid's words first: its title, the
+    /// outcome, the pull request or why it wasn't published; its summary's first line, which its
+    /// agent may have written, on a line of its own, with every secret obid holds taken out.
+    #[test]
+    fn a_job_that_ends_tells_its_conversation_how() {
+        let secret = "s3cr3t-token-351-value";
+        crate::secrets::known().learn("vault TEST_351", secret);
+        let job = |status: &str| {
+            json!({"id": "j1", "title": "Fix oby #351", "status": status, "conversation": "c1",
+                "summary": "", "published": null, "publishError": null, "dismissed": null})
+        };
+        let mut failed = job("failed");
+        failed["summary"] = json!(format!("\n Not logged in with {secret}\nMore below."));
+        assert_eq!(
+            job_report(&failed),
+            Some((
+                "c1".into(),
+                "Fix oby #351 failed.\nNot logged in with [redacted: vault TEST_351]".into()
+            ))
+        );
+        let mut published = job("done");
+        published["published"] = json!("https://github.com/obi-ai-bot/obi/pull/700");
+        published["summary"] = json!("Reports reach the chat.");
+        assert_eq!(
+            job_report(&published).unwrap().1,
+            "Fix oby #351 is done: https://github.com/obi-ai-bot/obi/pull/700\nReports reach the chat."
+        );
+        let mut unpublished = job("done");
+        unpublished["publishError"] = json!("Not published: the secret scan couldn't run.\nwhy");
+        assert_eq!(
+            job_report(&unpublished).unwrap().1,
+            "Fix oby #351 is done, but it wasn't published: Not published: the secret scan couldn't run."
+        );
+        assert_eq!(job_report(&job("done")).unwrap().1, "Fix oby #351 is done.");
+        assert_eq!(
+            job_report(&job("stopped")).unwrap().1,
+            "Fix oby #351 was stopped."
+        );
+        assert_eq!(
+            job_report(&job("interrupted")).unwrap().1,
+            "Fix oby #351 was interrupted."
+        );
+        // Nothing for a job still under way, one no conversation started, or one let go.
+        assert_eq!(job_report(&job("running")), None);
+        assert_eq!(job_report(&job("queued")), None);
+        let mut whole = job("failed");
+        whole["conversation"] = json!(null);
+        assert_eq!(job_report(&whole), None);
+        let mut dismissed = job("stopped");
+        dismissed["dismissed"] = json!("2026-10-17T00:00:00Z");
+        assert_eq!(job_report(&dismissed), None);
+        crate::secrets::known().forget("vault TEST_351");
+    }
 
     #[test]
     fn titles_are_the_first_line_as_the_design_cuts_it() {
