@@ -37,6 +37,7 @@ pub mod settings;
 pub mod sphere;
 pub mod store;
 pub mod token;
+pub mod vault;
 pub mod web;
 
 use std::future::Future;
@@ -166,6 +167,7 @@ pub async fn serve(
     };
     // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
     secrets::known().learn("api-token", &token);
+    vault::install(&config.home);
     let events = events::Events::new();
     let sandbox = std::env::current_exe()
         .map_err(|e| format!("obid can't find its own executable: {e}"))

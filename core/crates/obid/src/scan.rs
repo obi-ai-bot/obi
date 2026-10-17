@@ -7,8 +7,9 @@
 //! (`in_diff`, for publishing: crate::publish).
 //!
 //! A token split with spaces, dashes or zero-width characters, or written backwards, is checked
-//! too: the separators come out and the line is read both ways (#476). obid has no vault yet
-//! (#457); the secrets it already holds (`crate::secrets`) are looked for in those same forms.
+//! too: the separators come out and the line is read both ways (#476). The secrets obid holds
+//! (`crate::secrets`: its own and the owner's vault, #457) are looked for in those same forms, and
+//! when the vault can't be read the scan can't run (`crate::vault::check`): nothing goes out.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -962,6 +963,9 @@ async fn run_gitleaks(
 
 /// The whole scan on the texts (name, text): the built-in rules, then gitleaks.
 pub async fn scan(texts: &[(String, String)], scratch: &Path) -> Verdict {
+    if let Err(why) = crate::vault::check() {
+        return Verdict::CouldNotRun(why);
+    }
     let mut found = built_in(texts);
     match gitleaks(texts, scratch).await {
         Ok(more) => found.extend(more),

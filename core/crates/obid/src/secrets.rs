@@ -3,10 +3,12 @@
 //! plain, base64 (standard or URL-safe, at any offset in a longer run), hex and URL-encoded, as
 //! Engine/Vault.swift's `Leaks` finds them.
 //!
-//! obid has no vault yet (#457). The secrets it holds today are its API token (`home/api-token`),
-//! its Obi key, and the Sphere's delegation and access token; [`known`] holds them once obid has
-//! read or been given them. When the vault is ported, its values join the same set, so the log
-//! layer (`crate::logs`) takes them out too.
+//! The secrets obid holds are its API token (`home/api-token`), its Obi key, the Sphere's
+//! delegation and access token, and the owner's vault (`crate::vault`, #457); [`known`] holds them
+//! once obid has read or been given them. The vault's values join that set as `vault <name>`, and
+//! the set reads the vault again before each use when it changed (a value `obid vault add` put
+//! there while obid runs), so the log layer (`crate::logs`), the publish gate (`crate::scan`) and
+//! every text obid redacts take them out too.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -24,10 +26,16 @@ pub fn known() -> Arc<Secrets> {
     KNOWN.get_or_init(|| Arc::new(Secrets::default())).clone()
 }
 
+/// What brings a set up to date before it is read: the vault, for [`known`].
+type Refresh = Arc<dyn Fn() + Send + Sync>;
+
 /// Secret values by name, and what they look like in every form [`Secrets::redact`] takes out.
 #[derive(Default)]
 pub struct Secrets {
     inner: RwLock<Learned>,
+    /// What a marker says before the names: `redacted` unless [`Secrets::labelled`] says otherwise.
+    label: Option<&'static str>,
+    refresh: RwLock<Option<Refresh>>,
 }
 
 #[derive(Default)]
@@ -50,6 +58,35 @@ struct Needle {
 }
 
 impl Secrets {
+    /// A set whose markers read `[<label>: <name>]`: the vault's, `[vault: staging-api-key]`.
+    pub fn labelled(label: &'static str) -> Secrets {
+        Secrets {
+            label: Some(label),
+            ..Secrets::default()
+        }
+    }
+
+    /// Runs `refresh` before every read of the set ([`Secrets::redact`], [`Secrets::is_empty`],
+    /// [`Secrets::names_in`]), in place of the one set before. It must not read this set.
+    pub fn refresh_with(&self, refresh: Refresh) {
+        *self.refresh.write().unwrap_or_else(|e| e.into_inner()) = Some(refresh);
+    }
+
+    fn refreshed(&self) {
+        let refresh = self
+            .refresh
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(refresh) = refresh {
+            refresh();
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        self.label.unwrap_or("redacted")
+    }
+
     /// Learns `value` as `name`, in place of what `name` held before. A value shorter than
     /// [`SHORTEST`] bytes is not learned (and the one held before under `name` is forgotten).
     pub fn learn(&self, name: &str, value: impl AsRef<[u8]>) {
@@ -82,6 +119,7 @@ impl Secrets {
     }
 
     pub fn is_empty(&self) -> bool {
+        self.refreshed();
         self.inner
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -93,13 +131,15 @@ impl Secrets {
     /// each copy of a value, plain or encoded, first; then any base64, hex or URL-encoded run
     /// that decodes to text holding one.
     pub fn redact(&self, text: &str) -> String {
+        self.refreshed();
+        let label = self.label();
         let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         if inner.needles.is_empty() {
             return text.to_owned();
         }
         let mut text = text.to_owned();
         for needle in &inner.needles {
-            text = replace(&text, needle);
+            text = replace(&text, needle, label);
         }
         // What is left: runs that decode to a value (hex inside base64, a value partly
         // URL-encoded, base64 cut where the needles' offsets don't reach).
@@ -111,17 +151,43 @@ impl Secrets {
                     if names.is_empty() {
                         whole.to_owned()
                     } else {
-                        marker(&names)
+                        marker(label, &names)
                     }
                 })
                 .into_owned();
         }
         text
     }
+
+    /// The names of the values `text` holds, as it is or decoded whole (URL-encoded, base64, hex),
+    /// each once: what is left after [`Secrets::redact`] when a value hides in a way it doesn't
+    /// take apart.
+    pub fn names_in(&self, text: &str) -> Vec<String> {
+        self.refreshed();
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let mut names = hits(&inner.needles, text);
+        let lower = text.to_ascii_lowercase();
+        for needle in &inner.needles {
+            let found = if needle.any_case {
+                lower.contains(&needle.text.to_ascii_lowercase())
+            } else {
+                text.contains(&needle.text)
+            };
+            if found && !names.contains(&needle.name) {
+                names.push(needle.name.clone());
+            }
+        }
+        names
+    }
+
+    /// The marker [`Secrets::redact`] writes for `names`.
+    pub fn marker(&self, names: &[String]) -> String {
+        marker(self.label(), names)
+    }
 }
 
-fn marker(names: &[String]) -> String {
-    format!("[redacted: {}]", names.join(", "))
+fn marker(label: &str, names: &[String]) -> String {
+    format!("[{label}: {}]", names.join(", "))
 }
 
 /// A character a base64 run (standard or URL-safe) is made of, padding aside.
@@ -131,8 +197,8 @@ fn is_base64_char(b: u8) -> bool {
 
 /// `text` with every copy of `needle` replaced by its marker; for a base64 form, the whole run
 /// of base64 characters (and its padding) around each copy.
-fn replace(text: &str, needle: &Needle) -> String {
-    let marker = marker(std::slice::from_ref(&needle.name));
+fn replace(text: &str, needle: &Needle, label: &str) -> String {
+    let marker = marker(label, std::slice::from_ref(&needle.name));
     // ASCII lower case keeps every byte where it was, so positions found in the lower-cased
     // copy are the same in `text`.
     let (haystack, wanted) = if needle.any_case {
@@ -203,7 +269,12 @@ fn decodings(run: &str) -> Vec<String> {
             let Some(end) = trimmed.len().checked_sub(cut) else {
                 break;
             };
-            if let Ok(bytes) = engine.decode(&trimmed[..end]) {
+            // Cut by byte: a run with text that isn't ASCII in it (a URL-encoded one) is no
+            // base64 anyway, and is never cut inside a character.
+            let Some(cut_run) = trimmed.get(..end) else {
+                continue;
+            };
+            if let Ok(bytes) = engine.decode(cut_run) {
                 out.push(String::from_utf8_lossy(&bytes).into_owned());
                 break;
             }
@@ -469,6 +540,28 @@ mod tests {
         assert_eq!(secrets.redact("second-value-5678"), "[redacted: t]");
         secrets.forget("t");
         assert_eq!(secrets.redact("second-value-5678"), "second-value-5678");
+    }
+
+    /// A URL-encoded run with text that isn't ASCII in it ("…" after a cut title) is read by
+    /// character, never cut inside one.
+    #[test]
+    fn a_run_with_characters_that_arent_ascii_is_read_whole() {
+        let secrets = secrets();
+        let encoded = percent_encode(TOKEN, false);
+        for text in [
+            "Use tok%2Fabc…".to_owned(),
+            "a%41é".to_owned(),
+            format!("{encoded}…"),
+            format!("é{encoded}é"),
+        ] {
+            let redacted = secrets.redact(&text);
+            assert!(!redacted.contains(TOKEN), "{redacted}");
+            assert_eq!(
+                redacted.contains("[redacted: api-token]"),
+                text.contains(&encoded),
+                "{text}"
+            );
+        }
     }
 
     #[test]

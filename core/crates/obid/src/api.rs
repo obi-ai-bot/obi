@@ -184,6 +184,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(middleware::from_fn(crate::vault::answers))
         .layer(middleware::from_fn_with_state(shared.clone(), gate))
         .with_state(shared)
 }

@@ -2191,6 +2191,7 @@ impl Jobs {
         signal: &watch::Receiver<Signal>,
         gate: Gate<'_>,
     ) -> Result<agent::Turn, String> {
+        let prompt = &crate::vault::for_agent(prompt)?;
         let (obi_review, mcp_rules) = match gate {
             Gate::ObiReview => (true, &[][..]),
             Gate::Owner { mcp } => (false, mcp),

@@ -760,6 +760,8 @@ async fn scan_changes(
             "Not published: the secret scan couldn't read the changes ({e})."
         ))
     };
+    // The vault first: when it can't be read, the secrets it holds can't be looked for.
+    crate::vault::check().map_err(|why| could_not_run(&why))?;
     // The names first: a finding anywhere else in a file whose name is flagged never shows it.
     let pushed = pushed_objects(clone, &range).await.map_err(unreadable)?;
     let mut found: Vec<Found> = scan::in_names(&pushed.names)
