@@ -309,6 +309,23 @@ pub(super) fn context(shared: &Shared, turns: &[Turn], nonce: &str) -> Context {
     }
 }
 
+/// The own instructions of the repositories the turn's words or its briefing name, the words
+/// first (#543): quoted in the brain's file, never in its prompt.
+pub(super) async fn own(
+    shared: &Shared,
+    said: &str,
+    turns: &[Turn],
+    nonce: &str,
+) -> Vec<briefing::Own> {
+    let briefing = context(shared, turns, nonce).briefing.unwrap_or_default();
+    briefing::own_instructions(
+        &shared.config.home,
+        &shared.config.repos,
+        &[said, &briefing],
+    )
+    .await
+}
+
 /// Each configured tool's accounts, as jobs are routed to them.
 fn tool_accounts(
     config: &crate::config::Config,

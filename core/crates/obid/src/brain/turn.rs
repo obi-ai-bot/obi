@@ -240,6 +240,8 @@ pub async fn run(
     // Work the brain wants after looking things up waits for the user's Start.
     let mut researched = false;
     let answered = |talk: Talk, details: Option<String>| Answered { talk, details };
+    // The own instructions of the repositories the turn names, read once from their clones (#543).
+    let own = super::own(shared, said, given, &nonce).await;
     for step in 0..MOST_STEPS {
         // A stop is checked before the brain is asked for another action.
         if control.stopped() {
@@ -253,7 +255,13 @@ pub async fn run(
         context.turn_step = step;
         context.turn_length = Some(said.chars().count());
         // What the turn read and looked up goes into the next step's quoted file.
-        context.quoted = research.quoted(reads.quoted(context.quoted.take(), &nonce), &nonce);
+        context.quoted = research.quoted(
+            reads.quoted(
+                super::briefing::with_own(context.quoted.take(), &own, &nonce),
+                &nonce,
+            ),
+            &nonce,
+        );
         let planner = Planner {
             adapters: Planner::of(&shared.config, &room),
             falls_back_to_rules: step == 0,
