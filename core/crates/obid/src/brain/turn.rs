@@ -561,6 +561,12 @@ pub async fn run(
     let deadline = Instant::now() + shared.config.turn_budget;
     let live = || control.live();
     let halted = || !control.live();
+    // The turn says it's thinking before anything else (#592): the first brain call's line now,
+    // each later call's as it begins.
+    let mut thought = "Thinking".to_owned();
+    super::thinking(shared, control, 1, &thought, State::Running);
+    let mut announced = true;
+    let mut acknowledged = false;
     // The turn's own word, which fences everything quoted for the brain.
     let nonce = super::briefing::nonce();
     let mut done: Vec<String> = vec![];
@@ -617,7 +623,17 @@ pub async fn run(
             if named.is_none() {
                 named = Some(asked_for(shared, said, &context));
             }
+            if !announced {
+                super::thinking(shared, control, step + 1, &thought, State::Running);
+            }
+            announced = false;
             let mut planned = planner.plan(&request, &context, &halted).await;
+            let thought_state = if live() && Instant::now() < deadline {
+                State::Done
+            } else {
+                State::Failed
+            };
+            super::thinking(shared, control, step + 1, &thought, thought_state);
             if !live() {
                 planned
                     .refused
@@ -676,6 +692,15 @@ pub async fn run(
                 if checking {
                     break 'step (End::Checked, finish(&done));
                 }
+                thought = plan
+                    .named()
+                    .first()
+                    .and_then(|id| shared.jobs.get(id))
+                    .and_then(|job| job.title.filter(|t| !t.trim().is_empty()))
+                    .map_or_else(
+                        || "Looking at the jobs".to_owned(),
+                        |t| format!("Looking at {t}"),
+                    );
                 request = reads.continued(&so_far());
                 continue 'turn;
             }
@@ -721,6 +746,7 @@ pub async fn run(
                 if checking {
                     break 'step (End::Checked, finish(&done));
                 }
+                thought = "Going over what it found".to_owned();
                 request = research.continued(&reads.continued(&so_far()));
                 continue 'turn;
             }
@@ -733,7 +759,15 @@ pub async fn run(
                 break 'step (End::Repeated, finish(&done));
             }
             if !acting {
+                // The reply goes out as soon as the plan is checked, before its jobs are made
+                // (#592); a turn's other answers are said once they're known.
+                if plan.action == Action::Dispatch && !acknowledged {
+                    acknowledged = super::acknowledge(shared, control, &plan.reply);
+                }
                 let talk = actions::answer(shared, &planned, asked, researched, &live).await;
+                if !acknowledged {
+                    acknowledged = super::acknowledge(shared, control, spoken(&talk));
+                }
                 if plan.action == Action::Dispatch {
                     handled.dispatched(plan);
                 }
@@ -760,6 +794,7 @@ pub async fn run(
             if checking {
                 break 'step (End::Checked, finish(&done));
             }
+            thought = "Deciding what's next".to_owned();
             request = reads.continued(&continued(said, &done));
             continue 'turn;
         };
@@ -777,12 +812,17 @@ pub async fn run(
                     done = if text.is_empty() { vec![] } else { vec![text] };
                 }
                 request = reads.continued(&unfinished(said, &done, &missing));
+                thought = "Checking nothing was missed".to_owned();
                 checking = true;
                 continue 'turn;
             }
         }
         break (end, talk);
     };
+    // Ended before its first call (stopped or cancelled meanwhile): the line it sent fails.
+    if announced {
+        super::thinking(shared, control, 1, &thought, State::Failed);
+    }
     let (end, talk) = if checking {
         checked(
             end,
