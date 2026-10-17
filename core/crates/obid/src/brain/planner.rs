@@ -253,13 +253,7 @@ impl ClaudeBrain {
                 .map_err(Failure::Failed)?;
             (launch, false)
         } else {
-            let mut env: Vec<(OsString, OsString)> = vec![
-                ("HOME".into(), std::env::var_os("HOME").unwrap_or_default()),
-                ("PATH".into(), crate::process::tools_path()),
-            ];
-            if let Some(home) = &self.home {
-                env.push(("CLAUDE_CONFIG_DIR".into(), home.clone().into_os_string()));
-            }
+            let env = unboxed_env(|name| std::env::var_os(name), self.home.as_deref());
             let launch = Launch {
                 argv: std::iter::once(self.bin.clone().into_os_string())
                     .chain(flags)
@@ -352,6 +346,25 @@ impl ClaudeBrain {
             format!("claude returned no answer: {}", failures.join("; "))
         }))
     }
+}
+
+/// The brain's environment when it runs unboxed, from `get` (obid's own environment): what a job
+/// keeps of it (`USER` and `LOGNAME` among them: on macOS Claude Code finds its login in the
+/// keychain with them, #564), the person's `HOME`, the tools' `PATH`, and the account's
+/// `CLAUDE_CONFIG_DIR`. Never a Claude Code, Anthropic or GitHub variable (AGENTS.md, "Spawning
+/// claude").
+fn unboxed_env(
+    get: impl Fn(&str) -> Option<OsString>,
+    account: Option<&Path>,
+) -> Vec<(OsString, OsString)> {
+    let mut env = crate::process::kept(&get);
+    env.push(("HOME".into(), get("HOME").unwrap_or_default()));
+    env.push(("PATH".into(), crate::process::tools_path()));
+    if let Some(account) = account {
+        env.push(("CLAUDE_CONFIG_DIR".into(), account.as_os_str().to_owned()));
+    }
+    env.retain(|(name, _)| !crate::process::is_forbidden(&name.to_string_lossy()));
+    env
 }
 
 /// Runs `launch` with `input` on its stdin, for at most `limit`: what it printed and how it ended.
@@ -1282,6 +1295,57 @@ pub mod tests {
         assert_eq!(effort(QUICK_MODEL), Some("low"));
         assert_eq!(effort(DEEP_MODEL), Some("medium"));
         assert_eq!(effort("claude-opus-5-5"), None);
+    }
+
+    /// #564: unboxed, the brain keeps what a job keeps of obid's environment, `USER` and
+    /// `LOGNAME` among them (on macOS Claude Code finds its login with them), and never a Claude
+    /// Code, Anthropic or GitHub variable, even when obid has one.
+    #[test]
+    fn the_unboxed_brain_keeps_user_and_logname_and_nothing_forbidden() {
+        let obids = [
+            ("HOME", "/Users/someone"),
+            ("USER", "someone"),
+            ("LOGNAME", "someone"),
+            ("LANG", "en_US.UTF-8"),
+            ("HTTPS_PROXY", "http://proxy:3128"),
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_ENTRYPOINT", "sdk"),
+            ("ANTHROPIC_API_KEY", "sk-test"),
+            ("GH_TOKEN", "gho_test"),
+            ("SECRET_OF_OBID", "x"),
+        ];
+        let get = |name: &str| {
+            obids
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| OsString::from(v))
+        };
+        let env = unboxed_env(get, Some(Path::new("/accounts/work")));
+        let value = |name: &str| {
+            env.iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.to_string_lossy().into_owned())
+        };
+        for (name, expected) in [
+            ("USER", "someone"),
+            ("LOGNAME", "someone"),
+            ("LANG", "en_US.UTF-8"),
+            ("HTTPS_PROXY", "http://proxy:3128"),
+            ("HOME", "/Users/someone"),
+            ("CLAUDE_CONFIG_DIR", "/accounts/work"),
+        ] {
+            assert_eq!(value(name).as_deref(), Some(expected), "{name} in {env:?}");
+        }
+        assert!(value("PATH").is_some());
+        for name in [
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "ANTHROPIC_API_KEY",
+            "GH_TOKEN",
+            "SECRET_OF_OBID",
+        ] {
+            assert_eq!(value(name), None, "{name} in {env:?}");
+        }
     }
 
     /// The system prompt says what each tool is called and where the agents' words are quoted.
