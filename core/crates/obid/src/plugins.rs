@@ -42,8 +42,7 @@ impl Plugins {
     /// Installs the plug-ins obid ships (`config.bundled_plugins`) into `home/plugins/` where
     /// missing, disabled, then starts the host on `home`: it discovers every plug-in there and
     /// starts the ones the owner enabled, without waiting for them. A host that can't start
-    /// leaves obid running with no plug-ins; `GET /v1/obid/plugins` is then empty and `PUT` says
-    /// why.
+    /// leaves obid running with no plug-ins; `GET /v1/obid/plugins` and `PUT` then say why.
     pub async fn start(config: &Config) -> Plugins {
         install_bundled(&config.bundled_plugins, &config.home);
         let host = PluginHost::start(&config.home)
@@ -58,11 +57,23 @@ impl Plugins {
     }
 
     /// `GET /v1/obid/plugins`: every plug-in found, enabled or not.
-    pub fn list_json(&self) -> Value {
-        match &self.host {
-            Ok(host) => serde_json::to_value(host.list()).unwrap_or_else(|_| json!([])),
-            Err(_) => json!([]),
-        }
+    pub fn list_json(&self) -> Result<Value, ApiError> {
+        let host = self.started()?;
+        Ok(serde_json::to_value(host.list()).unwrap_or_else(|_| json!([])))
+    }
+
+    /// The host, or the `503` that says why it didn't start: an error is said, never shown as
+    /// an empty list. Redacted like its log line, since the host's words may carry a plug-in's.
+    fn started(&self) -> Result<&PluginHost, ApiError> {
+        self.host.as_ref().map_err(|why| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "obid's plug-in host didn't start: {}",
+                    crate::secrets::known().redact(why)
+                ),
+            )
+        })
     }
 
     /// `PUT /v1/obid/plugins/{id}`: `{"enabled": bool}`, optionally with `"config": {…}`.
@@ -91,12 +102,7 @@ impl Plugins {
         };
         let unknown = || ApiError::new(StatusCode::NOT_FOUND, "There's no such plug-in.");
         let id = PluginId::new(id).map_err(|_| unknown())?;
-        let host = self.host.as_ref().map_err(|why| {
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("obid's plug-in host didn't start: {why}"),
-            )
-        })?;
+        let host = self.started()?;
         match host.set_enabled(&id, enabled, config).await {
             Ok(status) => Ok(serde_json::to_value(status).unwrap_or(Value::Null)),
             Err(PluginError::Unknown(_)) => Err(unknown()),
@@ -170,9 +176,10 @@ impl Plugins {
 /// `GET /v1/obid/plugins`.
 pub async fn list(
     axum::extract::State(shared): axum::extract::State<std::sync::Arc<crate::api::Shared>>,
-) -> axum::response::Response {
+) -> Result<axum::response::Response, ApiError> {
     use axum::response::IntoResponse;
-    (StatusCode::OK, axum::Json(shared.plugins.list_json())).into_response()
+    let plugins = shared.plugins.list_json()?;
+    Ok((StatusCode::OK, axum::Json(plugins)).into_response())
 }
 
 /// `PUT /v1/obid/plugins/{id}`.
@@ -460,6 +467,33 @@ mod tests {
         // A source that isn't there installs nothing and doesn't fail.
         assert!(install_bundled(&folder.join("nowhere"), &home).is_empty());
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// `GET /v1/obid/plugins` and `PUT` of a host that didn't start: `503` with why, redacted.
+    /// (Nothing a test can give the real binary makes the host fail: `PluginHost::start` has
+    /// no error of its own yet.)
+    #[tokio::test]
+    async fn a_host_that_didnt_start_is_said_not_listed_as_empty() {
+        let secret = "plugins-test-secret-4f1c9a";
+        crate::secrets::known().learn("plugins-test", secret);
+        let plugins = Plugins {
+            host: Err(format!("its folder can't be read ({secret})")),
+        };
+        for answer in [
+            plugins.list_json(),
+            plugins.set_json("tetrix", br#"{"enabled": true}"#).await,
+        ] {
+            let error = answer.unwrap_err();
+            assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+            assert!(
+                error
+                    .message
+                    .starts_with("obid's plug-in host didn't start: its folder can't be read ("),
+                "{}",
+                error.message
+            );
+            assert!(!error.message.contains(secret), "{}", error.message);
+        }
     }
 
     #[test]
