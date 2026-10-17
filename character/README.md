@@ -193,7 +193,7 @@ webView.evaluateJavaScript("oby.setState('thinking')")
 
 `mac/main.swift` does all of this in about 150 lines. The Oby app loads the
 page with SwiftUI's `WebPage` from its own `oby://` scheme instead
-(`apps/shared/Character.swift`), keeps the notch's frame hidden until `ready`,
+(`apps/shared/Character.swift`), keeps its frame hidden until `ready`,
 and plays `loading` while its brain thinks.
 
 **Web (iframe).** Add `?embed` to the URL to hide the controls and make the
@@ -265,6 +265,5 @@ once after 1.2 s, as if waiting, then back at the cursor; after 6 s still it
 looks around on its own until the cursor moves again. While it's watching the
 cursor in `idle`, it doesn't fidget (Yawn, Distracted…): starting to watch
 cuts a fidget short, and the next waits for its break. `oby.look(null)` lets
-go at once. The notch does this with the cursor's position on the screen
-(`IslandController.tick` in `apps/mac/app/Island.swift`), and Sangam's desktop
-design with the one its Electron app sends (`design/app/src/renderer/src/Oby.tsx`).
+go at once. Sangam's desktop design does this with the cursor position its
+Electron app sends (`design/app/src/renderer/src/Oby.tsx`).

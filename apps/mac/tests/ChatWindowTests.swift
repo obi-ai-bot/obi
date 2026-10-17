@@ -88,10 +88,7 @@ struct ChatWindowTests {
         #expect(ConversationModel.showsTime(later, after: beforeMidnight, calendar: calendar))
     }
 
-    @Test func escapeStopsThinkingThenGoesBackThenCloses() throws {
-        #expect(IslandEscape.action(thinking: true, showingJob: true) == .stop)
-        #expect(IslandEscape.action(thinking: false, showingJob: true) == .back)
-        #expect(IslandEscape.action(thinking: false, showingJob: false) == .close)
+    @Test func escapeInTheComposerCallsItsStop() throws {
         let editor = ComposerEditor.Editor(frame: NSRect(x: 0, y: 0, width: 300, height: 52))
         var exits = 0
         editor.stop = { exits += 1; return true }
@@ -102,7 +99,7 @@ struct ChatWindowTests {
         #expect(exits == 1)
     }
 
-    @Test func composerEscapeUsesTheSameExitHandlerAsTheNotch() async throws {
+    @Test func composerEscapeUsesTheSameExitHandlerAsTheWindow() async throws {
         var exits = 0
         let root = ChatComposer(text: .constant(""), focused: .constant(true), tray: Tray(),
                                 onSend: {}, onScreenshot: {}, onStop: { exits += 1; return true })

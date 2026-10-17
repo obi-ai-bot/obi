@@ -22,7 +22,7 @@ struct StopButton: View {
     }
 }
 
-/// One compact job component in the transcript, Live and notch.
+/// One compact job component in the transcript and Live.
 struct JobChip: View {
     let job: Job
     var account = ""

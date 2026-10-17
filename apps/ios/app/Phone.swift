@@ -219,7 +219,7 @@ final class Phone {
     var signedIn: [Account] { accounts.filter(\.signedIn) }
 
     /// The jobs Home lists: all but the settled ones (`Job.settled`) that finished by the last Clear
-    /// done, newest first. Home puts them in their groups (JobList.groups), as the Mac's island does.
+    /// done, newest first. Home puts them in their groups (JobList.groups), as the Mac's window does.
     var visibleJobs: [Job] { jobs.filter { $0.listed(after: clearedAt, among: jobs) } }
 
     // MARK: Staying live
@@ -577,7 +577,7 @@ final class Phone {
         apply(.job(try await runner.move(id, agent: agent, account: account, model: model)))
     }
 
-    /// Clear done: the runner records the time, and Home here and the Mac's island hide the jobs
+    /// Clear done: the runner records the time, and Home here and the Mac's window hide the jobs
     /// that finished by then.
     func clear() async throws {
         clearedAt = try await runner.clear()

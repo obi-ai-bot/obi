@@ -72,6 +72,11 @@ struct WindowScreens {
         ChatWindow.measureLights(window, into: state)
         for _ in 0..<50 where !character.ready { try await Task.sleep(for: .milliseconds(100)) }
         try await Task.sleep(for: .milliseconds(1200))
+        try await save(name, window: window)
+    }
+
+    /// Names the window in `windows.txt` and waits for the shell's picture of it.
+    private func save(_ name: String, window: NSWindow) async throws {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let file = folder.appending(path: "\(name).png")
         // The test host has no Screen Recording, so it names the window and the shell that ran the
@@ -120,6 +125,19 @@ struct WindowScreens {
         let state = ChatState()
         state.trail.start(.group(.review), .job(id: "r2", local: false))
         try await shoot("mac-task", model: model(), state: state)
+    }
+
+    /// The talk key's pill with the window closed (#528), at each stage of a turn.
+    @Test(arguments: [TalkStage.listening, .thinking, .speaking])
+    func pill(_ stage: TalkStage) async throws {
+        let model = model()
+        model.turn = stage
+        let pill = TalkPillPanel(model: model)
+        pill.place()
+        pill.orderFrontRegardless()
+        defer { pill.close() }
+        try await Task.sleep(for: .milliseconds(500))
+        try await save("mac-pill-\(stage.word.lowercased())", window: pill)
     }
 
     @Test func taskNeedingYou() async throws {

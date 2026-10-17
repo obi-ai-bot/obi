@@ -16,7 +16,7 @@ struct SidebarTests {
         return job
     }
 
-    /// Opening the window from the notch lands on the conversation, or on the job it names, from a
+    /// Opening the window from an alert lands on the conversation, or on the job it names, from a
     /// fresh start: whatever was open before leaves.
     @MainActor @Test func openChatAlwaysReturnsToTheConversation() {
         let state = ChatState()
@@ -41,7 +41,7 @@ struct SidebarTests {
         #expect(SidebarSections.obyLabel(last: nil, unread: false) == "Oby, Say hello to Oby")
     }
 
-    /// The window's "N working", the notch's count and the brain's briefing all count the same
+    /// The window's "N working", the menu bar's count and the brain's briefing all count the same
     /// jobs: this Mac's active ones and the runner's.
     @Test func theCountsAgreeWithTheHeader() {
         let here = [job("r1", status: .running, created: 300), job("q1", status: .queued, created: 100), job("f1", status: .failed)]

@@ -2,7 +2,7 @@
 
 Oby ships as a notarized `.dmg` that updates itself (#282, part of F4 #8). A release runs on a Mac with Xcode 27, from [`scripts/release.sh`](../scripts/release.sh), with credentials in the keychain and nothing in git. GitHub Actions has no minutes for this ([ci.md](ci.md)), so there's no release workflow.
 
-Teammates install the DMG once, without a Gatekeeper warning, and from then on the app checks `https://downloads.oby.deskree.com/appcast.xml` every 6 hours, downloads a new version quietly and installs it when it quits. Once one is downloaded, the island offers **Update ready · Restart**, which installs it and relaunches Oby (after this Mac's check for the runner, if one runs). **Check for Updates…** in the menu-bar menu and the app menu asks right away, and Settings › About says the version.
+Teammates install the DMG once, without a Gatekeeper warning, and from then on the app checks `https://downloads.oby.deskree.com/appcast.xml` every 6 hours, downloads a new version quietly and installs it when it quits. Once one is downloaded, the menu-bar menu offers **Update ready · Restart**, which installs it and relaunches Oby (after this Mac's check for the runner, if one runs). **Check for Updates…** in the menu-bar menu and the app menu asks right away, and Settings › About says the version.
 
 ## One signing config
 

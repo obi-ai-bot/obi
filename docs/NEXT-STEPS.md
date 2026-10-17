@@ -42,7 +42,7 @@ obi/
 ├── core/            Rust daemon `obid`: goals with acceptance conditions, jobs, worktrees and sandbox, a model-agnostic planner, agent adapters (Claude Code stream-json, Codex app-server, anything over ACP), decision memory ("asked once, remembered"), inbox, publish gate (secret scan, never merges), vault, accounts and usage meters, event sources (GitHub, Slack), local API and event stream, Obi-to-Obi client
 ├── apps/
 │   ├── web/         TypeScript universal client, served by the daemon
-│   ├── mac/         Swift: notch, Touch ID, character; a thin client of the daemon
+│   ├── mac/         Swift: window, menu bar, Touch ID, character; a thin client of the daemon
 │   ├── ios/         Swift thin client
 │   ├── watch/       Swift thin client
 │   └── android/     Kotlin thin client, later

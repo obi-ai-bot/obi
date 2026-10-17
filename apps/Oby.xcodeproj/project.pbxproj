@@ -872,7 +872,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = mac/app/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
-				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_LSUIElement = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens only while you hold fn, and writes down what you say on this Mac.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Oby writes down what you say while you hold fn, on this Mac.";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
@@ -909,7 +909,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = mac/app/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
-				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_LSUIElement = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens only while you hold fn, and writes down what you say on this Mac.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Oby writes down what you say while you hold fn, on this Mac.";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";

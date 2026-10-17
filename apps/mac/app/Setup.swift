@@ -69,16 +69,16 @@ final class Permissions {
         switch kind {
         case .accessibility: "So Oby notices you holding fn (or Control-Option) in any app. It reads no other keys."
         case .microphone: "So Oby hears you while you hold fn, and only then. What you say is written down on this Mac."
-        case .notifications: "So Oby tells you when a job on your runner is done or needs you, while the island is closed."
+        case .notifications: "So Oby tells you when a job on your runner is done or needs you, while Oby's window is closed."
         }
     }
 
     /// Without it: what stops working, and nothing else.
     static func without(_ kind: Kind) -> String {
         switch kind {
-        case .accessibility: "Without it, type to Oby in the island instead of holding fn."
+        case .accessibility: "Without it, type to Oby in its window instead of holding fn."
         case .microphone: "Without it, type to Oby instead of talking."
-        case .notifications: "Without it, check the island for your runner's jobs."
+        case .notifications: "Without it, check Oby's window for your runner's jobs."
         }
     }
 
@@ -184,7 +184,7 @@ final class Tools {
 
 /// Which model does what: the Lead thinks, routine jobs run on a smaller model, complex jobs on a
 /// stronger one. Routine jobs are each tool's `<agent>.model`, which jobs already read; the
-/// Lead's pick waits for the Lead (#64); the complex pick is what the island offers for complex work.
+/// Lead's pick waits for the Lead (#64); the complex pick is what Oby offers for complex work.
 enum ModelPicks {
     /// The best planner first: Claude holds Oby to a typed plan, then Codex, then Cursor.
     static let planners = ["claude", "codex", "cursor"]
@@ -235,7 +235,7 @@ enum ModelPicks {
         UserDefaults.standard.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "")?[key] as? String
     }
 
-    /// The model the island offers for complex work: the user's pick, else Oby's stronger model
+    /// The model Oby offers for complex work: the user's pick, else Oby's stronger model
     /// (for whoever never picked). Nil when that's the model jobs already use: nothing to offer.
     static func complex(for agent: String) -> String? {
         let model = UserDefaults.standard.string(forKey: "\(agent).complexModel") ?? AgentModels.stronger[agent]

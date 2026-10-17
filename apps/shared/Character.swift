@@ -10,13 +10,11 @@ final class ObyCharacter {
     private let events = CharacterEvents()
     private var loaded = false
     private var paused = false
-    /// The host has fed Oby the cursor with `look(at:)`: from then on the page goes by that alone.
-    private var looks = false
     /// Oby's first frame is drawn (its `ready` event). Show its frame from then on: shown before,
     /// it may flash while the page loads.
     private(set) var ready = false
 
-    /// `query` is the page's: the notch's size by default; the window's Home asks for its embedded
+    /// `query` is the page's: the default is a 1.25 scale; the window's Home asks for its embedded
     /// look (`embed`, no playground, a transparent page) at Sangam's size.
     init(query: String = "size=1.25") {
         var config = WebPage.Configuration()
@@ -30,7 +28,7 @@ final class ObyCharacter {
                 where event == .finished {
                     loaded = true
                     applyPause()
-                    // Until it draws, the notch keeps Oby's frame transparent: say so if it doesn't.
+                    // Until it draws, the window keeps Oby's frame transparent: say so if it doesn't.
                     Task {
                         try? await Task.sleep(for: .seconds(5))
                         if !ready { Logger.character.notice("Oby's page loaded 5 s ago and hasn't drawn its first frame (no ready): its frame stays hidden until it does") }
@@ -42,7 +40,7 @@ final class ObyCharacter {
         }
     }
 
-    /// The state Oby shows whenever the island isn't closed: idle, listening, thinking, working,
+    /// The state Oby shows whenever the window shows it: idle, listening, thinking, working,
     /// loading or quiet.
     var mood = "idle" {
         didSet { if !paused, mood != oldValue { run(Self.switching(from: oldValue, to: mood), ["state": mood]) } }
@@ -58,7 +56,7 @@ final class ObyCharacter {
     /// One expression now, then back to the state.
     func play(_ expression: String) { run("oby.play(name)", ["name": expression]) }
 
-    /// A paused Oby draws nothing, so a closed island costs no CPU.
+    /// A paused Oby draws nothing, so a closed window costs no CPU.
     func pause(_ on: Bool) {
         guard on != paused else { return }
         paused = on
@@ -72,21 +70,11 @@ final class ObyCharacter {
         }
         // Look ahead and settle into a calm face first: paused mid-fidget or mid-glance,
         // Oby would freeze looking away.
-        let letGo = looks ? "oby.look(null)" : "document.dispatchEvent(new PointerEvent('pointerleave'))"
-        run("\(letGo); oby.setState('quiet', { now: true })", [:])
+        run("document.dispatchEvent(new PointerEvent('pointerleave')); oby.setState('quiet', { now: true })", [:])
         Task {
             try? await Task.sleep(for: .milliseconds(900))
             if paused { run("oby.pause(true)", [:]) }
         }
-    }
-
-    /// The panel never becomes key while you work elsewhere, so the page gets no mouse
-    /// events of its own: Oby looks at the cursor wherever it is, given from the top-left
-    /// corner of its frame in points (the page's CSS pixels), outside the frame too.
-    func look(at p: CGPoint) {
-        guard loaded else { return }
-        looks = true
-        run("oby.look(x, y)", ["x": p.x, "y": p.y])
     }
 
     private func run(_ js: String, _ arguments: [String: Any]) {

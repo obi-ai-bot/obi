@@ -16,7 +16,7 @@ final class Voice {
     var handsFree = false
     /// The words so far: the final ones, then the ones still changing.
     private(set) var words = ""
-    /// The microphone's recent loudness, 0...1, oldest first: the island's waveform.
+    /// The microphone's recent loudness, 0...1, oldest first: the pill's waveform.
     private(set) var levels = Voice.silence
     /// Why Oby can't listen, in one sentence.
     private(set) var problem: String?

@@ -15,7 +15,7 @@ obi/
 ├── core/            Rust: the daemon obid and its crates (section 3)
 ├── apps/
 │   ├── web/         TypeScript universal client, served by obid
-│   ├── mac/         Swift: notch, Touch ID, character; a thin client of obid
+│   ├── mac/         Swift: window, menu bar, Touch ID, character; a thin client of obid
 │   ├── ios/         Swift thin client
 │   ├── watch/       Swift thin client
 │   └── android/     Kotlin thin client, later

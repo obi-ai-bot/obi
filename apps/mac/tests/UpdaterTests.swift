@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Oby
 
-/// Updates (#282): the version as the menu says it, the island's pill only once an update is
+/// Updates (#282): the version as the menu says it, the menu's update item only once an update is
 /// downloaded, a Restart that installs now, and a relaunch that waits for this Mac's check.
 struct UpdaterTests {
     @Test func versionReadsLikeTheMenu() {
