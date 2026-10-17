@@ -4,7 +4,7 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 
 **API-level** means the test asks the runner through its HTTP API (`client.execute` on the router, or the API's own handlers), or checks what the API puts on the wire (a job's or account's JSON, the gate in front of every request). obid is checked the same way: the real binary, asked over HTTP (tests/*.rs), or a unit test of the same rule where the Swift test was one. Everything else is **Swift-internal**: it drives Swift types (Desk, the brain, the agent fakes, the stores), so it doesn't carry over; obid's own behaviour behind those is covered by its own tests.
 
-994 tests in all: **45 API-level and ported**, **30 API-level and not ported** (their endpoint or feature isn't in obid yet), **58 of the brain's, ported with it** (#546, below), and **861 Swift-internal and dropped**.
+994 tests in all: **46 API-level and ported**, **29 API-level and not ported** (their endpoint or feature isn't in obid yet), **58 of the brain's, ported with it** (#546, below), and **861 Swift-internal and dropped**.
 
 ## API-level, ported
 
@@ -44,7 +44,8 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 | RunnerTests.dispatchTakesOnlyWholeJobs | jobs_api.rs `dispatch_takes_only_whole_jobs` |  |
 | RunnerTests.jobsHaveISODatesAndEveryKey | runner_api.rs `jobs_have_iso_dates_and_every_key` | 67 keys: the Swift runner's 65 and obid's `obi` and `worktree` |
 | RunnerTests.messagesReachOnlyJobsThatCanTakeThem | runner_api.rs `messages_reach_only_jobs_that_can_take_them` | a job that never started is one whose repository couldn't be got ready (obid has no Gemini, the Swift test's way to fail one); a job at work hears the words as its next turn, and a round the owner asked for may commit nothing, in `a_running_job_hears_the_words_next_and_the_owners_round_may_commit_nothing`. A review another Obi asked for takes no words (422): its answer goes back to that Obi |
-| PermissionTests.theAPIAnswersPermissionsAndModes | runner_api.rs `the_api_answers_permissions_and_modes` | with the inbox's side of `aPermissionWaitsInTheInboxAndAlwaysSavesARuleTheNextPromptUses` and `denyReachesTheAgentWithTheWords` (a `permission` item, answered there with words); a mode that allows a waiting permission answers it, words told to the job are its no, and a stop drops it, in `modes_answer_what_they_allow_and_stopping_drops_the_permission`; Codex and Cursor ask too, in adapters.rs `codex_and_cursor_ask_the_owner_in_ask_mode`. obid keeps the rules and the default mode in `home/permissions.json`, not `oby.sqlite`. Not yet: a plan waiting for approval as the job's `question` (an agent in `plan` finishes with its plan as its summary), and a permission kept through a restart (the agent asks again) |
+| PermissionTests.theAPIAnswersPermissionsAndModes | runner_api.rs `the_api_answers_permissions_and_modes` | with the inbox's side of `aPermissionWaitsInTheInboxAndAlwaysSavesARuleTheNextPromptUses` and `denyReachesTheAgentWithTheWords` (a `permission` item, answered there with words); a mode that allows a waiting permission answers it, words told to the job are its no, and a stop drops it, in `modes_answer_what_they_allow_and_stopping_drops_the_permission`; Codex and Cursor ask too, in adapters.rs `codex_and_cursor_ask_the_owner_in_ask_mode`. obid keeps the rules and the default mode in `home/permissions.json`, not `oby.sqlite`. Plan approvals are covered by jobs_api.rs `a_plan_waits_for_the_owner_and_mode_changes_only_on_approval`; a permission is not kept through a restart (the agent asks again) |
+| PermissionTests.aQuestionSendsEveryKey | jobs_api.rs `a_question_sends_every_key_and_resumes_the_same_round`; `a_plan_waits_for_the_owner_and_mode_changes_only_on_approval` | summary and plan questions over HTTP, all keys including nulls; inbox/message answers, same-round resume, restart and stop covered |
 | RunnerTests.malformedKeysDontRegister | runner_api.rs `malformed_keys_dont_register` | and src/devices.rs `keys` |
 | RunnerTests.newPhonesNeedPairing | runner_api.rs `new_phones_need_pairing` | obid's pairing file is `home/pairing` |
 | RunnerTests.onlyTheOwnerGetsIn | status.rs `refuses_without_the_token` | obid's owner is whoever holds its API token (runner-api.md, "obid only: configuration"); a Tailscale login opens nothing |
@@ -136,7 +137,6 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 - #571 Failures: post-mortems, `oby-failure` issues and Fix it starting a fix job (split out of #445; its FailureTests are Swift-internal)
 - #446 The LAN gateway and its pairing
 - #447 Move: POST /v1/jobs/{id}/move
-- #448 A job's question: `question` on a job and its inbox item
 - #449 Research jobs: reads, reports and filed proposals
 - #450 Usage and reserves: POST /v1/accounts/{id}/reserve
 - #451 Publishing the owner's work (its endpoints and following are served now; no RunnerTests test is left on it)
@@ -157,7 +157,6 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 | GatewayTests.gatewayScrubsSessionIDsAndAccountHomes | the LAN gateway | #446 |
 | GatewayTests.pairingIsMadeOnTheLoopbackAPIWithTheRunnersToken | `/v1/pairing/invite`, `/v1/pairing/devices` | #446 |
 | MoveTests.theMoveEndpointMovesAJobOrSaysWhyNot | `POST /v1/jobs/{id}/move` | #447 |
-| PermissionTests.aQuestionSendsEveryKey | `question` on the job (an agent's question, a plan waiting for approval): obid sends `permission` and its inbox item (runner_api.rs `the_api_answers_permissions_and_modes`), and `question` is always null | #448 |
 | ResearchTests.aMissingScannerFilesNothing | `POST /v1/jobs/{id}/proposals/{index}/file` | #449 |
 | ResearchTests.aSecretInAProposalIsRefused | `POST /v1/jobs/{id}/proposals/{index}/file` | #449 |
 | ResearchTests.anUnknownReadIsRejectedByJobsAPI | research `reads` (obid refuses every `reads` with 422) | #449 |

@@ -476,6 +476,34 @@ pub fn permission_item(
     }
 }
 
+/// A summary or plan question, stable across restarts, one per number of owner answers.
+pub fn job_question_item(job: &crate::job::Job, now: i64) -> Item {
+    let q = job.question.as_ref().expect("question item has a question");
+    Item {
+        id: format!(
+            "{}-question-{}",
+            job.id,
+            job.notes.as_ref().map_or(0, Vec::len)
+        ),
+        kind: "question".into(),
+        job: job.id.clone(),
+        title: job.short_title(),
+        text: q.text.clone(),
+        options: q.options.clone(),
+        details: q.details.clone(),
+        recommended: q.recommended.map(|i| i as u32),
+        created: now,
+        done: None,
+        later: None,
+        answer: None,
+        obi: None,
+        plugin: None,
+        arrived: None,
+        start: None,
+        confirm: None,
+    }
+}
+
 /// The one answer to a `pluginEvent`.
 pub const DISMISS: &str = "Dismiss";
 

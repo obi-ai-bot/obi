@@ -185,6 +185,10 @@ pub async fn run_turn(
                     break;
                 };
                 let response = match answer {
+                    Answer::Allow if tool == "ExitPlanMode" => {
+                        json!({"behavior": "allow", "updatedInput": input,
+                        "updatedPermissions": [{"type":"setMode", "mode":"default", "destination":"session"}]})
+                    }
                     Answer::Allow => json!({"behavior": "allow", "updatedInput": input}),
                     Answer::Deny(why) => {
                         on_event(Event::Denied(why.clone()));

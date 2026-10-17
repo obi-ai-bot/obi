@@ -105,6 +105,12 @@ pub type ReviewHook = Arc<
 /// (answered, with the words the owner gave, or let go).
 #[derive(Debug, Clone)]
 pub enum PermissionNote {
+    Question(Box<Job>),
+    QuestionSettled {
+        job: String,
+        index: usize,
+        answer: Option<String>,
+    },
     Waiting(Box<Job>, Permission),
     Settled {
         job: String,
@@ -119,6 +125,7 @@ pub type PermissionHook = Arc<dyn Fn(PermissionNote) + Send + Sync>;
 /// A prompt waiting for the owner: the agent's call, its card, and where the answer goes.
 struct Ask {
     call: Call,
+    question: Option<crate::questions::Question>,
     permission: Permission,
     reply: tokio::sync::oneshot::Sender<Answer>,
 }
@@ -152,6 +159,8 @@ struct State {
     jobs: HashMap<String, Job>,
     /// The jobs a worker runs now, and how to tell it to stop.
     workers: HashMap<String, watch::Sender<Signal>>,
+    /// Idle native agents being drained before their approved session is queued again.
+    draining: std::collections::HashSet<String>,
     /// The jobs whose agent had its last turn: they take no more words until they end.
     wrapping: std::collections::HashSet<String>,
     /// Each job's prompts waiting for the owner, the one shown first.
@@ -163,6 +172,22 @@ struct State {
     /// When obid last tried to read each published pull request, and which one: an unavailable
     /// GitHub isn't asked again on every pass.
     followed: HashMap<String, (String, i64)>,
+}
+
+impl State {
+    fn takes_slot(&self, id: &str) -> bool {
+        !self.draining.contains(id)
+            && self
+                .jobs
+                .get(id)
+                .is_some_and(|j| j.status.is_active() && j.question.is_none())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnswerSource {
+    Owner,
+    Brain,
 }
 
 /// Every job obid has, and the workers running them.
@@ -186,6 +211,8 @@ pub struct Jobs {
     permission_hook: std::sync::OnceLock<PermissionHook>,
     /// Settings › Permissions' default mode and the saved rules (`home/permissions.json`).
     permissions: Mutex<permissions::Kept>,
+    /// Serialize publishing/settling question cards without holding the job-state lock in inbox hooks.
+    question_transition: Mutex<()>,
     /// The plug-in host: context for the agent, and `agent-mcp` plug-ins' servers.
     plugins: std::sync::OnceLock<Arc<crate::plugins::Plugins>>,
     /// The connected-app broker: job-scoped MCP config and use records.
@@ -211,7 +238,7 @@ impl Jobs {
         for mut job in store.load_all() {
             // A permission waited on an agent that is gone: the agent asks again.
             job.permission = None;
-            if job.status == Status::Running {
+            if job.status == Status::Running && job.question.is_none() {
                 job.status = Status::Queued;
                 job.step = "obid restarted while this ran: starting it again".into();
                 job.phase = Some(Phase::Prepare);
@@ -232,6 +259,7 @@ impl Jobs {
             state: Mutex::new(State {
                 jobs,
                 workers: HashMap::new(),
+                draining: std::collections::HashSet::new(),
                 wrapping: std::collections::HashSet::new(),
                 asks: HashMap::new(),
                 apple_logs: HashMap::new(),
@@ -246,6 +274,7 @@ impl Jobs {
             review_hook: std::sync::OnceLock::new(),
             permission_hook: std::sync::OnceLock::new(),
             permissions: Mutex::new(kept),
+            question_transition: Mutex::new(()),
             plugins: std::sync::OnceLock::new(),
             connections: std::sync::OnceLock::new(),
             api_url: Mutex::new(api_url),
@@ -387,7 +416,12 @@ impl Jobs {
 
     /// How many slots are taken: jobs a worker runs.
     pub fn running(&self) -> usize {
-        self.lock().workers.len()
+        let state = self.lock();
+        state
+            .workers
+            .keys()
+            .filter(|id| state.takes_slot(id))
+            .count()
     }
 
     /// How many of them run on the account `id`.
@@ -396,7 +430,12 @@ impl Jobs {
         state
             .workers
             .keys()
-            .filter(|id| state.jobs.get(*id).is_some_and(|j| j.account == account))
+            .filter(|id| {
+                state
+                    .jobs
+                    .get(*id)
+                    .is_some_and(|j| j.account == account && state.takes_slot(id))
+            })
             .count()
     }
 
@@ -1273,12 +1312,21 @@ impl Jobs {
             let mut queued: Vec<(i64, String)> = state
                 .jobs
                 .values()
-                .filter(|j| j.status == Status::Queued && !state.workers.contains_key(&j.id))
+                .filter(|j| {
+                    j.status == Status::Queued
+                        && j.question.is_none()
+                        && !state.workers.contains_key(&j.id)
+                })
                 .map(|j| (j.created, j.id.clone()))
                 .collect();
             queued.sort();
             for (_, id) in queued {
-                if state.workers.len() < self.max_running() {
+                let running = state
+                    .workers
+                    .keys()
+                    .filter(|id| state.takes_slot(id))
+                    .count();
+                if running < self.max_running() {
                     let (sender, receiver) = watch::channel(Signal::Run);
                     state.workers.insert(id.clone(), sender);
                     start.push((id, receiver));
@@ -1311,6 +1359,7 @@ impl Jobs {
                 {
                     let mut state = jobs.lock();
                     state.workers.remove(&id);
+                    state.draining.remove(&id);
                     state.wrapping.remove(&id);
                 }
                 jobs.changed.notify_waiters();
@@ -1323,7 +1372,7 @@ impl Jobs {
     /// started. A job that already ended comes back as it is. `None` for one obid doesn't have.
     pub fn stop(&self, id: &str) -> Option<Job> {
         let job = self.get(id)?;
-        if !job.status.is_active() {
+        if !job.status.is_active() && job.question.is_none() {
             return Some(job);
         }
         let worked = match self.lock().workers.get(id) {
@@ -1333,6 +1382,12 @@ impl Jobs {
             }
             None => false,
         };
+        let _question = self
+            .question_transition
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.settle_question(id, None);
+        self.update(id, |job| job.question = None);
         self.drop_asks(id);
         let stopped = self.update(id, |job| {
             job.status = Status::Stopped;
@@ -1357,7 +1412,7 @@ impl Jobs {
             .lock()
             .jobs
             .values()
-            .filter(|j| j.status.is_active())
+            .filter(|j| j.status.is_active() || j.question.is_some())
             .map(|j| j.id.clone())
             .collect();
         ids.iter().filter_map(|id| self.stop(id)).collect()
@@ -1368,6 +1423,25 @@ impl Jobs {
     /// session up again in the same worktree and branch, for one more round (and one more on a
     /// loop's limit). `None` for a job obid doesn't have; `Err` says why it can't take the words.
     pub fn message(self: &Arc<Self>, id: &str, text: &str) -> Option<Result<Job, Refused>> {
+        self.message_from(id, text, AnswerSource::Owner)
+    }
+
+    /// A brain may pass on words, but it cannot approve a plan even if the question began
+    /// after the brain inspected the job. Only an owner's API call or Confirm has that authority.
+    pub fn message_from_brain(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+    ) -> Option<Result<Job, Refused>> {
+        self.message_from(id, text, AnswerSource::Brain)
+    }
+
+    fn message_from(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+        source: AnswerSource,
+    ) -> Option<Result<Job, Refused>> {
         let job = self.get(id)?;
         let text = text.trim();
         if text.is_empty() || text.chars().count() > 2000 {
@@ -1388,6 +1462,9 @@ impl Jobs {
         let tool = Tool::from_id(&job.agent)
             .map(Tool::name)
             .unwrap_or("The agent");
+        if job.question.is_some() {
+            return Some(self.answer_job_question_from(id, text, None, source));
+        }
         // A waiting permission takes the words as its no: the agent hears nothing else until it's
         // answered.
         let waiting = self
@@ -1555,7 +1632,7 @@ impl Jobs {
     }
 
     /// Saves an allow rule for a repository, once; the prompts waiting now, in every job, follow it.
-    fn save_rule(&self, rule: &str, repo: &str) {
+    fn save_rule(self: &Arc<Self>, rule: &str, repo: &str) {
         {
             let mut kept = self.kept();
             if kept
@@ -1605,17 +1682,22 @@ impl Jobs {
 
     /// A prompt obid's fixed rules let through: the job's mode and its repository's rules allow or
     /// refuse it now, or it waits for the owner, shown on the job and in the inbox.
-    fn rule_on(&self, id: &str, tool: &str, input: &Value, worktree: &Path) -> Ruling {
+    fn rule_on(self: &Arc<Self>, id: &str, tool: &str, input: &Value, worktree: &Path) -> Ruling {
         let Some(job) = self.get(id) else {
             return Ruling::Now(Answer::Deny("The job is gone.".into()));
         };
         let call = Call::new(tool, input);
-        match permissions::decide(
-            &call,
-            Self::mode_of(&job),
-            &self.rules_for(&job.repo),
-            worktree,
-        ) {
+        let verdict = if tool == "ExitPlanMode" && Self::mode_of(&job) == Mode::Plan {
+            permissions::Verdict::Ask
+        } else {
+            permissions::decide(
+                &call,
+                Self::mode_of(&job),
+                &self.rules_for(&job.repo),
+                worktree,
+            )
+        };
+        match verdict {
             permissions::Verdict::Allow => Ruling::Now(Answer::Allow),
             permissions::Verdict::Deny(why) => Ruling::Now(Answer::Deny(why)),
             permissions::Verdict::Ask => {
@@ -1626,6 +1708,9 @@ impl Jobs {
                     let mut state = self.lock();
                     let asks = state.asks.entry(id.to_owned()).or_default();
                     asks.push_back(Ask {
+                        question: (tool == "ExitPlanMode").then(|| {
+                            crate::questions::Question::plan(input["plan"].as_str().unwrap_or(""))
+                        }),
                         call,
                         permission,
                         reply,
@@ -1642,12 +1727,44 @@ impl Jobs {
 
     /// The job shows its first waiting permission, or, with none left, goes on, its step saying
     /// what happened. The inbox hears of it.
-    fn show(&self, id: &str, step: Option<String>) {
+    fn show(self: &Arc<Self>, id: &str, step: Option<String>) {
         let first = self
             .lock()
             .asks
             .get(id)
             .and_then(|asks| asks.front().map(|a| a.permission.clone()));
+        let plan = self
+            .lock()
+            .asks
+            .get(id)
+            .and_then(|a| a.front())
+            .and_then(|a| a.question.clone());
+        if let Some(question) = plan {
+            let _question = self
+                .question_transition
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !self.get(id).is_some_and(|j| j.status.is_active())
+                || !self
+                    .lock()
+                    .asks
+                    .get(id)
+                    .and_then(|asks| asks.front())
+                    .is_some_and(|ask| ask.question.as_ref() == Some(&question))
+            {
+                return;
+            }
+            self.update(id, |job| {
+                job.question = Some(question.clone());
+                job.permission = None;
+                job.step = "Waiting for your OK on the plan".into();
+            });
+            if let Some(job) = self.get(id) {
+                self.note(PermissionNote::Question(Box::new(job)));
+            }
+            self.schedule();
+            return;
+        }
         let shown = self.get(id).and_then(|j| j.permission);
         if first.as_ref().map(|p| &p.id) == shown.as_ref().map(|p| &p.id) {
             if let Some(step) = step {
@@ -1671,7 +1788,7 @@ impl Jobs {
 
     /// The job's waiting prompts after its mode or the rules changed: what's allowed or refused
     /// now is answered, the rest keep waiting.
-    fn reconsider(&self, id: &str) {
+    fn reconsider(self: &Arc<Self>, id: &str) {
         let Some(job) = self.get(id) else { return };
         let worktree = self.worktree_path(id);
         let rules = self.rules_for(&job.repo);
@@ -1684,6 +1801,10 @@ impl Jobs {
             };
             let mut kept = VecDeque::new();
             while let Some(ask) = asks.pop_front() {
+                if ask.question.is_some() {
+                    kept.push_back(ask);
+                    continue;
+                }
                 match permissions::decide(&ask.call, mode, &rules, &worktree) {
                     permissions::Verdict::Allow => answered.push((ask, Answer::Allow)),
                     permissions::Verdict::Deny(why) => answered.push((ask, Answer::Deny(why))),
@@ -1713,7 +1834,7 @@ impl Jobs {
     /// The owner answers the job's waiting permission: allow it once, always (a rule for the
     /// repository), or no, with their words for the agent.
     pub fn answer_permission(
-        &self,
+        self: &Arc<Self>,
         id: &str,
         permission: &str,
         decision: Decision,
@@ -1736,6 +1857,11 @@ impl Jobs {
                     "That permission isn't waiting any more.".into(),
                 ));
             };
+            if asks.front().is_some_and(|a| a.question.is_some()) {
+                return Err(PermissionRefused::Refused(
+                    "Answer the plan's question to choose its permission mode.".into(),
+                ));
+            }
             if decision == Decision::Always
                 && asks.front().is_some_and(|a| a.permission.rule.is_none())
             {
@@ -1786,10 +1912,175 @@ impl Jobs {
         Ok(self.get(id).unwrap_or(job))
     }
 
+    fn settle_question(&self, id: &str, answer: Option<String>) {
+        if let Some(job) = self.get(id).filter(|j| j.question.is_some()) {
+            self.note(PermissionNote::QuestionSettled {
+                job: id.into(),
+                index: job.notes.as_ref().map_or(0, Vec::len),
+                answer,
+            });
+        }
+    }
+
+    /// Direct owner API only. Brain integrations must request a confirm card before invoking
+    /// this path for plan approvals; agent/model text is never authority to widen a mode.
+    pub fn answer_job_question(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+        expected_item: Option<&str>,
+    ) -> Result<Job, Refused> {
+        self.answer_job_question_from(id, text, expected_item, AnswerSource::Owner)
+    }
+
+    fn answer_job_question_from(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+        expected_item: Option<&str>,
+        source: AnswerSource,
+    ) -> Result<Job, Refused> {
+        let question_guard = self
+            .question_transition
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let safe = crate::secrets::known().redact(text);
+        if safe != text {
+            return Err(Refused(
+                "That answer contains a secret; it wasn't sent to the agent.".into(),
+            ));
+        }
+        let (answer, live, mode, index, park_native) = {
+            let mut state = self.lock();
+            let before = state
+                .jobs
+                .get(id)
+                .ok_or_else(|| Refused("There's no such job.".into()))?;
+            if !before.status.is_active() && before.status != Status::Interrupted {
+                return Err(Refused("That job isn't waiting for an answer.".into()));
+            }
+            let question = before
+                .question
+                .as_ref()
+                .ok_or_else(|| Refused("No question waits on this job.".into()))?;
+            let mode = question
+                .plan
+                .as_ref()
+                .and_then(|_| crate::questions::approval(text));
+            if mode.is_some() && source != AnswerSource::Owner {
+                return Err(Refused(
+                    "Only your confirmation can approve the plan.".into(),
+                ));
+            }
+            let index = before.notes.as_ref().map_or(0, Vec::len);
+            if expected_item.is_some_and(|item| item != format!("{id}-question-{index}")) {
+                return Err(Refused("That question isn't waiting any more.".into()));
+            }
+            let live = state.asks.get_mut(id).and_then(|asks| {
+                if asks.front().is_some_and(|a| a.question.is_some()) {
+                    asks.pop_front()
+                } else {
+                    None
+                }
+            });
+            // The plan gave up its slot while waiting. If someone else now uses it, accept
+            // the answer but drain this idle agent before the scheduler resumes its session.
+            let park_native = live.is_some()
+                && state
+                    .workers
+                    .keys()
+                    .filter(|id| state.takes_slot(id))
+                    .count()
+                    >= self.max_running();
+            if park_native {
+                state.draining.insert(id.into());
+                if let Some(worker) = state.workers.get(id) {
+                    let _ = worker.send(Signal::Shutdown);
+                }
+            }
+            let job = state.jobs.get_mut(id).expect("job exists under lock");
+            job.question = None;
+            job.notes.get_or_insert_with(Vec::new).push(text.into());
+            if let Some(mode) = mode {
+                job.mode = Some(mode.as_str().into());
+            }
+            job.step = format!("You: {text}");
+            if live.is_none() || park_native {
+                job.heard.push(if mode.is_some() { format!("The owner approved this plan: {text}. Carry it out in the selected permission mode.") } else { text.into() });
+                job.status = Status::Queued;
+                job.phase = Some(Phase::Work);
+                job.finished = None;
+            }
+            if live.is_some()
+                && !park_native
+                && mode.is_some()
+                && text.to_lowercase().starts_with("approve,")
+            {
+                job.heard.push(text.into());
+            }
+            (job.clone(), live, mode, index, park_native)
+        };
+        if let Err(e) = self.store.save(&answer) {
+            tracing::error!("can't keep job {id}: {e}");
+        }
+        self.note(PermissionNote::QuestionSettled {
+            job: id.into(),
+            index,
+            answer: Some(text.into()),
+        });
+        self.events.send("job", answer.to_json());
+        drop(question_guard);
+        if let Some(ask) = live.filter(|_| !park_native) {
+            let reply = if mode.is_some() {
+                Answer::Allow
+            } else {
+                Answer::Deny(format!("The owner wants changes to the plan: {text}"))
+            };
+            let _ = ask.reply.send(reply);
+            self.show(id, Some(format!("You: {text}")));
+        }
+        self.changed.notify_waiters();
+        self.schedule();
+        Ok(answer)
+    }
+
     /// Changes how much the job asks, from now on: the prompts waiting now that the new mode
     /// allows are answered. A finished job keeps the mode for when it runs again.
-    pub fn set_mode(&self, id: &str, mode: Mode) -> Option<Job> {
+    pub fn set_mode(self: &Arc<Self>, id: &str, mode: Mode) -> Option<Job> {
+        if mode != Mode::Plan
+            && self
+                .get(id)?
+                .question
+                .as_ref()
+                .is_some_and(|q| q.plan.is_some())
+        {
+            return self
+                .answer_job_question(id, &format!("Approve: {}", mode.title()), None)
+                .ok();
+        }
         self.update(id, |job| job.mode = Some(mode.as_str().to_owned()))?;
+        self.reconsider(id);
+        self.get(id)
+    }
+
+    /// Atomically refuse plan approval and Bypass on a model's unconfirmed mode proposal.
+    pub fn set_mode_from_brain(self: &Arc<Self>, id: &str, mode: Mode) -> Option<Job> {
+        let guard = self
+            .question_transition
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if mode == Mode::Bypass
+            || (mode != Mode::Plan
+                && self
+                    .get(id)?
+                    .question
+                    .as_ref()
+                    .is_some_and(|q| q.plan.is_some()))
+        {
+            return None;
+        }
+        self.update(id, |job| job.mode = Some(mode.as_str().into()))?;
+        drop(guard);
         self.reconsider(id);
         self.get(id)
     }
@@ -2077,6 +2368,12 @@ impl Jobs {
                 }
             }
             Ok(()) => {}
+            Err(_) if self.get(id).is_some_and(|j| j.question.is_some()) => {
+                self.update(id, |job| {
+                    job.status = Status::Interrupted;
+                    job.step = "Waiting for your answer".into();
+                });
+            }
             Err(why) => {
                 let review = self.get(id).and_then(|j| {
                     let body: ReviewRequest =
@@ -2354,7 +2651,7 @@ impl Jobs {
 
     /// Runs one turn of the job's tool and follows it on the job: its session and steps.
     async fn turn(
-        &self,
+        self: &Arc<Self>,
         id: &str,
         tool: Tool,
         launch: Launch,
@@ -3126,6 +3423,34 @@ impl Jobs {
                         .get_or_insert_with(Vec::new)
                         .push(said.clone());
                 });
+                let current = self.get(id).ok_or("the job is gone")?;
+                let question = if current.mode.as_deref() == Some("plan") {
+                    Some(crate::questions::Question::plan(&said))
+                } else {
+                    crate::questions::Question::parse(&said)
+                };
+                if let Some(question) = question {
+                    let _question = self
+                        .question_transition
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if !self.get(id).is_some_and(|j| j.status.is_active()) {
+                        return Ok(());
+                    }
+                    self.update(id, |job| {
+                        job.question = Some(question.clone());
+                        job.step = if question.plan.is_some() {
+                            "Waiting for your OK on the plan"
+                        } else {
+                            "Waiting for your answer"
+                        }
+                        .into();
+                    });
+                    if let Some(job) = self.get(id) {
+                        self.note(PermissionNote::Question(Box::new(job)));
+                    }
+                    return Ok(());
+                }
                 // Words the owner sent while it worked: the agent hears them now, in another turn of
                 // this round, before the check.
                 let words = self.take_heard(id);
@@ -3980,6 +4305,10 @@ fn owner_prompt(job: &Job) -> String {
         lines.push("End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.".into());
     }
     lines.push("Run checks in the foreground, and never end a turn waiting on a background command: obid takes the end of your turn as the end of your work.".into());
+    lines.push(crate::questions::HOW_TO_ASK.into());
+    if job.mode.as_deref() == Some("plan") {
+        lines.push(crate::questions::PLAN_FIRST.into());
+    }
     lines.push(
         "Finish with a short summary. Its first line is one sentence the user will see.".into(),
     );
@@ -4249,6 +4578,46 @@ fn tail_chars(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brain_authority_cannot_approve_a_waiting_plan_at_the_job_boundary() {
+        let home = std::env::temp_dir().join(format!("obid-plan-authority-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let config = Config::parse(
+            &json!({"listen":"127.0.0.1:7777","home":home,"owner":"test"}).to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(config, Events::new(), Err("not used".into())).unwrap();
+        let mut job = Job::new(
+            "q1".into(),
+            "o/r".into(),
+            "investigate".into(),
+            "Read".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        job.status = Status::Running;
+        job.mode = Some("plan".into());
+        job.question = Some(crate::questions::Question::plan("Read first."));
+        jobs.insert(job);
+        for answer in [
+            "Approve: Ask",
+            "Approve: Accept edits",
+            "Approve: Bypass",
+            "Approve",
+        ] {
+            assert!(jobs.message_from_brain("q1", answer).unwrap().is_err());
+            let job = jobs.get("q1").unwrap();
+            assert_eq!(job.mode.as_deref(), Some("plan"));
+            assert!(job.question.is_some());
+            assert!(job.notes.is_none());
+        }
+        for mode in [Mode::Ask, Mode::AcceptEdits, Mode::Bypass] {
+            assert!(jobs.set_mode_from_brain("q1", mode).is_none());
+        }
+        assert!(jobs.get("q1").unwrap().question.is_some());
+        let _ = std::fs::remove_dir_all(home);
+    }
 
     #[test]
     fn paths_inside_the_repository() {

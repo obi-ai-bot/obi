@@ -3357,3 +3357,95 @@ fn no_extra_step_when_the_budget_ran_out() {
     assert!(!checked(&obid));
     assert_eq!(ends(&obid), ["budget_spent"]);
 }
+
+fn waiting_plan(obid: &Obid) -> String {
+    let made = call(
+        obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job":{"repo":"obi-e2e/fixture-app","kind":"investigate","task":"SAY_JSON: \"QUESTION: Which API?\"","mode":"plan","title":"Owner plan"}}),
+        ),
+    );
+    assert_eq!(made.status, 201, "{}", made.text);
+    let id = made.body["id"].as_str().unwrap().to_owned();
+    within(60, "a plan waits", || {
+        get_job(obid, &id)["question"]["plan"]
+            .is_string()
+            .then_some(())
+    });
+    id
+}
+
+#[test]
+fn the_brain_cannot_approve_a_plan_by_setting_ask_or_accept_edits() {
+    for mode in ["ask", "acceptEdits"] {
+        let folder = Folder::new(&format!("plan-mode-confirm-{mode}"));
+        let obid = started(&folder);
+        let id = waiting_plan(&obid);
+        queue(&obid, &[set_mode(&id, mode), reply("")]);
+        said(&obid, "approve the plan");
+        assert_eq!(get_job(&obid, &id)["mode"], "plan");
+        assert!(get_job(&obid, &id)["question"].is_object());
+        let card = items_of(&obid, "confirm").pop().unwrap();
+        assert_eq!(
+            owner_answers(&obid, card["id"].as_str().unwrap(), "Confirm").status,
+            200
+        );
+        within(60, "owner confirmed its mode", || {
+            (get_job(&obid, &id)["mode"] == mode).then_some(())
+        });
+    }
+}
+
+#[test]
+fn the_brain_cannot_approve_a_plan_by_forwarding_message_text() {
+    let folder = Folder::new("plan-message-confirm");
+    let obid = started(&folder);
+    let id = waiting_plan(&obid);
+    queue(&obid, &[message_plan(&id), reply("")]);
+    said(&obid, "Approve: Bypass");
+    assert_eq!(get_job(&obid, &id)["mode"], "plan");
+    assert!(get_job(&obid, &id)["question"].is_object());
+    let card = items_of(&obid, "confirm").pop().unwrap();
+    assert_eq!(
+        owner_answers(&obid, card["id"].as_str().unwrap(), "Confirm").status,
+        200
+    );
+    within(60, "owner approved bypass", || {
+        (get_job(&obid, &id)["mode"] == "bypass").then_some(())
+    });
+}
+
+#[test]
+fn a_oneoff_job_question_can_be_answered_in_conversation() {
+    let folder = Folder::new("question-voice-once");
+    let obid = started(&folder);
+    let made = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job":{"repo":"obi-e2e/fixture-app","kind":"investigate","task":format!("SAY_JSON: {}",json!("QUESTION: Which?\nOPTIONS: Keep | Change"))}}),
+        ),
+    );
+    assert_eq!(made.status, 201, "{}", made.text);
+    let id = made.body["id"].as_str().unwrap().to_owned();
+    within(60, "question waits", || {
+        get_job(&obid, &id)["question"].is_object().then_some(())
+    });
+    let item = items_of(&obid, "question").pop().unwrap();
+    queue(
+        &obid,
+        &[
+            answer_item(item["id"].as_str().unwrap(), Some(1), None),
+            reply(""),
+        ],
+    );
+    said(&obid, "choose Keep");
+    assert!(items_of(&obid, "confirm").is_empty());
+    within(60, "same job hears one-off answer", || {
+        let job = get_job(&obid, &id);
+        (job["question"].is_null() && job["notes"] == json!(["Keep"])).then_some(())
+    });
+}

@@ -1495,10 +1495,18 @@ fn modes_answer_what_they_allow_and_stopping_drops_the_permission() {
         "plan",
         json!([{"tool": "Edit", "input": {"file_path": "src/a.js"}}, {"tool": "Read", "input": {"file_path": "src/a.js"}}]),
     );
-    let planned = ended(&obid, &planning);
-    let summary = planned["summary"].as_str().unwrap();
+    let planned = within(60, "the read-only plan waits for the owner", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{planning}"), None).body;
+        job["question"]["plan"].is_string().then_some(job)
+    });
+    assert_eq!(planned["status"], "running");
+    let summary = planned["question"]["plan"].as_str().unwrap();
     assert!(
         summary.starts_with("answers: deny: Plan mode: read only") && summary.ends_with(", allow"),
         "{planned}"
+    );
+    assert_eq!(
+        call(&obid, "POST", &format!("/v1/jobs/{planning}/stop"), None).body["status"],
+        "stopped"
     );
 }

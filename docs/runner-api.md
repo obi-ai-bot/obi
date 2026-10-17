@@ -1252,6 +1252,12 @@ The owner's secrets for connections they make (#457), kept and used as the Swift
 - **What goes out.** The publish gate and every scan (`crate::scan`: publishing, Obi-to-Obi replies and review results) look for the vault's secrets in those same forms, in every file a push sends, read whole (base64 wrapped over lines joined), and in each commit message; when the vault can't be read, the scan can't run and nothing goes out (`publishError` `Not published: the secret scan couldn't run (the vault can't be read: …).`).
 - **The log.** The log layer takes the vault's secrets out of plug-ins' lines with the other secrets `obid` holds, as `[redacted: vault <name>]`; when the vault can't be read, the values it read last are still taken out.
 
+### obid only: job questions
+
+obid implements the Job `question` and inbox `question` contracts above (#448). It parks a successful turn ending in `QUESTION:` (or a plan-mode turn's plan) without running its check or publishing. The job remains `running`, releases its execution slot, and persists the question in its job JSON. After restart it keeps waiting with no agent running. Answering through the owner's inbox or job messages resumes its session in the same round; stopping clears the question and settles the inbox item. All question keys (`text`, `options`, `details`, `recommended`, `plan`) are always present, including nulls.
+
+A Claude Code `ExitPlanMode` request waits as that same plan question. Only an explicit owner answer may approve it and choose the next mode, including `POST /v1/jobs/{id}/mode` with a mode other than `plan`. Ordinary permission reconsideration never approves a plan. The brain port (#546, #551, #552) must require its owner confirm card before invoking this owner-only path for a trust-widening plan approval; model or agent text alone never authorizes it.
+
 ### obid only: conversations
 
 Many conversations with Oby instead of one thread (#493; decided 2026-10-16, D2): each thing asked on Home can start its own, and every device sees them all. The Swift runner keeps its one thread.

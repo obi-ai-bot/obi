@@ -440,7 +440,7 @@ fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
             false,
         );
     }
-    match shared.jobs.message(&job.id, TRY_AGAIN) {
+    match shared.jobs.message_from_brain(&job.id, TRY_AGAIN) {
         Some(Ok(job)) => (
             format!("Started {name} again on {}.", place(shared, &job)),
             true,
@@ -488,6 +488,14 @@ fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
         Ok(words) => crate::secrets::known().redact(&words),
         Err(why) => return Outcome::Failed(format!("Couldn't tell {name}: {why}")),
     };
+    if job.question.as_ref().is_some_and(|q| q.plan.is_some())
+        && crate::questions::approval(&words).is_some()
+    {
+        confirm_plan(shared, &job, &words);
+        return Outcome::Done(format!(
+            "Approving {name}'s plan waits for your OK: confirm it in your inbox."
+        ));
+    }
     // Running one more round of a job that ended starts work, like Start: only the owner's own
     // Confirm does it (the owner's decision of 2026-10-16). A running job just hears the words.
     if !active {
@@ -510,7 +518,7 @@ fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
             "{name} ended, so one more round with your words waits for your OK: confirm it in your inbox."
         ));
     }
-    match shared.jobs.message(&job.id, &words) {
+    match shared.jobs.message_from_brain(&job.id, &words) {
         Some(Ok(_)) => Outcome::Done(format!("Told {name} what you said.")),
         Some(Err(refused)) => Outcome::Failed(format!("Couldn't tell {name}: {}", refused.0)),
         None => Outcome::Failed("That job isn't here any more.".into()),
@@ -561,7 +569,9 @@ async fn answer_inbox(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
         words = matched.clone();
     }
     // Every option of obid's items is Oby's own words, so it's said; the user's words aren't.
-    let said = if item.options.contains(&words) {
+    let said = if item.kind == "question" {
+        ", with your answer".into()
+    } else if item.options.contains(&words) {
         format!(": {words}")
     } else {
         ", with your words".to_owned()
@@ -651,6 +661,30 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
                     payload: serde_json::json!({"permission": permission.id}),
                 },
             )
+        }
+        "question" => {
+            let Some(job) = job else {
+                return Owners::Refuse("its job is gone.".into());
+            };
+            if job.question.as_ref().is_some_and(|q| q.plan.is_some())
+                && let Some(mode) = crate::questions::approval(words)
+            {
+                Owners::Confirm(
+                    format!(
+                        "Approve {}'s plan in {} mode",
+                        job.short_title(),
+                        mode.title()
+                    ),
+                    format!(
+                        "This approves the waiting plan in {} mode. It happens only if you confirm. The proposed answer, quoted:\n\n{}",
+                        mode.title(),
+                        quoted(words)
+                    ),
+                    on_item(action::ANSWER_ITEM, serde_json::json!({"answer":words})),
+                )
+            } else {
+                Owners::No
+            }
         }
         "permission" | "pluginEvent" => Owners::No,
         // Saying no once to another Obi is one-off; accepting its request at all, remembering
@@ -776,12 +810,53 @@ fn stop(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     })
 }
 
+/// A model proposal is never an owner's plan approval. Pin the question's id so Confirm
+/// cannot approve a later plan on the same job.
+fn confirm_plan(shared: &Arc<Shared>, job: &Job, words: &str) {
+    let mode = crate::questions::approval(words).expect("only an approval is proposed");
+    confirm(
+        shared,
+        &job.id,
+        format!(
+            "Approve {}'s plan in {} mode",
+            job.short_title(),
+            mode.title()
+        ),
+        format!(
+            "This approves the waiting plan in {} mode. It happens only if you confirm. The proposed answer, quoted:\n\n{}",
+            mode.title(),
+            quoted(words)
+        ),
+        Confirmed {
+            action: action::ANSWER_ITEM.into(),
+            target: format!(
+                "{}-question-{}",
+                job.id,
+                job.notes.as_ref().map_or(0, Vec::len)
+            ),
+            payload: serde_json::json!({"answer":words}),
+        },
+    );
+}
+
 /// "Stop asking on the Watch job": a running job's mode, as `POST /v1/jobs/{id}/mode` sets it.
 fn set_mode(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     let Some(mode) = plan.mode else {
         return Outcome::NeedsWhich("Say which mode.".into());
     };
     let mode = mode.to_permissions();
+    let waiting_plans: Vec<Job> = if mode != crate::permissions::Mode::Plan {
+        plan.named()
+            .iter()
+            .filter_map(|id| shared.jobs.get(id))
+            .filter(|job| job.question.as_ref().is_some_and(|q| q.plan.is_some()))
+            .collect()
+    } else {
+        vec![]
+    };
+    for job in &waiting_plans {
+        confirm_plan(shared, job, &format!("Approve: {}", mode.title()));
+    }
     // Bypass stops a job asking anything: it widens what the agent may do, so only the user's
     // own Confirm sets it (#546). The other modes are done at once: ask and plan, and
     // acceptEdits, which still asks before every command (the owner's choice).
@@ -790,10 +865,17 @@ fn set_mode(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
             .named()
             .iter()
             .filter_map(|id| shared.jobs.get(id))
-            .filter(|j| j.status.is_active())
+            .filter(|j| j.status.is_active() && !waiting_plans.iter().any(|p| p.id == j.id))
             .collect();
         if jobs.is_empty() {
-            return Outcome::Done("That job isn't running any more.".into());
+            return Outcome::Done(
+                if waiting_plans.is_empty() {
+                    "That job isn't running any more."
+                } else {
+                    "Approving the plan waits for your OK: confirm it in your inbox."
+                }
+                .into(),
+            );
         }
         let names: Vec<String> = jobs.iter().map(crate::job::Job::short_title).collect();
         // One item per job: each is the owner's own decision.
@@ -820,14 +902,24 @@ fn set_mode(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     }
     let mut done: Vec<String> = vec![];
     for id in plan.named() {
+        if waiting_plans.iter().any(|p| p.id == *id) {
+            continue;
+        }
         if shared.jobs.get(id).is_some_and(|j| j.status.is_active())
-            && let Some(job) = shared.jobs.set_mode(id, mode)
+            && let Some(job) = shared.jobs.set_mode_from_brain(id, mode)
         {
             done.push(job.short_title());
         }
     }
     if done.is_empty() {
-        return Outcome::Done("That job isn't running any more.".into());
+        return Outcome::Done(
+            if waiting_plans.is_empty() {
+                "That job isn't running any more."
+            } else {
+                "Approving the plan waits for your OK: confirm it in your inbox."
+            }
+            .into(),
+        );
     }
     Outcome::Done(format!(
         "{} {} in {} mode now.",

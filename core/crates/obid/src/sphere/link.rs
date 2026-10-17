@@ -333,6 +333,41 @@ impl Link {
                 link.permission_note(note);
             }
         }));
+        // A crash after saving an answer but before settling its inbox card must not leave an
+        // orphan question. The job file is authoritative; pending questions missing cards are
+        // repaired by the following loop.
+        let questions: Vec<Item> = link
+            .lock()
+            .inbox
+            .values()
+            .filter(|item| item.kind == "question" && item.obi.is_none() && item.done.is_none())
+            .cloned()
+            .collect();
+        let stale: Vec<Item> = questions
+            .into_iter()
+            .filter(|item| {
+                !link.jobs.get(&item.job).is_some_and(|job| {
+                    job.question.is_some()
+                        && job.status != crate::job::Status::Stopped
+                        && item.id
+                            == format!(
+                                "{}-question-{}",
+                                job.id,
+                                job.notes.as_ref().map_or(0, Vec::len)
+                            )
+                })
+            })
+            .collect();
+        for mut item in stale {
+            item.done = Some(time::now());
+            link.lock().inbox.insert(item.id.clone(), item.clone());
+            link.save_item(&item);
+        }
+        for job in link.jobs.list(usize::MAX) {
+            if job.question.is_some() && job.status != crate::job::Status::Stopped {
+                link.permission_note(crate::jobs::PermissionNote::Question(Box::new(job)));
+            }
+        }
         let hook = Arc::downgrade(&link);
         link.jobs.on_review_end(Arc::new(move |job, done| {
             let link = hook.upgrade();
@@ -433,6 +468,27 @@ impl Link {
         {
             let mut state = self.lock();
             match note {
+                PermissionNote::Question(job) => {
+                    let item = inbox::job_question_item(&job, now);
+                    for other in state.inbox.values_mut() {
+                        if other.job == job.id && other.done.is_none() && other.id != item.id {
+                            other.done = Some(now);
+                            changed.push(other.clone());
+                        }
+                    }
+                    if !state.inbox.contains_key(&item.id) {
+                        state.inbox.insert(item.id.clone(), item.clone());
+                        changed.push(item);
+                    }
+                }
+                PermissionNote::QuestionSettled { job, index, answer } => {
+                    let id = format!("{job}-question-{index}");
+                    if let Some(item) = state.inbox.get_mut(&id).filter(|i| i.done.is_none()) {
+                        item.done = Some(now);
+                        item.answer = answer;
+                        changed.push(item.clone());
+                    }
+                }
                 PermissionNote::Waiting(job, permission) => {
                     let item = inbox::permission_item(&job, &permission, now);
                     for other in state.inbox.values_mut() {
@@ -2724,6 +2780,35 @@ impl Link {
                 .ok_or_else(|| api(StatusCode::NOT_FOUND, "There's no such inbox item."))?;
             if item.done.is_some() {
                 return Err(api(StatusCode::CONFLICT, "That item is done already."));
+            }
+            if item.kind == "question" && item.obi.is_none() {
+                drop(state);
+                return match given {
+                    Given::Answer(answer) => {
+                        // Owner endpoint only. A brain proposing persistent/trust-widening actions
+                        // must surface its confirm card before calling this boundary (#546).
+                        self.jobs
+                            .answer_job_question(&item.job, &answer, Some(&item.id))
+                            .map_err(|e| api(StatusCode::CONFLICT, e.0))?;
+                        Ok(self
+                            .lock()
+                            .inbox
+                            .get(&item.id)
+                            .cloned()
+                            .unwrap_or(item)
+                            .to_json())
+                    }
+                    Given::Done | Given::Later(_) => {
+                        let mut item = item;
+                        match given {
+                            Given::Later(at) => item.later = Some(at),
+                            _ => item.done = Some(now),
+                        }
+                        self.lock().inbox.insert(item.id.clone(), item.clone());
+                        self.save_item(&item);
+                        Ok(item.to_json())
+                    }
+                };
             }
             if item.kind == "permission" {
                 drop(state);

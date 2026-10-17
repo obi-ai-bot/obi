@@ -900,3 +900,268 @@ fn the_default_login_is_a_copy_the_person_keeps_unchanged() {
     assert!(!login.join(".claude/.credentials.json").exists());
     assert!(login.join(".claude.json").exists());
 }
+
+// Ports PermissionTests.aQuestionSendsEveryKey, exercising the binary and both summary/plan paths.
+#[test]
+fn a_question_sends_every_key_and_resumes_the_same_round() {
+    let folder = Folder::new("question-keys");
+    let remote = fixture(&folder.0);
+    let config = config(&folder.0, &remote);
+    let obid = start(&folder.0, &config);
+    let summary = "Choose *.swift?\n**QUESTION:** Which *.swift?\nOPTIONS: Keep (Recommended) — Keep the API. | Change — Change the API.";
+    let id = post_job(&obid, json!({"repo":"obi-e2e/fixture-app", "kind":"investigate", "task":format!("SAY_JSON: {}", json!(summary)), "check":"touch checked; exit 42"})).body["id"].as_str().unwrap().to_owned();
+    let job = until(&obid, &id, |j| j["question"].is_object());
+    assert_eq!(job["status"], "running");
+    assert_eq!(job["step"], "Waiting for your answer");
+    assert_eq!(request(&obid, "GET", "/v1/status", None).body["running"], 0);
+    assert!(
+        !obid
+            .home
+            .join("worktrees")
+            .join(&id)
+            .join("checked")
+            .exists()
+    );
+    // A waiting question releases its slot; another actual job can finish.
+    request(
+        &obid,
+        "PUT",
+        "/v1/settings/jobs",
+        Some(r#"{"maxRunning":1}"#),
+    );
+    let other = post_job(
+        &obid,
+        json!({"repo":"obi-e2e/fixture-app", "kind":"investigate", "task":"ECHO"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(wait(&obid, &other)["status"], "done");
+    assert_eq!(
+        job["question"],
+        json!({"text":"Which *.swift?", "options":["Keep","Change"], "details":["Keep the API.","Change the API."],"recommended":0,"plan":null})
+    );
+    let inbox = request(&obid, "GET", "/v1/inbox", None).body;
+    let item = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["job"] == id)
+        .unwrap();
+    assert_eq!(item["kind"], "question");
+    let round = job["round"].clone();
+    let answer = request(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
+        Some(r#"{"answer":"ECHO"}"#),
+    );
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    let ended = wait(&obid, &id);
+    assert!(ended["question"].is_null());
+    assert_eq!(ended["round"], round);
+    assert!(
+        ended["summaries"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("heard: ECHO"),
+        "{ended}"
+    );
+    assert_eq!(ended["status"], "failed"); // check runs only after the answer
+    assert_eq!(ended["notes"], json!(["ECHO"]));
+    assert_eq!(
+        request(
+            &obid,
+            "POST",
+            &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
+            Some(r#"{"answer":"again"}"#)
+        )
+        .status,
+        409
+    );
+}
+
+#[test]
+fn a_question_keeps_waiting_after_restart_and_stop_drops_it() {
+    let folder = Folder::new("question-restart");
+    let remote = fixture(&folder.0);
+    let config = config(&folder.0, &remote);
+    let mut obid = start(&folder.0, &config);
+    let id = post_job(&obid, json!({"repo":"obi-e2e/fixture-app", "kind":"investigate", "task":format!("SAY_JSON: {}", json!("QUESTION: Which?\nOPTIONS: A | B"))})).body["id"].as_str().unwrap().to_owned();
+    let job = until(&obid, &id, |j| j["question"].is_object());
+    assert_eq!(job["question"]["details"], Value::Null);
+    assert_eq!(job["question"]["recommended"], Value::Null);
+    assert_eq!(job["question"]["plan"], Value::Null);
+    obid.child.kill().unwrap();
+    obid.child.wait().unwrap();
+    drop(obid);
+    let mut obid = start(&folder.0, &config);
+    std::thread::sleep(Duration::from_millis(250));
+    let kept = request(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(kept["status"], "running");
+    assert_eq!(kept["step"], "Waiting for your answer");
+    assert_eq!(kept["question"], job["question"]);
+    let inbox = request(&obid, "GET", "/v1/inbox", None).body;
+    assert_eq!(
+        inbox
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["job"] == id && i["state"] == "open")
+            .count(),
+        1
+    );
+    assert_eq!(
+        request(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/messages"),
+            Some(r#"{"text":"ECHO"}"#)
+        )
+        .status,
+        200
+    );
+    let ended = wait(&obid, &id);
+    assert_eq!(ended["round"], job["round"]);
+    assert!(ended["summary"].as_str().unwrap().contains("heard: ECHO"));
+    // Simulate the crash window after the job answer was persisted but its card wasn't settled.
+    let old = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["job"] == id)
+        .unwrap();
+    let path = obid
+        .home
+        .join("inbox")
+        .join(format!("{}.json", old["id"].as_str().unwrap()));
+    let mut raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    raw["done"] = Value::Null;
+    std::fs::write(&path, raw.to_string()).unwrap();
+    obid.child.kill().unwrap();
+    obid.child.wait().unwrap();
+    drop(obid);
+    let obid = start(&folder.0, &config);
+    let repaired = request(&obid, "GET", "/v1/inbox", None).body;
+    assert!(
+        !repaired
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["job"] == id && i["state"] == "open")
+    );
+    let id = post_job(&obid, json!({"repo":"obi-e2e/fixture-app", "kind":"investigate", "task":format!("SAY_JSON: {}", json!("QUESTION: Stop?"))})).body["id"].as_str().unwrap().to_owned();
+    until(&obid, &id, |j| j["question"].is_object());
+    let stopped = request(&obid, "POST", &format!("/v1/jobs/{id}/stop"), Some("{}")).body;
+    assert_eq!(stopped["status"], "stopped");
+    assert!(stopped["question"].is_null());
+    let inbox = request(&obid, "GET", "/v1/inbox", None).body;
+    assert!(
+        !inbox
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["job"] == id && i["state"] == "open")
+    );
+}
+
+#[test]
+fn a_plan_waits_for_the_owner_and_mode_changes_only_on_approval() {
+    let folder = Folder::new("question-plan");
+    let remote = fixture(&folder.0);
+    let config = config(&folder.0, &remote);
+    let obid = start(&folder.0, &config);
+    for task in [
+        format!("SAY_JSON: {}", json!("1. Read\n2. Test")),
+        r#"ASK: {"tool":"ExitPlanMode","input":{"plan":"1. Read\n2. Test"}}"#.into(),
+    ] {
+        let id = post_job(
+            &obid,
+            json!({"repo":"obi-e2e/fixture-app","kind":"investigate","task":task,"mode":"plan"}),
+        )
+        .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let job = until(&obid, &id, |j| j["question"]["plan"].is_string());
+        assert_eq!(job["mode"], "plan");
+        assert!(job["permission"].is_null());
+        assert_eq!(job["question"]["text"], "Approve the plan?");
+        assert_eq!(job["question"]["recommended"], 0);
+        assert_eq!(job["question"]["details"], Value::Null);
+        assert_eq!(
+            job["question"]["options"],
+            json!(["Approve: Accept edits", "Approve: Bypass", "Change it"])
+        );
+        assert_eq!(
+            request(
+                &obid,
+                "POST",
+                &format!("/v1/jobs/{id}/messages"),
+                Some(r#"{"text":"Approve: Bypass"}"#)
+            )
+            .status,
+            200
+        );
+        let ended = wait(&obid, &id);
+        assert_eq!(ended["mode"], "bypass");
+        assert!(ended["question"].is_null());
+        assert_eq!(ended["round"], job["round"]);
+    }
+}
+
+#[test]
+fn a_native_plan_question_starts_the_job_already_queued_behind_it() {
+    let folder = Folder::new("question-plan-slot");
+    let remote = fixture(&folder.0);
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    assert_eq!(
+        request(
+            &obid,
+            "PUT",
+            "/v1/settings/jobs",
+            Some(r#"{"maxRunning":1}"#)
+        )
+        .status,
+        200
+    );
+    let plan=post_job(&obid,json!({"repo":"obi-e2e/fixture-app","kind":"investigate","mode":"plan","task":r#"WAIT_TO_ASK ASK: {"tool":"ExitPlanMode","input":{"plan":"Read first."}}"#})).body["id"].as_str().unwrap().to_owned();
+    until(&obid, &plan, |j| j["status"] == "running");
+    let next = post_job(
+        &obid,
+        json!({"repo":"obi-e2e/fixture-app","kind":"investigate","task":"SLEEP"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    until(&obid, &next, |j| j["waiting"]["kind"] == "cap");
+    let release = obid.home.join("worktrees").join(&plan).join(".obi");
+    std::fs::create_dir_all(&release).unwrap();
+    std::fs::write(release.join("release-ask"), "").unwrap();
+    until(&obid, &plan, |j| j["question"].is_object());
+    until(&obid, &next, |j| j["status"] == "running"); // No create/answer/settings call wakes scheduling.
+    beat(&obid, &next);
+    let round = request(&obid, "GET", &format!("/v1/jobs/{plan}"), None).body["round"].clone();
+    let accepted = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{plan}/messages"),
+        Some(r#"{"text":"Approve: Bypass"}"#),
+    );
+    assert_eq!(accepted.status, 200, "{}", accepted.text);
+    assert_eq!(accepted.body["status"], "queued");
+    assert!(accepted.body["question"].is_null());
+    until(&obid, &plan, |j| j["waiting"]["kind"] == "cap");
+    assert_eq!(request(&obid, "GET", "/v1/status", None).body["running"], 1);
+    request(&obid, "POST", &format!("/v1/jobs/{next}/stop"), None);
+    let resumed = until(&obid, &plan, |j| j["status"] == "done");
+    assert_eq!(resumed["mode"], "bypass");
+    assert_eq!(resumed["round"], round);
+    assert_eq!(resumed["notes"], json!(["Approve: Bypass"]));
+}
