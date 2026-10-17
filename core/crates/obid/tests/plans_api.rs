@@ -3612,7 +3612,8 @@ fn the_brain_cannot_settle_a_secret_by_changing_the_mode() {
     let id = job_in(
         &obid,
         "Env reader",
-        r#"ASK: {"tool": "Bash", "input": {"command": "cat .env"}}"#,
+        // A read: Ask, Plan and Accept edits all let reads through without asking.
+        r#"ASK: {"tool": "Read", "input": {"file_path": ".env"}}"#,
         "sandbox",
     );
     let permission = within(30, "a permission waits", || {

@@ -1001,7 +1001,7 @@ fn a_mode_change_never_settles_a_secret() {
     let obid = start(&folder.0, &config(&folder.0, &remote));
     let task = format!(
         "ASK: {}",
-        json!({"tool": "Bash", "input": {"command": "cat .env"}})
+        json!({"tool": "Read", "input": {"file_path": ".env"}})
     );
     let id = post_job(
         &obid,
