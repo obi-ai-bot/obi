@@ -267,7 +267,7 @@ fn status_answers_with_engine_obid() {
     assert_eq!(status["clearedAt"], Value::Null);
     assert_eq!(status["github"], "owner");
     assert_eq!(status["checks"], "no app");
-    assert_eq!(status["permissions"], json!({"mode": "bypass"}));
+    assert_eq!(status["permissions"], json!({"mode": "sandbox"}));
     let worktrees = folder.0.join("home").join("worktrees");
     assert_eq!(
         status["cleanup"],

@@ -2,7 +2,9 @@
 //! job asks its owner. Whatever the mode, obid's fixed denials come first (`crate::policy`: no
 //! publishing, the worktree only, no background work, only Tetrix's reads among MCP tools); then
 //! the owner's saved rules for the repository (deny beats allow); then the mode allows, refuses or
-//! asks. Reads and the agent's own bookkeeping never ask.
+//! asks. Reads and the agent's own bookkeeping never ask, except in Sandbox mode (the default),
+//! where obid answers whatever stays inside the job's OS sandbox and asks only about what leaves
+//! it or sticks (`reach`).
 //!
 //! The rules and Settings › Permissions' default mode are kept in `home/permissions.json` (0600).
 
@@ -20,12 +22,23 @@ pub enum Mode {
     AcceptEdits,
     /// The agent only reads; everything else asks, and edits are refused.
     Plan,
-    /// obid answers everything by its rules: the default.
+    /// obid answers everything by its rules, the network and secrets too.
     Bypass,
+    /// obid answers what stays inside the job's OS sandbox (edits in the worktree, commands, tests,
+    /// reads) by its rules and records it on the job; it asks about what leaves the sandbox
+    /// (the network beyond the model's API, secrets and the vault, a read outside the worktree):
+    /// the default.
+    Sandbox,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 4] = [Mode::Ask, Mode::AcceptEdits, Mode::Plan, Mode::Bypass];
+    pub const ALL: [Mode; 5] = [
+        Mode::Ask,
+        Mode::AcceptEdits,
+        Mode::Plan,
+        Mode::Bypass,
+        Mode::Sandbox,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -33,6 +46,7 @@ impl Mode {
             Mode::AcceptEdits => "acceptEdits",
             Mode::Plan => "plan",
             Mode::Bypass => "bypass",
+            Mode::Sandbox => "sandbox",
         }
     }
 
@@ -43,6 +57,7 @@ impl Mode {
             Mode::AcceptEdits => "Accept edits",
             Mode::Plan => "Plan",
             Mode::Bypass => "Bypass",
+            Mode::Sandbox => "Sandbox",
         }
     }
 
@@ -68,6 +83,8 @@ pub struct Call {
     /// The files it writes, as the agent named them.
     pub paths: Vec<String>,
     pub url: Option<String>,
+    /// What a search or listing looks at (`path`, a glob), as the agent named it.
+    pub reads: Vec<String>,
 }
 
 impl Call {
@@ -81,6 +98,12 @@ impl Call {
                 .into_iter()
                 .collect(),
             url: text("url"),
+            reads: ["path", "pattern", "glob"]
+                .iter()
+                // A Grep's pattern is a regular expression, not a place.
+                .filter(|key| !(tool == "Grep" && **key == "pattern"))
+                .filter_map(|key| text(key))
+                .collect(),
         }
     }
 }
@@ -100,6 +123,85 @@ pub struct Permission {
     pub rule: Option<String>,
     /// "Yes, and don't ask again for swift test in deskree-inc/oby", or none without a rule.
     pub always: Option<String>,
+    /// Why it asks when the job's mode would have answered it, like "It reaches the network beyond
+    /// the model's API."; none otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+/// A permission obid answered by its own rules, without the owner, kept on the job (`answered`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Answered {
+    pub id: String,
+    pub tool: String,
+    /// "Run cargo test", "Edit permissions.rs".
+    pub title: String,
+    /// The command, the files or the address, cut to [`DETAIL_CAP`] characters.
+    pub detail: String,
+    /// `allowed` or `refused`.
+    pub decision: String,
+    /// Why it was refused, in the words the agent heard; none when allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Seconds since the epoch.
+    pub at: i64,
+}
+
+/// How many answers a job keeps, newest last; `answeredCount` counts them all.
+pub const KEPT_ANSWERED: usize = 50;
+
+/// How much of a command a kept answer holds.
+const DETAIL_CAP: usize = 300;
+
+impl Answered {
+    /// `answer` to `call`, as the job's page says it.
+    pub fn of(
+        call: &Call,
+        repo: &str,
+        worktree: &Path,
+        refused: Option<&str>,
+        at: i64,
+    ) -> Answered {
+        let card = card(call, &new_id(), repo, worktree);
+        Answered {
+            id: card.id,
+            tool: card.tool,
+            title: card.title,
+            detail: card.detail.chars().take(DETAIL_CAP).collect(),
+            decision: if refused.is_some() {
+                "refused"
+            } else {
+                "allowed"
+            }
+            .into(),
+            reason: refused.map(str::to_owned),
+            at,
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        let mut value = json!({"id": self.id, "tool": self.tool, "title": self.title,
+                               "detail": self.detail, "decision": self.decision,
+                               "at": obi_protocol::time::format(self.at)});
+        if let Some(reason) = &self.reason {
+            value["reason"] = json!(reason);
+        }
+        value
+    }
+}
+
+/// Whether obid's answer to `tool` is worth the owner's seeing: the agent's own bookkeeping isn't.
+pub fn is_noted(tool: &str) -> bool {
+    !matches!(tool, "ExitPlanMode" | "Task" | "Agent" | "TodoWrite")
+}
+
+/// `entry` added to a job's answers, which keep the latest [`KEPT_ANSWERED`].
+pub fn keep_answered(kept: &mut Vec<Answered>, count: &mut u32, entry: Answered) {
+    kept.push(entry);
+    *count += 1;
+    if kept.len() > KEPT_ANSWERED {
+        kept.drain(..kept.len() - KEPT_ANSWERED);
+    }
 }
 
 /// A rule the owner saved for a repository.
@@ -279,12 +381,619 @@ const RUNS_ANYTHING_AFTER: [&str; 17] = [
     "xcrun swift",
 ];
 
+/// What makes a call leave the job's OS sandbox or stick, so Sandbox mode asks the owner about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// Secrets, the vault or a login: never covered by a saved allow rule, never saved as one.
+    Secrets,
+    /// The network beyond the model's API: a download, an install, a web page.
+    Network,
+    /// A read outside the job's worktree.
+    Outside,
+    /// A tool obid doesn't know stays inside the sandbox.
+    Unknown,
+}
+
+impl Reach {
+    pub fn why(self) -> &'static str {
+        match self {
+            Reach::Secrets => "It touches secrets or the vault.",
+            Reach::Network => "It reaches the network beyond the model's API.",
+            Reach::Outside => "It reads outside the job's worktree.",
+            Reach::Unknown => "obid doesn't know this tool stays inside the job's sandbox.",
+        }
+    }
+}
+
+/// Tools that look at files without changing them.
+const READS: &[&str] = &["Read", "Grep", "Glob", "LS", "NotebookRead"];
+
+/// Programs that reach the network whatever follows them.
+const NETWORK_PROGRAMS: &[&str] = &[
+    "curl",
+    "wget",
+    "nc",
+    "ncat",
+    "netcat",
+    "telnet",
+    "ssh",
+    "scp",
+    "sftp",
+    "rsync",
+    "ftp",
+    "socat",
+    "nmap",
+    "dig",
+    "nslookup",
+    "ping",
+    "traceroute",
+    "aria2c",
+    "http",
+    "xh",
+    "gh",
+    "npx",
+    "bunx",
+    "gem",
+    "apt",
+    "apt-get",
+];
+
+/// What comes before the program a command runs (its options and its numbers are skipped too).
+/// Shells aren't here: what `bash -c` runs is read as a command of its own ([`simple_commands`]).
+const WRAPPERS: &[&str] = &[
+    "sudo",
+    "doas",
+    "env",
+    "time",
+    "nohup",
+    "timeout",
+    "nice",
+    "ionice",
+    "xargs",
+    "exec",
+    "command",
+    "builtin",
+    "stdbuf",
+    "watch",
+    "setsid",
+    "caffeinate",
+];
+
+/// Shells: `-c` runs the code after it, and a here-document fed to one is code too.
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+
+/// Tools and the subcommands of theirs that download or install (`npm install`, `cargo add`).
+/// An empty list is every subcommand. git's `remote` and `submodule` are read in [`downloads`].
+const NETWORK_AFTER: &[(&str, &[&str])] = &[
+    (
+        "npm",
+        &[
+            "install", "i", "ci", "add", "update", "upgrade", "publish", "exec", "create",
+        ],
+    ),
+    (
+        "pnpm",
+        &[
+            "install", "i", "add", "update", "up", "upgrade", "publish", "dlx", "create",
+        ],
+    ),
+    (
+        "yarn",
+        &[
+            "install", "add", "up", "upgrade", "publish", "dlx", "create",
+        ],
+    ),
+    ("bun", &["install", "i", "add", "update", "x", "create"]),
+    (
+        "cargo",
+        &[
+            "install", "add", "fetch", "update", "publish", "search", "login",
+        ],
+    ),
+    ("go", &["get", "install"]),
+    ("pip", &["install", "download"]),
+    ("pip3", &["install", "download"]),
+    ("uv", &["add", "sync", "pip", "tool", "lock"]),
+    ("poetry", &["add", "install", "update", "lock"]),
+    ("bundle", &["install", "update", "add"]),
+    ("git", &["clone", "fetch", "pull", "ls-remote"]),
+    ("docker", &[]),
+    ("podman", &[]),
+    (
+        "brew",
+        &["install", "update", "upgrade", "reinstall", "tap"],
+    ),
+    ("dotnet", &["restore", "add"]),
+    ("mix", &["deps.get", "deps.update"]),
+    ("composer", &[]),
+    ("dnf", &[]),
+    ("yum", &[]),
+    ("conda", &["install", "update", "create"]),
+];
+
+/// How deep obid reads code inside code (`bash -c "$(…)"`); deeper, it asks.
+const NESTING: usize = 4;
+
+/// A program's name without its folder: `/usr/bin/curl` is `curl`.
+fn base(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+/// The simple commands `command` runs, each as its words with the quotes taken out, read the way
+/// a shell reads it, best-effort: split at `|`, `;`, `&`, `(`, `)` and new lines outside quotes,
+/// comments dropped. What `$(…)` and backticks run (inside double quotes too), what a shell runs
+/// with `-c` or `eval`, and a here-document or here-string fed to a shell are read the same way.
+/// Any other here-document and every quoted argument are words, not commands: a commit message
+/// that says "run curl" isn't a download. None when the code nests deeper than [`NESTING`].
+fn simple_commands(command: &str) -> Option<Vec<Vec<String>>> {
+    let mut out = Vec::new();
+    read_commands(command, 0, &mut out).then_some(out)
+}
+
+/// Where [`simple_commands`] is in a line.
+#[derive(Default)]
+struct Reader {
+    commands: Vec<Vec<String>>,
+    words: Vec<String>,
+    word: String,
+    in_word: bool,
+    /// Here-documents waiting for the end of the line: the word that ends one, whether its lines'
+    /// tabs are stripped (`<<-`), and the command it feeds.
+    heredocs: Vec<(String, bool, usize)>,
+    /// The text fed to a command (a here-document's, a here-string), and that command.
+    fed: Vec<(String, usize)>,
+    /// The next word is a here-string (`<<< word`).
+    here_string: bool,
+}
+
+impl Reader {
+    fn end_word(&mut self) {
+        if self.in_word {
+            let word = std::mem::take(&mut self.word);
+            if std::mem::take(&mut self.here_string) {
+                self.fed.push((word, self.commands.len()));
+            } else {
+                self.words.push(word);
+            }
+            self.in_word = false;
+        }
+    }
+
+    fn end_command(&mut self) {
+        self.end_word();
+        if !self.words.is_empty() {
+            self.commands.push(std::mem::take(&mut self.words));
+        }
+    }
+}
+
+/// Adds the simple commands of `text` to `out`, and those of the code inside it; false when it
+/// nests deeper than [`NESTING`].
+fn read_commands(text: &str, depth: usize, out: &mut Vec<Vec<String>>) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    read_until(&chars, &mut i, None, depth, out)
+}
+
+/// Reads the simple commands of `chars` from `*i` into `out`, up to `stop` (the `)` that closes a
+/// `$(`, or the backtick that closes one), and leaves `*i` after it. False when the code nests
+/// deeper than [`NESTING`].
+fn read_until(
+    chars: &[char],
+    i: &mut usize,
+    stop: Option<char>,
+    depth: usize,
+    out: &mut Vec<Vec<String>>,
+) -> bool {
+    if depth > NESTING {
+        return false;
+    }
+    let mut r = Reader::default();
+    let mut ok = true;
+    // Subshells opened inside: their `)` isn't `stop`'s.
+    let mut parens = 0usize;
+    while *i < chars.len() {
+        let c = chars[*i];
+        if Some(c) == stop && (c == '`' || parens == 0) {
+            *i += 1;
+            break;
+        }
+        match c {
+            '\'' => {
+                r.in_word = true;
+                *i += 1;
+                while *i < chars.len() && chars[*i] != '\'' {
+                    r.word.push(chars[*i]);
+                    *i += 1;
+                }
+            }
+            '"' => {
+                r.in_word = true;
+                *i += 1;
+                while *i < chars.len() && chars[*i] != '"' {
+                    match chars[*i] {
+                        '\\' if *i + 1 < chars.len() => {
+                            r.word.push(chars[*i + 1]);
+                            *i += 1;
+                        }
+                        '$' if chars.get(*i + 1) == Some(&'(') => {
+                            *i += 2;
+                            ok &= read_until(chars, i, Some(')'), depth + 1, out);
+                            continue;
+                        }
+                        '`' => {
+                            *i += 1;
+                            ok &= read_until(chars, i, Some('`'), depth + 1, out);
+                            continue;
+                        }
+                        other => r.word.push(other),
+                    }
+                    *i += 1;
+                }
+            }
+            '\\' => {
+                // A backslash before a new line joins the lines.
+                if chars.get(*i + 1).is_some_and(|&n| n != '\n') {
+                    r.in_word = true;
+                    r.word.push(chars[*i + 1]);
+                }
+                *i += 1;
+            }
+            '$' if chars.get(*i + 1) == Some(&'(') => {
+                *i += 2;
+                ok &= read_until(chars, i, Some(')'), depth + 1, out);
+                r.in_word = true;
+                continue;
+            }
+            '`' => {
+                *i += 1;
+                ok &= read_until(chars, i, Some('`'), depth + 1, out);
+                r.in_word = true;
+                continue;
+            }
+            '#' if !r.in_word => {
+                while *i + 1 < chars.len() && chars[*i + 1] != '\n' {
+                    *i += 1;
+                }
+            }
+            ' ' | '\t' => r.end_word(),
+            '\n' => {
+                r.end_command();
+                // The lines of each here-document the line opened, up to the word that ends it.
+                for (end, strip, command) in std::mem::take(&mut r.heredocs) {
+                    let mut body = String::new();
+                    while *i + 1 < chars.len() {
+                        let start = *i + 1;
+                        let stop = chars[start..]
+                            .iter()
+                            .position(|&c| c == '\n')
+                            .map_or(chars.len(), |n| start + n);
+                        let line: String = chars[start..stop].iter().collect();
+                        *i = stop;
+                        let line = if strip {
+                            line.trim_start_matches('\t')
+                        } else {
+                            &line
+                        };
+                        if line == end {
+                            break;
+                        }
+                        body.push_str(line);
+                        body.push('\n');
+                    }
+                    r.fed.push((body, command));
+                }
+            }
+            '(' => {
+                parens += 1;
+                r.end_command();
+            }
+            ')' => {
+                parens = parens.saturating_sub(1);
+                r.end_command();
+            }
+            '|' | ';' | '&' => r.end_command(),
+            '<' | '>' => {
+                r.end_word();
+                if c == '<' && chars.get(*i + 1) == Some(&'<') {
+                    if chars.get(*i + 2) == Some(&'<') {
+                        r.here_string = true;
+                        *i += 3;
+                        continue;
+                    }
+                    *i += 2;
+                    let strip = chars.get(*i) == Some(&'-');
+                    if strip {
+                        *i += 1;
+                    }
+                    while chars.get(*i).is_some_and(|c| *c == ' ' || *c == '\t') {
+                        *i += 1;
+                    }
+                    let mut end = String::new();
+                    while let Some(&d) = chars.get(*i) {
+                        if d.is_whitespace() || matches!(d, '|' | ';' | '&' | '(' | ')' | '<' | '>')
+                        {
+                            break;
+                        }
+                        if !matches!(d, '\'' | '"' | '\\') {
+                            end.push(d);
+                        }
+                        *i += 1;
+                    }
+                    r.heredocs.push((end, strip, r.commands.len()));
+                    continue;
+                }
+                // `2>&1`, `<&3`: the `&` names a file descriptor.
+                if chars.get(*i + 1) == Some(&'&') {
+                    *i += 1;
+                }
+            }
+            other => {
+                r.in_word = true;
+                r.word.push(other);
+            }
+        }
+        *i += 1;
+    }
+    r.end_command();
+    let mut nested = Vec::new();
+    for (text, command) in std::mem::take(&mut r.fed) {
+        let feeds_a_shell = r.commands.get(command).is_some_and(|words| {
+            program_index(words).is_some_and(|p| SHELLS.contains(&base(&words[p])))
+        });
+        if feeds_a_shell {
+            nested.push(text);
+        }
+    }
+    for words in &r.commands {
+        let Some(p) = program_index(words) else {
+            continue;
+        };
+        let program = base(&words[p]);
+        let rest = &words[p + 1..];
+        // `bash -c '…'`, `sh -ec "…"`: the code after the option.
+        if SHELLS.contains(&program)
+            && let Some(flag) = rest
+                .iter()
+                .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'))
+            && let Some(code) = rest.get(flag + 1)
+        {
+            nested.push(code.clone());
+        }
+        if program == "eval" {
+            nested.push(rest.join(" "));
+        }
+    }
+    out.append(&mut r.commands);
+    ok && nested
+        .iter()
+        .all(|code| read_commands(code, depth + 1, out))
+}
+
+/// Where the program of a simple command is, after assignments (`FOO=1`) and wrappers (`sudo`,
+/// `timeout 5s`, `env -i`) with their options and numbers.
+fn program_index(words: &[String]) -> Option<usize> {
+    words.iter().position(|w| {
+        let digits = w.trim_end_matches(['s', 'm', 'h', 'd']);
+        let number = digits.starts_with(|c: char| c.is_ascii_digit())
+            && digits.chars().all(|c| c.is_ascii_digit() || c == '.');
+        !(is_assignment(w) || w.starts_with('-') || number || WRAPPERS.contains(&base(w)))
+    })
+}
+
+/// The subcommand of a tool's command: the first word after the tool's own options, and after the
+/// values of git's `-C` and `-c`.
+fn subcommand<'a>(program: &str, rest: &'a [String]) -> Option<(usize, &'a str)> {
+    let mut i = 0;
+    while i < rest.len() {
+        let word = rest[i].as_str();
+        if program == "git" && matches!(word, "-C" | "-c") {
+            i += 2;
+        } else if word.starts_with('-') {
+            i += 1;
+        } else {
+            return Some((i, word));
+        }
+    }
+    None
+}
+
+/// Whether a simple command reaches the network: a client, an install, a clone.
+fn downloads(words: &[String]) -> bool {
+    let Some(p) = program_index(words) else {
+        return false;
+    };
+    let program = base(&words[p]);
+    if NETWORK_PROGRAMS.contains(&program) {
+        return true;
+    }
+    let rest = &words[p + 1..];
+    let sub = subcommand(program, rest);
+    if program == "git" {
+        // `git remote -v` and `git submodule status` stay local.
+        let then = |i: usize| subcommand(program, &rest[i + 1..]).map(|(_, w)| w);
+        match sub {
+            Some((i, "remote")) => return matches!(then(i), Some("update" | "show" | "prune")),
+            Some((i, "submodule")) => return matches!(then(i), Some("update" | "add" | "foreach")),
+            _ => {}
+        }
+    }
+    let Some((_, subcommands)) = NETWORK_AFTER.iter().find(|(name, _)| *name == program) else {
+        return false;
+    };
+    subcommands.is_empty() || sub.is_some_and(|(_, s)| subcommands.contains(&s))
+}
+
+/// Whether `command` reaches the network: a client, an install, a clone, in any of the simple
+/// commands it runs ([`simple_commands`]). Matching words is best-effort, like publishing's
+/// (`crate::policy`): the job sandbox is what confines the files, and a script that opens a socket
+/// itself isn't caught here. Code nested deeper than obid reads asks.
+fn uses_network(command: &str) -> bool {
+    simple_commands(command).is_none_or(|commands| commands.iter().any(|w| downloads(w)))
+}
+
+/// Names that say a file holds secrets or a login, wherever it is.
+const SECRET_NAMES: &[&str] = &[
+    "api-token",
+    "credentials.json",
+    ".credentials.json",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".pgpass",
+    ".git-credentials",
+];
+
+/// Folders that hold secrets or a login.
+const SECRET_FOLDERS: &[&str] = &[".ssh", ".aws", ".gnupg", ".kube", ".docker"];
+
+/// Variables that name where the agent's own login is.
+const LOGIN_VARIABLES: &[&str] = &["claude_config_dir", "codex_home"];
+
+/// Whether `text` (a path, an address, a word of a command) names a secret or a login: a
+/// well-known file or folder, an `.env` file, the folder of the agent's own login, a process's
+/// environment.
+fn names_a_secret(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if LOGIN_VARIABLES.iter().any(|v| lower.contains(v))
+        || (lower.contains("/proc/") && lower.ends_with("/environ"))
+    {
+        return true;
+    }
+    lower.split(['=', ':', ',']).any(|part| {
+        if part
+            .split('/')
+            .any(|folder| SECRET_FOLDERS.contains(&folder))
+        {
+            return true;
+        }
+        let name = base(part);
+        SECRET_NAMES.contains(&name)
+            || name == ".env"
+            || (name.starts_with(".env.")
+                && !name.ends_with(".example")
+                && !name.ends_with(".sample")
+                && !name.ends_with(".template"))
+    })
+}
+
+/// Whether `text` holds a value the vault keeps, in any form the vault finds. When the vault can't
+/// be read, it might: ask.
+fn holds_a_vault_value(text: &str) -> bool {
+    crate::vault::for_agent(text).map_or(true, |clean| clean != text)
+}
+
+/// Programs whose first argument is a pattern to look for, not a file.
+const SEARCHES: &[&str] = &["grep", "egrep", "fgrep", "rg", "ag", "ack"];
+
+/// Whether a simple command touches secrets or a login: it prints the environment or a keychain's
+/// passwords, asks for a code host's login, or names a secret's file ([`names_a_secret`]). What a
+/// command only says isn't a file: a commit's message, the pattern a search looks for. (What
+/// `echo` prints is read: `cat $(echo ~/.ssh/id_rsa)` reads the key.)
+fn reads_a_secret(words: &[String]) -> bool {
+    let Some(p) = program_index(words) else {
+        // `env` alone prints the environment.
+        return words.iter().any(|w| base(w) == "env");
+    };
+    let program = base(&words[p]);
+    let rest = &words[p + 1..];
+    let sub = subcommand(program, rest).map(|(_, s)| s);
+    match program {
+        "printenv" => return true,
+        "export" | "declare" | "typeset" if rest.iter().all(|w| w.starts_with('-')) => {
+            return true;
+        }
+        "security" if sub.is_some_and(|s| s.starts_with("find-") || s.starts_with("dump-")) => {
+            return true;
+        }
+        "gh" if sub == Some("auth") => return true,
+        _ => {}
+    }
+    let mut said = vec![false; rest.len()];
+    if program == "git" {
+        for (i, w) in rest.iter().enumerate() {
+            // `-m "…"`, and `-am "…"`: short options run together, the last one `-m`.
+            let ends_in_m = w.starts_with('-') && !w.starts_with("--") && w.ends_with('m');
+            if (ends_in_m || w == "--message") && i + 1 < rest.len() {
+                said[i + 1] = true;
+            }
+            if w.starts_with("--message=") || (w.starts_with("-m") && w.len() > 2) {
+                said[i] = true;
+            }
+        }
+    }
+    if SEARCHES.contains(&program) {
+        let mut pattern_given = false;
+        for (i, w) in rest.iter().enumerate() {
+            if matches!(w.as_str(), "-e" | "--regexp") && i + 1 < rest.len() {
+                said[i + 1] = true;
+                pattern_given = true;
+            }
+        }
+        if !pattern_given && let Some(first) = rest.iter().position(|w| !w.starts_with('-')) {
+            said[first] = true;
+        }
+    }
+    words[..=p]
+        .iter()
+        .chain(rest.iter().zip(&said).filter(|(_, s)| !**s).map(|(w, _)| w))
+        .any(|w| names_a_secret(w))
+}
+
+/// Whether `command` touches secrets, a login or the vault, in any of the simple commands it runs
+/// or anywhere in its text for a vault value. Code nested deeper than obid reads asks.
+fn command_touches_a_secret(command: &str) -> bool {
+    holds_a_vault_value(command)
+        || simple_commands(command)
+            .is_none_or(|commands| commands.iter().any(|w| reads_a_secret(w)))
+}
+
+/// What takes `call` out of the job's sandbox, or none when it stays inside: the files of the
+/// worktree, commands, tests. Reads and searches look only at the worktree (`crate::policy`).
+pub fn reach(call: &Call, worktree: &Path) -> Option<Reach> {
+    let tool = call.tool.as_str();
+    let named = call.paths.iter().chain(&call.reads).chain(call.url.iter());
+    let secret = named
+        .clone()
+        .any(|t| names_a_secret(t) || holds_a_vault_value(t))
+        || call
+            .command
+            .as_deref()
+            .is_some_and(command_touches_a_secret);
+    if secret {
+        return Some(Reach::Secrets);
+    }
+    match tool {
+        "WebFetch" | "WebSearch" => Some(Reach::Network),
+        "Bash" => call
+            .command
+            .as_deref()
+            .is_some_and(uses_network)
+            .then_some(Reach::Network),
+        _ if EDITS.contains(&tool) || READS.contains(&tool) => call
+            .paths
+            .iter()
+            .chain(&call.reads)
+            .any(|p| !crate::policy::path_inside(p, worktree))
+            .then_some(Reach::Outside),
+        "ExitPlanMode" | "Task" | "Agent" | "TodoWrite" => None,
+        _ if tool.starts_with("mcp__") => None,
+        _ => Some(Reach::Unknown),
+    }
+}
+
 /// The mode's answer to `call`, after the owner's saved `rules` for the job's repository. obid's
 /// fixed denials (`crate::policy`) come before this, in every mode.
 pub fn decide(call: &Call, mode: Mode, rules: &[Rule], worktree: &Path) -> Verdict {
+    let sandbox = mode == Mode::Sandbox;
+    let reach = if sandbox { reach(call, worktree) } else { None };
     // The plan's own end: in Plan the agent finishes with it, in any other mode there's nothing to
-    // approve.
-    if call.tool == "ExitPlanMode" || QUIET.contains(&call.tool.as_str()) {
+    // approve. Reads never ask, but in Sandbox mode one that leaves the worktree does.
+    if call.tool == "ExitPlanMode" || (QUIET.contains(&call.tool.as_str()) && reach.is_none()) {
         return Verdict::Allow;
     }
     if call.tool.starts_with("mcp__") {
@@ -303,8 +1012,10 @@ pub fn decide(call: &Call, mode: Mode, rules: &[Rule], worktree: &Path) -> Verdi
     if mode == Mode::Plan && edit {
         return Verdict::Deny(PLAN_ONLY.into());
     }
-    // Plan changes nothing: a saved allow rule doesn't let a command through while planning.
+    // Plan changes nothing: a saved allow rule doesn't let a command through while planning. And
+    // no rule lets secrets through in Sandbox mode: the owner answers those one at a time.
     if mode != Mode::Plan
+        && reach != Some(Reach::Secrets)
         && rules
             .iter()
             .any(|r| r.decision == "allow" && matches(&r.rule, call, worktree, true))
@@ -313,6 +1024,7 @@ pub fn decide(call: &Call, mode: Mode, rules: &[Rule], worktree: &Path) -> Verdi
     }
     match mode {
         Mode::Bypass => Verdict::Allow,
+        Mode::Sandbox if reach.is_none() => Verdict::Allow,
         Mode::AcceptEdits if edit => Verdict::Allow,
         _ => Verdict::Ask,
     }
@@ -524,7 +1236,8 @@ pub fn card(call: &Call, id: &str, repo: &str, worktree: &Path) -> Permission {
             first.to_owned()
         }
     };
-    let (title, detail, rule, what) = match family(&call.tool) {
+    let why = reach(call, worktree);
+    let (title, detail, mut rule, mut what) = match family(&call.tool) {
         "Bash" => {
             let command = call.command.clone().unwrap_or_default();
             let detail: String = command.chars().take(2000).collect();
@@ -565,6 +1278,15 @@ pub fn card(call: &Call, id: &str, repo: &str, worktree: &Path) -> Permission {
                 .url
                 .clone()
                 .or_else(|| call.command.clone())
+                .or_else(|| {
+                    let looked: Vec<&str> = call
+                        .paths
+                        .iter()
+                        .chain(&call.reads)
+                        .map(String::as_str)
+                        .collect();
+                    (!looked.is_empty()).then(|| looked.join(", "))
+                })
                 .unwrap_or_default();
             let title = match tool {
                 "WebFetch" => format!(
@@ -577,6 +1299,11 @@ pub fn card(call: &Call, id: &str, repo: &str, worktree: &Path) -> Permission {
             (title, detail, Some(tool.to_owned()), Some(tool.to_owned()))
         }
     };
+    // Secrets are answered one at a time, never by a rule that would cover the next.
+    if why == Some(Reach::Secrets) {
+        rule = None;
+        what = None;
+    }
     Permission {
         id: id.to_owned(),
         tool: call.tool.clone(),
@@ -584,6 +1311,7 @@ pub fn card(call: &Call, id: &str, repo: &str, worktree: &Path) -> Permission {
         detail,
         rule,
         always: what.map(|w| format!("Yes, and don't ask again for {w} in {repo}")),
+        why: why.map(|r| r.why().to_owned()),
     }
 }
 
@@ -612,7 +1340,7 @@ pub fn new_rule_id() -> String {
 /// What `home/permissions.json` keeps.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Kept {
-    /// Settings › Permissions: the mode new jobs get; bypass until the owner picks another.
+    /// Settings › Permissions: the mode new jobs get; sandbox until the owner picks another.
     #[serde(default)]
     pub mode: Option<String>,
     /// The saved rules, oldest first.
@@ -625,7 +1353,7 @@ impl Kept {
         self.mode
             .as_deref()
             .and_then(Mode::parse)
-            .unwrap_or(Mode::Bypass)
+            .unwrap_or(Mode::Sandbox)
     }
 }
 
@@ -891,6 +1619,7 @@ mod tests {
                 detail: "swift test --filter SpeechTests".into(),
                 rule: Some("Bash(swift test:*)".into()),
                 always: Some("Yes, and don't ask again for swift test in deskree-inc/oby".into()),
+                why: None,
             }
         );
         let chained = card(
@@ -928,6 +1657,236 @@ mod tests {
             worktree,
         );
         assert_eq!(fetch.title, "Fetch example.com");
+    }
+
+    /// Sandbox mode: what stays inside the job's sandbox is answered; the network, secrets and a
+    /// read outside the worktree ask, and no saved rule lets secrets through.
+    #[test]
+    fn sandbox_mode_asks_only_about_what_leaves_the_sandbox() {
+        let inside = [
+            bash("cargo test --workspace"),
+            bash("npm test"),
+            bash("make lint && cargo fmt --all -- --check"),
+            bash("python3 -m pytest tests"),
+            bash("git status"),
+            bash("git commit -m hello"),
+            bash("grep -rn curl src"),
+            bash("cargo test ping"),
+            tool("Edit", &["/tmp/oby/jobs/abc/Engine/Jobs.swift"]),
+            tool("Write", &["new.swift"]),
+            tool("Read", &["/tmp/oby/jobs/abc/a.swift"]),
+            tool("Read", &["src/a.swift"]),
+            tool("Edit", &["docs/.env.example"]),
+            tool("mcp__tetrix__get_entity", &[]),
+            tool("TodoWrite", &[]),
+        ];
+        for call in &inside {
+            assert_eq!(
+                decide_in(call, Mode::Sandbox, &[]),
+                Verdict::Allow,
+                "{call:?}"
+            );
+        }
+        let search = |tool: &str, key: &str, value: &str| {
+            Call::new(tool, &serde_json::json!({ key: value }))
+        };
+        let leaves = [
+            (bash("curl https://example.com"), Reach::Network),
+            (bash("npm install left-pad"), Reach::Network),
+            (bash("cargo add serde"), Reach::Network),
+            (bash("pip3 install requests"), Reach::Network),
+            (bash("git fetch origin"), Reach::Network),
+            (bash("git -C sub pull"), Reach::Network),
+            (bash("cargo test && wget x"), Reach::Network),
+            (bash("bash -c 'cd a && curl x'"), Reach::Network),
+            (bash("timeout 5 ssh host"), Reach::Network),
+            (bash("FOO=1 docker pull alpine"), Reach::Network),
+            (
+                Call {
+                    tool: "WebFetch".into(),
+                    url: Some("https://example.com".into()),
+                    ..Call::default()
+                },
+                Reach::Network,
+            ),
+            (tool("WebSearch", &[]), Reach::Network),
+            (bash("cat ~/.ssh/id_rsa"), Reach::Secrets),
+            (bash("cat /h/api-token"), Reach::Secrets),
+            (bash("printenv"), Reach::Secrets),
+            (bash("cat .env"), Reach::Secrets),
+            (tool("Edit", &[".env.production"]), Reach::Secrets),
+            (
+                tool("Read", &["/tmp/oby/jobs/abc/.aws/credentials"]),
+                Reach::Secrets,
+            ),
+            (tool("Read", &["/etc/hosts"]), Reach::Outside),
+            (tool("Read", &["../other/a.swift"]), Reach::Outside),
+            (search("Grep", "path", "/etc"), Reach::Outside),
+            (search("Glob", "pattern", "/etc/*"), Reach::Outside),
+            (search("Glob", "pattern", "../*"), Reach::Outside),
+            (search("LS", "path", "~"), Reach::Outside),
+            (tool("SomethingNew", &[]), Reach::Unknown),
+        ];
+        for (call, reach) in &leaves {
+            assert_eq!(
+                decide_in(call, Mode::Sandbox, &[]),
+                Verdict::Ask,
+                "{call:?}"
+            );
+            assert_eq!(
+                super::reach(call, Path::new(WORKTREE)),
+                Some(*reach),
+                "{call:?}"
+            );
+        }
+        // A grep's pattern isn't a place to read.
+        assert_eq!(
+            decide_in(
+                &search("Grep", "pattern", "/etc/passwd"),
+                Mode::Sandbox,
+                &[]
+            ),
+            Verdict::Allow
+        );
+        // A saved rule the owner made covers the network (their decision), never secrets.
+        let curl = rule("Bash(curl:*)", "allow");
+        assert_eq!(
+            decide_in(&bash("curl https://example.com"), Mode::Sandbox, &[curl]),
+            Verdict::Allow
+        );
+        let cat = rule("Bash(cat:*)", "allow");
+        assert_eq!(
+            decide_in(&bash("cat ~/.ssh/id_rsa"), Mode::Sandbox, &[cat]),
+            Verdict::Ask
+        );
+        // A deny rule still refuses.
+        assert!(matches!(
+            decide_in(
+                &bash("cargo test"),
+                Mode::Sandbox,
+                &[rule("Bash(cargo test:*)", "deny")]
+            ),
+            Verdict::Deny(_)
+        ));
+        // The other modes are as they were: Bypass lets the network go, Accept edits asks.
+        assert_eq!(
+            decide_in(&bash("curl https://example.com"), Mode::Bypass, &[]),
+            Verdict::Allow
+        );
+        assert_eq!(
+            decide_in(&bash("cargo test"), Mode::AcceptEdits, &[]),
+            Verdict::Ask
+        );
+        // The card says why it asks, and offers no rule for a secret.
+        let worktree = Path::new(WORKTREE);
+        let net = card(&bash("npm install left-pad"), "p1", "o/r", worktree);
+        assert_eq!(
+            net.why.as_deref(),
+            Some("It reaches the network beyond the model's API.")
+        );
+        assert_eq!(net.rule.as_deref(), Some("Bash(npm install:*)"));
+        let secret = card(&bash("cat ~/.ssh/id_rsa"), "p2", "o/r", worktree);
+        assert_eq!(
+            (secret.rule, secret.always, secret.why.as_deref()),
+            (None, None, Some("It touches secrets or the vault."))
+        );
+        assert_eq!(Mode::parse("sandbox"), Some(Mode::Sandbox));
+        assert_eq!(Kept::default().default_mode(), Mode::Sandbox);
+    }
+
+    /// Commands are read as a shell reads them: what a message or a pattern only says doesn't
+    /// ask, and code inside code (`$(…)`, backticks, `bash -c`, a here-document fed to a shell)
+    /// is read too (#586).
+    #[test]
+    fn commands_are_read_as_a_shell_reads_them() {
+        let worktree = Path::new(WORKTREE);
+        let commit = "git commit -m \"$(cat <<'EOF'\nfix: don't run curl; ssh keys stay\n- npm install left-pad (no)\n- printenv, .env and ~/.ssh/id_rsa, api-token\nEOF\n)\"";
+        let inside = [
+            commit,
+            "git commit -m \"use wget; curl | ssh\"",
+            "git commit -m'mention .env'",
+            "git commit -am \"keep .env.local and ~/.ssh out of logs\"",
+            "cargo test 2>&1 | tee out.log",
+            "git remote -v",
+            "git submodule status",
+            "grep -rn api-token docs",
+            "rg -e '.env' src",
+            "sh scripts/check.sh",
+            "cat <<EOF > notes.txt\ncurl x\nEOF\ncargo test",
+            "timeout 5s cargo test",
+            "# curl x\ncargo test",
+            "ls src/api-token.rs",
+        ];
+        for command in inside {
+            assert_eq!(super::reach(&bash(command), worktree), None, "{command}");
+        }
+        let network = [
+            "echo \"$(curl -s https://x)\"",
+            "echo `wget x`",
+            "bash <<EOF\ncurl x\nEOF",
+            "bash <<< 'curl x'",
+            "sh -ec \"npm install\"",
+            "bash -o pipefail -c 'cd a && curl x'",
+            "eval curl x",
+            "(cd sub && git fetch)",
+            "curl \"https://x?a=1&b=2\"",
+            "xargs -n1 curl < urls",
+            "env FOO=1 timeout 5 ssh host",
+            "git remote update",
+            "git submodule update --init",
+            "cargo test && \\\ncurl x",
+            "git commit -m \"$(curl x)\"",
+        ];
+        for command in network {
+            assert_eq!(
+                super::reach(&bash(command), worktree),
+                Some(Reach::Network),
+                "{command}"
+            );
+        }
+        let secrets = [
+            "cat \"$CLAUDE_CONFIG_DIR/.credentials.json\"",
+            "ls $CODEX_HOME",
+            "cat /proc/self/environ",
+            "env",
+            "export -p",
+            "security find-generic-password -s x",
+            "gh auth token",
+            "source .env && cargo test",
+            "cargo run --env-file=.env.local",
+            "FILE=~/.aws/credentials cargo test",
+            "grep -e x ~/.netrc",
+            "cat $(echo ~/.ssh/id_ed25519)",
+            // Code nested deeper than obid reads asks, one call at a time.
+            "a $(b $(c $(d $(e $(f $(g))))))",
+        ];
+        for command in secrets {
+            assert_eq!(
+                super::reach(&bash(command), worktree),
+                Some(Reach::Secrets),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn answers_are_kept_newest_last_and_counted() {
+        let worktree = Path::new(WORKTREE);
+        let mut kept = Vec::new();
+        let mut count = 0;
+        for n in 0..KEPT_ANSWERED + 5 {
+            let entry = Answered::of(&bash(&format!("cargo test {n}")), "o/r", worktree, None, 7);
+            keep_answered(&mut kept, &mut count, entry);
+        }
+        assert_eq!(kept.len(), KEPT_ANSWERED);
+        assert_eq!(count as usize, KEPT_ANSWERED + 5);
+        assert_eq!(kept[0].detail, "cargo test 5");
+        let refused = Answered::of(&bash("make deploy"), "o/r", worktree, Some("No."), 7);
+        assert_eq!(
+            (refused.decision.as_str(), refused.reason.as_deref()),
+            ("refused", Some("No."))
+        );
+        assert!(!is_noted("TodoWrite") && is_noted("Bash"));
     }
 
     #[test]

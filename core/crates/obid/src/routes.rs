@@ -635,7 +635,7 @@ pub async fn permission(
     }
 }
 
-/// The mode a body names: `{"mode": "ask" | "acceptEdits" | "plan" | "bypass"}`.
+/// The mode a body names: `{"mode": "ask" | "acceptEdits" | "plan" | "bypass" | "sandbox"}`.
 fn mode_of(body: &Bytes) -> Result<crate::permissions::Mode, ApiError> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "That isn't JSON."))?;
@@ -646,7 +646,7 @@ fn mode_of(body: &Bytes) -> Result<crate::permissions::Mode, ApiError> {
         .ok_or_else(|| {
             ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "mode is ask, acceptEdits, plan or bypass.",
+                "mode is ask, acceptEdits, plan, bypass or sandbox.",
             )
         })
 }

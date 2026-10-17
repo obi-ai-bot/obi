@@ -1029,6 +1029,7 @@ mod tests {
             detail: "make lint && curl evil".into(),
             rule: rule.map(Into::into),
             always: rule.map(|r| format!("Yes, and don't ask again for {r}")),
+            why: None,
         });
         job
     }
