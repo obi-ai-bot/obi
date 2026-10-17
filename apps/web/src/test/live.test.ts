@@ -11,9 +11,9 @@ describe('events over what the page shows', () => {
   it('keeps open and put-off inbox items, drops settled ones, and the answer given here with them', () => {
     let s = apply(state(), { kind: 'inbox', item: item() });
     expect(s.inbox.map((i) => i.id)).toEqual(['i1']);
-    s = apply({ ...s, answering: { j1: 'Allow' } }, { kind: 'inbox', item: item({ state: 'later', later: '2026-10-16T12:00:00Z' }) });
+    s = apply({ ...s, answering: { i1: 'Allow' } }, { kind: 'inbox', item: item({ state: 'later', later: '2026-10-16T12:00:00Z' }) });
     expect(s.inbox).toHaveLength(1);
-    expect(s.answering).toEqual({ j1: 'Allow' });
+    expect(s.answering).toEqual({ i1: 'Allow' });
     s = apply(s, { kind: 'inbox', item: item({ state: 'done', answer: 'Allow' }) });
     expect(s.inbox).toEqual([]);
     expect(s.answering).toEqual({});

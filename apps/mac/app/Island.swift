@@ -192,7 +192,7 @@ final class IslandController {
         // The brain's briefing takes in the runner's jobs, inbox and accounts too, and "stop" reaches its jobs.
         desk.elsewhere = { [weak self] in
             guard let self else { return [] }
-            return [Briefing.Place(name: feed.name, jobs: feed.jobs, inbox: feed.inbox, accounts: feed.accounts)]
+            return [Briefing.Place(name: feed.name, jobs: feed.jobs, inbox: feed.briefingInbox, accounts: feed.accounts)]
         }
         desk.loadSettingOptions = {
             guard let codex = try? await CodexAgent.models(home: nil), !codex.isEmpty else { return nil }
@@ -257,14 +257,8 @@ final class IslandController {
         // "Try it again", "let it go", "answer the merge item: try again" and "start it now" reach the
         // runner's jobs and inbox as the apps' own buttons do (#300).
         desk.actElsewhere = { [weak self] remote in
-            guard let self, let runner = feed.runner else { throw RunnerError(message: "The runner isn't set up.") }
-            switch remote {
-            case .settle(let item, let words): try await feed.settle(item, answer: words)
-            case .tell(let job, let words): feed.apply(try await feed.about(job) { try await $0.tell(job, words) })
-            case .dismiss(let job): feed.apply(try await feed.about(job) { try await $0.dismiss(job) })
-            case .startNow(let job): feed.apply(try await feed.about(job) { try await $0.startNow(job) })
-            case .liftReserve(let account): _ = try await runner.liftReserve(account, true)
-            }
+            guard let self else { throw RunnerError(message: "The runner isn't set up.") }
+            try await feed.act(remote)
         }
         desk.onReply = { [weak self] text, spoken in self?.replied(text, spoken: spoken) }
         desk.plansElsewhere = { [weak self] in self?.feed.local ?? false }

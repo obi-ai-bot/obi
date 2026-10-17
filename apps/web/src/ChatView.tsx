@@ -9,7 +9,7 @@ import Formatted from './Formatted';
 import { tokenize } from './textTokens';
 import { answerQuestion, ask, loadOlder, markSeen, openConversation, tellJob, useLive, type Live } from './live';
 import { isNew, layerOf, startOf, toMessage, useChat, type Message } from './chats';
-import { AGENTS, metaOf, useTasks, type Task } from './tasks';
+import { AGENTS, metaOf, useTasks, type Ask, type Task } from './tasks';
 
 // how long the way out takes (the sink animation in app.css)
 const LEAVE_MS = 220;
@@ -24,7 +24,7 @@ export const clock = (ago: number) => {
 
 // One entry in the thread: a message, or the decision the task needs from you
 // (Oby asking, so it sits on Oby's side).
-type Entry = Message | { id: 'ask'; who: 'oby'; ask: true; ago?: number; text?: undefined };
+type Entry = Message | { id: string; who: 'oby'; ask: Ask; ago?: number; text?: undefined };
 
 // A task's own thread, oldest first: what started it (your words in the conversation, or its
 // request), Oby's answer that started it with its card (or just its card, when it started
@@ -84,7 +84,7 @@ export default function ChatView({ id, kind = 'task', leaving, covered = false, 
   const before = task ? threadOf(live, task) : [];
   const thread: Entry[] = task ? [
     ...before,
-    ...(task.status === 'needs' && j!.ask ? [{ id: 'ask' as const, who: 'oby' as const, ask: true as const }] : []),
+    ...(task.status === 'needs' ? j!.asks.map((a, i) => ({ id: `ask:${a.item ?? i}`, who: 'oby' as const, ask: a })) : []),
   ] : mine ? chat.said : [];
   // Oby at work on an answer, and what it's on
   const typing = !task && mine && chat.typing, step = !task && mine ? chat.step : undefined;
@@ -149,7 +149,7 @@ export default function ChatView({ id, kind = 'task', leaving, covered = false, 
                 const parts = [
                   // the decision the task needs from you, as on its card
                   'ask' in m ? (
-                    <div key="ask" className="msg-ask"><AskBlock task={task!} inChat /></div>
+                    <div key="ask" className="msg-ask"><AskBlock task={task!} ask={m.ask} inChat /></div>
                   ) : side !== 'oby' ? (
                     // yours, set as typed
                     m.text ? <p key="text" className="msg-bubble"><Formatted text={m.text} /></p> : null

@@ -4,7 +4,7 @@ import StatusDot from './StatusDot';
 import { ObyIcon } from './ObyFace';
 import type { Stage } from './api';
 import { answerItem, dismissJob, markSeen } from './live';
-import { ASK_LABEL, ago, metaOf, type Task } from './tasks';
+import { ASK_LABEL, ago, metaOf, type Ask, type Task } from './tasks';
 
 // A task as a card in its group: where it came from and what it is, which
 // agent has it where, then what's happening now: the live step while it runs,
@@ -60,7 +60,8 @@ export default function TaskCard({ task, alone = false, onOpen, style }: {
         </div>
       )}
 
-      {task.status === 'needs' && j.ask && <AskBlock task={task} />}
+      {/* every decision it needs, oldest first: a confirm about its permission sits beside it */}
+      {task.status === 'needs' && j.asks.map((a, i) => <AskBlock key={a.item ?? i} task={task} ask={a} />)}
 
       {/* done: what it left behind, one line; on its page, Result has it */}
       {result && <div className="tc-done"><div>{result}</div></div>}
@@ -131,30 +132,35 @@ export default function TaskCard({ task, alone = false, onOpen, style }: {
 // happened, then the choices (the recommended one first-looking) and Later.
 // A pick goes to obid (POST /v1/inbox/{id}/answer, or /dismiss for a failed job
 // with no inbox item) and shows as a check line until the item is settled.
-export function AskBlock({ task, inChat = false }: { task: Task; inChat?: boolean }) {
-  const ask = task.job.ask!;
+// A confirm item (obid only, #546) is headed by what its Confirm does, its
+// Confirm says so again, and neither answer looks picked: it's the owner's call.
+export function AskBlock({ task, ask, inChat = false }: { task: Task; ask: Ask; inChat?: boolean }) {
   const answer = (option: string) => {
-    if (ask.item) void answerItem(task.id, ask.item, option);
+    if (ask.item) void answerItem(ask.item, option);
     else if (option === 'Dismiss') void dismissJob(task.id);
   };
+  const confirm = ask.kind === 'confirm';
+  const primary = confirm ? -1 : ask.recommended ?? 0;
   return (
     <div className="tc-ask">
       <span className={`tc-ask-kind is-${ask.kind}`}>{ASK_LABEL[ask.kind] ?? ask.kind}</span>
       <p className="tc-ask-head">{ask.headline}</p>
       {ask.text && <p className="tc-ask-text">{ask.text}</p>}
       {ask.detail && <pre className="tc-code">{ask.detail}</pre>}
-      {ask.later && !task.answer && <p className="tc-ask-text">Put off for now.</p>}
-      {task.answer ? (
-        !inChat && <p className="tc-answered"><Check size={14} strokeWidth={1.8} />{task.answer}</p>
+      {/* words someone else wrote: data, set apart, never the heading */}
+      {ask.quoted && <blockquote className="tc-quoted"><pre className="tc-code">{ask.quoted}</pre></blockquote>}
+      {ask.later && !ask.answer && <p className="tc-ask-text">Put off for now.</p>}
+      {ask.answer ? (
+        !inChat && <p className="tc-answered"><Check size={14} strokeWidth={1.8} />{ask.answer}</p>
       ) : (
         <div className="tc-options">
           {ask.options.map((o, i) => (
             <button
               key={o}
-              className={`tc-option${i === (ask.recommended ?? 0) ? ' is-primary' : ''}${o === 'Deny' ? ' is-danger' : ''}`}
+              className={`tc-option${i === primary ? ' is-primary' : ''}${o === 'Deny' ? ' is-danger' : ''}`}
               onClick={() => answer(o)}
             >
-              {o}
+              {confirm && o === 'Confirm' ? `Confirm: ${ask.headline}` : o}
             </button>
           ))}
           {ask.item && <button className="tc-option is-quiet" onClick={() => answer('Later')}>Later</button>}

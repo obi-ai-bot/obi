@@ -38,17 +38,23 @@ struct InboxSection: View {
     private func card(_ item: InboxItem, now: Date) -> some View {
         let job = phone.jobs.first { $0.id == item.job }
         let permission = item.kind == "permission" ? job?.permission : nil
+        // A confirm item (obid only, #546): its title is what Confirm does, why it waits under it,
+        // the words it would send quoted apart; Confirm or Cancel, nothing recommended, no words.
+        let confirming = item.kind == RunnerConfirm.kind
         // A permission's words go with a deny; anything else's are the answer. An item without a job takes none.
-        let answerWords: ((String) -> Void)? = item.job.isEmpty ? nil : { words in
+        let answerWords: ((String) -> Void)? = item.job.isEmpty || confirming ? nil : { words in
             if let job, permission != nil { deny(job, words) } else { settle(item, answer: words) }
         }
         return VStack(alignment: .leading, spacing: 10) {
             Text(item.line(now: now)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             // Oby's plain words (#65), when the runner wrote them; the item as it is otherwise.
-            DecisionCard(title: item.words.title(item.text), happened: item.words.body, behindDetails: item.words.details(item.text),
-                         detail: permission?.detail,
+            DecisionCard(title: confirming ? item.title : item.words.title(item.text),
+                         happened: confirming ? InboxWords.plain(item.text) : item.words.body,
+                         behindDetails: confirming ? nil : item.words.details(item.text),
+                         detail: confirming ? item.confirm?.words : permission?.detail,
                          plan: item.kind == "question" ? job?.question?.plan : nil,
-                         options: CardOption.inbox(item.options, kind: item.kind, question: job?.question, permission: permission, words: item.words, details: item.details),
+                         options: CardOption.inbox(item.options, kind: item.kind, question: job?.question, permission: permission, words: item.words,
+                                                   details: item.details, does: item.title),
                          busy: busy, wordsNote: item.kind == "permission" ? CardOption.denyWords : nil,
                          onChoose: { option in
                              if option.answer == "Open the PR",
@@ -83,7 +89,7 @@ struct InboxSection: View {
             problem = nil
         } label: {
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.text).font(.subheadline.weight(.medium)).lineLimit(1)
+                Text(item.kind == RunnerConfirm.kind ? item.title : item.text).font(.subheadline.weight(.medium)).lineLimit(1)
                 Text(item.line(now: now)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
