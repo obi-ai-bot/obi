@@ -2140,9 +2140,10 @@ extension Logger {
 }
 
 extension KeyedDecodingContainer {
-    /// A mode this build doesn't know (a newer runner's, like obid's `sandbox`, #586) reads as none:
-    /// one such job must not make a whole list of jobs fail to decode.
+    /// A mode this build doesn't know (a newer runner's, like obid's `sandbox`, #586) reads as `ask`,
+    /// the narrowest: one such job must not make a whole list of jobs fail to decode, and it must not
+    /// read as nil either, which `Job.currentMode` takes for bypass. A missing mode stays nil (older jobs).
     func decodeIfPresent(_ type: PermissionMode.Type, forKey key: Key) throws -> PermissionMode? {
-        try decodeIfPresent(String.self, forKey: key).flatMap(PermissionMode.init(rawValue:))
+        try decodeIfPresent(String.self, forKey: key).map { PermissionMode(rawValue: $0) ?? .ask }
     }
 }

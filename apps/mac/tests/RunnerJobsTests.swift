@@ -21,15 +21,17 @@ struct RunnerJobsTests {
         #expect(try Runner.decoder.decode(RunnerStatus.self, from: Data(status.utf8)).runner.host == "tetrix-lab")
     }
 
-    /// obid's `sandbox` mode (#586), and a mode from a runner newer still, read as no mode this Mac
-    /// knows, never as a list that fails whole: one such job used to empty the window.
+    /// obid's `sandbox` mode (#586), and a mode from a runner newer still, read as Ask, the narrowest
+    /// mode this Mac knows: never as a list that fails whole (one such job used to empty the window),
+    /// and never as nil, which Engine's `Job.currentMode` takes for bypass. A missing mode stays nil.
     @Test(arguments: ["sandbox", "future"])
     func aModeTheMacDoesNotKnowKeepsTheList(_ mode: String) throws {
         let withMode = jobs.replacingOccurrences(of: #""model":null,"notes":["#, with: #""mode":"\#(mode)","model":null,"notes":["#)
         #expect(withMode != jobs)
         let decoded = try Runner.decoder.decode([Job].self, from: Data(withMode.utf8))
         #expect(decoded.map(\.id) == ["4bbb145a", "e4ea28be"])
-        #expect(decoded[0].mode == nil)
+        #expect(decoded[0].mode == .ask && decoded[0].currentMode == .ask)
+        #expect(decoded[1].mode == nil)
         #expect(RunnerJobExtras.of(Data(withMode.utf8))["4bbb145a"]?.mode == mode)
         // A mode it knows still reads.
         let plan = jobs.replacingOccurrences(of: #""model":null,"notes":["#, with: #""mode":"plan","model":null,"notes":["#)
