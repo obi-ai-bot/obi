@@ -257,6 +257,7 @@ struct ConversationListTests {
     @Test func aRunnerWithOneThreadIgnoresConversationEvents() {
         let (list, _) = make()
         list.apply(.changed(convo("a")))
+        #expect(!list.served && list.items.isEmpty)
         list.apply(.gone("a"))
         #expect(!list.served && list.items.isEmpty)
     }
