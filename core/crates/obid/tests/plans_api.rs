@@ -3449,6 +3449,11 @@ fn no_extra_step_after_a_stop() {
             )
         });
         events_named(&events, "step", 10, |got| got.len() == 2);
+        // Stop while the brain thinks about the second step: once its call has started, not on
+        // the first step's event, which comes a moment before it (#590 made that race show).
+        within(10, "the second step's call starts", || {
+            (calls(&obid).len() == 2).then_some(())
+        });
         call(&obid, "POST", "/v1/conversation/stop", None);
         asking.join().unwrap()
     });
@@ -3465,13 +3470,14 @@ fn no_extra_step_when_the_budget_ran_out() {
     let folder = Folder::new("brain-check-budget");
     let remote = fixture(&folder.0.join("fixture"));
     let mut config = config(&folder.0, &remote, &planner());
-    config["turnBudget"] = json!(2);
+    // Room for the first step on a loaded machine; the later steps think past it.
+    config["turnBudget"] = json!(5);
     let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
     let id = running(&obid, "Vault secrets")["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    let late = format!("SLEEP 3 {}", reply(""));
+    let late = format!("SLEEP 6 {}", reply(""));
     queue(&obid, &[set_mode(&id, "ask"), late.clone(), late]);
     let answer = said(
         &obid,
