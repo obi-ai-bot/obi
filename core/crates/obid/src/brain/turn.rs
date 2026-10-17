@@ -681,7 +681,10 @@ pub async fn run(
             // The chat reads before it answers (#302): what's read is in the next step's file.
             if plan.action == Action::ReadJob {
                 reads.read(plan.named().first().map(String::as_str), |id| {
-                    shared.jobs.get(id).map(|job| read::section(&job))
+                    shared
+                        .jobs
+                        .get(id)
+                        .map(|job| read::section(&job, &shared.config.home))
                 });
                 if Instant::now() >= deadline {
                     break 'step (End::BudgetSpent, finish(&done));

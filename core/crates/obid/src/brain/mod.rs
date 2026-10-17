@@ -318,6 +318,10 @@ pub(super) fn context(shared: &Shared, turns: &[Turn], nonce: &str) -> Context {
         accounts: told,
         repos: config.repos.iter().map(|r| r.repo.clone()).collect(),
         max_running: shared.jobs.max_running(),
+        failures: briefing::week(
+            crate::failures::list(&config.home, crate::failures::MOST),
+            now,
+        ),
         now,
         nonce: nonce.to_owned(),
     };
