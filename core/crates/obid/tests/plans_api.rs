@@ -1497,8 +1497,42 @@ fn a_bypass_dispatch_waits_for_the_owners_confirm() {
         "Start fix fixture-app (Greeting fix) in Bypass mode, on auto · auto, check node --test"
     );
     assert_eq!(confirm["confirm"]["action"], "start_job");
-    let confirmed = owner_answers(&obid, confirm["id"].as_str().unwrap(), "Confirm");
-    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    let id = confirm["id"].as_str().unwrap().to_owned();
+    // Owner UI retries can race at the HTTP boundary. Both responses may describe the same
+    // completed card, but only one proposed job may be created.
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let port = obid.port;
+    let confirmers: Vec<_> = (0..2)
+        .map(|_| {
+            let barrier = barrier.clone();
+            let id = id.clone();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                use std::net::TcpStream;
+                barrier.wait();
+                let body = json!({"answer": "Confirm"}).to_string();
+                let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                write!(
+                    stream,
+                    "POST /v1/inbox/{id}/answer HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    TOKEN,
+                    body.len()
+                )
+                .unwrap();
+                let mut response = String::new();
+                stream.read_to_string(&mut response).unwrap();
+                response
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .parse::<u16>()
+                    .unwrap()
+            })
+        })
+        .collect();
+    for confirmer in confirmers {
+        assert!(matches!(confirmer.join().unwrap(), 200 | 409));
+    }
     let jobs = call(&obid, "GET", "/v1/jobs", None).body;
     assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
     assert_eq!(jobs[0]["mode"], "bypass");
