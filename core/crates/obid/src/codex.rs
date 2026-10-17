@@ -70,6 +70,8 @@ pub async fn run_turn(
         turn: None,
         said: None,
         ended: None,
+        limits_read: None,
+        account_read: None,
     };
     let mut turn = Turn::default();
     match run.turn(prompt, options).await {
@@ -130,6 +132,9 @@ struct Run<D, E> {
     said: Option<String>,
     /// The turn's end: what it said, and whether it failed.
     ended: Option<(String, bool)>,
+    /// The `account/rateLimits/read` and `account/read` requests not answered yet.
+    limits_read: Option<u64>,
+    account_read: Option<u64>,
 }
 
 impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
@@ -142,12 +147,13 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         .await?
         .map_err(|e| Stop::Failed(format!("Codex couldn't start: {}", e.message)))?;
         self.conn.notify("initialized", None).await;
-        // Older servers may not implement this method; notifications still update usage.
-        if let Ok(limits) = self.call("account/rateLimits/read", json!({})).await?
-            && let Some(usage) = crate::accounts::codex(&limits["rateLimits"])
-        {
-            (self.on_event)(Event::Usage(usage));
-        }
+        // The account's usage and plan, answered while the thread starts: reading them asks
+        // OpenAI, and the job doesn't wait for that (`handle`).
+        self.limits_read = Some(
+            self.conn
+                .request("account/rateLimits/read", json!({}))
+                .await,
+        );
 
         let cwd = self.worktree.to_string_lossy().into_owned();
         let mut params = thread_params(&cwd);
@@ -200,6 +206,40 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
     }
 
     async fn handle(&mut self, message: Value) {
+        if let Some(answer) = self
+            .limits_read
+            .and_then(|id| conn::answer_to(&message, id))
+        {
+            self.limits_read = None;
+            // An older server may not know the method: its notifications still report usage.
+            let usage = answer
+                .ok()
+                .and_then(|read| crate::accounts::codex_read(&read));
+            // A server whose snapshot doesn't name the plan may say it in `account/read`.
+            if usage.as_ref().is_none_or(|usage| usage.plan.is_none()) {
+                self.account_read = Some(self.conn.request("account/read", json!({})).await);
+            }
+            if let Some(usage) = usage {
+                (self.on_event)(Event::Usage(usage));
+            }
+            return;
+        }
+        if let Some(answer) = self
+            .account_read
+            .and_then(|id| conn::answer_to(&message, id))
+        {
+            self.account_read = None;
+            if let Some(plan) = answer
+                .ok()
+                .and_then(|read| crate::accounts::codex_account_plan(&read))
+            {
+                (self.on_event)(Event::Usage(crate::accounts::Usage {
+                    plan: Some(plan),
+                    ..Default::default()
+                }));
+            }
+            return;
+        }
         if let Some(id) = conn::request_id(&message).cloned() {
             return self.answer(id, &message).await;
         }
@@ -217,6 +257,15 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             Some("account/rateLimits/updated") => {
                 if let Some(usage) = crate::accounts::codex(&params["rateLimits"]) {
                     (self.on_event)(Event::Usage(usage));
+                }
+            }
+            Some("account/updated") => {
+                if let Some(plan) = crate::accounts::codex_account_plan(&json!({"account": params}))
+                {
+                    (self.on_event)(Event::Usage(crate::accounts::Usage {
+                        plan: Some(plan),
+                        ..Default::default()
+                    }));
                 }
             }
             Some("item/started") => {

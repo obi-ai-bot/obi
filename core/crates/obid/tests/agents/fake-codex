@@ -12,6 +12,10 @@
 //   FAIL             the turn fails with the API's error inside its message
 //   TWICE            round one says it isn't done; round two (a resumed thread) writes .obi/twice
 //   ENV              says its CODEX_HOME and HOME
+//   LIMITS: <json>   sends it as an `account/rateLimits/updated` snapshot, then "Nothing to do."
+// Its account comes from $CODEX_HOME: `fake-rate-limits.json` answers `account/rateLimits/read`
+// (a snapshot, or a whole answer when it has `rateLimits`; none: the method is unknown, as on an
+// older server), and `fake-account.json` answers `account/read`.
 //   a brain's prompt answers one plan: a reply "From Codex.", with work.md's first line
 //   anything else    "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable, or
@@ -123,6 +127,8 @@ async function runTurn(turnId, prompt) {
     writeFileSync(".obi/twice", "");
     return complete(turnId, `Round ${state.rounds} on thread ${thread}, which remembers: ${task}\nGOAL MET`);
   }
+  const limits = task.match(/LIMITS: (\{.*\})/);
+  if (limits) send({ method: "account/rateLimits/updated", params: { rateLimits: JSON.parse(limits[1]) } });
   if (task.includes("ENV")) return complete(turnId, `CODEX_HOME=${process.env.CODEX_HOME}\nHOME=${process.env.HOME}`);
   // Only `item/completed` carries the words: Codex's newer turns leave `items` empty.
   send({ method: "item/completed", params: { threadId: thread, turnId, item: { type: "agentMessage", id: "m0", text: "Nothing to do." } } });
@@ -149,7 +155,13 @@ rl.on("line", (line) => {
       return send({ id, result: { userAgent: "fake-codex/0.0.0" } });
     case "account/rateLimits/read": {
       const file = join(home, "fake-rate-limits.json");
-      return send({ id, result: { rateLimits: existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {} } });
+      if (!existsSync(file)) return send({ id, error: { code: -32601, message: `fake-codex doesn't know ${method}` } });
+      const read = JSON.parse(readFileSync(file, "utf8"));
+      return send({ id, result: read.rateLimits ? read : { rateLimits: read } });
+    }
+    case "account/read": {
+      const file = join(home, "fake-account.json");
+      return send({ id, result: existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : { account: null, requiresOpenaiAuth: true } });
     }
     case "initialized":
       return;
