@@ -253,7 +253,7 @@ pub async fn run(
         context.turn_step = step;
         context.turn_length = Some(said.chars().count());
         // What the turn read and looked up goes into the next step's quoted file.
-        context.quoted = research.quoted(reads.quoted(context.quoted.take()));
+        context.quoted = research.quoted(reads.quoted(context.quoted.take(), &nonce), &nonce);
         let planner = Planner {
             adapters: Planner::of(&shared.config, &room),
             falls_back_to_rules: step == 0,
@@ -332,10 +332,11 @@ pub async fn run(
                 &text,
                 "running",
             );
-            if !control.stopped() && Instant::now() < deadline {
-                research.run(&lookups, &tools).await;
+            // Stopped or cancelled: no lookup runs.
+            if control.live() && Instant::now() < deadline {
+                research.run(&lookups, &tools, said).await;
             }
-            let cut = control.stopped() || Instant::now() >= deadline;
+            let cut = !control.live() || Instant::now() >= deadline;
             let state = if cut { "failed" } else { "done" };
             step_event(shared, control, step + 1, Action::Research, &text, state);
             if cut {

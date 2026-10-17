@@ -57,6 +57,19 @@ pub mod action {
     /// Start a job the brain planned in Bypass mode: `target` the conversation that planned it,
     /// `payload` `{"job": <the job as POST /v1/jobs takes it>}`.
     pub const START_JOB: &str = "start_job";
+    /// Accept another Obi's request: `target` its `obiRequest` item.
+    pub const ACCEPT: &str = "accept";
+    /// Accept it and remember for its repository: `target` its `obiRequest` item.
+    pub const ACCEPT_REMEMBER: &str = "accept_remember";
+    /// Decline it and remember for its repository: `target` its `obiRequest` item.
+    pub const DECLINE_REMEMBER: &str = "decline_remember";
+    /// Answer another Obi's question in words: `target` its `obiRequest` item, `payload`
+    /// `{"words": "…"}`.
+    pub const ANSWER_QUESTION: &str = "answer_question";
+    /// Start the work the brain proposed after looking things up: `target` its `start` item.
+    pub const START: &str = "start";
+    /// Answer any other item: `target` the item, `payload` `{"answer": "…"}`.
+    pub const ANSWER_ITEM: &str = "answer_item";
 }
 
 /// A `confirm` item: `title` says exactly what `Confirm` does, `confirmed` is what obid carries

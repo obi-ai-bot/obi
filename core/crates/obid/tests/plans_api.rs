@@ -1933,7 +1933,11 @@ fn a_failed_lookup_is_reported_and_what_lookups_read_never_reaches_the_prompt() 
             reply("I couldn't read those sources."),
         ],
     );
-    said(&obid, "read the missing file, that URL and greet");
+    // The address is in the owner's words, so it reaches the private-address check.
+    said(
+        &obid,
+        "read the missing file, https://127.0.0.1.nip.io and greet",
+    );
     let calls = calls(&obid);
     let file = read(calls[1].join("work.md"));
     assert!(
@@ -1946,7 +1950,16 @@ fn a_failed_lookup_is_reported_and_what_lookups_read_never_reaches_the_prompt() 
     );
     assert!(file.contains("2:   return `Hello, ${name}!`;"), "{file}");
     let second = read(calls[1].join("input"));
-    assert!(second.contains("not in the repository at") && second.contains("private address"));
+    // Why a lookup failed is quoted with its result, never in the prompt (review on #552, N1).
+    assert!(
+        second.contains("returned status failed (why is quoted in work.md)"),
+        "{second}"
+    );
+    assert!(
+        second.contains("returned status refused (why is quoted in work.md)"),
+        "{second}"
+    );
+    assert!(!second.contains("not in the repository at") && !second.contains("private address"));
     for call in &calls {
         assert!(!read(call.join("input")).contains("return `Hello"));
         assert!(!read(call.join("args")).contains("return `Hello"));
@@ -2049,4 +2062,334 @@ fn a_stopped_job_is_tried_again() {
         "{job}"
     );
     assert_ne!(job["status"], "stopped", "{job}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The inbox the brain may and may not answer (the owner's decision of 2026-10-16, review on
+// #552): what persists or widens trust waits for the owner's own Confirm.
+
+fn answer_item(item: &str, option: Option<i64>, words: Option<&str>) -> String {
+    json!({"action": "answer_inbox", "reply": "", "dispatches": [], "question": null, "jobs": [],
+           "item": item, "option": option, "answer": words})
+    .to_string()
+}
+
+/// answer_inbox with "Always allow" on a permission saves no rule: a confirm item waits; Allow
+/// once is done in the turn.
+#[test]
+fn always_allow_in_the_inbox_waits_for_the_owners_confirm() {
+    let folder = Folder::new("brain-inbox-always");
+    let obid = started(&folder);
+    let ask = r#"ASKS: [{"tool": "Bash", "input": {"command": "make lint"}}]"#;
+    let id = job_that(&obid, "Vault secrets", ask, Some("ask"), "running")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let item = within(30, "a permission waits", || {
+        items_of(&obid, "permission")
+            .into_iter()
+            .find(|i| i["job"] == id.as_str())
+    });
+    let item_id = item["id"].as_str().unwrap().to_owned();
+    queue(&obid, &[answer_item(&item_id, Some(2), None), reply("")]);
+    let answer = said(&obid, "how is the vault job going?");
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("confirm it in your inbox"),
+        "{answer}"
+    );
+    assert_eq!(
+        call(&obid, "GET", "/v1/permissions/rules", None).body,
+        json!([])
+    );
+    assert!(
+        items_of(&obid, "permission")
+            .iter()
+            .any(|i| i["id"] == item_id.as_str())
+    );
+    let confirm = items_of(&obid, "confirm").pop().unwrap();
+    assert_eq!(
+        confirm["title"],
+        "Always allow Bash(make lint:*) in obi-e2e/fixture-app"
+    );
+    let permission = item_id.rsplit('-').next().unwrap();
+    assert_eq!(
+        confirm["confirm"],
+        json!({"action": "always_allow", "target": id, "payload": {"permission": permission}})
+    );
+    let confirmed = owner_answers(&obid, confirm["id"].as_str().unwrap(), "Confirm");
+    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    assert_eq!(
+        call(&obid, "GET", "/v1/permissions/rules", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// The review's probe: answering another Obi's request with "Accept, and remember for this
+/// repo" saves no decision and starts no job; a confirm item waits, and the owner's Confirm does
+/// both. A plain Decline is done in the turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn accepting_another_obis_request_waits_for_the_owners_confirm() {
+    let folder = Folder::new("brain-inbox-obi");
+    let sphere = FakeSphere::start().await;
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(
+        &folder.0,
+        &config(&folder.0, &remote, &planner()),
+        Some(planner().parent().unwrap()),
+    );
+    let wellington = Owner::new("wellington");
+    let joined = tokio::task::block_in_place(|| join_a(&obid, &sphere, &wellington));
+    assert_eq!(joined["state"], "joined");
+    let ernesto = TestObi::join(&sphere, "obi-ernesto", "ernesto").await;
+    // A plain Decline is one-off: done in the turn.
+    let first = ernesto.request("obi-wellington", "review_request", brief(), 3600);
+    ernesto.send(&first).await;
+    tokio::task::block_in_place(|| {
+        let item = within(20, "the request waits", || {
+            items_of(&obid, "obiRequest").pop()
+        });
+        let item_id = item["id"].as_str().unwrap().to_owned();
+        queue(&obid, &[answer_item(&item_id, Some(3), None), reply("")]);
+        assert_eq!(
+            said(&obid, "no to ernesto's review")["text"],
+            "Answered Review request from ernesto's item: Decline."
+        );
+        assert!(items_of(&obid, "obiRequest").is_empty());
+        assert!(items_of(&obid, "confirm").is_empty());
+        assert_eq!(
+            call(&obid, "GET", "/v1/obid/decisions", None).body,
+            json!([])
+        );
+    });
+    let request = ernesto.request("obi-wellington", "review_request", brief(), 3600);
+    ernesto.send(&request).await;
+    tokio::task::block_in_place(|| {
+        let item = within(20, "the request waits", || {
+            items_of(&obid, "obiRequest").pop()
+        });
+        let item_id = item["id"].as_str().unwrap().to_owned();
+        queue(&obid, &[answer_item(&item_id, Some(2), None), reply("")]);
+        let answer = said(&obid, "how is the vault job going?");
+        assert!(
+            answer["text"]
+                .as_str()
+                .unwrap()
+                .contains("confirm it in your inbox"),
+            "{answer}"
+        );
+        // Nothing changed: no decision, no job, the request still waits.
+        assert_eq!(
+            call(&obid, "GET", "/v1/obid/decisions", None).body,
+            json!([])
+        );
+        assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
+        assert_eq!(items_of(&obid, "obiRequest").len(), 1);
+        let confirm = items_of(&obid, "confirm").pop().unwrap();
+        assert_eq!(
+            confirm["title"],
+            "Accept, and remember for this repo: Review request from ernesto"
+        );
+        assert_eq!(
+            confirm["confirm"],
+            json!({"action": "accept_remember", "target": item_id, "payload": null})
+        );
+        // The owner's own Confirm does it.
+        let confirmed = owner_answers(&obid, confirm["id"].as_str().unwrap(), "Confirm");
+        assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+        let decisions = call(&obid, "GET", "/v1/obid/decisions", None).body;
+        assert_eq!(decisions.as_array().unwrap().len(), 1, "{decisions}");
+        assert_eq!(decisions[0]["decision"], "accept");
+        assert_eq!(decisions[0]["fromOwner"], "ernesto");
+        within(20, "the review job starts", || {
+            let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+            (jobs.as_array().unwrap().len() == 1).then_some(())
+        });
+        assert!(items_of(&obid, "obiRequest").is_empty());
+    });
+}
+
+/// Starting the work the brain proposed is the owner's call: the brain's Start starts nothing;
+/// a confirm item waits, and the owner's Confirm starts it (review on #552).
+#[test]
+fn the_brain_cant_press_start_on_its_own_proposal() {
+    let folder = Folder::new("brain-inbox-start");
+    let obid = started(&folder);
+    let dispatch = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "fix", "title": "Injected fix",
+         "task": "Fix it", "rounds": 1, "mode": "bypass", "check": "node --test"}]});
+    queue(
+        &obid,
+        &[
+            research(vec![lookup(
+                "list_files",
+                json!({"repo": "obi-e2e/fixture-app"}),
+            )]),
+            dispatch.to_string(),
+        ],
+    );
+    said(&obid, "look into the greeting and fix it");
+    let start = items_of(&obid, "start").pop().unwrap();
+    let start_id = start["id"].as_str().unwrap().to_owned();
+    queue(&obid, &[answer_item(&start_id, Some(1), None), reply("")]);
+    let answer = said(&obid, "thanks");
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("confirm it in your inbox"),
+        "{answer}"
+    );
+    assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
+    assert_eq!(items_of(&obid, "start").len(), 1);
+    let confirm = items_of(&obid, "confirm").pop().unwrap();
+    assert_eq!(
+        confirm["title"],
+        "Start fix fixture-app (Injected fix) in Bypass mode, on auto · auto, check node --test"
+    );
+    assert!(
+        start["text"]
+            .as_str()
+            .unwrap()
+            .contains("Start fix fixture-app (Injected fix) in Bypass mode, on auto · auto, check node --test?"),
+        "{start}"
+    );
+    assert_eq!(
+        confirm["confirm"],
+        json!({"action": "start", "target": start_id, "payload": null})
+    );
+    // The owner's own Confirm starts it, through the proposal: once, however many come at once.
+    let confirm_id = confirm["id"].as_str().unwrap();
+    let statuses: Vec<u16> = std::thread::scope(|scope| {
+        let tries: Vec<_> = (0..8)
+            .map(|_| scope.spawn(|| owner_answers(&obid, confirm_id, "Confirm").status))
+            .collect();
+        tries.into_iter().map(|t| t.join().unwrap()).collect()
+    });
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 200).count(),
+        1,
+        "{statuses:?}"
+    );
+    assert!(items_of(&obid, "confirm").is_empty());
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs.as_array().unwrap().len(), 1);
+    assert_eq!(jobs[0]["title"], "Injected fix");
+    assert!(items_of(&obid, "start").is_empty());
+}
+
+/// The brain is never offered a confirm item, and never answers one.
+#[test]
+fn the_brain_never_answers_a_confirm_item() {
+    let folder = Folder::new("brain-inbox-confirm");
+    let obid = started(&folder);
+    let id = job_that(&obid, "Vault secrets", "SLEEP", Some("ask"), "running")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let bypass = json!({"action": "set_mode", "reply": "", "dispatches": [], "question": null,
+                        "jobs": [id], "mode": "bypass"});
+    queue(&obid, &[bypass.to_string(), reply("")]);
+    said(&obid, "stop asking on the vault job");
+    let confirm = items_of(&obid, "confirm").pop().unwrap();
+    let confirm_id = confirm["id"].as_str().unwrap().to_owned();
+    queue(
+        &obid,
+        &[
+            answer_item(&confirm_id, Some(1), None),
+            answer_item(&confirm_id, Some(1), None),
+        ],
+    );
+    said(&obid, "confirm it");
+    let args = std::fs::read_to_string(calls(&obid).last().unwrap().join("args"))
+        .expect("the brain's last call has its args");
+    assert!(!args.contains(&format!("\"{confirm_id}\"")));
+    let refused = records(&obid).pop().unwrap()["refused"].to_string();
+    assert!(
+        refused.contains("answer_inbox names an item waiting in the inbox"),
+        "{refused}"
+    );
+    assert_eq!(get_job(&obid, &id)["mode"], "ask");
+    assert_eq!(items_of(&obid, "confirm").len(), 1);
+}
+
+/// Cancel on a proposal is one-off: done in the turn, nothing to confirm (review on #552).
+#[test]
+fn cancel_on_a_proposal_is_done_in_the_turn() {
+    let folder = Folder::new("brain-inbox-cancel");
+    let obid = started(&folder);
+    let dispatch = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "fix", "title": "Greeting fix",
+         "task": "Fix it", "rounds": 1}]});
+    queue(
+        &obid,
+        &[
+            research(vec![lookup(
+                "list_files",
+                json!({"repo": "obi-e2e/fixture-app"}),
+            )]),
+            dispatch.to_string(),
+        ],
+    );
+    said(&obid, "look into the greeting and fix it");
+    let start = items_of(&obid, "start").pop().unwrap();
+    let start_id = start["id"].as_str().unwrap().to_owned();
+    queue(&obid, &[answer_item(&start_id, Some(2), None), reply("")]);
+    assert_eq!(
+        said(&obid, "never mind that fix")["text"],
+        "Answered Greeting fix's item: Cancel."
+    );
+    assert!(items_of(&obid, "start").is_empty());
+    assert!(items_of(&obid, "confirm").is_empty());
+    assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
+}
+
+/// Two owners' Starts on one proposal at once start one job (review on #552).
+#[test]
+fn concurrent_starts_on_a_proposal_start_one_job() {
+    let folder = Folder::new("brain-start-race");
+    let obid = started(&folder);
+    let dispatch = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "fix", "title": "Greeting fix",
+         "task": "Fix it", "rounds": 1}]});
+    queue(
+        &obid,
+        &[
+            research(vec![lookup(
+                "list_files",
+                json!({"repo": "obi-e2e/fixture-app"}),
+            )]),
+            dispatch.to_string(),
+        ],
+    );
+    said(&obid, "look into the greeting and fix it");
+    let start_id = items_of(&obid, "start").pop().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let statuses: Vec<u16> = std::thread::scope(|scope| {
+        let tries: Vec<_> = (0..8)
+            .map(|_| scope.spawn(|| owner_answers(&obid, &start_id, "Start").status))
+            .collect();
+        tries.into_iter().map(|t| t.join().unwrap()).collect()
+    });
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 200).count(),
+        1,
+        "{statuses:?}"
+    );
+    assert_eq!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }
