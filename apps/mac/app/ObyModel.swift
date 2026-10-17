@@ -59,10 +59,12 @@ final class IslandModel {
     var waiting: Int { desk.jobs.count(where: \.isWaiting) + feed.waiting }
 
     /// Jobs and inbox items that wait for you, each job once: the menu bar's count, with `working`.
+    /// It runs on every change to the jobs, so the list is put together once, not once per job (#511).
     var needsYou: Int {
         var waits = Set<String>()
+        let all = desk.jobs + feed.jobs
         for (jobs, place) in [(desk.jobs, "mac"), (feed.jobs, "runner")] {
-            for job in jobs where lists(job) && job.waitsForYou { waits.insert("\(place)/\(job.id)") }
+            for job in jobs where job.waitsForYou && job.listed(after: feed.clearedAt, among: all) { waits.insert("\(place)/\(job.id)") }
         }
         for entry in IslandInbox.entries(desk: desk, feed: feed, now: .now) {
             waits.insert(entry.item.job.isEmpty ? entry.id : "\(entry.local ? "mac" : "runner")/\(entry.item.job)")
@@ -89,7 +91,8 @@ final class IslandModel {
     /// The one line the iPhone's Home says too (apps/shared/JobList.swift): who's working, and what
     /// needs you among the jobs listed.
     var summary: String {
-        Summary.line(working: working, waiting: waiting, needs: NeedsYou.line((desk.jobs + feed.jobs).filter { lists($0) }))
+        let all = desk.jobs + feed.jobs
+        return Summary.line(working: working, waiting: waiting, needs: NeedsYou.line(all.filter { $0.listed(after: feed.clearedAt, among: all) }))
     }
 }
 

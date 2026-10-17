@@ -145,6 +145,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
+    /// Opening Oby again (Spotlight, Finder, `open`) while it runs opens its window: there's no Dock icon to click.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        chat.show()
+        return false
+    }
+
     /// Show Oby your screen with the window closed: the overlay, then the window opens on the conversation with the screenshot attached.
     func showScreen() {
         Task {
