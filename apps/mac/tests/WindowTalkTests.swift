@@ -38,6 +38,17 @@ struct WindowTalkTests {
         for item in ["Undo", "Redo", "Cut", "Copy", "Paste", "Select All"] { #expect(edit.contains(item), "\(item) in \(edit)") }
     }
 
+    /// The Dock icon clicked with the window closed opens it; with it up, macOS brings it forward.
+    /// Closing the window never quits Oby: the talk key, its pill and the menu bar icon carry on.
+    @Test func theDockIconOpensTheWindowAndClosingItKeepsObyRunning() {
+        let app = AppDelegate()
+        var opened = 0
+        app.reopen = { opened += 1 }
+        #expect(app.applicationShouldHandleReopen(NSApp, hasVisibleWindows: false) && opened == 1)
+        #expect(app.applicationShouldHandleReopen(NSApp, hasVisibleWindows: true) && opened == 1)
+        #expect(!app.applicationShouldTerminateAfterLastWindowClosed(NSApp))
+    }
+
     @Test func theMenuBarSaysWhatWorksAndWhatNeedsYou() {
         #expect(MenuBarLabel.label(working: 0, needsYou: 0) == "Oby")
         #expect(MenuBarLabel.label(working: 2, needsYou: 0) == "Oby: 2 working")
