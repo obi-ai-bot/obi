@@ -41,7 +41,9 @@ struct ObyApp: App {
         } label: {
             MenuBarLabel(model: app.island.model)
         }
-        // The app menu, when a window of Oby's is up: Check for Updates… under About.
+        // Oby is a regular app (#528): with its window in front, the menu bar is Oby's own — the app menu
+        // (About, Check for Updates…, Settings…, Hide, Quit), Edit, View, Window and Help, SwiftUI's
+        // standard ones, which the composer's Undo, Cut, Copy and Paste go through.
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { app.island.updater.check() }
@@ -146,11 +148,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    /// Opening Oby again (Spotlight, Finder, `open`) while it runs opens its window: there's no Dock icon to click.
+    /// Clicking Oby's Dock icon, or opening it again (Spotlight, Finder, `open`), while it runs opens its window.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        chat.show()
-        return false
+        if !flag { chat.show() }
+        return true
     }
+
+    /// Closing the window leaves Oby running: the talk key, its pill and the menu bar icon carry on.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     /// Show Oby your screen with the window closed: the overlay, then the window opens on the conversation with the screenshot attached.
     func showScreen() {
