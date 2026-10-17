@@ -185,11 +185,32 @@ struct GatewayEnvelope: Decodable, Equatable {
     var secret: String
 
     static func decode(_ text: String) throws -> GatewayEnvelope {
+        let envelope: GatewayEnvelope
         do {
-            return try JSONDecoder().decode(GatewayEnvelope.self, from: Data(text.utf8))
+            envelope = try JSONDecoder().decode(GatewayEnvelope.self, from: Data(text.utf8))
         } catch {
             throw RunnerError(message: "That isn't Oby's pairing QR code. Scan the one the Mac's Settings › Runner shows.")
         }
+        // An invitation pasted from a message could send this iPhone anywhere: it must point at
+        // the Mac it names, over HTTPS, or at a gateway on the home network.
+        guard MacLink.isHostname(envelope.link.hostname), envelope.reachesItsMac else {
+            throw RunnerError(message: "That invitation doesn't point at the Mac it names, so Oby won't pair with it.")
+        }
+        return envelope
+    }
+
+    /// The URL is the link's own hostname over HTTPS, or plain HTTP to a home-network address.
+    private var reachesItsMac: Bool {
+        guard let host = url.host()?.lowercased() else { return false }
+        if url.scheme == "https" {
+            return (url.port.map { "\(host):\($0)" } ?? host) == link.hostname.lowercased()
+        }
+        guard url.scheme == "http" else { return false }
+        if host.hasSuffix(".local") { return true }
+        let parts = host.split(separator: ".").compactMap { UInt8($0) }
+        guard parts.count == 4 else { return false }
+        return parts[0] == 10 || (parts[0] == 172 && (16...31).contains(parts[1]))
+            || (parts[0] == 192 && parts[1] == 168) || (parts[0] == 169 && parts[1] == 254)
     }
 }
 

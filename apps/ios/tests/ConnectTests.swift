@@ -23,10 +23,10 @@ struct ConnectTests {
     }
 
     @Test func theQRCodeCarriesTheGatewayAndTheLink() throws {
-        let text = #"{"url":"http://192.168.1.20:8810","link":{"hostname":"oby-abc.tetrix.pro","name":"Wellington's MacBook Air"},"secret":"one-time"}"#
+        let text = #"{"url":"http://192.168.1.20:8810","link":{"hostname":"oby-abcdefghijklmnop.tetrix.pro","name":"Wellington's MacBook Air"},"secret":"one-time"}"#
         let envelope = try GatewayEnvelope.decode(text)
         #expect(envelope.url == gateway)
-        #expect(envelope.link == MacLink(name: "Wellington's MacBook Air", hostname: "oby-abc.tetrix.pro"))
+        #expect(envelope.link == MacLink(name: "Wellington's MacBook Air", hostname: "oby-abcdefghijklmnop.tetrix.pro"))
         #expect(envelope.secret == "one-time")
         // Any other QR code says what to scan instead.
         #expect(throws: RunnerError.self) { try GatewayEnvelope.decode("https://example.com/menu") }
@@ -42,6 +42,23 @@ struct ConnectTests {
         #expect(MacLink.hostname(from: "https://Mac.tail0000.ts.net:8443/") == "mac.tail0000.ts.net:8443")
         for wrong in ["ts.net", "mac.ts.net", "mac.tail0000.ts.net.evil.com", "mac.tail0000.ts.net:", "evil.com:8443"] {
             #expect(!MacLink.isHostname(wrong), Comment(rawValue: wrong))
+        }
+    }
+
+    /// A pasted invitation can't send this iPhone somewhere other than the Mac it names: the URL is
+    /// the link's own hostname over HTTPS, or a home-network gateway over HTTP.
+    @Test func anInvitationPointsAtTheMacItNames() {
+        let link = #"{"hostname":"mac.tail0000.ts.net:8443","name":"My Mac"}"#
+        for url in ["https://evil.example", "https://mac.tail0000.ts.net", "http://mac.tail0000.ts.net:8443", "http://8.8.8.8:8810", "ftp://192.168.1.20"] {
+            #expect(throws: RunnerError.self, Comment(rawValue: url)) {
+                try GatewayEnvelope.decode(#"{"url":"\#(url)","link":\#(link),"secret":"s"}"#)
+            }
+        }
+        #expect(throws: RunnerError.self) {
+            try GatewayEnvelope.decode(#"{"url":"https://evil.example","link":{"hostname":"evil.example","name":"M"},"secret":"s"}"#)
+        }
+        for url in ["https://mac.tail0000.ts.net:8443", "http://192.168.1.20:8810", "http://10.0.0.5:8810", "http://my-mac.local:8810"] {
+            #expect((try? GatewayEnvelope.decode(#"{"url":"\#(url)","link":\#(link),"secret":"s"}"#)) != nil, Comment(rawValue: url))
         }
     }
 

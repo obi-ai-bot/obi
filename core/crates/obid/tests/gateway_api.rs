@@ -363,3 +363,63 @@ fn gateway_answers_lose_vault_secrets_session_ids_and_account_homes() {
         "{events}"
     );
 }
+
+/// One raw request to the gateway: `extra` header lines as given.
+fn raw(obid: &Obid, extra: &str, body: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", obid.gateway.unwrap())).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let text = format!(
+        "POST /v1/pairing HTTP/1.1\r\nHost: mac.tail0000.ts.net\r\nConnection: close\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(text.as_bytes()).unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    (answer.split(' ').nth(1).unwrap().parse().unwrap(), answer)
+}
+
+/// What a web page could send can't redeem or use up an invitation: a request a browser makes
+/// (it says its `Origin`) is `403`, and one that isn't JSON is `415` (a page can't send JSON
+/// across origins without asking first). A phone's name keeps no control characters, so it
+/// can't forge lines in obid's log.
+#[test]
+fn only_a_phone_redeems_an_invitation() {
+    let folder = Folder::new("gateway-browser");
+    let obid = started(&folder);
+    let invitation = call(
+        &obid,
+        "POST",
+        "/v1/pairing/invite",
+        Some(&json!({"url": "https://mac.tail0000.ts.net:8443"})),
+    )
+    .body;
+    let code = invitation["code"].as_str().unwrap();
+    let body = json!({"credential": "wrong"}).to_string();
+    for _ in 0..6 {
+        let (status, answer) = raw(
+            &obid,
+            "Origin: https://evil.example\r\nContent-Type: application/json\r\n",
+            &body,
+        );
+        assert_eq!(status, 403, "{answer}");
+        let (status, answer) = raw(&obid, "Content-Type: text/plain\r\n", &body);
+        assert_eq!(status, 415, "{answer}");
+    }
+    // None of those counted: the invitation still works.
+    let named = json!({"credential": code, "name": "Phone\nERROR forged log line"}).to_string();
+    let (status, answer) = raw(&obid, "Content-Type: application/json\r\n", &named);
+    assert_eq!(status, 200, "{answer}");
+    let listed = call(&obid, "GET", "/v1/pairing/devices", None);
+    assert_eq!(
+        listed.body[0]["name"], "PhoneERROR forged log line",
+        "{}",
+        listed.text
+    );
+    assert!(
+        !obid.log().contains("\nERROR forged log line"),
+        "{}",
+        obid.log()
+    );
+}

@@ -250,7 +250,8 @@ impl Gateway {
         let token = random(64);
         let device = Device {
             id: uuid::Uuid::new_v4().to_string(),
-            name: name.chars().take(100).collect(),
+            // No control characters: the name goes in obid's log.
+            name: name.chars().filter(|c| !c.is_control()).take(100).collect(),
             created: seconds(now),
             expires_at: seconds(now + LIFETIME),
         };
@@ -390,8 +391,24 @@ struct RedeemRequest {
     name: Option<String>,
 }
 
-/// `POST /v1/pairing`, on the gateway only.
+/// `POST /v1/pairing`, on the gateway only. Only a phone redeems: a browser says its `Origin`,
+/// and a page can't send JSON across origins without asking first, so neither a page the owner
+/// opens nor a rebound name can use an invitation up.
 async fn redeem(State(through): State<Through>, request: Request) -> Response {
+    if request.headers().contains_key(header::ORIGIN) {
+        return error(StatusCode::FORBIDDEN, "Only a phone pairs with obid.");
+    }
+    let json = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().starts_with("application/json"));
+    if !json {
+        return error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Pairing takes JSON (Content-Type: application/json).",
+        );
+    }
     let Ok(bytes) = axum::body::to_bytes(request.into_body(), 64 * 1024).await else {
         return error(StatusCode::PAYLOAD_TOO_LARGE, "That request is too large.");
     };
