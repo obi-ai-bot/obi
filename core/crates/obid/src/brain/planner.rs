@@ -79,7 +79,7 @@ impl Adapter {
     /// The plan as JSON, or why there is none. `model` is for the adapters that take one. Each
     /// model call it makes, a retry included, is added to `calls` (#533).
     #[allow(clippy::too_many_arguments)]
-    async fn complete(
+    pub(super) async fn complete(
         &self,
         model: &str,
         system: &str,
@@ -723,7 +723,7 @@ impl Planner {
 
 /// What the brain gets, with the vault's secrets taken out ([`crate::vault::for_agent`]), or why
 /// the vault can't be read.
-fn for_brain(
+pub(super) fn for_brain(
     system: &str,
     user: &str,
     schema: &str,

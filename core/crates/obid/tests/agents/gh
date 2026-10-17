@@ -1,4 +1,24 @@
 #!/bin/sh
+# A stand-in for gh in obid's tests. With a board in $HOME/board (obid's HOME), it serves the
+# Lead's reads from its files and keeps the claims it is asked to make (#589):
+#   user, projects.json, items.json, issues.json, prs.json   what each read answers
+#   unreadable    when it exists, `gh project list` fails
+#   body-<n>      issue n's body, for `gh issue view <n> … -q .body`
+#   edits         one line per `gh issue edit`: <issue> <repo> <label added> <last line of the body>
+board="$HOME/board"
+if [ -d "$board" ]; then
+  case "$1 $2" in
+    "api user") cat "$board/user"; exit 0 ;;
+    "project list")
+      if [ -f "$board/unreadable" ]; then echo "HTTP 502: Bad Gateway" >&2; exit 1; fi
+      cat "$board/projects.json"; exit 0 ;;
+    "project item-list") cat "$board/items.json"; exit 0 ;;
+    "issue list") cat "$board/issues.json"; exit 0 ;;
+    "pr list") cat "$board/prs.json"; exit 0 ;;
+    "issue view") if [ "$8" = "-q" ]; then cat "$board/body-$3" 2>/dev/null; exit 0; fi ;;
+    "issue edit") printf '%s %s %s %s\n' "$3" "$5" "$7" "$(printf '%s\n' "$9" | tail -n 1)" >> "$board/edits"; exit 0 ;;
+  esac
+fi
 case "$3" in
   176) printf '%s\n' '{"title":"fix accounts review","body":"Files: `Engine/Accounts.swift`, `Engine/Review.swift`, `RunnerTests/`"}' ;;
   198) printf '%s\n' '{"title":"fix checks review","body":"Files: `Engine/Review.swift`, `Engine/CheckRuns.swift`"}' ;;
