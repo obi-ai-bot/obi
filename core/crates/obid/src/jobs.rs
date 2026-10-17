@@ -1597,12 +1597,43 @@ impl Jobs {
             .collect()
     }
 
-    /// The job's mode, as it names it.
+    /// The job's mode, as it names it. A job from before modes is in Bypass; a mode this obid
+    /// can't read (one a newer obid wrote) asks rather than allow.
     fn mode_of(job: &Job) -> Mode {
-        job.mode
-            .as_deref()
-            .and_then(Mode::parse)
-            .unwrap_or(Mode::Bypass)
+        match job.mode.as_deref() {
+            None => Mode::Bypass,
+            Some(mode) => Mode::parse(mode).unwrap_or(Mode::Ask),
+        }
+    }
+
+    /// Where the job's sandbox ends, for `permissions::reach`: its worktree, its temporary folder,
+    /// its `HOME` (the account's folder for Cursor) and its agent's login folders.
+    fn bounds(&self, job: &Job, worktree: &Path) -> permissions::Bounds {
+        let temp = self.temp_path(&job.id);
+        let tool = Tool::from_id(&job.agent);
+        let config_dir = tool.and_then(|tool| {
+            self.accounts(tool)
+                .into_iter()
+                .find(|a| a.id == job.account)
+                .and_then(|a| a.config_dir)
+        });
+        let mut logins = vec![
+            self.login_path(&job.id),
+            temp.join(".claude"),
+            temp.join(".claude.json"),
+            temp.join(".codex"),
+        ];
+        logins.extend(config_dir.clone());
+        let home = match (tool, &config_dir) {
+            (Some(Tool::Cursor), Some(dir)) => dir.clone(),
+            _ => temp.clone(),
+        };
+        permissions::Bounds {
+            worktree: worktree.to_path_buf(),
+            temp: Some(temp),
+            home: Some(home),
+            logins,
+        }
     }
 
     /// A prompt obid's fixed rules let through: the job's mode and its repository's rules allow or
@@ -1612,11 +1643,12 @@ impl Jobs {
             return Ruling::Now(Answer::Deny("The job is gone.".into()));
         };
         let call = Call::new(tool, input);
+        let bounds = self.bounds(&job, worktree);
         match permissions::decide(
             &call,
             Self::mode_of(&job),
             &self.rules_for(&job.repo),
-            worktree,
+            &bounds,
         ) {
             permissions::Verdict::Allow => {
                 self.answered(id, &call, worktree, None);
@@ -1628,7 +1660,7 @@ impl Jobs {
             }
             permissions::Verdict::Ask => {
                 let permission =
-                    permissions::card(&call, &permissions::new_id(), &job.repo, worktree);
+                    permissions::card(&call, &permissions::new_id(), &job.repo, &bounds);
                 let (reply, answer) = tokio::sync::oneshot::channel();
                 let first = {
                     let mut state = self.lock();
@@ -1658,7 +1690,7 @@ impl Jobs {
         let entry = permissions::Answered::of(
             call,
             &job.repo,
-            worktree,
+            &self.bounds(&job, worktree),
             refused,
             obi_protocol::time::now(),
         );
@@ -1701,6 +1733,7 @@ impl Jobs {
     fn reconsider(&self, id: &str) {
         let Some(job) = self.get(id) else { return };
         let worktree = self.worktree_path(id);
+        let bounds = self.bounds(&job, &worktree);
         let rules = self.rules_for(&job.repo);
         let mode = Self::mode_of(&job);
         let mut answered: Vec<(Ask, Answer)> = Vec::new();
@@ -1711,7 +1744,7 @@ impl Jobs {
             };
             let mut kept = VecDeque::new();
             while let Some(ask) = asks.pop_front() {
-                match permissions::decide(&ask.call, mode, &rules, &worktree) {
+                match permissions::decide(&ask.call, mode, &rules, &bounds) {
                     permissions::Verdict::Allow => answered.push((ask, Answer::Allow)),
                     permissions::Verdict::Deny(why) => answered.push((ask, Answer::Deny(why))),
                     permissions::Verdict::Ask => kept.push_back(ask),
@@ -4286,6 +4319,25 @@ fn tail_chars(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A job from before modes is in Bypass; a mode this obid can't read asks (security review
+    /// of #586, S4).
+    #[test]
+    fn a_mode_obid_cant_read_asks() {
+        let mut job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        assert_eq!(Jobs::mode_of(&job), Mode::Bypass);
+        job.mode = Some("someday".into());
+        assert_eq!(Jobs::mode_of(&job), Mode::Ask);
+        job.mode = Some("sandbox".into());
+        assert_eq!(Jobs::mode_of(&job), Mode::Sandbox);
+    }
 
     #[test]
     fn paths_inside_the_repository() {

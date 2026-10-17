@@ -310,10 +310,13 @@ impl ToolCall {
                 .collect()
         };
         match self.kind.as_deref()? {
+            // Without its command, the title stands in for obid's fixed rules (a publish is still
+            // refused), and Sandbox mode asks (`seen`: false, docs/runner-api.md #586).
             "execute" => Some(vec![(
                 "Bash".into(),
                 json!({"command": self.command.as_deref().unwrap_or(title),
-                       "run_in_background": self.background}),
+                       "run_in_background": self.background,
+                       "seen": self.command.is_some()}),
             )]),
             "edit" | "delete" | "move" => Some(per_path("Edit")),
             "read" | "search" => {
@@ -899,7 +902,7 @@ mod tests {
             call.calls(),
             Some(vec![(
                 "Bash".into(),
-                json!({"command": "git push", "run_in_background": false})
+                json!({"command": "git push", "run_in_background": false, "seen": true})
             )])
         );
         assert_eq!(call.step(), "Running git push");

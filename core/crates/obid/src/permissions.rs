@@ -85,6 +85,8 @@ pub struct Call {
     pub url: Option<String>,
     /// What a search or listing looks at (`path`, a glob), as the agent named it.
     pub reads: Vec<String>,
+    /// The command is only a title the agent gave (`"seen": false`, Cursor without a command).
+    pub unseen: bool,
 }
 
 impl Call {
@@ -104,6 +106,7 @@ impl Call {
                 .filter(|key| !(tool == "Grep" && **key == "pattern"))
                 .filter_map(|key| text(key))
                 .collect(),
+            unseen: input.get("seen").and_then(Value::as_bool) == Some(false),
         }
     }
 }
@@ -158,16 +161,16 @@ impl Answered {
     pub fn of(
         call: &Call,
         repo: &str,
-        worktree: &Path,
+        bounds: &Bounds,
         refused: Option<&str>,
         at: i64,
     ) -> Answered {
-        let card = card(call, &new_id(), repo, worktree);
+        let card = card(call, &new_id(), repo, bounds);
         Answered {
             id: card.id,
             tool: card.tool,
             title: card.title,
-            detail: card.detail.chars().take(DETAIL_CAP).collect(),
+            detail: scrubbed(&card.detail).chars().take(DETAIL_CAP).collect(),
             decision: if refused.is_some() {
                 "refused"
             } else {
@@ -188,6 +191,25 @@ impl Answered {
         }
         value
     }
+}
+
+/// `detail` as the job's record keeps it: a login in an address (`https://user:pass@host`) and
+/// every word that looks like a token taken out.
+fn scrubbed(detail: &str) -> String {
+    static LOGIN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let login = LOGIN.get_or_init(|| regex::Regex::new(r"://[^/\s@]+@").expect("a regex"));
+    let detail = login.replace_all(detail, "://");
+    detail
+        .split(' ')
+        .map(|word| {
+            if crate::scan::matches(word).is_empty() {
+                word.to_owned()
+            } else {
+                "[redacted]".to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Whether obid's answer to `tool` is worth the owner's seeing: the agent's own bookkeeping isn't.
@@ -436,6 +458,24 @@ const NETWORK_PROGRAMS: &[&str] = &[
     "gem",
     "apt",
     "apt-get",
+    "pipx",
+    "uvx",
+    "deno",
+    "gradle",
+    "gradlew",
+    "mvn",
+    "mvnw",
+    "rustup",
+    "psql",
+    "mysql",
+    "mongosh",
+    "redis-cli",
+    "kubectl",
+    "helm",
+    "aws",
+    "gcloud",
+    "az",
+    "terraform",
 ];
 
 /// What comes before the program a command runs (its options and its numbers are skipped too).
@@ -490,7 +530,7 @@ const NETWORK_AFTER: &[(&str, &[&str])] = &[
             "install", "add", "fetch", "update", "publish", "search", "login",
         ],
     ),
-    ("go", &["get", "install"]),
+    ("go", &["get", "install", "mod"]),
     ("pip", &["install", "download"]),
     ("pip3", &["install", "download"]),
     ("uv", &["add", "sync", "pip", "tool", "lock"]),
@@ -798,25 +838,83 @@ fn subcommand<'a>(program: &str, rest: &'a [String]) -> Option<(usize, &'a str)>
     None
 }
 
-/// Whether a simple command reaches the network: a client, an install, a clone.
-fn downloads(words: &[String]) -> bool {
+/// Whether a simple command reaches the network: a client, an install, a clone, a program obid
+/// can't read (`$(echo curl)`, `$c`), or code it runs that obid doesn't read (`python3 -c`,
+/// `node -e`, `find -exec`).
+fn downloads(words: &[String], bounds: &Bounds) -> bool {
     let Some(p) = program_index(words) else {
         return false;
     };
+    // A program named by a variable or a substitution could be anything.
+    if words[p].is_empty() || words[p].starts_with('$') {
+        return true;
+    }
     let program = base(&words[p]);
+    let rest = &words[p + 1..];
+    let sub = subcommand(program, rest);
+    if matches!(program, "npx" | "bunx") {
+        // A tool the repository installed runs from it; any other is downloaded first.
+        return !sub.is_some_and(|(_, tool)| {
+            !tool.contains('/')
+                && bounds
+                    .worktree
+                    .join("node_modules/.bin")
+                    .join(tool)
+                    .exists()
+        });
+    }
     if NETWORK_PROGRAMS.contains(&program) {
         return true;
     }
-    let rest = &words[p + 1..];
-    let sub = subcommand(program, rest);
-    if program == "git" {
-        // `git remote -v` and `git submodule status` stay local.
-        let then = |i: usize| subcommand(program, &rest[i + 1..]).map(|(_, w)| w);
-        match sub {
-            Some((i, "remote")) => return matches!(then(i), Some("update" | "show" | "prune")),
-            Some((i, "submodule")) => return matches!(then(i), Some("update" | "add" | "foreach")),
-            _ => {}
+    let has = |flags: &[&str]| rest.iter().any(|w| flags.contains(&w.as_str()));
+    let python = program.starts_with("python") || program.starts_with("pypy");
+    if python {
+        let module = rest
+            .iter()
+            .position(|w| w == "-m")
+            .and_then(|i| rest.get(i + 1));
+        if has(&["-c"])
+            || module.is_some_and(|m| matches!(m.as_str(), "pip" | "pip3" | "ensurepip"))
+        {
+            return true;
         }
+    }
+    // Code given inline is code obid doesn't read.
+    let inline = match program {
+        "node" | "nodejs" | "bun" => has(&["-e", "--eval", "-p", "--print"]),
+        "perl" | "ruby" => rest
+            .iter()
+            .any(|w| w.starts_with('-') && !w.starts_with("--") && w.contains(['e', 'E'])),
+        "php" => has(&["-r"]),
+        "find" => has(&["-exec", "-execdir", "-ok", "-okdir"]),
+        _ => false,
+    };
+    if inline {
+        return true;
+    }
+    match (program, sub) {
+        // A bare `yarn` or `bundle` installs.
+        ("yarn" | "bundle", None) => return true,
+        ("swift", Some((i, "package"))) => {
+            return matches!(
+                subcommand(program, &rest[i + 1..]).map(|(_, w)| w),
+                Some("resolve" | "update")
+            );
+        }
+        // `git remote -v` and `git submodule status` stay local.
+        ("git", Some((i, "remote"))) => {
+            return matches!(
+                subcommand(program, &rest[i + 1..]).map(|(_, w)| w),
+                Some("update" | "show" | "prune")
+            );
+        }
+        ("git", Some((i, "submodule"))) => {
+            return matches!(
+                subcommand(program, &rest[i + 1..]).map(|(_, w)| w),
+                Some("update" | "add" | "foreach")
+            );
+        }
+        _ => {}
     }
     let Some((_, subcommands)) = NETWORK_AFTER.iter().find(|(name, _)| *name == program) else {
         return false;
@@ -825,16 +923,21 @@ fn downloads(words: &[String]) -> bool {
 }
 
 /// Whether `command` reaches the network: a client, an install, a clone, in any of the simple
-/// commands it runs ([`simple_commands`]). Matching words is best-effort, like publishing's
-/// (`crate::policy`): the job sandbox is what confines the files, and a script that opens a socket
-/// itself isn't caught here. Code nested deeper than obid reads asks.
-fn uses_network(command: &str) -> bool {
-    simple_commands(command).is_none_or(|commands| commands.iter().any(|w| downloads(w)))
+/// commands it runs ([`simple_commands`]), or bash's `/dev/tcp` anywhere. Matching words is
+/// best-effort, like publishing's (`crate::policy`): neither OS sandbox limits an agent's network
+/// yet, and a script that opens a socket itself isn't caught here. Code nested deeper than obid
+/// reads asks.
+fn uses_network(command: &str, bounds: &Bounds) -> bool {
+    command.contains("/dev/tcp")
+        || command.contains("/dev/udp")
+        || simple_commands(command)
+            .is_none_or(|commands| commands.iter().any(|w| downloads(w, bounds)))
 }
 
 /// Names that say a file holds secrets or a login, wherever it is.
 const SECRET_NAMES: &[&str] = &[
     "api-token",
+    "auth.json",
     "credentials.json",
     ".credentials.json",
     "id_rsa",
@@ -848,30 +951,149 @@ const SECRET_NAMES: &[&str] = &[
     ".git-credentials",
 ];
 
+/// `.env` files a repository commits for its tests and local runs: reading the worktree's own,
+/// when git has it, doesn't ask (the repository already holds it).
+const COMMITTED_ENV: &[&str] = &[".env.test", ".env.development"];
+
 /// Folders that hold secrets or a login.
 const SECRET_FOLDERS: &[&str] = &[".ssh", ".aws", ".gnupg", ".kube", ".docker"];
 
-/// Variables that name where the agent's own login is.
-const LOGIN_VARIABLES: &[&str] = &["claude_config_dir", "codex_home"];
+/// Variables that hold a token obid gives a job, or name where the agent's login is.
+pub const SECRET_VARIABLES: &[&str] = &[
+    "OBY_MCP_TOKEN",
+    "OBY_CHECK_TOKEN",
+    "OBID_API_TOKEN",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "CURSOR_CONFIG_DIR",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+];
+
+/// Folders the job sandbox lets every process read: the system's software and settings, devices.
+const SYSTEM_FOLDERS: &[&str] = &[
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/etc",
+    "/opt",
+    "/nix",
+    "/dev",
+    "/proc",
+    "/sys",
+    "/System",
+    "/Library",
+    "/Applications",
+    "/private/etc",
+    "/private/var/select",
+    "/private/var/run/resolv.conf",
+    "/var/run/resolv.conf",
+];
+
+/// Where a job's sandbox ends, as [`reach`] sees it: its worktree, its temporary folder, its
+/// `HOME` (the temporary folder, or the account's folder for Cursor), and the folders that hold its
+/// agent's login.
+#[derive(Debug, Clone, Default)]
+pub struct Bounds {
+    pub worktree: PathBuf,
+    pub temp: Option<PathBuf>,
+    pub home: Option<PathBuf>,
+    pub logins: Vec<PathBuf>,
+}
+
+impl Bounds {
+    /// Only a worktree: a job whose folders obid doesn't know.
+    pub fn of(worktree: &Path) -> Bounds {
+        Bounds {
+            worktree: worktree.to_path_buf(),
+            ..Bounds::default()
+        }
+    }
+
+    /// `word` as a path, `~` and `$HOME` taken as the job's `HOME`; none when it isn't one.
+    fn path_of(&self, word: &str) -> Option<PathBuf> {
+        let home = |rest: &str| {
+            self.home
+                .as_ref()
+                .map(|h| h.join(rest.trim_start_matches('/')))
+        };
+        if word == "~" || word == "$HOME" || word == "${HOME}" {
+            return self.home.clone();
+        }
+        if let Some(rest) = word
+            .strip_prefix("~/")
+            .or_else(|| word.strip_prefix("$HOME/"))
+            .or_else(|| word.strip_prefix("${HOME}/"))
+        {
+            return home(rest);
+        }
+        word.starts_with('/').then(|| PathBuf::from(word))
+    }
+
+    /// Whether `path` is in the agent's login folders, as written or after links.
+    fn in_login(&self, path: &Path) -> bool {
+        let real = std::fs::canonicalize(path).ok();
+        self.logins.iter().any(|login| {
+            let login_real = std::fs::canonicalize(login).ok();
+            path.starts_with(login)
+                || login_real.as_ref().is_some_and(|l| path.starts_with(l))
+                || real.as_ref().is_some_and(|r| {
+                    r.starts_with(login) || login_real.as_ref().is_some_and(|l| r.starts_with(l))
+                })
+        })
+    }
+
+    /// Whether the job may read `path` without asking: in its worktree or its temporary folder.
+    fn holds(&self, path: &str) -> bool {
+        crate::policy::path_inside(path, &self.worktree)
+            || self
+                .temp
+                .as_ref()
+                .is_some_and(|temp| crate::policy::path_inside(path, temp))
+    }
+}
 
 /// Whether `text` (a path, an address, a word of a command) names a secret or a login: a
-/// well-known file or folder, an `.env` file, the folder of the agent's own login, a process's
-/// environment.
-fn names_a_secret(text: &str) -> bool {
+/// well-known file or folder (a glob that could match one too), an `.env` file, the agent's own
+/// login folder or a variable naming it, a token variable, a process's environment.
+fn names_a_secret(text: &str, bounds: &Bounds) -> bool {
     let lower = text.to_ascii_lowercase();
-    if LOGIN_VARIABLES.iter().any(|v| lower.contains(v))
+    if SECRET_VARIABLES
+        .iter()
+        .any(|v| lower.contains(&v.to_ascii_lowercase()))
         || (lower.contains("/proc/") && lower.ends_with("/environ"))
     {
         return true;
     }
-    lower.split(['=', ':', ',']).any(|part| {
+    text.split(['=', ':', ',']).any(|part| {
+        if let Some(path) = bounds.path_of(part)
+            && bounds.in_login(&path)
+        {
+            return true;
+        }
+        let part = part.to_ascii_lowercase();
         if part
             .split('/')
             .any(|folder| SECRET_FOLDERS.contains(&folder))
         {
             return true;
         }
-        let name = base(part);
+        let name = base(&part);
+        // `.cred*`, `id_*`, `.env*`: a glob that could match a secret's name.
+        if let Some(glob) = name.find(['*', '?', '[']) {
+            let literal = &name[..glob];
+            return literal.len() >= 2
+                && (SECRET_NAMES.iter().any(|s| s.starts_with(literal))
+                    || ".env".starts_with(literal)
+                    || literal.starts_with(".env"));
+        }
+        if COMMITTED_ENV.contains(&name) {
+            return !committed(&part, bounds);
+        }
         SECRET_NAMES.contains(&name)
             || name == ".env"
             || (name.starts_with(".env.")
@@ -879,6 +1101,22 @@ fn names_a_secret(text: &str) -> bool {
                 && !name.ends_with(".sample")
                 && !name.ends_with(".template"))
     })
+}
+
+/// Whether `path` is a file of the worktree's own that git has (`git ls-files`).
+fn committed(path: &str, bounds: &Bounds) -> bool {
+    if !crate::policy::path_inside(path, &bounds.worktree) {
+        return false;
+    }
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(&bounds.worktree)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Whether `text` holds a value the vault keeps, in any form the vault finds. When the vault can't
@@ -890,29 +1128,15 @@ fn holds_a_vault_value(text: &str) -> bool {
 /// Programs whose first argument is a pattern to look for, not a file.
 const SEARCHES: &[&str] = &["grep", "egrep", "fgrep", "rg", "ag", "ack"];
 
-/// Whether a simple command touches secrets or a login: it prints the environment or a keychain's
-/// passwords, asks for a code host's login, or names a secret's file ([`names_a_secret`]). What a
-/// command only says isn't a file: a commit's message, the pattern a search looks for. (What
-/// `echo` prints is read: `cat $(echo ~/.ssh/id_rsa)` reads the key.)
-fn reads_a_secret(words: &[String]) -> bool {
+/// The words of a simple command that may name a file: all of them, but what a command only says
+/// (a commit's message, the pattern a search looks for). What `echo` prints is read too:
+/// `cat $(echo ~/.ssh/id_rsa)` reads the key.
+fn file_words(words: &[String]) -> Vec<&String> {
     let Some(p) = program_index(words) else {
-        // `env` alone prints the environment.
-        return words.iter().any(|w| base(w) == "env");
+        return words.iter().collect();
     };
     let program = base(&words[p]);
     let rest = &words[p + 1..];
-    let sub = subcommand(program, rest).map(|(_, s)| s);
-    match program {
-        "printenv" => return true,
-        "export" | "declare" | "typeset" if rest.iter().all(|w| w.starts_with('-')) => {
-            return true;
-        }
-        "security" if sub.is_some_and(|s| s.starts_with("find-") || s.starts_with("dump-")) => {
-            return true;
-        }
-        "gh" if sub == Some("auth") => return true,
-        _ => {}
-    }
     let mut said = vec![false; rest.len()];
     if program == "git" {
         for (i, w) in rest.iter().enumerate() {
@@ -941,44 +1165,107 @@ fn reads_a_secret(words: &[String]) -> bool {
     words[..=p]
         .iter()
         .chain(rest.iter().zip(&said).filter(|(_, s)| !**s).map(|(w, _)| w))
-        .any(|w| names_a_secret(w))
+        .collect()
+}
+
+/// Whether a simple command touches secrets or a login: it prints the environment or a keychain's
+/// passwords, asks for a code host's login, or names a secret's file ([`names_a_secret`]).
+fn reads_a_secret(words: &[String], bounds: &Bounds) -> bool {
+    let Some(p) = program_index(words) else {
+        // `env` alone prints the environment.
+        return words.iter().any(|w| base(w) == "env");
+    };
+    let program = base(&words[p]);
+    let rest = &words[p + 1..];
+    let sub = subcommand(program, rest).map(|(_, s)| s);
+    match program {
+        "printenv" => return true,
+        // `set` alone prints every variable, `export -p` the exported ones.
+        "set" | "export" | "declare" | "typeset" if rest.iter().all(|w| w.starts_with('-')) => {
+            return true;
+        }
+        "security" if sub.is_some_and(|s| s.starts_with("find-") || s.starts_with("dump-")) => {
+            return true;
+        }
+        "gh" if sub == Some("auth") => return true,
+        _ => {}
+    }
+    file_words(words)
+        .into_iter()
+        .any(|w| names_a_secret(w, bounds))
 }
 
 /// Whether `command` touches secrets, a login or the vault, in any of the simple commands it runs
 /// or anywhere in its text for a vault value. Code nested deeper than obid reads asks.
-fn command_touches_a_secret(command: &str) -> bool {
+fn command_touches_a_secret(command: &str, bounds: &Bounds) -> bool {
     holds_a_vault_value(command)
         || simple_commands(command)
-            .is_none_or(|commands| commands.iter().any(|w| reads_a_secret(w)))
+            .is_none_or(|commands| commands.iter().any(|w| reads_a_secret(w, bounds)))
+}
+
+/// Whether a command names a file outside what the job may read without asking: an absolute path
+/// (or one from `~`) that isn't in its worktree, its temporary folder or the system's folders.
+fn reads_outside(command: &str, bounds: &Bounds) -> bool {
+    let Some(commands) = simple_commands(command) else {
+        return true;
+    };
+    commands.iter().any(|words| {
+        file_words(words).into_iter().any(|word| {
+            word.split('=').any(|part| {
+                let Some(path) = bounds.path_of(part) else {
+                    return false;
+                };
+                if part.contains(char::is_whitespace) {
+                    return false;
+                }
+                let text = path.to_string_lossy();
+                !(bounds.holds(&text) || SYSTEM_FOLDERS.iter().any(|f| path.starts_with(f)))
+            })
+        })
+    })
 }
 
 /// What takes `call` out of the job's sandbox, or none when it stays inside: the files of the
-/// worktree, commands, tests. Reads and searches look only at the worktree (`crate::policy`).
-pub fn reach(call: &Call, worktree: &Path) -> Option<Reach> {
+/// worktree and the job's temporary folder, commands, tests.
+pub fn reach(call: &Call, bounds: &Bounds) -> Option<Reach> {
     let tool = call.tool.as_str();
     let named = call.paths.iter().chain(&call.reads).chain(call.url.iter());
     let secret = named
         .clone()
-        .any(|t| names_a_secret(t) || holds_a_vault_value(t))
+        .any(|t| names_a_secret(t, bounds) || holds_a_vault_value(t))
         || call
             .command
             .as_deref()
-            .is_some_and(command_touches_a_secret);
+            .is_some_and(|c| command_touches_a_secret(c, bounds));
     if secret {
         return Some(Reach::Secrets);
     }
     match tool {
         "WebFetch" | "WebSearch" => Some(Reach::Network),
-        "Bash" => call
-            .command
-            .as_deref()
-            .is_some_and(uses_network)
-            .then_some(Reach::Network),
+        "Bash" => {
+            // Cursor didn't say what it runs, only a title.
+            let Some(command) = call
+                .command
+                .as_deref()
+                .filter(|c| !c.trim().is_empty() && !call.unseen)
+            else {
+                return Some(Reach::Unknown);
+            };
+            if uses_network(command, bounds) {
+                Some(Reach::Network)
+            } else if reads_outside(command, bounds) {
+                Some(Reach::Outside)
+            } else {
+                None
+            }
+        }
+        // Cursor didn't say what it reads.
+        "Read" if call.paths.is_empty() && call.reads.is_empty() => Some(Reach::Unknown),
         _ if EDITS.contains(&tool) || READS.contains(&tool) => call
             .paths
             .iter()
             .chain(&call.reads)
-            .any(|p| !crate::policy::path_inside(p, worktree))
+            .any(|p| !bounds.holds(p))
             .then_some(Reach::Outside),
         "ExitPlanMode" | "Task" | "Agent" | "TodoWrite" => None,
         _ if tool.starts_with("mcp__") => None,
@@ -988,9 +1275,10 @@ pub fn reach(call: &Call, worktree: &Path) -> Option<Reach> {
 
 /// The mode's answer to `call`, after the owner's saved `rules` for the job's repository. obid's
 /// fixed denials (`crate::policy`) come before this, in every mode.
-pub fn decide(call: &Call, mode: Mode, rules: &[Rule], worktree: &Path) -> Verdict {
+pub fn decide(call: &Call, mode: Mode, rules: &[Rule], bounds: &Bounds) -> Verdict {
+    let worktree = bounds.worktree.as_path();
     let sandbox = mode == Mode::Sandbox;
-    let reach = if sandbox { reach(call, worktree) } else { None };
+    let reach = if sandbox { reach(call, bounds) } else { None };
     // The plan's own end: in Plan the agent finishes with it, in any other mode there's nothing to
     // approve. Reads never ask, but in Sandbox mode one that leaves the worktree does.
     if call.tool == "ExitPlanMode" || (QUIET.contains(&call.tool.as_str()) && reach.is_none()) {
@@ -1193,6 +1481,22 @@ fn matches(rule: &str, call: &Call, worktree: &Path, allowing: bool) -> bool {
                 files.iter().any(|f| fits(f))
             };
     }
+    if let Some(site) = content.strip_prefix("domain:") {
+        return call
+            .url
+            .as_deref()
+            .and_then(host)
+            .is_some_and(|h| h == site || h.ends_with(&format!(".{site}")));
+    }
+    if READS.contains(&family(&call.tool)) {
+        let places: Vec<&String> = call.paths.iter().chain(&call.reads).collect();
+        return !places.is_empty()
+            && if allowing {
+                places.iter().all(|p| fits(p))
+            } else {
+                places.iter().any(|p| fits(p))
+            };
+    }
     fits(
         call.url
             .as_deref()
@@ -1227,7 +1531,8 @@ pub fn prefix(command: &str) -> Option<String> {
 }
 
 /// The card for a call that waits for the owner, with the id it's answered by.
-pub fn card(call: &Call, id: &str, repo: &str, worktree: &Path) -> Permission {
+pub fn card(call: &Call, id: &str, repo: &str, bounds: &Bounds) -> Permission {
+    let worktree = bounds.worktree.as_path();
     let line = |text: &str, cap: usize| {
         let first = text.split('\n').next().unwrap_or(text);
         if first.chars().count() > cap {
@@ -1236,7 +1541,7 @@ pub fn card(call: &Call, id: &str, repo: &str, worktree: &Path) -> Permission {
             first.to_owned()
         }
     };
-    let why = reach(call, worktree);
+    let why = reach(call, bounds);
     let (title, detail, mut rule, mut what) = match family(&call.tool) {
         "Bash" => {
             let command = call.command.clone().unwrap_or_default();
@@ -1296,7 +1601,25 @@ pub fn card(call: &Call, id: &str, repo: &str, worktree: &Path) -> Permission {
                 "WebSearch" => "Search the web".to_owned(),
                 _ => format!("Use {tool}"),
             };
-            (title, detail, Some(tool.to_owned()), Some(tool.to_owned()))
+            // "Always" covers what was asked about: a fetch's site, a search's folder.
+            let (rule, what) = match tool {
+                "WebFetch" => match call.url.as_deref().and_then(host) {
+                    Some(site) => (
+                        Some(format!("WebFetch(domain:{site})")),
+                        Some(format!("fetches from {site}")),
+                    ),
+                    None => (None, None),
+                },
+                _ if READS.contains(&tool) => match call.paths.iter().chain(&call.reads).next() {
+                    Some(place) => (
+                        Some(format!("{tool}({place})")),
+                        Some(format!("{tool} in {place}")),
+                    ),
+                    None => (None, None),
+                },
+                _ => (Some(tool.to_owned()), Some(tool.to_owned())),
+            };
+            (title, detail, rule, what)
         }
     };
     // Secrets are answered one at a time, never by a rule that would cover the next.
@@ -1410,7 +1733,7 @@ mod tests {
     }
 
     fn decide_in(call: &Call, mode: Mode, rules: &[Rule]) -> Verdict {
-        decide(call, mode, rules, Path::new(WORKTREE))
+        decide(call, mode, rules, &Bounds::of(Path::new(WORKTREE)))
     }
 
     /// PermissionTests.eachModeAllowsOrAsks.
@@ -1594,7 +1917,7 @@ mod tests {
             ),
             Verdict::Deny(_)
         ));
-        let worktree = Path::new(WORKTREE);
+        let worktree = &Bounds::of(Path::new(WORKTREE));
         let wrapped = card(
             &bash("python3 -c 'import os'"),
             "p1",
@@ -1734,7 +2057,7 @@ mod tests {
                 "{call:?}"
             );
             assert_eq!(
-                super::reach(call, Path::new(WORKTREE)),
+                super::reach(call, &Bounds::of(Path::new(WORKTREE))),
                 Some(*reach),
                 "{call:?}"
             );
@@ -1778,7 +2101,7 @@ mod tests {
             Verdict::Ask
         );
         // The card says why it asks, and offers no rule for a secret.
-        let worktree = Path::new(WORKTREE);
+        let worktree = &Bounds::of(Path::new(WORKTREE));
         let net = card(&bash("npm install left-pad"), "p1", "o/r", worktree);
         assert_eq!(
             net.why.as_deref(),
@@ -1799,7 +2122,7 @@ mod tests {
     /// is read too (#586).
     #[test]
     fn commands_are_read_as_a_shell_reads_them() {
-        let worktree = Path::new(WORKTREE);
+        let worktree = &Bounds::of(Path::new(WORKTREE));
         let commit = "git commit -m \"$(cat <<'EOF'\nfix: don't run curl; ssh keys stay\n- npm install left-pad (no)\n- printenv, .env and ~/.ssh/id_rsa, api-token\nEOF\n)\"";
         let inside = [
             commit,
@@ -1869,9 +2192,271 @@ mod tests {
         }
     }
 
+    /// A job's folders on disk for the review's tests: a worktree that is a git repository with a
+    /// committed `.env.test` and a local `vitest`, a temporary folder, and an account's folder.
+    fn job_folders(name: &str) -> (PathBuf, Bounds) {
+        let root = std::env::temp_dir().join(format!("obid-bounds-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let worktree = root.join("worktree");
+        let temp = root.join("tmp");
+        let account = root.join("accounts/stub");
+        for dir in [&worktree.join("node_modules/.bin"), &temp, &account] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(worktree.join("node_modules/.bin/vitest"), "").unwrap();
+        std::fs::write(worktree.join(".env.test"), "PORT=1\n").unwrap();
+        std::fs::write(worktree.join(".env.development"), "PORT=2\n").unwrap();
+        let git = |args: &[&str]| {
+            let ran = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&worktree)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(ran.status.success(), "{ran:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", ".env.test"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "env",
+        ]);
+        let bounds = Bounds {
+            worktree: worktree.clone(),
+            temp: Some(temp.clone()),
+            home: Some(temp.clone()),
+            logins: vec![account, temp.join(".claude"), temp.join(".codex")],
+        };
+        (root, bounds)
+    }
+
+    /// Security review of #586, S2: what else reaches the network, and what isn't network after
+    /// all (a tool the repository installed, run with `npx`).
+    #[test]
+    fn more_forms_reach_the_network() {
+        let (root, bounds) = job_folders("network");
+        for command in [
+            "$(echo curl) https://x",
+            "c=curl; $c https://x",
+            "$'\\x63url' https://x",
+            "exec 3<>/dev/tcp/1.2.3.4/80",
+            "echo hi > /dev/udp/1.2.3.4/53",
+            "python3 -m pip install requests",
+            "python -m ensurepip",
+            "python3 -c 'import urllib.request'",
+            "node -e 'fetch(1)'",
+            "perl -le 'print 1'",
+            "ruby -e 'puts 1'",
+            "find . -name x -exec curl {} \\;",
+            "yarn",
+            "bundle",
+            "go mod download",
+            "pipx run black",
+            "uvx ruff",
+            "deno run main.ts",
+            "gradle build",
+            "./gradlew test",
+            "mvn test",
+            "rustup update",
+            "swift package resolve",
+            "psql -h db",
+            "redis-cli ping",
+            "kubectl get pods",
+            "aws s3 ls",
+            "gcloud projects list",
+            "terraform plan",
+            "npx prettier --check .",
+        ] {
+            assert_eq!(
+                super::reach(&bash(command), &bounds),
+                Some(Reach::Network),
+                "{command}"
+            );
+        }
+        for command in [
+            "npx vitest run",
+            "yarn test",
+            "bundle exec rspec",
+            "swift build",
+            "python3 -m pytest tests",
+            "node --test",
+            "find . -name '*.rs'",
+        ] {
+            assert_eq!(super::reach(&bash(command), &bounds), None, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Security review of #586, S2: the agent's own login is named by its real folder, a glob
+    /// that could match a login file, a token variable or a bare `set`.
+    #[test]
+    fn the_real_login_and_tokens_are_secrets() {
+        let (root, bounds) = job_folders("secrets");
+        let account = root.join("accounts/stub");
+        for command in [
+            format!("cat {}/auth.json", account.display()),
+            format!("ls {}", account.display()),
+            format!("cat {}/settings.json", account.display()),
+            "cat auth.json".into(),
+            "cat ~/.claude/.cred*".into(),
+            "ls ~/.claude".into(),
+            "cat $HOME/.codex/config.toml".into(),
+            "echo $OBY_MCP_TOKEN".into(),
+            "curl -H \"Authorization: $OBY_CHECK_TOKEN\" x".into(),
+            "set".into(),
+        ] {
+            assert_eq!(
+                super::reach(&bash(&command), &bounds),
+                Some(Reach::Secrets),
+                "{command}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Security review of #586, S3: a command that names a file outside the worktree, the job's
+    /// temporary folder and the system's folders asks; Cursor's call without its command or its
+    /// place asks; a committed `.env.test` and the temporary folder don't.
+    #[test]
+    fn outside_reads_and_unseen_calls_ask() {
+        let (root, bounds) = job_folders("outside");
+        let worktree = bounds.worktree.display().to_string();
+        let temp = bounds.temp.clone().unwrap().display().to_string();
+        for command in [
+            "cat /Users/someone/notes.txt",
+            "ls /tmp",
+            "cp src/a.js /Volumes/usb/a.js",
+            "grep -rn TODO /home/other",
+            "cargo build --target-dir=/srv/cache",
+        ] {
+            assert_eq!(
+                super::reach(&bash(command), &bounds),
+                Some(Reach::Outside),
+                "{command}"
+            );
+        }
+        for command in [
+            "cat /etc/hosts".to_owned(),
+            "ls /usr/bin".into(),
+            "cargo test > /dev/null 2>&1".into(),
+            format!("cat {worktree}/src/a.js"),
+            format!("cat {temp}/out.log"),
+            "cat ~/out.log".into(),
+            "grep -rn '/etc/passwd' src".into(),
+            "git commit -m '/Users/x/notes'".into(),
+        ] {
+            assert_eq!(super::reach(&bash(&command), &bounds), None, "{command}");
+        }
+        let grep =
+            |path: &str| Call::new("Grep", &serde_json::json!({"pattern": "x", "path": path}));
+        assert_eq!(super::reach(&grep(&temp), &bounds), None);
+        assert_eq!(super::reach(&grep("/etc"), &bounds), Some(Reach::Outside));
+        // Cursor: a title in place of its command, a read with no place.
+        let titled = Call::new(
+            "Bash",
+            &serde_json::json!({"command": "git status", "seen": false}),
+        );
+        assert_eq!(super::reach(&titled, &bounds), Some(Reach::Unknown));
+        let nowhere = Call::new("Read", &serde_json::json!({}));
+        assert_eq!(super::reach(&nowhere, &bounds), Some(Reach::Unknown));
+        // `.env` files: a committed `.env.test` reads; an untracked `.env.development`, `.npmrc`,
+        // `.docker/` and `.kube/` ask.
+        let read = |path: &str| Call::new("Read", &serde_json::json!({"file_path": path}));
+        assert_eq!(super::reach(&read(".env.test"), &bounds), None);
+        assert_eq!(super::reach(&bash("cat .env.test"), &bounds), None);
+        for secret in [
+            ".env.development",
+            ".npmrc",
+            ".docker/config.json",
+            ".kube/config",
+        ] {
+            assert_eq!(
+                super::reach(&read(secret), &bounds),
+                Some(Reach::Secrets),
+                "{secret}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Security review of #586, S4: "always" covers a fetch's site and a search's place, not the
+    /// whole tool, and the job's record leaves out a login in an address and a token.
+    #[test]
+    fn always_covers_a_site_or_a_place_and_the_record_keeps_no_token() {
+        let worktree = &Bounds::of(Path::new(WORKTREE));
+        let fetch = |url: &str| Call {
+            tool: "WebFetch".into(),
+            url: Some(url.into()),
+            ..Call::default()
+        };
+        let site_card = card(&fetch("https://docs.example.com/a"), "p1", "o/r", worktree);
+        assert_eq!(
+            site_card.rule.as_deref(),
+            Some("WebFetch(domain:docs.example.com)")
+        );
+        let site = rule("WebFetch(domain:example.com)", "allow");
+        let decided =
+            |call: &Call| decide(call, Mode::Sandbox, std::slice::from_ref(&site), worktree);
+        assert_eq!(
+            decided(&fetch("https://docs.example.com/a")),
+            Verdict::Allow
+        );
+        assert_eq!(decided(&fetch("https://example.com/b")), Verdict::Allow);
+        assert_eq!(
+            decided(&fetch("https://evil.com/?example.com")),
+            Verdict::Ask
+        );
+        assert_eq!(decided(&fetch("https://notexample.com/")), Verdict::Ask);
+        let grep =
+            |path: &str| Call::new("Grep", &serde_json::json!({"pattern": "x", "path": path}));
+        let place_card = card(&grep("/etc"), "p2", "o/r", worktree);
+        assert_eq!(place_card.rule.as_deref(), Some("Grep(/etc)"));
+        let place = rule("Grep(/etc)", "allow");
+        assert_eq!(
+            decide(
+                &grep("/etc"),
+                Mode::Sandbox,
+                std::slice::from_ref(&place),
+                worktree
+            ),
+            Verdict::Allow
+        );
+        assert_eq!(
+            decide(
+                &grep("/var"),
+                Mode::Sandbox,
+                std::slice::from_ref(&place),
+                worktree
+            ),
+            Verdict::Ask
+        );
+        let token = format!("ghp_{}", "a".repeat(36));
+        let recorded = Answered::of(
+            &bash(&format!(
+                "git clone https://user:hunter2@example.com/r.git && echo {token}"
+            )),
+            "o/r",
+            worktree,
+            None,
+            7,
+        );
+        assert!(!recorded.detail.contains("hunter2"), "{}", recorded.detail);
+        assert!(!recorded.detail.contains(&token), "{}", recorded.detail);
+        assert!(
+            recorded.detail.contains("https://example.com/r.git"),
+            "{}",
+            recorded.detail
+        );
+    }
+
     #[test]
     fn answers_are_kept_newest_last_and_counted() {
-        let worktree = Path::new(WORKTREE);
+        let worktree = &Bounds::of(Path::new(WORKTREE));
         let mut kept = Vec::new();
         let mut count = 0;
         for n in 0..KEPT_ANSWERED + 5 {

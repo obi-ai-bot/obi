@@ -787,7 +787,19 @@ fn what_leaves_the_sandbox_still_asks() {
     let folder = Folder::new("sandbox-outside");
     let remote = fixture(&folder.0.join("fixture"));
     let obid = start(&folder.0, &config(&folder.0, &remote));
+    // The account's own folder (its `configDir`), as obid gives it to the agent.
+    let login = folder.0.join("home/accounts/stub/settings.json");
     for (ask, why, always) in [
+        (
+            json!({"tool": "Bash", "input": {"command": format!("cat {}", login.display())}}),
+            "It touches secrets or the vault.",
+            false,
+        ),
+        (
+            json!({"tool": "Bash", "input": {"command": "cat /Users/Shared/notes.txt"}}),
+            "It reads outside the job's worktree.",
+            true,
+        ),
         (
             json!({"tool": "Bash", "input": {"command": "npm install left-pad"}}),
             "It reaches the network beyond the model's API.",
