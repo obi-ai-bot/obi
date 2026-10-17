@@ -20,14 +20,14 @@ final class SettingsSelection {
     }
 }
 
-/// The Oby window (Sangam's design, #11 and #270), opened from the notch, the menu or ⌘O: the side
-/// panel, and Home with pages opening over it.
+/// The Oby window (Sangam's design, #11 and #270), opened from the menu bar icon, an alert or ⌘O: the
+/// side panel, and Home with pages opening over it.
 final class ChatWindow: NSObject, NSWindowDelegate {
     private let island: IslandController
     private var window: NSWindow?
     /// What's open over Home, and where the title bar's content starts.
     private let state = ChatState()
-    /// Oby on Home's stage: its own page, apart from the notch's, paused while out of sight.
+    /// Oby on Home's stage: its own page, paused while out of sight.
     private lazy var character = ObyCharacter(query: "embed&size=1.23")
 
     init(island: IslandController) { self.island = island }
@@ -105,6 +105,12 @@ final class ChatWindow: NSObject, NSWindowDelegate {
     }
 
     var isOpen: Bool { window?.isVisible ?? false }
+
+    /// The window is in front on Home or the conversation, where what Oby hears and says shows (#528).
+    var showsTalk: Bool {
+        guard NSApp.isActive, window?.isVisible == true else { return false }
+        return state.trail.top == nil || state.trail.top == .talk
+    }
 }
 
 /// The title bar's height and where its content starts, from where macOS put the traffic lights.
@@ -244,7 +250,7 @@ private struct HomeView: View {
                 VStack(spacing: 0) {
                     stage
                         .opacity(away ? 0 : 1).scaleEffect(away && !reduceMotion ? 0.98 : 1)
-                    if model.state == .listening && !away {
+                    if model.listening && !away {
                         ListeningLine(voice: model.voice).frame(maxWidth: Tokens.homeBox - 2 * Tokens.gutter)
                             .padding(.horizontal, Tokens.gutter).padding(.bottom, 8)
                     }
@@ -527,51 +533,7 @@ struct EyeLevel: Layout {
     }
 }
 
-/// Chips in rows, each row centred, wrapping when the next one doesn't fit.
-struct CenteredFlow: Layout {
-    var spacing: CGFloat = 8
-    /// Off: each row starts at the left, as a card's choices do.
-    var centred = true
-
-    private func rows(_ subviews: Subviews, width: CGFloat) -> [[(index: Int, size: CGSize)]] {
-        var rows: [[(index: Int, size: CGSize)]] = [[]]
-        var used: CGFloat = 0
-        for (index, view) in subviews.enumerated() {
-            var size = view.sizeThatFits(.unspecified)
-            if size.width > width { size = view.sizeThatFits(ProposedViewSize(width: width, height: nil)) }
-            if !rows[rows.count - 1].isEmpty && used + spacing + size.width > width {
-                rows.append([]); used = 0
-            }
-            used += (rows[rows.count - 1].isEmpty ? 0 : spacing) + size.width
-            rows[rows.count - 1].append((index, size))
-        }
-        return rows
-    }
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let width = proposal.width ?? .infinity
-        let rows = rows(subviews, width: width)
-        let height = rows.map { $0.map(\.size.height).max() ?? 0 }.reduce(0, +) + spacing * CGFloat(max(0, rows.count - 1))
-        let widest = rows.map { row in row.map(\.size.width).reduce(0, +) + spacing * CGFloat(max(0, row.count - 1)) }.max() ?? 0
-        return CGSize(width: min(width, widest), height: height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var y = bounds.minY
-        for row in rows(subviews, width: bounds.width) {
-            let width = row.map(\.size.width).reduce(0, +) + spacing * CGFloat(max(0, row.count - 1))
-            var x = centred ? bounds.midX - width / 2 : bounds.minX
-            let height = row.map(\.size.height).max() ?? 0
-            for item in row {
-                subviews[item.index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(item.size))
-                x += item.size.width + spacing
-            }
-            y += height + spacing
-        }
-    }
-}
-
-/// The notch's messenger bubbles (Island.swift): no per-message chrome, one centered timestamp above each group.
+/// Messenger bubbles: no per-message chrome, one centered timestamp above each group.
 struct TurnRow: View {
     let turn: Turn
     var grouped = false

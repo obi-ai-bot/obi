@@ -4,7 +4,7 @@ import Observation
 import OSLog
 import UserNotifications
 
-/// The always-on runner (Settings › Runner) for as long as Oby runs, not only while the island is
+/// The always-on runner (Settings › Runner) for as long as Oby runs, not only while the window is
 /// open: its jobs, followed over `GET /v1/events` (one idle connection the runner pings every 15
 /// seconds), and an alert when one needs the user, as the iPhone gets them (Runner/Push.swift).
 @Observable
@@ -31,7 +31,7 @@ final class RunnerFeed {
             if queued != waiting { waiting = queued }
         }
     }
-    /// Agents working on the runner now (jobs waiting their turn aren't, #238). The closed notch
+    /// Agents working on the runner now (jobs waiting their turn aren't, #238). The menu bar's count
     /// reads this, not `jobs`, so a new step doesn't redraw it.
     private(set) var working = 0
     /// The runner's jobs queued behind something (`Job.waiting`).
@@ -107,7 +107,7 @@ final class RunnerFeed {
     /// The runner version shown in quick Settings.
     private(set) var version: String?
     /// When Clear done was last pressed, here or on the iPhone (the runner's clock), or nil: the
-    /// island hides the jobs that finished by then, the runner's and this Mac's alike.
+    /// window hides the jobs that finished by then, the runner's and this Mac's alike.
     private(set) var clearedAt: Date?
     /// How the line to the runner is: Settings › Runner says it.
     private(set) var connection = RunnerConnection.connecting
@@ -127,7 +127,7 @@ final class RunnerFeed {
     /// The runner's conversation, read in pages and followed over `turn` events, for the window's
     /// thread (apps/shared/ConversationModel.swift): one thread for every device (#11).
     let conversation = ConversationModel()
-    /// A job's notice just changed to something that needs the user: the notch's heads-up.
+    /// A job's notice just changed to something that needs the user, once its alert is posted.
     @ObservationIgnored var onNotice: (Job, Notice) -> Void = { _, _ in }
 
     /// The URL followed now, or nil before `start`.
@@ -143,7 +143,7 @@ final class RunnerFeed {
     /// What each job's alert last said, or nil until the first list arrives: what the jobs already
     /// need when Oby starts isn't news.
     @ObservationIgnored private var notified: [String: Notice]?
-    /// The runner's jobs whose screen the island shows: new lists keep them even when they're
+    /// The runner's jobs whose screen the window shows: new lists keep them even when they're
     /// older than the latest 50, as on the iPhone.
     @ObservationIgnored private var onScreen: Set<String> = []
     /// How many times Settings › Runner changed: an answer from before the last change is the
@@ -302,6 +302,8 @@ final class RunnerFeed {
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     case .turn(let turn): conversation.apply(turn)
                     case .step(let step): conversation.apply(step)
+                    // The Mac shows one thread until it runs on obid.
+                    case .conversation: break
                     }
                 }
             } catch {
@@ -339,7 +341,7 @@ final class RunnerFeed {
 
     // MARK: Planning through the runner on this Mac (#283)
 
-    /// The runner's brain's answer to the user's words, as the island's and the window's cards
+    /// The runner's brain's answer to the user's words, as the window's cards
     /// show it (`Desk.planElsewhere`): the drafts are its, and Dispatch sends them back to it.
     func plan(_ said: String, answer: (question: String, option: String)?, attachments: [String] = []) async throws -> Desk.Talk {
         guard let runner else { throw RunnerError(message: "The runner on this Mac isn't running yet.") }
@@ -379,7 +381,7 @@ final class RunnerFeed {
         return url
     }
 
-    /// Clear done: the runner records the time, and the island here and Home on the iPhone hide
+    /// Clear done: the runner records the time, and the window here and Home on the iPhone hide
     /// the jobs that finished by then.
     func clear() async throws {
         guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to clear done jobs.") }
@@ -517,7 +519,7 @@ final class RunnerFeed {
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
     }
 
-    /// A job's screen opened or closed on the island: while it's open, new lists keep its job.
+    /// A job's screen opened or closed in the window: while it's open, new lists keep its job.
     func showing(_ id: String, _ shown: Bool) {
         if shown { onScreen.insert(id) } else { onScreen.remove(id) }
     }
@@ -631,7 +633,7 @@ final class RunnerFeed {
     /// so a newer notice replaces the older one.
     static let jobKey = "job"
 
-    /// The "ready" alert's Publish: the island opens on the job, shows the runner's sentence, and asks for Touch ID.
+    /// The "ready" alert's Publish: the window opens on the job, shows the runner's sentence, and asks for Touch ID.
     static let publishButton = "publish"
 
     /// The runner's categories: "ready" for a job waiting for Publish, with Publish and Open, as the

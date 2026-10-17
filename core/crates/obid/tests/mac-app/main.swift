@@ -77,7 +77,7 @@ do {
             // A P-256 key as DeviceKey.publicKey() gives it (X9.63), made here: no Secure Enclave.
             let deviceKey = P256.Signing.PrivateKey().publicKey.x963Representation
             say("devices \(await answered { _ = try await runner.register(name: "Test Mac", publicKey: deviceKey) })")
-            // Clear done, from the island.
+            // Clear done, from the window.
             let cleared = try await runner.clear()
             say("cleared \(cleared.formatted(.iso8601))")
             say("ready")
@@ -87,7 +87,7 @@ do {
             say("event job \(job.id) \(job.status.rawValue)")
             if following == nil, job.status == .running {
                 following = job.id
-                // Stop all, from the island (apps/mac/app/Island.swift).
+                // Stop all, from the menu bar (apps/mac/app/ObyController.swift).
                 let stopped = try await runner.stopAll()
                 say("stop-all \(stopped.stopped) \(stopped.jobs.map(\.id).joined(separator: ","))")
             }

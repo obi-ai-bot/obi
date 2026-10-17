@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// While you hold the talk key (or after fn + Space): what Oby hears, over the window's message
-/// box, and how to send it. The notch shows the same; this keeps it in the window once the notch
-/// goes (#528).
+/// box, and how to send it. With the window closed or behind another app, the talk key's pill
+/// (apps/mac/app/TalkPill.swift) says it instead.
 struct ListeningLine: View {
     let voice: Voice
 

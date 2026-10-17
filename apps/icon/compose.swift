@@ -47,7 +47,7 @@ func canvas(_ size: Int, fraction: CGFloat?, background: ((CGContext, CGFloat) -
     return context.makeImage()!
 }
 
-/// Oby's dark: the island's black, lifted a little at the top so it reads as a surface.
+/// Oby's dark: Oby's black, lifted a little at the top so it reads as a surface.
 func night(_ context: CGContext, _ side: CGFloat, corner: CGFloat = 0) {
     if corner > 0 {
         context.addPath(CGPath(roundedRect: CGRect(x: 0, y: 0, width: side, height: side), cornerWidth: corner, cornerHeight: corner, transform: nil))

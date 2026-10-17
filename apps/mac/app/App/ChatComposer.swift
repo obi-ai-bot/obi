@@ -42,7 +42,7 @@ struct ChatComposer: View {
     let onSend: () -> Void
     let onScreenshot: () -> Void
     let onStop: () -> Bool
-    /// Esc with nothing to stop (the window's conversation goes back); the notch leaves it nil.
+    /// Esc with nothing to stop (the window's conversation goes back).
     var onEscape: (() -> Void)? = nil
     @State private var width: CGFloat = 300
 
@@ -103,8 +103,7 @@ struct ComposerEditor: NSViewRepresentable {
     var focusRequest = 0
     let onSend: () -> Void
     let onStop: () -> Bool
-    /// The window's message box sets its text on a taller line, as Sangam's design does; the
-    /// notch keeps the font's own.
+    /// The window's message box sets its text on a taller line, as Sangam's design does.
     var lineHeight: CGFloat? = nil
     var textColor: NSColor = .white
     var label = "Message Oby"

@@ -92,7 +92,7 @@ impl Approvals {
             .decode(approval.signature.trim())
             .ok()
             .and_then(|der| p256::ecdsa::Signature::from_der(&der).ok());
-        if !signature.is_some_and(|s| key.verify(message.as_bytes(), &s).is_ok()) {
+        if signature.is_none_or(|s| key.verify(message.as_bytes(), &s).is_err()) {
             return Err("The signature doesn't match the device's key.".into());
         }
         if approval.action != action {

@@ -75,6 +75,9 @@ struct File {
     /// "…"}`; left out, [`crate::vault::Location::default_for`].
     #[serde(default)]
     vault: Option<VaultSetting>,
+    /// Where the gateway listens (crate::gateway), on 127.0.0.1; left out, there's none.
+    #[serde(default)]
+    gateway: Option<String>,
 }
 
 /// `vault` as written.
@@ -162,6 +165,9 @@ pub struct Config {
     /// How long the event orchestrator waits for nearby events to come together before its
     /// turn (#590): 30 seconds unless `orchestratorDelay` says otherwise (1 to 600).
     pub orchestrator_delay: std::time::Duration,
+    /// Where paired phones reach obid (crate::gateway): `gateway`, an address on 127.0.0.1; none
+    /// when it is left out.
+    pub gateway: Option<SocketAddr>,
 }
 
 /// Where the plug-ins obid ships are when the configuration doesn't say: the `plugins/` folder
@@ -330,6 +336,17 @@ impl Config {
             ));
         }
 
+        let gateway = match file.gateway.as_deref().map(str::parse::<SocketAddr>) {
+            None => None,
+            Some(Ok(address)) if address.ip() == Ipv4Addr::LOCALHOST => Some(address),
+            Some(_) => {
+                return invalid(format!(
+                    "gateway is {:?}: it must be an address on 127.0.0.1 with a port, like 127.0.0.1:8810; put `tailscale serve` in front of it.",
+                    file.gateway.unwrap_or_default()
+                ));
+            }
+        };
+
         let orchestrator_delay = file.orchestrator_delay.unwrap_or(30);
         if !(1..=600).contains(&orchestrator_delay) {
             return invalid(format!(
@@ -350,6 +367,7 @@ impl Config {
             vault,
             turn_budget: std::time::Duration::from_secs(turn_budget),
             orchestrator_delay: std::time::Duration::from_secs(orchestrator_delay),
+            gateway,
         })
     }
 }
@@ -559,6 +577,21 @@ mod tests {
     }
 
     /// The event orchestrator waits 30 seconds for nearby events, or 1 to 600 as configured.
+    #[test]
+    fn the_gateway_is_only_ever_on_127_0_0_1() {
+        assert_eq!(
+            Config::parse(&with(serde_json::json!({}))).unwrap().gateway,
+            None
+        );
+        let config =
+            Config::parse(&with(serde_json::json!({"gateway": "127.0.0.1:8810"}))).unwrap();
+        assert_eq!(config.gateway, Some("127.0.0.1:8810".parse().unwrap()));
+        for gateway in ["0.0.0.0:8810", "100.64.0.1:8810", "localhost:8810", "8810"] {
+            let text = with(serde_json::json!({ "gateway": gateway }));
+            assert!(problem(&text).contains("gateway"), "{gateway}");
+        }
+    }
+
     #[test]
     fn the_orchestrator_delay_is_1_to_600_seconds() {
         let config = Config::parse(&with(serde_json::json!({}))).unwrap();

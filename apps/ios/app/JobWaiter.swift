@@ -27,8 +27,16 @@ final class JobWaiter: NSObject, URLSessionDownloadDelegate {
         Task {
             // Downloads from before a relaunch carry on; don't start them twice.
             let pending = Set(await session.allTasks.compactMap(\.originalRequest?.url))
-            for url in urls where !pending.contains(url) { session.downloadTask(with: url).resume() }
+            for url in urls where !pending.contains(url) { session.downloadTask(with: Self.request(url)).resume() }
         }
+    }
+
+    /// The wait with this iPhone's device token, as every gateway request carries (Phone.runner):
+    /// without it the gateway answers 401 at once.
+    static func request(_ url: URL, token: String? = GatewayTokenStore.read()) -> URLRequest {
+        var request = URLRequest(url: url)
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        return request
     }
 
     /// iOS woke Oby for this session's events: the session has to exist to receive them.

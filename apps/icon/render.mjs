@@ -37,7 +37,7 @@ await send('Page.enable');
 await send('Page.navigate', { url: `http://127.0.0.1:8770/oby.html?size=${obySize}` });
 await sleep(3500);
 console.log('webgl:', await js(`(() => { const c = document.querySelector('canvas'); return c ? c.width + 'x' + c.height : 'no canvas' })()`));
-// Calm and looking ahead, the way Oby settles in the notch.
+// Calm and looking ahead, the way Oby settles in the window.
 await js(`document.dispatchEvent(new PointerEvent('pointerleave')); oby.setState('quiet', { now: true }); true`);
 await sleep(2500);
 for (let i = 0; i < parseInt(shots, 10); i++) {

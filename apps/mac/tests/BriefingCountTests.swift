@@ -61,8 +61,8 @@ struct BriefingCountTests {
         #expect(desk.briefing(turns: []).working == 0)
     }
 
-    /// 1 job running on the runner and 14 queued behind another's files or the update: the notch,
-    /// the island's header and the brain say "1 agent is working, 14 waiting." (#238). The waiting
+    /// 1 job running on the runner and 14 queued behind another's files or the update: the menu bar,
+    /// the window's header and the brain say "1 agent is working, 14 waiting." (#238). The waiting
     /// ones say Waiting, in gray, under their own group, and the sidebar marks them queued (#496).
     @Test func theHeadlineCountsOnlyWorkingJobs() {
         let feed = RunnerFeed()

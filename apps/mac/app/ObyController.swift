@@ -1,0 +1,324 @@
+import AppKit
+import Foundation
+import OSLog
+import UserNotifications
+
+/// What Oby does outside its window: the runner's feed and this Mac's desk, the talk key and its
+/// pill, Stop all, and the alerts that open the window on a job. Nothing of it draws over the screen
+/// but the pill.
+final class IslandController {
+    let desk = Desk()
+    let feed = RunnerFeed()
+    /// Sparkle (apps/mac/app/Updater.swift).
+    let updater = Updater()
+    /// Reach this Mac from anywhere (#285): Settings › Remote access and the tunnel it runs.
+    let remote = RemoteAccess()
+    let availability = MacAvailability()
+    let model: IslandModel
+    let talkKey = TalkKey()
+    let stopAllKey = StopAllKey()
+    private var pill: TalkPillPanel?
+    private var observingAvailability = false
+    /// Every repository the user pushed to lately: names the voice listens for. Fetched when you
+    /// first talk, and again each time until it works.
+    private var repos: [String] = []
+    /// The last words sent were hands-free (fn + Space): once Oby has spoken its reply, it listens again.
+    private var handsFreeAsk = false
+    /// Opens the Oby window (apps/mac/app/App/ChatWindow.swift), on a job's screen when one is named: the
+    /// app sets it.
+    var openWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
+    /// The window (or first launch) is up, in front, and showing what you say and Oby's answer: the
+    /// pill stays away then. The app sets it.
+    var windowShowsTalk: () -> Bool = { false }
+
+    init() {
+        desk.issueSync.enabled = true
+        model = IslandModel(desk: desk, feed: feed, updater: updater, availability: availability)
+        // A restart never interrupts a check this Mac runs for the runner.
+        updater.busy = { [weak feed] in feed?.checks.current != nil }
+    }
+
+    func start() {
+        availability.startMonitoring()
+        observeAvailability()
+        // Remote access was on: the tunnel runs again, as a child of this login item.
+        remote.start()
+        // What needs you on this Mac's jobs is an alert, as the runner's are (RunnerFeed.post); a click opens the window on it.
+        desk.onFinish = { job in
+            if job.waitsForYou { Self.alert(job.doneLine, id: job.id, local: job.id) }
+        }
+        desk.onInboxChange = { item in
+            if item.kind == .question, item.isOpen, item.later == nil { Self.alert("Question: \(item.title)", id: item.id, local: item.job.isEmpty ? nil : item.job) }
+        }
+        // The brain's briefing takes in the runner's jobs, inbox and accounts too, and "stop" reaches its jobs.
+        desk.elsewhere = { [weak self] in
+            guard let self else { return [] }
+            return [Briefing.Place(name: feed.name, jobs: feed.jobs, inbox: feed.briefingInbox, accounts: feed.accounts)]
+        }
+        desk.loadSettingOptions = {
+            guard let codex = try? await CodexAgent.models(home: nil), !codex.isEmpty else { return nil }
+            return (["claude": AgentModels.claude.map(\.0), "codex": codex.map(\.id)],
+                    ["claude": AgentModels.claudeEfforts, "codex": Array(Set(codex.flatMap(\.efforts))).sorted()],
+                    ["codex": Dictionary(uniqueKeysWithValues: codex.map { ($0.id, $0.efforts) })])
+        }
+        desk.stopElsewhere = { [weak self] ids in
+            guard let self else { return [:] }
+            var failed: [String: String] = [:]
+            for id in ids {
+                do {
+                    guard feed.runner != nil else { throw RunnerError(message: "\(feed.name) isn't set up.") }
+                    feed.apply(try await feed.about(id) { try await $0.stop(id) })
+                } catch {
+                    failed[id] = error.localizedDescription
+                }
+            }
+            return failed
+        }
+        desk.moveElsewhere = { [weak self] id, target, why in
+            guard let self, feed.runner != nil else { throw RunnerError(message: "The runner isn't set up.") }
+            let job = try await feed.about(id) { try await $0.move(id, agent: target.agent, account: target.account, model: target.model, why: why) }
+            feed.apply(job)
+            return job
+        }
+        desk.liftElsewhereReserve = { [weak self] id, lift in
+            guard let self, let runner = feed.runner else { return false }
+            do {
+                _ = try await runner.liftReserve(id, lift)
+                return true
+            } catch { return false }
+        }
+        // "Allow it", "no, run only the runner tests" and "stop asking on the Watch job" reach the
+        // runner's jobs too (#134): a permission through its answer, a plan through the job's words,
+        // as its card would send them.
+        desk.answerElsewhere = { [weak self] job, decision, message in
+            guard let self, let runner = feed.runner else { return "The runner isn't set up." }
+            do {
+                if job.question?.plan != nil {
+                    let words = decision == .deny ? (message ?? PermissionPolicy.changeIt) : "Approve: \(PermissionMode.acceptEdits.title)"
+                    feed.apply(try await runner.tell(job.id, words))
+                    return nil
+                }
+                guard let permission = job.permission?.id ?? feed.extras[job.id]?.permission?.id,
+                      let answer = RunnerPermission.Decision(rawValue: decision.rawValue) else { return "It isn't waiting for your OK any more." }
+                feed.apply(try await runner.answer(job.id, permission: permission, answer, message: message))
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }
+        desk.modeElsewhere = { [weak self] job, mode in
+            guard let self, let choice = RunnerMode(rawValue: mode.rawValue) else { return "The runner isn't set up." }
+            do {
+                try await feed.setMode(job.id, choice)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }
+        // "Try it again", "let it go", "answer the merge item: try again" and "start it now" reach the
+        // runner's jobs and inbox as the apps' own buttons do (#300).
+        desk.actElsewhere = { [weak self] remote in
+            guard let self else { throw RunnerError(message: "The runner isn't set up.") }
+            try await feed.act(remote)
+        }
+        desk.onReply = { [weak self] text, spoken in self?.replied(text, spoken: spoken) }
+        desk.plansElsewhere = { [weak self] in self?.feed.local ?? false }
+        desk.planElsewhere = { [weak self] said, answer in
+            guard let self else { throw RunnerError(message: "Oby is closing.") }
+            return try await feed.plan(said, answer: answer)
+        }
+        desk.planElsewhereWithAttachments = { [weak self] said, answer, attachments in
+            guard let self else { throw RunnerError(message: "Oby is closing.") }
+            return try await feed.plan(said, answer: answer, attachments: attachments)
+        }
+        desk.cancelElsewhere = { [weak self] in await self?.feed.cancelPlan() }
+        feed.onFollow = { [weak self] local in
+            self?.desk.issueSync.enabled = !local
+            self?.availability.setRunnerEnabled(local)
+            self?.updateAvailability()
+        }
+        feed.start()
+        Task { await desk.refresh() }
+        talkKey.on = { [weak self] in self?.talk($0) }
+        talkKey.start()
+        stopAllKey.on = { [weak self] in self?.stopAll() }
+        stopAllKey.start()
+        model.voice.prepare()
+    }
+
+    private func updateAvailability() {
+        availability.setRunningJobs(!desk.active.isEmpty || (feed.local && !feed.active.isEmpty) || feed.checks.current != nil)
+    }
+
+    /// Observation fires once per change, so re-register after updating the assertion. This keeps
+    /// Oby idle with its window closed, instead of polling the runner and the local desk on a timer.
+    private func observeAvailability() {
+        guard !observingAvailability else { return }
+        observingAvailability = true
+        withObservationTracking {
+            _ = desk.active
+            _ = feed.active
+            _ = feed.local
+            _ = feed.checks.current
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                observingAvailability = false
+                updateAvailability()
+                observeAvailability()
+            }
+        }
+        updateAvailability()
+    }
+
+    /// Stop all (⌃⌥⌘. or the menu): every job on this Mac and on the runner stops now, and an alert
+    /// says how many.
+    func stopAll() {
+        let here = desk.stopAll()
+        Task {
+            var line: String
+            do {
+                let there = try await feed.runner?.stopAll()
+                for job in there?.jobs ?? [] { feed.apply(job) }
+                let stopped = here + (there?.stopped ?? 0)
+                line = stopped == 0 ? "Nothing is running." : "Stopped \(stopped) job\(stopped == 1 ? "" : "s")."
+            } catch {
+                line = "Stopped \(here) here. Couldn't reach the runner: \(error.localizedDescription)"
+            }
+            Self.alert(line, id: "stop-all")
+        }
+    }
+
+    /// The talk key: a turn starts, with the pill while the window isn't showing it, and what you
+    /// said goes to the planner as if typed.
+    private func talk(_ event: TalkKey.Event) {
+        let voice = model.voice
+        switch event {
+        case .press:
+            // Whatever Oby was saying, you come first.
+            model.speaker.stop()
+        case .start(let key):
+            listen(key: key)
+        case .handsFree:
+            voice.handsFree = true
+        case .send:
+            let key = voice.key
+            handsFreeAsk = voice.handsFree
+            // The microphone closes now; the words are written down while the pill says it's thinking.
+            setTurn(.thinking)
+            voice.finish { [weak self] said in self?.heard(said, key: key) }
+        case .cancel:
+            handsFreeAsk = false
+            voice.cancel()
+            stopListening()
+        }
+    }
+
+    private func listen(key: TalkKey.Key) {
+        // Your own jobs' repositories first: they're the ones you're likeliest to name.
+        model.voice.start(key: key, context: Voice.context(repos: desk.jobs.map(\.repo) + repos))
+        if repos.isEmpty { Task { repos = (try? await Workspace.knownRepos()) ?? [] } }
+        model.listening = true
+        setTurn(.listening)
+    }
+
+    /// Oby answered what you said: it speaks the reply (Settings › General), and in hands-free
+    /// mode listens again for yours once it has finished.
+    private func replied(_ text: String, spoken: Bool) {
+        guard spoken else { return }
+        guard Speaker.on else { setTurn(nil); return }
+        let again = handsFreeAsk
+        let key = model.voice.key
+        setTurn(.speaking)
+        model.speaker.speak(text) { [weak self] heard in
+            guard let self else { return }
+            guard heard, again, model.voice.phase == .idle, !model.listening else {
+                // Cut off by the next press: that turn is already under way.
+                if model.turn == .speaking { setTurn(nil) }
+                return
+            }
+            talkKey.listenAgain()
+            listen(key: key)
+            model.voice.handsFree = true
+        }
+    }
+
+    private func heard(_ said: String, key: TalkKey.Key) {
+        // A bare "stop" or "never mind" ends the turn and the hands-free listening, and no job
+        // with it: Desk.ask sends nothing to the brain for it, so nothing is spoken and nothing
+        // listens again.
+        let cancels = Conversation.cancels(said)
+        if cancels { handsFreeAsk = false }
+        if !said.isEmpty { desk.ask(said, spoken: true) }
+        // Talking again already: that's what shows.
+        guard model.voice.phase == .idle, model.listening else { return }
+        model.listening = false
+        if said.isEmpty {
+            let problem = model.voice.problem
+            setTurn(nil)
+            Self.alert(problem ?? "Oby didn't catch that", id: "talk")
+        } else if cancels {
+            setTurn(nil)
+        } else {
+            watchThinking()
+            // Not in the voice's queue: the alert waits for you, and talking mustn't.
+            if key == .fn { Task { GlobeKey.guideOnce() } }
+        }
+    }
+
+    private func stopListening() {
+        guard model.listening else { return }
+        model.listening = false
+        setTurn(nil)
+    }
+
+    /// The brain stops thinking without a reply to speak (it asks a question, or the turn was
+    /// replaced or cancelled): the pill ends, and a question is an alert. A reply ends it in `replied`.
+    /// Observation fires once, on the change: nothing runs while the pill is away.
+    private func watchThinking() {
+        withObservationTracking {
+            _ = desk.talk
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, model.turn == .thinking, !model.listening else { return }
+                if case .thinking = desk.talk { watchThinking(); return }
+                // A reply is `replied`'s to settle, and it has been by now.
+                if case .question(_, let question) = desk.talk { Self.alert("Oby asks: \(question.text)", id: "talk") }
+                setTurn(nil)
+            }
+        }
+    }
+
+    /// The turn's stage changes: the pill follows, unless the window is showing the turn.
+    private func setTurn(_ stage: TalkStage?) {
+        model.turn = stage
+        if TalkStage.shows(stage, windowShowsTalk: windowShowsTalk()) {
+            let pill = pill ?? TalkPillPanel(model: model)
+            self.pill = pill
+            pill.place()
+            pill.orderFrontRegardless()
+        } else {
+            pill?.orderOut(nil)
+        }
+    }
+
+    // MARK: Alerts
+
+    /// An alert for a job on this Mac, as the runner's (RunnerFeed.post): a click opens the window on it.
+    static let localJobKey = "localJob"
+
+    /// One alert, replacing an earlier one with the same `id`. `local`: the id of this Mac's job it is about.
+    static func alert(_ title: String, id: String, local job: String? = nil) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.sound = .default
+        content.threadIdentifier = "jobs"
+        if let job { content.userInfo = [localJobKey: job] }
+        let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
+        Task {
+            do { try await UNUserNotificationCenter.current().add(request) } catch {
+                Logger.feed.error("posting an alert failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+}

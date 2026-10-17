@@ -3,7 +3,7 @@ import Foundation
 import SwiftUI
 #endif
 
-/// The one line Home's header on the iPhone and the closed notch and the island's header on the
+/// The one line Home's header on the iPhone and the window's menu bar on the
 /// Mac all say about the jobs: who's working, who waits, and what needs you. Foundation only: the
 /// runner's tests build it too.
 nonisolated enum Summary {
@@ -93,7 +93,7 @@ nonisolated enum JobList {
     }
 
     /// Whether Clear done would take the job from the list: it's settled. While no listed job
-    /// would go, neither the iPhone's Home nor the Mac's island offers Clear done.
+    /// would go, neither the iPhone's Home nor the Mac's window offers Clear done.
     static func clears(settled: Bool) -> Bool { settled }
 
     /// Clear done by time alone: the job hasn't finished, nothing was ever cleared, or it finished

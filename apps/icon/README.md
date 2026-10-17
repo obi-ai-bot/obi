@@ -1,6 +1,6 @@
 # Oby's icon
 
-Every Oby icon is Sangam's character itself, rendered from `character/` rather than drawn again, so the icon always matches the Oby that lives in the notch.
+Every Oby icon is Sangam's character itself, rendered from `character/` rather than drawn again, so the icon always matches the Oby in the window.
 
 ```
 AppIcon.icon/    Icon Composer document: iPhone, iPad, Mac and Apple Watch

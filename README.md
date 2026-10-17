@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="docs/images/hero.gif" width="760" alt="Oby in the notch, saying hi, listening, thinking, working and done">
+  <img src="docs/images/app-chat.webp" width="760" alt="The Oby window: your conversation with Oby, your agents on the left and the live ones on the right">
 </p>
 
 <h1 align="center">Hi, I’m Oby.</h1>
 
 <p align="center">
-  <b>I live in your Mac’s notch and hand your coding work to Claude Code, Codex and Cursor.</b><br>
+  <b>I’m a window on your Mac, with an icon in the menu bar, and I hand your coding work to Claude Code, Codex and Cursor.</b><br>
   You tell me what you want off your mind. I find the right agent, keep an eye on it,<br>
   and only bother you when a decision is yours.
 </p>
@@ -27,31 +27,15 @@ I don’t write the code myself. I find the best agent for the job, give it a cl
 
 ## Hold fn and tell me
 
-<p align="center">
-  <img src="docs/images/notch-listening.webp" width="820" alt="Oby listening in the notch while you hold the fn key">
-</p>
-
-Hold the **fn** key, say what you need, let go. I listen on your Mac, only while you hold the key. Rather type? Click me in the notch. You can also hand me a screenshot or whatever is on your clipboard.
-
-<p align="center">
-  <img src="docs/images/notch-open.webp" width="820" alt="The notch opened, with two agents working and a place to type">
-</p>
+Hold the **fn** key, say what you need, let go. I listen on your Mac, only while you hold the key. With my window closed, a small pill on your screen says when I’m listening, thinking and speaking, then goes away. Rather type? Open my window from the menu bar icon. You can also hand me a screenshot or whatever is on your clipboard.
 
 ## I start as soon as you've said it
-
-<p align="center">
-  <img src="docs/images/notch-plan.webp" width="820" alt="Oby's reply: Cursor is building the empty state in tetrix-front-end, with the job's card under it">
-</p>
 
 Say the word and the work starts, like Claude Code or Codex: no card to confirm. I tell you which agent, which account, which repository and which branch, under my reply, with **Stop** on the job. Change any of it after: move the job to another tool, account or model, or tell its agent something. Every job gets its own branch, so your working copy stays exactly how you left it. Only when my brain can't answer and I had to guess do I ask first.
 
 ## Then I get out of your way
 
-<p align="center">
-  <img src="docs/images/desktop.webp" width="820" alt="A Mac with Oby resting in the notch while you keep coding">
-</p>
-
-While agents work, I sit quietly in the notch with a tiny counter. Hover over me to peek. Click the Oby icon in the menu bar for everything else, including **Stop all agents**.
+While agents work, I sit quietly in the menu bar with a tiny counter of what’s working or needs you. Click the Oby icon for **Open Oby**, **Stop all agents** and the rest. When something is yours to decide, I send a notification, and clicking it opens my window on that item.
 
 ## I only call you when it’s yours to decide
 
@@ -60,7 +44,7 @@ While agents work, I sit quietly in the notch with a tiny counter. Hover over me
   <img src="docs/images/needs-approval.webp" width="410" alt="Claude Code finished a review: post it with Touch ID, read it first, or later">
 </p>
 
-When an agent wants to run something, you can allow it once, always for that repository, or say no, right from the notch. When a job's check passes and the secret scan is clean, Oby pushes its branch and opens the pull request by itself, ready for your review. A review or a comment going out as you is shown first, and you confirm it with Touch ID.
+When an agent wants to run something, you can allow it once, always for that repository, or say no, right from my window. When a job's check passes and the secret scan is clean, Oby pushes its branch and opens the pull request by itself, ready for your review. A review or a comment going out as you is shown first, and you confirm it with Touch ID.
 
 <p align="center">
   <img src="docs/images/needs-touch-id.webp" width="820" alt="Touch ID before Oby posts a review as you">
@@ -72,11 +56,7 @@ When an agent wants to run something, you can allow it once, always for that rep
 
 ## A picture is worth a thousand prompts
 
-<p align="center">
-  <img src="docs/images/notch-screenshot.webp" width="820" alt="Dragging over part of the screen so Oby can see it">
-</p>
-
-Drag over anything on your screen and I’ll pass it to your agent along with what you said. Error messages, a broken layout, a chart that looks wrong: show me instead of describing it.
+Choose **Show Oby Your Screen…** in the menu bar (or the camera in my message box), drag over anything on your screen and I’ll pass it to your agent along with what you said. Error messages, a broken layout, a chart that looks wrong: show me instead of describing it.
 
 ## My app: everything I’m doing for you
 
@@ -156,10 +136,10 @@ The rules I live by:
 ## Say hi in two minutes
 
 <p align="center">
-  <img src="docs/images/first-launch.webp" width="880" alt="First launch: hello, hold fn, permissions, agents, GitHub Slack and Vercel, memory, your team, and the notch">
+  <img src="docs/images/first-launch.webp" width="880" alt="First launch: hello, hold fn, permissions, agents, GitHub Slack and Vercel, memory and your team">
 </p>
 
-Hello, hold fn, a few permissions (each one says what it’s for), your agents, your tools, your memory, your team. Then I move into the notch.
+Hello, hold fn, a few permissions (each one says what it’s for), your agents, your tools, your memory, your team.
 
 ## I’m on your wrist too
 
@@ -183,7 +163,7 @@ Sangam drew me: a soft cube with two eyes. I breathe, blink, follow your pointer
 
 ```
 apps/Oby.xcodeproj  the Apple apps: the Mac app now, the iPhone and Apple Watch apps later
-apps/mac/           the Mac app (SwiftUI): the notch, the character, Settings
+apps/mac/           the Mac app (SwiftUI): the window, the menu bar, the character, Settings
 Engine/             Oby's engine, shared by the Mac app and the runner: the brain, jobs, agents, accounts, Publish
 apps/ios/           the iPhone app (coming)
 apps/watch/         the Apple Watch app (coming)

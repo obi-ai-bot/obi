@@ -120,7 +120,7 @@ for (const loop of LOOPS) {
   mkdirSync(dir, { recursive: true });
   await send('Page.navigate', { url: `http://127.0.0.1:${pagePort}/oby.html?embed&size=${obySize}` });
   for (let i = 0; i < 50 && !(await js('!!window.oby && !!window.__step')); i++) await sleep(100);
-  // Calm and looking ahead, the way Oby settles in the notch; nothing plays on its own.
+  // Calm and looking ahead, the way Oby settles on the watch; nothing plays on its own.
   await js(`document.dispatchEvent(new PointerEvent('pointerleave')); oby.setState('quiet', { now: true }); true`);
   await js('__step(45)');
   for (let i = 0; i < loop.pre; i++) {

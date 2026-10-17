@@ -1,6 +1,6 @@
 # Working on Oby
 
-Oby is a native macOS app (SwiftUI, macOS 26 and later) that lives in the notch and hands coding work to the user's own Claude Code, Codex, Cursor and Gemini CLIs. The product is described in [README.md](README.md); what is being built, and in which order, is the GitHub project "Oby — Roadmap" (one milestone per feature, F1 to F16).
+Oby is a native macOS app (SwiftUI, macOS 26 and later) that lives in a window and the menu bar and hands coding work to the user's own Claude Code, Codex, Cursor and Gemini CLIs. The product is described in [README.md](README.md); what is being built, and in which order, is the GitHub project "Oby — Roadmap" (one milestone per feature, F1 to F16).
 
 ## How we work
 
@@ -30,7 +30,7 @@ Oby is a native macOS app (SwiftUI, macOS 26 and later) that lives in the notch 
 - **Reading agents' output:** split on `\n` only. Foundation's `lines` also breaks at U+2028 inside JSON strings, and a broken `result` line hangs the job.
 - **Agents can't publish:** they run with an empty `GH_CONFIG_DIR` (no GitHub login) and Oby's clone has an invalid `remote.origin.pushurl`. Only Publish pushes: by itself when a job ends done with commits, or by hand (Touch ID, Face ID) when that failed.
 - **On Linux, agents run in bubblewrap** (`Agents.sandboxed`, proven 2026-10-10 on tetrix-lab): they run as the runner's user, so home is empty except for `Agents.tools` (throwaway copies of the folders the CLIs live in), git's settings (read-only) and the job's own account, all of `OBY_HOME` is empty, and `/` is read-only. Real writes: the worktree, the clone's objects, refs, packed-refs and the worktree's own git folder, and the job's account home. Codex's own sandbox (bubblewrap too) can't nest under Ubuntu's AppArmor profile, so on Linux Codex runs `danger-full-access` with `approvalPolicy: "untrusted"` and Oby answers every command.
-- **The character in the notch:** `NSPanel` (borderless, non-activating) at `CGWindowLevelForKey(.mainMenuWindow) + 3`; `oby.html` served from the `oby://` scheme into SwiftUI's `WebView`; JavaScript calls go to the page's own world (`contentWorld: .page`). Paused while the island is closed: about 0% CPU.
+- **The character in the window:** `oby.html` served from the `oby://` scheme into SwiftUI's `WebView` on the window's Home; JavaScript calls go to the page's own world (`contentWorld: .page`). It's paused while the window is closed or out of sight. Oby has no always-on panel, no 30 Hz mouse timer and no global click monitor, so with the window closed and nothing running it should sit at about 0% CPU (check it in Activity Monitor over 1 minute). With the window closed, the talk key shows a small floating pill (`TalkPillPanel`) while it's held or hands-free is on; it never takes a click or the keyboard.
 
 ## Build and run
 

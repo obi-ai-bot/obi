@@ -14,9 +14,13 @@ nonisolated struct MacLink: Codable, Equatable, Sendable {
     var tunnelURL: URL { URL(string: "https://\(hostname)")! }
 
     /// Whether `text` is a hostname the control plane makes: `oby-`, 16 or more lowercase letters
-    /// or digits, then the zone. Never a deeper name: that would need another certificate.
+    /// or digits, then the zone. Never a deeper name: that would need another certificate. Or the
+    /// Mac's Tailscale name, `<machine>.<tailnet>.ts.net` with the port `tailscale serve` gives
+    /// obid's gateway (docs/runner-api.md, "obid only: the gateway"): Tailscale makes its certificate.
     static func isHostname(_ text: String) -> Bool {
-        text.wholeMatch(of: /oby-[a-z0-9]{16,}(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?){2,}/) != nil && text.count <= 253
+        guard text.count <= 253 else { return false }
+        return text.wholeMatch(of: /oby-[a-z0-9]{16,}(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?){2,}/) != nil
+            || text.wholeMatch(of: /[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9-]{1,63}\.ts\.net(?::[0-9]{1,5})?/) != nil
     }
 
     /// The hostname in `text` as typed or scanned (spaces around it, capitals, "https://", a path

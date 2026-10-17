@@ -497,7 +497,7 @@ Decided 2026-10-10: the agent merges once the review approves.
 ## 7 · Report back
 
 ### 7.1 Report
-- **What happens:** each job carries its own report, shown on the notch and the iPhone and saved in the Tetrix session:
+- **What happens:** each job carries its own report, shown in the Mac window and the iPhone and saved in the Tetrix session:
   - The result: what merged, with links.
   - The steps: worktree, tests (3 rounds), PR, reviewed by X, 1 change, merged.
   - Worth knowing: risks, follow-ups, what was skipped and why.

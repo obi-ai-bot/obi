@@ -6,7 +6,7 @@ import Testing
 import WebKit
 @testable import Oby
 
-/// Sangam's newer mascot (#499), as the app bundles it (character/package/build.sh) and the notch drives it.
+/// Sangam's newer mascot (#499), as the app bundles it (character/package/build.sh) and the window drives it.
 @MainActor
 struct CharacterTests {
     /// The bundled page, loaded as the app loads it.
@@ -27,7 +27,7 @@ struct CharacterTests {
         let states = try await Self.js(page, "return oby.states") as? [String]
         #expect(states == ["idle", "listening", "thinking", "working", "loading", "quiet"])
         let expressions = Set(try await Self.js(page, "return oby.expressions") as? [String] ?? [])
-        // The states' expressions, Island.swift's notices, and the iPhone's Home (apps/ios/app/Home.swift).
+        // The states' expressions, and the iPhone's Home (apps/ios/app/Home.swift).
         for name in ["Listening", "Thinking", "Working", "Loading", "Agree", "Confused", "Hello", "Grin"] {
             #expect(expressions.contains(name), "\(name) isn't in the bundled page")
         }
@@ -62,9 +62,9 @@ struct CharacterTests {
         #expect(try await Self.js(page, "return oby.playing") as? String == "Listening")
     }
 
-    /// The notch keeps Oby's frame transparent until the page says it has drawn, so the bundled
-    /// page has to say it. Hosted as the notch hosts it: in an ordered-front borderless panel, the
-    /// web view at opacity 0 (hidden, it would draw nothing and never be ready).
+    /// The window keeps Oby's frame transparent until the page says it has drawn, so the bundled
+    /// page has to say it. Hosted with the web view at opacity 0 (hidden, it would draw nothing and
+    /// never be ready), in an ordered-front borderless panel.
     @Test func bundledPageSaysReadyOnceItDraws() async throws {
         let character = ObyCharacter()
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 136, height: 136), styleMask: [.borderless, .nonactivatingPanel],
@@ -81,29 +81,18 @@ struct CharacterTests {
         #expect(character.ready, "the bundled page never sent ready")
     }
 
-    @Test func notchShowsLoadingWhileTheBrainThinks() throws {
+    @Test func obyShowsLoadingWhileTheBrainThinks() throws {
         let folder = FileManager.default.temporaryDirectory.appending(path: "oby-character-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
         let model = IslandModel(desk: desk, feed: RunnerFeed(), availability: MacAvailability())
-        model.state = .open
         #expect(model.mood == "idle")
         desk.talk = .thinking("What's left on #499?")
         #expect(model.mood == "loading")
         desk.talk = .reply("Two checks.")
         #expect(model.mood == "idle")
-        model.state = .listening
+        model.listening = true
         #expect(model.mood == "listening")
-    }
-
-    @Test func cursorIsGivenFromObysFrame() {
-        // A 600-point island whose top is the top of a 982-point screen, Oby's frame 14 in and 18 down.
-        let island = CGRect(x: 456, y: 982 - 300, width: 600, height: 300)
-        let frame = CGRect(x: 14, y: 18, width: 136, height: 136)
-        #expect(IslandModel.look(CGPoint(x: 470, y: 964), island: island, frame: frame) == .zero)
-        #expect(IslandModel.look(CGPoint(x: 606, y: 828), island: island, frame: frame) == CGPoint(x: 136, y: 136))
-        // Outside the frame stays outside: the page eases the head off past its edge.
-        #expect(IslandModel.look(CGPoint(x: 1200, y: 982), island: island, frame: frame) == CGPoint(x: 730, y: -18))
     }
 }
