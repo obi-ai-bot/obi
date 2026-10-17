@@ -12,7 +12,7 @@ struct GroupPane: View {
     @State private var picked: WorkList.Tab?
 
     /// Archived (#280) isn't on the Mac yet: until it is, Clear done takes finished jobs off the list.
-    static let archivedLine = "Older ones will be in Archived, which isn't on the Mac yet. Until then, Clear done takes them off this list."
+    static let archivedLine = "Older ones will be in Archived, which isn't on the Mac yet. Until then, Clear done (in Home's ⋮) takes them off this list."
 
     private var tab: WorkList.Tab { picked ?? WorkList.firstTab(items) }
     private var ranked: [WorkList.Item<SidebarSections.JobRow>] { WorkList.ranked(items) }
@@ -28,10 +28,7 @@ struct GroupPane: View {
                 .padding(.bottom, 16)
                 let cards = WorkList.items(ranked, in: tab)
                 ForEach(cards) { item in
-                    let row = item.job
-                    JobChip(job: row.job, account: LiveView.account(of: row.job, local: row.local, desk: model.desk, feed: model.feed),
-                            onOpen: { onOpenJob(row.job.id, row.local) },
-                            onStop: { model.stopChatJob(row.job.id, local: row.local) })
+                    TaskCardView(item: item, model: model) { onOpenJob(item.job.job.id, item.job.local) }
                 }
                 if cards.isEmpty {
                     Text(tab == .done ? "Nothing completed yet" : "Nothing running")

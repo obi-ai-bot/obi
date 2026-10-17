@@ -72,6 +72,8 @@ struct SidebarView: View {
     let onOpenSettings: (SettingsTab) -> Void
     @AppStorage(GroupBy.key) private var groupBy = GroupBy.type
     @State private var search = ""
+    /// Why the last Clear done didn't go through, until the next one does.
+    @State private var clearProblem: String?
     @State private var searching = false
     @FocusState private var searchFocused: Bool
     /// Groups folded away (while searching, every group with a match opens), and those showing
@@ -89,6 +91,20 @@ struct SidebarView: View {
                 || $0.job.job.agentName.localizedCaseInsensitiveContains(query)
         }
         return WorkList.groups(items, by: groupBy)
+    }
+
+    /// Clear done can take something: a runner is set, a settled task is listed, and Oby isn't
+    /// waiting on an answer to its own question.
+    private var clearable: Bool {
+        if case .question = desk.talk { return false }
+        return feed.runner != nil && work.contains { model.clears($0.job.job) }
+    }
+
+    /// Clear done: the runner records the time, and the finished tasks go from here and from the iPhone's Home.
+    private func clear() {
+        Task {
+            do { try await feed.clear(); clearProblem = nil } catch { clearProblem = error.localizedDescription }
+        }
     }
 
     var body: some View {
@@ -113,11 +129,17 @@ struct SidebarView: View {
                         ForEach(GroupBy.allCases, id: \.self) { Text($0.label).tag($0) }
                     }
                     .pickerStyle(.inline)
+                    Divider()
+                    // Through the runner (it keeps the time), so the iPhone's Home clears too.
+                    Button("Clear done", action: clear).disabled(!clearable)
                 } label: { IconButton(symbol: "ellipsis", rotated: true) }
                     .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
                     .accessibilityLabel("Home options")
             }
-            .padding(.bottom, 12)
+            .padding(.bottom, clearProblem == nil ? 12 : 4)
+            if let clearProblem {
+                Text(clearProblem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.horizontal, 10).padding(.bottom, 8)
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if searching { searchField.transition(.opacity.combined(with: .move(edge: .top))) }

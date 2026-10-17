@@ -61,6 +61,8 @@ struct MessageBox: View {
     var onEscape: (() -> Void)? = nil
     /// Each account's week, for the gauge by voice-or-send; none, no gauge.
     var usage: [UsageRow] = []
+    /// The + (a screenshot, the clipboard, a file): off where nothing can take them (a task's page).
+    var attachments = true
     @State private var width: CGFloat = 480
     @State private var hovering = false
 
@@ -70,7 +72,7 @@ struct MessageBox: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if !tray.items.isEmpty { tags.padding(.bottom, 6) }
+            if attachments && !tray.items.isEmpty { tags.padding(.bottom, 6) }
             if stacked {
                 editor.padding(BoxMetrics.stackedPadding)
                 HStack(spacing: 4) {
@@ -98,7 +100,7 @@ struct MessageBox: View {
         .contentShape(RoundedRectangle(cornerRadius: BoxMetrics.radius, style: .continuous))
         .onHover { hovering = $0 }
         .animation(Tokens.fade, value: hovering || focused)
-        .overlay(alignment: .top) { problem.offset(y: -28) }
+        .overlay(alignment: .top) { if attachments { problem.offset(y: -28) } }
     }
 
     private var editor: some View {
@@ -118,7 +120,11 @@ struct MessageBox: View {
 
     /// + : a screenshot, what you copied, or a file (Sangam's + panel's Add files; the Obys and tasks
     /// it can add come with obid).
-    private var plus: some View {
+    @ViewBuilder private var plus: some View {
+        if attachments { plusMenu } else { Color.clear.frame(width: 4, height: BoxMetrics.button) }
+    }
+
+    private var plusMenu: some View {
         Menu {
             Button("Screenshot", action: onScreenshot).disabled(tray.capturing)
             Button("Clipboard", action: tray.pasteClipboard)
@@ -137,11 +143,8 @@ struct MessageBox: View {
     /// Voice while the box is empty: the talk key does it, so it says how. Send once there's text.
     @ViewBuilder private var end: some View {
         ZStack {
-            BoxIcon(symbol: "waveform")
-                .help("Hold fn (or Control-Option) to talk")
-                .accessibilityLabel("Hold fn to talk")
-                .opacity(empty ? 1 : 0).scaleEffect(empty ? 1 : 0.4)
-                .accessibilityHidden(!empty)
+            // The talk key speaks to Oby: where the box tells an agent, no voice.
+            if attachments { voiceIcon }
             Button(action: onSend) { BoxIcon(symbol: "arrow.up", color: Tokens.ink) }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Send")
@@ -149,7 +152,16 @@ struct MessageBox: View {
                 .disabled(empty)
                 .accessibilityHidden(empty)
         }
+        .frame(width: BoxMetrics.button)
         .animation(Tokens.spring, value: empty)
+    }
+
+    private var voiceIcon: some View {
+        BoxIcon(symbol: "waveform")
+            .help("Hold fn (or Control-Option) to talk")
+            .accessibilityLabel("Hold fn to talk")
+            .opacity(empty ? 1 : 0).scaleEffect(empty ? 1 : 0.4)
+            .accessibilityHidden(!empty)
     }
 
     /// What goes with the words, as tags over them.

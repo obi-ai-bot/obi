@@ -244,6 +244,10 @@ private struct HomeView: View {
                 VStack(spacing: 0) {
                     stage
                         .opacity(away ? 0 : 1).scaleEffect(away && !reduceMotion ? 0.98 : 1)
+                    if model.state == .listening && !away {
+                        ListeningLine(voice: model.voice).frame(maxWidth: Tokens.homeBox - 2 * Tokens.gutter)
+                            .padding(.horizontal, Tokens.gutter).padding(.bottom, 8)
+                    }
                     box
                         .opacity(away ? 0 : 1).offset(y: away && !reduceMotion ? 12 : 0)
                 }
@@ -328,7 +332,7 @@ private struct HomeView: View {
             ConversationPage(model: model, composerFocusRequest: state.composerFocusRequest,
                              onOpenJob: { state.trail.push(.job(id: $0, local: $1)) }, onBack: back)
         case .job(let id, let local):
-            JobPane(model: model, id: id, local: local).takesKeys()
+            JobPane(model: model, id: id, local: local, onBack: back).takesKeys()
         case .group(let kind):
             GroupPane(model: model, kind: kind, items: work.filter { $0.type == kind },
                       onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })
@@ -413,6 +417,15 @@ private struct TitleBar: View {
                 .accessibilityLabel("Where you are")
             }
             Spacer(minLength: 16)
+            // An update is downloaded (apps/mac/app/Updater.swift): Restart installs it and relaunches,
+            // after this Mac's check if one runs.
+            if let pill = model.updater.pill {
+                Button(pill) { model.updater.install() }
+                    .buttonStyle(ChipButtonStyle())
+                    .disabled(model.updater.waiting)
+                    .help("Installs the update and relaunches Oby. While this Mac runs a check for the runner, it waits for the check to end.")
+                    .padding(.trailing, state.trail.isHome ? Tokens.gutter : 8)
+            }
             if case .job(let id, _) = state.trail.top, ConversationModel.started(id, in: model.thread) {
                 Button("Go to conversation") { state.trail.push(.talk) }
                     .buttonStyle(ChipButtonStyle())
@@ -438,7 +451,8 @@ private struct Crumb: View {
                 .foregroundStyle(here ? Tokens.text : hovering ? Tokens.ink : Tokens.muted)
                 .padding(.horizontal, 6).frame(height: 26)
                 .background(!here && hovering ? Tokens.hover : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .frame(maxWidth: here ? nil : 200, alignment: .leading)
+                // An earlier step: at most 200 points, a shorter name only as wide as it is.
+                .frame(maxWidth: here ? nil : 200, alignment: .leading).fixedSize(horizontal: !here, vertical: false)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -643,12 +657,13 @@ struct ThinkingLine: View {
     }
 }
 
-/// A job's screen in the middle column (apps/mac/app/JobView.swift), with Back: the same screen the island
-/// opens, publishing after Touch ID the same way.
+/// A job's page over Home (Sangam's TaskView): a runner's job open here stays across new lists,
+/// and one older than its latest 50 is fetched.
 private struct JobPane: View {
     let model: IslandModel
     let id: String
     let local: Bool
+    var onBack: (() -> Void)? = nil
     @State private var problem: String?
 
     private var desk: Desk { model.desk }
@@ -656,22 +671,17 @@ private struct JobPane: View {
     private var job: Job? { (local ? desk.jobs : feed.jobs).first { $0.id == id } }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if let job {
-                        screen(job)
-                    } else if let problem {
-                        Text(problem).font(OBYStyle.small).foregroundStyle(.red)
-                    } else {
-                        ProgressView().controlSize(.small).tint(.white)
-                    }
-                }
-                .frame(maxWidth: 760, alignment: .leading)
-                .padding(28)
+        Group {
+            if let job {
+                TaskPage(job: job, actions: TaskActions.of(job, local: local, model: model), tray: model.tray,
+                         publishNow: model.publishing == job.id, onPublishNow: { model.publishing = nil }, onBack: onBack)
+            } else if let problem {
+                Text(problem).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.danger)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        // A runner's job open here stays across new lists; one older than the latest 50 is fetched.
         .onChange(of: id, initial: true) { old, new in
             if old != new, !local { feed.showing(old, false) }
             guard !local else { return }
@@ -681,69 +691,5 @@ private struct JobPane: View {
             }
         }
         .onDisappear { if !local { feed.showing(id, false) } }
-    }
-
-    @ViewBuilder private func screen(_ job: Job) -> some View {
-        if local {
-            JobView(job: job, place: "This Mac", account: desk.accounts.accounts.first { $0.account.id == job.account }?.account.name,
-                    onStop: { desk.stop(job.id) },
-                    publishing: JobView.Publishing(action: { Publish.action(for: job, base: job.base ?? "") },
-                                                   publish: { _ in _ = try await desk.publish(job.id, approve: Publish.touchID) }),
-                    onMessage: { try desk.message(job.id, $0) }, onDismiss: { try desk.dismiss(job.id) },
-                    extras: RunnerJobExtras(local: job),
-                    onMode: { try desk.changeMode(job.id, to: $0) },
-                    onPermission: { try desk.answerPermission(job.id, $0, message: $1) },
-                    accounts: desk.accounts.accounts,
-                    onStartNow: { try desk.startNow(job.id) }, onUseAnyway: { _ = desk.liftReserve($0, true) },
-                    readReport: {
-                        guard let saved = desk.store.report(job.id) else { throw Shell.Failure(message: "This job has no research report.") }
-                        return ResearchDocument(job: saved.job, commit: saved.commit, markdown: saved.markdown,
-                                                proposals: saved.proposals.map { ResearchProposal(index: $0.index, repo: $0.repo, title: $0.title, body: $0.body, labels: $0.labels, filed: $0.filed, filedAt: $0.filedAt) })
-                    },
-                    fileProposal: { index, start in
-                        guard var saved = desk.store.report(job.id),
-                              let position = saved.proposals.firstIndex(where: { $0.index == index }) else {
-                            throw Shell.Failure(message: "There's no proposed issue with that index.")
-                        }
-                        guard saved.proposals[position].filed == nil else { throw Shell.Failure(message: "This issue was already filed.") }
-                        let proposal = saved.proposals[position]
-                        do {
-                            let findings = try await Publish.scan(texts: [("issue title", proposal.title), ("issue body", proposal.body)])
-                            guard findings.isEmpty else { throw Shell.Failure(message: "The proposed issue didn't pass Oby's secret scan.") }
-                        } catch { throw Shell.Failure(message: "Oby's secret scanner couldn't run or found a secret; nothing was filed.") }
-                        let result = try await Shell.run(["gh", "issue", "create", "-R", proposal.repo, "--title", proposal.title, "--body-file", "-"],
-                                                         input: Data(proposal.body.utf8), as: .app)
-                        guard result.status == 0, let url = URL(string: result.text), url.scheme == "https", url.host == "github.com" else {
-                            throw Shell.Failure(message: result.err.isEmpty ? "GitHub couldn't create the proposed issue." : result.err)
-                        }
-                        let issueURL = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                        saved.proposals[position].filed = issueURL
-                        saved.proposals[position].filedAt = .now
-                        desk.store.save(saved)
-                        desk.sent(job.id, Outgoing(action: .issue, repo: proposal.repo, id: issueURL))
-                        let number = url.path.split(separator: "/").last.flatMap { Int($0) }
-                        var started: Job?
-                        if start, let number {
-                            started = try await desk.dispatch(Desk.NewJob(repo: proposal.repo, kind: "build", task: "Work on #\(number): \(proposal.title)", issue: number))
-                        }
-                        return FileProposalResult(issue: issueURL, jobId: started?.id)
-                    })
-        } else {
-            JobView(job: job, place: feed.name, account: nil,
-                    onStop: { Task { if let stopped = try? await feed.about(job.id, { try await $0.stop(job.id) }) { feed.apply(stopped) } } },
-                    publishing: feed.device.key.isAvailable
-                        ? JobView.Publishing(action: { try await feed.publishAction(job.id) }, publish: { try await feed.publish(job.id, action: $0) })
-                        : nil,
-                    onMessage: { text in if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.tell(job.id, text) }) } },
-                    onDismiss: { if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.dismiss(job.id) }) } },
-                    extras: feed.extras[job.id],
-                    onMode: { try await feed.setMode(job.id, $0) },
-                    onPermission: { try await feed.answer(job.id, $0, message: $1) },
-                    accounts: feed.accounts,
-                    onStartNow: { if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.startNow(job.id) }) } },
-                    onUseAnyway: { account in if let runner = feed.runner { _ = try await runner.liftReserve(account, true) } },
-                    readReport: { try await feed.about(job.id) { try await $0.report(job.id) } },
-                    fileProposal: { index, start in try await feed.about(job.id) { try await $0.fileProposal(job.id, index: index, start: start) } })
-        }
     }
 }
