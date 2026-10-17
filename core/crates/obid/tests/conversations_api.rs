@@ -775,3 +775,155 @@ fn failed_turn_write_does_not_change_the_existing_conversation() {
     assert_eq!(turns(&restarted, &query), after);
     restarted.stop();
 }
+
+/// A kept conversation titled `title`, its `n`th turn (from 1) saying `said` and the others
+/// small talk, `sequence` placing it in the list. Returns its id and its turns' ids.
+fn kept_talk(
+    home: &Path,
+    n: u64,
+    title: &str,
+    turns: u64,
+    said: Option<(u64, &str)>,
+) -> (String, Vec<String>) {
+    let id = format!("00000000-0000-4000-8000-{n:012}");
+    let turn_ids: Vec<String> = (1..=turns)
+        .map(|t| format!("2000{n:04}-0000-4000-8000-{t:012}"))
+        .collect();
+    let list: Vec<Value> = (1..=turns)
+        .map(|t| {
+            let text = match said {
+                Some((at, words)) if at == t => words.to_owned(),
+                _ => format!("small talk {t}"),
+            };
+            json!({"id": turn_ids[(t - 1) as usize],
+                   "who": if t % 2 == 1 { "user" } else { "oby" },
+                   "text": text, "at": "2026-10-01T00:00:00Z", "jobs": [], "conversation": id})
+        })
+        .collect();
+    let thread = json!({
+        "id": id, "title": title, "pinned": false,
+        "created": "2026-10-01T00:00:00Z", "sequence": n, "turns": list,
+    });
+    std::fs::write(
+        home.join(format!("conversations/{id}.json")),
+        thread.to_string(),
+    )
+    .unwrap();
+    (id, turn_ids)
+}
+
+const DECIDED: &str = "Decided: the Watch target stays off-limits until the Mac app ships.";
+
+/// Three kept conversations: "Release planning", whose 40th of 41 turns decides about the Watch
+/// target; "Watch target notes", which says so only in its title; and one about something else.
+fn watch_talks(folder: &Folder) -> (Obid, String, String, String) {
+    let remote = fixture(&folder.0.join("fixture"));
+    let config = config(&folder.0, &remote, &planner());
+    let home = folder.0.join("home");
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(home.join("conversations"))
+            .unwrap();
+    }
+    let (release, turns) = kept_talk(&home, 1, "Release planning", 41, Some((40, DECIDED)));
+    let (notes, _) = kept_talk(&home, 2, "Watch target notes", 2, None);
+    kept_talk(&home, 3, "Lunch", 2, Some((1, "watch the oven")));
+    let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
+    (obid, release, turns[39].clone(), notes)
+}
+
+/// #593: `GET /v1/conversations?q=` finds a conversation by what was said in it, with the turn
+/// that said it; a title says it too; every word must be in one turn; deleted ones never appear.
+#[test]
+fn conversations_are_found_by_what_was_said_in_them() {
+    let folder = Folder::new("conversation-find");
+    let (obid, release, fortieth, notes) = watch_talks(&folder);
+
+    let found = conversations(&obid, "?q=watch%20target");
+    assert_eq!(ids(&found), [notes.as_str(), release.as_str()], "{found:?}");
+    let hit = &found[1];
+    assert_eq!(hit["title"], "Release planning");
+    assert_eq!(hit["turn"]["id"], fortieth.as_str(), "{hit}");
+    assert_eq!(hit["turn"]["who"], "oby");
+    assert_eq!(hit["turn"]["text"], DECIDED);
+    // Only the title says it: no turn.
+    assert!(found[0]["turn"].is_null(), "{}", found[0]);
+    // Any case, and a limit.
+    assert_eq!(
+        ids(&conversations(&obid, "?q=WATCH%20Target&limit=1")),
+        [notes.as_str()]
+    );
+    assert!(conversations(&obid, "?q=nobody%20said%20this").is_empty());
+
+    for bad in ["?q=", "?q=%20%20", &format!("?q={}", "x".repeat(201))] {
+        let answer = call(&obid, "GET", &format!("/v1/conversations{bad}"), None);
+        assert_eq!(answer.status, 422, "{bad}: {}", answer.text);
+    }
+
+    let gone = call(
+        &obid,
+        "DELETE",
+        &format!("/v1/conversations/{release}"),
+        None,
+    );
+    assert_eq!(gone.status, 204, "{}", gone.text);
+    assert_eq!(
+        ids(&conversations(&obid, "?q=watch%20target")),
+        [notes.as_str()]
+    );
+    assert!(conversations(&obid, "?q=off-limits").is_empty());
+}
+
+/// The fake planner's account folder: its queue of plans and what each call got.
+fn brain(obid: &Obid) -> PathBuf {
+    obid.home.join("accounts/stub")
+}
+
+fn queue(obid: &Obid, lines: &[String]) {
+    std::fs::create_dir_all(brain(obid)).unwrap();
+    std::fs::write(brain(obid).join("plans"), lines.join("\n") + "\n").unwrap();
+}
+
+/// #593: "What did we decide about the Watch target?" finds the conversation where it was said
+/// and the brain answers from the quoted turn, naming its conversation.
+#[test]
+fn the_brain_answers_from_a_conversation_it_found() {
+    let folder = Folder::new("conversation-find-brain");
+    let (obid, release, fortieth, _) = watch_talks(&folder);
+    let find = json!({"action": "find_conversation", "reply": "", "dispatches": [],
+                      "question": null, "jobs": [], "message": "Watch target"});
+    queue(
+        &obid,
+        &[find.to_string(), "QUOTE watch target stays".into()],
+    );
+
+    let answer = plan(
+        &obid,
+        json!({"said": "What did we decide about the Watch target?", "new": true}),
+    );
+    let text = answer["text"].as_str().unwrap();
+    assert!(text.contains("Release planning"), "{text}");
+    assert!(text.contains(DECIDED), "{text}");
+    assert_ne!(answer["conversation"], release.as_str());
+
+    // What it found was in the second call's work.md, fenced, with the turn's id; the first
+    // call had none of it.
+    let calls = brain(&obid).join("calls");
+    let first = std::fs::read_to_string(calls.join("1/work.md")).unwrap_or_default();
+    assert!(!first.contains(DECIDED), "{first}");
+    let second = std::fs::read_to_string(calls.join("2/work.md")).unwrap();
+    let block = second
+        .split("\n<<<quoted-")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no fence in {second}"));
+    assert!(block.contains(DECIDED), "{second}");
+    assert!(block.contains(&fortieth), "{second}");
+    assert!(block.contains(&release), "{second}");
+    // The user's own question, in the conversation the turn is in, isn't a match.
+    assert!(!second.contains("What did we decide"), "{second}");
+    let input = std::fs::read_to_string(calls.join("2/input")).unwrap();
+    assert!(input.contains("Oby found 2 conversations"), "{input}");
+}
