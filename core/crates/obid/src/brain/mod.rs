@@ -305,6 +305,17 @@ pub(super) fn context(shared: &Shared, turns: &[Turn], nonce: &str) -> Context {
             .filter(|i| i.kind != "confirm")
             .map(|i| i.id.clone())
             .collect(),
+        ended: briefing
+            .jobs()
+            .into_iter()
+            .filter(|job| left_unfinished(job, now))
+            .map(|job| plan::Ended {
+                id: job.id.clone(),
+                repo: job.repo.clone(),
+                issue: job.issue.map(|n| n as i64),
+                pr: job.pr.map(|n| n as i64),
+            })
+            .collect(),
         ..Context::default()
     }
 }
@@ -324,6 +335,22 @@ pub(super) async fn own(
         &[said, &briefing],
     )
     .await
+}
+
+/// A job that failed, was stopped or ran out of rounds in the last two days, and wasn't let go:
+/// its agent is the one to carry its work on (#541).
+fn left_unfinished(job: &crate::job::Job, now: i64) -> bool {
+    use crate::job::Status;
+    let ended = matches!(
+        job.status,
+        Status::Failed | Status::Stopped | Status::Interrupted
+    ) || (job.status == Status::Done && job.limit.is_some());
+    ended
+        && job.obi.is_none()
+        && job.dismissed.is_none()
+        && job
+            .finished
+            .is_some_and(|finished| now - finished < briefing::RECENT)
 }
 
 /// Each configured tool's accounts, as jobs are routed to them.
