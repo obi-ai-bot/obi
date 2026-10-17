@@ -1671,9 +1671,10 @@ fn a_curlrc_never_sees_the_token() {
     assert!(text(&out).contains("obid is running"), "{}", text(&out));
     let token = std::fs::read_to_string(rig.obid_home().join("api-token")).unwrap();
     let traced = std::fs::read_to_string(&trace).unwrap_or_default();
+    // trace-ascii breaks its lines every 64 bytes, so the header is looked for in pieces.
     assert!(
-        !traced.contains(token.trim()),
-        "the token is in {}",
+        !traced.contains("Authorization") && !traced.contains(&token.trim()[..16]),
+        "the token's header is in {}",
         trace.display()
     );
     assert!(!trace.exists(), "~/.curlrc was read: {traced}");
