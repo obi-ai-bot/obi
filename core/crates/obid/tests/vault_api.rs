@@ -697,8 +697,11 @@ fn on_a_mac_the_vault_can_be_the_keychain() {
     let (_, out, _) = vault(&path, &["list"], None);
     assert_eq!(out, "staging-api-key\n");
 
-    // A second add replaces the value: the first is no longer a secret, the second is.
+    // A second add replaces the value: the first is no longer a secret, the second is. It comes
+    // in a later second than the first, so the item's date changes and the very next answer must
+    // take the new value out: no waiting, which would hide a read that went missing (#579).
     let second = format!("{first}-second");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     add(&path, "staging-api-key", &second);
     let id = dispatch(
         &obid,
