@@ -5,7 +5,7 @@
 //!
 //! What obid doesn't do yet, and so never sends: the post-mortem (a model turn reading Oby's own
 //! source), the `oby-failure` issues filed from it, their inbox items and the fix job. Every
-//! record's `postMortem` is null, so Fix it always answers that it isn't studied yet.
+//! record's `postMortem` is null, so Fix it always answers that it isn't studied yet (#571).
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -200,7 +200,7 @@ fn evidence(home: &Path, job: &Job) -> Evidence {
     let secrets = crate::secrets::known();
     let mut check = Vec::new();
     let log = home.join("logs").join(&job.id).join("check.log");
-    if let Some(output) = tail(&log, 3000) {
+    if let Some(output) = tail(&log, 3000).filter(|_| !stale(home, job, &log)) {
         check.push(format!(
             "`{}` printed (its end):\n{output}",
             job.check.as_deref().unwrap_or("the check")
@@ -214,6 +214,24 @@ fn evidence(home: &Path, job: &Job) -> Evidence {
         step: secrets.redact(&step(job)),
         check: (!check.is_empty()).then(|| secrets.redact(&check.join("\n\n"))),
     }
+}
+
+/// Whether the job's check output is from an earlier run: written before a failure of the job
+/// that obid recorded already. A run the owner's words started again rewrites it only when it
+/// gets to its check, so a run that failed before that would quote the last one's.
+fn stale(home: &Path, job: &Job, log: &Path) -> bool {
+    let Some(written) = std::fs::metadata(log)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+    else {
+        return true;
+    };
+    let written = written.as_secs() as i64;
+    let finished = job.finished.unwrap_or(job.created);
+    crate::store::load_dir::<Record>(&folder(home))
+        .iter()
+        .any(|r| r.job == job.id && r.date < finished && written <= r.date)
 }
 
 /// "Stage 3 of 5, Check: node --test · phase check · step Checking · round 2 of 2"
@@ -388,6 +406,77 @@ mod tests {
         ] {
             assert_eq!(found(&job(quiet), 1_001), None, "{quiet:?}");
         }
+    }
+
+    /// A home of the test's own, removed when it ends.
+    struct Home(PathBuf);
+
+    impl Home {
+        fn new(name: &str) -> Home {
+            let path =
+                std::env::temp_dir().join(format!("obid-failures-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(path.join("logs/ab12cd34")).unwrap();
+            Home(path)
+        }
+
+        fn records(&self) -> Vec<Record> {
+            list(&self.0, MOST)
+        }
+    }
+
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_failure_is_recorded_once_whatever_the_job_says_later() {
+        let home = Home::new("once");
+        let now = obi_protocol::time::now();
+        let mut failed = job(Status::Failed);
+        failed.finished = Some(now);
+        failed.summary = "The first words.".into();
+        observe(&home.0, &failed);
+        let first = home.records();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].evidence.summary, "The first words.");
+        // The same failure, seen again as the job changes: the record stays as it was.
+        failed.summary = "Later words.".into();
+        failed.step = "Something else".into();
+        observe(&home.0, &failed);
+        assert_eq!(home.records(), first);
+    }
+
+    #[test]
+    fn a_later_run_never_quotes_an_earlier_runs_check() {
+        let home = Home::new("stale");
+        std::fs::write(
+            home.0.join("logs/ab12cd34/check.log"),
+            "the first run's check\n",
+        )
+        .unwrap();
+        let now = obi_protocol::time::now();
+        let mut failed = job(Status::Failed);
+        failed.check = Some("node --test".into());
+        // It failed after its check ran, then failed again after the owner's words started it
+        // again, before its check ran.
+        failed.finished = Some(now + 5);
+        observe(&home.0, &failed);
+        failed.finished = Some(now + 10);
+        observe(&home.0, &failed);
+        let records = home.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].evidence.check, None, "{records:?}");
+        assert!(
+            records[1]
+                .evidence
+                .check
+                .as_deref()
+                .is_some_and(|c| c.contains("the first run's check")),
+            "{records:?}"
+        );
     }
 
     #[test]

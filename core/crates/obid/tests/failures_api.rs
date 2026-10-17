@@ -33,8 +33,8 @@ fn failures(obid: &Obid, query: &str) -> Vec<Value> {
 }
 
 /// FailureTests.theAPIListsFailuresAndFixesThem: a job that failed and one stopped at a limit are
-/// recorded, newest first, once each, kept across a restart; one that ended done or was stopped
-/// isn't. A record is read by its id, the limit is capped, and Fix it refuses a record that
+/// recorded, newest first, kept across a restart; one that ended done or was stopped isn't (that
+/// each is recorded once is src/failures.rs `a_failure_is_recorded_once_whatever_the_job_says_later`). A record is read by its id, the limit is capped, and Fix it refuses a record that
 /// isn't studied (obid makes no post-mortem yet). The evidence holds no secret obid knows.
 #[test]
 fn the_api_lists_failures_and_fixes_them() {
@@ -83,8 +83,6 @@ fn the_api_lists_failures_and_fixes_them() {
     assert_eq!(jobs, [newer.as_str(), older.as_str()], "{list:?}");
     let first = &list[0];
     assert_eq!(first["trigger"], "limit");
-    assert_eq!(first["postMortem"], Value::Null);
-    assert_eq!(first["intervention"], false);
     assert_eq!(first["repo"], "obi-e2e/fixture-app");
     assert!(first["date"].as_str().unwrap().ends_with('Z'), "{first}");
     assert!(
@@ -110,22 +108,37 @@ fn the_api_lists_failures_and_fixes_them() {
         list[1]["evidence"]["summary"],
         "Nothing committed: Nothing to do."
     );
-    // Every key the API promises, null where obid has nothing.
-    for key in [
-        "rounds",
-        "studyError",
-        "issue",
-        "issueError",
-        "fix",
-        "fixedBy",
-        "fixedAt",
-    ] {
-        assert!(list[1].get(key).is_some(), "{key} in {}", list[1]);
+    // Every key the API promises, sent: null, empty or none where obid has nothing (a key left
+    // out would read as null too, so each is looked up as itself).
+    for record in &list {
+        let has = |key: &str, value: Value| {
+            assert_eq!(record.get(key), Some(&value), "{key} in {record}");
+        };
+        for key in [
+            "postMortem",
+            "studyError",
+            "issue",
+            "issueError",
+            "fix",
+            "fixedBy",
+            "fixedAt",
+        ] {
+            has(key, Value::Null);
+        }
+        has("intervention", json!(false));
+        has("tries", json!(0));
+        has("acted", json!(false));
+        assert!(record.get("rounds").is_some_and(Value::is_u64), "{record}");
+        let evidence = &record["evidence"];
+        for (key, value) in [
+            ("worktree", Value::Null),
+            ("source", Value::Null),
+            ("reviews", json!([])),
+            ("log", json!([])),
+        ] {
+            assert_eq!(evidence.get(key), Some(&value), "{key} in {evidence}");
+        }
     }
-    for key in ["worktree", "source"] {
-        assert_eq!(list[1]["evidence"][key], Value::Null, "{key}");
-    }
-    assert_eq!(list[1]["evidence"]["reviews"], json!([]));
 
     let id = list[1]["id"].as_str().unwrap().to_owned();
     let one = call(&obid, "GET", &format!("/v1/failures/{id}"), None);
@@ -153,11 +166,6 @@ fn the_api_lists_failures_and_fixes_them() {
     let fix = call(&obid, "POST", &format!("/v1/failures/{id}/fix"), None);
     assert_eq!(fix.status, 409, "{}", fix.text);
     assert_eq!(fix.body["error"], "Oby hasn't studied this failure yet.");
-
-    // Each is recorded once: dismissing the job changes it, and nothing new is recorded.
-    let dismissed = call(&obid, "POST", &format!("/v1/jobs/{older}/dismiss"), None);
-    assert_eq!(dismissed.status, 200, "{}", dismissed.text);
-    assert_eq!(failures(&obid, "").len(), 2);
 
     // Kept for good: a restart reads them back.
     assert!(obid.stop().success());
