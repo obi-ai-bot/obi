@@ -1089,6 +1089,8 @@ fn a_plan_waits_for_the_owner_and_mode_changes_only_on_approval() {
             .unwrap()
             .to_owned();
         let job = until(&obid, &id, |j| j["question"]["plan"].is_string());
+        // The agent's own plan, not a summary written after obid let ExitPlanMode through.
+        assert_eq!(job["question"]["plan"], "1. Read\n2. Test", "{job}");
         assert_eq!(job["mode"], "plan");
         assert!(job["permission"].is_null());
         assert_eq!(job["question"]["text"], "Approve the plan?");
@@ -1108,8 +1110,12 @@ fn a_plan_waits_for_the_owner_and_mode_changes_only_on_approval() {
             .status,
             200
         );
-        let ended = wait(&obid, &id);
-        assert_eq!(ended["mode"], "bypass");
+        // Ended, or waiting on a plan again: a job that missed the approval asks once more.
+        let ended = until(&obid, &id, |j| {
+            !matches!(j["status"].as_str(), Some("queued" | "running"))
+                || j["notes"].is_array() && j["question"].is_object()
+        });
+        assert_eq!(ended["mode"], "bypass", "{ended}");
         assert!(ended["question"].is_null());
         assert_eq!(ended["round"], job["round"]);
     }
