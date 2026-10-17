@@ -132,6 +132,14 @@ pub struct Permission {
     pub why: Option<String>,
 }
 
+impl Permission {
+    /// Whether it touches secrets, a login or the vault: the owner answers it one at a time, and
+    /// never the brain (#586).
+    pub fn is_secret(&self) -> bool {
+        self.why.as_deref() == Some(Reach::Secrets.why())
+    }
+}
+
 /// A permission obid answered by its own rules, without the owner, kept on the job (`answered`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Answered {
