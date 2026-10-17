@@ -3569,3 +3569,36 @@ fn the_brain_cannot_set_sandbox_mode() {
     assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
     assert!(items_of(&obid, "confirm").is_empty());
 }
+
+/// #586: the brain never lets a secret through, not even once. "Allow it" in chat leaves the
+/// permission waiting for the owner's own answer in the inbox, and the agent hears nothing.
+#[test]
+fn the_brain_never_lets_a_secret_through() {
+    let folder = Folder::new("brain-no-secret");
+    let obid = started(&folder);
+    let id = job_in(
+        &obid,
+        "Key reader",
+        r#"ASK: {"tool": "Bash", "input": {"command": "cat ~/.ssh/id_rsa"}}"#,
+        "sandbox",
+    );
+    let permission = within(30, "a permission waits", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        job["permission"]["id"].as_str().map(str::to_owned)
+    });
+    let allow = json!({"action": "answer_permission", "reply": "", "dispatches": [], "question": null,
+                       "jobs": [id], "decision": "allow", "message": null});
+    queue(&obid, &[allow.to_string()]);
+    let answer = said(&obid, "allow it");
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("only you can let it through, in your inbox"),
+        "{answer}"
+    );
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["permission"]["id"], permission.as_str(), "{job}");
+    assert_eq!(job["status"], "running");
+    assert_eq!(items_of(&obid, "permission").len(), 1);
+}
