@@ -232,6 +232,39 @@ fn respond(
     Ok((StatusCode::OK, axum::Json(body)).into_response())
 }
 
+/// A `thinking` event (#592): one call to the brain, as it begins and as its plan comes (`done`),
+/// or doesn't (`failed`: the turn was cancelled, stopped or out of time). `index` is the step the
+/// call plans, as the `step` events count them.
+pub(super) fn thinking(
+    shared: &Shared,
+    control: &turn::Control,
+    index: usize,
+    text: &str,
+    state: turn::State,
+) {
+    shared.events.send(
+        "thinking",
+        json!({"turn": control.turn, "conversation": control.conversation, "index": index,
+               "text": text, "state": state.as_str(),
+               "at": obi_protocol::time::format(obi_protocol::time::now())}),
+    );
+}
+
+/// A `reply` event (#592): what Oby says, as soon as the plan that says it is checked and before
+/// the jobs it starts are made. Never for a turn that's cancelled or stopped, nor for no words.
+/// Whether it went out.
+pub(super) fn acknowledge(shared: &Shared, control: &turn::Control, text: &str) -> bool {
+    if text.trim().is_empty() || !control.live() {
+        return false;
+    }
+    shared.events.send(
+        "reply",
+        json!({"turn": control.turn, "conversation": control.conversation, "text": text,
+               "at": obi_protocol::time::format(obi_protocol::time::now())}),
+    );
+    true
+}
+
 /// What the brain may choose from (`Desk.brainContext`): the accounts, the repositories, the ids
 /// each action may name, and the briefing with `turns` as the conversation so far.
 pub(super) fn context(shared: &Shared, turns: &[Turn], nonce: &str) -> Context {
@@ -286,6 +319,10 @@ pub(super) fn context(shared: &Shared, turns: &[Turn], nonce: &str) -> Context {
         accounts: told,
         repos: config.repos.iter().map(|r| r.repo.clone()).collect(),
         max_running: shared.jobs.max_running(),
+        failures: briefing::week(
+            crate::failures::list(&config.home, crate::failures::MOST),
+            now,
+        ),
         now,
         nonce: nonce.to_owned(),
     };
