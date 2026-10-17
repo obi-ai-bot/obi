@@ -3,8 +3,13 @@
 #
 #   curl -fsSL https://downloads.oby.deskree.com/obid/install.sh | sh
 #   sh install.sh [install] [--archive FILE [--sha256 HEX]] [--from URL] [--owner ID]
-#                  [--home DIR] [--prefix DIR] [--listen ADDR] [--no-wait]
-#   sh install.sh uninstall [--prefix DIR] [--purge]
+#                  [--home DIR] [--prefix DIR] [--config FILE] [--listen ADDR] [--service NAME]
+#                  [--no-wait]
+#   sh install.sh uninstall [--prefix DIR] [--config FILE] [--service NAME] [--purge]
+#
+# --service names the service (launchd label on macOS, com.deskree.obid; systemd unit on Linux,
+# obid), so a second obid, or a test, can be installed beside the real one without touching it:
+# give it its own --service, --prefix, --home, --config and --listen, and the same to uninstall.
 #
 # On Linux it installs a systemd user service (and turns lingering on, so it starts at boot and
 # survives a logout); on macOS a launchd agent. Either way it:
@@ -19,9 +24,11 @@
 # (docs/ARCHITECTURE.md 5.3). Running it again updates obid and keeps the home, the token and the
 # configuration. It needs no root.
 set -eu
+# What runs as the owner (the program, the service file) is theirs alone to change, whatever umask
+# they log in with; the home, the token and the configuration are made narrower still below.
+umask 022
 
 BASE_URL="https://downloads.oby.deskree.com/obid"
-LABEL="com.deskree.obid"
 
 say() { printf '%s\n' "$*"; }
 warn() { printf 'obid install: %s\n' "$*" >&2; }
@@ -33,8 +40,8 @@ case "${1:-}" in
 install | uninstall) command_word="$1"; shift ;;
 esac
 
-archive="" sha256="" from="$BASE_URL" owner="" obid_home="" prefix="" listen="127.0.0.1:7777"
-wait_for_obid=1 purge=0
+archive="" sha256="" from="$BASE_URL" owner="" obid_home="" prefix="" listen="" service=""
+config="" wait_for_obid=1 purge=0
 while [ $# -gt 0 ]; do
   case "$1" in
   --archive) archive="${2:?--archive needs a file}"; shift 2 ;;
@@ -44,6 +51,8 @@ while [ $# -gt 0 ]; do
   --home) obid_home="${2:?--home needs a folder}"; shift 2 ;;
   --prefix) prefix="${2:?--prefix needs a folder}"; shift 2 ;;
   --listen) listen="${2:?--listen needs an address}"; shift 2 ;;
+  --service) service="${2:?--service needs a name}"; shift 2 ;;
+  --config) config="${2:?--config needs a file}"; shift 2 ;;
   --no-wait) wait_for_obid=0; shift ;;
   --purge) purge=1; shift ;;
   *) die "unknown option $1 (see the top of this script)." ;;
@@ -70,20 +79,49 @@ user="$(id -un)"
 
 if [ "$kind" = linux ]; then
   config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  [ -n "$service" ] || service="obid"
   [ -n "$prefix" ] || prefix="$HOME/.local/opt/obid"
-  config_dir="$config_home/obid"
-  [ -n "$obid_home" ] || obid_home="${XDG_DATA_HOME:-$HOME/.local/share}/obid"
-  unit="$config_home/systemd/user/obid.service"
+  [ -n "$config" ] || config="$config_home/obid/config.json"
+  default_home="${XDG_DATA_HOME:-$HOME/.local/share}/obid"
+  unit="$config_home/systemd/user/$service.service"
 else
   support="$HOME/Library/Application Support/Oby"
+  [ -n "$service" ] || service="com.deskree.obid"
   [ -n "$prefix" ] || prefix="$support/obid"
-  config_dir="$prefix"
+  [ -n "$config" ] || config="$prefix/config.json"
   # The folder the Mac app reads api-token from for "This Mac" (docs/runner-api.md).
-  [ -n "$obid_home" ] || obid_home="$support/Runner"
-  plist="$HOME/Library/LaunchAgents/$LABEL.plist"
-  log="$HOME/Library/Logs/obid.log"
+  default_home="$support/Runner"
+  plist="$HOME/Library/LaunchAgents/$service.plist"
+  if [ "$service" = com.deskree.obid ]; then log="$HOME/Library/Logs/obid.log"; else log="$HOME/Library/Logs/$service.log"; fi
 fi
-config="$config_dir/config.json"
+case "$service" in
+"" | .* | *[!A-Za-z0-9._-]*) die "--service ($service) may hold only letters, digits and _ . - (and not start with a dot)." ;;
+esac
+config_dir="$(dirname "$config")"
+
+# A configuration already there says where obid's home is and where it listens: what is installed
+# follows it (an edited config.json is never rewritten), and an option that says otherwise is a
+# mistake to stop at, not to guess about.
+config_value() {
+  sed -n 's/.*"'"$1"'" *: *"\([^"]*\)".*/\1/p' "$config" 2>/dev/null | head -n 1
+}
+if [ -f "$config" ]; then
+  kept_home="$(config_value home)"
+  kept_listen="$(config_value listen)"
+  [ -n "$kept_home" ] || die "$config names no home, so I can't tell where obid keeps its data. Fix it or move it away."
+  if [ -n "$obid_home" ] && [ "$obid_home" != "$kept_home" ]; then
+    die "$config says obid's home is $kept_home, not $obid_home. Leave --home out, or edit or move $config."
+  fi
+  obid_home="$kept_home"
+  if [ -n "$kept_listen" ]; then
+    if [ -n "$listen" ] && [ "$listen" != "$kept_listen" ]; then
+      die "$config says obid listens on $kept_listen, not $listen. Leave --listen out, or edit $config."
+    fi
+    listen="$kept_listen"
+  fi
+fi
+[ -n "$obid_home" ] || obid_home="$default_home"
+[ -n "$listen" ] || listen="127.0.0.1:7777"
 token_file="$obid_home/api-token"
 
 # Paths go into a JSON file, a systemd unit and a property list: keep them to characters that mean
@@ -99,7 +137,7 @@ plain() {
 }
 plain "--prefix" "$prefix"
 plain "--home" "$obid_home"
-plain "the configuration folder" "$config_dir"
+plain "--config" "$config"
 
 systemctl_user() {
   # Over ssh there is often no XDG_RUNTIME_DIR, and systemctl --user can't find the user manager.
@@ -112,9 +150,9 @@ systemctl_user() {
 
 stop_service() {
   if [ "$kind" = linux ]; then
-    if [ -e "$unit" ]; then systemctl_user disable --now obid.service >/dev/null 2>&1 || true; fi
+    if [ -e "$unit" ]; then systemctl_user disable --now "$service.service" >/dev/null 2>&1 || true; fi
   else
-    launchctl bootout "gui/$uid/$LABEL" >/dev/null 2>&1 || true
+    launchctl bootout "gui/$uid/$service" >/dev/null 2>&1 || true
   fi
 }
 
@@ -122,7 +160,8 @@ stop_service() {
 # children with it; this catches the rest (a job that left its session).
 end_leftovers() {
   command -v pgrep >/dev/null 2>&1 || { warn "pgrep isn't installed, so I can't check that nothing of obid's is left running."; return 0; }
-  pattern="^$prefix/bin/obid( |\$)"
+  # The prefix as a pattern: its . and + match only themselves.
+  pattern="^$(printf '%s' "$prefix" | sed 's/[.+]/[&]/g')/bin/obid( |\$)"
   for signal in TERM KILL; do
     pids="$(pgrep -u "$uid" -f "$pattern" || true)"
     [ -n "$pids" ] || return 0
@@ -136,6 +175,17 @@ end_leftovers() {
 }
 
 if [ "$command_word" = uninstall ]; then
+  if [ "$purge" = 1 ]; then
+    # What --purge deletes is what the configuration says obid's home is (read above), never a
+    # guess, and never a folder the Swift runner keeps its own data in too (the Mac's Runner
+    # folder can be both): checked before anything is stopped.
+    case "$obid_home" in
+    / | "$HOME" | "$HOME/" | "") die "Not deleting $obid_home: it isn't a folder of obid's. Nothing was removed." ;;
+    esac
+    if [ -e "$obid_home/oby.sqlite" ]; then
+      die "Not deleting $obid_home: the Swift runner keeps its data there too (oby.sqlite). Nothing was removed. Uninstall without --purge, and delete obid's own files by hand (docs/install.md, Uninstall)."
+    fi
+  fi
   stop_service
   if [ "$kind" = linux ]; then
     rm -f "$unit"
@@ -149,15 +199,10 @@ if [ "$command_word" = uninstall ]; then
   rmdir "$prefix/bin" "$prefix/share" 2>/dev/null || true
   say "obid is stopped and removed from $prefix; the service is gone."
   if [ "$purge" = 1 ]; then
-    # What to delete is what the configuration says obid's home is, never a guess.
-    kept_home="$(sed -n 's/^ *"home": *"\([^"]*\)".*/\1/p' "$config" 2>/dev/null | head -n 1)"
-    [ -n "$kept_home" ] || kept_home="$obid_home"
-    case "$kept_home" in
-    / | "$HOME" | "$HOME/" | "") die "Not deleting $kept_home: it isn't a folder of obid's." ;;
-    esac
-    say "Deleting obid's home $kept_home (jobs, clones, worktrees, the token, the vault file) and $config."
-    rm -rf "$kept_home"
+    say "Deleting obid's home $obid_home (jobs, clones, worktrees, the token, the vault file) and $config."
+    rm -rf "$obid_home"
     rm -f "$config"
+    if [ "$kind" = macos ]; then rm -f "$log"; fi
     rmdir "$config_dir" 2>/dev/null || true
   else
     say "Kept: $obid_home (jobs, clones, the token) and $config. 'uninstall --purge' deletes them."
@@ -201,6 +246,22 @@ elif command -v shasum >/dev/null 2>&1; then digest() { shasum -a 256 "$1" | { r
 else die "sha256sum (or shasum) is needed and isn't installed."
 fi
 
+# obid finds claude and codex on the login shell's PATH (AGENTS.md, "PATH"), which over ssh or
+# from a script can be longer than this one's: ask that shell too.
+login_shell=""
+if command -v getent >/dev/null 2>&1; then
+  login_shell="$(getent passwd "$user" 2>/dev/null | sed 's/.*://')"
+elif [ "$kind" = macos ] && command -v dscl >/dev/null 2>&1; then
+  login_shell="$(dscl . -read "/Users/$user" UserShell 2>/dev/null | sed -n 's/^UserShell: *//p')"
+fi
+[ -n "$login_shell" ] || login_shell="${SHELL:-}"
+found() {
+  command -v "$1" >/dev/null 2>&1 && return 0
+  [ -n "$login_shell" ] && [ -x "$login_shell" ] || return 1
+  # shellcheck disable=SC2016
+  "$login_shell" -l -c 'command -v "$0"' "$1" </dev/null >/dev/null 2>&1
+}
+
 if [ -z "$owner" ]; then owner="$user"; fi
 case "$owner" in
 "" | *[!A-Za-z0-9_.@-]*) die "--owner ($owner) may hold only letters, digits and _ . @ -." ;;
@@ -236,6 +297,8 @@ say "Installing $version for $target."
 stop_service
 
 mkdir -p "$prefix/bin" "$prefix/share"
+# Folders an earlier install made under a looser umask are narrowed too.
+chmod 755 "$prefix/bin" "$prefix/share"
 cp "$work/new/bin/obid" "$prefix/bin/obid.new"
 chmod 755 "$prefix/bin/obid.new"
 mv -f "$prefix/bin/obid.new" "$prefix/bin/obid"
@@ -270,7 +333,7 @@ if [ -e "$config" ]; then
   say "Kept your configuration $config."
 else
   codex=""
-  if command -v codex >/dev/null 2>&1; then
+  if found codex; then
     codex=',
     "codex": {"bin": "codex", "accounts": [{"id": "codex", "name": "Codex", "configDir": null}]}'
   fi
@@ -293,7 +356,7 @@ EOF
   mv "$config.new" "$config"
   say "Wrote $config (owner $owner)."
 fi
-command -v claude >/dev/null 2>&1 || warn "Claude Code isn't on this PATH. Install it and sign in as $user (claude auth login): obid runs the CLIs you already use."
+found claude || warn "Claude Code isn't on your login shell's PATH. Install it and sign in as $user (claude auth login): obid runs the CLIs you already use."
 
 if [ "$kind" = linux ]; then
   mkdir -p "$(dirname "$unit")"
@@ -318,13 +381,19 @@ WantedBy=default.target
 EOF
   mv "$unit.new" "$unit"
   systemctl_user daemon-reload || die "can't reach your systemd user manager. Log in as $user (not su or sudo) and run this again."
-  systemctl_user enable --now obid.service || die "systemd couldn't start obid: systemctl --user status obid"
+  systemctl_user enable --now "$service.service" || die "systemd couldn't start obid: systemctl --user status $service"
   if ! loginctl enable-linger "$user" 2>/dev/null; then
     warn "Couldn't turn on lingering, so obid starts only while you are logged in. Run: sudo loginctl enable-linger $user"
   fi
-  where="journalctl --user -u obid"
+  where="journalctl --user -u $service"
 else
   mkdir -p "$(dirname "$plist")" "$(dirname "$log")"
+  # launchd appends obid's output to the log and keeps the file's mode: only you may read it.
+  (
+    umask 077
+    : >>"$log"
+  )
+  chmod 600 "$log"
   cat >"$plist.new" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -333,7 +402,7 @@ else
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>$LABEL</string>
+	<string>$service</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>$prefix/bin/obid</string>
@@ -379,4 +448,7 @@ if [ "$wait_for_obid" = 1 ] && command -v curl >/dev/null 2>&1; then
 fi
 
 say "obid is running on http://$listen as a service. Its API token is in $token_file."
-say "Update: run this script again with a newer archive. Remove: sh install.sh uninstall. See docs/install.md."
+# Removing it takes the names it was installed under.
+same=""
+if [ "$service" != obid ] && [ "$service" != com.deskree.obid ]; then same=" --service $service --prefix '$prefix' --config '$config'"; fi
+say "Update: run this script again with a newer archive. Remove: sh install.sh uninstall$same. See docs/install.md."

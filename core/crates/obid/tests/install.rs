@@ -4,7 +4,7 @@
 //!
 //! The scripts run for real under `sh`, in a `PATH` of symlinks to just the tools they use, plus
 //! stand-ins for the ones that would change the machine (`systemctl`, `loginctl`, `launchctl`,
-//! `uname` for the Mac). Each stand-in appends what it was called with, and its environment, to
+//! `uname`, so a Linux machine is checked on a Mac too). Each stand-in appends what it was called with, and its environment, to
 //! `calls.log`.
 
 #![cfg(unix)]
@@ -20,30 +20,8 @@ const OBID: &str = env!("CARGO_BIN_EXE_obid");
 /// The tools the installer may use (and `env`, which the stand-ins use), found on this machine and
 /// linked into the test's `PATH`.
 const TOOLS: &[&str] = &[
-    "sh",
-    "tar",
-    "gzip",
-    "od",
-    "head",
-    "tr",
-    "sed",
-    "mkdir",
-    "chmod",
-    "cat",
-    "cp",
-    "mv",
-    "rm",
-    "rmdir",
-    "mktemp",
-    "id",
-    "dirname",
-    "grep",
-    "sleep",
-    "pgrep",
-    "sha256sum",
-    "kill",
-    "uname",
-    "env",
+    "sh", "tar", "gzip", "od", "head", "tr", "sed", "mkdir", "chmod", "cat", "cp", "mv", "rm",
+    "rmdir", "mktemp", "id", "dirname", "grep", "sleep", "pgrep", "kill", "env",
 ];
 
 struct Folder(PathBuf);
@@ -79,11 +57,23 @@ fn script(name: &str) -> PathBuf {
         .unwrap()
 }
 
+/// The digest tool the installer prefers, or the one it falls back to (macOS before 15 has only
+/// `shasum`).
+const DIGEST_TOOLS: &[&str] = &["sha256sum", "shasum"];
+
 fn find_tool(name: &str) -> Option<PathBuf> {
-    ["/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin"]
-        .iter()
-        .map(|dir| Path::new(dir).join(name))
-        .find(|path| path.exists())
+    // macOS keeps sha256sum in /sbin.
+    [
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+    ]
+    .iter()
+    .map(|dir| Path::new(dir).join(name))
+    .find(|path| path.exists())
 }
 
 fn write_executable(path: &Path, text: &str) {
@@ -124,12 +114,14 @@ impl Rig {
         std::fs::create_dir_all(rig.user_home()).unwrap();
         std::fs::create_dir_all(rig.folder.0.join("tmp")).unwrap();
         for tool in TOOLS {
-            if *tool == "uname" && os == Os::Mac {
-                continue;
-            }
             let found = find_tool(tool).unwrap_or_else(|| panic!("{tool} isn't on this machine"));
             std::os::unix::fs::symlink(found, tools.join(tool)).unwrap();
         }
+        let digest = DIGEST_TOOLS
+            .iter()
+            .find_map(|tool| find_tool(tool).map(|found| (tool, found)))
+            .expect("neither sha256sum nor shasum is on this machine");
+        std::os::unix::fs::symlink(digest.1, tools.join(digest.0)).unwrap();
         if os == Os::Mac {
             write_executable(
                 &tools.join("uname"),
@@ -137,6 +129,18 @@ impl Rig {
             );
             rig.stand_in("launchctl", "");
         } else {
+            // Linux whatever machine runs the tests, so the same paths are checked on a Mac.
+            write_executable(
+                &tools.join("uname"),
+                &format!(
+                    "#!/bin/sh\ncase \"$1\" in -s) echo Linux ;; -m) echo {} ;; esac\n",
+                    if cfg!(target_arch = "aarch64") {
+                        "aarch64"
+                    } else {
+                        "x86_64"
+                    }
+                ),
+            );
             rig.stand_in("systemctl", "");
             rig.stand_in("loginctl", "");
             rig.stand_in("bwrap", "");
@@ -249,6 +253,26 @@ impl Rig {
         command.output().unwrap()
     }
 
+    /// `install`, by someone whose umask lets their group write what they make (Ubuntu's default
+    /// for a user with a group of their own).
+    fn install_with_group_umask(&self, args: &[&str]) -> Output {
+        let mut command = self.command("install.sh");
+        command
+            .args(["--archive"])
+            .arg(self.archive_path())
+            .arg("--no-wait")
+            .args(args);
+        let mut wrapped = Command::new(tools_sh(&self.tools()));
+        wrapped
+            .args(["-c", "umask 002; exec \"$0\" \"$@\""])
+            .arg(command.get_program())
+            .args(command.get_args())
+            .env_clear()
+            .envs(command.get_envs().filter_map(|(k, v)| v.map(|v| (k, v))))
+            .stdin(Stdio::null());
+        wrapped.output().unwrap()
+    }
+
     fn uninstall(&self, args: &[&str]) -> Output {
         self.command("install.sh")
             .arg("uninstall")
@@ -303,6 +327,25 @@ fn text(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+/// The SHA-256 of a file, in hex.
+fn sha256(path: &Path) -> String {
+    let out = match find_tool("sha256sum") {
+        Some(tool) => Command::new(tool).arg(path).output().unwrap(),
+        None => Command::new(find_tool("shasum").expect("no shasum"))
+            .args(["-a", "256"])
+            .arg(path)
+            .output()
+            .unwrap(),
+    };
+    assert!(out.status.success(), "{}", text(&out));
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string()
 }
 
 fn mode(path: &Path) -> u32 {
@@ -633,6 +676,8 @@ fn the_mac_gets_a_launch_agent_in_the_home_the_mac_app_reads() {
         assert!(plist.contains(&part), "{part}\n{plist}");
     }
     assert!(!plist.contains("EnvironmentVariables"), "{plist}");
+    // Its log, where obid's output goes, is the owner's alone.
+    assert_eq!(mode(&rig.user_home().join("Library/Logs/obid.log")), 0o600);
     let calls = rig.calls();
     assert!(
         calls.contains(&format!("launchctl bootstrap gui/{} ", unsafe_uid())),
@@ -662,12 +707,7 @@ fn a_download_is_checked_against_its_checksum() {
     std::fs::create_dir_all(&served).unwrap();
     let name = format!("obid-{}.tar.gz", rig.target());
     std::fs::copy(rig.archive_path(), served.join(&name)).unwrap();
-    let digest = Command::new("sha256sum")
-        .arg(served.join(&name))
-        .output()
-        .unwrap();
-    let digest = String::from_utf8(digest.stdout).unwrap();
-    let digest = digest.split_whitespace().next().unwrap().to_string();
+    let digest = sha256(&served.join(&name));
     std::fs::write(
         served.join(format!("{name}.sha256")),
         format!("{digest}  {name}\n"),
@@ -814,6 +854,239 @@ fn the_mac_uninstall_boots_the_agent_out_and_removes_it() {
     // The Mac's configuration lives in the same folder, and stays.
     assert!(rig.config().is_file());
     assert!(rig.obid_home().join("api-token").is_file());
+}
+
+#[test]
+fn a_second_obid_installs_beside_the_first_under_its_own_service_name() {
+    let rig = Rig::linux("service");
+    assert!(rig.install(&[]).status.success());
+    let first_unit = std::fs::read_to_string(rig.unit()).unwrap();
+    let first_config = std::fs::read_to_string(rig.config()).unwrap();
+    let first_token = std::fs::read_to_string(rig.obid_home().join("api-token")).unwrap();
+
+    let scratch = rig.folder.0.join("scratch");
+    let (prefix, home, config) = (
+        scratch.join("opt"),
+        scratch.join("home"),
+        scratch.join("etc/config.json"),
+    );
+    let args = [
+        "--service",
+        "obid-test-585",
+        "--prefix",
+        prefix.to_str().unwrap(),
+        "--home",
+        home.to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--listen",
+        "127.0.0.1:7895",
+    ];
+    // A folder of the prefix's that an earlier install left open to the group.
+    std::fs::create_dir_all(prefix.join("bin")).unwrap();
+    std::fs::set_permissions(prefix.join("bin"), std::fs::Permissions::from_mode(0o775)).unwrap();
+    let out = rig.install_with_group_umask(&args);
+    assert!(out.status.success(), "{}", text(&out));
+    let unit = rig
+        .user_home()
+        .join(".config/systemd/user/obid-test-585.service");
+    let written = std::fs::read_to_string(&unit).unwrap();
+    // What runs as the owner is theirs alone to change, whatever their umask.
+    assert_eq!(mode(&unit), 0o644);
+    assert_eq!(mode(&prefix.join("bin/obid")), 0o755);
+    assert_eq!(mode(&prefix.join("bin")), 0o755);
+    assert_eq!(mode(&prefix.join("share/plugins")), 0o755);
+    assert!(
+        written.contains(&format!(
+            "ExecStart=\"{}/bin/obid\" serve --config \"{}\"",
+            prefix.display(),
+            config.display()
+        )),
+        "{written}"
+    );
+    let loaded = Config::load(&config).unwrap();
+    assert_eq!(loaded.home, home);
+    assert_eq!(loaded.listen.to_string(), "127.0.0.1:7895");
+    assert_eq!(mode(&home.join("api-token")), 0o600);
+    assert!(
+        rig.calls()
+            .contains("systemctl --user enable --now obid-test-585.service"),
+        "{}",
+        rig.calls()
+    );
+
+    // Removing it, named the same way, leaves the first one exactly as it was.
+    let removed = rig.uninstall(&[
+        "--service",
+        "obid-test-585",
+        "--prefix",
+        prefix.to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--purge",
+    ]);
+    assert!(removed.status.success(), "{}", text(&removed));
+    assert!(!unit.exists());
+    assert!(!home.exists());
+    assert!(!config.exists());
+    assert!(!prefix.exists());
+    assert_eq!(std::fs::read_to_string(rig.unit()).unwrap(), first_unit);
+    assert_eq!(std::fs::read_to_string(rig.config()).unwrap(), first_config);
+    assert_eq!(
+        std::fs::read_to_string(rig.obid_home().join("api-token")).unwrap(),
+        first_token
+    );
+    assert!(rig.prefix().join("bin/obid").is_file());
+    let calls = rig.calls();
+    assert!(
+        calls.contains("systemctl --user disable --now obid-test-585.service"),
+        "{calls}"
+    );
+    assert!(
+        !calls.contains("disable --now obid.service"),
+        "the first obid was stopped: {calls}"
+    );
+
+    // A name that would break the unit's file name or a property list is refused.
+    for name in ["../obid", "a b", ".hidden", "a/b"] {
+        let out = rig.install(&["--service", name, "--prefix", prefix.to_str().unwrap()]);
+        assert!(!out.status.success(), "{name}: {}", text(&out));
+    }
+    assert!(!prefix.exists());
+}
+
+#[test]
+fn a_test_launch_agent_on_the_mac_never_names_the_real_one() {
+    let rig = Rig::mac("mac-service");
+    let scratch = rig.folder.0.join("scratch");
+    let (prefix, home) = (scratch.join("opt"), scratch.join("home"));
+    let label = "com.deskree.obid.test-585";
+    let out = rig.install_with_group_umask(&[
+        "--service",
+        label,
+        "--prefix",
+        prefix.to_str().unwrap(),
+        "--home",
+        home.to_str().unwrap(),
+        "--listen",
+        "127.0.0.1:7895",
+    ]);
+    assert!(out.status.success(), "{}", text(&out));
+    let plist_path = rig
+        .user_home()
+        .join(format!("Library/LaunchAgents/{label}.plist"));
+    let plist = std::fs::read_to_string(&plist_path).unwrap();
+    assert_eq!(mode(&plist_path), 0o644);
+    assert!(
+        plist.contains(&format!("<key>Label</key>\n\t<string>{label}</string>")),
+        "{plist}"
+    );
+    let log = rig.user_home().join(format!("Library/Logs/{label}.log"));
+    assert!(
+        plist.contains(&format!("<string>{}</string>", log.display())),
+        "{plist}"
+    );
+    // The config is in the prefix, and points at the scratch home.
+    let config = Config::load(&prefix.join("config.json")).unwrap();
+    assert_eq!(config.home, home);
+    // Nothing of the real install was made or called.
+    assert!(!rig.plist().exists());
+    assert!(!rig.prefix().exists());
+    assert!(!rig.obid_home().exists());
+    let uid = unsafe_uid();
+    let calls = rig.calls();
+    assert!(
+        calls.contains(&format!(
+            "launchctl bootstrap gui/{uid} {}",
+            plist_path.display()
+        )),
+        "{calls}"
+    );
+    assert!(
+        !calls.contains(&format!("gui/{uid}/com.deskree.obid\n")),
+        "{calls}"
+    );
+
+    let out = rig.uninstall(&["--service", label, "--prefix", prefix.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!plist_path.exists());
+    let calls = rig.calls();
+    assert!(
+        calls.contains(&format!("launchctl bootout gui/{uid}/{label}")),
+        "{calls}"
+    );
+    assert!(
+        !calls
+            .lines()
+            .any(|l| l == format!("launchctl bootout gui/{uid}/com.deskree.obid")),
+        "{calls}"
+    );
+}
+
+#[test]
+fn a_configuration_already_there_decides_the_home_and_the_port() {
+    // An obid set up by hand before the installer: its config.json names its own home and port.
+    let rig = Rig::mac("existing-config");
+    let own_home = rig
+        .user_home()
+        .join("Library/Application Support/Oby/obid/home");
+    std::fs::create_dir_all(rig.prefix()).unwrap();
+    let edited = format!(
+        "{{\"listen\": \"127.0.0.1:7811\", \"home\": \"{}\", \"owner\": \"someone\"}}\n",
+        own_home.display()
+    );
+    std::fs::write(rig.config(), &edited).unwrap();
+    let out = rig.install(&[]);
+    assert!(out.status.success(), "{}", text(&out));
+    // The token is made where that obid will look for it, not in the default home.
+    assert_eq!(mode(&own_home.join("api-token")), 0o600);
+    assert!(!rig.obid_home().exists(), "a second home was made");
+    assert_eq!(std::fs::read_to_string(rig.config()).unwrap(), edited);
+    assert!(text(&out).contains("127.0.0.1:7811"), "{}", text(&out));
+
+    // An option that contradicts it stops the install before anything changes.
+    let token = std::fs::read_to_string(own_home.join("api-token")).unwrap();
+    let elsewhere = rig.folder.0.join("elsewhere");
+    for args in [
+        vec!["--home", elsewhere.to_str().unwrap()],
+        vec!["--listen", "127.0.0.1:7777"],
+    ] {
+        let calls_before = rig.calls();
+        let out = rig.install(&args);
+        assert!(!out.status.success(), "{args:?}: {}", text(&out));
+        assert!(text(&out).contains(rig.config().to_str().unwrap()));
+        assert_eq!(
+            rig.calls(),
+            calls_before,
+            "{args:?}: the service was touched"
+        );
+    }
+    assert!(!elsewhere.exists());
+    assert_eq!(
+        std::fs::read_to_string(own_home.join("api-token")).unwrap(),
+        token
+    );
+}
+
+#[test]
+fn purging_never_deletes_a_home_the_swift_runner_keeps_its_data_in() {
+    // On a Mac the This Mac home can be the Swift runner's folder too.
+    let rig = Rig::mac("purge-shared");
+    assert!(rig.install(&[]).status.success());
+    std::fs::write(rig.obid_home().join("oby.sqlite"), "the Swift runner's").unwrap();
+    let calls_before = rig.calls();
+    let out = rig.uninstall(&["--purge"]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("oby.sqlite"), "{}", text(&out));
+    assert_eq!(
+        std::fs::read_to_string(rig.obid_home().join("oby.sqlite")).unwrap(),
+        "the Swift runner's"
+    );
+    assert!(rig.obid_home().join("api-token").is_file());
+    // It stopped before anything: the agent is still loaded and installed.
+    assert_eq!(rig.calls(), calls_before);
+    assert!(rig.plist().is_file());
+    assert!(rig.prefix().join("bin/obid").is_file());
 }
 
 /// Ends a process on drop, so a failed test leaves none behind.
@@ -976,11 +1249,9 @@ fn the_packager_builds_the_archive_the_installer_reads() {
     }
     // Its checksum file is the one the installer reads.
     let sums = std::fs::read_to_string(out_dir.join("obid-linux-x86_64.tar.gz.sha256")).unwrap();
-    let want = Command::new("sha256sum").arg(&archive).output().unwrap();
-    let want = String::from_utf8(want.stdout).unwrap();
     assert_eq!(
         sums.split_whitespace().next(),
-        want.split_whitespace().next()
+        Some(sha256(&archive).as_str())
     );
     assert!(sums.trim_end().ends_with("obid-linux-x86_64.tar.gz"));
 
