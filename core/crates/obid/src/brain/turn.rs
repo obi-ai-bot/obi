@@ -554,6 +554,20 @@ pub async fn run(
     asked: &Asked<'_>,
     control: &Arc<Control>,
 ) -> Answered {
+    // "Work on the roadmap" and the like are the Lead's (#589): it reads the board, not the
+    // briefing.
+    if super::lead::leads(said) {
+        // It says it's thinking first, like every turn (#592).
+        let thought = "Reading the roadmap";
+        super::thinking(shared, control, 1, thought, State::Running);
+        let answered = super::lead::run(shared, said, asked, control).await;
+        let state = match answered.end {
+            End::Cancelled | End::Stopped | End::BudgetSpent => State::Failed,
+            _ => State::Done,
+        };
+        super::thinking(shared, control, 1, thought, state);
+        return answered;
+    }
     let room = Room {
         root: shared.config.home.join("plans"),
         jobs: shared.jobs.clone(),
