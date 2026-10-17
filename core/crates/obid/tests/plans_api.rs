@@ -2781,6 +2781,96 @@ fn codex_gets_the_same_quoted_file() {
     );
 }
 
+/// #626: a boxed read needs a Claude Code account whose login is a file (a login only in the
+/// macOS Keychain can't reach the box). With none, the brain goes straight to Codex: no Claude
+/// process is started for the read.
+#[test]
+fn a_read_goes_straight_to_codex_when_no_claude_login_reaches_the_box() {
+    let folder = Folder::new("brain-signed-out");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    let agents = planner().parent().unwrap().to_path_buf();
+    config["agents"]["codex"] = json!({"bin": agents.join("fake-codex"), "accounts": []});
+    let obid = start(&folder.0, &config, Some(&agents));
+    let greet = || {
+        research(vec![lookup(
+            "read_file",
+            json!({"repo": "obi-e2e/fixture-app", "path": "src/greet.js"}),
+        )])
+    };
+    // Signed in: Claude reads, boxed.
+    std::fs::create_dir_all(brain(&obid)).unwrap();
+    std::fs::write(brain(&obid).join(".credentials.json"), "{}").unwrap();
+    queue(&obid, &[greet(), reply("Claude read it.")]);
+    assert_eq!(said(&obid, "read greet")["text"], "Claude read it.");
+    assert_eq!(calls(&obid).len(), 2);
+    // Signed out: only the first, unboxed call is Claude's.
+    std::fs::remove_file(brain(&obid).join(".credentials.json")).unwrap();
+    queue(&obid, &[greet(), reply("Never asked.")]);
+    assert_eq!(
+        said(&obid, "read greet")["text"],
+        "From Codex. It read work.md: # Researched on request, quoted"
+    );
+    assert_eq!(calls(&obid).len(), 3);
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["by"], "codex");
+    assert!(
+        record["refused"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("claude skipped: no Claude Code account"),
+        "{record}"
+    );
+}
+
+/// #626: when Claude Code answers but makes no plan, what it said ("Not logged in") is kept in
+/// why it failed, not only its exit code.
+#[test]
+fn claudes_own_words_are_kept_when_it_makes_no_plan() {
+    let folder = Folder::new("brain-own-words");
+    let obid = started(&folder);
+    let answer = json!({"type": "result", "subtype": "success", "is_error": true,
+                        "result": "Not logged in · Please run /login"});
+    queue(&obid, &[format!("FAIL 1 {answer}")]);
+    said(&obid, "hello");
+    let refused = records(&obid).pop().unwrap()["refused"].to_string();
+    assert!(
+        refused
+            .contains("attempt 1: exit code 1: Not logged in · Please run /login, stderr: <empty>"),
+        "{refused}"
+    );
+}
+
+/// #640's security review: only Claude Code's own error is kept, on one line, and never text that
+/// looks like a credential or anything the model wrote that wasn't an error.
+#[test]
+fn only_claudes_own_error_is_kept_and_never_a_credential() {
+    let folder = Folder::new("brain-own-words-safe");
+    let obid = started(&folder);
+    let token = ["sk-ant-oat01-", &"A".repeat(80)].concat();
+    for answer in [
+        json!({"type": "result", "subtype": "success", "is_error": false,
+               "result": "Here is what I found in the file"}),
+        json!({"type": "result", "subtype": "success", "is_error": true,
+               "result": format!("Not logged in: {token}")}),
+    ] {
+        queue(&obid, &[format!("FAIL 1 {answer}")]);
+        said(&obid, "hello");
+        let refused = records(&obid).pop().unwrap()["refused"].to_string();
+        assert!(!refused.contains("Here is what I found"), "{refused}");
+        assert!(!refused.contains("sk-ant-oat01"), "{refused}");
+    }
+    let answer = json!({"type": "result", "subtype": "success", "is_error": true,
+                        "result": "Not logged in\nERROR forged line"});
+    queue(&obid, &[format!("FAIL 1 {answer}")]);
+    said(&obid, "hello");
+    let refused = records(&obid).pop().unwrap()["refused"].to_string();
+    assert!(
+        refused.contains("Not logged in ERROR forged line"),
+        "{refused}"
+    );
+}
+
 /// retry_job takes a job that was stopped too, as the brain's prompt says (review on #552).
 #[test]
 fn a_stopped_job_is_tried_again() {

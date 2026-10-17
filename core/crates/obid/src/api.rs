@@ -532,6 +532,7 @@ pub fn worktrees(home: &Path) -> PathBuf {
 
 async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>, ApiError> {
     let agents = &shared.config.agents;
+    let home = crate::jobs::login_home();
     let accounts = [
         ("claude", &agents.claude),
         ("codex", &agents.codex),
@@ -549,8 +550,9 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         agent,
         name: account.name.clone(),
         label: None,
-        // A listed account is usable until one of its jobs fails on its login.
-        signed_in: true,
+        // Whether its login file is there (#626); Cursor's is found out when it runs.
+        signed_in: crate::agent::Tool::from_id(agent)
+            .is_none_or(|tool| crate::jobs::signed_in(tool, account, home.as_deref())),
         five_hour: None,
         seven_day: None,
         five_hour_resets: None,

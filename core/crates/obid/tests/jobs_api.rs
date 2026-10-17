@@ -1343,3 +1343,38 @@ fn the_default_login_is_a_copy_the_person_keeps_unchanged() {
     assert!(!login.join(".claude/.credentials.json").exists());
     assert!(login.join(".claude.json").exists());
 }
+
+/// #626: routing skips an account whose login file isn't there (a login only in the macOS
+/// Keychain can't reach the job's sandbox): another account of the tool, else another tool.
+#[test]
+fn routing_skips_an_account_that_isnt_signed_in() {
+    let folder = Folder::new("signed-out");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote);
+    let accounts = folder.0.join("home/accounts");
+    config["agents"]["claude"]["accounts"] = json!([
+        {"id": "keychain", "name": "Keychain", "configDir": accounts.join("keychain")},
+        {"id": "file", "name": "File", "configDir": accounts.join("file")}
+    ]);
+    config["agents"]["codex"] = json!({
+        "bin": Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-codex"),
+        "accounts": [{"id": "codex", "name": "Codex", "configDir": accounts.join("codex")}]
+    });
+    for (account, file) in [("file", ".credentials.json"), ("codex", "auth.json")] {
+        std::fs::create_dir_all(accounts.join(account)).unwrap();
+        std::fs::write(accounts.join(account).join(file), "{}").unwrap();
+    }
+    let obid = start(&folder.0, &config);
+    let job = |agent: Value| {
+        let answer = post_job(
+            &obid,
+            json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Say hello.",
+                   "agent": agent}),
+        );
+        assert_eq!(answer.status, 201, "{}", answer.text);
+        (answer.body["agent"].clone(), answer.body["account"].clone())
+    };
+    assert_eq!(job(json!("claude")), (json!("claude"), json!("file")));
+    std::fs::remove_file(accounts.join("file/.credentials.json")).unwrap();
+    assert_eq!(job(json!("auto")), (json!("codex"), json!("codex")));
+}
