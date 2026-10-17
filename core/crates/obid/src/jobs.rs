@@ -1744,6 +1744,11 @@ impl Jobs {
             };
             let mut kept = VecDeque::new();
             while let Some(ask) = asks.pop_front() {
+                // A secret waits for the owner's own answer: a new mode or rule never settles it.
+                if ask.permission.is_secret() {
+                    kept.push_back(ask);
+                    continue;
+                }
                 match permissions::decide(&ask.call, mode, &rules, &bounds) {
                     permissions::Verdict::Allow => answered.push((ask, Answer::Allow)),
                     permissions::Verdict::Deny(why) => answered.push((ask, Answer::Deny(why))),

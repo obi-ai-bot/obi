@@ -991,6 +991,59 @@ fn an_install_that_chose_bypass_keeps_it() {
     }
 }
 
+/// Re-review of #586, S2: a secret waits for the owner's own answer. Changing the job's mode, to
+/// any mode, Bypass too, doesn't settle its card, and the agent hears nothing until the owner
+/// answers it.
+#[test]
+fn a_mode_change_never_settles_a_secret() {
+    let folder = Folder::new("sandbox-secret-mode");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let task = format!(
+        "ASK: {}",
+        json!({"tool": "Bash", "input": {"command": "cat .env"}})
+    );
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let waiting = until(&obid, &id, |j| j["permission"].is_object());
+    assert_eq!(
+        waiting["permission"]["why"],
+        "It touches secrets or the vault."
+    );
+    for mode in ["ask", "plan", "acceptEdits", "bypass", "sandbox"] {
+        let changed = request(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/mode"),
+            Some(&json!({"mode": mode}).to_string()),
+        );
+        assert_eq!(changed.status, 200, "{}", changed.text);
+        std::thread::sleep(Duration::from_millis(300));
+        let job = request(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        assert_eq!(job["mode"], mode);
+        assert_eq!(
+            job["permission"]["id"], waiting["permission"]["id"],
+            "{mode}: {job}"
+        );
+        assert_eq!(job["status"], "running", "{mode}");
+        assert_eq!(job["summary"], "", "{mode}: the agent heard an answer");
+    }
+    let allowed = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/permission"),
+        Some(&json!({"id": waiting["permission"]["id"], "decision": "allow"}).to_string()),
+    );
+    assert_eq!(allowed.status, 200, "{}", allowed.text);
+    assert_eq!(wait(&obid, &id)["summary"], "answer: allow");
+}
+
 /// Settings › Permissions: the default is Sandbox, and the owner can go back to asking for
 /// commands (Accept edits): then a test run waits for them (#586).
 #[test]

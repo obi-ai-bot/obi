@@ -3602,3 +3602,36 @@ fn the_brain_never_lets_a_secret_through() {
     assert_eq!(job["status"], "running");
     assert_eq!(items_of(&obid, "permission").len(), 1);
 }
+
+/// Re-review of #586, S2: the brain can't settle a secret by changing the job's mode. After it
+/// sets Ask, Plan and Accept edits, the card still waits and the agent heard nothing.
+#[test]
+fn the_brain_cannot_settle_a_secret_by_changing_the_mode() {
+    let folder = Folder::new("brain-secret-mode");
+    let obid = started(&folder);
+    let id = job_in(
+        &obid,
+        "Env reader",
+        r#"ASK: {"tool": "Bash", "input": {"command": "cat .env"}}"#,
+        "sandbox",
+    );
+    let permission = within(30, "a permission waits", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        job["permission"]["id"].as_str().map(str::to_owned)
+    });
+    queue(
+        &obid,
+        &[
+            set_mode(&id, "ask"),
+            set_mode(&id, "plan"),
+            set_mode(&id, "acceptEdits"),
+            reply("Done."),
+        ],
+    );
+    said(&obid, "read it, whatever mode it takes");
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["mode"], "acceptEdits", "{job}");
+    assert_eq!(job["permission"]["id"], permission.as_str(), "{job}");
+    assert_eq!(job["status"], "running");
+    assert_eq!(job["summary"], "", "the agent heard an answer: {job}");
+}

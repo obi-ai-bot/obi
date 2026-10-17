@@ -484,6 +484,8 @@ const NETWORK_PROGRAMS: &[&str] = &[
     "gcloud",
     "az",
     "terraform",
+    "busybox",
+    "toybox",
 ];
 
 /// What comes before the program a command runs (its options and its numbers are skipped too).
@@ -877,14 +879,19 @@ fn downloads(words: &[String], bounds: &Bounds) -> bool {
     let has = |flags: &[&str]| rest.iter().any(|w| flags.contains(&w.as_str()));
     let python = program.starts_with("python") || program.starts_with("pypy");
     if python {
-        let module = rest
-            .iter()
-            .position(|w| w == "-m")
-            .and_then(|i| rest.get(i + 1));
-        if has(&["-c"])
-            || module.is_some_and(|m| matches!(m.as_str(), "pip" | "pip3" | "ensurepip"))
-        {
-            return true;
+        // The interpreter's own options end at `-m <module>` or a script: a `-c` after them is the
+        // module's or the script's (`python3 -m pytest -c setup.cfg`).
+        for (i, w) in rest.iter().enumerate() {
+            match w.as_str() {
+                "-c" => return true,
+                "-m" => {
+                    return rest
+                        .get(i + 1)
+                        .is_some_and(|m| matches!(m.as_str(), "pip" | "pip3" | "ensurepip"));
+                }
+                _ if !w.starts_with('-') => break,
+                _ => {}
+            }
         }
     }
     // Code given inline is code obid doesn't read.
@@ -894,7 +901,27 @@ fn downloads(words: &[String], bounds: &Bounds) -> bool {
             .iter()
             .any(|w| w.starts_with('-') && !w.starts_with("--") && w.contains(['e', 'E'])),
         "php" => has(&["-r"]),
-        "find" => has(&["-exec", "-execdir", "-ok", "-okdir"]),
+        // `find … -exec <program> … ;`: what it runs, read as a command of its own.
+        "find" => rest
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| matches!(w.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir"))
+            .any(|(i, _)| {
+                let run: Vec<String> = rest[i + 1..]
+                    .iter()
+                    .take_while(|w| !matches!(w.as_str(), ";" | "+"))
+                    .cloned()
+                    .collect();
+                downloads(&run, bounds)
+                    || program_index(&run).is_some_and(|p| {
+                        SHELLS.contains(&base(&run[p]))
+                            && run[p + 1..]
+                                .iter()
+                                .position(|w| w.starts_with('-') && w.contains('c'))
+                                .and_then(|f| run.get(p + 2 + f))
+                                .is_none_or(|code| uses_network(code, bounds))
+                    })
+            }),
         _ => false,
     };
     if inline {
@@ -1023,7 +1050,7 @@ impl Bounds {
     }
 
     /// `word` as a path, `~` and `$HOME` taken as the job's `HOME`; none when it isn't one.
-    fn path_of(&self, word: &str) -> Option<PathBuf> {
+    fn path_of(&self, word: &str, base: &Path) -> Option<PathBuf> {
         let home = |rest: &str| {
             self.home
                 .as_ref()
@@ -1039,12 +1066,31 @@ impl Bounds {
         {
             return home(rest);
         }
-        word.starts_with('/').then(|| PathBuf::from(word))
+        if word.starts_with('/') {
+            return Some(PathBuf::from(word));
+        }
+        // A relative word is a path from where the command runs: `cat link/settings.json`, `../x`.
+        let plain = !word.is_empty()
+            && !word.starts_with('-')
+            && !word.contains("://")
+            && !word.contains(['$', '`'])
+            && !word.contains(char::is_whitespace);
+        plain.then(|| base.join(word))
+    }
+
+    /// Where `cd` leaves a command that ran from `base`.
+    fn cd(&self, words: &[String], base: &Path) -> PathBuf {
+        match words.get(1) {
+            None => self.home.clone().unwrap_or_else(|| base.to_path_buf()),
+            Some(dir) => self
+                .path_of(dir, base)
+                .unwrap_or_else(|| base.to_path_buf()),
+        }
     }
 
     /// Whether `path` is in the agent's login folders, as written or after links.
     fn in_login(&self, path: &Path) -> bool {
-        let real = std::fs::canonicalize(path).ok();
+        let real = crate::policy::real_path(path);
         self.logins.iter().any(|login| {
             let login_real = std::fs::canonicalize(login).ok();
             path.starts_with(login)
@@ -1068,7 +1114,7 @@ impl Bounds {
 /// Whether `text` (a path, an address, a word of a command) names a secret or a login: a
 /// well-known file or folder (a glob that could match one too), an `.env` file, the agent's own
 /// login folder or a variable naming it, a token variable, a process's environment.
-fn names_a_secret(text: &str, bounds: &Bounds) -> bool {
+fn names_a_secret(text: &str, bounds: &Bounds, base_dir: &Path) -> bool {
     let lower = text.to_ascii_lowercase();
     if SECRET_VARIABLES
         .iter()
@@ -1078,11 +1124,11 @@ fn names_a_secret(text: &str, bounds: &Bounds) -> bool {
         return true;
     }
     text.split(['=', ':', ',']).any(|part| {
-        if let Some(path) = bounds.path_of(part)
-            && bounds.in_login(&path)
-        {
+        let path = bounds.path_of(part, base_dir);
+        if path.as_deref().is_some_and(|p| bounds.in_login(p)) {
             return true;
         }
+        let place = path.map_or_else(|| part.to_owned(), |p| p.to_string_lossy().into_owned());
         let part = part.to_ascii_lowercase();
         if part
             .split('/')
@@ -1100,7 +1146,7 @@ fn names_a_secret(text: &str, bounds: &Bounds) -> bool {
                     || literal.starts_with(".env"));
         }
         if COMMITTED_ENV.contains(&name) {
-            return !committed(&part, bounds);
+            return !committed(&place, bounds);
         }
         SECRET_NAMES.contains(&name)
             || name == ".env"
@@ -1178,7 +1224,7 @@ fn file_words(words: &[String]) -> Vec<&String> {
 
 /// Whether a simple command touches secrets or a login: it prints the environment or a keychain's
 /// passwords, asks for a code host's login, or names a secret's file ([`names_a_secret`]).
-fn reads_a_secret(words: &[String], bounds: &Bounds) -> bool {
+fn reads_a_secret(words: &[String], bounds: &Bounds, base_dir: &Path) -> bool {
     let Some(p) = program_index(words) else {
         // `env` alone prints the environment.
         return words.iter().any(|w| base(w) == "env");
@@ -1200,15 +1246,104 @@ fn reads_a_secret(words: &[String], bounds: &Bounds) -> bool {
     }
     file_words(words)
         .into_iter()
-        .any(|w| names_a_secret(w, bounds))
+        .any(|w| names_a_secret(w, bounds, base_dir))
+}
+
+/// Each simple command of `commands` with the folder it runs from: the worktree, then where each
+/// `cd` (or `pushd`) before it in the same command line leaves it.
+fn with_folders<'a>(commands: &'a [Vec<String>], bounds: &Bounds) -> Vec<(&'a [String], PathBuf)> {
+    let mut here = bounds.worktree.clone();
+    commands
+        .iter()
+        .map(|words| {
+            let at = here.clone();
+            if program_index(words).is_some_and(|p| matches!(base(&words[p]), "cd" | "pushd")) {
+                here = bounds.cd(words, &here);
+            }
+            (words.as_slice(), at)
+        })
+        .collect()
 }
 
 /// Whether `command` touches secrets, a login or the vault, in any of the simple commands it runs
 /// or anywhere in its text for a vault value. Code nested deeper than obid reads asks.
 fn command_touches_a_secret(command: &str, bounds: &Bounds) -> bool {
     holds_a_vault_value(command)
-        || simple_commands(command)
-            .is_none_or(|commands| commands.iter().any(|w| reads_a_secret(w, bounds)))
+        || simple_commands(command).is_none_or(|commands| {
+            with_folders(&commands, bounds)
+                .iter()
+                .any(|(words, at)| reads_a_secret(words, bounds, at))
+        })
+}
+
+/// git settings given on the command line (`git -c key=value`) that can't run a program: any other
+/// one could (`core.sshCommand`, `core.fsmonitor`, `core.pager`, `diff.external`, `alias.*`,
+/// `credential.helper`, …), so the command asks.
+const GIT_SAFE_SETTINGS: &[&str] = &[
+    "user.name",
+    "user.email",
+    "init.defaultbranch",
+    "core.quotepath",
+    "core.autocrlf",
+    "core.safecrlf",
+    "commit.gpgsign",
+    "tag.gpgsign",
+    "pull.rebase",
+    "merge.ff",
+];
+
+/// Whether a command gives git a setting, or a variable, that can run a program obid doesn't read.
+fn runs_through_git_settings(command: &str) -> bool {
+    let Some(commands) = simple_commands(command) else {
+        return true;
+    };
+    commands.iter().any(|words| {
+        let runs = |name: &str| {
+            let name = name.to_ascii_lowercase();
+            !(GIT_SAFE_SETTINGS.contains(&name.as_str())
+                || name.starts_with("color.")
+                || name.starts_with("advice."))
+        };
+        // `GIT_SSH_COMMAND=…`, `GIT_PAGER=…`, `GIT_CONFIG_PARAMETERS=…` before the program.
+        let variables = words.iter().take_while(|w| is_assignment(w)).any(|w| {
+            let name = w.split('=').next().unwrap_or_default();
+            name.starts_with("GIT_")
+                && !matches!(
+                    name,
+                    "GIT_AUTHOR_NAME"
+                        | "GIT_AUTHOR_EMAIL"
+                        | "GIT_COMMITTER_NAME"
+                        | "GIT_COMMITTER_EMAIL"
+                        | "GIT_AUTHOR_DATE"
+                        | "GIT_COMMITTER_DATE"
+                        | "GIT_PAGER_IN_USE"
+                )
+        });
+        let Some(p) = program_index(words).filter(|p| base(&words[*p]) == "git") else {
+            return variables;
+        };
+        // git's own options, before its subcommand (`git log -c` is a diff's option).
+        let mut i = p + 1;
+        while let Some(w) = words.get(i).filter(|w| w.starts_with('-')) {
+            let setting = match w.as_str() {
+                "-c" => Some(words.get(i + 1).map_or("", String::as_str)),
+                "-C" => None,
+                _ => w.strip_prefix("-c").filter(|kv| !kv.is_empty()),
+            };
+            if setting.is_some_and(|kv| runs(kv.split('=').next().unwrap_or_default()))
+                || w.starts_with("--config-env")
+                || w.starts_with("--exec-path=")
+            {
+                return true;
+            }
+            i += if matches!(w.as_str(), "-c" | "-C") {
+                2
+            } else {
+                1
+            };
+        }
+        variables
+    })
 }
 
 /// Whether a command names a file outside what the job may read without asking: an absolute path
@@ -1217,17 +1352,34 @@ fn reads_outside(command: &str, bounds: &Bounds) -> bool {
     let Some(commands) = simple_commands(command) else {
         return true;
     };
-    commands.iter().any(|words| {
+    with_folders(&commands, bounds).iter().any(|(words, at)| {
         file_words(words).into_iter().any(|word| {
             word.split('=').any(|part| {
-                let Some(path) = bounds.path_of(part) else {
+                let Some(path) = bounds.path_of(part, at) else {
                     return false;
                 };
+                // `awk '/x/ {print}'`: a quoted program, not a file.
                 if part.contains(char::is_whitespace) {
                     return false;
                 }
-                let text = path.to_string_lossy();
-                !(bounds.holds(&text) || SYSTEM_FOLDERS.iter().any(|f| path.starts_with(f)))
+                if bounds.holds(&path.to_string_lossy()) {
+                    return false;
+                }
+                // A system folder as written (`..` taken out) and after links: `/home` leads into
+                // `/System` on macOS, and `../../x` or a link out of the worktree is out.
+                let system = |p: &Path| SYSTEM_FOLDERS.iter().any(|f| p.starts_with(f));
+                let written: PathBuf = path.components().fold(PathBuf::new(), |mut out, c| {
+                    match c {
+                        Component::ParentDir => {
+                            out.pop();
+                        }
+                        Component::CurDir => {}
+                        other => out.push(other),
+                    }
+                    out
+                });
+                let real = crate::policy::real_path(&path).unwrap_or_else(|| written.clone());
+                !(system(&written) && system(&real))
             })
         })
     })
@@ -1240,7 +1392,7 @@ pub fn reach(call: &Call, bounds: &Bounds) -> Option<Reach> {
     let named = call.paths.iter().chain(&call.reads).chain(call.url.iter());
     let secret = named
         .clone()
-        .any(|t| names_a_secret(t, bounds) || holds_a_vault_value(t))
+        .any(|t| names_a_secret(t, bounds, &bounds.worktree) || holds_a_vault_value(t))
         || call
             .command
             .as_deref()
@@ -1259,7 +1411,9 @@ pub fn reach(call: &Call, bounds: &Bounds) -> Option<Reach> {
             else {
                 return Some(Reach::Unknown);
             };
-            if uses_network(command, bounds) {
+            if runs_through_git_settings(command) {
+                Some(Reach::Unknown)
+            } else if uses_network(command, bounds) {
                 Some(Reach::Network)
             } else if reads_outside(command, bounds) {
                 Some(Reach::Outside)
@@ -1285,8 +1439,15 @@ pub fn reach(call: &Call, bounds: &Bounds) -> Option<Reach> {
 /// fixed denials (`crate::policy`) come before this, in every mode.
 pub fn decide(call: &Call, mode: Mode, rules: &[Rule], bounds: &Bounds) -> Verdict {
     let worktree = bounds.worktree.as_path();
-    let sandbox = mode == Mode::Sandbox;
-    let reach = if sandbox { reach(call, bounds) } else { None };
+    // Secrets, a login or the vault: in every mode, only the owner's own answer lets one through
+    // (the security review of #586): no mode and no saved rule does, so a mode the brain sets
+    // can't settle one. What else leaves the sandbox matters only in Sandbox mode.
+    let reach = match reach(call, bounds) {
+        Some(Reach::Secrets) => Some(Reach::Secrets),
+        other if mode == Mode::Sandbox => other,
+        _ => None,
+    };
+    let secret = reach == Some(Reach::Secrets);
     // The plan's own end: in Plan the agent finishes with it, in any other mode there's nothing to
     // approve. Reads never ask, but in Sandbox mode one that leaves the worktree does.
     if call.tool == "ExitPlanMode" || (QUIET.contains(&call.tool.as_str()) && reach.is_none()) {
@@ -1308,10 +1469,12 @@ pub fn decide(call: &Call, mode: Mode, rules: &[Rule], bounds: &Bounds) -> Verdi
     if mode == Mode::Plan && edit {
         return Verdict::Deny(PLAN_ONLY.into());
     }
+    if secret {
+        return Verdict::Ask;
+    }
     // Plan changes nothing: a saved allow rule doesn't let a command through while planning. And
     // no rule lets secrets through in Sandbox mode: the owner answers those one at a time.
     if mode != Mode::Plan
-        && reach != Some(Reach::Secrets)
         && rules
             .iter()
             .any(|r| r.decision == "allow" && matches(&r.rule, call, worktree, true))
@@ -2460,6 +2623,77 @@ mod tests {
             "{}",
             recorded.detail
         );
+    }
+
+    /// Re-review of #586, S2: a secret waits for the owner in every mode, whatever rule is saved,
+    /// so a mode the brain sets can't let one through. Other reads still go through.
+    #[test]
+    fn secrets_wait_for_the_owner_in_every_mode() {
+        let worktree = &Bounds::of(Path::new(WORKTREE));
+        let read = |path: &str| Call::new("Read", &serde_json::json!({"file_path": path}));
+        let edit = |path: &str| tool("Edit", &[path]);
+        let rules = [
+            rule("Read", "allow"),
+            rule("Edit", "allow"),
+            rule("Bash(cat:*)", "allow"),
+        ];
+        for mode in Mode::ALL {
+            for call in [
+                read(".env"),
+                read(".aws/credentials"),
+                edit(".env.production"),
+                bash("cat ~/.aws/credentials"),
+            ] {
+                for saved in [&[][..], &rules[..]] {
+                    let verdict = decide(&call, mode, saved, worktree);
+                    assert_ne!(verdict, Verdict::Allow, "{mode:?} {call:?} {saved:?}");
+                }
+            }
+            assert_eq!(
+                decide(&read("src/a.js"), mode, &[], worktree),
+                Verdict::Allow,
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// Re-review of #586, S3 and S4: relative words are paths from where the command runs (links
+    /// followed), git settings that run a program ask, busybox is network; a pytest's `-c` and a
+    /// `find -exec rm` aren't.
+    #[test]
+    fn relative_paths_git_settings_and_what_runs() {
+        let (root, bounds) = job_folders("relative");
+        let account = root.join("accounts/stub");
+        std::fs::write(account.join("settings.json"), "{}").unwrap();
+        std::fs::create_dir_all(bounds.worktree.join("src")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&account, bounds.worktree.join("link")).unwrap();
+        for (command, reach) in [
+            ("cat link/settings.json", Some(Reach::Secrets)),
+            ("cat ../../x", Some(Reach::Outside)),
+            ("cd src && cat ../../../x", Some(Reach::Outside)),
+            ("cd src && cat ../README.md", None),
+            ("cat src/a.js", None),
+            ("git -c core.pager=less log", Some(Reach::Unknown)),
+            (
+                "git -c core.sshCommand='curl x' fetch",
+                Some(Reach::Unknown),
+            ),
+            ("git -c alias.st=status st", Some(Reach::Unknown)),
+            ("git -cdiff.external=x diff", Some(Reach::Unknown)),
+            ("GIT_SSH_COMMAND=x git status", Some(Reach::Unknown)),
+            ("git -c user.name=t -c user.email=t@t commit -m x", None),
+            ("git log -c HEAD", None),
+            ("busybox wget https://x", Some(Reach::Network)),
+            ("python3 -m pytest -c setup.cfg", None),
+            ("python3 -c 'print(1)'", Some(Reach::Network)),
+            ("find . -name '*.o' -exec rm {} +", None),
+            ("find . -exec curl {} \\;", Some(Reach::Network)),
+            ("find . -exec sh -c 'curl x' \\;", Some(Reach::Network)),
+        ] {
+            assert_eq!(super::reach(&bash(command), &bounds), reach, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
