@@ -46,8 +46,9 @@ pub enum Action {
     DismissJob,
     AnswerInbox,
     StartNow,
-    /// Only for the event orchestrator (#351).
+    /// The user tells a job something (#542), or the event orchestrator does (#351).
     MessageJob,
+    /// Only for the event orchestrator (#351).
     FixFailure,
     AskReviewAgain,
     /// Read-only context gathering before the chat answers or proposes work.
@@ -500,6 +501,8 @@ pub struct Context {
     /// What this turn's lookups found, their titles and results: a finding's path must be in it
     /// (#540).
     pub found: String,
+    /// The briefing's jobs whose pull request was merged: they take no more words (#542).
+    pub merged: Vec<String>,
     /// The briefing's jobs that failed, were stopped or ran out of rounds in the last two days:
     /// more work on their issue or pull request goes on in them (#541).
     pub ended: Vec<Ended>,
@@ -565,7 +568,7 @@ impl Plan {
     pub fn problems(&self, context: &Context, canary: &str) -> Vec<String> {
         let mut problems: Vec<String> = vec![];
         let action = self.action;
-        if !context.orchestrator && matches!(action, Action::MessageJob | Action::FixFailure) {
+        if !context.orchestrator && action == Action::FixFailure {
             problems.push(format!(
                 "{} is only available to Oby's event orchestrator",
                 action.as_str()
@@ -742,6 +745,11 @@ impl Plan {
                 }
                 if self.message.as_deref().is_none_or(blank) {
                     problems.push("message_job needs what Oby found and what to change".into());
+                }
+                for id in named.iter().filter(|id| context.merged.contains(id)) {
+                    problems.push(format!(
+                        "{id}'s pull request was merged: it takes no more words, dispatch a new job instead"
+                    ));
                 }
             }
             Action::AskReviewAgain => {
@@ -1529,7 +1537,7 @@ pub fn schema(context: &Context) -> Value {
         "start_now",
     ];
     if !context.orchestrator {
-        actions.push("research");
+        actions.extend(["research", "message_job"]);
     } else {
         actions.extend(["message_job", "fix_failure"]);
     }
@@ -2161,6 +2169,58 @@ mod tests {
         );
         let system = crate::brain::planner::system(false);
         assert!(system.contains("Never write \"based on your findings\""));
+    }
+
+    /// #542: the user may tell a job of the briefing something; one whose pull request merged
+    /// takes no more words. fix_failure stays the event orchestrator's.
+    #[test]
+    fn the_user_may_message_a_job_but_not_a_merged_one() {
+        let mut context = context();
+        context.movable = vec!["ab12cd34".into(), "33aa33aa".into()];
+        let message = |ids: &[&str], text: Option<&str>| {
+            let mut plan = Plan::of(Action::MessageJob, "");
+            plan.jobs = Some(ids.iter().map(|id| (*id).to_owned()).collect());
+            plan.message = text.map(str::to_owned);
+            plan
+        };
+        assert!(
+            message(&["ab12cd34"], Some("skip the Watch target"))
+                .problems(&context, "zq9")
+                .is_empty()
+        );
+        assert!(
+            !message(&["ab12cd34"], None)
+                .problems(&context, "zq9")
+                .is_empty()
+        );
+        assert!(
+            message(&["zz"], Some("hi"))
+                .problems(&context, "zq9")
+                .contains(&"zz isn't a job Oby can message".to_owned())
+        );
+        assert!(
+            message(&["ab12cd34", "33aa33aa"], Some("hi"))
+                .problems(&context, "zq9")
+                .contains(&"message_job names one job".to_owned())
+        );
+        context.merged = vec!["33aa33aa".into()];
+        assert_eq!(
+            message(&["33aa33aa"], Some("one more thing")).problems(&context, "zq9"),
+            [
+                "33aa33aa's pull request was merged: it takes no more words, dispatch a new job instead"
+            ]
+        );
+        let mut fix = Plan::of(Action::FixFailure, "");
+        fix.item = Some("f1".into());
+        assert!(
+            fix.problems(&context, "zq9")
+                .contains(&"fix_failure is only available to Oby's event orchestrator".to_owned())
+        );
+        let actions = schema(&context)["properties"]["action"]["enum"].clone();
+        assert!(actions.as_array().unwrap().contains(&json!("message_job")));
+        assert!(!actions.as_array().unwrap().contains(&json!("fix_failure")));
+        let system = crate::brain::planner::system(false);
+        assert!(system.contains("Oby passes on the user's own words, not yours"));
     }
 
     #[test]

@@ -1853,6 +1853,144 @@ fn work_a_failed_job_left_goes_on_in_it_unless_the_user_starts_over() {
     assert_eq!(jobs[0]["issue"], 176);
 }
 
+/// message_job naming `id`, with the brain's own words, which Oby doesn't pass on.
+fn message_plan(id: &str) -> String {
+    json!({"action": "message_job", "reply": "", "dispatches": [], "question": null, "jobs": [id],
+           "message": "Skip the Watch target."})
+    .to_string()
+}
+
+/// What the fake agent of job `id` reported it heard last (`REPORT`).
+fn reported(obid: &Obid, id: &str) -> serde_json::Value {
+    let text = std::fs::read_to_string(
+        obid.home
+            .join("worktrees")
+            .join(id)
+            .join(".obi/report.json"),
+    )
+    .unwrap();
+    serde_json::from_str(&text).unwrap()
+}
+
+/// #542: "tell the vault job to skip the Watch target" while it runs: its agent's next input is
+/// the user's own words (not the brain's), the job's notes and step show them, and the turn's
+/// step says it passed them on.
+#[test]
+fn the_user_tells_a_running_job_something() {
+    let folder = Folder::new("brain-message-running");
+    let obid = started(&folder);
+    let answer = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate",
+                             "task": "PAUSE: 3000", "title": "Vault secrets"}}),
+        ),
+    );
+    assert_eq!(answer.status, 201, "{}", answer.text);
+    let id = answer.body["id"].as_str().unwrap().to_owned();
+    within(60, "its agent is at work", || {
+        let job = get_job(&obid, &id);
+        (job["status"] == "running" && job["step"] == "Starting Claude Code").then_some(())
+    });
+    let events = follow_events(&obid);
+    queue(&obid, &[message_plan(&id), reply("")]);
+    let words = "Tell the vault job to skip the Watch target, and REPORT";
+    assert_eq!(
+        said(&obid, words)["text"],
+        "Told Vault secrets what you said."
+    );
+    let job = get_job(&obid, &id);
+    assert_eq!(job["step"], format!("You: {words}"));
+    assert_eq!(job["notes"], json!([words]));
+    let heard = events_named(&events, "step", 10, |got| got.len() == 2);
+    assert_eq!(
+        steps(&heard),
+        ["1:message_job:running", "1:message_job:done"]
+    );
+    assert_eq!(heard[0]["text"], "Passing your message to Vault secrets");
+    let done = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None).body;
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["round"], 1);
+    assert_eq!(reported(&obid, &id)["prompt"], words);
+    // A running job hears the words at once: nothing waits for a Confirm.
+    assert!(items_of(&obid, "confirm").is_empty());
+}
+
+/// #542, with the owner's decision of 2026-10-16: telling a job that ended done something starts
+/// nothing by itself. It's a confirm item with the user's words (a secret obid holds taken out);
+/// Cancel starts nothing, and the owner's Confirm runs one more round that starts with them, in
+/// the job's own worktree.
+#[test]
+fn telling_a_finished_job_something_waits_for_the_owners_confirm() {
+    let folder = Folder::new("brain-message-done");
+    let obid = started(&folder);
+    let job = job_that(&obid, "Vault secrets", "Nothing", None, "done");
+    let id = job["id"].as_str().unwrap().to_owned();
+    let worktree = job["worktree"].clone();
+    assert!(worktree.is_string(), "{job}");
+    let token = std::fs::read_to_string(obid.home.join("api-token")).unwrap();
+    let token = token.trim();
+    let words = format!("one more thing for the vault job: REPORT, and {token} isn't yours");
+    let ask = |obid: &Obid| {
+        queue(obid, &[message_plan(&id), reply("")]);
+        let answer = said(obid, &words);
+        assert_eq!(
+            answer["text"],
+            "Vault secrets ended, so one more round with your words waits for your OK: confirm it in your inbox."
+        );
+        let confirms = items_of(obid, "confirm");
+        assert_eq!(confirms.len(), 1, "{confirms:?}");
+        confirms[0].clone()
+    };
+
+    // Declined: nothing starts.
+    let declined = ask(&obid);
+    assert_eq!(declined["job"], json!(id));
+    assert_eq!(declined["options"], json!(["Confirm", "Cancel"]));
+    let text = declined["text"].as_str().unwrap();
+    assert!(
+        text.contains("> one more thing for the vault job: REPORT, and [redacted: ")
+            && !text.contains(token),
+        "{text}"
+    );
+    let job = get_job(&obid, &id);
+    assert_eq!(
+        (job["status"].clone(), job["round"].clone()),
+        (json!("done"), json!(1))
+    );
+    assert!(job["notes"].is_null(), "{job}");
+    assert_eq!(
+        owner_answers(&obid, declined["id"].as_str().unwrap(), "Cancel").status,
+        200
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let job = get_job(&obid, &id);
+    assert_eq!(
+        (job["status"].clone(), job["round"].clone()),
+        (json!("done"), json!(1))
+    );
+
+    // Confirmed: one more round, in its own worktree, starting with the words.
+    let confirm = ask(&obid);
+    let confirmed = owner_answers(&obid, confirm["id"].as_str().unwrap(), "Confirm");
+    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    let done = within(30, "its round ended", || {
+        let job = get_job(&obid, &id);
+        (job["status"] == "done" && job["round"] == 2).then_some(job)
+    });
+    assert_eq!(done["worktree"], worktree);
+    let prompt = reported(&obid, &id)["prompt"].as_str().unwrap().to_owned();
+    assert!(
+        prompt.starts_with("one more thing for the vault job: REPORT, and [redacted: ")
+            && prompt.ends_with("] isn't yours"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains(token));
+    assert!(!done["notes"].to_string().contains(token), "{done}");
+}
+
 /// JobActionTests.aJobThatIsStillRunningCantBeTriedAgain, aJobThatNeedsNothingSaysWhyItStays and
 /// startNowStartsAJobWaitingForItsStartWhen's last half: what can't happen says why, and fails.
 #[test]

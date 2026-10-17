@@ -741,7 +741,7 @@ pub async fn run(
                 };
                 break 'step (end, after(&done, talk));
             }
-            let outcome = act(shared, control, plan, index).await;
+            let outcome = act(shared, control, plan, said, index).await;
             handled.acted(shared, plan);
             if !outcome.text().is_empty() {
                 done.push(outcome.text().to_owned());
@@ -796,10 +796,16 @@ pub async fn run(
 }
 
 /// Does one action that changes something, with its step events around it (`Desk.step`).
-async fn act(shared: &Arc<Shared>, control: &Control, plan: &Plan, index: usize) -> Outcome {
+async fn act(
+    shared: &Arc<Shared>,
+    control: &Control,
+    plan: &Plan,
+    said: &str,
+    index: usize,
+) -> Outcome {
     let text = actions::step_text(shared, plan);
     step_event(shared, control, index, plan.action, &text, State::Running);
-    let outcome = actions::act(shared, plan).await;
+    let outcome = actions::act(shared, plan, said).await;
     step_event(
         shared,
         control,

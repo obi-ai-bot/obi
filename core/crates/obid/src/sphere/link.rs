@@ -2482,6 +2482,24 @@ impl Link {
                     .map(|_| ())
                     .map_err(|e| api(StatusCode::UNPROCESSABLE_ENTITY, e.0))
             }
+            inbox::action::MESSAGE_JOB => {
+                let job = self
+                    .jobs
+                    .get(target)
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone."))?;
+                if job.merged() {
+                    return Err(api(
+                        StatusCode::CONFLICT,
+                        "Its pull request was merged: start a new job instead.",
+                    ));
+                }
+                let words = confirmed.payload["words"].as_str().unwrap_or("");
+                match self.jobs.message(target, words) {
+                    Some(Ok(_)) => Ok(()),
+                    Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
+                    None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
+                }
+            }
             // The ones that answer an inbox item, as the owner would have.
             inbox::action::ACCEPT
             | inbox::action::ACCEPT_REMEMBER
