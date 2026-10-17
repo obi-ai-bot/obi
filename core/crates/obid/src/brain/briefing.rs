@@ -31,6 +31,8 @@ pub struct Account {
     pub agent: String,
     pub name: String,
     pub running: usize,
+    /// Its plan and use (#584; #450 fills it).
+    pub usage: super::usage::Usage,
 }
 
 impl Account {
@@ -170,7 +172,12 @@ impl Briefing {
             lines.push("(No accounts.)".into());
         }
         for account in &self.accounts {
-            let mut parts = vec!["no usage reported yet".to_owned()];
+            let mut parts = vec![
+                account
+                    .usage
+                    .line(self.now)
+                    .unwrap_or_else(|| "no usage reported yet".to_owned()),
+            ];
             if account.running > 0 {
                 parts.push(format!(
                     "{} job{} running",
@@ -886,12 +893,14 @@ mod tests {
                     agent: "claude".into(),
                     name: "Personal".into(),
                     running: 1,
+                    usage: Default::default(),
                 },
                 Account {
                     id: "work".into(),
                     agent: "codex".into(),
                     name: "Work".into(),
                     running: 0,
+                    usage: Default::default(),
                 },
             ],
             repos: vec!["deskree-inc/oby".into()],

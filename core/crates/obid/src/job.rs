@@ -100,6 +100,74 @@ pub struct Brief {
     pub done: Option<String>,
 }
 
+/// The model and reasoning effort of one stage of a job; a side left out is the tool's own.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pick {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// A job that plans first (#584): a plan round in plan mode on `plan`, then, once the owner has
+/// approved the plan (the job's mode left `plan`), the same job's next round on `build`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanFirst {
+    pub plan: Pick,
+    pub build: Pick,
+    /// `plan` until the build round starts, then `build`.
+    pub stage: String,
+}
+
+/// What the brain chose for a job and why (#584), kept with the job for its card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Choice {
+    /// The brain's reason, one line. The job's `model` and `effort` are what the round runs now.
+    pub why: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_first: Option<PlanFirst>,
+}
+
+/// A model the way people say it: "Opus 5.5" for `claude-opus-5-5`; an id obid doesn't know
+/// stays as it is.
+pub fn model_name(id: &str) -> String {
+    match id {
+        "claude-fable-5-1" => "Fable 5.1".into(),
+        "claude-opus-5-5" => "Opus 5.5".into(),
+        "claude-sonnet-5-5" => "Sonnet 5.5".into(),
+        "claude-haiku-5-5" => "Haiku 5.5".into(),
+        "gpt-6.1-sol" => "GPT-6.1-Sol".into(),
+        "gpt-6-astra" => "GPT-6-Astra".into(),
+        other => other.into(),
+    }
+}
+
+impl Choice {
+    /// The choice in the job's step text: "Planning on Opus 5.5, building on Sonnet 5.5: the
+    /// change spans the vault and publishing." `model` and `effort` are what the job runs now.
+    pub fn line(&self, model: Option<&str>, effort: Option<&str>) -> String {
+        let why = self.why.trim().trim_end_matches('.');
+        if let Some(plan_first) = &self.plan_first {
+            let name = |pick: &Pick| {
+                pick.model
+                    .as_deref()
+                    .map_or("the tool's model".into(), model_name)
+            };
+            return format!(
+                "Planning on {}, building on {}: {why}.",
+                name(&plan_first.plan),
+                name(&plan_first.build)
+            );
+        }
+        let mut what = model.map_or("The tool's model".into(), model_name);
+        if let Some(effort) = effort {
+            what.push_str(&format!(" at {effort} effort"));
+        }
+        format!("{what}: {why}.")
+    }
+}
+
 /// A job as obid keeps it (`home/jobs/<id>.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -217,6 +285,10 @@ pub struct Job {
     /// What Oby found before it started, for the first prompt (#540). Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brief: Option<Brief>,
+    /// What the brain chose for the job and why (#584), or none: `model` and `effort` came from
+    /// the owner or Settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<Choice>,
 }
 
 impl Job {
@@ -296,6 +368,7 @@ impl Job {
             offers: Vec::new(),
             asked: false,
             brief: None,
+            choice: None,
         }
     }
 
@@ -512,6 +585,9 @@ impl Job {
             "worktree": self.worktree,
             "conversation": self.conversation,
         });
+        if let Some(choice) = &self.choice {
+            value["choice"] = json!(choice);
+        }
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
         }

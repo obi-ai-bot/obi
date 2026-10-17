@@ -213,6 +213,10 @@ pub fn plan(said: &str, context: &Context) -> Plan {
         reads: None,
         findings: None,
         done: None,
+        model: None,
+        effort: None,
+        why: None,
+        plan_first: None,
     };
     let dispatch = |reply: String, dispatches: Vec<Dispatch>| {
         let mut plan = Plan::of(Action::Dispatch, &reply);

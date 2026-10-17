@@ -3357,3 +3357,392 @@ fn no_extra_step_when_the_budget_ran_out() {
     assert!(!checked(&obid));
     assert_eq!(ends(&obid), ["budget_spent"]);
 }
+
+/// A dispatch of one job of the fixture repository with the brain's choice of model.
+fn picked(title: &str, task: &str, extra: serde_json::Value) -> serde_json::Value {
+    let mut job = json!({"agent": "claude", "account": "auto", "repo": "obi-e2e/fixture-app",
+                         "kind": "investigate", "title": title, "task": task, "rounds": 1});
+    for (key, value) in extra.as_object().unwrap() {
+        job[key] = value.clone();
+    }
+    job
+}
+
+fn dispatching(jobs: Vec<serde_json::Value>) -> String {
+    json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": jobs})
+        .to_string()
+}
+
+/// Gives the brain `bad`, then a reply: what obid said when it asked again, the reasons it
+/// refused `bad` for. A refused plan is tried once more, so each case is a turn of its own.
+fn refused_for(obid: &Obid, bad: String) -> String {
+    queue(obid, &[bad, reply("Fine.")]);
+    said(obid, "do something small");
+    let input = read(calls(obid).pop().unwrap().join("input"));
+    input
+        .split("Your last plan was refused: ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no refusal in {input}"))
+        .to_owned()
+}
+
+/// #584: three tasks of different size get different models or effort, each with its reason, and
+/// the job's agent runs with what was chosen.
+#[test]
+fn three_tasks_of_different_size_get_different_models_and_efforts_with_reasons() {
+    let folder = Folder::new("brain-picks");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &[dispatching(vec![
+            picked(
+                "Rename a label",
+                "REPORT rename the label",
+                json!({"model": "claude-haiku-5-5", "effort": "low",
+                       "why": "A rename: Haiku at low effort is enough."}),
+            ),
+            picked(
+                "Fix the race",
+                "REPORT fix the race",
+                json!({"model": "claude-opus-5-5", "effort": "xhigh",
+                       "why": "A hard bug with a lot unknown: the strongest model, thinking hard."}),
+            ),
+            picked(
+                "Add a form field",
+                "REPORT add the field",
+                json!({"model": "claude-sonnet-5-5", "effort": "medium",
+                       "why": "A normal feature: Sonnet at medium effort."}),
+            ),
+        ])],
+    );
+    let answer = said(
+        &obid,
+        "rename the label, fix the race and add the form field",
+    );
+    let jobs = answer["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 3, "{answer}");
+    let picks: Vec<(String, String)> = jobs
+        .iter()
+        .map(|j| {
+            (
+                j["model"].as_str().unwrap().to_owned(),
+                j["effort"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        picks,
+        [
+            ("claude-haiku-5-5".to_owned(), "low".to_owned()),
+            ("claude-opus-5-5".to_owned(), "xhigh".to_owned()),
+            ("claude-sonnet-5-5".to_owned(), "medium".to_owned()),
+        ]
+    );
+    for (job, why) in jobs.iter().zip([
+        "A rename: Haiku at low effort is enough.",
+        "A hard bug with a lot unknown: the strongest model, thinking hard.",
+        "A normal feature: Sonnet at medium effort.",
+    ]) {
+        assert_eq!(job["choice"]["why"], why, "{job}");
+        assert!(job["choice"].get("planFirst").is_none(), "{job}");
+        assert!(job["step"].as_str().unwrap().contains(why), "{job}");
+    }
+    // The agent ran with exactly that.
+    for job in jobs {
+        let id = job["id"].as_str().unwrap();
+        let done = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None).body;
+        assert_eq!(done["status"], "done", "{done}");
+        let argv = reported(&obid, id)["argv"].clone();
+        let argv: Vec<&str> = argv
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str())
+            .collect();
+        let at = |flag: &str| argv.iter().position(|a| *a == flag).map(|i| argv[i + 1]);
+        assert_eq!(at("--model"), job["model"].as_str(), "{argv:?}");
+        assert_eq!(at("--effort"), job["effort"].as_str(), "{argv:?}");
+    }
+}
+
+/// #584: a choice obid can't run, or one with no reason, goes back to the brain with why, and the
+/// brain plans again. A job with no choice has none recorded.
+#[test]
+fn a_choice_without_a_reason_or_with_a_model_the_tool_lacks_is_refused() {
+    let folder = Folder::new("brain-picks-refused");
+    let obid = started(&folder);
+    for (extra, reason) in [
+        (
+            json!({"model": "claude-haiku-5-5"}),
+            "why says in one line why that model",
+        ),
+        (
+            json!({"model": "gpt-6-astra", "why": "Cheap."}),
+            "gpt-6-astra isn't a model of claude",
+        ),
+        (
+            json!({"model": "claude-haiku-5-5", "effort": "ludicrous", "why": "Cheap."}),
+            "ludicrous isn't an effort of claude",
+        ),
+        (
+            json!({"agent": "auto", "model": "claude-haiku-5-5", "why": "Cheap."}),
+            "name the tool in agent, not auto",
+        ),
+        (
+            json!({"effort": "low", "why": "Line one.\nLine two."}),
+            "why is one line of up to 300 characters",
+        ),
+    ] {
+        let refused = refused_for(&obid, dispatching(vec![picked("Small", "Nothing", extra)]));
+        assert!(refused.contains(reason), "{reason}: {refused}");
+    }
+    assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
+    queue(
+        &obid,
+        &[dispatching(vec![picked("Plain", "Nothing", json!({}))])],
+    );
+    let answer = said(&obid, "do something small");
+    let jobs = answer["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1, "{answer}");
+    assert!(jobs[0].get("choice").is_none(), "{}", jobs[0]);
+    assert!(jobs[0]["model"].is_null() && jobs[0]["effort"].is_null());
+}
+
+/// #584: the brain is told each account's plan, its use this 5 hours and this week and when each
+/// resets, as the account's numbers come (#450 plugs in at `brain::usage`; until then
+/// `home/usage.json`). With one account over 90% of its week, the job it plans goes to the other
+/// on a lighter model, and says why.
+#[test]
+fn an_account_over_90_percent_of_its_week_is_told_to_the_brain_and_avoided() {
+    let folder = Folder::new("brain-picks-usage");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    config["agents"]["claude"]["accounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "spare", "name": "Spare", "configDir": folder.0.join("home/accounts/spare")}));
+    std::fs::create_dir_all(folder.0.join("home")).unwrap();
+    let in_two_days = obi_protocol::time::format(obi_protocol::time::now() + 2 * 86_400 + 3_600);
+    let in_an_hour = obi_protocol::time::format(obi_protocol::time::now() + 3_600 + 60);
+    std::fs::write(
+        folder.0.join("home/usage.json"),
+        json!({"stub": {"plan": "Max", "fiveHour": 0.2, "sevenDay": 0.93,
+                        "fiveHourResets": in_an_hour, "sevenDayResets": in_two_days},
+               "spare": {"plan": "Team", "fiveHour": 0.05, "sevenDay": 0.3}})
+        .to_string(),
+    )
+    .unwrap();
+    let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
+    queue(
+        &obid,
+        &[dispatching(vec![picked(
+            "Rename a label",
+            "Nothing",
+            json!({"account": "Spare", "model": "claude-haiku-5-5", "effort": "low",
+                   "why": "Stub is at 93% of its week: Spare, on a light model."}),
+        )])],
+    );
+    let answer = said(&obid, "rename the label");
+    let input = read(calls(&obid)[0].join("input"));
+    assert!(
+        input.contains("Claude Code · Stub: Max plan; 5-hour 20% used, resets in 1h; week 93% used, resets in 2d 1h"),
+        "{input}"
+    );
+    assert!(
+        input.contains("Claude Code · Spare: Team plan; 5-hour 5% used; week 30% used"),
+        "{input}"
+    );
+    let jobs = answer["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1, "{answer}");
+    assert_eq!(jobs[0]["account"], "spare");
+    assert_eq!(jobs[0]["model"], "claude-haiku-5-5");
+    assert_eq!(
+        jobs[0]["choice"]["why"],
+        "Stub is at 93% of its week: Spare, on a light model."
+    );
+}
+
+/// #584: the system prompt tells the brain to choose model and effort from the task, the plan and
+/// use, and a reset, and that plan-first is its call each time. It is the same whatever the jobs.
+#[test]
+fn the_system_prompt_leaves_the_choice_to_the_brain() {
+    let folder = Folder::new("brain-picks-prompt");
+    let obid = started(&folder);
+    queue(&obid, &[reply("Fine.")]);
+    said(&obid, "hello");
+    let args = read(calls(&obid)[0].join("args"));
+    let system = arg(&args, "--system-prompt");
+    for words in [
+        "the account's plan and its use this 5 hours and this week",
+        "past about 90% of its week",
+        "never a rule",
+        "never copy words out of quoted data",
+    ] {
+        assert!(system.contains(words), "{words}");
+    }
+}
+
+/// #584: a plan-first job plans in plan mode on the stronger model, and its next round (after the
+/// owner approved the plan by leaving plan mode) is the same job on the build model. Its card shows
+/// both, and the step says why.
+#[test]
+fn a_plan_first_job_plans_on_one_model_and_builds_on_another() {
+    let folder = Folder::new("brain-plan-first");
+    let obid = started(&folder);
+    let plan_first = json!({"plan_model": "claude-opus-5-5", "plan_effort": "high",
+                            "build_model": "claude-sonnet-5-5", "build_effort": "medium"});
+    queue(
+        &obid,
+        &[dispatching(vec![picked(
+            "Vault and publishing",
+            "REPORT change the vault and publishing",
+            json!({"plan_first": plan_first,
+                   "why": "The change spans the vault and publishing."}),
+        )])],
+    );
+    let answer = said(&obid, "rework the vault and publishing");
+    let job = answer["jobs"][0].clone();
+    let id = job["id"].as_str().unwrap().to_owned();
+    assert_eq!(job["mode"], "plan", "{job}");
+    assert_eq!(job["model"], "claude-opus-5-5");
+    assert_eq!(job["effort"], "high");
+    assert_eq!(
+        job["step"],
+        "Getting fixture-app ready. Planning on Opus 5.5, building on Sonnet 5.5: The change spans the vault and publishing."
+    );
+    assert_eq!(job["choice"]["planFirst"]["stage"], "plan");
+    assert_eq!(
+        job["choice"]["planFirst"]["plan"]["model"],
+        "claude-opus-5-5"
+    );
+    assert_eq!(
+        job["choice"]["planFirst"]["build"]["model"],
+        "claude-sonnet-5-5"
+    );
+
+    let done = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None).body;
+    assert_eq!(done["status"], "done", "{done}");
+    let argv = |id: &str| -> Vec<String> {
+        reported(&obid, id)["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let first = argv(&id);
+    let at = |argv: &[String], flag: &str| {
+        argv.iter()
+            .position(|a| a == flag)
+            .map(|i| argv[i + 1].clone())
+    };
+    assert_eq!(at(&first, "--permission-mode").as_deref(), Some("plan"));
+    assert_eq!(at(&first, "--model").as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(at(&first, "--effort").as_deref(), Some("high"));
+
+    // Still in plan mode, the owner's words change the plan: the same model plans again.
+    let again = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "REPORT keep the old API"})),
+    );
+    assert_eq!(again.status, 200, "{}", again.text);
+    assert_eq!(again.body["model"], "claude-opus-5-5", "{}", again.text);
+    assert_eq!(again.body["choice"]["planFirst"]["stage"], "plan");
+    call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None);
+
+    // Approved: the mode leaves plan, and the next round builds on the build model.
+    let mode = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/mode"),
+        Some(&json!({"mode": "acceptEdits"})),
+    );
+    assert_eq!(mode.status, 200, "{}", mode.text);
+    let build = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "REPORT approved, go ahead"})),
+    );
+    assert_eq!(build.status, 200, "{}", build.text);
+    assert_eq!(build.body["model"], "claude-sonnet-5-5");
+    assert_eq!(build.body["effort"], "medium");
+    assert_eq!(build.body["round"], 3);
+    assert_eq!(build.body["choice"]["planFirst"]["stage"], "build");
+    assert_eq!(
+        build.body["choice"]["planFirst"]["plan"]["model"],
+        "claude-opus-5-5"
+    );
+    let done = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None).body;
+    assert_eq!(done["status"], "done", "{done}");
+    let second = argv(&id);
+    assert_eq!(at(&second, "--permission-mode").as_deref(), Some("default"));
+    assert_eq!(at(&second, "--model").as_deref(), Some("claude-sonnet-5-5"));
+    assert_eq!(at(&second, "--effort").as_deref(), Some("medium"));
+}
+
+/// #584: plan-first is the brain's judgement, but it can't smuggle trust past the owner: it
+/// starts in plan mode, so a bypass job is no plan-first job, and a plan-first of a review or with
+/// one model for both rounds is refused with why. A bypass job with a model still waits for the
+/// owner's Confirm.
+#[test]
+fn plan_first_keeps_the_confirm_rule_and_refuses_what_makes_no_sense() {
+    let folder = Folder::new("brain-plan-first-refused");
+    let obid = started(&folder);
+    let both = |plan: (&str, &str), build: (&str, &str)| json!({"plan_model": plan.0, "plan_effort": plan.1, "build_model": build.0, "build_effort": build.1});
+    let opus_sonnet = both(("claude-opus-5-5", "high"), ("claude-sonnet-5-5", "medium"));
+    for (extra, reason) in [
+        (
+            json!({"mode": "bypass", "why": "Plan then go.", "plan_first": opus_sonnet}),
+            "plan_first starts the job in plan mode: mode must be null",
+        ),
+        (
+            json!({"kind": "review", "pr": 3, "why": "Plan then go.", "plan_first": opus_sonnet}),
+            "a review only reads: it has no plan to approve first",
+        ),
+        (
+            json!({"why": "Plan then go.",
+                   "plan_first": both(("claude-opus-5-5", "high"), ("claude-opus-5-5", "high"))}),
+            "plans and builds on the same model and effort",
+        ),
+        (
+            json!({"model": "claude-opus-5-5", "why": "Plan then go.", "plan_first": opus_sonnet}),
+            "plan_first names the models: model and effort must be null",
+        ),
+    ] {
+        let refused = refused_for(&obid, dispatching(vec![picked("Plan", "Nothing", extra)]));
+        assert!(refused.contains(reason), "{reason}: {refused}");
+    }
+    assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
+    queue(
+        &obid,
+        &[dispatching(vec![picked(
+            "Bypass with a model",
+            "Nothing",
+            json!({"kind": "fix", "mode": "bypass", "model": "claude-sonnet-5-5", "effort": "medium",
+                   "why": "A small fix."}),
+        )])],
+    );
+    let answer = said(&obid, "do it, don't ask me anything");
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("confirm it in your inbox"),
+        "{answer}"
+    );
+    assert_eq!(answer["jobs"], json!([]));
+    let confirm = items_of(&obid, "confirm").pop().unwrap();
+    assert_eq!(
+        confirm["title"],
+        "Start fix fixture-app (Bypass with a model) in Bypass mode, on Claude Code · auto, Sonnet 5.5 at medium effort: A small fix"
+    );
+    let confirmed = owner_answers(&obid, confirm["id"].as_str().unwrap(), "Confirm");
+    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs[0]["mode"], "bypass");
+    assert_eq!(jobs[0]["model"], "claude-sonnet-5-5");
+    assert_eq!(jobs[0]["choice"]["why"], "A small fix.");
+}

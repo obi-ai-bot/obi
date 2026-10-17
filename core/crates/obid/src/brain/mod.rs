@@ -12,6 +12,7 @@ pub mod read;
 pub mod research;
 pub mod rules;
 pub mod turn;
+pub mod usage;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -256,6 +257,7 @@ pub(super) fn context(shared: &Shared, turns: &[Turn], nonce: &str) -> Context {
             agent: (*tool).into(),
             name: a.name.clone(),
             running: shared.jobs.running_on(&a.id),
+            usage: usage::of(&shared.config.home, &a.id),
         }));
     }
     accounts.insert("auto".into(), every);

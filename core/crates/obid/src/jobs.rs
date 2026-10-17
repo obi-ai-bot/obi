@@ -72,6 +72,9 @@ pub struct NewJob {
     pub rounds: Option<u32>,
     pub check: Option<String>,
     pub model: Option<String>,
+    /// Reasoning effort for the job's turns (`low`, `medium`, `high`, `xhigh` or `max`), or the
+    /// tool's own.
+    pub effort: Option<String>,
     pub files: Option<Vec<String>>,
     pub attachments: Option<Vec<String>>,
     pub mode: Option<String>,
@@ -80,6 +83,9 @@ pub struct NewJob {
     /// What the brain found before it planned the job, and what done means (#540).
     #[serde(default)]
     pub brief: Option<crate::job::Brief>,
+    /// What the brain chose for the job and why (#584). Never from `POST /v1/jobs`.
+    #[serde(default)]
+    pub choice: Option<crate::job::Choice>,
 }
 
 /// A review another Obi asked for, once the owner or a remembered decision accepted it.
@@ -1128,6 +1134,16 @@ impl Jobs {
         {
             return Err(Refused("mode is ask, acceptEdits, plan or bypass.".into()));
         }
+        if let Some(effort) = &new.effort
+            && (effort.is_empty()
+                || effort.len() > 12
+                || !effort.bytes().all(|b| b.is_ascii_lowercase()))
+        {
+            return Err(Refused(format!(
+                "{effort} isn't an effort of {}.",
+                tool.name()
+            )));
+        }
         let files = new.files.as_deref().map(claimed_files).transpose()?;
         if let Some(base) = &new.base
             && !git::is_branch_name(base)
@@ -1169,6 +1185,8 @@ impl Jobs {
             .or(repo.check.clone())
             .filter(|c| !c.trim().is_empty());
         job.model = new.model.map(|m| m.trim().to_owned());
+        job.effort = new.effort.map(|e| e.trim().to_owned());
+        job.choice = new.choice;
         job.files = files;
         job.attachments = new.attachments;
         job.conversation = new.conversation;
@@ -1193,7 +1211,14 @@ impl Jobs {
             },
         };
         job.phase = Some(Phase::Prepare);
-        job.step = format!("Getting {} ready", job.repo_name());
+        job.step = match &job.choice {
+            Some(choice) => format!(
+                "Getting {} ready. {}",
+                job.repo_name(),
+                choice.line(job.model.as_deref(), job.effort.as_deref())
+            ),
+            None => format!("Getting {} ready", job.repo_name()),
+        };
         let job = self.insert(job);
         self.schedule();
         Ok(job)
@@ -1454,6 +1479,19 @@ impl Jobs {
             }
             let job = state.jobs.get_mut(id)?;
             heard(job);
+            // A job that planned first builds on its build model once its plan is approved: the
+            // owner moved its mode off plan (#584).
+            if job.mode.as_deref() != Some("plan")
+                && let Some(plan_first) = job
+                    .choice
+                    .as_mut()
+                    .and_then(|c| c.plan_first.as_mut())
+                    .filter(|p| p.stage == "plan")
+            {
+                plan_first.stage = "build".into();
+                job.model = plan_first.build.model.clone();
+                job.effort = plan_first.build.effort.clone();
+            }
             job.status = Status::Queued;
             job.phase = Some(Phase::Work);
             job.round = Some(job.current_round() + 1);
@@ -2405,6 +2443,7 @@ impl Jobs {
                 let options = codex::Options {
                     resume: job.session.clone(),
                     model: job.model.clone(),
+                    effort: job.effort.clone(),
                     plan,
                 };
                 codex::run_turn(
@@ -3040,6 +3079,9 @@ impl Jobs {
                 .collect();
                 if let Some(model) = &job.model {
                     flags.extend(["--model".into(), model.into()]);
+                }
+                if let Some(effort) = &job.effort {
+                    flags.extend(["--effort".into(), effort.into()]);
                 }
                 if let Some(session) = &job.session {
                     flags.extend(["--resume".into(), session.into()]);

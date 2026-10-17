@@ -130,6 +130,7 @@ async fn dispatch(
     for (d, files) in plan.dispatches.iter().zip(files) {
         // An issue and a pull request is the issue's work started from the pull request (#219):
         // obid has no `fromPR` yet, so the job is the issue's, from its repository's base.
+        let (model, effort) = d.first_pick();
         let new = NewJob {
             repo: d.repo.clone(),
             kind: d.kind.as_str().into(),
@@ -150,7 +151,15 @@ async fn dispatch(
             attachments: (!asked.attachments.is_empty()).then(|| asked.attachments.to_vec()),
             conversation: Some(asked.conversation.to_owned()),
             base: d.base_branch.clone(),
-            mode: d.mode.map(|m| m.as_str().to_owned()),
+            // A job that plans first starts in plan mode: its plan waits for the owner's OK.
+            mode: if d.plan_first.is_some() {
+                Some(super::plan::Mode::Plan.as_str().to_owned())
+            } else {
+                d.mode.map(|m| m.as_str().to_owned())
+            },
+            model,
+            effort,
+            choice: d.choice(),
             brief: d.brief(),
             ..NewJob::default()
         };
@@ -251,6 +260,14 @@ pub fn describe(new: &NewJob) -> String {
         ", on {agent} · {}",
         super::briefing::line(new.account.as_deref().unwrap_or("auto"), 40)
     ));
+    if let Some(choice) = &new.choice {
+        what.push_str(&format!(
+            ", {}",
+            choice
+                .line(new.model.as_deref(), new.effort.as_deref())
+                .trim_end_matches('.')
+        ));
+    }
     if let Some(check) = new.check.as_deref().filter(|c| !c.trim().is_empty()) {
         what.push_str(&format!(", check {}", super::briefing::line(check, 120)));
     }

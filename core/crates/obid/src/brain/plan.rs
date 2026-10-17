@@ -273,6 +273,38 @@ pub struct Dispatch {
     /// One line saying what must be true when the job is finished (#540).
     #[serde(default)]
     pub done: Option<String>,
+    /// The model the job runs on, a model of its tool (#584); none for Settings'.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// How hard the job thinks, as the tool takes it; none for the tool's own.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Why the brain chose that model and effort, or to plan first: one line, required with any.
+    #[serde(default)]
+    pub why: Option<String>,
+    /// A stronger model plans in plan mode, then the same job builds on another (#584).
+    #[serde(default, alias = "planFirst")]
+    pub plan_first: Option<PlanFirst>,
+}
+
+/// Plan-first: the models and efforts of the plan round and of the build round after it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanFirst {
+    pub plan_model: String,
+    #[serde(default)]
+    pub plan_effort: Option<String>,
+    pub build_model: String,
+    #[serde(default)]
+    pub build_effort: Option<String>,
+}
+
+/// The efforts a tool takes (Claude Code's `--effort`, Codex's reasoning effort); Cursor has none.
+pub fn efforts(agent: &str) -> &'static [&'static str] {
+    match agent {
+        "claude" => &["low", "medium", "high", "xhigh", "max"],
+        "codex" => &["low", "medium", "high", "xhigh"],
+        _ => &[],
+    }
 }
 
 pub use crate::job::Finding;
@@ -288,6 +320,38 @@ impl Dispatch {
             .filter(|d| !d.is_empty())
             .map(str::to_owned);
         (!findings.is_empty() || done.is_some()).then_some(crate::job::Brief { findings, done })
+    }
+
+    /// What the brain chose for the job, to keep with it (#584), or none.
+    pub fn choice(&self) -> Option<crate::job::Choice> {
+        let why = self
+            .why
+            .as_deref()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())?;
+        let pick = |model: &Option<String>, effort: &Option<String>| crate::job::Pick {
+            model: model.clone(),
+            effort: effort.clone(),
+        };
+        let plan_first = self.plan_first.as_ref().map(|p| crate::job::PlanFirst {
+            plan: pick(&Some(p.plan_model.clone()), &p.plan_effort),
+            build: pick(&Some(p.build_model.clone()), &p.build_effort),
+            stage: "plan".into(),
+        });
+        (plan_first.is_some() || self.model.is_some() || self.effort.is_some()).then(|| {
+            crate::job::Choice {
+                why: why.to_owned(),
+                plan_first,
+            }
+        })
+    }
+
+    /// The model and effort the job's first round runs on: plan-first's plan round, else its own.
+    pub fn first_pick(&self) -> (Option<String>, Option<String>) {
+        match &self.plan_first {
+            Some(p) => (Some(p.plan_model.clone()), p.plan_effort.clone()),
+            None => (self.model.clone(), self.effort.clone()),
+        }
     }
 }
 
@@ -584,6 +648,7 @@ impl Plan {
         texts.extend(self.dispatches.iter().map(|d| d.task.as_str()));
         texts.extend(self.dispatches.iter().filter_map(|d| d.title.as_deref()));
         texts.extend(self.dispatches.iter().filter_map(|d| d.done.as_deref()));
+        texts.extend(self.dispatches.iter().filter_map(|d| d.why.as_deref()));
         texts.extend(
             self.dispatches
                 .iter()
@@ -1229,6 +1294,90 @@ fn move_problems(destination: &Move, context: &Context) -> Vec<String> {
     problems
 }
 
+/// What's wrong with the model, effort and plan-first a job names (#584). Which to choose is the
+/// brain's judgement; obid checks only that it exists, fits the tool, and says why.
+fn choice_problems(dispatch: &Dispatch, context: &Context) -> Vec<String> {
+    let mut problems = vec![];
+    let chosen =
+        dispatch.model.is_some() || dispatch.effort.is_some() || dispatch.plan_first.is_some();
+    if !chosen {
+        return problems;
+    }
+    match dispatch.why.as_deref().map(str::trim) {
+        None | Some("") => problems.push(
+            "why says in one line why that model, effort or plan-first (the task, the account's use, a reset)"
+                .into(),
+        ),
+        Some(why) if why.contains('\n') || count(why) > 300 => {
+            problems.push("why is one line of up to 300 characters".into())
+        }
+        Some(_) => {}
+    }
+    let agent = dispatch.agent.as_str();
+    if agent == "auto" {
+        problems
+            .push("a model or effort belongs to a tool: name the tool in agent, not auto".into());
+        return problems;
+    }
+    let none = vec![];
+    let models = context.models.get(agent).unwrap_or(&none);
+    let model = |model: &str, problems: &mut Vec<String>| {
+        if !models.iter().any(|m| m == model) {
+            problems.push(format!(
+                "{model} isn't a model of {agent}; choices: {}",
+                if models.is_empty() {
+                    "none".into()
+                } else {
+                    models.join(", ")
+                }
+            ));
+        }
+    };
+    let effort = |effort: &str, problems: &mut Vec<String>| {
+        if !efforts(agent).contains(&effort) {
+            problems.push(format!(
+                "{effort} isn't an effort of {agent}; choices: {}",
+                if efforts(agent).is_empty() {
+                    "none".into()
+                } else {
+                    efforts(agent).join(", ")
+                }
+            ));
+        }
+    };
+    if let Some(m) = &dispatch.model {
+        model(m, &mut problems);
+    }
+    if let Some(e) = &dispatch.effort {
+        effort(e, &mut problems);
+    }
+    if let Some(plan_first) = &dispatch.plan_first {
+        if dispatch.model.is_some() || dispatch.effort.is_some() {
+            problems.push("plan_first names the models: model and effort must be null".into());
+        }
+        if dispatch.kind == Kind::Review {
+            problems.push("a review only reads: it has no plan to approve first".into());
+        }
+        if dispatch.mode.is_some_and(|m| m != Mode::Plan) {
+            problems.push("plan_first starts the job in plan mode: mode must be null".into());
+        }
+        model(&plan_first.plan_model, &mut problems);
+        model(&plan_first.build_model, &mut problems);
+        for e in [&plan_first.plan_effort, &plan_first.build_effort]
+            .into_iter()
+            .flatten()
+        {
+            effort(e, &mut problems);
+        }
+        if plan_first.plan_model == plan_first.build_model
+            && plan_first.plan_effort == plan_first.build_effort
+        {
+            problems.push("plan_first plans and builds on the same model and effort: it's just one job; leave plan_first null".into());
+        }
+    }
+    problems
+}
+
 /// What's wrong with one job of a plan.
 fn dispatch_problems(dispatch: &Dispatch, context: &Context) -> Vec<String> {
     let mut problems = vec![];
@@ -1306,6 +1455,7 @@ fn dispatch_problems(dispatch: &Dispatch, context: &Context) -> Vec<String> {
     if !(1..=10).contains(&dispatch.rounds) {
         problems.push("rounds must be 1 to 10".into());
     }
+    problems.extend(choice_problems(dispatch, context));
     if let Some(check) = &dispatch.check
         && !is_check(check)
     {
@@ -1457,7 +1607,7 @@ pub fn schema(context: &Context) -> Value {
     let string = json!({"type": "string"});
     let dispatch = json!({
         "type": "object", "additionalProperties": false,
-        "required": ["agent", "account", "repo", "base_branch", "pr", "issue", "epic", "kind", "title", "task", "inputs", "rounds", "check", "complexity", "start_when", "mode", "reads", "findings", "done"],
+        "required": ["agent", "account", "repo", "base_branch", "pr", "issue", "epic", "kind", "title", "task", "inputs", "rounds", "check", "complexity", "start_when", "mode", "reads", "findings", "done", "model", "effort", "why", "plan_first"],
         "properties": {
             "agent": {"enum": tools},
             "account": string,
@@ -1484,6 +1634,14 @@ pub fn schema(context: &Context) -> Value {
                                "lines": {"type": ["string", "null"], "maxLength": 15},
                                "note": {"type": "string", "maxLength": NOTE_LENGTH}}}},
             "done": {"type": ["string", "null"], "maxLength": DONE_LENGTH},
+            "model": {"type": ["string", "null"]},
+            "effort": {"type": ["string", "null"]},
+            "why": {"type": ["string", "null"], "maxLength": 300},
+            "plan_first": nullable(json!({
+                "type": "object", "additionalProperties": false,
+                "required": ["plan_model", "plan_effort", "build_model", "build_effort"],
+                "properties": {"plan_model": string, "plan_effort": {"type": ["string", "null"]},
+                               "build_model": string, "build_effort": {"type": ["string", "null"]}}})),
         },
     });
     let question = json!({
