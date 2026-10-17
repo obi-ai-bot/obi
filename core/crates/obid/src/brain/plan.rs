@@ -1288,27 +1288,22 @@ fn nullable(object: Value) -> Value {
     json!({"anyOf": [{"type": "null"}, object]})
 }
 
-/// Keeps the first of each, in order: a JSON Schema enum must not repeat an item.
-fn unique(items: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut out: Vec<String> = vec![];
-    for item in items {
-        if !out.contains(&item) {
-            out.push(item);
-        }
-    }
-    out
-}
-
-/// The JSON schema the model has to fill, with the choices it has right now.
+/// The JSON schema the model has to fill. It's the same from turn to turn (#534): the schema is
+/// the first thing the model's server reads, so a job or an inbox item in it would undo the cache
+/// on every call. Ids, accounts, models and repositories are strings, checked by
+/// [`Plan::problems`], whose refusal goes back to the model; only the event orchestrator, a
+/// caller of its own, has other actions.
 pub fn schema(context: &Context) -> Value {
     let modes = json!(["ask", "acceptEdits", "plan", "bypass"]);
+    let tools = json!(["auto", "claude", "codex", "cursor"]);
+    let string = json!({"type": "string"});
     let dispatch = json!({
         "type": "object", "additionalProperties": false,
         "required": ["agent", "account", "repo", "base_branch", "pr", "issue", "epic", "kind", "title", "task", "inputs", "rounds", "check", "complexity", "start_when", "mode", "reads"],
         "properties": {
-            "agent": {"enum": context.accounts.keys().collect::<Vec<_>>()},
-            "account": {"enum": unique(context.accounts.values().flatten().cloned().collect::<BTreeSet<_>>())},
-            "repo": {"enum": context.repos},
+            "agent": {"enum": tools},
+            "account": string,
+            "repo": string,
             "base_branch": {"type": ["string", "null"]},
             "pr": {"type": ["integer", "null"]},
             "issue": {"type": ["integer", "null"]},
@@ -1320,8 +1315,7 @@ pub fn schema(context: &Context) -> Value {
             "kind": {"enum": Kind::ALL.iter().map(|k| k.as_str()).collect::<Vec<_>>()},
             "title": {"type": "string", "maxLength": 60},
             "task": {"type": "string", "maxLength": 2000},
-            "inputs": if context.handles.is_empty() { json!({"type": "array", "maxItems": 0}) }
-                      else { json!({"type": "array", "items": {"enum": context.handles}}) },
+            "inputs": {"type": "array", "items": string},
             // obid can't hold a job until something happens yet (#455).
             "start_when": {"type": "array", "maxItems": 0},
             "mode": nullable(json!({"enum": modes})),
@@ -1343,10 +1337,7 @@ pub fn schema(context: &Context) -> Value {
             "effort": {"type": ["string", "null"]},
             "complex_effort": {"type": ["string", "null"]},
             "max_running": {"type": ["integer", "null"], "minimum": 1, "maximum": 20},
-            // Two accounts can share a name: an enum must not repeat an item, and an empty one is
-            // invalid, so the brain's call would fail.
-            "account": if context.setting_accounts.is_empty() { json!({"type": "null"}) }
-                       else { nullable(json!({"enum": unique(context.setting_accounts.iter().cloned())})) },
+            "account": {"type": ["string", "null"]},
             "lift": {"type": ["boolean", "null"]},
         },
     });
@@ -1355,44 +1346,15 @@ pub fn schema(context: &Context) -> Value {
         "required": ["tool", "repo", "ref", "query", "path", "start_line", "end_line", "number", "url"],
         "properties": {
             "tool": {"enum": ["search_code", "list_files", "read_file", "git_log", "view_issue", "view_pr", "fetch_url"]},
-            "repo": nullable(json!({"enum": context.repos})), "ref": {"type": ["string", "null"]},
+            "repo": {"type": ["string", "null"]}, "ref": {"type": ["string", "null"]},
             "query": {"type": ["string", "null"], "maxLength": 200}, "path": {"type": ["string", "null"], "maxLength": 300},
             "start_line": {"type": ["integer", "null"], "minimum": 1}, "end_line": {"type": ["integer", "null"], "minimum": 1},
             "number": {"type": ["integer", "null"], "minimum": 1}, "url": {"type": ["string", "null"]},
         },
     });
-    // The jobs the actions may name, the briefing's order kept.
-    let named = unique(
-        context
-            .jobs
-            .iter()
-            .chain(&context.movable)
-            .chain(&context.permissions)
-            .cloned(),
-    );
-    let mut agents = vec!["auto".to_owned()];
-    agents.extend(context.models.keys().cloned());
-    let mut accounts = vec!["auto".to_owned()];
-    accounts.extend(
-        context
-            .move_accounts
-            .values()
-            .flatten()
-            .cloned()
-            .collect::<BTreeSet<_>>(),
-    );
-    let mut models = vec!["auto".to_owned()];
-    models.extend(
-        context
-            .models
-            .values()
-            .flatten()
-            .cloned()
-            .collect::<BTreeSet<_>>(),
-    );
     let destination = json!({
         "type": "object", "additionalProperties": false, "required": ["agent", "account", "model"],
-        "properties": {"agent": {"enum": agents}, "account": {"enum": accounts}, "model": {"enum": models}},
+        "properties": {"agent": {"enum": tools}, "account": string, "model": string},
     });
     let mut actions: Vec<&str> = vec![
         "dispatch",
@@ -1415,14 +1377,9 @@ pub fn schema(context: &Context) -> Value {
     } else {
         actions.extend(["message_job", "fix_failure"]);
     }
-    if context.orchestrator || !context.review_authors.is_empty() {
-        actions.push("ask_review_again");
-    }
-    let items: Vec<&String> = context
-        .inbox
-        .iter()
-        .chain(&context.fixable_failures)
-        .collect();
+    // Offered whether or not the briefing has an Oby-authored pull request: problems refuses it
+    // for a job that has none.
+    actions.push("ask_review_again");
     json!({
         "type": "object", "additionalProperties": false,
         "required": ["action", "reply", "dispatches", "question", "jobs", "all", "move", "decision", "message", "mode", "setting", "item", "option", "answer", "lookups", "details"],
@@ -1431,15 +1388,14 @@ pub fn schema(context: &Context) -> Value {
             "reply": {"type": "string", "maxLength": REPLY_LENGTH},
             "dispatches": {"type": "array", "items": dispatch, "maxItems": MOST_DISPATCHES},
             "question": nullable(question),
-            "jobs": if named.is_empty() { json!({"type": "array", "maxItems": 0}) }
-                    else { json!({"type": "array", "items": {"enum": named}, "maxItems": 10}) },
+            "jobs": {"type": "array", "items": string, "maxItems": 10},
             "all": {"type": "boolean"},
             "move": nullable(destination),
             "decision": nullable(json!({"enum": ["allow", "always", "deny"]})),
             "message": {"type": ["string", "null"], "maxLength": 2000},
             "mode": nullable(json!({"enum": modes})),
             "setting": nullable(setting),
-            "item": if items.is_empty() { json!({"type": "null"}) } else { nullable(json!({"enum": items})) },
+            "item": {"type": ["string", "null"]},
             "option": {"type": ["integer", "null"], "minimum": 1, "maximum": 20},
             "answer": {"type": ["string", "null"], "maxLength": 2000},
             "lookups": {"type": "array", "items": lookup, "maxItems": 4},
@@ -1523,15 +1479,15 @@ mod tests {
                 .jobs,
             None
         );
+        // The schema names no job (#534): problems checks them, so it's the same with or without.
         let schema = schema(&context);
         assert_eq!(
-            schema["properties"]["jobs"]["items"]["enum"],
-            json!(["ab12cd34"])
+            schema["properties"]["jobs"]["items"],
+            json!({"type": "string"})
         );
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("jobs")) && required.contains(&json!("all")));
-        let none = super::schema(&Context::default());
-        assert_eq!(none["properties"]["jobs"]["maxItems"], 0);
+        assert_eq!(super::schema(&Context::default()), schema);
         let long = Plan::of(Action::ReplyOnly, &"x".repeat(REPLY_LENGTH + 1));
         assert_eq!(
             long.problems(&context, "zq9"),
@@ -1578,7 +1534,8 @@ mod tests {
         assert!(standalone.problems(&context, "zq9").is_empty());
     }
 
-    /// BrainTests.cursorInDispatchEnum: the schema offers Cursor as a tool wherever one is named.
+    /// BrainTests.cursorInDispatchEnum: the schema offers Cursor as a tool wherever one is named;
+    /// every tool, connected or not (#534), and problems refuses one that isn't connected.
     #[test]
     fn cursor_in_dispatch_enum() {
         let context = Context {
@@ -1591,7 +1548,7 @@ mod tests {
         };
         let schema = schema(&context);
         let dispatch = &schema["properties"]["dispatches"]["items"]["properties"]["agent"]["enum"];
-        assert_eq!(dispatch, &json!(["auto", "cursor"]));
+        assert_eq!(dispatch, &json!(["auto", "claude", "codex", "cursor"]));
         let setting =
             &schema["properties"]["setting"]["anyOf"][1]["properties"]["agent"]["anyOf"][1]["enum"];
         assert_eq!(setting, &json!(["claude", "codex", "cursor"]));
@@ -1791,18 +1748,18 @@ mod tests {
             stray.problems(&context, "c4n4ry"),
             ["only answer_inbox has an item, an option or an answer"]
         );
-        // The schema offers the items, and the actions.
+        // The schema offers the actions; the items are the briefing's, checked above (#534).
         let schema = schema(&context).to_string();
         for part in [
             "\"retry_job\"",
             "\"dismiss_job\"",
             "\"answer_inbox\"",
             "\"start_now\"",
-            "\"fa11ed00-failed-1\"",
         ] {
             assert!(schema.contains(part), "{part}");
         }
-        let prompt = crate::brain::planner::system("c4n4ry", false, false);
+        assert!(!schema.contains("fa11ed00-failed-1"));
+        let prompt = crate::brain::planner::system(false);
         for action in ["retry_job", "dismiss_job", "answer_inbox", "start_now"] {
             assert!(prompt.contains(action), "{action}");
         }
@@ -1857,7 +1814,7 @@ mod tests {
             ]
         );
         assert!(!finish("investigate").is_empty());
-        let system = crate::brain::planner::system("zq9", false, false);
+        let system = crate::brain::planner::system(false);
         assert!(system.contains("finish #19 from PR #124") && !system.contains("(never both)"));
     }
 
