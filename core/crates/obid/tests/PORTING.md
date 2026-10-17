@@ -4,7 +4,7 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 
 **API-level** means the test asks the runner through its HTTP API (`client.execute` on the router, or the API's own handlers), or checks what the API puts on the wire (a job's or account's JSON, the gate in front of every request). obid is checked the same way: the real binary, asked over HTTP (tests/*.rs), or a unit test of the same rule where the Swift test was one. Everything else is **Swift-internal**: it drives Swift types (Desk, the brain, the agent fakes, the stores), so it doesn't carry over; obid's own behaviour behind those is covered by its own tests.
 
-994 tests in all: **42 API-level and ported**, **33 API-level and not ported** (their endpoint or feature isn't in obid yet), **919 Swift-internal and dropped**.
+994 tests in all: **43 API-level and ported**, **32 API-level and not ported** (their endpoint or feature isn't in obid yet), **919 Swift-internal and dropped**.
 
 ## API-level, ported
 
@@ -21,6 +21,7 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 | CheckTests.theAPIHandsOutChecksTakesTheirResultsAndTellsEveryApp | runner_api.rs `the_api_hands_out_checks_takes_their_results_and_tells_every_app` | an existing queued merge check is handed out and its result is sent to every app; obid publishes now, but queues a merge check only once Oby's review approves, which is #525 |
 | ClearTests.theClearSurvivesARestartAndNeverGoesBack | runner_api.rs `clear_done_is_kept_said_and_heard` | the restart through the API; the clock going back in src/clear.rs `the_clear_survives_a_restart_and_never_goes_back` |
 | DismissTests.theAPIDismissesAndSaysWhenItCant | jobs_api.rs `nothing_committed_fails_and_dismiss_lets_it_go` | its last line, `GET /v1/jobs/{id}/publish` answering 409 for a dismissed job, in runner_api.rs `publish_by_hand_is_off_a_dismissed_job` (a dismissed job has nothing to publish: `409`, saying so) |
+| FailureTests.theAPIListsFailuresAndFixesThem | failures_api.rs `the_api_lists_failures_and_fixes_them` | a failed job and one stopped at a limit (obid leaves no job interrupted), with a done and a stopped job that aren't recorded, each recorded once and kept across a restart; the evidence's redaction of obid's API token; obid makes no post-mortem yet, so Fix it answers 409 (runner-api.md, "obid only: failures"; the rest is #571); that each is recorded once is src/failures.rs `a_failure_is_recorded_once_whatever_the_job_says_later` |
 | InboxTests.theAPIListsAnswersAndTellsEveryApp | sphere_api.rs `the_inbox_lists_answers_and_tells_every_app` | with an `obiRequest` item, the only kind obid makes so far |
 | LoopbackTests.comparesTokensWhole | src/token.rs `same_compares_whole_tokens` | unit test |
 | LoopbackTests.letsLoopbackHostsInWithTheToken | status.rs `lets_loopback_hosts_in_with_the_token` |  |
@@ -62,7 +63,8 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 - #442 Plans and the brain: POST /v1/plans and GET /v1/conversation
 - #443 Mac checks and Apple checks: queued checks, results, /v1/agent/apple-check
 - #444 Connections: /v1/connections, /v1/me and agents' MCP through obid
-- #445 Failures: /v1/failures and their fixes
+- #445 Failures: /v1/failures and their fixes (the records are served now; no RunnerTests test is left on it)
+- #571 Failures: post-mortems, `oby-failure` issues and Fix it starting a fix job (split out of #445; its FailureTests are Swift-internal)
 - #446 The LAN gateway and its pairing
 - #447 Move: POST /v1/jobs/{id}/move
 - #448 A job's question: `question` on a job and its inbox item
@@ -81,7 +83,6 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 | Swift test | Needs | Issue |
 |---|---|---|
 | ConnectionTests.agentsUseConnectedAppsWithoutEverSeeingTheLogin | `/v1/connections`, `/v1/me`, `/v1/agent/mcp/…` | #444 |
-| FailureTests.theAPIListsFailuresAndFixesThem | `/v1/failures…` | #445 |
 | GatewayTests.gatewayForwardsTheRunnersTokenToTheMacRunner | the LAN gateway | #446 |
 | GatewayTests.gatewayRouterRedactsSecretsInFiniteAndSSEResponses | the LAN gateway | #446 |
 | GatewayTests.gatewayRouterRequiresTokensAndHidesUnlistedRoutes | the LAN gateway and `/v1/pairing/…` (#284) | #446 |

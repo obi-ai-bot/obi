@@ -17,6 +17,7 @@ pub mod conn;
 pub mod conversation;
 pub mod devices;
 pub mod events;
+pub mod failures;
 pub mod git;
 pub mod github;
 pub mod job;
