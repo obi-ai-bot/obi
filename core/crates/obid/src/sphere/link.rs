@@ -2414,7 +2414,7 @@ impl Link {
                     ));
                 }
                 if answer == inbox::CONFIRM {
-                    let confirmed = item.confirm.clone().ok_or_else(|| {
+                    let confirmed = item.confirm.clone().map(|c| *c).ok_or_else(|| {
                         api(StatusCode::CONFLICT, "That item says nothing to do.")
                     })?;
                     self.carry_out(confirmed).await?;

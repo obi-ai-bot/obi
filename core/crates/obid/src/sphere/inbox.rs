@@ -82,7 +82,7 @@ pub fn confirm_item(
         obi: None,
         plugin: None,
         arrived: Some(arrival()),
-        confirm: Some(confirmed),
+        confirm: Some(Box::new(confirmed)),
     }
 }
 
@@ -116,7 +116,8 @@ pub struct Item {
     /// On a `confirm` item: what Oby's brain planned that only the owner may do, carried out on
     /// their `Confirm` (#546), shown as `confirm`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confirm: Option<Confirmed>,
+    // Boxed: an item is kept by value in enums, and most items have none.
+    pub confirm: Option<Box<Confirmed>>,
 }
 
 /// Now in nanoseconds since the epoch, strictly later than any earlier answer in this process:
