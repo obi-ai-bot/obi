@@ -488,6 +488,20 @@ While a turn carries out actions, `GET /v1/events` sends a `step` event when eac
 {"turn":"8d…","index":1,"action":"research","text":"Searching oby for “Runner API”","state":"running","at":"2026-10-12T12:00:00Z"}
 ```
 
+Oby says what it's doing before it knows what it will do (#592, obid only): a turn sends a `thinking` event as soon as it starts, well within half a second of `POST /v1/plans`, however long its brain then takes, and one for each later call to its brain as it begins. Each line is `running`, then `done` when that call's plan comes, or `failed` when the turn was cancelled, stopped or ran out of time first. `index` is the step the call plans, as the `step` events count them; `text` is what it thinks about: `Thinking` for the first call, then `Looking at <job>` after reading a job, `Going over what it found` after research, `Deciding what's next` after an action, `Checking nothing was missed` for the completion check (below):
+
+```json
+{"turn":"8d…","conversation":"c1…","index":1,"text":"Thinking","state":"running","at":"2026-10-12T12:00:00Z"}
+```
+
+Then a `reply` event carries what Oby says as soon as it knows (#592, obid only), so an app can show or speak it while the rest of the turn happens: for a plan that starts jobs, its words as soon as the plan is checked, before the jobs are made (the jobs' own `job` events come after it, and `POST /v1/plans` answers once they're made); for a reply or a question, the words once they're settled. At most one per turn, never for a turn that's cancelled or stopped before it, and never empty. When the answer of `POST /v1/plans` says the same words, they've been said already. A turn cancelled after its `reply` went out (`POST /v1/plans/cancel` while its jobs are made) still answers `none` and starts nothing:
+
+```json
+{"turn":"8d…","conversation":"c1…","text":"On it: one job for the README.","at":"2026-10-12T12:00:03Z"}
+```
+
+The brain still answers with `--output-format json`, all at once: streaming the reply's words while they're written (`stream-json`) waits until the per-call records (#533) show it doesn't slow the turn.
+
 `POST /v1/conversation/stop` asks the turn underway to stop after its current action, and answers `{"stopped": true}`. On obid, which runs a turn per conversation, the body may name it, `{"conversation": "<id>"}`; with no body it's the conversation of the latest turn under way, and turns in other conversations go on (`400` for any other body). A bare cancel word sent with `"new": true` stops no turn. `POST /v1/plans/cancel` takes the same body. The in-flight `POST /v1/plans` then returns a reply describing what it completed. The cancel words `stop` and `never mind` have the same effect. The turn budget is 110 seconds; clients should wait 120 seconds while following its step events.
 
 `POST /v1/plans/cancel` drops the turn underway instead, and answers `{"cancelled": true}`: the plan its brain is making does nothing when it comes, and the in-flight `POST /v1/plans` answers `none`. What the turn already did stays done. An app sends it before it replaces a turn with new words.
@@ -741,6 +755,15 @@ data: { …Turn }
 
 event: conversation
 data: { …Conversation }
+
+event: step
+data: { …Step }
+
+event: thinking
+data: { …Thinking }
+
+event: reply
+data: { …Reply }
 ```
 
 - A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`, `dismissed`, `macCheck`, `mergeError`, a move to another account. The app replaces the job with that `id`.
@@ -750,6 +773,7 @@ data: { …Conversation }
   obid sends the item as it is when the event goes out, one event at a time, so the events for one item never go back to an older state and the last one is the item as `GET /v1/inbox` lists it (the same goes for `exchange` events, obid only: Obi-to-Obi exchanges, below). Two changes close together can come as two events that both carry the newer state: an item answered as soon as it arrives may never be seen `open`.
 - `check` comes when a Mac check or an Apple check (below) is queued, taken by a Mac or ends. A Mac that runs checks asks for one (`GET /v1/checks/next`) when one is `queued`; other apps can ignore it, since the job's own event carries `macCheck` and `appleCheck` too.
 - `turn` comes with every turn of the conversation that's added, from any app, and again when one changes (its `jobs`): the turn as `GET /v1/conversation` lists it. Replace the turn with that `id`, or add it in `at` order. Older runners don't send it.
+- `step`, `thinking` and `reply` (`thinking` and `reply` obid only) follow a turn of the conversation as it happens: `POST /v1/plans`, above.
 - `conversation` (obid only) comes whenever one of obid's conversations starts, gets a turn, is renamed, pinned or deleted: obid only: conversations, below. The Swift runner doesn't send it.
 - Settled jobs, failed checks, review errors and studied failures wake Oby's orchestrator. Events arriving within 30 seconds are handled in one turn. Event summaries are written by Oby; the brain must read the related job before acting, and agent/check output remains quoted evidence.
 - A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop. Fetch what you show (`GET /v1/status`, `GET /v1/jobs`, `GET /v1/inbox`; a runner older than the inbox answers `404` there, which means an empty inbox, and any other failure means try again) only once the events' response has arrived, and apply the events that came meanwhile over it: the runner follows a connection before it answers, so nothing that changes in between is lost.
