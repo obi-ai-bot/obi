@@ -220,6 +220,13 @@ pub struct Job {
 }
 
 impl Job {
+    /// Whether its pull request was merged, as the job's `pullRequest` says: it's finished for
+    /// good and takes no more words (#542). obid follows no pull request yet, so none reads
+    /// merged until it does.
+    pub fn merged(&self) -> bool {
+        self.to_json()["pullRequest"]["state"] == "MERGED"
+    }
+
     /// A new job, queued now.
     pub fn new(
         id: String,

@@ -341,8 +341,9 @@ fn place(shared: &Shared, job: &Job) -> String {
 pub const TRY_AGAIN: &str =
     "Try again, picking up where you left off. Finish with a short summary as asked.";
 
-/// Carries out an action that changes something, and says what happened.
-pub async fn act(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
+/// Carries out an action that changes something, and says what happened. `said` is the user's
+/// own words this turn, which message_job passes on.
+pub async fn act(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
     match plan.action {
         Action::StopAgent => stop(shared, plan),
         Action::SetMode => set_mode(shared, plan),
@@ -350,6 +351,7 @@ pub async fn act(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
         Action::RetryJob | Action::DismissJob | Action::StartNow => on_jobs(shared, plan),
         Action::AnswerInbox => answer_inbox(shared, plan).await,
         Action::SetSetting => set_setting(shared, plan),
+        Action::MessageJob => message_job(shared, plan, said),
         Action::MoveJob => {
             let names: Vec<String> = plan
                 .named()
@@ -445,6 +447,73 @@ fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
         ),
         Some(Err(refused)) => (format!("Couldn't try {name} again: {}", refused.0), false),
         None => ("That job isn't here any more.".into(), false),
+    }
+}
+
+/// message_job (#542): the user's own words reach the job's agent, with the secrets obid knows
+/// taken out, never the brain's restatement of them (obid has no event orchestrator to speak
+/// for itself yet, #351). A running job hears them at its next turn; one that ended picks its
+/// session up again in its own worktree for one more round that starts with them. A job whose
+/// pull request was merged takes none: that's new work.
+fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
+    let Some(id) = plan.named().first() else {
+        return Outcome::Failed("Say which job to tell.".into());
+    };
+    let Some(job) = shared.jobs.get(id) else {
+        return Outcome::Failed("That job isn't here any more.".into());
+    };
+    let name = job.short_title();
+    if job.merged() {
+        return Outcome::Failed(format!(
+            "Couldn't tell {name}: its pull request was merged, so start a new job instead."
+        ));
+    }
+    let active = job.status.is_active();
+    if !active
+        && job
+            .worktree
+            .as_deref()
+            .is_none_or(|w| !std::path::Path::new(w).is_dir())
+    {
+        return Outcome::Failed(format!(
+            "Couldn't tell {name}: its worktree is gone, so start a new job instead."
+        ));
+    }
+    if !active && job.session.is_none() {
+        return Outcome::Failed(format!(
+            "Couldn't tell {name}: it never started, so there's no session to pick up."
+        ));
+    }
+    let words = match crate::vault::for_agent(said.trim()) {
+        Ok(words) => crate::secrets::known().redact(&words),
+        Err(why) => return Outcome::Failed(format!("Couldn't tell {name}: {why}")),
+    };
+    // Running one more round of a job that ended starts work, like Start: only the owner's own
+    // Confirm does it (the owner's decision of 2026-10-16). A running job just hears the words.
+    if !active {
+        confirm(
+            shared,
+            &job.id,
+            format!("One more round of {name}, with your words"),
+            format!(
+                "Oby's brain planned to tell {name} what you said. It ended, so this picks its session up again for one more round in its own worktree, on {}, starting with your words. It happens only if you confirm. Your words, quoted:\n\n{}",
+                place(shared, &job),
+                quoted(&words)
+            ),
+            Confirmed {
+                action: action::MESSAGE_JOB.into(),
+                target: job.id.clone(),
+                payload: serde_json::json!({"words": words}),
+            },
+        );
+        return Outcome::Done(format!(
+            "{name} ended, so one more round with your words waits for your OK: confirm it in your inbox."
+        ));
+    }
+    match shared.jobs.message(&job.id, &words) {
+        Some(Ok(_)) => Outcome::Done(format!("Told {name} what you said.")),
+        Some(Err(refused)) => Outcome::Failed(format!("Couldn't tell {name}: {}", refused.0)),
+        None => Outcome::Failed("That job isn't here any more.".into()),
     }
 }
 
@@ -910,7 +979,8 @@ pub fn step_text(shared: &Shared, plan: &Plan) -> String {
         Action::RetryJob => format!("Trying {} again", what()),
         Action::DismissJob => format!("Letting {} go", what()),
         Action::AskReviewAgain => format!("Asking for another review of {}", what()),
-        Action::StartNow | Action::MessageJob => format!("Starting {} now", what()),
+        Action::StartNow => format!("Starting {} now", what()),
+        Action::MessageJob => format!("Passing your message to {}", what()),
         Action::AnswerInbox => "Answering an inbox item".into(),
         other => other.as_str().into(),
     }
