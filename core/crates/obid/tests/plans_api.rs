@@ -1497,8 +1497,42 @@ fn a_bypass_dispatch_waits_for_the_owners_confirm() {
         "Start fix fixture-app (Greeting fix) in Bypass mode, on auto · auto, check node --test"
     );
     assert_eq!(confirm["confirm"]["action"], "start_job");
-    let confirmed = owner_answers(&obid, confirm["id"].as_str().unwrap(), "Confirm");
-    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    let id = confirm["id"].as_str().unwrap().to_owned();
+    // Owner UI retries can race at the HTTP boundary. Both responses may describe the same
+    // completed card, but only one proposed job may be created.
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let port = obid.port;
+    let confirmers: Vec<_> = (0..2)
+        .map(|_| {
+            let barrier = barrier.clone();
+            let id = id.clone();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                use std::net::TcpStream;
+                barrier.wait();
+                let body = json!({"answer": "Confirm"}).to_string();
+                let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                write!(
+                    stream,
+                    "POST /v1/inbox/{id}/answer HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    TOKEN,
+                    body.len()
+                )
+                .unwrap();
+                let mut response = String::new();
+                stream.read_to_string(&mut response).unwrap();
+                response
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .parse::<u16>()
+                    .unwrap()
+            })
+        })
+        .collect();
+    for confirmer in confirmers {
+        assert!(matches!(confirmer.join().unwrap(), 200 | 409));
+    }
     let jobs = call(&obid, "GET", "/v1/jobs", None).body;
     assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
     assert_eq!(jobs[0]["mode"], "bypass");
@@ -2169,6 +2203,134 @@ fn a_turn_cancelled_while_its_jobs_are_made_starts_nothing() {
     });
     assert_eq!(answer["kind"], "none", "{answer}");
     assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Answering as soon as Oby knows (#592): a thinking line per brain call, then the reply.
+
+/// The `thinking` events as `index:state:text`.
+fn thoughts(events: &[serde_json::Value]) -> Vec<String> {
+    events
+        .iter()
+        .map(|e| {
+            format!(
+                "{}:{}:{}",
+                e["index"],
+                e["state"].as_str().unwrap(),
+                e["text"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+/// #592's acceptance: however long the brain thinks, the turn says so within 500 ms of
+/// `POST /v1/plans`, and the line is done when the plan comes.
+#[test]
+fn a_turn_says_it_is_thinking_within_half_a_second() {
+    let folder = Folder::new("brain-thinking-first");
+    let obid = started(&folder);
+    let events = follow_events(&obid);
+    queue(&obid, &[format!("SLEEP 2 {}", reply("All quiet."))]);
+    let answer = std::thread::scope(|scope| {
+        let begun = std::time::Instant::now();
+        let asking = scope.spawn(|| said(&obid, "how are the jobs going?"));
+        let first = events_named(&events, "thinking", 5, |got| !got.is_empty());
+        let took = begun.elapsed();
+        assert!(
+            took < std::time::Duration::from_millis(500),
+            "the first thinking event came after {took:?}"
+        );
+        assert_eq!(thoughts(&first), ["1:running:Thinking"]);
+        assert!(first[0]["at"].is_string());
+        asking.join().unwrap()
+    });
+    assert_eq!(answer["text"], "All quiet.");
+    let done = events_named(&events, "thinking", 5, |got| !got.is_empty());
+    assert_eq!(thoughts(&done), ["1:done:Thinking"]);
+    let turn = turn_of(&obid, "how are the jobs going?");
+    assert_eq!(done[0]["turn"], turn.as_str());
+    assert_eq!(done[0]["conversation"], answer["conversation"]);
+}
+
+/// #592: each brain call of the turn has its own line, saying what it thinks about.
+#[test]
+fn each_brain_call_has_its_own_thinking_line() {
+    let folder = Folder::new("brain-thinking-lines");
+    let obid = started(&folder);
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let events = follow_events(&obid);
+    queue(&obid, &[read_plan(&id), reply("It's at its check.")]);
+    assert_eq!(
+        said(&obid, "how is the vault job?")["text"],
+        "It's at its check."
+    );
+    let heard = events_named(&events, "thinking", 5, |got| got.len() == 4);
+    assert_eq!(
+        thoughts(&heard),
+        [
+            "1:running:Thinking",
+            "1:done:Thinking",
+            "2:running:Looking at Vault secrets",
+            "2:done:Looking at Vault secrets"
+        ]
+    );
+}
+
+/// #592's acceptance: the reply reaches the event stream before the jobs it starts are made.
+#[test]
+fn the_reply_comes_before_the_jobs_it_starts() {
+    let folder = Folder::new("brain-reply-first");
+    let obid = started(&folder);
+    let events = follow_events(&obid);
+    let plan = json!({"action": "dispatch", "reply": "On it: one job for the README.",
+        "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "issue": null,
+         "kind": "fix", "title": "README typo", "task": "Fix the typo in the README", "rounds": 1}]});
+    queue(&obid, &[plan.to_string()]);
+    let answer = said(&obid, "fix the readme typo");
+    assert_eq!(answer["jobs"].as_array().unwrap().len(), 1, "{answer}");
+    let mut heard = vec![];
+    while !heard.iter().any(|(name, _)| name == "job") {
+        let (name, data) = events
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("no job event; heard {heard:?}"));
+        if name == "reply" || name == "job" {
+            heard.push((name, data));
+        }
+    }
+    let (first, reply) = &heard[0];
+    assert_eq!(first, "reply", "{heard:?}");
+    assert_eq!(reply["text"], "On it: one job for the README.");
+    assert_eq!(
+        reply["turn"],
+        turn_of(&obid, "fix the readme typo").as_str()
+    );
+    assert_eq!(reply["conversation"], answer["conversation"]);
+}
+
+/// #592's acceptance: a turn the user cancels while its brain thinks says nothing: its thinking
+/// line fails and no reply goes out.
+#[test]
+fn a_cancelled_turn_sends_no_reply() {
+    let folder = Folder::new("brain-cancel-no-reply");
+    let obid = started(&folder);
+    let events = follow_events(&obid);
+    queue(&obid, &[format!("SLEEP 1 {}", reply("On it."))]);
+    let answer = std::thread::scope(|scope| {
+        let asking = scope.spawn(|| said(&obid, "tell me about the jobs"));
+        let running = events_named(&events, "thinking", 5, |got| !got.is_empty());
+        assert_eq!(thoughts(&running), ["1:running:Thinking"]);
+        call(&obid, "POST", "/v1/plans/cancel", None);
+        asking.join().unwrap()
+    });
+    assert_eq!(answer["kind"], "none", "{answer}");
+    let ended = events_named(&events, "thinking", 5, |got| !got.is_empty());
+    assert_eq!(thoughts(&ended), ["1:failed:Thinking"]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(events.try_iter().all(|(name, _)| name != "reply"));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3321,6 +3483,11 @@ fn no_extra_step_after_a_stop() {
             )
         });
         events_named(&events, "step", 10, |got| got.len() == 2);
+        // Stop while the brain thinks about the second step: once its call has started, not on
+        // the first step's event, which comes a moment before it (#590 made that race show).
+        within(10, "the second step's call starts", || {
+            (calls(&obid).len() == 2).then_some(())
+        });
         call(&obid, "POST", "/v1/conversation/stop", None);
         asking.join().unwrap()
     });
@@ -3337,13 +3504,14 @@ fn no_extra_step_when_the_budget_ran_out() {
     let folder = Folder::new("brain-check-budget");
     let remote = fixture(&folder.0.join("fixture"));
     let mut config = config(&folder.0, &remote, &planner());
-    config["turnBudget"] = json!(2);
+    // Room for the first step on a loaded machine; the later steps think past it.
+    config["turnBudget"] = json!(5);
     let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
     let id = running(&obid, "Vault secrets")["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    let late = format!("SLEEP 3 {}", reply(""));
+    let late = format!("SLEEP 6 {}", reply(""));
     queue(&obid, &[set_mode(&id, "ask"), late.clone(), late]);
     let answer = said(
         &obid,

@@ -16,6 +16,8 @@ use std::time::Instant;
 use serde_json::json;
 
 use super::actions::{self, Asked, Outcome, Talk};
+use super::find::{self, Finds};
+use super::orchestrator::{self, Orchestration};
 use super::plan::{Action, Plan};
 use super::planner::{Planner, Record, Room};
 use super::read::{self, JobReads};
@@ -82,6 +84,16 @@ impl Turns {
         for earlier in underway.iter().filter(|c| c.conversation == conversation) {
             earlier.cancelled.store(true, Ordering::SeqCst);
         }
+        // A user's words preempt the event orchestrator's turn: it stops after the action under
+        // way (#590).
+        if conversation != super::orchestrator::CONVERSATION {
+            for event in underway
+                .iter()
+                .filter(|c| c.conversation == super::orchestrator::CONVERSATION)
+            {
+                event.stopped.store(true, Ordering::SeqCst);
+            }
+        }
         underway.push(control.clone());
         control
     }
@@ -112,6 +124,13 @@ impl Turns {
             any = true;
         }
         any
+    }
+
+    /// Whether a user's turn is under way: the event orchestrator waits for it (#590).
+    pub fn user_turn_underway(&self) -> bool {
+        self.lock()
+            .iter()
+            .any(|c| c.conversation != super::orchestrator::CONVERSATION)
     }
 
     /// The conversation of the latest turn under way.
@@ -553,6 +572,42 @@ pub async fn run(
     asked: &Asked<'_>,
     control: &Arc<Control>,
 ) -> Answered {
+    // "Work on the roadmap" and the like are the Lead's (#589): it reads the board, not the
+    // briefing.
+    if super::lead::leads(said) {
+        // It says it's thinking first, like every turn (#592).
+        let thought = "Reading the roadmap";
+        super::thinking(shared, control, 1, thought, State::Running);
+        let answered = super::lead::run(shared, said, asked, control).await;
+        let state = match answered.end {
+            End::Cancelled | End::Stopped | End::BudgetSpent => State::Failed,
+            _ => State::Done,
+        };
+        super::thinking(shared, control, 1, thought, state);
+        return answered;
+    }
+    run_with(shared, said, given, asked, control, None).await
+}
+
+/// Runs one turn of the event orchestrator (#590): no user's words, the events in the prompt,
+/// and obid's checks on every plan before it acts.
+pub async fn run_event(
+    shared: &Arc<Shared>,
+    orchestration: &Orchestration,
+    asked: &Asked<'_>,
+    control: &Arc<Control>,
+) -> Answered {
+    run_with(shared, "", &[], asked, control, Some(orchestration)).await
+}
+
+async fn run_with(
+    shared: &Arc<Shared>,
+    said: &str,
+    given: &[Turn],
+    asked: &Asked<'_>,
+    control: &Arc<Control>,
+    orchestration: Option<&Orchestration>,
+) -> Answered {
     let room = Room {
         root: shared.config.home.join("plans"),
         jobs: shared.jobs.clone(),
@@ -561,6 +616,12 @@ pub async fn run(
     let deadline = Instant::now() + shared.config.turn_budget;
     let live = || control.live();
     let halted = || !control.live();
+    // The turn says it's thinking before anything else (#592): the first brain call's line now,
+    // each later call's as it begins.
+    let mut thought = "Thinking".to_owned();
+    super::thinking(shared, control, 1, &thought, State::Running);
+    let mut announced = true;
+    let mut acknowledged = false;
     // The turn's own word, which fences everything quoted for the brain.
     let nonce = super::briefing::nonce();
     let mut done: Vec<String> = vec![];
@@ -568,6 +629,9 @@ pub async fn run(
     let mut request = said.to_owned();
     let mut details: Option<String> = None;
     let mut reads = JobReads::default();
+    let mut finds = Finds::default();
+    // The jobs this turn read, which an event turn must have done before it acts (#590).
+    let mut read_ids: HashSet<String> = HashSet::new();
     let mut research = research::Log::default();
     let tools = research::Tools::new(shared.jobs.clone());
     // Work the brain wants after looking things up waits for the user's Start.
@@ -601,23 +665,41 @@ pub async fn run(
             context.turn_length = Some(said.chars().count());
             context.said = said.to_owned();
             context.found = research.found();
+            if let Some(orchestration) = orchestration {
+                context.orchestrator = true;
+                context.orchestrator_context = Some(orchestration.context(&nonce));
+            }
             // What the turn read and looked up goes into the next step's quoted file.
             context.quoted = research.quoted(
-                reads.quoted(
-                    super::briefing::with_own(context.quoted.take(), &own, &nonce),
+                finds.quoted(
+                    reads.quoted(
+                        super::briefing::with_own(context.quoted.take(), &own, &nonce),
+                        &nonce,
+                    ),
                     &nonce,
                 ),
                 &nonce,
             );
             let planner = Planner {
                 adapters: Planner::of(&shared.config, &room),
-                falls_back_to_rules: step == 0,
+                // Rules never stand in for an event turn: they read a person's words.
+                falls_back_to_rules: step == 0 && orchestration.is_none(),
                 deadline: Some(deadline),
             };
             if named.is_none() {
                 named = Some(asked_for(shared, said, &context));
             }
+            if !announced {
+                super::thinking(shared, control, step + 1, &thought, State::Running);
+            }
+            announced = false;
             let mut planned = planner.plan(&request, &context, &halted).await;
+            let thought_state = if live() && Instant::now() < deadline {
+                State::Done
+            } else {
+                State::Failed
+            };
+            super::thinking(shared, control, step + 1, &thought, thought_state);
             if !live() {
                 planned
                     .refused
@@ -655,6 +737,31 @@ pub async fn run(
             let plan = &planned.plan;
             let index = step + 1;
             step += 1;
+            // obid's checks on an event turn's plan, before it reads or acts (#590).
+            if let Some(orchestration) = orchestration
+                && let Err(escalation) = orchestration.check(
+                    plan,
+                    &read_ids,
+                    obi_protocol::time::now(),
+                    |id| {
+                        shared.link.item(id).map(|i| orchestrator::ItemView {
+                            open: i.done.is_none(),
+                            job: i.job,
+                            kind: i.kind,
+                            options: i.options,
+                        })
+                    },
+                    |id| {
+                        crate::failures::get(home, id)
+                            .map(|r| r.job)
+                            .filter(|j| !j.is_empty())
+                    },
+                    |id| shared.jobs.get(id).map(|j| orchestrator::signature(&j)),
+                )
+            {
+                orchestration.escalate(shared, &escalation);
+                break 'step (End::CouldNot, after(&done, Talk::reply(escalation.reply)));
+            }
             let so_far = || {
                 if done.is_empty() {
                     said.to_owned()
@@ -664,8 +771,12 @@ pub async fn run(
             };
             // The chat reads before it answers (#302): what's read is in the next step's file.
             if plan.action == Action::ReadJob {
+                read_ids.extend(plan.named().iter().cloned());
                 reads.read(plan.named().first().map(String::as_str), |id| {
-                    shared.jobs.get(id).map(|job| read::section(&job))
+                    shared
+                        .jobs
+                        .get(id)
+                        .map(|job| read::section(&job, &shared.config.home))
                 });
                 if Instant::now() >= deadline {
                     break 'step (End::BudgetSpent, finish(&done));
@@ -673,7 +784,36 @@ pub async fn run(
                 if checking {
                     break 'step (End::Checked, finish(&done));
                 }
-                request = reads.continued(&so_far());
+                thought = plan
+                    .named()
+                    .first()
+                    .and_then(|id| shared.jobs.get(id))
+                    .and_then(|job| job.title.filter(|t| !t.trim().is_empty()))
+                    .map_or_else(
+                        || "Looking at the jobs".to_owned(),
+                        |t| format!("Looking at {t}"),
+                    );
+                request = finds.continued(&reads.continued(&so_far()));
+                continue 'turn;
+            }
+            // The chat finds past conversations before it answers (#593), never the one asking.
+            if plan.action == Action::FindConversation {
+                finds.find(plan.message.as_deref(), |words| {
+                    shared.conversations.search(
+                        words,
+                        Some(asked.conversation),
+                        None,
+                        find::CONVERSATIONS,
+                    )
+                });
+                if Instant::now() >= deadline {
+                    break 'step (End::BudgetSpent, finish(&done));
+                }
+                if checking {
+                    break 'step (End::Checked, finish(&done));
+                }
+                thought = "Going over past conversations".to_owned();
+                request = finds.continued(&reads.continued(&so_far()));
                 continue 'turn;
             }
             if plan.action == Action::Research {
@@ -718,7 +858,8 @@ pub async fn run(
                 if checking {
                     break 'step (End::Checked, finish(&done));
                 }
-                request = research.continued(&reads.continued(&so_far()));
+                thought = "Going over what it found".to_owned();
+                request = research.continued(&finds.continued(&reads.continued(&so_far())));
                 continue 'turn;
             }
             if matches!(plan.action, Action::ReplyOnly | Action::AskUser) {
@@ -730,7 +871,15 @@ pub async fn run(
                 break 'step (End::Repeated, finish(&done));
             }
             if !acting {
+                // The reply goes out as soon as the plan is checked, before its jobs are made
+                // (#592); a turn's other answers are said once they're known.
+                if plan.action == Action::Dispatch && !acknowledged {
+                    acknowledged = super::acknowledge(shared, control, &plan.reply);
+                }
                 let talk = actions::answer(shared, &planned, asked, researched, &live).await;
+                if !acknowledged {
+                    acknowledged = super::acknowledge(shared, control, spoken(&talk));
+                }
                 if plan.action == Action::Dispatch {
                     handled.dispatched(plan);
                 }
@@ -741,7 +890,13 @@ pub async fn run(
                 };
                 break 'step (end, after(&done, talk));
             }
-            let outcome = act(shared, control, plan, said, index).await;
+            // The orchestrator's message to a job is its own, about the error it read; a person's
+            // message is their own words (#542).
+            let words = match (orchestration, plan.action) {
+                (Some(_), Action::MessageJob) => plan.message.clone().unwrap_or_default(),
+                _ => said.to_owned(),
+            };
+            let outcome = act(shared, control, plan, &words, index).await;
             handled.acted(shared, plan);
             if !outcome.text().is_empty() {
                 done.push(outcome.text().to_owned());
@@ -757,7 +912,8 @@ pub async fn run(
             if checking {
                 break 'step (End::Checked, finish(&done));
             }
-            request = reads.continued(&continued(said, &done));
+            thought = "Deciding what's next".to_owned();
+            request = finds.continued(&reads.continued(&continued(said, &done)));
             continue 'turn;
         };
         // Before Oby answers, everything the user named was handled (#539): what's left goes
@@ -773,13 +929,18 @@ pub async fn run(
                     earlier.extend(jobs);
                     done = if text.is_empty() { vec![] } else { vec![text] };
                 }
-                request = reads.continued(&unfinished(said, &done, &missing));
+                request = finds.continued(&reads.continued(&unfinished(said, &done, &missing)));
+                thought = "Checking nothing was missed".to_owned();
                 checking = true;
                 continue 'turn;
             }
         }
         break (end, talk);
     };
+    // Ended before its first call (stopped or cancelled meanwhile): the line it sent fails.
+    if announced {
+        super::thinking(shared, control, 1, &thought, State::Failed);
+    }
     let (end, talk) = if checking {
         checked(
             end,

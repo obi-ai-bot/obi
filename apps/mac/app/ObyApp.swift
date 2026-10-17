@@ -150,9 +150,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     /// Clicking Oby's Dock icon, or opening it again (Spotlight, Finder, `open`), while it runs opens its window.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { chat.show() }
+        if !flag { reopen() }
         return true
     }
+
+    /// What a reopen does with no window up: the window opens (tests count it instead).
+    lazy var reopen: () -> Void = { [unowned self] in chat.show() }
 
     /// Closing the window leaves Oby running: the talk key, its pill and the menu bar icon carry on.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

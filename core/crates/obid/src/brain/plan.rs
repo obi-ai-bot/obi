@@ -53,6 +53,8 @@ pub enum Action {
     AskReviewAgain,
     /// Read-only context gathering before the chat answers or proposes work.
     Research,
+    /// The chat finds past conversations by what was said in them before it answers (#593).
+    FindConversation,
 }
 
 impl Action {
@@ -76,6 +78,7 @@ impl Action {
             Action::FixFailure => "fix_failure",
             Action::AskReviewAgain => "ask_review_again",
             Action::Research => "research",
+            Action::FindConversation => "find_conversation",
         }
     }
 
@@ -724,6 +727,20 @@ impl Plan {
                     problems.push("set_mode needs its mode".into());
                 }
             }
+            Action::FindConversation => {
+                if context.orchestrator {
+                    problems.push("find_conversation is only for the chat".into());
+                }
+                let words = self.message.as_deref().unwrap_or("");
+                if crate::conversation::search_words(words).is_empty() {
+                    problems.push("find_conversation puts the words to find in `message`".into());
+                } else if count(words) > crate::conversation::QUERY {
+                    problems.push(format!(
+                        "find_conversation's `message` is at most {} characters",
+                        crate::conversation::QUERY
+                    ));
+                }
+            }
             Action::ReadJob => {
                 if named.len() != 1 {
                     problems.push("read_job names one job".into());
@@ -800,6 +817,7 @@ impl Plan {
         if !self.message.as_deref().unwrap_or("").is_empty()
             && action != Action::AnswerPermission
             && action != Action::MessageJob
+            && action != Action::FindConversation
         {
             problems.push("only answer_permission has a decision or a message".into());
         }
@@ -878,6 +896,7 @@ impl Plan {
         }
         if action != Action::MessageJob
             && action != Action::AnswerPermission
+            && action != Action::FindConversation
             && self.message.as_deref().is_some_and(|m| !m.is_empty())
         {
             problems.push("only message_job or answer_permission has a message".into());
@@ -1537,7 +1556,7 @@ pub fn schema(context: &Context) -> Value {
         "start_now",
     ];
     if !context.orchestrator {
-        actions.extend(["research", "message_job"]);
+        actions.extend(["research", "message_job", "find_conversation"]);
     } else {
         actions.extend(["message_job", "fix_failure"]);
     }
@@ -1951,6 +1970,44 @@ mod tests {
         assert!(schema(&context).to_string().contains("read_job"));
         // It changes nothing, so the loop doesn't count it as an action that did something.
         assert!(!Action::ReadJob.acts() && !Action::Research.acts());
+    }
+
+    /// #593: find_conversation takes the words to find in `message`, changes nothing, and is
+    /// the chat's alone.
+    #[test]
+    fn find_conversation_plans_are_checked() {
+        let mut context = Context::default();
+        let mut find = Plan::of(Action::FindConversation, "");
+        assert_eq!(
+            find.problems(&context, "zq9"),
+            ["find_conversation puts the words to find in `message`"]
+        );
+        find.message = Some(" ?! ".into());
+        assert_eq!(
+            find.problems(&context, "zq9"),
+            ["find_conversation puts the words to find in `message`"]
+        );
+        find.message = Some("x".repeat(201));
+        assert_eq!(
+            find.problems(&context, "zq9"),
+            ["find_conversation's `message` is at most 200 characters"]
+        );
+        find.message = Some("the Watch target".into());
+        assert!(find.problems(&context, "zq9").is_empty());
+        assert!(!Action::FindConversation.acts());
+        assert!(
+            schema(&context)
+                .to_string()
+                .contains("\"find_conversation\"")
+        );
+        assert!(crate::brain::planner::system(false).contains("- find_conversation:"));
+        context.orchestrator = true;
+        assert!(!schema(&context).to_string().contains("find_conversation"));
+        assert!(!crate::brain::planner::system(true).contains("- find_conversation:"));
+        assert_eq!(
+            find.problems(&context, "zq9"),
+            ["find_conversation is only for the chat"]
+        );
     }
 
     /// FinishFromPRTests.finishingAnIssueFromAPullRequestIsAValidFixBuildOrTest and
