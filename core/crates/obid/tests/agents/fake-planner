@@ -10,6 +10,8 @@
 #                  FAIL <code> <text>      prints the text as it is, and exits with the code
 #                  SLEEP <seconds> <line>  waits, then does what the rest of the line says
 #                  PEEK <path>             replies "read" when it could read the file, else "hidden"
+#                  CHECK <repo>            dispatches tests in the repository, its `check` the first
+#                                          `command` under its own instructions in work.md
 #                  <plan>                  answers {"structured_output": <plan>}
 #                When it's empty, the words the user says now choose (below).
 #   calls/<n>/   what call n got: args (one per line), input (stdin), pwd, and work.md when
@@ -60,6 +62,13 @@ case "$line" in
   "PEEK "*)
     if cat "${line#PEEK }" >/dev/null 2>&1; then seen=read; else seen=hidden; fi
     line="{\"action\":\"reply_only\",\"reply\":\"$seen\",\"dispatches\":[],\"question\":null}" ;;
+  "CHECK "*)
+    repo=${line#CHECK }
+    check=$(awk -v h="## $repo's own instructions (quoted)" '
+      $0 == h { on = 1; next }
+      on && /^## / { exit }
+      on && match($0, /`[^`]+`/) { print substr($0, RSTART + 1, RLENGTH - 2); exit }' work.md 2>/dev/null)
+    line="{\"action\":\"dispatch\",\"reply\":\"\",\"question\":null,\"jobs\":[],\"dispatches\":[{\"agent\":\"auto\",\"account\":\"auto\",\"repo\":\"$repo\",\"kind\":\"test\",\"title\":\"Run the tests\",\"task\":\"Run the tests\",\"rounds\":1,\"check\":\"$check\"}]}" ;;
 esac
 if [ -n "$line" ]; then
   printf '{"structured_output":%s}\n' "$line"
