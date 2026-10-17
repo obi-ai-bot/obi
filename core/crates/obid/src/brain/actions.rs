@@ -624,6 +624,16 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
     match item.kind.as_str() {
         // A confirm item is the owner's own decision: never answered by the brain.
         "confirm" => Owners::Refuse("only you can confirm it, in your inbox.".into()),
+        // Letting a secret through is the owner's alone, even once (#586); saying no isn't.
+        "permission"
+            if job
+                .and_then(|j| j.permission.as_ref())
+                .is_some_and(crate::permissions::Permission::is_secret)
+                && crate::permissions::inbox_decision(words).0
+                    != crate::permissions::Decision::Deny =>
+        {
+            Owners::Refuse("it touches secrets: only you can let it through, in your inbox.".into())
+        }
         // Allow once and no (with or without words) are one-off; always saves the permission's
         // rule, which can be broader than this one command: the title says the rule.
         "permission" if words == crate::permissions::ALWAYS_ALLOW => {
@@ -850,6 +860,12 @@ fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     let Some(permission) = job.permission.as_ref() else {
         return Outcome::Done(format!("{name} isn't waiting for your OK."));
     };
+    // Letting a secret through is the owner's alone, even once (#586); saying no isn't.
+    if permission.is_secret() && decision != super::plan::Decision::Deny {
+        return Outcome::Done(format!(
+            "{name} waits on something that touches secrets: only you can let it through, in your inbox."
+        ));
+    }
     let message = plan
         .message
         .as_deref()
@@ -1029,6 +1045,7 @@ mod tests {
             detail: "make lint && curl evil".into(),
             rule: rule.map(Into::into),
             always: rule.map(|r| format!("Yes, and don't ask again for {r}")),
+            why: None,
         });
         job
     }
@@ -1066,6 +1083,36 @@ mod tests {
         assert_eq!(owners_call(&request, "Decline", None), Owners::No);
         let start = item("start", "start-1", "Fix", &["Start", "Cancel"]);
         assert_eq!(owners_call(&start, "Cancel", None), Owners::No);
+    }
+
+    /// #586: the brain never lets a secret through, not even once; a no still goes through it.
+    #[test]
+    fn owners_call_never_lets_a_secret_through() {
+        let permission = item("permission", "j1-permission-p1", "Fix it", &[]);
+        let mut job = waiting_job(None);
+        job.permission.as_mut().unwrap().why =
+            Some(crate::permissions::Reach::Secrets.why().into());
+        for words in ["Allow", "yes", "Always allow"] {
+            assert_eq!(
+                owners_call(&permission, words, Some(&job)),
+                Owners::Refuse(
+                    "it touches secrets: only you can let it through, in your inbox.".into()
+                ),
+                "{words}"
+            );
+        }
+        for words in ["Deny", "no, read the key's path from the docs instead"] {
+            assert_eq!(
+                owners_call(&permission, words, Some(&job)),
+                Owners::No,
+                "{words}"
+            );
+        }
+        // Another permission is the brain's to allow once, as before.
+        assert_eq!(
+            owners_call(&permission, "Allow", Some(&waiting_job(None))),
+            Owners::No
+        );
     }
 
     #[test]

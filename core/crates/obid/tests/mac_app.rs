@@ -179,7 +179,7 @@ fn the_mac_app_follows_obid_and_lists_its_jobs() {
     assert_eq!(
         next(&lines, "status ", 60, &mut seen),
         format!(
-            "status host={host} version=0.2.0 accounts=stub clearedAt=null mode=bypass cleanup=true"
+            "status host={host} version=0.2.0 accounts=stub clearedAt=null mode=sandbox cleanup=true"
         )
     );
     assert_eq!(

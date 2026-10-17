@@ -72,6 +72,8 @@ pub struct Briefing {
     /// The repositories jobs can work in, from the configuration.
     pub repos: Vec<String>,
     pub max_running: usize,
+    /// Settings › Permissions' mode, which a job has unless told otherwise: only another is said.
+    pub default_mode: &'static str,
     /// The week's failure records, newest first ([`week`]).
     pub failures: Vec<Record>,
     /// Seconds since the epoch.
@@ -444,7 +446,7 @@ impl Briefing {
         };
         parts.push(state);
         if job.status.is_active()
-            && let Some(mode) = job.mode.as_deref().filter(|m| *m != "bypass")
+            && let Some(mode) = job.mode.as_deref().filter(|m| *m != self.default_mode)
         {
             parts.push(format!(
                 "mode {}",
@@ -1030,10 +1032,34 @@ mod tests {
             ],
             repos: vec!["deskree-inc/oby".into()],
             max_running: 6,
+            default_mode: "sandbox",
             failures: vec![],
             now: NOW,
             nonce: "n0nce".into(),
         }
+    }
+
+    /// #586: a job's mode is said only when it isn't the owner's default, so a job in Bypass,
+    /// which never asks, is named, and one in the default Sandbox isn't.
+    #[test]
+    fn the_briefing_names_a_mode_only_when_it_isnt_the_default() {
+        let mut sandboxed = job("ab12cd34", "Vault secrets");
+        sandboxed.status = Status::Running;
+        sandboxed.mode = Some("sandbox".into());
+        let mut bypassed = job("cd34ef56", "Watch fix");
+        bypassed.status = Status::Running;
+        bypassed.mode = Some("bypass".into());
+        let briefing = briefing(vec![], vec![]);
+        assert!(
+            !briefing.describe(&sandboxed).contains("mode "),
+            "{}",
+            briefing.describe(&sandboxed)
+        );
+        assert!(
+            briefing.describe(&bypassed).contains("mode Bypass"),
+            "{}",
+            briefing.describe(&bypassed)
+        );
     }
 
     /// ConversationTests.theBriefingTellsTheBrainAboutTheWork, for what obid has: no pull

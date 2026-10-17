@@ -3525,3 +3525,114 @@ fn no_extra_step_when_the_budget_ran_out() {
     assert!(!checked(&obid));
     assert_eq!(ends(&obid), ["budget_spent"]);
 }
+
+/// #586: `sandbox` stops a job asking the owner about what stays inside its sandbox, so it widens
+/// trust, and it is the owner's to set (`PUT /v1/settings/permissions`, `POST /v1/jobs/{id}/mode`).
+/// The brain's plan can't name it: a plan that sets it, or dispatches a job in it, is refused, and
+/// the job's mode stays as it was, with nothing started and nothing to confirm.
+#[test]
+fn the_brain_cannot_set_sandbox_mode() {
+    let folder = Folder::new("brain-no-sandbox");
+    let obid = started(&folder);
+    let id = job_in(&obid, "Vault secrets", "SLEEP", "ask");
+    within(30, "the job runs", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["status"] == "running").then_some(())
+    });
+    let dispatch = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "fix", "title": "Greeting fix",
+         "task": "Fix the greeting", "rounds": 1, "check": "node --test", "mode": "sandbox"}]});
+    queue(&obid, &[set_mode(&id, "sandbox"), dispatch.to_string()]);
+    // Both plans miss the schema, so the rules answer instead.
+    let answer = said(&obid, "stop asking me about commands");
+    assert_eq!(answer["kind"], "question", "{answer}");
+    assert_eq!(answer["jobs"], json!([]));
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["by"], "rules");
+    let refused: Vec<&str> = record["refused"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert_eq!(refused.len(), 2, "{record}");
+    for plan in refused {
+        assert!(
+            plan.starts_with("claude plan refused (the output doesn't match the schema)")
+                && plan.contains(r#""mode":"sandbox""#),
+            "{plan}"
+        );
+    }
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["mode"], "ask", "{job}");
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
+    assert!(items_of(&obid, "confirm").is_empty());
+}
+
+/// #586: the brain never lets a secret through, not even once. "Allow it" in chat leaves the
+/// permission waiting for the owner's own answer in the inbox, and the agent hears nothing.
+#[test]
+fn the_brain_never_lets_a_secret_through() {
+    let folder = Folder::new("brain-no-secret");
+    let obid = started(&folder);
+    let id = job_in(
+        &obid,
+        "Key reader",
+        r#"ASK: {"tool": "Bash", "input": {"command": "cat ~/.ssh/id_rsa"}}"#,
+        "sandbox",
+    );
+    let permission = within(30, "a permission waits", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        job["permission"]["id"].as_str().map(str::to_owned)
+    });
+    let allow = json!({"action": "answer_permission", "reply": "", "dispatches": [], "question": null,
+                       "jobs": [id], "decision": "allow", "message": null});
+    queue(&obid, &[allow.to_string()]);
+    let answer = said(&obid, "allow it");
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("only you can let it through, in your inbox"),
+        "{answer}"
+    );
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["permission"]["id"], permission.as_str(), "{job}");
+    assert_eq!(job["status"], "running");
+    assert_eq!(items_of(&obid, "permission").len(), 1);
+}
+
+/// Re-review of #586, S2: the brain can't settle a secret by changing the job's mode. After it
+/// sets Ask, Plan and Accept edits, the card still waits and the agent heard nothing.
+#[test]
+fn the_brain_cannot_settle_a_secret_by_changing_the_mode() {
+    let folder = Folder::new("brain-secret-mode");
+    let obid = started(&folder);
+    let id = job_in(
+        &obid,
+        "Env reader",
+        // A read: Ask, Plan and Accept edits all let reads through without asking.
+        r#"ASK: {"tool": "Read", "input": {"file_path": ".env"}}"#,
+        "sandbox",
+    );
+    let permission = within(30, "a permission waits", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        job["permission"]["id"].as_str().map(str::to_owned)
+    });
+    queue(
+        &obid,
+        &[
+            set_mode(&id, "ask"),
+            set_mode(&id, "plan"),
+            set_mode(&id, "acceptEdits"),
+            reply("Done."),
+        ],
+    );
+    said(&obid, "read it, whatever mode it takes");
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["mode"], "acceptEdits", "{job}");
+    assert_eq!(job["permission"]["id"], permission.as_str(), "{job}");
+    assert_eq!(job["status"], "running");
+    assert_eq!(job["summary"], "", "the agent heard an answer: {job}");
+}

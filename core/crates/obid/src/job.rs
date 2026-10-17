@@ -39,7 +39,11 @@ impl Status {
 pub const KINDS: [&str; 6] = ["review", "fix", "build", "test", "investigate", "research"];
 
 /// The permission modes (docs/runner-api.md, "Permission modes").
-pub const MODES: [&str; 4] = ["ask", "acceptEdits", "plan", "bypass"];
+pub const MODES: [&str; 5] = ["ask", "acceptEdits", "plan", "bypass", "sandbox"];
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
 
 /// The pipeline stage a job is in, as it last was (Engine/Pipeline.swift, `JobStage.ID`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +197,12 @@ pub struct Job {
     /// Per-job bearer for `POST` and `GET /v1/agent/apple-check`; never sent to the API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apple_token: Option<String>,
+    /// What obid answered for the owner by its own rules (permissions.rs `Answered`): the latest
+    /// few, with `answered_count` for all of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answered: Vec<crate::permissions::Answered>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub answered_count: u32,
     /// Calls an agent made through the user's connected apps; names only, never secret values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connection_uses: Vec<crate::connections::ConnectionUse>,
@@ -290,6 +300,8 @@ impl Job {
             apple_check: None,
             apple_ran: None,
             apple_token: None,
+            answered: Vec::new(),
+            answered_count: 0,
             connection_uses: Vec::new(),
             connections: None,
             heard: Vec::new(),
@@ -501,6 +513,8 @@ impl Job {
             "waiting": self.waiting.as_ref().filter(|_| self.status == Status::Queued),
             "mode": self.mode.as_deref().unwrap_or("bypass"),
             "permission": self.permission,
+            "answered": self.answered.iter().map(crate::permissions::Answered::to_json).collect::<Vec<_>>(),
+            "answeredCount": self.answered_count,
             "connectionUses": self.connection_uses,
             "pipeline": self.pipeline(),
             "title": self.short_title(),
@@ -836,8 +850,10 @@ mod tests {
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's three.
-        assert_eq!(object.len(), 68);
+        // The Swift runner's 65 keys, and obid's five.
+        assert_eq!(object.len(), 70);
+        assert_eq!(value["answered"], json!([]));
+        assert_eq!(value["answeredCount"], 0);
         assert_eq!(value["report"], false);
         assert_eq!(value["cloudNeedsYou"], false);
         assert_eq!(value["mode"], "bypass");
