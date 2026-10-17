@@ -16,6 +16,9 @@ use serde_json::{Value, json};
 
 use crate::api::{ApiError, Shared};
 
+/// The permission rule that lets a job's agent call the broker's tools (`mcp__oby__<connection>_<tool>`),
+/// in the job's rules only when it was given the broker.
+pub const BROKER_RULE: &str = "mcp__oby__*";
 const ACTING: &str = "Acting as you needs your OK, which arrives with permission modes.";
 const LONGEST: usize = 256 * 1024;
 const MCP_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -832,27 +835,13 @@ impl Connections {
 
     async fn api_get(&self, c: &Connection, args: &Value) -> Result<Value, String> {
         let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-        if !valid_api_path(path) {
+        let query = args.get("query").and_then(Value::as_object);
+        let Some(url) = api_url(c, path, query) else {
             return Ok(failure(format!(
                 "The path starts with / and stays on {}, like /v1/me.",
                 c.host()
             )));
-        }
-        let base = c.url();
-        let mut url = base.clone();
-        let base_path = base.path().trim_end_matches('/');
-        url.set_path(&format!("{base_path}{path}"));
-        let mut query: Vec<_> = args
-            .get("query")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flatten()
-            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_owned())))
-            .collect();
-        query.sort();
-        if !query.is_empty() {
-            url.query_pairs_mut().extend_pairs(query);
-        }
+        };
         let response = self
             .authorized(c, self.client.get(url))
             .await?
@@ -901,17 +890,29 @@ fn connection_json(connection: &Connection, saved: bool, last_used: Option<&Stri
         "secretSaved": saved, "lastUsed": last_used})
 }
 
+/// Read or write: read only when the tool says it's read-only (MCP's `readOnlyHint`) and its
+/// name has no word that acts (a server's hint is only a hint). Words split as Broker.swift's
+/// `access` splits them: at a lower-case letter or digit followed by a capital, and at anything
+/// that isn't a letter.
 fn access(name: &str, tool: &Value) -> &'static str {
-    let words = name
-        .replace(|c: char| c.is_ascii_uppercase(), "_")
-        .to_ascii_lowercase();
+    let mut words = String::with_capacity(name.len() + 8);
+    let mut previous: Option<char> = None;
+    for c in name.chars() {
+        if c.is_ascii_uppercase()
+            && previous.is_some_and(|p| p.is_ascii_lowercase() || p.is_ascii_digit())
+        {
+            words.push('_');
+        }
+        words.push(c.to_ascii_lowercase());
+        previous = Some(c);
+    }
     let acting = [
         "send", "post", "create", "delete", "remove", "pay", "update", "write", "edit", "reply",
         "publish", "upload", "transfer", "invite", "archive", "merge", "comment", "put", "patch",
         "set", "add", "move",
     ];
     let suspicious = words
-        .split(|c: char| !c.is_ascii_alphanumeric())
+        .split(|c: char| !c.is_ascii_alphabetic())
         .any(|w| acting.contains(&w));
     if tool
         .get("annotations")
@@ -937,6 +938,36 @@ fn api_tools(c: &Connection) -> Vec<Value> {
         json!({"name":format!("{}_get",c.name),"description":format!("{} (through Oby): GET a path of {base} with the user's login. Answers with the status and the body.",c.name),"inputSchema":{"type":"object","properties":{"path":{"type":"string","description":format!("The path under {base}, starting with /, like /v1/me.")},"query":{"type":"object","additionalProperties":{"type":"string"},"description":"Query parameters."}},"required":["path"]},"annotations":{"readOnlyHint":true}}),
         json!({"name":format!("{}_send",c.name),"description":format!("{} (through Oby): POST, PUT, PATCH or DELETE as the user. Acts as the user, so Oby refuses it for now.",c.name),"inputSchema":{"type":"object","properties":{"method":{"type":"string","enum":["POST","PUT","PATCH","DELETE"]},"path":{"type":"string"}},"required":["method","path"]},"annotations":{"readOnlyHint":false}}),
     ]
+}
+
+/// The URL an API connection's `get` asks: `path` under its base URL, with `query` (string
+/// values only, sorted). None when the path isn't one (`valid_api_path`), or when the URL it makes
+/// would leave the connection's scheme, host or port (Broker.swift's `url`).
+fn api_url(
+    c: &Connection,
+    path: &str,
+    query: Option<&serde_json::Map<String, Value>>,
+) -> Option<reqwest::Url> {
+    if !valid_api_path(path) {
+        return None;
+    }
+    let base = c.url();
+    let mut url = base.clone();
+    let base_path = base.path().trim_end_matches('/');
+    url.set_path(&format!("{base_path}{path}"));
+    let mut query: Vec<_> = query
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_owned())))
+        .collect();
+    query.sort();
+    if !query.is_empty() {
+        url.query_pairs_mut().extend_pairs(query);
+    }
+    (url.scheme() == base.scheme()
+        && url.host_str() == base.host_str()
+        && url.port_or_known_default() == base.port_or_known_default())
+    .then_some(url)
 }
 
 fn valid_api_path(path: &str) -> bool {
@@ -1198,5 +1229,268 @@ async fn agent_mcp(
     match shared.connections.handle(&job, value).await {
         Some(answer) => (StatusCode::OK, Json(answer)).into_response(),
         None => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn folder(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("obid-connections-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    /// A private vault in `home` holding `secrets`.
+    fn vault(home: &Path, secrets: &[(&str, &str)]) {
+        let dir = home.join("vault");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let values: serde_json::Map<String, Value> = secrets
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), json!(v)))
+            .collect();
+        let file = dir.join("secrets.json");
+        std::fs::write(&file, json!({ "secrets": values }).to_string()).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn connection(name: &str, mcp: &str, secret: &str) -> Connection {
+        Connection {
+            name: name.into(),
+            mcp: Some(mcp.into()),
+            api: None,
+            secret: secret.into(),
+            header: None,
+            created: "2026-10-16T00:00:00Z".into(),
+        }
+    }
+
+    /// A broker over `home` with `all` connected, and no jobs to ask.
+    fn broker(home: &Path, all: Vec<Connection>) -> Connections {
+        Connections {
+            file: home.join("connections.json"),
+            uses_file: home.join("vault/uses.jsonl"),
+            vault_file: home.join("vault/secrets.json"),
+            all: Mutex::new(all),
+            last_used: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(HashMap::new()),
+            snapshots: Mutex::new(HashMap::new()),
+            upstreams: tokio::sync::Mutex::new(HashMap::new()),
+            jobs: Weak::new(),
+            client: reqwest::Client::new(),
+            api_url: "http://127.0.0.1:7777".into(),
+            next_id: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    /// ConnectionTests.onlyReadOnlyToolsThatDontActAreReads, and the names whose acting word
+    /// starts with a capital or ends at a digit.
+    #[test]
+    fn only_read_only_tools_that_dont_act_are_reads() {
+        let read = json!({"annotations": {"readOnlyHint": true}});
+        for name in [
+            "search_threads",
+            "getProfile",
+            "list_posts",
+            "whoami",
+            "v2Search",
+        ] {
+            assert_eq!(access(name, &read), "read", "{name}");
+        }
+        assert_eq!(access("search_threads", &json!({})), "write");
+        assert_eq!(
+            access(
+                "search",
+                &json!({"annotations": {"readOnlyHint": true, "destructiveHint": true}})
+            ),
+            "write"
+        );
+        for acting in [
+            "send_email",
+            "createIssue",
+            "delete-file",
+            "pay_invoice",
+            "post_message",
+            "replyToThread",
+            "SendEmail",
+            "draftSend",
+            "messageSend",
+            "threadReply",
+            "send2",
+            "FILE_UPLOAD",
+        ] {
+            assert_eq!(access(acting, &read), "write", "{acting}");
+        }
+    }
+
+    /// ConnectionTests.anAPIsPathStaysOnItsHost.
+    #[test]
+    fn an_apis_path_stays_on_its_host() {
+        let api = Connection {
+            name: "people".into(),
+            mcp: None,
+            api: Some("https://api.example.com/v2".into()),
+            secret: "people-key".into(),
+            header: Some("X-Api-Key".into()),
+            created: String::new(),
+        };
+        let query = json!({"fields": "name email", "n": 3});
+        assert_eq!(
+            api_url(&api, "/me", query.as_object()).unwrap().as_str(),
+            "https://api.example.com/v2/me?fields=name+email"
+        );
+        for path in [
+            "//evil.example/x",
+            "me",
+            "/a b",
+            "/x%zz",
+            "/x%2",
+            "http://evil.example/",
+            "/\\evil.example",
+            "",
+        ] {
+            assert!(api_url(&api, path, None).is_none(), "{path}");
+        }
+        for path in [
+            "/@evil.example",
+            "/../../../evil.example",
+            "/%2e%2e/%2fevil.example",
+        ] {
+            let url = api_url(&api, path, None).unwrap();
+            assert_eq!(url.host_str(), Some("api.example.com"), "{path}: {url}");
+            assert_eq!(url.scheme(), "https", "{path}");
+        }
+    }
+
+    /// The URLs and headers a connection refuses (422): the secret never goes in the clear, to a
+    /// login in the URL, to a header that isn't the secret's own, or under a name a tool's
+    /// `<connection>_<tool>` couldn't split from.
+    #[test]
+    fn connections_that_could_send_the_secret_elsewhere_are_refused() {
+        let good = connection("mail", "https://mail.example.com/mcp", "mail-token");
+        assert_eq!(good.problem(), None);
+        let local = connection("local", "http://127.0.0.1:9/mcp", "mail-token");
+        assert_eq!(local.problem(), None);
+        let mut wrong = vec![
+            connection("web", "http://example.com/mcp", "mail-token"),
+            connection("web", "http://127.0.0.1.example.com/mcp", "mail-token"),
+            connection("Mail_2", "https://example.com/mcp", "mail-token"),
+            connection("", "https://example.com/mcp", "mail-token"),
+            connection("-mail", "https://example.com/mcp", "mail-token"),
+            connection("mail", "https://user:pw@example.com/mcp", "mail-token"),
+            connection("mail", "https://example.com/mcp?key=1", "mail-token"),
+            connection("mail", "https://example.com/mcp#x", "mail-token"),
+            connection("mail", "ftp://example.com/mcp", "mail-token"),
+            connection("mail", "not a url", "mail-token"),
+            connection("mail", "https://example.com/mcp", "../secret"),
+            connection("mail", "https://example.com/mcp", ""),
+        ];
+        let mut both = good.clone();
+        both.api = Some("https://example.com".into());
+        wrong.push(both);
+        let mut neither = good.clone();
+        neither.mcp = None;
+        wrong.push(neither);
+        for header in [
+            "Host",
+            "cookie",
+            "Content-Length",
+            "Mcp-Session-Id",
+            "X Key",
+            "",
+        ] {
+            let mut c = good.clone();
+            c.header = Some(header.into());
+            wrong.push(c);
+        }
+        for c in wrong {
+            assert!(c.problem().is_some(), "{c:?}");
+        }
+    }
+
+    /// The vault is read only when its folder and file are the owner's alone, never through a
+    /// symbolic link.
+    #[test]
+    fn a_vault_that_isnt_private_is_refused() {
+        let home = folder("vault");
+        let file = home.join("vault/secrets.json");
+        assert_eq!(secure_vault(&file), Ok(None), "no vault yet");
+        vault(&home, &[("mail-token", "mail-0123456789")]);
+        assert_eq!(
+            secure_vault(&file).unwrap().unwrap()["mail-token"],
+            "mail-0123456789"
+        );
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(secure_vault(&file).is_err(), "a file others can read");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(home.join("vault"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        assert!(secure_vault(&file).is_err(), "a folder others can read");
+        std::fs::set_permissions(home.join("vault"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let elsewhere = home.join("elsewhere.json");
+        std::fs::rename(&file, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
+        assert!(secure_vault(&file).is_err(), "a symbolic link");
+        let broker = broker(&home, vec![]);
+        assert!(broker.vault_value("mail-token").is_err());
+    }
+
+    /// A job uses the connections it started with: one added since never reaches it, and one
+    /// replaced or removed since stops at once. Each job has its own token, and an ended job's
+    /// goes.
+    #[test]
+    fn a_job_keeps_the_connections_it_started_with() {
+        let home = folder("snapshot");
+        vault(
+            &home,
+            &[
+                ("mail-token", "mail-0123456789"),
+                ("people-key", "people-0123456789"),
+            ],
+        );
+        let mail = connection("mail", "https://mail.example.com/mcp", "mail-token");
+        let people = connection("people", "https://people.example.com/mcp", "people-key");
+        let broker = broker(&home, vec![mail.clone(), people.clone()]);
+        let names =
+            |job: &str| -> Vec<String> { broker.usable(job).into_iter().map(|c| c.name).collect() };
+        let (url, token) = broker.open_job("job1").unwrap();
+        assert_eq!(url, "http://127.0.0.1:7777/v1/agent/mcp/job1");
+        assert_eq!(broker.open_job("job1").unwrap().1, token, "one token a job");
+        assert_eq!(names("job1"), ["mail", "people"]);
+
+        let evil = connection("evil", "https://evil.example.com/mcp", "mail-token");
+        let mut replaced = people.clone();
+        replaced.secret = "mail-token".into();
+        *broker.all.lock().unwrap() = vec![evil, mail.clone(), replaced];
+        assert_eq!(names("job1"), ["mail"], "added and replaced since");
+        let (_, other) = broker.open_job("job2").unwrap();
+        assert_ne!(other, token);
+        assert_eq!(names("job2"), ["evil", "mail", "people"]);
+
+        *broker.all.lock().unwrap() = vec![];
+        assert!(names("job1").is_empty(), "removed since");
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(broker.close_job("job1"));
+        let tokens = broker.tokens.lock().unwrap();
+        assert!(!tokens.contains_key(&token) && tokens.contains_key(&other));
+    }
+
+    /// With nothing connected, or no secret in the vault for it, a job gets no broker.
+    #[test]
+    fn with_nothing_usable_agents_get_no_broker() {
+        let home = folder("lonely");
+        assert_eq!(broker(&home, vec![]).open_job("lonely"), None);
+        let mail = connection("mail", "https://mail.example.com/mcp", "mail-token");
+        assert_eq!(broker(&home, vec![mail.clone()]).open_job("lonely"), None);
+        vault(&home, &[("other", "other-0123456789")]);
+        assert_eq!(broker(&home, vec![mail]).open_job("lonely"), None);
     }
 }

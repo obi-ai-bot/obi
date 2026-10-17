@@ -3032,7 +3032,7 @@ impl Jobs {
                 };
                 let mut mcp_rules = crate::plugins::rules(&servers);
                 if broker.is_some() && tool != Tool::Cursor {
-                    mcp_rules.push("mcp__oby__*".into());
+                    mcp_rules.push(crate::connections::BROKER_RULE.into());
                 }
                 if !servers.is_empty() || broker.is_some() && tool == Tool::Claude {
                     let file = spec.temp.join(MCP_CONFIG_FILE);

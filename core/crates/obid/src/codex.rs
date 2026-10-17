@@ -447,6 +447,34 @@ pub fn finished(turn: &Value, said: Option<&str>) -> (String, bool) {
 mod tests {
     use super::*;
 
+    /// ConnectionTests' last part: Codex finds the broker in its config and reads the job's token
+    /// from a variable it names; the token is never an argument (other processes read those).
+    #[test]
+    fn codex_reaches_the_broker_with_the_token_out_of_its_arguments() {
+        let url = "http://127.0.0.1:7777/v1/agent/mcp/job1";
+        let token = "job-token-0123456789abcdef";
+        let args: Vec<String> = argv(PathBuf::from("/bin/codex"), Some((url, token)))
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "/bin/codex",
+                "-c",
+                r#"mcp_servers.oby.url="http://127.0.0.1:7777/v1/agent/mcp/job1""#,
+                "-c",
+                r#"mcp_servers.oby.bearer_token_env_var="OBY_MCP_TOKEN""#,
+                "app-server"
+            ]
+        );
+        assert!(!args.iter().any(|a| a.contains(token)));
+        assert_eq!(
+            argv(PathBuf::from("/bin/codex"), None),
+            ["/bin/codex", "app-server"]
+        );
+    }
+
     #[test]
     fn the_shell_codex_wraps_commands_in_comes_off() {
         assert_eq!(unwrap_shell("/bin/zsh -lc 'git status'"), "git status");

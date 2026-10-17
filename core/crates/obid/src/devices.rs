@@ -176,19 +176,10 @@ impl Devices {
         let Ok(signature) = p256::ecdsa::Signature::from_der(&signature_bytes) else {
             return false;
         };
-        let Some(saved) = self
-            .saved
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .devices
-            .iter()
-            .find(|d| d.id == device)
-            .cloned()
-        else {
+        let Some(public_key) = self.public_key(device) else {
             return false;
         };
-        let Ok(key_bytes) = base64::engine::general_purpose::STANDARD.decode(saved.public_key)
-        else {
+        let Ok(key_bytes) = base64::engine::general_purpose::STANDARD.decode(public_key) else {
             return false;
         };
         let Ok(key) = p256::ecdsa::VerifyingKey::from_sec1_bytes(&key_bytes) else {
@@ -274,6 +265,147 @@ mod tests {
             .unwrap();
         let again = Devices::open(&home);
         assert_eq!(again.register("Mac", &key(3), SystemTime::now()), Ok(id));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// What a phone sends to approve a connection change: `message` signed with `scalar`'s key.
+    fn signed(
+        scalar: u8,
+        device: &str,
+        action: &str,
+        signed_at: &str,
+        message: &str,
+    ) -> serde_json::Value {
+        use p256::ecdsa::signature::Signer as _;
+        let key = p256::ecdsa::SigningKey::from_slice(&[scalar; 32]).unwrap();
+        let signature: p256::ecdsa::Signature = key.sign(message.as_bytes());
+        serde_json::json!({"device": device, "action": action, "signedAt": signed_at,
+            "signature": base64::engine::general_purpose::STANDARD.encode(signature.to_der().as_bytes())})
+    }
+
+    /// A connection change goes through only with a registered device's signature over obid's
+    /// own sentence, `"oby-connection\n<action>\n<signedAt>"`, signed within two minutes, once,
+    /// even across a restart (ConnectionTests.agentsUseConnectedAppsWithoutEverSeeingTheLogin's
+    /// approvals, and what it can't reach: the clock and the other kinds of signed sentence).
+    #[test]
+    fn a_connection_change_needs_one_fresh_signature_from_a_registered_device() {
+        let home = folder("connection-approval");
+        std::fs::write(
+            home.join("devices.json"),
+            serde_json::json!({"devices": [{"id": "phone", "name": "Phone", "publicKey": key(9),
+                "registered": "2026-10-16T00:00:00Z"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let devices = Devices::open(&home);
+        let action = "Connect mail: agents' read-only calls to the MCP server https://mail.example.com/mcp carry the vault secret mail-token as Authorization: Bearer.";
+        let at = |offset: i64| obi_protocol::time::format(obi_protocol::time::now() + offset);
+        let now = at(0);
+        let good = |signed_at: &str| {
+            signed(
+                9,
+                "phone",
+                action,
+                signed_at,
+                &format!("oby-connection\n{action}\n{signed_at}"),
+            )
+        };
+
+        // What is refused, none of it using an approval up.
+        let refused = [
+            ("no device", {
+                let mut a = good(&now);
+                a.as_object_mut().unwrap().remove("device");
+                a
+            }),
+            (
+                "an unknown device",
+                signed(
+                    9,
+                    "laptop",
+                    action,
+                    &now,
+                    &format!("oby-connection\n{action}\n{now}"),
+                ),
+            ),
+            (
+                "another key",
+                signed(
+                    8,
+                    "phone",
+                    action,
+                    &now,
+                    &format!("oby-connection\n{action}\n{now}"),
+                ),
+            ),
+            (
+                "another action, signed",
+                signed(
+                    9,
+                    "phone",
+                    "Disconnect mail.",
+                    &now,
+                    &format!("oby-connection\nDisconnect mail.\n{now}"),
+                ),
+            ),
+            (
+                "another action, claimed",
+                signed(
+                    9,
+                    "phone",
+                    "Disconnect mail.",
+                    &now,
+                    &format!("oby-connection\n{action}\n{now}"),
+                ),
+            ),
+            (
+                "another time than signed",
+                signed(
+                    9,
+                    "phone",
+                    action,
+                    &at(1),
+                    &format!("oby-connection\n{action}\n{now}"),
+                ),
+            ),
+            (
+                "a publish approval",
+                signed(
+                    9,
+                    "phone",
+                    action,
+                    &now,
+                    &format!("oby-publish\njob1\n{action}\n{now}"),
+                ),
+            ),
+            ("the bare action", signed(9, "phone", action, &now, action)),
+            ("three minutes ago", good(&at(-180))),
+            ("three minutes ahead", good(&at(180))),
+            ("no time", good("yesterday")),
+            ("no signature", {
+                let mut a = good(&now);
+                a["signature"] = serde_json::json!("not base64!");
+                a
+            }),
+            ("a signature that isn't DER", {
+                let mut a = good(&now);
+                a["signature"] = serde_json::json!("AAAA");
+                a
+            }),
+        ];
+        for (why, approval) in &refused {
+            assert!(!devices.approves_connection(approval, action), "{why}");
+        }
+
+        let approval = good(&now);
+        assert!(devices.approves_connection(&approval, action));
+        assert!(!devices.approves_connection(&approval, action), "used once");
+        assert!(
+            !Devices::open(&home).approves_connection(&approval, action),
+            "used once, after a restart"
+        );
+        // Another one, signed a second later, goes through: each is its own.
+        assert!(Devices::open(&home).approves_connection(&good(&at(1)), action));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

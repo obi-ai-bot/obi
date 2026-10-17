@@ -308,7 +308,13 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
 /// On Linux, sandboxed agents reach the host through slirp4netns at 10.0.2.2. Admit that fixed
 /// host only for the job-token MCP route; normal app API requests still require a loopback Host.
 fn agent_gateway_request(uri: &axum::http::Uri, headers: &HeaderMap) -> bool {
-    if !cfg!(target_os = "linux") || uri.authority().is_some() {
+    cfg!(target_os = "linux") && gateway_host(uri, headers)
+}
+
+/// The request names the slirp4netns host alias, `10.0.2.2` (any port), in its one `Host`, and
+/// no other authority.
+fn gateway_host(uri: &axum::http::Uri, headers: &HeaderMap) -> bool {
+    if uri.authority().is_some() {
         return false;
     }
     let mut hosts = headers.get_all(header::HOST).iter();
@@ -618,6 +624,45 @@ fn disk_usage_unless(path: &Path, cancelled: &AtomicBool) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the slirp4netns host alias, alone in one `Host`, is the agents' gateway; the gate
+    /// admits it on Linux, and only on `/v1/agent/mcp/{job}` with that job's token.
+    #[test]
+    fn the_agents_gateway_is_only_the_slirp_host() {
+        let ask = |uri: &str, hosts: &[&str]| {
+            let mut headers = HeaderMap::new();
+            for host in hosts {
+                headers.append(header::HOST, host.parse().unwrap());
+            }
+            gateway_host(&uri.parse().unwrap(), &headers)
+        };
+        for host in ["10.0.2.2", "10.0.2.2:7777", " 10.0.2.2:1 "] {
+            assert!(ask("/v1/agent/mcp/job1", &[host]), "{host}");
+        }
+        for hosts in [
+            &["10.0.2.3"][..],
+            &["10.0.2.2.evil.example"],
+            &["10.0.2.2:"],
+            &["10.0.2.2:x"],
+            &["10.0.2.2:7777:1"],
+            &["evil.example"],
+            &["127.0.0.1"],
+            &["10.0.2.2", "10.0.2.2"],
+            &[],
+        ] {
+            assert!(!ask("/v1/agent/mcp/job1", hosts), "{hosts:?}");
+        }
+        assert!(!ask("http://evil.example/v1/agent/mcp/job1", &["10.0.2.2"]));
+        assert_eq!(
+            agent_gateway_request(&"/v1/agent/mcp/job1".parse().unwrap(), &{
+                let mut headers = HeaderMap::new();
+                headers.insert(header::HOST, "10.0.2.2".parse().unwrap());
+                headers
+            }),
+            cfg!(target_os = "linux"),
+            "the gateway is Linux's alone"
+        );
+    }
 
     #[test]
     fn loopback_names() {
