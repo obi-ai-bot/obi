@@ -113,6 +113,25 @@ struct DesignTests {
         #expect(ConversationList.ago(at(3 * 1440 + 10), now: now) == "3d")
     }
 
+    /// Home's words start a conversation: obid names it in a `conversation` event as the turn
+    /// begins, titled from the words, so the phone knows its id before the answer (Stop needs it).
+    @Test func aNewConversationIsKnownByItsTitle() {
+        let said = "review oby PR #33 and tell me what it changes in the gateway, please"
+        #expect(ConversationList.started(by: said, RunnerConversation(id: "c", title: "Review oby PR #33 and tell me what it changes…")))
+        #expect(ConversationList.started(by: "hihi", RunnerConversation(id: "c", title: "Hihi")))
+        #expect(!ConversationList.started(by: "hihi", RunnerConversation(id: "c", title: "Hi")))
+        #expect(!ConversationList.started(by: "hihi", RunnerConversation(id: "c", title: "Hihi", deleted: true)))
+    }
+
+    /// Words queued offline keep the conversation they were for, across a relaunch.
+    @Test func queuedWordsKeepTheirConversation() throws {
+        let queued = OfflineMessage(id: "m", said: "and the vault one?", question: nil, option: nil, voice: false, conversation: "c1")
+        let read = try JSONDecoder().decode(OfflineMessage.self, from: JSONEncoder().encode(queued))
+        #expect(read.conversation == "c1" && read.new == nil)
+        let old = try JSONDecoder().decode(OfflineMessage.self, from: Data(#"{"id":"m","said":"hi","voice":false}"#.utf8))
+        #expect(old.conversation == nil && old.new == nil)
+    }
+
     // MARK: A task's card
 
     #if DEBUG

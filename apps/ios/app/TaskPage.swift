@@ -208,7 +208,9 @@ struct TaskPage: View {
         .scrollDismissesKeyboard(.interactively)
         .background(Tokens.bg)
         .safeAreaInset(edge: .bottom) {
-            if let job, TaskFacts.box(job) != nil {
+            // Every task but Oby's own reviews takes words. Not gated on its session: obid's
+            // gateway leaves `session` out on purpose, and the runner picks it up itself.
+            if let job, job.reviewOf == nil {
                 VStack(alignment: .leading, spacing: 6) {
                     if let noteProblem {
                         Text(noteProblem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.horizontal, Tokens.gutter + 12)

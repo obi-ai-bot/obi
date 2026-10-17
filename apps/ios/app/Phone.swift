@@ -48,6 +48,17 @@ nonisolated enum ConversationList {
         list.sorted { ($0.pinned ? 1 : 0, $0.latest) > ($1.pinned ? 1 : 0, $1.latest) }
     }
 
+    /// Whether `conversation` is the one `said` just started: obid titles a new conversation from
+    /// its first line (at most 48 characters, the first 45 and "…" when longer, its first letter
+    /// upper-case), and names it in a `conversation` event as the turn begins.
+    static func started(by said: String, _ conversation: RunnerConversation) -> Bool {
+        guard !conversation.deleted, !conversation.title.isEmpty else { return false }
+        let first = said.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").first.map(String.init) ?? ""
+        guard conversation.title.hasSuffix("…") else { return first.caseInsensitiveCompare(conversation.title) == .orderedSame }
+        let cut = conversation.title.dropLast().trimmingCharacters(in: .whitespaces)
+        return !cut.isEmpty && first.lowercased().hasPrefix(cut.lowercased())
+    }
+
     /// Whether a step of Oby's turn belongs in the thread shown: a one-thread runner's always;
     /// on obid, only its own conversation's, and none while a new one waits for its id (Thinking
     /// says enough until then).
@@ -340,6 +351,13 @@ final class Phone {
     }
 
     private func take(_ changed: RunnerConversation) {
+        // The conversation Home's words started, named as the turn begins: the thread shown, its
+        // steps and Stop are that one's from now on, before Oby's answer comes.
+        if startingNew, let pending, let request = requests[pending], request.new,
+           !(conversations ?? []).contains(where: { $0.id == changed.id }),
+           ConversationList.started(by: request.said, changed) {
+            adopt(changed.id, echo: pending)
+        }
         if let list = conversations { conversations = ConversationList.placed(changed, in: list) }
         if changed.deleted, changed.id == current { show(nil) }
     }
@@ -539,7 +557,8 @@ final class Phone {
     /// ran meanwhile shows as ended. The request for the plan stays: the runner answers it.
     func stopTurn() async {
         do {
-            try await runner.stopConversation()
+            // obid stops the latest turn in any conversation unless it's told which (#493).
+            try await runner.stopConversation(talkIn ?? current)
             stopProblem = nil
             conversation.settleSteps()
         } catch let error as RunnerError where error.status == 404 {
@@ -594,7 +613,8 @@ final class Phone {
         talkIn = current
         pending = echo.id
         if connection != .live {
-            offlineQueue.queue(OfflineMessage(id: echo.id, said: said, question: answer?.question, option: answer?.option, voice: voice, target: offlineQueueTarget))
+            offlineQueue.queue(OfflineMessage(id: echo.id, said: said, question: answer?.question, option: answer?.option, voice: voice,
+                                              target: offlineQueueTarget, conversation: request.conversation, new: request.new ? true : nil))
             talk = .queued(said)
             pending = nil
             return
@@ -608,7 +628,8 @@ final class Phone {
 
     private func restoreQueuedMessages(for target: String) {
         for item in offlineQueue.messages where item.target == target {
-            requests[item.id] = Request(said: item.said, answer: item.question.flatMap { question in item.option.map { (question, $0) } }, voice: item.voice)
+            requests[item.id] = Request(said: item.said, answer: item.question.flatMap { question in item.option.map { (question, $0) } }, voice: item.voice,
+                                        conversation: item.conversation, new: item.new ?? false)
             if !echoes.contains(where: { $0.id == item.id }) {
                 echoes.append(Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil))
             }
@@ -624,7 +645,9 @@ final class Phone {
             let request = requests[item.id] ?? Request(
                 said: item.said,
                 answer: item.question.flatMap { question in item.option.map { (question, $0) } },
-                voice: item.voice
+                voice: item.voice,
+                conversation: item.conversation,
+                new: item.new ?? false
             )
             let echo = echoes.first(where: { $0.id == item.id }) ?? Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil)
             let planned = try await destinationRunner.planned(request.said, answer: request.answer,

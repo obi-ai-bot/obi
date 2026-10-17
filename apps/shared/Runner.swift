@@ -1029,14 +1029,18 @@ nonisolated struct Runner: Sendable {
     }
 
     /// Stop: the turn Oby is working on ends where it is (`POST /v1/conversation/stop`, #304). A
-    /// runner from before it answers 404.
-    func stopConversation() async throws {
-        try await send("POST", "v1/conversation/stop")
+    /// runner from before it answers 404. On obid, `conversation` names the one whose turn stops;
+    /// without it obid stops the latest turn under way, in whichever conversation.
+    func stopConversation(_ conversation: String? = nil) async throws {
+        try await send("POST", "v1/conversation/stop", body: conversation.map(TurnTarget.init))
     }
 
-    func cancelPlan() async {
-        _ = try? await send("POST", "v1/plans/cancel")
+    func cancelPlan(_ conversation: String? = nil) async {
+        _ = try? await send("POST", "v1/plans/cancel", body: conversation.map(TurnTarget.init))
     }
+
+    /// The body naming the conversation a stop or a cancel is for (obid only, #493).
+    private struct TurnTarget: Encodable { var conversation: String }
 
     func dispatch(_ job: Job) async throws -> Job {
         struct Body: Encodable { var job: DispatchedJob; var mode: String? }
