@@ -207,6 +207,8 @@ async function report(prompt) {
         probes.emptyToken = await status("POST", server.url, { Authorization: "Bearer " }, rpc);
         probes.twoTokens = await status("POST", server.url, { Authorization: `${auth}, ${auth}` }, rpc);
         probes.ownToken = await status("POST", server.url, { Authorization: auth }, rpc);
+        const other = prompt.match(/OTHER_JOB: (\S+)/);
+        if (other) probes.otherJob = await status("POST", `${base}/v1/agent/mcp/${other[1]}`, { Authorization: auth }, rpc);
       }
     } catch (e) {
       answers[name] = { error: String(e) };

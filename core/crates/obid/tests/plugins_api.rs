@@ -602,39 +602,71 @@ fn agents_use_connected_apps_without_ever_seeing_the_login() {
         after.text
     );
 
-    let (second_job, second_report) = run_job(&obid, "investigate", "REPORT", None);
+    // Tokens: one a job, and each only for its own job while it runs. A job that waits keeps
+    // its broker while a second one, from inside, tries its own token on the first's.
+    let made = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "PAUSE: 60000"}}),
+        ),
+    );
+    assert_eq!(made.status, 201, "{}", made.text);
+    let waiting_id = made.body["id"].as_str().unwrap().to_owned();
+    let mut waiting = Value::Null;
+    for _ in 0..200 {
+        waiting = call(&obid, "GET", &format!("/v1/jobs/{waiting_id}"), None).body;
+        if waiting["status"] == "running" && waiting["step"] != "Waiting" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(waiting["status"], "running", "{waiting}");
+    let (second_job, second_report) = run_job(
+        &obid,
+        "investigate",
+        &format!("REPORT MCP_PROBE OTHER_JOB: {waiting_id}"),
+        None,
+    );
+    assert_eq!(second_job["status"], "done", "{second_job}");
     let second_report = second_report.expect("second agent report");
-    let first_id = job["id"].as_str().unwrap();
-    let second_id = second_job["id"].as_str().unwrap();
-    let first_token = report["mcp"]["mcpServers"]["oby"]["headers"]["Authorization"]
-        .as_str()
-        .unwrap();
-    let second_token = second_report["mcp"]["mcpServers"]["oby"]["headers"]["Authorization"]
-        .as_str()
-        .unwrap();
+    assert_eq!(
+        second_report["probes"]["otherJob"], 401,
+        "a token for another job that is running: {}",
+        second_report["probes"]
+    );
+    assert_eq!(second_report["probes"]["ownToken"], 200);
+    let token_of = |report: &Value| {
+        report["mcp"]["mcpServers"]["oby"]["headers"]["Authorization"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("Bearer ")
+            .unwrap()
+            .to_owned()
+    };
+    let (first_token, second_token) = (token_of(&report), token_of(&second_report));
     assert_ne!(first_token, second_token);
     let rpc = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
-    assert_eq!(
-        call_with_token(
+    // Ended jobs' tokens, on their own job and on the one still running.
+    for (token, id) in [
+        (&first_token, job["id"].as_str().unwrap()),
+        (&second_token, second_job["id"].as_str().unwrap()),
+        (&first_token, waiting_id.as_str()),
+        (&second_token, waiting_id.as_str()),
+    ] {
+        let refused = call_with_token(
             &obid,
-            first_token,
+            token,
             "POST",
-            &format!("/v1/agent/mcp/{second_id}"),
-            Some(&rpc)
-        )
-        .status,
-        401
-    );
+            &format!("/v1/agent/mcp/{id}"),
+            Some(&rpc),
+        );
+        assert_eq!(refused.status, 401, "{id}: {}", refused.text);
+    }
     assert_eq!(
-        call_with_token(
-            &obid,
-            first_token,
-            "POST",
-            &format!("/v1/agent/mcp/{first_id}"),
-            Some(&rpc)
-        )
-        .status,
-        401
+        call(&obid, "POST", &format!("/v1/jobs/{waiting_id}/stop"), None).status,
+        200
     );
     let remove_asked = call(&obid, "DELETE", "/v1/connections/people", None);
     assert_eq!(remove_asked.status, 403);
