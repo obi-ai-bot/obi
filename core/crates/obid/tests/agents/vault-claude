@@ -3,10 +3,14 @@
 // as obid runs `claude`. It knows one value, VALUE, which the tests put in obid's vault, as an
 // agent might have it from somewhere else. What it does comes from the prompt:
 //   PLAIN            commits ordinary files: .env.example (names, no values), a fixture key that
-//                    isn't the vault's, and VALUE cut short (not the secret)
+//                    isn't the vault's, VALUE cut short (not the secret), and a compose file with
+//                    `image: postgres:16` and a `changeme` password
 //   FILE: <form>     commits config.txt holding VALUE as <form>: plain, base64, hex or url
 //   MESSAGE: <form>  commits notes.txt with VALUE as <form> in the commit message
+//   WRAPPED          commits config.b64: LONG (a second value, 64 bytes), base64 wrapped at 76 characters
+//                    as GNU base64 writes it
 //   SLOW             waits 3 seconds, then commits hello.txt
+//   WAIT             waits 60 seconds, then ends the turn
 //   anything else    ends the turn with "Nothing to do."
 // Every turn writes the prompt it got to .obi/seen-prompt.txt in the worktree (.obi/ is never part
 // of the work), so a test can read what reached the agent.
@@ -23,6 +27,8 @@ const git = (...args) => execFileSync("git", ["-c", "commit.gpgsign=false", ...a
 
 // tests/vault_api.rs's VALUE, put together only when the agent runs.
 const VALUE = ["vault-", "fixture/", "Q7m2+a=b?c&d"].join("");
+// tests/vault_api.rs's `long()`: 64 bytes, so GNU base64 puts it on no line whole.
+const LONG = ["long-vault-", "value/"].join("") + "Z9+k=x?y&w".repeat(5) + "-end";
 const forms = {
   plain: VALUE,
   base64: Buffer.from(VALUE).toString("base64"),
@@ -51,7 +57,8 @@ rl.on("line", (line) => {
       mkdirSync("fixtures", { recursive: true });
       writeFileSync("fixtures/test-key.txt", "fixture key for the tests: test-fixture-key-0000\n");
       writeFileSync("near.txt", `${VALUE.slice(0, -3)}\n`);
-      git("add", ".env.example", "fixtures/test-key.txt", "near.txt");
+      writeFileSync("compose.yml", "services:\n  db:\n    image: postgres:16\n    environment:\n      POSTGRES_PASSWORD: changeme\n");
+      git("add", ".env.example", "fixtures/test-key.txt", "near.txt", "compose.yml");
       git("commit", "-q", "-m", "chore: add the example settings");
       result("Added the example settings.");
     } else if (file) {
@@ -64,6 +71,15 @@ rl.on("line", (line) => {
       git("add", "notes.txt");
       git("commit", "-q", "-m", `chore: add notes.txt\n\nwith ${forms[commitMessage[1]]}`);
       result("Added notes.txt.");
+    } else if (prompt.includes("WRAPPED")) {
+      const encoded = Buffer.from(LONG).toString("base64");
+      writeFileSync("config.b64", `${encoded.match(/.{1,76}/g).join("\n")}\n`);
+      git("add", "config.b64");
+      git("commit", "-q", "-m", "chore: add config.b64");
+      result("Added config.b64.");
+    } else if (prompt.includes("WAIT")) {
+      execFileSync("sleep", ["60"]);
+      result("Waited.");
     } else if (prompt.includes("SLOW")) {
       execFileSync("sleep", ["3"]);
       writeFileSync("hello.txt", "hello\n");

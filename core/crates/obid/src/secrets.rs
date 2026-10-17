@@ -138,6 +138,11 @@ impl Secrets {
             return text.to_owned();
         }
         let mut text = text.to_owned();
+        // Wrapped runs first, judged whole: a shorter value's needle inside one line would break
+        // the run and leave the rest of it.
+        if text.contains('\n') {
+            text = unwrapped(&inner.needles, &text, label);
+        }
         for needle in &inner.needles {
             text = replace(&text, needle, label);
         }
@@ -184,6 +189,80 @@ impl Secrets {
     pub fn marker(&self, names: &[String]) -> String {
         marker(self.label(), names)
     }
+}
+
+/// `text` with base64 or hex wrapped over lines taken out (Engine/Vault.swift, `Leaks.unwrapped`):
+/// each run of lines that hold nothing else, joined with the end of the line before as the scan
+/// joins them (`crate::scan`), and when the joined run holds a value, every line of it, and the
+/// line it continues, is the marker. GNU base64 wraps at 76, so a value of 58 bytes or more is on
+/// no line whole.
+fn unwrapped(needles: &[Needle], text: &str, label: &str) -> String {
+    let trim = |s: &str| -> String {
+        s.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\r' | '"' | '\'' | ',' | '\\'))
+            .to_owned()
+    };
+    let mut lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+    let encoded: Vec<bool> = lines
+        .iter()
+        .map(|line| {
+            let text = trim(line);
+            !text.is_empty()
+                && text.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-')
+                })
+        })
+        .collect();
+    let mut start = 0;
+    while start < lines.len() {
+        if !encoded[start] {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end + 1 < lines.len() && encoded[end + 1] {
+            end += 1;
+        }
+        let lead = if start == 0 {
+            String::new()
+        } else {
+            let before = trim(&lines[start - 1]);
+            let tail = before
+                .bytes()
+                .rev()
+                .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'_' | b'-'))
+                .count();
+            if tail >= 8 {
+                before[before.len() - tail..].to_owned()
+            } else {
+                String::new()
+            }
+        };
+        if end > start || !lead.is_empty() {
+            let joined: String = std::iter::once(lead.clone())
+                .chain(lines[start..=end].iter().map(|l| trim(l)))
+                .collect();
+            let mut names = hits(needles, &joined);
+            let lower = joined.to_ascii_lowercase();
+            for needle in needles {
+                let found = if needle.any_case {
+                    lower.contains(&needle.text.to_ascii_lowercase())
+                } else {
+                    joined.contains(&needle.text)
+                };
+                if found && !names.contains(&needle.name) {
+                    names.push(needle.name.clone());
+                }
+            }
+            if !names.is_empty() {
+                let first = if lead.is_empty() { start } else { start - 1 };
+                for line in &mut lines[first..=end] {
+                    *line = marker(label, &names);
+                }
+            }
+        }
+        start = end + 1;
+    }
+    lines.join("\n")
 }
 
 fn marker(label: &str, names: &[String]) -> String {
@@ -562,6 +641,44 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// Base64 wrapped over lines (GNU base64 wraps at 76) holds the value on no line whole: the
+    /// lines of the run go, and nothing around them.
+    #[test]
+    fn base64_wrapped_over_lines_is_taken_out() {
+        let secrets = Secrets::default();
+        let value = format!("wrapped-vault-value/{}", "q7+m2=a?b&c".repeat(6));
+        secrets.learn("long", &value);
+        let encoded = b64(value.as_bytes());
+        let lines: Vec<&str> = encoded
+            .as_bytes()
+            .chunks(76)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        assert!(lines.len() >= 2);
+        for text in [
+            format!("the start\n{}\nthe end", lines.join("\n")),
+            format!("the start\n{}\r\nthe end", lines.join("\r\n")),
+            format!("key = \"{}\n{}\"\nthe end", lines[0], lines[1..].join("\n")),
+        ] {
+            let redacted = secrets.redact(&text);
+            for line in &lines {
+                assert!(!redacted.contains(line), "{redacted}");
+            }
+            assert!(
+                redacted.starts_with(if text.starts_with("key") {
+                    "[redacted: long]"
+                } else {
+                    "the start\n[redacted: long]"
+                }),
+                "{redacted}"
+            );
+            assert!(redacted.ends_with("\nthe end"), "{redacted}");
+        }
+        // Encoded lines that hold no value stay.
+        let other = format!("a b\n{}\n{}\nc d", "QUJD".repeat(19), "REVG".repeat(19));
+        assert_eq!(secrets.redact(&other), other);
     }
 
     #[test]

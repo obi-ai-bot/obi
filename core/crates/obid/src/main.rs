@@ -172,6 +172,7 @@ fn vault(config: &std::path::Path, action: &obid::vault::Action) -> ExitCode {
     };
     ExitCode::from(obid::vault::run(
         &config.home,
+        &config.vault,
         action,
         obid::vault::read_value,
         |line| println!("{line}"),

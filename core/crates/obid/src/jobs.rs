@@ -2466,13 +2466,13 @@ impl Jobs {
             .file_name()
             .and_then(|name| name.to_str())
             .expect("the request file has a name");
-        crate::obi_dir::write_new(&inputs, file, &text)
+        crate::obi_dir::write_new(&inputs, file, &crate::vault::for_agent_bytes(&text)?)
             .map_err(|e| format!("obid can't write the request: {e}"))?;
         let file = Path::new(review::DIFF_FILE)
             .file_name()
             .and_then(|name| name.to_str())
             .expect("the diff file has a name");
-        crate::obi_dir::write_new(&inputs, file, &change)
+        crate::obi_dir::write_new(&inputs, file, &crate::vault::for_agent_bytes(&change)?)
             .map_err(|e| format!("obid can't write the diff: {e}"))?;
 
         // 4. The agent, with a fixed prompt, in the sandbox.

@@ -452,10 +452,33 @@ struct Line<'a> {
 }
 
 /// Base64 or hex wrapped over several lines: runs of adjacent lines that hold nothing else,
-/// joined with the end of the line before, and found at the run's first line.
+/// joined with the end of the line before, and found at the run's first line, by the built-in
+/// rules and for the secrets obid holds (a vault value through GNU base64, which wraps at 76, is
+/// on no line whole).
 fn wrapped(lines: &[Line<'_>]) -> Vec<Finding> {
+    let mut found = Vec::new();
+    for (name, number, joined) in wrapped_runs(lines) {
+        found.extend(matches(&joined).into_iter().map(|rule| Finding {
+            name: name.clone(),
+            line: Some(number),
+            rule,
+        }));
+        if holds_known_secret(&joined) {
+            found.push(Finding {
+                name,
+                line: Some(number),
+                rule: "vault secret".into(),
+            });
+        }
+    }
+    found
+}
+
+/// Each run of two or more adjacent lines that hold only base64 or hex (or one such line after
+/// the line whose end it continues), as the text's name, the run's first line and the run joined.
+fn wrapped_runs(lines: &[Line<'_>]) -> Vec<(String, usize, String)> {
     let trim = |s: &str| -> String {
-        s.trim_matches(|c: char| c == ' ' || c == '\t' || matches!(c, '"' | '\'' | ',' | '\\'))
+        s.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\r' | '"' | '\'' | ',' | '\\'))
             .to_owned()
     };
     let mut found = Vec::new();
@@ -469,11 +492,7 @@ fn wrapped(lines: &[Line<'_>]) -> Vec<Finding> {
                 "{lead}{}",
                 run.iter().map(|l| trim(l.text)).collect::<String>()
             );
-            found.extend(matches(&joined).into_iter().map(|rule| Finding {
-                name: first.name.to_owned(),
-                line: Some(first.number),
-                rule,
-            }));
+            found.push((first.name.to_owned(), first.number, joined));
         }
         run.clear();
         lead.clear();
@@ -766,22 +785,45 @@ pub fn in_names(names: &[Name]) -> Vec<Finding> {
     all
 }
 
-/// The secrets obid holds in a whole file (`name`), line by line, in every form [`holds_known_secret`]
-/// reads: what a push sends in a file even where no hunk of the diff shows it.
+/// The secrets obid holds in a whole file (`name`), line by line and in runs of base64 or hex
+/// wrapped over lines, in every form [`holds_known_secret`] reads: what a push sends in a file even
+/// where no hunk of the diff shows it.
 pub fn known_secrets_in_file(text: &str, name: &str) -> Vec<Finding> {
     if crate::secrets::known().is_empty() {
         return Vec::new();
     }
-    let name = shown_name(name);
-    text.split('\n')
+    let shown = shown_name(name);
+    let mut found: Vec<Finding> = text
+        .split('\n')
         .enumerate()
         .filter(|(_, line)| holds_known_secret(line))
         .map(|(i, _)| Finding {
-            name: name.clone(),
+            name: shown.clone(),
             line: Some(i + 1),
             rule: "vault secret".into(),
         })
-        .collect()
+        .collect();
+    // Base64 or hex wrapped over lines holds a value on no line whole.
+    let lines: Vec<Line<'_>> = text
+        .split('\n')
+        .enumerate()
+        .map(|(i, line)| Line {
+            name,
+            number: i + 1,
+            text: line,
+        })
+        .collect();
+    for (_, number, joined) in wrapped_runs(&lines) {
+        let finding = Finding {
+            name: shown.clone(),
+            line: Some(number),
+            rule: "vault secret".into(),
+        };
+        if holds_known_secret(&joined) && !found.contains(&finding) {
+            found.push(finding);
+        }
+    }
+    found
 }
 
 /// gitleaks on names, each on a line of its own (a newline or carriage return in a name is written
@@ -1145,6 +1187,54 @@ exit 99"#,
             ),
         }
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A vault value of 58 bytes or more, through GNU base64 (wrapped at 76 characters), is on
+    /// no line whole: the joined run is read, in an added hunk, in a whole file and in a text.
+    #[test]
+    fn a_vault_secret_wrapped_over_lines_is_found() {
+        struct Forget;
+        impl Drop for Forget {
+            fn drop(&mut self) {
+                crate::secrets::known().forget("scan-wrap-test");
+            }
+        }
+        let value = format!("wrapped-vault-value/{}", "q7+m2=a?b&c".repeat(6));
+        assert!(value.len() >= 58);
+        crate::secrets::known().learn("scan-wrap-test", &value);
+        let _forget = Forget;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&value);
+        let wrapped: Vec<&str> = encoded
+            .as_bytes()
+            .chunks(76)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        assert!(wrapped.len() >= 2);
+        let file = format!("the start\n{}\nthe end\n", wrapped.join("\n"));
+        let whole = known_secrets_in_file(&file, "secret.b64");
+        assert!(
+            whole
+                .iter()
+                .any(|f| f.rule == "vault secret" && f.line == Some(2)),
+            "{whole:?}"
+        );
+        let added: String = file.lines().map(|l| format!("+{l}\n")).collect();
+        let diff = format!(
+            "diff --git a/secret.b64 b/secret.b64\n--- /dev/null\n+++ b/secret.b64\n@@ -0,0 +1,{} @@\n{added}",
+            file.lines().count()
+        );
+        assert!(
+            in_diff(&diff)
+                .iter()
+                .any(|f| f.rule == "vault secret" && f.line == Some(2)),
+            "{:?}",
+            in_diff(&diff)
+        );
+        assert!(
+            built_in(&texts(&format!("token:\n{}", wrapped.join("\n"))))
+                .iter()
+                .any(|f| f.rule == "vault secret"),
+        );
     }
 
     /// A secret learned for one test, forgotten however the test ends.

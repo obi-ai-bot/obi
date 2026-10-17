@@ -1,22 +1,28 @@
 //! The owner's vault (#457, ported from Engine/Vault.swift and Runner/VaultCommand.swift): secrets
 //! the owner adds for connections they make, which obid uses in its own calls and never shows.
 //!
-//! - **Where.** `home/vault/secrets.json`, as the Swift runner's `FileVault` keeps them: a folder
-//!   only obid's user may open (0700) holding a file only that user may read (0600). A folder or
-//!   file anyone else may read, that someone else owns, or that is a link isn't read: the vault
-//!   can't be read until it's fixed, and then nothing goes out. `home` is what every job's and
-//!   plug-in's sandbox hides (docs/ARCHITECTURE.md 5.3), so no agent or plug-in reads it.
+//! - **Where** ([`Location`]). On a Mac whose obid runs in the Mac app's runner home, the Swift
+//!   runner's own Keychain items (service `com.deskree.oby.runner.vault`), so the owner's secrets
+//!   carry over; anywhere else `home/vault/secrets.json`, as the Swift runner's `FileVault` keeps
+//!   them: a folder only obid's user may open (0700) holding a file only that user may read (0600).
+//!   A folder or file anyone else may read, that someone else owns, or that is a link isn't read:
+//!   the vault can't be read until it's fixed, and then nothing goes out. The configuration's
+//!   `vault` can say either. `home` is what every job's and plug-in's sandbox hides
+//!   (docs/ARCHITECTURE.md 5.3). No items, or no file, is an empty vault.
 //! - **How values come in.** `obid vault --config <path> add NAME` with the value on stdin (typed
 //!   without echo at a terminal), never as an argument or in an environment variable, where other
 //!   processes of the same user read it (docs/ARCHITECTURE.md 5.3, "What the sandbox can't hide").
-//!   No API takes or returns a value.
+//!   A common word or a weak pattern is refused. No API takes or returns a value.
 //! - **Where values go.** They join `crate::secrets::known()` as `vault <name>`, read again
-//!   whenever the file changed (`obid vault add` while obid runs), so the log layer
+//!   whenever the store changed (`obid vault add` while obid runs), so the log layer
 //!   (`crate::logs`), the publish gate (`crate::scan`, `crate::publish`) and every text obid
-//!   redacts take them out, plain and in every encoded form `crate::secrets` knows.
+//!   redacts take them out, plain and in every encoded form `crate::secrets` knows. obid's own
+//!   calls read one with [`value`].
 //! - **Answers.** Every `/v1` answer has them taken out (`[vault: <name>]`), and is `503` with the
-//!   reason when the vault can't be read ([`answers`]; docs/runner-api.md, "No vault secret").
-//! - **Agents.** [`for_agent`] is the text an agent may get, and fails when the vault can't be read.
+//!   reason when the vault can't be read, after the request was carried out, so a stop always
+//!   stops ([`answers`]; docs/runner-api.md, "No vault secret").
+//! - **Agents.** [`for_agent`] and [`for_agent_bytes`] are what an agent may get, and fail when the
+//!   vault can't be read.
 //! - **Failing closed.** [`check`] says why the vault can't be read: the publish gate and the scan
 //!   send nothing then. The log layer keeps redacting with the values it learned last.
 
@@ -62,29 +68,196 @@ pub fn name_problem(name: &str) -> Option<&'static str> {
     (!fits).then_some("A secret's name is up to 64 letters, digits, dots, dashes or underscores.")
 }
 
-/// Why the vault won't keep `value`, or none.
+/// Why the vault won't keep `value`, or none. Besides its size: a common word or a weak pattern
+/// (`postgres`, `changeme`, `00000000`) is refused, since every push holding it would be refused
+/// and every answer would have it taken out (`image: postgres:16` in a compose file).
 pub fn value_problem(value: &str) -> Option<String> {
     if value.len() < SHORTEST || value.trim().is_empty() {
         return Some(format!("A secret is at least {SHORTEST} characters."));
     }
-    (value.len() > LONGEST).then(|| "A secret is at most 64 KB.".to_owned())
+    if value.len() > LONGEST {
+        return Some("A secret is at most 64 KB.".to_owned());
+    }
+    weak(value).then(|| {
+        "That value looks like a common word or a simple pattern, not a secret: every push holding it would be refused and every answer would have it taken out. Add the real secret.".to_owned()
+    })
 }
 
-/// `value` without the line breaks a paste puts around it.
+/// Words a value isn't, with or without digits and marks after it.
+const COMMON: &[&str] = &[
+    "password",
+    "passwd",
+    "changeme",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "mariadb",
+    "redis",
+    "mongodb",
+    "admin",
+    "administrator",
+    "root",
+    "secret",
+    "letmein",
+    "welcome",
+    "qwerty",
+    "default",
+    "example",
+    "guest",
+    "test",
+    "testing",
+    "localhost",
+    "user",
+    "username",
+];
+
+/// Whether `value` is a common word, a weak pattern, or too short a run of one kind of character
+/// to be told apart from ordinary text: fewer than 6 different characters, a common word (with
+/// digits or marks after it), or under 50 bits by its length and the kinds of characters in it.
+fn weak(value: &str) -> bool {
+    let distinct: std::collections::BTreeSet<char> = value.chars().collect();
+    if distinct.len() < 6 {
+        return true;
+    }
+    let lower = value.to_lowercase();
+    let word = lower.trim_end_matches(|c: char| !c.is_alphabetic());
+    if COMMON.contains(&word) {
+        return true;
+    }
+    let mut alphabet = 0u32;
+    if value.chars().any(|c| c.is_ascii_lowercase()) {
+        alphabet += 26;
+    }
+    if value.chars().any(|c| c.is_ascii_uppercase()) {
+        alphabet += 26;
+    }
+    if value.chars().any(|c| c.is_ascii_digit()) {
+        alphabet += 10;
+    }
+    if value.chars().any(|c| !c.is_ascii_alphanumeric()) {
+        alphabet += 33;
+    }
+    let bits = value.chars().count() as f64 * f64::from(alphabet).log2();
+    bits < 50.0
+}
+
+/// `value` without the whitespace a paste puts around it (spaces, tabs, line breaks): a token
+/// copied with a trailing space would otherwise never match what goes out.
 fn trimmed(value: &str) -> &str {
-    value.trim_matches(|c: char| {
-        matches!(
-            c,
-            '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
-        )
-    })
+    value.trim()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Where the vault is
+
+/// The Keychain service the Swift runner's items are under on a Mac (Engine/Vault.swift,
+/// `KeychainVault.runnerService`): obid uses the same items, so the owner's secrets carry over.
+pub const RUNNER_SERVICE: &str = "com.deskree.oby.runner.vault";
+
+/// Where the vault keeps its secrets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Location {
+    /// `home/vault/secrets.json` (Engine/Vault.swift, `FileVault`).
+    File,
+    /// Generic passwords in the login Keychain under `service`, one per secret, the name as the
+    /// account (Engine/Vault.swift, `KeychainVault`). macOS only.
+    Keychain { service: String },
+}
+
+impl Location {
+    /// Where the vault is when the configuration doesn't say: on a Mac whose obid runs in the Mac
+    /// app's runner home (`~/Library/Application Support/Oby/Runner`, runner-api.md "The Mac app on
+    /// the same Mac"), the Swift runner's Keychain items; anywhere else a file in `home`, so another
+    /// obid on the same Mac (a test's, a second home) never reads or changes the owner's secrets.
+    pub fn default_for(home: &Path) -> Location {
+        let runner_home = nix::unistd::User::from_uid(nix::unistd::getuid())
+            .ok()
+            .flatten()
+            .map(|user| user.dir.join("Library/Application Support/Oby/Runner"));
+        if cfg!(target_os = "macos") && runner_home.as_deref() == Some(home) {
+            Location::Keychain {
+                service: RUNNER_SERVICE.into(),
+            }
+        } else {
+            Location::File
+        }
+    }
+
+    /// `vault` as the configuration writes it: `{"store": "file"}`, or `{"store": "keychain"}`
+    /// with an optional `service` (the Swift runner's when left out).
+    pub fn parse(store: &str, service: Option<&str>) -> Result<Location, String> {
+        match (store, service) {
+            ("file", None) => Ok(Location::File),
+            ("file", Some(_)) => Err("a file vault takes no service.".into()),
+            ("keychain", _) if !cfg!(target_os = "macos") => {
+                Err("the Keychain is macOS's: on this machine the vault is a file (\"store\": \"file\").".into())
+            }
+            ("keychain", Some(service)) if service.trim().is_empty() => {
+                Err("service is empty.".into())
+            }
+            ("keychain", service) => Ok(Location::Keychain {
+                service: service.unwrap_or(RUNNER_SERVICE).to_owned(),
+            }),
+            _ => Err(format!("store is {store:?}: \"file\" or \"keychain\".")),
+        }
+    }
+
+    fn store(&self, home: &Path) -> Box<dyn Store> {
+        match self {
+            Location::File => Box::new(FileStore::new(folder(home))),
+            #[cfg(target_os = "macos")]
+            Location::Keychain { service } => Box::new(keychain::KeychainStore::new(service)),
+            #[cfg(not(target_os = "macos"))]
+            Location::Keychain { .. } => Box::new(Unavailable),
+        }
+    }
+}
+
+/// Where a vault keeps its secrets (Engine/Vault.swift, `VaultStore`). Errors name the secret or
+/// the place, never a value.
+pub trait Store: Send + Sync {
+    /// Changes whenever the secrets may have changed, here or elsewhere. Cheap: no value is read.
+    /// Fails when the store can't be read as it is now.
+    fn stamp(&self) -> Result<String, String>;
+    /// Every secret; none when there's no vault yet.
+    fn read(&self) -> Result<BTreeMap<String, String>, String>;
+    /// One secret, or none.
+    fn value(&self, name: &str) -> Result<Option<String>, String> {
+        Ok(self.read()?.remove(name))
+    }
+    fn save(&self, value: &str, name: &str) -> Result<(), String>;
+    /// Removes `name`; whether it was there.
+    fn remove(&self, name: &str) -> Result<bool, String>;
+    /// Tidies what an interrupted save left, when obid starts.
+    fn tidy(&self) {}
+}
+
+/// A Keychain asked for where there's none: every read fails, so nothing goes out.
+#[cfg(not(target_os = "macos"))]
+struct Unavailable;
+
+#[cfg(not(target_os = "macos"))]
+impl Store for Unavailable {
+    fn stamp(&self) -> Result<String, String> {
+        Err("there's no Keychain on this machine.".into())
+    }
+    fn read(&self) -> Result<BTreeMap<String, String>, String> {
+        self.stamp().map(|_| BTreeMap::new())
+    }
+    fn save(&self, _: &str, _: &str) -> Result<(), String> {
+        self.stamp().map(|_| ())
+    }
+    fn remove(&self, _: &str) -> Result<bool, String> {
+        self.stamp().map(|_| false)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
 // The file
 
 /// `secrets.json` in a folder only obid's user may open (Engine/Vault.swift, `FileVault`). Errors
-/// name the place, never a value.
+/// name the place, never a value. A save or a removal holds `.lock` in the folder (`flock`), so two
+/// `obid vault add` runs at once each keep their secret.
 pub struct FileStore {
     folder: PathBuf,
     /// One read-and-write at a time in this process.
@@ -108,32 +281,6 @@ impl FileStore {
         self.folder.join("secrets.json")
     }
 
-    /// Changes whenever the secrets may have changed (each save is a new file): the file's inode,
-    /// size and time, after the same checks as reading it, so a chmod that lets others read it
-    /// fails even with the values learned. No value is read. `none` with no vault yet.
-    pub fn stamp(&self) -> Result<String, String> {
-        use std::os::unix::fs::MetadataExt;
-        if private(&self.folder, true)?.is_none() {
-            return Ok("none".into());
-        }
-        let Some(info) = private(&self.file(), false)? else {
-            return Ok("none".into());
-        };
-        Ok(format!(
-            "{} {} {}.{}",
-            info.ino(),
-            info.size(),
-            info.mtime(),
-            info.mtime_nsec()
-        ))
-    }
-
-    /// Every secret, or none when there's no file yet.
-    pub fn read(&self) -> Result<BTreeMap<String, String>, String> {
-        let _held = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        self.read_unlocked()
-    }
-
     fn read_unlocked(&self) -> Result<BTreeMap<String, String>, String> {
         if private(&self.folder, true)?.is_none() || private(&self.file(), false)?.is_none() {
             return Ok(BTreeMap::new());
@@ -151,29 +298,11 @@ impl FileStore {
             })
     }
 
-    /// Adds `value` as `name`, or replaces it.
-    pub fn save(&self, value: &str, name: &str) -> Result<(), String> {
-        let _held = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut secrets = self.read_unlocked()?;
-        secrets.insert(name.to_owned(), value.to_owned());
-        self.write(&secrets)
-    }
-
-    /// Removes `name`; whether it was there.
-    pub fn remove(&self, name: &str) -> Result<bool, String> {
-        let _held = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut secrets = self.read_unlocked()?;
-        if secrets.remove(name).is_none() {
-            return Ok(false);
-        }
-        self.write(&secrets)?;
-        Ok(true)
-    }
-
-    /// The file in place of the old one: created 0600 (and never through a link) before a byte
-    /// is written, synced, then renamed over it.
-    fn write(&self, secrets: &BTreeMap<String, String>) -> Result<(), String> {
+    /// `body` with the folder made (0700) and its `.lock` held: in this process and across
+    /// processes. What an interrupted save left is removed first.
+    fn locked<T>(&self, body: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let _held = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let folder = &self.folder;
         if let Some(parent) = folder.parent() {
             std::fs::DirBuilder::new()
@@ -193,6 +322,41 @@ impl FileStore {
             }
         }
         private(folder, true)?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(folder.join(".lock"))
+            .and_then(|lock| lock.lock().map(|()| lock))
+            .map_err(|e| format!("Can't lock the vault in {} ({e}).", folder.display()))?;
+        self.remove_leftovers();
+        let done = body();
+        drop(lock);
+        done
+    }
+
+    /// The temporary files a save that was interrupted left (`.secrets-<uuid>.json`).
+    fn remove_leftovers(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.folder) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(".secrets-") && name.ends_with(".json") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    /// The file in place of the old one: created 0600 (and never through a link) before a byte
+    /// is written, synced, renamed over it, and the folder synced so the rename lasts.
+    fn write(&self, secrets: &BTreeMap<String, String>) -> Result<(), String> {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let folder = &self.folder;
         let data = serde_json::to_vec_pretty(&Saved {
             secrets: secrets.clone(),
         })
@@ -205,19 +369,252 @@ impl FileStore {
                 .mode(0o600)
                 .custom_flags(nix::libc::O_NOFOLLOW)
                 .open(&temporary)?;
-            // Whatever the umask made of it.
-            std::fs::set_permissions(
-                &temporary,
-                std::os::unix::fs::PermissionsExt::from_mode(0o600),
-            )?;
+            // Whatever the umask made of it, on the file obid holds open (fchmod).
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
             file.write_all(&data)?;
             file.sync_all()?;
-            std::fs::rename(&temporary, self.file())
+            std::fs::rename(&temporary, self.file())?;
+            std::fs::File::open(folder)?.sync_all()
         })();
         written.map_err(|e| {
             let _ = std::fs::remove_file(&temporary);
             format!("Can't save the vault in {} ({e}).", folder.display())
         })
+    }
+}
+
+impl Store for FileStore {
+    /// The file's inode, size and time, after the same checks as reading it (each save is a new
+    /// file), so a chmod that lets others read it fails even with the values learned. `none` with
+    /// no vault yet.
+    fn stamp(&self) -> Result<String, String> {
+        use std::os::unix::fs::MetadataExt;
+        if private(&self.folder, true)?.is_none() {
+            return Ok("none".into());
+        }
+        let Some(info) = private(&self.file(), false)? else {
+            return Ok("none".into());
+        };
+        Ok(format!(
+            "{} {} {}.{}",
+            info.ino(),
+            info.size(),
+            info.mtime(),
+            info.mtime_nsec()
+        ))
+    }
+
+    fn read(&self) -> Result<BTreeMap<String, String>, String> {
+        let _held = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.read_unlocked()
+    }
+
+    fn save(&self, value: &str, name: &str) -> Result<(), String> {
+        self.locked(|| {
+            let mut secrets = self.read_unlocked()?;
+            secrets.insert(name.to_owned(), value.to_owned());
+            self.write(&secrets)
+        })
+    }
+
+    fn remove(&self, name: &str) -> Result<bool, String> {
+        if private(&self.folder, true)?.is_none() {
+            return Ok(false);
+        }
+        self.locked(|| {
+            let mut secrets = self.read_unlocked()?;
+            if secrets.remove(name).is_none() {
+                return Ok(false);
+            }
+            self.write(&secrets)?;
+            Ok(true)
+        })
+    }
+
+    fn tidy(&self) {
+        if matches!(private(&self.folder, true), Ok(Some(_))) {
+            let _ = self.locked(|| Ok(()));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The Keychain
+
+/// The Mac's vault (Engine/Vault.swift, `KeychainVault`): generic passwords in the owner's login
+/// Keychain under one service, one per secret, the secret's name as the account and `Oby vault:
+/// <name>` as the label, as the Swift runner makes them, so its items and obid's are the same.
+/// Listing reads the names and dates alone, never a value.
+///
+/// The login Keychain is named by its path, from the user database (`getpwuid`), in every search,
+/// add, update and removal, never found through `$HOME`: an obid started with another `HOME` would
+/// otherwise see no items at all, an empty vault, and take nothing out.
+///
+/// Measured on a Mac (2026-10-17): another program of the same user reads and updates these items
+/// without being asked (macOS adds it to the item's access list), so against such a program the
+/// Keychain holds them no better than the file does; only the program that made an item may delete
+/// it; and obid doesn't set `kSecAttrAccessible` (the Swift runner sets
+/// `WhenUnlockedThisDeviceOnly`).
+#[cfg(target_os = "macos")]
+mod keychain {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use core_foundation::data::CFData;
+    use security_framework::item::{
+        ItemAddOptions, ItemAddValue, ItemClass, ItemSearchOptions, ItemUpdateOptions,
+        ItemUpdateValue, Limit, Location, SearchResult,
+    };
+    use security_framework::os::macos::keychain::SecKeychain;
+
+    use super::Store;
+
+    /// errSecItemNotFound.
+    const NOT_FOUND: i32 = -25300;
+    /// errSecInvalidOwnerEdit: another program made the item, and only it may delete it.
+    const NOT_OURS: i32 = -25244;
+
+    pub struct KeychainStore {
+        service: String,
+    }
+
+    impl KeychainStore {
+        pub fn new(service: &str) -> KeychainStore {
+            KeychainStore {
+                service: service.to_owned(),
+            }
+        }
+
+        /// The owner's login Keychain, by its path.
+        fn login(&self) -> Result<SecKeychain, String> {
+            let path: PathBuf = nix::unistd::User::from_uid(nix::unistd::getuid())
+                .ok()
+                .flatten()
+                .map(|user| user.dir.join("Library/Keychains/login.keychain-db"))
+                .ok_or(
+                    "obid can't find its user's home folder, so it can't find the login Keychain.",
+                )?;
+            if !path.is_file() {
+                return Err(format!("There's no login Keychain at {}.", path.display()));
+            }
+            SecKeychain::open(&path)
+                .map_err(|e| format!("Can't open the login Keychain at {} ({e}).", path.display()))
+        }
+
+        /// A search for this vault's items (one, with `account`), in the login Keychain only.
+        fn search(&self, account: Option<&str>) -> Result<ItemSearchOptions, String> {
+            let mut search = ItemSearchOptions::new();
+            search
+                .class(ItemClass::generic_password())
+                .service(&self.service)
+                .keychains(&[self.login()?]);
+            if let Some(account) = account {
+                search.account(account);
+            }
+            Ok(search)
+        }
+
+        /// Every item's attributes (`acct` its name, `mdat` when it last changed), never its data.
+        fn items(&self, account: Option<&str>) -> Result<Vec<BTreeMap<String, String>>, String> {
+            let mut search = self.search(account)?;
+            search.load_attributes(true).limit(Limit::All);
+            match search.search() {
+                Ok(found) => Ok(found
+                    .iter()
+                    .filter_map(SearchResult::simplify_dict)
+                    .map(|item| item.into_iter().collect())
+                    .collect()),
+                Err(e) if e.code() == NOT_FOUND => Ok(Vec::new()),
+                Err(e) => Err(format!(
+                    "Couldn't list the vault in the Keychain ({}: {e}): unlock the login Keychain, or allow obid in Keychain Access.",
+                    self.service
+                )),
+            }
+        }
+    }
+
+    impl Store for KeychainStore {
+        /// Each item's name and when it last changed: Keychain Access, `security` or the Swift
+        /// runner can change one outside obid.
+        fn stamp(&self) -> Result<String, String> {
+            let mut lines: Vec<String> = self
+                .items(None)?
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{} {}",
+                        item.get("acct").map_or("?", String::as_str),
+                        item.get("mdat").map_or("", String::as_str)
+                    )
+                })
+                .collect();
+            lines.sort();
+            Ok(lines.join("\n"))
+        }
+
+        fn read(&self) -> Result<BTreeMap<String, String>, String> {
+            let mut secrets = BTreeMap::new();
+            for item in self.items(None)? {
+                let Some(name) = item.get("acct") else {
+                    continue;
+                };
+                if let Some(value) = self.value(name)? {
+                    secrets.insert(name.clone(), value);
+                }
+            }
+            Ok(secrets)
+        }
+
+        fn value(&self, name: &str) -> Result<Option<String>, String> {
+            let mut search = self.search(Some(name))?;
+            search.load_data(true).limit(1);
+            match search.search() {
+                Ok(found) => Ok(found.into_iter().find_map(|item| match item {
+                    SearchResult::Data(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+                    _ => None,
+                })),
+                Err(e) if e.code() == NOT_FOUND => Ok(None),
+                Err(e) => Err(format!(
+                    "Couldn't read {name} in the Keychain ({e}): unlock the login Keychain, or allow obid in Keychain Access."
+                )),
+            }
+        }
+
+        /// An item already there gets the new value and keeps its attributes; a new one is made
+        /// with the Swift runner's label.
+        fn save(&self, value: &str, name: &str) -> Result<(), String> {
+            let data = CFData::from_buffer(value.as_bytes());
+            let saved = if self.items(Some(name))?.is_empty() {
+                let mut add = ItemAddOptions::new(ItemAddValue::Data {
+                    class: ItemClass::generic_password(),
+                    data,
+                });
+                add.set_service(&self.service)
+                    .set_account_name(name)
+                    .set_label(format!("Oby vault: {name}"))
+                    .set_location(Location::FileKeychain(self.login()?));
+                add.add()
+            } else {
+                let mut update = ItemUpdateOptions::new();
+                update.set_value(ItemUpdateValue::Data(data));
+                security_framework::item::update_item(&self.search(Some(name))?, &update)
+            };
+            saved.map_err(|e| format!("Couldn't save {name} in the Keychain ({e})."))
+        }
+
+        fn remove(&self, name: &str) -> Result<bool, String> {
+            if self.items(Some(name))?.is_empty() {
+                return Ok(false);
+            }
+            match self.search(Some(name))?.delete() {
+                Ok(()) => Ok(true),
+                Err(e) if e.code() == NOT_FOUND => Ok(false),
+                Err(e) if e.code() == NOT_OURS => Err(format!(
+                    "{name} was added to the Keychain by another program (Oby's runner): only it may remove it, so remove it there, or in Keychain Access."
+                )),
+                Err(e) => Err(format!("Couldn't remove {name} from the Keychain ({e}).")),
+            }
+        }
     }
 }
 
@@ -274,11 +671,11 @@ fn private(path: &Path, directory: bool) -> Result<Option<std::fs::Metadata>, St
 // ---------------------------------------------------------------------------------------------
 // The vault
 
-/// The vault: its file, the values it learned (into its own set, whose markers read
-/// `[vault: <name>]`, and into the set obid's log and publish gate read), and the file's stamp when
-/// it learned them.
+/// The vault: its store, the values it learned (into its own set, whose markers read
+/// `[vault: <name>]`, and into the set obid's log and publish gate read), and the store's stamp
+/// when it learned them.
 pub struct Vault {
-    store: FileStore,
+    store: Box<dyn Store>,
     known: Arc<Secrets>,
     secrets: Secrets,
     learned: Mutex<Learned>,
@@ -298,18 +695,27 @@ fn known_name(name: &str) -> String {
 }
 
 impl Vault {
-    /// The vault in `folder`, whose values join `known`.
-    pub fn new(folder: PathBuf, known: Arc<Secrets>) -> Vault {
+    /// The vault in `store`, whose values join `known`.
+    pub fn new(store: Box<dyn Store>, known: Arc<Secrets>) -> Vault {
         Vault {
-            store: FileStore::new(folder),
+            store,
             known,
             secrets: Secrets::labelled("vault"),
             learned: Mutex::new(Learned::default()),
         }
     }
 
-    pub fn store(&self) -> &FileStore {
-        &self.store
+    /// The vault in `folder/secrets.json`, whose values join `known`.
+    pub fn file(folder: PathBuf, known: Arc<Secrets>) -> Vault {
+        Vault::new(Box::new(FileStore::new(folder)), known)
+    }
+
+    /// The value of the secret `name`, read from the store as it is now, after the same check
+    /// every reader gets: fails when the vault can't be read, and is none when it has no such
+    /// secret. Its value is in `known()` already, as `vault <name>`.
+    pub fn value(&self, name: &str) -> Result<Option<String>, String> {
+        self.check()?;
+        self.store.value(name)
     }
 
     /// The secrets' names, sorted. Never their values.
@@ -488,9 +894,11 @@ static SHARED: RwLock<Option<Arc<Vault>>> = RwLock::new(None);
 /// Opens the vault in `home/vault` as obid's, learns what it holds into `known()`, and has
 /// `known()` read it again whenever it changed. Said in the log when it can't be read: then every
 /// `/v1` answer is `503` and nothing is published until it's fixed.
-pub fn install(home: &Path) -> Arc<Vault> {
+pub fn install(home: &Path, location: &Location) -> Arc<Vault> {
     let known = crate::secrets::known();
-    let vault = Arc::new(Vault::new(folder(home), known.clone()));
+    let store = location.store(home);
+    store.tidy();
+    let vault = Arc::new(Vault::new(store, known.clone()));
     let weak = Arc::downgrade(&vault);
     known.refresh_with(Arc::new(move || {
         if let Some(vault) = weak.upgrade() {
@@ -511,6 +919,23 @@ pub fn shared() -> Option<Arc<Vault>> {
     SHARED.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// The value of obid's vault secret `name`, for obid's own call on a connection the owner made
+/// (Engine/Vault.swift, `Vault.use`): what connections (#444) read a secret through. It is read
+/// from the store as it is now, after the same check as every other reader, so it fails (`the
+/// vault can't be read: …`) whenever an answer would be `503` and a publish would send nothing; it
+/// is none when the vault has no such secret, or no vault is installed. The value is already in
+/// `crate::secrets::known()` as `vault <name>`, so the log, the scan and every redaction take it
+/// out: don't learn it again under another name. Never put it in a log line, an answer, an
+/// argument or an environment.
+pub fn value(name: &str) -> Result<Option<String>, String> {
+    match shared() {
+        Some(vault) => vault
+            .value(name)
+            .map_err(|why| format!("the vault can't be read: {why}")),
+        None => Ok(None),
+    }
+}
+
 /// Why obid's vault can't be read, as the scan says it (`the vault can't be read: …`), or nothing.
 /// Without a vault installed there's nothing to look for.
 pub fn check() -> Result<(), String> {
@@ -526,17 +951,36 @@ pub fn check() -> Result<(), String> {
 /// why, when the vault can't be read: then nothing goes to an agent.
 pub fn for_agent(text: &str) -> Result<String, String> {
     match shared() {
-        Some(vault) => vault.redact(text).map_err(|why| {
-            format!(
-                "The vault can't be read, so obid gave the agent nothing: {why} Once it's fixed, tell the job to go on."
-            )
-        }),
+        Some(vault) => vault
+            .redact(text)
+            .map_err(|why| unreadable_for_agents(&why)),
         None => Ok(text.to_owned()),
     }
 }
 
+/// A file's bytes as an agent may get them (`.obi/inputs/`): JSON with every string scrubbed,
+/// other text redacted, the vault's secrets taken out either way. Fails like [`for_agent`] when
+/// the vault can't be read.
+pub fn for_agent_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    match shared() {
+        Some(vault) => vault
+            .scrubbed(bytes)
+            .map(|clean| clean.unwrap_or_else(|| bytes.to_vec()))
+            .map_err(|why| unreadable_for_agents(&why)),
+        None => Ok(bytes.to_vec()),
+    }
+}
+
+fn unreadable_for_agents(why: &str) -> String {
+    format!(
+        "The vault can't be read, so obid gave the agent nothing: {why} Once it's fixed, tell the job to go on."
+    )
+}
+
 /// Every `/v1` answer, after the gate let the request in (docs/runner-api.md, "No vault secret"):
-/// `503` with the reason when the vault can't be read; otherwise every string of a JSON answer,
+/// the request is always carried out first, so a stop, a stop-all or a permission's answer takes
+/// effect whatever the vault (Runner/API.swift does the same); then its answer is `503` with the
+/// reason when the vault can't be read, and otherwise every string of a JSON answer,
 /// and every other text answer, with the vault's secrets taken out. An answer with a length is
 /// scrubbed whole; a streamed one (the event stream, `/wait`) a frame at a time, and it ends at the
 /// first frame the vault can't be read for. Files that aren't text (a check's bundle) go as they
@@ -548,10 +992,10 @@ pub async fn answers(request: Request, next: Next) -> Response {
     let Some(vault) = shared() else {
         return next.run(request).await;
     };
+    let response = next.run(request).await;
     if let Err(why) = vault.check() {
         return unreadable(&why);
     }
-    let response = next.run(request).await;
     let kind = response
         .headers()
         .get(header::CONTENT_TYPE)
@@ -640,12 +1084,13 @@ impl Action {
 /// holds a value.
 pub fn run(
     home: &Path,
+    location: &Location,
     action: &Action,
     read: impl FnOnce() -> Option<String>,
     mut say: impl FnMut(&str),
     mut fail: impl FnMut(&str),
 ) -> u8 {
-    let vault = Vault::new(folder(home), Arc::new(Secrets::default()));
+    let vault = Vault::new(location.store(home), Arc::new(Secrets::default()));
     let done = match action {
         Action::List => vault.names().map(|names| names.iter().for_each(|n| say(n))),
         Action::Add(name) => {
@@ -694,9 +1139,32 @@ pub fn read_value() -> Option<String> {
     }
     use nix::sys::termios;
     eprintln!("Value (not shown), then Return:");
+    use nix::sys::signal::{SigSet, Signal};
     let saved = termios::tcgetattr(&stdin).ok()?;
     let mut quiet = saved.clone();
     quiet.local_flags.remove(termios::LocalFlags::ECHO);
+    // Ctrl-C (or a hang-up or a stop) while the value is typed: echo comes back before obid ends.
+    // The signals wait for a thread of their own (sigwait), which puts the terminal back.
+    let mut stops = SigSet::empty();
+    for signal in [
+        Signal::SIGINT,
+        Signal::SIGTERM,
+        Signal::SIGHUP,
+        Signal::SIGQUIT,
+    ] {
+        stops.add(signal);
+    }
+    stops.thread_block().ok()?;
+    {
+        let saved = saved.clone();
+        std::thread::spawn(move || {
+            if stops.wait().is_ok() {
+                let _ = termios::tcsetattr(std::io::stdin(), termios::SetArg::TCSANOW, &saved);
+                eprintln!();
+                std::process::exit(130);
+            }
+        });
+    }
     termios::tcsetattr(&stdin, termios::SetArg::TCSANOW, &quiet).ok()?;
     let mut line = String::new();
     let read = std::io::BufRead::read_line(&mut stdin.lock(), &mut line);
@@ -732,7 +1200,7 @@ mod tests {
 
         fn vault(&self) -> (Vault, Arc<Secrets>) {
             let known = Arc::new(Secrets::default());
-            (Vault::new(self.0.join("vault"), known.clone()), known)
+            (Vault::file(self.0.join("vault"), known.clone()), known)
         }
     }
 
@@ -783,21 +1251,59 @@ mod tests {
         ]
     }
 
+    /// The Swift runner's Keychain items when obid runs in the Mac app's runner home; a file in
+    /// `home` anywhere else, unless the configuration says.
+    #[test]
+    fn where_the_vault_is() {
+        let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+            .unwrap()
+            .unwrap();
+        let runner_home = user.dir.join("Library/Application Support/Oby/Runner");
+        let expected = if cfg!(target_os = "macos") {
+            Location::Keychain {
+                service: RUNNER_SERVICE.into(),
+            }
+        } else {
+            Location::File
+        };
+        assert_eq!(Location::default_for(&runner_home), expected);
+        assert_eq!(
+            Location::default_for(Path::new("/tmp/obid-home")),
+            Location::File
+        );
+        assert_eq!(Location::parse("file", None), Ok(Location::File));
+        assert!(Location::parse("file", Some("x")).is_err());
+        assert!(Location::parse("cloud", None).is_err());
+        if cfg!(target_os = "macos") {
+            assert_eq!(Location::parse("keychain", None), Ok(expected));
+            assert_eq!(
+                Location::parse("keychain", Some("com.example.test")),
+                Ok(Location::Keychain {
+                    service: "com.example.test".into()
+                })
+            );
+            assert!(Location::parse("keychain", Some(" ")).is_err());
+        } else {
+            assert!(Location::parse("keychain", None).is_err());
+        }
+    }
+
     #[test]
     fn the_file_is_readable_only_by_obids_user() {
         let scratch = Scratch::new();
         let (vault, _) = scratch.vault();
         vault.add(&secret(), "staging-api-key").unwrap();
         let folder = std::fs::metadata(scratch.0.join("vault")).unwrap();
-        let file = std::fs::metadata(vault.store().file()).unwrap();
+        let file = std::fs::metadata(scratch.0.join("vault/secrets.json")).unwrap();
         assert_eq!(folder.mode() & 0o777, 0o700);
         assert_eq!(file.mode() & 0o777, 0o600);
         // No temporary file is left behind.
-        let left: Vec<_> = std::fs::read_dir(scratch.0.join("vault"))
+        let mut left: Vec<_> = std::fs::read_dir(scratch.0.join("vault"))
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert_eq!(left, [std::ffi::OsString::from("secrets.json")]);
+        left.sort();
+        assert_eq!(left, [".lock", "secrets.json"]);
         assert_eq!(vault.names().unwrap(), ["staging-api-key"]);
     }
 
@@ -808,7 +1314,7 @@ mod tests {
         let value = secret();
         vault.add(&value, "staging-api-key").unwrap();
         vault.check().unwrap();
-        let file = vault.store().file();
+        let file = scratch.0.join("vault/secrets.json");
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
         let why = vault.check().unwrap_err();
         assert!(why.contains("Others may read"), "{why}");
@@ -855,7 +1361,7 @@ mod tests {
         assert!(known.is_empty());
         assert!(!scratch.0.join("vault").exists());
         vault.add("long-enough-value", "fine").unwrap();
-        std::fs::write(vault.store().file(), "not the vault").unwrap();
+        std::fs::write(scratch.0.join("vault/secrets.json"), "not the vault").unwrap();
         let why = vault.check().unwrap_err();
         assert!(
             why.ends_with("isn't what obid writes: move it aside, then add the secrets again with `obid vault --config <path> add NAME`."),
@@ -874,11 +1380,36 @@ mod tests {
         for value in ["short", "        ", "\n\n\n\n\n\n\n\n\n"] {
             assert!(vault.add(value, "fine").is_err(), "{value:?}");
         }
+        // A common word or a weak pattern isn't a secret.
+        for value in [
+            "postgres",
+            "Password123!",
+            "changeme",
+            "00000000",
+            "12345678",
+            "abababababababab",
+            "letmein2024",
+            "qwertyuiop",
+            "abcdefgh",
+        ] {
+            let why = vault.add(value, "fine").unwrap_err();
+            assert!(
+                why.contains("common word or a simple pattern"),
+                "{value}: {why}"
+            );
+        }
+        for value in [
+            "sk_9fQ2mX7pL4vR8tZ1",
+            "tok/1a2b3c+a=b?c&d é",
+            "correct-horse-battery-staple",
+        ] {
+            assert_eq!(value_problem(value), None, "{value}");
+        }
         assert!(vault.add(&"v".repeat(LONGEST + 1), "fine").is_err());
         assert!(!scratch.0.join("vault").exists());
-        // A paste's line breaks go; the value is what's between them.
-        vault.add("\nlong-enough-value\r\n", "fine").unwrap();
-        let saved = vault.store().read().unwrap();
+        // A paste's spaces and line breaks go; the value is what's between them.
+        vault.add(" \nlong-enough-value \r\n", "fine").unwrap();
+        let saved = FileStore::new(scratch.0.join("vault")).read().unwrap();
         assert_eq!(saved["fine"], "long-enough-value");
         assert!(vault.remove("fine").unwrap());
         assert!(!vault.remove("fine").unwrap());
@@ -893,7 +1424,7 @@ mod tests {
         let (vault, known) = scratch.vault();
         vault.check().unwrap();
         assert!(known.is_empty());
-        let other = Vault::new(scratch.0.join("vault"), Arc::new(Secrets::default()));
+        let other = Vault::file(scratch.0.join("vault"), Arc::new(Secrets::default()));
         let value = secret();
         other.add(&value, "staging-api-key").unwrap();
         vault.check().unwrap();
@@ -968,6 +1499,7 @@ mod tests {
         let mut run_with = |action: Action, given: Option<String>| -> u8 {
             run(
                 &scratch.0,
+                &Location::File,
                 &action,
                 || given,
                 |line| out.push(line.to_owned()),

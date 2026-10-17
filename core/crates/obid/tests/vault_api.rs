@@ -28,6 +28,16 @@ fn value() -> String {
     ["vault-", "fixture/", "Q7m2+a=b?c&d"].concat()
 }
 
+/// The stand-in agent's second value, 64 bytes: GNU base64 (76 characters a line) puts it on no
+/// line whole.
+fn long() -> String {
+    format!(
+        "{}{}-end",
+        ["long-vault-", "value/"].concat(),
+        "Z9+k=x?y&w".repeat(5)
+    )
+}
+
 /// Characters every encoding treats differently: `/`, `+`, `=`, `?`, `&`, a space and a
 /// non-ASCII one (VaultTests' `secret()`).
 fn secret() -> String {
@@ -333,10 +343,19 @@ fn publishing(name: &str) -> (Folder, Obid, PathBuf) {
 }
 
 /// An ordinary publish still goes out: an `.env.example` with names and no values, a fixture key
-/// that isn't the vault's, and the vault's value cut short are no vault secret.
+/// that isn't the vault's, the vault's value cut short, and a compose file with
+/// `image: postgres:16`, since the vault refuses `postgres` and `changeme` as secrets.
 #[test]
 fn an_ordinary_publish_still_goes_out() {
     let (folder, obid, remote) = publishing("vault-plain");
+    let config = folder.0.join("config.json");
+    for common in ["postgres", "changeme"] {
+        let (code, out, err) = vault(&config, &["add", "db-password"], Some(common));
+        assert_eq!(code, 1, "{common}: {out}{err}");
+        assert!(err.contains("common word or a simple pattern"), "{err}");
+    }
+    let (_, names, _) = vault(&config, &["list"], None);
+    assert_eq!(names, "fixture-key\n");
     let id = dispatch(
         &obid,
         json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "PLAIN"}),
@@ -514,4 +533,194 @@ fn a_damaged_vault_gives_the_agent_nothing() {
         job.text,
         obid.log()
     );
+}
+
+/// A vault that can't be read never keeps the owner from stopping work: the stop is carried out,
+/// and only its answer is `503` (Runner/API.swift does the same).
+#[test]
+fn stop_all_stops_the_job_even_when_the_vault_cant_be_read() {
+    let (_folder, obid, _) = publishing("vault-stop");
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "WAIT"}),
+    );
+    let seen = obid
+        .home
+        .join(format!("worktrees/{id}/.obi/seen-prompt.txt"));
+    within(30, "the agent got its task", || seen.exists().then_some(()));
+    chmod(&vault_file(&obid), 0o644);
+    let answer = call(&obid, "POST", "/v1/stop-all", None);
+    assert_eq!(answer.status, 503, "{}", answer.text);
+    let stored = obid.home.join(format!("jobs/{id}.json"));
+    within(20, "the job stopped", || {
+        let job: Value = serde_json::from_slice(&std::fs::read(&stored).ok()?).ok()?;
+        (job["status"] == "stopped").then_some(())
+    });
+    chmod(&vault_file(&obid), 0o600);
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None);
+    assert_eq!(job.body["status"], "stopped", "{}", job.text);
+}
+
+/// A vault value of 58 bytes or more through GNU base64, which wraps at 76 characters, is on no
+/// line whole: a pushed file holding it is refused, and an answer has every line of it taken out.
+#[test]
+fn a_wrapped_vault_secret_is_refused_and_taken_out() {
+    let (folder, obid, remote) = publishing("vault-wrapped");
+    let long = long();
+    assert!(long.len() >= 58 && !long.contains(&value()));
+    add(&folder.0.join("config.json"), "long-key", &long);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "WRAPPED"}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
+    let summary = job["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("Not published: possible secret in config.b64:1 (vault secret"),
+        "{summary}"
+    );
+    assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
+
+    let encoded = b64(&long);
+    let lines: Vec<&str> = encoded
+        .as_bytes()
+        .chunks(76)
+        .map(|c| std::str::from_utf8(c).unwrap())
+        .collect();
+    assert!(lines.len() >= 2);
+    let asked = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate",
+               "task": format!("the key is\n{}\nthanks, bye", lines.join("\n"))}),
+    );
+    let answer = call(&obid, "GET", &format!("/v1/jobs/{asked}"), None);
+    for line in &lines {
+        assert!(!answer.text.contains(line), "{}", answer.text);
+    }
+    let request = answer.body["request"].as_str().unwrap();
+    assert!(
+        request.starts_with("the key is\n[vault: long-key"),
+        "{request}"
+    );
+    assert!(request.ends_with("]\nthanks, bye"), "{request}");
+}
+
+/// Two `obid vault add` runs at once each keep their secret: a save holds the vault's lock, and
+/// what an interrupted save left is gone afterwards.
+#[test]
+fn adds_at_once_each_keep_their_secret() {
+    let folder = Folder::new("vault-at-once");
+    let remote = fixture(&folder.0.join("fixture"));
+    let config = config(&folder.0, &remote, &agent());
+    let path = write_config(&folder.0, &config);
+    let leftover = folder.0.join("home/vault/.secrets-interrupted.json");
+    add(&path, "first-key", &format!("{}-first", value()));
+    std::fs::write(&leftover, "{}").unwrap();
+    let runs: Vec<_> = (0..12)
+        .map(|n| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                vault(
+                    &path,
+                    &["add", &format!("key-{n}")],
+                    Some(&format!("{}-{n}", value())),
+                )
+            })
+        })
+        .collect();
+    for run in runs {
+        let (code, out, err) = run.join().unwrap();
+        assert_eq!(code, 0, "{out}{err}");
+    }
+    let (_, names, _) = vault(&path, &["list"], None);
+    let mut expected: Vec<String> = (0..12).map(|n| format!("key-{n}")).collect();
+    expected.push("first-key".into());
+    expected.sort();
+    assert_eq!(names.lines().collect::<Vec<_>>(), expected);
+    assert!(!leftover.exists());
+}
+
+/// Items under a throwaway Keychain service, removed however the test ends (by `obid vault
+/// remove`: only the program that made an item may delete it).
+#[cfg(target_os = "macos")]
+struct Throwaway {
+    config: PathBuf,
+    names: Vec<String>,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Throwaway {
+    fn drop(&mut self) {
+        for name in &self.names {
+            let _ = vault(&self.config, &["remove", name], None);
+        }
+    }
+}
+
+/// On a Mac the vault can be the Keychain, as the Swift runner keeps it: no items is an empty
+/// vault (answers come, jobs run); a secret `obid vault add` puts there while obid runs is taken
+/// out of answers from then on; `list` shows it, a second `add` replaces it, `remove` takes it out;
+/// and nothing is written to `home/vault`. A throwaway service, never the owner's.
+#[cfg(target_os = "macos")]
+#[test]
+fn on_a_mac_the_vault_can_be_the_keychain() {
+    let folder = Folder::new("vault-keychain");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &agent());
+    let service = format!("com.deskree.oby.vault-test-{}", std::process::id());
+    config["vault"] = json!({"store": "keychain", "service": service});
+    let path = write_config(&folder.0, &config);
+    let _cleanup = Throwaway {
+        config: path.clone(),
+        names: vec!["staging-api-key".into()],
+    };
+    let obid = start(&folder.0, &config, None);
+    assert_eq!(call(&obid, "GET", "/v1/status", None).status, 200);
+    let (code, out, _) = vault(&path, &["list"], None);
+    assert_eq!((code, out.as_str()), (0, ""));
+
+    let first = secret();
+    add(&path, "staging-api-key", &first);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate",
+               "task": format!("Use {first} for the staging tests")}),
+    );
+    ended(&obid, &id);
+    let answer = call(&obid, "GET", &format!("/v1/jobs/{id}"), None);
+    assert_eq!(
+        answer.body["request"], "Use [vault: staging-api-key] for the staging tests",
+        "{}",
+        answer.text
+    );
+    let (_, out, _) = vault(&path, &["list"], None);
+    assert_eq!(out, "staging-api-key\n");
+
+    // A second add replaces the value: the first is no longer a secret, the second is.
+    let second = format!("{first}-second");
+    add(&path, "staging-api-key", &second);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate",
+               "task": format!("Old: {first} . New: {second}")}),
+    );
+    let answer = call(&obid, "GET", &format!("/v1/jobs/{id}"), None);
+    let request = answer.body["request"].as_str().unwrap();
+    assert!(!request.contains(&second), "{request}");
+    assert!(request.contains(&format!("Old: {first} .")), "{request}");
+
+    let (code, out, err) = vault(&path, &["remove", "staging-api-key"], None);
+    assert_eq!(
+        (code, out.as_str()),
+        (0, "Removed staging-api-key.\n"),
+        "{err}"
+    );
+    let answer = call(&obid, "GET", &format!("/v1/jobs/{id}"), None);
+    assert!(
+        answer.body["request"].as_str().unwrap().contains(&second),
+        "{}",
+        answer.text
+    );
+    assert!(!obid.home.join("vault").exists());
 }

@@ -167,7 +167,7 @@ pub async fn serve(
     };
     // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
     secrets::known().learn("api-token", &token);
-    vault::install(&config.home);
+    vault::install(&config.home, &config.vault);
     let events = events::Events::new();
     let sandbox = std::env::current_exe()
         .map_err(|e| format!("obid can't find its own executable: {e}"))
