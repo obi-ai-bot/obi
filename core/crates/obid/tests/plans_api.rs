@@ -396,6 +396,179 @@ fn codex_plans_when_claude_cannot() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// What each brain turn spent (#533): one entry per model call in the turn's record.
+
+/// Claude Code's whole result line, as `--output-format json` prints it, with `plan` as its
+/// structured output (left out when `plan` is null).
+fn result_line(subtype: &str, plan: serde_json::Value) -> String {
+    let mut line = json!({
+        "type": "result", "subtype": subtype, "is_error": subtype != "success",
+        "duration_ms": 3120, "num_turns": 2, "total_cost_usd": 0.0042,
+        "usage": {"input_tokens": 1200, "output_tokens": 80,
+                  "cache_read_input_tokens": 900, "cache_creation_input_tokens": 300}
+    });
+    if !plan.is_null() {
+        line["structured_output"] = plan;
+    }
+    format!("PRINT {line}")
+}
+
+/// #533's acceptance: a result carrying usage, cost, duration and turns is recorded with exactly
+/// those values, next to the model and the conversation's turn.
+#[test]
+fn a_brain_turn_records_what_its_call_reported() {
+    let folder = Folder::new("brain-numbers");
+    let obid = started(&folder);
+    let plan: serde_json::Value = serde_json::from_str(&reply("Ready")).unwrap();
+    queue(&obid, &[result_line("success", plan)]);
+    let answer = said(&obid, "hello");
+    assert_eq!(answer["text"], "Ready");
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["conversation"], answer["conversation"]);
+    assert!(
+        record["turn"].as_str().is_some_and(|t| !t.is_empty()),
+        "{record}"
+    );
+    assert_eq!(record["step"], 0);
+    let calls = record["calls"].as_array().unwrap();
+    assert_eq!(calls.len(), 1, "{record}");
+    let call = &calls[0];
+    assert!(call["wall_ms"].as_u64().is_some(), "{call}");
+    let mut call = call.clone();
+    call.as_object_mut().unwrap().remove("wall_ms");
+    assert_eq!(
+        call,
+        json!({"adapter": "claude", "model": "claude-haiku-5-5", "attempt": 1,
+               "outcome": "plan", "subtype": "success", "duration_ms": 3120, "num_turns": 2,
+               "total_cost_usd": 0.0042, "input_tokens": 1200, "output_tokens": 80,
+               "cache_read_input_tokens": 900, "cache_creation_input_tokens": 300})
+    );
+    let log = read(folder.0.join("obid.stderr"));
+    assert!(
+        log.contains("calls: claude claude-haiku-5-5 plan (success, 3120 ms, 2 turns, 1200 in, 80 out, 900 cache read, 300 cache written, $0.0042"),
+        "{log}"
+    );
+}
+
+/// #533's acceptance: a result with no usage leaves the numbers null, never zero.
+#[test]
+fn a_result_without_usage_leaves_the_numbers_null() {
+    let folder = Folder::new("brain-no-usage");
+    let obid = started(&folder);
+    queue(&obid, &[reply("Ready")]);
+    said(&obid, "hello");
+    let record = records(&obid).pop().unwrap();
+    let call = &record["calls"][0];
+    for field in [
+        "subtype",
+        "duration_ms",
+        "num_turns",
+        "total_cost_usd",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ] {
+        assert!(call[field].is_null(), "{field} in {call}");
+        assert!(call.get(field).is_some(), "{field} missing in {call}");
+    }
+    assert_eq!(call["outcome"], "plan");
+}
+
+/// #533's acceptance: a run that ran out of turns without a plan is recorded with its subtype,
+/// as a failed call.
+#[test]
+fn a_run_out_of_turns_is_a_failed_call_with_its_subtype() {
+    let folder = Folder::new("brain-max-turns");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &[result_line("error_max_turns", serde_json::Value::Null)],
+    );
+    // Rules stand in: "hello" names no repository, so they ask.
+    assert_eq!(said(&obid, "hello")["kind"], "question");
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["by"], "rules");
+    let calls = record["calls"].as_array().unwrap();
+    assert_eq!(calls.len(), 1, "{record}");
+    assert_eq!(calls[0]["outcome"], "failed");
+    assert_eq!(calls[0]["subtype"], "error_max_turns");
+    assert_eq!(calls[0]["num_turns"], 2);
+    assert!(
+        record["refused"][0]
+            .as_str()
+            .unwrap()
+            .contains("attempt 1: error_max_turns, stderr:"),
+        "{record}"
+    );
+}
+
+/// #533's acceptance: a retry is its own call in the same turn's record, a process retry and a
+/// retry after a refused plan alike.
+#[test]
+fn every_attempt_is_its_own_call_in_the_turns_record() {
+    let folder = Folder::new("brain-attempts");
+    let obid = started(&folder);
+    queue(&obid, &["EXIT 15".into(), reply("Ready")]);
+    said(&obid, "hello");
+    let record = records(&obid).pop().unwrap();
+    let calls = record["calls"].as_array().unwrap();
+    assert_eq!(calls.len(), 2, "{record}");
+    assert_eq!(
+        (calls[0]["attempt"].clone(), calls[0]["outcome"].clone()),
+        (json!(1), json!("failed"))
+    );
+    assert_eq!(
+        (calls[1]["attempt"].clone(), calls[1]["outcome"].clone()),
+        (json!(2), json!("plan"))
+    );
+
+    let stop = json!({"action": "stop_agent", "reply": "", "dispatches": [], "question": null,
+                      "jobs": ["zz"], "all": false});
+    queue(
+        &obid,
+        &[stop.to_string(), reply("Nothing of that name runs.")],
+    );
+    said(&obid, "stop the zz job");
+    let record = records(&obid).pop().unwrap();
+    let outcomes: Vec<_> = record["calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["attempt"].clone(), c["outcome"].clone()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [(json!(1), json!("refused")), (json!(2), json!("plan"))],
+        "{record}"
+    );
+}
+
+/// #533: Codex's call is recorded with what its turn reported; what it doesn't report is null.
+#[test]
+fn a_codex_call_is_recorded_after_claudes() {
+    let folder = Folder::new("brain-codex-calls");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    let agents = planner().parent().unwrap().to_path_buf();
+    config["agents"]["codex"] = json!({"bin": agents.join("fake-codex"), "accounts": []});
+    let obid = start(&folder.0, &config, Some(&agents));
+    queue(&obid, &["EXIT 15".into(), "EXIT 15".into()]);
+    said(&obid, "how is it going?");
+    let record = records(&obid).pop().unwrap();
+    let calls = record["calls"].as_array().unwrap();
+    assert_eq!(calls.len(), 3, "{record}");
+    let codex = &calls[2];
+    assert_eq!(codex["adapter"], "codex");
+    assert_eq!(codex["outcome"], "plan");
+    assert_eq!(codex["subtype"], "success");
+    assert!(
+        codex["model"].is_null() && codex["input_tokens"].is_null(),
+        "{codex}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // The briefing (#546, step 2): what the brain is told before the user's words.
 
 /// A job whose agent works until it's stopped, titled `title`, running.

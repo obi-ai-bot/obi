@@ -64,7 +64,8 @@ impl Adapter {
         }
     }
 
-    /// The plan as JSON, or why there is none. `model` is for the adapters that take one.
+    /// The plan as JSON, or why there is none. `model` is for the adapters that take one. Each
+    /// model call it makes, a retry included, is added to `calls` (#533).
     #[allow(clippy::too_many_arguments)]
     async fn complete(
         &self,
@@ -75,16 +76,21 @@ impl Adapter {
         schema: &str,
         timeout: Duration,
         halted: Halted<'_>,
+        calls: &mut Vec<Call>,
     ) -> Result<String, Failure> {
         match self {
             Adapter::Claude(claude) => {
                 claude
-                    .complete(model, system, user, quoted, schema, timeout, halted)
+                    .complete(model, system, user, quoted, schema, timeout, halted, calls)
                     .await
             }
-            Adapter::Codex(codex) => codex.complete(system, user, quoted, schema, timeout).await,
+            Adapter::Codex(codex) => {
+                codex
+                    .complete(system, user, quoted, schema, timeout, calls)
+                    .await
+            }
             #[cfg(test)]
-            Adapter::Fake(fake) => fake.complete(model),
+            Adapter::Fake(fake) => fake.complete(model, calls),
         }
     }
 }
@@ -143,6 +149,7 @@ impl ClaudeBrain {
         schema: &str,
         timeout: Duration,
         halted: Halted<'_>,
+        calls: &mut Vec<Call>,
     ) -> Result<String, Failure> {
         // What the brain reads has the secrets obid knows taken out.
         let secrets = crate::secrets::known();
@@ -224,21 +231,37 @@ impl ClaudeBrain {
             } else {
                 remaining
             };
+            let began = Instant::now();
             let result = run(&launch, own_group, input.as_bytes(), limit)
                 .await
                 .map_err(|e| Failure::Failed(format!("Claude Code couldn't start: {e}")))?;
+            let answer = serde_json::from_slice::<Value>(&result.out).ok();
+            // It can report success without structured_output: the field is what counts.
+            let plan = answer
+                .as_ref()
+                .and_then(|a| a.get("structured_output"))
+                .filter(|p| p.is_object());
+            let mut call = Call::read("claude", Some(model), answer.as_ref(), began);
+            if plan.is_none() {
+                call.outcome = CallOutcome::Failed;
+            }
+            calls.push(call);
             if halted() {
                 return Err(Failure::Halted);
             }
-            // It can report success without structured_output: the field is what counts.
-            if let Ok(answer) = serde_json::from_slice::<Value>(&result.out)
-                && let Some(plan) = answer.get("structured_output").filter(|p| p.is_object())
-            {
+            if let Some(plan) = plan {
                 return Ok(plan.to_string());
             }
             let text = String::from_utf8_lossy(&result.out).trim().to_owned();
+            let subtype = answer
+                .as_ref()
+                .and_then(|a| a["subtype"].as_str())
+                .filter(|s| *s != "success");
             let reason = if result.timed_out {
                 "timeout".to_owned()
+            } else if let Some(subtype) = subtype {
+                // error_max_turns and the like say more than an exit code.
+                subtype.to_owned()
             } else if result.status == Some(15) {
                 "exit code 15".to_owned()
             } else if text.is_empty() {
@@ -338,6 +361,7 @@ impl CodexBrain {
         quoted: Option<&str>,
         schema: &str,
         timeout: Duration,
+        calls: &mut Vec<Call>,
     ) -> Result<String, Failure> {
         let secrets = crate::secrets::known();
         let folder = self.room.folder().map_err(Failure::Failed)?;
@@ -365,6 +389,7 @@ impl CodexBrain {
             secrets.redact(user)
         );
         let (_stop, stop) = tokio::sync::watch::channel(crate::process::Signal::Run);
+        let began = Instant::now();
         let options = crate::codex::Options {
             resume: None,
             model: None,
@@ -383,17 +408,40 @@ impl CodexBrain {
             },
             |_| {},
         )
-        .await
-        .map_err(|e| Failure::Failed(format!("Codex couldn't start: {e}")))?;
+        .await;
+        // Codex's end of turn carries no usage: the call has its subtype and how long it took.
+        let mut call = Call::read("codex", None, None, began);
+        call.subtype = turn
+            .as_ref()
+            .ok()
+            .and_then(|t| t.result.as_ref())
+            .and_then(|r| r["subtype"].as_str())
+            .map(str::to_owned);
+        let turn = match turn {
+            Ok(turn) => turn,
+            Err(e) => {
+                call.outcome = CallOutcome::Failed;
+                calls.push(call);
+                return Err(Failure::Failed(format!("Codex couldn't start: {e}")));
+            }
+        };
         let text = turn
             .result
             .as_ref()
             .filter(|r| r["is_error"] != true)
             .and_then(|r| r["result"].as_str())
             .unwrap_or("");
-        match (text.find('{'), text.rfind('}')) {
-            (Some(start), Some(end)) if start <= end => Ok(text[start..=end].to_owned()),
-            _ => Err(Failure::Failed(if turn.timed_out {
+        let found = match (text.find('{'), text.rfind('}')) {
+            (Some(start), Some(end)) if start <= end => Some(text[start..=end].to_owned()),
+            _ => None,
+        };
+        if found.is_none() {
+            call.outcome = CallOutcome::Failed;
+        }
+        calls.push(call);
+        match found {
+            Some(plan) => Ok(plan),
+            None => Err(Failure::Failed(if turn.timed_out {
                 "Codex took too long.".into()
             } else {
                 "Codex returned no plan.".into()
@@ -410,6 +458,8 @@ pub struct Planned {
     pub by: String,
     /// What went wrong before it: adapters that failed, and plans refused with why.
     pub refused: Vec<String>,
+    /// Every model call it took, in order (#533).
+    pub calls: Vec<Call>,
 }
 
 /// The adapters and whether rules stand in.
@@ -480,10 +530,12 @@ impl Planner {
                     ),
                     by: "none".into(),
                     refused: vec![format!("the vault can't be read: {why}")],
+                    calls: vec![],
                 };
             }
         };
         let mut refused: Vec<String> = vec![];
+        let mut calls: Vec<Call> = vec![];
         let deep = context.turn_step > 0
             || context.turn_length.unwrap_or_else(|| said.chars().count()) > 600;
         // Claude keeps half of this for its one process retry: Sonnet gets enough for each try.
@@ -498,7 +550,8 @@ impl Planner {
                 if left <= Duration::from_secs(1) {
                     break;
                 }
-                let data = match adapter
+                let before = calls.len();
+                let answer = adapter
                     .complete(
                         model,
                         &system,
@@ -507,9 +560,18 @@ impl Planner {
                         &schema,
                         left,
                         halted,
+                        &mut calls,
                     )
-                    .await
-                {
+                    .await;
+                // Attempts count per adapter across its process retries and refusals.
+                for i in before..calls.len() {
+                    let earlier = calls[..i]
+                        .iter()
+                        .filter(|c| c.adapter == calls[i].adapter)
+                        .count();
+                    calls[i].attempt = earlier as u32 + 1;
+                }
+                let data = match answer {
                     Ok(data) => data,
                     Err(Failure::Halted) => {
                         refused.push(format!("{} stopped: the turn ended", adapter.name()));
@@ -517,6 +579,7 @@ impl Planner {
                             plan: Plan::of(Action::Ignore, ""),
                             by: "none".into(),
                             refused,
+                            calls,
                         };
                     }
                     Err(Failure::Failed(why)) => {
@@ -538,12 +601,17 @@ impl Planner {
                                 plan,
                                 by: adapter.name().into(),
                                 refused,
+                                calls,
                             };
                         }
                         problems
                     }
                     None => vec!["the output doesn't match the schema".to_owned()],
                 };
+                // The call that brought it gave a plan obid refused.
+                if let Some(call) = calls.last_mut() {
+                    call.outcome = CallOutcome::Refused;
+                }
                 // The plan itself too, so the log shows what the brain wanted to do.
                 let shown: String = data.chars().take(1000).collect();
                 refused.push(format!(
@@ -563,12 +631,14 @@ impl Planner {
                 plan: Plan::of(Action::Ignore, ""),
                 by: "rules".into(),
                 refused,
+                calls,
             };
         }
         Planned {
             plan: super::rules::plan(said, context),
             by: "rules".into(),
             refused,
+            calls,
         }
     }
 }
@@ -652,17 +722,130 @@ pub const JOB_ACTIONS_PROMPT: &str = "- retry_job: the user wants a failed, stop
 - ask_review_again: for an Oby-authored pull request, ask the author's job to run one more review (\"review oby #123 again\"). For an event retry, use it after reading a retryable review error. `jobs` names the author job from the briefing; Oby routes the verdict back to it and may choose another account with room.
 These actions change something: Oby does them and says what happened. `jobs` names jobs for job actions; `item`, `option` and `answer` are null unless the action is answer_inbox or fix_failure. `message` is non-null only for message_job.";
 
+/// How one model call ended.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CallOutcome {
+    /// A plan obid took.
+    Plan,
+    /// A plan obid refused: the next call is told why.
+    Refused,
+    /// No plan: the process failed, timed out, or ended without one (`error_max_turns`).
+    Failed,
+}
+
+/// One model call of a brain turn: one process, or one Codex turn (#533). The numbers are what
+/// the CLI reported in its result (`claude -p --output-format json`), `None` when it reported
+/// nothing, never zero; `wall_ms` is what obid measured, from start to exit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Call {
+    pub adapter: String,
+    pub model: Option<String>,
+    /// Counted from 1 within the adapter: a process retry or a retry after a refusal is the next.
+    pub attempt: u32,
+    pub outcome: CallOutcome,
+    pub subtype: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub wall_ms: u64,
+    pub num_turns: Option<u64>,
+    pub total_cost_usd: Option<f64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+}
+
+impl Call {
+    /// The call `answer` reports (Claude Code's result line, when it printed one), which began at
+    /// `began`. It counts as a plan until the planner says otherwise, and the planner numbers it.
+    pub fn read(
+        adapter: &str,
+        model: Option<&str>,
+        answer: Option<&Value>,
+        began: Instant,
+    ) -> Call {
+        let field = |key: &str| answer.map_or(&Value::Null, |a| &a[key]);
+        let usage = |key: &str| field("usage")[key].as_u64();
+        Call {
+            adapter: adapter.to_owned(),
+            model: model.map(str::to_owned),
+            attempt: 1,
+            outcome: CallOutcome::Plan,
+            subtype: field("subtype").as_str().map(str::to_owned),
+            duration_ms: field("duration_ms").as_u64(),
+            wall_ms: u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
+            num_turns: field("num_turns").as_u64(),
+            total_cost_usd: field("total_cost_usd").as_f64(),
+            input_tokens: usage("input_tokens"),
+            output_tokens: usage("output_tokens"),
+            cache_read_input_tokens: usage("cache_read_input_tokens"),
+            cache_creation_input_tokens: usage("cache_creation_input_tokens"),
+        }
+    }
+
+    /// The call in a few words, with only the numbers it has: `claude claude-haiku-5-5 plan
+    /// (success, 3120 ms, 1 turn, 1200 in, 80 out, 900 cache read, 300 cache written, $0.0042,
+    /// 3400 ms waited)`.
+    pub fn line(&self) -> String {
+        let mut numbers: Vec<String> = vec![];
+        if let Some(subtype) = &self.subtype {
+            numbers.push(subtype.clone());
+        }
+        if let Some(ms) = self.duration_ms {
+            numbers.push(format!("{ms} ms"));
+        }
+        if let Some(turns) = self.num_turns {
+            numbers.push(format!("{turns} turn{}", if turns == 1 { "" } else { "s" }));
+        }
+        for (count, what) in [
+            (self.input_tokens, "in"),
+            (self.output_tokens, "out"),
+            (self.cache_read_input_tokens, "cache read"),
+            (self.cache_creation_input_tokens, "cache written"),
+        ] {
+            if let Some(count) = count {
+                numbers.push(format!("{count} {what}"));
+            }
+        }
+        if let Some(cost) = self.total_cost_usd {
+            numbers.push(format!("${cost:.4}"));
+        }
+        numbers.push(format!("{} ms waited", self.wall_ms));
+        let outcome = match self.outcome {
+            CallOutcome::Plan => "plan",
+            CallOutcome::Refused => "refused",
+            CallOutcome::Failed => "failed",
+        };
+        let model = self
+            .model
+            .as_deref()
+            .map_or(String::new(), |m| format!(" {m}"));
+        format!("{}{model} {outcome} ({})", self.adapter, numbers.join(", "))
+    }
+}
+
 /// One turn of the brain: the user's words and the plan they got (`BrainTurn`). Every turn is
 /// logged and kept in `home/brain-turns.jsonl`, the last [`KEPT`], so a request that seems to
 /// vanish can be traced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub at: String,
+    /// The conversation and the user's turn this step of the brain belongs to: a turn of several
+    /// steps has a record for each (#533).
+    #[serde(default)]
+    pub conversation: Option<String>,
+    #[serde(default)]
+    pub turn: Option<String>,
+    #[serde(default)]
+    pub step: usize,
     pub said: String,
     /// The adapter that made the plan, `rules`, or `none`.
     pub by: String,
     pub plan: Plan,
     pub refused: Vec<String>,
+    /// Every model call it took, retries and fallbacks included, each with its numbers.
+    #[serde(default)]
+    pub calls: Vec<Call>,
 }
 
 /// How many turns are kept.
@@ -672,11 +855,23 @@ impl Record {
     pub fn new(said: &str, planned: &Planned) -> Record {
         Record {
             at: obi_protocol::time::format(obi_protocol::time::now()),
+            conversation: None,
+            turn: None,
+            step: 0,
             said: said.to_owned(),
             by: planned.by.clone(),
             plan: planned.plan.clone(),
             refused: planned.refused.clone(),
+            calls: planned.calls.clone(),
         }
+    }
+
+    /// The record as step `step` of the user's turn under `control`.
+    pub fn of(mut self, control: &super::turn::Control, step: usize) -> Record {
+        self.conversation = Some(control.conversation.clone());
+        self.turn = Some(control.turn.clone());
+        self.step = step;
+        self
     }
 
     /// The turn as one log line, the user's words included.
@@ -772,6 +967,10 @@ impl Record {
         if !self.refused.is_empty() {
             parts.push(format!("before it: {}", self.refused.join(" | ")));
         }
+        if !self.calls.is_empty() {
+            let calls: Vec<String> = self.calls.iter().map(Call::line).collect();
+            parts.push(format!("calls: {}", calls.join(" | ")));
+        }
         parts.join("; ")
     }
 
@@ -823,8 +1022,9 @@ pub mod tests {
     }
 
     impl Fake {
-        pub fn complete(&self, model: &str) -> Result<String, Failure> {
+        pub fn complete(&self, model: &str, calls: &mut Vec<Call>) -> Result<String, Failure> {
             self.models.lock().unwrap().push(model.to_owned());
+            calls.push(Call::read("fake", Some(model), None, Instant::now()));
             let mut fail = self.fail_next.lock().unwrap();
             if *fail {
                 *fail = false;
@@ -904,10 +1104,14 @@ pub mod tests {
         plan.jobs = Some(vec!["ab12cd34".into()]);
         let record = Record {
             at: String::new(),
+            conversation: None,
+            turn: None,
+            step: 0,
             said: "cancel it".into(),
             by: "claude".into(),
             plan,
             refused: vec!["claude plan refused (zz isn't a job Oby can stop): {}".into()],
+            calls: vec![],
         };
         assert_eq!(
             record.line(),
