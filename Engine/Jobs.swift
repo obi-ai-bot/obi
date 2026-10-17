@@ -2138,3 +2138,11 @@ nonisolated final class JobStore {
 extension Logger {
     nonisolated static let jobs = Logger(subsystem: "com.deskree.oby", category: "jobs")
 }
+
+extension KeyedDecodingContainer {
+    /// A mode this build doesn't know (a newer runner's, like obid's `sandbox`, #586) reads as none:
+    /// one such job must not make a whole list of jobs fail to decode.
+    func decodeIfPresent(_ type: PermissionMode.Type, forKey key: Key) throws -> PermissionMode? {
+        try decodeIfPresent(String.self, forKey: key).flatMap(PermissionMode.init(rawValue:))
+    }
+}

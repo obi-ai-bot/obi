@@ -33,7 +33,7 @@ struct SettingsView: View {
             }
             Section {
                 Picker("Default mode", selection: $mode) {
-                    ForEach(RunnerMode.allCases) { choice in
+                    ForEach(RunnerMode.local) { choice in
                         Text(choice.label).tag(PermissionMode(rawValue: choice.rawValue) ?? .bypass)
                     }
                 }
