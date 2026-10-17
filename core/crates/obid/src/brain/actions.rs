@@ -244,18 +244,23 @@ fn set_mode(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
             return Outcome::Done("That job isn't running any more.".into());
         }
         let names: Vec<String> = jobs.iter().map(crate::job::Job::short_title).collect();
-        let ids: Vec<&str> = jobs.iter().map(|j| j.id.as_str()).collect();
-        let title = format!("Stop asking on {}: Bypass mode", names.join(", "));
-        confirm(
-            shared,
-            if ids.len() == 1 { ids[0] } else { "" },
-            title,
-            format!(
-                "Oby's brain planned Bypass mode for {}: obid answers everything by its rules, and the job stops asking you. It happens only if you confirm.",
-                names.join(", ")
-            ),
-            serde_json::json!({"do": "set_mode", "jobs": ids, "mode": mode.as_str()}),
-        );
+        // One item per job: each is the owner's own decision.
+        for job in &jobs {
+            let name = job.short_title();
+            confirm(
+                shared,
+                &job.id,
+                format!("Stop asking on {name}: Bypass mode"),
+                format!(
+                    "Oby's brain planned Bypass mode for {name}: obid answers everything by its rules, and the job stops asking you. It happens only if you confirm."
+                ),
+                crate::sphere::inbox::Confirmed {
+                    action: crate::sphere::inbox::action::SET_MODE_BYPASS.into(),
+                    target: job.id.clone(),
+                    payload: serde_json::Value::Null,
+                },
+            );
+        }
         return Outcome::Done(format!(
             "Bypass mode stops {} asking you, so it waits for your OK: confirm it in your inbox.",
             names.join(", ")
@@ -314,7 +319,11 @@ fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
                 "Oby's brain planned to answer {name}'s permission with always: {always}. It saves the rule {rule} for {}, and happens only if you confirm.",
                 job.repo
             ),
-            serde_json::json!({"do": "answer_permission", "job": id, "permission": permission.id}),
+            crate::sphere::inbox::Confirmed {
+                action: crate::sphere::inbox::action::ALWAYS_ALLOW.into(),
+                target: id.clone(),
+                payload: serde_json::json!({"permission": permission.id}),
+            },
         );
         return Outcome::Done(format!(
             "Always allowing saves a rule for {}, so it waits for your OK: confirm it in your inbox.",
@@ -352,9 +361,15 @@ fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
 
 /// Puts what the brain planned, which only the user may do, in the inbox as a `confirm` item:
 /// carried out only on their own Confirm (`POST /v1/inbox/{id}/answer`).
-fn confirm(shared: &Shared, job: &str, title: String, text: String, action: serde_json::Value) {
+fn confirm(
+    shared: &Shared,
+    job: &str,
+    title: String,
+    text: String,
+    confirmed: crate::sphere::inbox::Confirmed,
+) {
     let item =
-        crate::sphere::inbox::confirm_item(job, title, text, action, obi_protocol::time::now());
+        crate::sphere::inbox::confirm_item(job, title, text, confirmed, obi_protocol::time::now());
     shared.link.add_confirm(item);
 }
 

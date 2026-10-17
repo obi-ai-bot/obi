@@ -2414,8 +2414,10 @@ impl Link {
                     ));
                 }
                 if answer == inbox::CONFIRM {
-                    self.carry_out(item.confirm.clone().unwrap_or_default())
-                        .await?;
+                    let confirmed = item.confirm.clone().ok_or_else(|| {
+                        api(StatusCode::CONFLICT, "That item says nothing to do.")
+                    })?;
+                    self.carry_out(confirmed).await?;
                 }
             }
             item.done = Some(time::now());
@@ -2426,15 +2428,16 @@ impl Link {
         Ok(item.to_json())
     }
 
-    /// What a confirmed `confirm` item does.
-    async fn carry_out(self: &Arc<Self>, action: Value) -> Result<(), ApiError> {
-        let text = |key: &str| action[key].as_str().unwrap_or("").to_owned();
-        match action["do"].as_str() {
-            Some("answer_permission") => {
+    /// What a confirmed `confirm` item does: one dispatcher, a case per action.
+    async fn carry_out(self: &Arc<Self>, confirmed: inbox::Confirmed) -> Result<(), ApiError> {
+        let target = confirmed.target.as_str();
+        match confirmed.action.as_str() {
+            inbox::action::ALWAYS_ALLOW => {
                 use crate::jobs::PermissionRefused;
+                let permission = confirmed.payload["permission"].as_str().unwrap_or("");
                 match self.jobs.answer_permission(
-                    &text("job"),
-                    &text("permission"),
+                    target,
+                    permission,
                     crate::permissions::Decision::Always,
                     None,
                 ) {
@@ -2448,20 +2451,14 @@ impl Link {
                     }
                 }
             }
-            Some("set_mode") => {
-                let mode = crate::permissions::Mode::parse(&text("mode"))
-                    .ok_or_else(|| api(StatusCode::CONFLICT, "That mode isn't one obid knows."))?;
-                for job in action["jobs"].as_array().into_iter().flatten() {
-                    let job = job.as_str().unwrap_or("");
-                    self.jobs
-                        .set_mode(job, mode)
-                        .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone."))?;
-                }
-                Ok(())
-            }
-            _ => Err(api(
+            inbox::action::SET_MODE_BYPASS => self
+                .jobs
+                .set_mode(target, crate::permissions::Mode::Bypass)
+                .map(|_| ())
+                .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone.")),
+            other => Err(api(
                 StatusCode::CONFLICT,
-                "obid doesn't know what this item does.",
+                format!("obid doesn't know the action {other:?}."),
             )),
         }
     }

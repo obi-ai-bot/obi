@@ -344,6 +344,15 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
   | `permission` | the job's agent waits for the user's OK (`permission` on the job) | the permission's `title` | `Allow`, `Always allow`, `Deny` (only `Allow` and `Deny` when it has no `rule`) |
   | `confirm` | obid only (#546): Oby's brain planned something that persists or widens trust, which it never does in a turn (obid only: the brain, below); `title` says exactly what `Confirm` does, like `Always allow Bash(make lint:*) in acme/app`, and `job` is the job it's about, or empty | what was planned and why it waits | `Confirm`, `Cancel`, none recommended |
 
+  A `confirm` item (obid only) also carries `confirm`, what its `Confirm` carries out: `{"action": "always_allow", "target": "ab12cd34", "payload": {"permission": "p1a2b3c"}}`. `action` is a typed name, `target` what it acts on (a job's id or an inbox item's id, as the action says) and `payload` what else it needs (`null` when nothing). obid carries every action out through one dispatcher, so a new action is a new name with its own `target` and `payload`, the shape unchanged. The actions so far:
+
+  | `action` | `target` | `payload` | `Confirm` does |
+  |---|---|---|---|
+  | `always_allow` | a job | `{"permission": "<id>"}` | answers that job's waiting permission with always, saving its rule |
+  | `set_mode_bypass` | a running job | `null` | puts the job in Bypass mode |
+
+  An unknown `action` is refused with `409`, and the item stays open. Apps show a `confirm` item like any other item with options, and need no change.
+
   **Only decisions wait in the inbox (#215).** Every item offers at least one answer that changes something, besides done and later: a `question` takes the agent's options or the user's words, and every other kind declares its own (above). An item with nothing to decide arrives already `done`, with no `answer`: it's kept in `oby.sqlite` with the reports (the job's own report, or the audit's `outgoing`) and comes as an `inbox` event whose `state` is `done`, so it never shows in the inbox. That's the audit's report when it fixed the drift by itself, and a `failure` whose fix is already underway. A new kind declares its answers, or none of its items reach the inbox.
 
   More kinds will come (hands-on steps): show one you don't know with its `text` and `options`. A plan waiting for approval is a `question` item (its job's `question` has the `plan`).

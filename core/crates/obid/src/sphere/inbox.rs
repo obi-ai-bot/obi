@@ -28,9 +28,38 @@ pub const OBI_OPTIONS: [&str; 4] = [ACCEPT, ACCEPT_REMEMBER, DECLINE, DECLINE_RE
 pub const CONFIRM: &str = "Confirm";
 pub const CANCEL: &str = "Cancel";
 
-/// A `confirm` item: `title` says exactly what `Confirm` does, `action` is what obid carries out
-/// then. No option is recommended: it's the owner's call.
-pub fn confirm_item(job: &str, title: String, text: String, action: Value, now: i64) -> Item {
+/// What a `confirm` item does on the owner's Confirm (runner-api.md, "Inbox item"): a typed
+/// action, what it acts on, and what it needs. One dispatcher carries every action out
+/// (`Link::carry_out`); a new action is a new name and a new case there, the shape the same.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Confirmed {
+    /// The action, by name: one of [`action`].
+    pub action: String,
+    /// What it acts on: a job's id or an inbox item's id, as the action says.
+    pub target: String,
+    /// What the action needs besides its target, like the permission it answers.
+    #[serde(default)]
+    pub payload: Value,
+}
+
+/// The actions a `confirm` item may carry out.
+pub mod action {
+    /// Always allow a job's waiting permission, saving its rule: `target` the job, `payload`
+    /// `{"permission": "<id>"}`.
+    pub const ALWAYS_ALLOW: &str = "always_allow";
+    /// Put a running job in Bypass mode: `target` the job.
+    pub const SET_MODE_BYPASS: &str = "set_mode_bypass";
+}
+
+/// A `confirm` item: `title` says exactly what `Confirm` does, `confirmed` is what obid carries
+/// out then. No option is recommended: it's the owner's call.
+pub fn confirm_item(
+    job: &str,
+    title: String,
+    text: String,
+    confirmed: Confirmed,
+    now: i64,
+) -> Item {
     Item {
         id: format!(
             "confirm-{}",
@@ -53,7 +82,7 @@ pub fn confirm_item(job: &str, title: String, text: String, action: Value, now: 
         obi: None,
         plugin: None,
         arrived: Some(arrival()),
-        confirm: Some(action),
+        confirm: Some(confirmed),
     }
 }
 
@@ -85,9 +114,9 @@ pub struct Item {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrived: Option<u64>,
     /// On a `confirm` item: what Oby's brain planned that only the owner may do, carried out on
-    /// their `Confirm` (#546). Kept, never shown: the item's title says it.
+    /// their `Confirm` (#546), shown as `confirm`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confirm: Option<Value>,
+    pub confirm: Option<Confirmed>,
 }
 
 /// Now in nanoseconds since the epoch, strictly later than any earlier answer in this process:
@@ -153,6 +182,9 @@ impl Item {
         });
         if let Some(plugin) = &self.plugin {
             shown["plugin"] = plugin.clone();
+        }
+        if let Some(confirmed) = &self.confirm {
+            shown["confirm"] = serde_json::to_value(confirmed).unwrap_or_default();
         }
         shown
     }

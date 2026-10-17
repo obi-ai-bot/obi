@@ -1069,6 +1069,11 @@ fn always_allowing_waits_for_the_owners_confirm() {
         confirms[0]["title"],
         "Always allow Bash(make lint:*) in obi-e2e/fixture-app"
     );
+    let permission = job["permission"]["id"].as_str().unwrap();
+    assert_eq!(
+        confirms[0]["confirm"],
+        json!({"action": "always_allow", "target": id, "payload": {"permission": permission}})
+    );
     // The owner's own Confirm does it.
     let confirmed = owner_answers(&obid, confirms[0]["id"].as_str().unwrap(), "Confirm");
     assert_eq!(confirmed.status, 200, "{}", confirmed.text);
@@ -1113,6 +1118,10 @@ fn bypass_mode_waits_for_the_owners_confirm() {
     assert_eq!(
         confirms[0]["title"],
         "Stop asking on Vault secrets: Bypass mode"
+    );
+    assert_eq!(
+        confirms[0]["confirm"],
+        json!({"action": "set_mode_bypass", "target": id, "payload": null})
     );
     // Cancel does nothing; a second card's Confirm does it.
     assert_eq!(
