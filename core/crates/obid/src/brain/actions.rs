@@ -422,7 +422,8 @@ fn on_jobs(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     }
 }
 
-/// Runs a job that failed or was cut off again, where it left off (`Desk.retry`): obid has no
+/// Runs a job that failed, was stopped or was cut off again, where it left off (`Desk.retry`,
+/// and the brain's prompt: "a failed, stopped or cut-off job"): obid has no
 /// failed-job inbox item, so it tells the job's agent to try again, which picks its session up.
 fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
     let name = job.short_title();
@@ -434,7 +435,7 @@ fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
     }
     if !matches!(
         job.status,
-        crate::job::Status::Failed | crate::job::Status::Interrupted
+        crate::job::Status::Failed | crate::job::Status::Stopped | crate::job::Status::Interrupted
     ) {
         return (
             format!("Couldn't try {name} again: it didn't fail, and no round is waiting for you."),

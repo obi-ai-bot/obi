@@ -2017,3 +2017,36 @@ fn codex_gets_the_same_quoted_file() {
         "From Codex. It read work.md: # Researched on request, quoted"
     );
 }
+
+/// retry_job takes a job that was stopped too, as the brain's prompt says (review on #552).
+#[test]
+fn a_stopped_job_is_tried_again() {
+    let folder = Folder::new("brain-retry-stopped");
+    let obid = started(&folder);
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Its agent has a session to pick up again.
+    within(30, "the job has a session", || {
+        get_job(&obid, &id)["session"].is_string().then_some(())
+    });
+    assert_eq!(
+        call(&obid, "POST", &format!("/v1/jobs/{id}/stop"), None).status,
+        200
+    );
+    assert_eq!(get_job(&obid, &id)["status"], "stopped");
+    queue(&obid, &[on_jobs("retry_job", &[&id]), reply("")]);
+    assert_eq!(
+        said(&obid, "try the stopped job again")["text"],
+        "Started Vault secrets again on Claude Code · Stub."
+    );
+    let job = get_job(&obid, &id);
+    assert!(
+        job["notes"]
+            .to_string()
+            .contains("Try again, picking up where you left off."),
+        "{job}"
+    );
+    assert_ne!(job["status"], "stopped", "{job}");
+}
