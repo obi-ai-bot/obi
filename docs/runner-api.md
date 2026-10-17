@@ -1265,6 +1265,11 @@ valid for other clients; This Mac mode uses the fixed home and address above.
 
 ### obid only: the vault
 
+A connection receives a credential from the same checked snapshot already learned by obid's
+redactors. If Keychain Access changes an item between checks, the broker never gets a newer
+credential from an unchecked second read. An unreadable store still refuses the request.
+
+
 The owner's secrets for connections they make (#457), kept and used as the Swift runner keeps them (Engine/Vault.swift):
 
 - **Where.** On a Mac whose `obid` runs in the Mac app's runner home (`~/Library/Application Support/Oby/Runner`, [The Mac app on the same Mac](#obid-only-configuration)), the Swift runner's own Keychain items: generic passwords in the owner's login Keychain under the service `com.deskree.oby.runner.vault`, the secret's name as the account, labelled `Oby vault: <name>`, so secrets the owner added to the Swift runner carry over. Anywhere else, and on Linux, `home/vault/secrets.json` (`{"secrets": {"<name>": "<value>"}}`) as the Swift runner's file vault keeps it: a folder only `obid`'s user may open (0700), the file readable only by that user (0600), each save a new file written 0600 and renamed into place under a lock (`home/vault/.lock`), so two `obid vault add` runs at once each keep their secret. The configuration's `vault` can say either ([obid only: configuration](#obid-only-configuration)). No items, or no file, is an empty vault, which everything reads.
