@@ -359,6 +359,50 @@ mod tests {
         assert_eq!(acting_refusal(&brain, 0), None);
     }
 
+    /// FinishFromPRTests.rulesDispatchTheIssueFromThePullRequestsHead, and
+    /// theBrainsPlanIsDispatchedFromThePullRequestsHead's record line.
+    #[test]
+    fn rules_dispatch_the_issue_from_the_pull_requests_head() {
+        let context = context();
+        let shape = |said: &str| {
+            let plan = plan(said, &context);
+            assert!(plan.problems(&context, "zq9").is_empty(), "{said}");
+            plan.dispatches
+                .iter()
+                .map(|d| {
+                    format!(
+                        "{} {}/{}",
+                        d.kind.as_str(),
+                        d.issue.unwrap_or(0),
+                        d.pr.unwrap_or(0)
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shape("finish oby #19 from PR #124"), ["fix 19/124"]);
+        assert_eq!(
+            shape("pick up issue 19 in oby from pull request 124"),
+            ["fix 19/124"]
+        );
+        assert_eq!(shape("build oby #19 from PR #124"), ["build 19/124"]);
+        assert_eq!(shape("review oby #19 from PR #124"), ["review 0/124"]);
+        assert_eq!(
+            shape("investigate oby #19 from PR #124"),
+            ["investigate 19/0"]
+        );
+        let planned = Planned {
+            plan: plan("finish oby #19 from PR #124", &context),
+            by: "claude".into(),
+            refused: vec![],
+        };
+        let line =
+            super::super::planner::Record::new("finish oby #19 from PR #124", &planned).line();
+        assert!(
+            line.contains("fix deskree-inc/oby #19 from PR #124"),
+            "{line}"
+        );
+    }
+
     #[test]
     fn rules_read_only_what_they_can_be_sure_of() {
         let context = context();

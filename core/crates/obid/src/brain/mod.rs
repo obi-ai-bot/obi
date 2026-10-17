@@ -8,6 +8,8 @@ pub mod actions;
 pub mod briefing;
 pub mod plan;
 pub mod planner;
+pub mod read;
+pub mod research;
 pub mod rules;
 pub mod turn;
 

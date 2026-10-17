@@ -1722,6 +1722,145 @@ mod tests {
         assert_eq!(dispatch["reads"], json!({"type": "null"}));
     }
 
+    /// JobActionTests.swiftChecksWhatTheBrainNames
+    #[test]
+    fn obid_checks_what_the_brain_names() {
+        let context = Context {
+            movable: vec!["fa11ed00".into()],
+            inbox: vec!["fa11ed00-failed-1".into()],
+            ..Context::default()
+        };
+        let on = |action: &str, ids: &[&str]| {
+            Plan::decode(
+                json!({"action": action, "reply": "", "question": null, "dispatches": [], "jobs": ids})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap()
+        };
+        let answer = |item: &str, option: Option<i64>, words: Option<&str>| {
+            Plan::decode(
+                json!({"action": "answer_inbox", "reply": "", "question": null, "dispatches": [], "jobs": [],
+                       "item": item, "option": option, "answer": words})
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap()
+        };
+        for action in ["retry_job", "dismiss_job", "start_now"] {
+            assert!(
+                on(action, &["fa11ed00"])
+                    .problems(&context, "c4n4ry")
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            on("retry_job", &["nobody"]).problems(&context, "c4n4ry"),
+            ["nobody isn't a job in the briefing"]
+        );
+        assert_eq!(
+            on("start_now", &[]).problems(&context, "c4n4ry"),
+            ["start_now names 1 to 10 jobs"]
+        );
+        assert!(
+            answer("fa11ed00-failed-1", Some(1), None)
+                .problems(&context, "c4n4ry")
+                .is_empty()
+        );
+        assert!(
+            answer("fa11ed00-failed-1", None, Some("try again"))
+                .problems(&context, "c4n4ry")
+                .is_empty()
+        );
+        assert_eq!(
+            answer("nothing-1", Some(1), None).problems(&context, "c4n4ry"),
+            ["answer_inbox names an item waiting in the inbox"]
+        );
+        assert_eq!(
+            answer("fa11ed00-failed-1", None, None).problems(&context, "c4n4ry"),
+            ["answer_inbox gives an option or the user's words"]
+        );
+        assert_eq!(
+            answer("fa11ed00-failed-1", Some(1), Some("x")).problems(&context, "c4n4ry"),
+            ["answer_inbox gives an option or the user's words, not both"]
+        );
+        // The fields belong to answer_inbox alone.
+        let mut stray = on("retry_job", &["fa11ed00"]);
+        stray.item = Some("fa11ed00-failed-1".into());
+        assert_eq!(
+            stray.problems(&context, "c4n4ry"),
+            ["only answer_inbox has an item, an option or an answer"]
+        );
+        // The schema offers the items, and the actions.
+        let schema = schema(&context).to_string();
+        for part in [
+            "\"retry_job\"",
+            "\"dismiss_job\"",
+            "\"answer_inbox\"",
+            "\"start_now\"",
+            "\"fa11ed00-failed-1\"",
+        ] {
+            assert!(schema.contains(part), "{part}");
+        }
+        let prompt = crate::brain::planner::system("c4n4ry", false, false);
+        for action in ["retry_job", "dismiss_job", "answer_inbox", "start_now"] {
+            assert!(prompt.contains(action), "{action}");
+        }
+    }
+
+    /// ReadJobTests.readJobPlansAreChecked
+    #[test]
+    fn read_job_plans_are_checked() {
+        let context = Context {
+            accounts: BTreeMap::from([("claude".into(), vec!["default".into()])]),
+            repos: vec!["deskree-inc/oby".into()],
+            movable: vec!["aaaa1111".into(), "bbbb2222".into()],
+            ..Context::default()
+        };
+        let mut read = Plan::of(Action::ReadJob, "");
+        read.jobs = Some(vec!["aaaa1111".into()]);
+        assert!(read.problems(&context, "zq9").is_empty());
+        read.jobs = Some(vec!["zz".into()]);
+        assert_eq!(
+            read.problems(&context, "zq9"),
+            ["zz isn't a job Oby can read"]
+        );
+        read.jobs = Some(vec!["aaaa1111".into(), "bbbb2222".into()]);
+        assert_eq!(read.problems(&context, "zq9"), ["read_job names one job"]);
+        assert!(schema(&context).to_string().contains("read_job"));
+        // It changes nothing, so the loop doesn't count it as an action that did something.
+        assert!(!Action::ReadJob.acts() && !Action::Research.acts());
+    }
+
+    /// FinishFromPRTests.finishingAnIssueFromAPullRequestIsAValidFixBuildOrTest and
+    /// theBrainIsToldToDispatchFromThePullRequestsHead.
+    #[test]
+    fn finishing_an_issue_from_a_pull_request_is_a_valid_fix_build_or_test() {
+        let context = context();
+        let finish = |kind: &str| {
+            let mut plan = Plan::of(Action::Dispatch, "");
+            plan.dispatches = vec![
+                serde_json::from_value(json!({
+                "agent": "claude", "account": "default", "repo": "deskree-inc/oby", "pr": 124,
+                "issue": 19, "kind": kind, "task": "Finish #19 from PR #124"}))
+                .unwrap(),
+            ];
+            plan.problems(&context, "zq9")
+        };
+        for kind in ["fix", "build", "test"] {
+            assert!(finish(kind).is_empty(), "{kind}");
+        }
+        assert_eq!(
+            finish("review"),
+            [
+                "a job is about a pr or an issue, not both, unless it's a fix, build or test of the issue that starts from the pr"
+            ]
+        );
+        assert!(!finish("investigate").is_empty());
+        let system = crate::brain::planner::system("zq9", false, false);
+        assert!(system.contains("finish #19 from PR #124") && !system.contains("(never both)"));
+    }
+
     #[test]
     fn unknown_kinds_are_investigations_and_branch_names_are_checked() {
         let dispatch: Dispatch =

@@ -695,6 +695,7 @@ mod tests {
             plugin: None,
             arrived: None,
             confirm: None,
+            start: None,
         };
         let briefing = briefing(vec![old, done, failed, running], vec![permission]);
         let text = briefing.text();

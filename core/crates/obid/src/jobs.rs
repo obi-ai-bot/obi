@@ -54,8 +54,8 @@ enum Gate<'a> {
     Owner { mcp: &'a [String] },
 }
 
-/// A job the owner describes whole (`POST /v1/jobs`), checked. A confirm item keeps one until
-/// the owner says so.
+/// A job the owner describes whole (`POST /v1/jobs`), checked. A `start` or `confirm` inbox
+/// item keeps one until the owner says so.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct NewJob {
     pub repo: String,
@@ -1837,6 +1837,37 @@ impl Jobs {
     }
 
     /// The lock that orders the preparations of `repo`.
+    /// A configured repository's default branch.
+    pub fn default_branch(&self, repo: &str) -> Option<String> {
+        self.config
+            .repos
+            .iter()
+            .find(|r| r.repo == repo)
+            .map(|r| r.default_branch.clone())
+    }
+
+    /// obid's clone of `repo`, with its default branch fetched now, for the brain's lookups
+    /// (#546): one at a time with the jobs getting ready in it.
+    pub async fn research_clone(&self, repo: &str) -> Result<PathBuf, String> {
+        let config = self
+            .config
+            .repos
+            .iter()
+            .find(|r| r.repo == repo)
+            .ok_or_else(|| format!("{repo} isn't a known repository"))?;
+        let preparing = self.preparing(repo);
+        let _ready = preparing.lock().await;
+        let base = &config.default_branch;
+        git::ensure_clone(
+            &self.config.home,
+            repo,
+            &config.remote,
+            &[format!("+refs/heads/{base}:refs/remotes/origin/{base}")],
+        )
+        .await
+        .map_err(|e| format!("Couldn't get {repo} ready: {e}"))
+    }
+
     fn preparing(&self, repo: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.preparing
             .lock()

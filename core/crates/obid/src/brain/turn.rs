@@ -16,6 +16,8 @@ use serde_json::json;
 use super::actions::{self, Asked, Outcome, Talk};
 use super::plan::{Action, Plan};
 use super::planner::{Planner, Record, Room};
+use super::read::{self, JobReads};
+use super::research;
 use crate::api::Shared;
 use crate::conversation::Turn;
 
@@ -232,6 +234,11 @@ pub async fn run(
     let mut taken: HashSet<String> = HashSet::new();
     let mut request = said.to_owned();
     let mut details: Option<String> = None;
+    let mut reads = JobReads::default();
+    let mut research = research::Log::default();
+    let tools = research::Tools::new(shared.jobs.clone());
+    // Work the brain wants after looking things up waits for the user's Start.
+    let mut researched = false;
     let answered = |talk: Talk, details: Option<String>| Answered { talk, details };
     for step in 0..MOST_STEPS {
         // A stop is checked before the brain is asked for another action.
@@ -245,6 +252,8 @@ pub async fn run(
         let mut context = super::context(shared, given, &nonce);
         context.turn_step = step;
         context.turn_length = Some(said.chars().count());
+        // What the turn read and looked up goes into the next step's quoted file.
+        context.quoted = research.quoted(reads.quoted(context.quoted.take(), &nonce), &nonce);
         let planner = Planner {
             adapters: Planner::of(&shared.config, &room),
             falls_back_to_rules: step == 0,
@@ -288,9 +297,53 @@ pub async fn run(
             break;
         }
         let plan = &planned.plan;
-        if matches!(plan.action, Action::ReadJob | Action::Research) {
-            let talk = Talk::reply("Oby can't read jobs or look things up on this runner yet.");
-            return answered(after(&done, talk), details);
+        let so_far = || {
+            if done.is_empty() {
+                said.to_owned()
+            } else {
+                continued(said, &done)
+            }
+        };
+        // The chat reads before it answers (#302): what's read is in the next step's file.
+        if plan.action == Action::ReadJob {
+            reads.read(plan.named().first().map(String::as_str), |id| {
+                shared.jobs.get(id).map(|job| read::section(&job))
+            });
+            if Instant::now() >= deadline {
+                break;
+            }
+            request = reads.continued(&so_far());
+            continue;
+        }
+        if plan.action == Action::Research {
+            let lookups = plan.lookups.clone().unwrap_or_default();
+            researched |= !lookups.is_empty();
+            let texts: Vec<String> = lookups.iter().map(research::step_text).collect();
+            let text = if texts.is_empty() {
+                "Looking up context".to_owned()
+            } else {
+                texts.join(", ")
+            };
+            step_event(
+                shared,
+                control,
+                step + 1,
+                Action::Research,
+                &text,
+                "running",
+            );
+            // Stopped or cancelled: no lookup runs.
+            if control.live() && Instant::now() < deadline {
+                research.run(&lookups, &tools, said).await;
+            }
+            let cut = !control.live() || Instant::now() >= deadline;
+            let state = if cut { "failed" } else { "done" };
+            step_event(shared, control, step + 1, Action::Research, &text, state);
+            if cut {
+                break;
+            }
+            request = research.continued(&reads.continued(&so_far()));
+            continue;
         }
         if matches!(plan.action, Action::ReplyOnly | Action::AskUser) {
             details = plan.details.clone();
@@ -301,7 +354,7 @@ pub async fn run(
             break;
         }
         if !acting {
-            let talk = actions::answer(shared, &planned, asked, &live).await;
+            let talk = actions::answer(shared, &planned, asked, researched, &live).await;
             return answered(after(&done, talk), details);
         }
         let outcome = act(shared, control, plan, step + 1).await;
@@ -316,7 +369,7 @@ pub async fn run(
             done.push(AS_FAR_AS.into());
             break;
         }
-        request = continued(said, &done);
+        request = reads.continued(&continued(said, &done));
     }
     answered(finish(&done), details)
 }
@@ -324,15 +377,15 @@ pub async fn run(
 /// Does one action that changes something, with its step events around it (`Desk.step`).
 async fn act(shared: &Arc<Shared>, control: &Control, plan: &Plan, index: usize) -> Outcome {
     let text = actions::step_text(shared, plan);
-    step(shared, control, index, plan.action, &text, "running");
+    step_event(shared, control, index, plan.action, &text, "running");
     let outcome = actions::act(shared, plan).await;
     let state = if outcome.failed() { "failed" } else { "done" };
-    step(shared, control, index, plan.action, &text, state);
+    step_event(shared, control, index, plan.action, &text, state);
     outcome
 }
 
 /// A `step` event: one action of the turn, as it starts and ends.
-pub fn step(
+pub fn step_event(
     shared: &Shared,
     control: &Control,
     index: usize,
