@@ -122,6 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         RunnerFeed.registerCategories()
         island.openWindow = { [weak self] job in self?.chat.show(job: job) }
         island.windowShowsTalk = { [weak self] in self.map { $0.chat.showsTalk || $0.firstLaunch.isOpen } ?? false }
+        island.windowShowsConversation = { [weak self] in self?.chat.showsConversation ?? false }
         island.start()
         // Scheduled update checks (apps/mac/app/Updater.swift), in the build that ships. A Debug build from
         // Xcode checks only when asked, so a release never replaces it quietly.

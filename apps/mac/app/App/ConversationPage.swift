@@ -58,7 +58,7 @@ struct ConversationPage: View {
     private var thread: some View {
         // Every half minute: a time that turns into yesterday's, and the inbox's waits move on.
         TimelineView(.periodic(from: .now, by: 30)) { context in
-            let turns = conversation.thread(with: desk.turns)
+            let turns = conversation.thread(with: model.localTurns)
             let entries = (desk.inbox.map { IslandInbox.Entry(item: $0, local: true) }
                 + (feed.inbox + feed.inboxHistory).map { IslandInbox.Entry(item: $0, local: false) })
                 .filter { $0.item.isDecision && ($0.item.later == nil || $0.item.later! <= context.date) }

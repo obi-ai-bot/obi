@@ -109,6 +109,9 @@ final class ChatWindow: NSObject, NSWindowDelegate {
 
     var isOpen: Bool { window?.isVisible ?? false }
 
+    /// The window is in front on the conversation page: the talk key's words carry on in it (#493).
+    var showsConversation: Bool { NSApp.isActive && window?.isVisible == true && state.trail.top == .talk }
+
     /// The window is in front on Home or the conversation, where what Oby hears and says shows (#528).
     var showsTalk: Bool {
         guard NSApp.isActive, window?.isVisible == true else { return false }

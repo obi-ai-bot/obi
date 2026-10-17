@@ -166,6 +166,7 @@ struct ConversationListTests {
         list.startNew()
         #expect(thread.runnerTurns.isEmpty && list.shownTitle == ConversationList.newTitle)
         // The answer says which conversation the words started: it opens.
+        #expect(list.target() == .new)
         await list.joined("c")
         #expect(list.shown == "c" && !list.starting && !list.creating && thread.runnerTurns.map(\.id) == ["t-c"])
     }
@@ -214,6 +215,43 @@ struct ConversationListTests {
         await list.open("a")
         await list.joined("late")
         #expect(list.shown == "a" && !list.creating)
+    }
+
+    /// The talk key away from the conversation page (#493): its words go to the latest conversation,
+    /// sending neither field (#507), once; the window stays where it is, even on an empty new one.
+    @Test func theTalkKeyAwayFromTheConversationCarriesOnInTheLatest() async {
+        let (list, _) = make([convo("a", ago: 10), convo("b", ago: 5)])
+        await list.open("a")
+        list.nextToLatest = true
+        #expect(list.target() == .latest && !list.creating)
+        #expect(list.target() == .conversation("a"))
+        list.startNew()
+        list.nextToLatest = true
+        #expect(list.target() == .latest && !list.creating)
+        await list.joined("b")
+        #expect(list.shown == nil && list.starting)
+        // On a runner with one thread it's the same request as ever.
+        list.reset()
+        list.nextToLatest = true
+        #expect(list.target() == .latest)
+        #expect(!list.nextToLatest)
+    }
+
+    /// Each of obid's conversations is only its own turns: this Mac's history from before the runner
+    /// planned joins the one thread of a runner that keeps one, never a conversation.
+    @Test func aConversationShowsOnlyItsOwnTurns() {
+        let mine = [Turn(id: "m1", date: now - 60, who: .user, text: "before the runner planned")]
+        #expect(IslandModel.localTurns(mine, conversations: false).map(\.id) == ["m1"])
+        #expect(IslandModel.localTurns(mine, conversations: true).isEmpty)
+        let feed = RunnerFeed()
+        let model = IslandModel(desk: Desk(), feed: feed, availability: MacAvailability())
+        #expect(model.localTurns.map(\.id) == model.desk.turns.map(\.id))
+        feed.conversations.take([convo("a")])
+        #expect(model.localTurns.isEmpty)
+        feed.conversation.apply(Turn(id: "r1", date: now, who: .user, text: "in a"))
+        #expect(model.thread.map(\.id) == ["r1"])
+        feed.conversations.reset()
+        #expect(model.localTurns.map(\.id) == model.desk.turns.map(\.id))
     }
 
     @Test func aRunnerWithOneThreadIgnoresConversationEvents() {

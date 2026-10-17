@@ -24,6 +24,9 @@ final class ConversationList {
     private(set) var problem: String?
     /// The conversations known when the words that start a new one went out.
     @ObservationIgnored private var known: Set<String> = []
+    /// The next words are the talk key's, said away from the conversation page: they go to the
+    /// latest conversation, as the Watch's do (#493), and obid picks it (no `conversation`, #507).
+    @ObservationIgnored var nextToLatest = false
 
     /// The runner followed, and the thread the window shows.
     @ObservationIgnored var runner: () -> Runner? = { nil }
@@ -127,7 +130,8 @@ final class ConversationList {
     /// Where the words about to go to `POST /v1/plans` land. A runner with one thread gets neither
     /// field. Marks a new conversation as under way.
     func target() -> PlanTarget {
-        guard served else { return .latest }
+        defer { nextToLatest = false }
+        guard served, !nextToLatest else { return .latest }
         if let shown, !starting { return .conversation(shown) }
         known = Set(items.map(\.id))
         creating = true
@@ -136,9 +140,11 @@ final class ConversationList {
 
     /// The runner answered: the words joined `conversation` (nil from a runner with one thread).
     func joined(_ conversation: String?) async {
+        let started = creating
         creating = false
-        // Still on the new conversation these words started: it opens. Somewhere else by now: it stays.
-        guard served, starting, let conversation else { return }
+        // Still on the new conversation these words started: it opens. Somewhere else by now, or
+        // words that joined the latest one: the window stays where it is.
+        guard served, started, starting, let conversation else { return }
         known.insert(conversation)
         await show(conversation)
     }
