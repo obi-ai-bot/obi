@@ -2334,7 +2334,8 @@ impl Jobs {
             }
         }
         let argv: Vec<OsString> = match tool {
-            Tool::Codex => codex::argv(bin),
+            // The brain never gets the connected-app broker.
+            Tool::Codex => codex::argv(bin, None),
             _ => std::iter::once(bin.into_os_string()).chain(flags).collect(),
         };
         Ok(Launch {
