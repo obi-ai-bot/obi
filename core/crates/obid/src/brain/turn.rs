@@ -2,9 +2,9 @@
 //! action, obid does it and tells the brain what happened, and the brain picks the next, until
 //! the request is done ("Deskree is full, move its jobs to Personal and Codex" is several
 //! moves). It ends on an answer, an action it already took, one that couldn't happen, a later
-//! step only rules could plan, eight actions, or the turn's budget. Each action that changes
-//! something is a `step` event when it starts and when it ends; Stop finishes the action under
-//! way and starts nothing more.
+//! step only rules could plan, eight actions, or the turn's budget, and says which as an [`End`]
+//! (#538). Each action that changes something is a `step` event when it starts and when it ends;
+//! Stop finishes the action under way and starts nothing more.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -206,10 +206,106 @@ fn setting_refusal(refused: &[String]) -> Option<String> {
     .then(|| reason.to_owned())
 }
 
-/// What a turn answers, and the longer Markdown under it when the brain gave some.
+/// Why a turn ended (#538), as Claude Code's loop records why it stopped (`next_turn`,
+/// `max_turns`, `aborted`…): the loop, its step events and its tests go by this, never by the
+/// words the user hears, which a clearer message or a translation can change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum End {
+    /// The brain answered: a reply, or nothing more to say once the work was done.
+    Answered,
+    /// The brain asked the user something.
+    AskedUser,
+    /// The plan started these jobs, by id.
+    StartedJobs(Vec<String>),
+    /// An action couldn't happen, or the plan's jobs couldn't start.
+    CouldNot,
+    /// An action didn't say which job or item: the user is asked to.
+    NeedsWhich,
+    /// The brain planned an action the turn already took.
+    Repeated,
+    /// The turn's budget ran out.
+    BudgetSpent,
+    /// Stop: the action under way finished, and nothing more started.
+    Stopped,
+    /// Cancelled, or replaced by new words: nothing more happens, and the answer is none.
+    Cancelled,
+    /// The brain couldn't plan, and rules stood in.
+    BrainFailed,
+    /// The turn took its eight actions.
+    MostSteps,
+}
+
+impl End {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            End::Answered => "answered",
+            End::AskedUser => "asked_user",
+            End::StartedJobs(_) => "started_jobs",
+            End::CouldNot => "could_not",
+            End::NeedsWhich => "needs_which",
+            End::Repeated => "repeated",
+            End::BudgetSpent => "budget_spent",
+            End::Stopped => "stopped",
+            End::Cancelled => "cancelled",
+            End::BrainFailed => "brain_failed",
+            End::MostSteps => "most_steps",
+        }
+    }
+}
+
+/// A step's state, as its `step` event says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    Running,
+    Done,
+    Failed,
+}
+
+impl State {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            State::Running => "running",
+            State::Done => "done",
+            State::Failed => "failed",
+        }
+    }
+}
+
+/// What an action's outcome means for its step and for the turn: one that happened goes on to
+/// the next step; one that didn't fails its step and ends the turn, saying why.
+pub fn settle(outcome: &Outcome) -> (State, Option<End>) {
+    match outcome {
+        Outcome::Done(_) => (State::Done, None),
+        Outcome::Failed(_) => (State::Failed, Some(End::CouldNot)),
+        Outcome::NeedsWhich(_) => (State::Failed, Some(End::NeedsWhich)),
+    }
+}
+
+/// Why a turn whose plan answered ended: a question, the jobs it started, or a reply.
+fn answered_end(plan: &Plan, talk: &Talk, researched: bool, control: &Control) -> End {
+    if control.cancelled() {
+        return End::Cancelled;
+    }
+    match talk {
+        // Stopped while the jobs' issues were read: nothing started.
+        Talk::None if plan.action == Action::Dispatch && control.stopped() => End::Stopped,
+        Talk::Question { .. } => End::AskedUser,
+        Talk::Reply { jobs, .. } if !jobs.is_empty() => End::StartedJobs(
+            jobs.iter()
+                .filter_map(|job| job["id"].as_str().map(str::to_owned))
+                .collect(),
+        ),
+        // Jobs research found wait in the inbox; others that didn't start say why.
+        _ if plan.action == Action::Dispatch && !researched => End::CouldNot,
+        _ => End::Answered,
+    }
+}
+
+/// What a turn answers, the longer Markdown under it when the brain gave some, and why it ended.
 pub struct Answered {
     pub talk: Talk,
     pub details: Option<String>,
+    pub end: End,
 }
 
 /// Runs one turn for `said`, the conversation so far being `given`.
@@ -239,17 +335,20 @@ pub async fn run(
     let tools = research::Tools::new(shared.jobs.clone());
     // Work the brain wants after looking things up waits for the user's Start.
     let mut researched = false;
-    let answered = |talk: Talk, details: Option<String>| Answered { talk, details };
     // The own instructions of the repositories the turn names, read once from their clones (#543).
     let own = super::own(shared, said, given, &nonce).await;
-    for step in 0..MOST_STEPS {
+    let mut step = 0;
+    let (end, talk) = loop {
         // A stop is checked before the brain is asked for another action.
         if control.stopped() {
-            return answered(finish(&done), details);
+            break (End::Stopped, finish(&done));
+        }
+        if step >= MOST_STEPS {
+            break (End::MostSteps, finish(&done));
         }
         if Instant::now() >= deadline {
             done.push(AS_FAR_AS.into());
-            break;
+            break (End::BudgetSpent, finish(&done));
         }
         let mut context = super::context(shared, given, &nonce);
         context.turn_step = step;
@@ -273,12 +372,10 @@ pub async fn run(
                 .refused
                 .push("the turn was cancelled before the plan came: nothing done".into());
             Record::new(&request, &planned).of(control, step).keep(home);
-            let talk = if control.cancelled() {
-                Talk::None
-            } else {
-                finish(&done)
-            };
-            return answered(talk, details);
+            if control.cancelled() {
+                break (End::Cancelled, Talk::None);
+            }
+            break (End::Stopped, finish(&done));
         }
         // The turn's budget ran out while the brain thought: its plan does nothing.
         if Instant::now() >= deadline {
@@ -287,24 +384,26 @@ pub async fn run(
                 .push("the plan came after the turn's budget: nothing done".into());
             Record::new(&request, &planned).of(control, step).keep(home);
             done.push(AS_FAR_AS.into());
-            return answered(finish(&done), details);
+            break (End::BudgetSpent, finish(&done));
         }
         Record::new(&request, &planned).of(control, step).keep(home);
         if let Some(refusal) = super::rules::acting_refusal(&planned, step) {
-            return answered(after(&done, Talk::reply(refusal)), details);
+            break (End::BrainFailed, after(&done, Talk::reply(refusal)));
         }
         if planned.by == "rules"
             && let Some(reason) = setting_refusal(&planned.refused)
         {
             let talk = Talk::reply(format!("I couldn't use that setting: {reason}."));
-            return answered(after(&done, talk), details);
+            break (End::CouldNot, after(&done, talk));
         }
         // Rules only stand in for the brain on the user's own words: a later step they planned
         // is a guess.
         if step > 0 && planned.by == "rules" {
-            break;
+            break (End::BrainFailed, finish(&done));
         }
         let plan = &planned.plan;
+        let index = step + 1;
+        step += 1;
         let so_far = || {
             if done.is_empty() {
                 said.to_owned()
@@ -318,7 +417,7 @@ pub async fn run(
                 shared.jobs.get(id).map(|job| read::section(&job))
             });
             if Instant::now() >= deadline {
-                break;
+                break (End::BudgetSpent, finish(&done));
             }
             request = reads.continued(&so_far());
             continue;
@@ -335,20 +434,32 @@ pub async fn run(
             step_event(
                 shared,
                 control,
-                step + 1,
+                index,
                 Action::Research,
                 &text,
-                "running",
+                State::Running,
             );
             // Stopped or cancelled: no lookup runs.
             if control.live() && Instant::now() < deadline {
                 research.run(&lookups, &tools, said).await;
             }
-            let cut = !control.live() || Instant::now() >= deadline;
-            let state = if cut { "failed" } else { "done" };
-            step_event(shared, control, step + 1, Action::Research, &text, state);
-            if cut {
-                break;
+            let cut = if control.cancelled() {
+                Some(End::Cancelled)
+            } else if control.stopped() {
+                Some(End::Stopped)
+            } else if Instant::now() >= deadline {
+                Some(End::BudgetSpent)
+            } else {
+                None
+            };
+            let state = if cut.is_some() {
+                State::Failed
+            } else {
+                State::Done
+            };
+            step_event(shared, control, index, Action::Research, &text, state);
+            if let Some(end) = cut {
+                break (end, finish(&done));
             }
             request = research.continued(&reads.continued(&so_far()));
             continue;
@@ -359,36 +470,48 @@ pub async fn run(
         let acting = plan.action.acts();
         // The same action twice in one turn: it's done; the brain only repeated itself.
         if acting && !taken.insert(plan.signature()) {
-            break;
+            break (End::Repeated, finish(&done));
         }
         if !acting {
             let talk = actions::answer(shared, &planned, asked, researched, &live).await;
-            return answered(after(&done, talk), details);
+            let end = if planned.by == "rules" {
+                End::BrainFailed
+            } else {
+                answered_end(plan, &talk, researched, control)
+            };
+            break (end, after(&done, talk));
         }
-        let outcome = act(shared, control, plan, step + 1).await;
+        let outcome = act(shared, control, plan, index).await;
         if !outcome.text().is_empty() {
             done.push(outcome.text().to_owned());
         }
-        // An action that couldn't happen ends the turn: the user hears why.
-        if outcome.failed() {
-            break;
+        // An action that didn't happen ends the turn: the user hears why.
+        if let (_, Some(end)) = settle(&outcome) {
+            break (end, finish(&done));
         }
         if Instant::now() >= deadline {
             done.push(AS_FAR_AS.into());
-            break;
+            break (End::BudgetSpent, finish(&done));
         }
         request = reads.continued(&continued(said, &done));
-    }
-    answered(finish(&done), details)
+    };
+    tracing::info!("turn {} ended: {}", control.turn, end.as_str());
+    Answered { talk, details, end }
 }
 
 /// Does one action that changes something, with its step events around it (`Desk.step`).
 async fn act(shared: &Arc<Shared>, control: &Control, plan: &Plan, index: usize) -> Outcome {
     let text = actions::step_text(shared, plan);
-    step_event(shared, control, index, plan.action, &text, "running");
+    step_event(shared, control, index, plan.action, &text, State::Running);
     let outcome = actions::act(shared, plan).await;
-    let state = if outcome.failed() { "failed" } else { "done" };
-    step_event(shared, control, index, plan.action, &text, state);
+    step_event(
+        shared,
+        control,
+        index,
+        plan.action,
+        &text,
+        settle(&outcome).0,
+    );
     outcome
 }
 
@@ -399,12 +522,12 @@ pub fn step_event(
     index: usize,
     action: Action,
     text: &str,
-    state: &str,
+    state: State,
 ) {
     shared.events.send(
         "step",
         json!({"turn": control.turn, "conversation": control.conversation, "index": index,
-               "action": action.as_str(), "text": text, "state": state,
+               "action": action.as_str(), "text": text, "state": state.as_str(),
                "at": obi_protocol::time::format(obi_protocol::time::now())}),
     );
 }
@@ -469,6 +592,96 @@ mod tests {
             Some("maxRunning goes from 1 to 20".into())
         );
         assert_eq!(setting_refusal(&["claude failed: x".into()]), None);
+    }
+
+    /// #538's acceptance: what an action's step and the turn do comes from its outcome. Reworded
+    /// replies (test doubles with other words, some starting as another kind's did) change
+    /// nothing: a failed action fails its step and ends the turn, one that happened goes on.
+    #[test]
+    fn a_step_is_decided_by_its_outcome_never_by_its_words() {
+        for text in [
+            "Couldn't move it: obid can't yet.",
+            "Say which job.",
+            "That job isn't running any more.",
+            "Started Vault secrets again.",
+            "Erledigt.",
+            "",
+        ] {
+            assert_eq!(
+                settle(&Outcome::Done(text.into())),
+                (State::Done, None),
+                "{text}"
+            );
+            assert_eq!(
+                settle(&Outcome::Failed(text.into())),
+                (State::Failed, Some(End::CouldNot)),
+                "{text}"
+            );
+            assert_eq!(
+                settle(&Outcome::NeedsWhich(text.into())),
+                (State::Failed, Some(End::NeedsWhich)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_answer_ends_the_turn_with_what_it_was() {
+        let control = Turns::default().begin("t1", "c1");
+        let reply = Plan::of(Action::ReplyOnly, "");
+        let dispatch = Plan::of(Action::Dispatch, "");
+        let started = Talk::Reply {
+            text: "Whatever it says.".into(),
+            jobs: vec![json!({"id": "ab12cd34"}), json!({"id": "ef56ab78"})],
+        };
+        assert_eq!(
+            answered_end(&dispatch, &started, false, &control),
+            End::StartedJobs(vec!["ab12cd34".into(), "ef56ab78".into()])
+        );
+        let refused = Talk::reply("Whatever it says.");
+        assert_eq!(
+            answered_end(&dispatch, &refused, false, &control),
+            End::CouldNot
+        );
+        // After research the jobs wait in the inbox for a Start.
+        assert_eq!(
+            answered_end(&dispatch, &refused, true, &control),
+            End::Answered
+        );
+        assert_eq!(
+            answered_end(&reply, &refused, false, &control),
+            End::Answered
+        );
+        assert_eq!(
+            answered_end(&reply, &Talk::None, false, &control),
+            End::Answered
+        );
+        let question = Talk::Question {
+            said: "x".into(),
+            question: super::super::plan::Question {
+                text: "Which?".into(),
+                options: vec![],
+                details: None,
+                recommended: None,
+                plan: None,
+            },
+        };
+        assert_eq!(
+            answered_end(&reply, &question, false, &control),
+            End::AskedUser
+        );
+        let turns = Turns::default();
+        let stopped = turns.begin("t2", "c2");
+        turns.stop(None);
+        assert_eq!(
+            answered_end(&dispatch, &Talk::None, false, &stopped),
+            End::Stopped
+        );
+        turns.cancel(None);
+        assert_eq!(
+            answered_end(&dispatch, &started, false, &stopped),
+            End::Cancelled
+        );
     }
 
     #[test]

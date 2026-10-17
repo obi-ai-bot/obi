@@ -231,6 +231,15 @@ fn records(obid: &Obid) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Why each turn ended, in order, as obid logs it (#538): `answered`, `could_not`, `stopped`….
+fn ends(obid: &Obid) -> Vec<String> {
+    obid.log()
+        .lines()
+        .filter_map(|line| line.split(" ended: ").nth(1))
+        .map(|reason| reason.trim().to_owned())
+        .collect()
+}
+
 fn reply(text: &str) -> String {
     json!({"action": "reply_only", "reply": text, "dispatches": [], "question": null, "jobs": []})
         .to_string()
@@ -276,6 +285,7 @@ fn exhausted_retries_keep_exit_and_stderr_in_fallback_evidence() {
     assert_eq!(answer["kind"], "question", "{answer}");
     assert_eq!(answer["question"]["text"], "Which repository?");
     assert_eq!(calls(&obid).len(), 2);
+    assert_eq!(ends(&obid), ["brain_failed"]);
     let record = records(&obid).pop().unwrap();
     assert_eq!(record["by"], "rules");
     let refused = record["refused"].as_array().unwrap();
@@ -910,6 +920,7 @@ fn a_two_step_turn_sends_each_running_and_done_event_in_order() {
     let second = read(calls[1].join("input"));
     assert!(second.contains("The user says now:\nchange the mode twice\n\n(Oby already did this for the request, step by step: Vault secrets is in Ask mode now.\n"), "{second}");
     assert!(read(calls[1].join("args")).contains("--model\nclaude-sonnet-5-5\n"));
+    assert_eq!(ends(&obid), ["answered"]);
 }
 
 /// The id of the user's turn that said `words`.
@@ -946,6 +957,7 @@ fn a_repeated_action_ends_the_turn() {
         "Vault secrets is in Ask mode now."
     );
     assert_eq!(calls(&obid).len(), 2);
+    assert_eq!(ends(&obid), ["repeated"]);
 }
 
 /// ConversationStepsTests.stoppingAfterTheFirstStepDoesNotStartAnotherAction, and #546's
@@ -979,6 +991,7 @@ fn stopping_after_the_first_step_does_not_start_another_action() {
     assert!(events.try_iter().all(|(name, _)| name != "step"));
     let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
     assert_eq!(job["mode"], "ask");
+    assert_eq!(ends(&obid), ["stopped"]);
     let turns = call(&obid, "GET", "/v1/conversation", None).body;
     assert_eq!(
         turns.as_array().unwrap().last().unwrap()["text"],
@@ -1032,6 +1045,7 @@ fn a_cancelled_turn_stops_nothing() {
         asking.join().unwrap()
     });
     assert_eq!(answer["kind"], "none", "{answer}");
+    assert_eq!(ends(&obid), ["cancelled"]);
     let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
     assert_eq!(job["status"], "running");
     assert_eq!(
@@ -1181,6 +1195,7 @@ fn a_failed_action_ends_the_turn_and_its_step_fails() {
         "{answer}"
     );
     assert_eq!(calls(&obid).len(), 1);
+    assert_eq!(ends(&obid), ["could_not"]);
 }
 
 /// The turn's budget bounds the planning too (review on #551): a plan that comes after it is
@@ -1219,6 +1234,7 @@ fn a_plan_that_comes_after_the_turn_budget_does_nothing() {
         refused.contains("the plan came after the turn's budget: nothing done"),
         "{refused}"
     );
+    assert_eq!(ends(&obid), ["budget_spent"]);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1924,6 +1940,7 @@ fn a_plan_starts_its_jobs_and_links_them_to_the_turn() {
         json!(ids)
     );
     assert_eq!(call(&obid, "GET", "/v1/inbox", None).body, json!([]));
+    assert_eq!(ends(&obid), ["started_jobs"]);
 }
 
 /// NoDispatchCardTests.aCancelledOrLateTurnStartsNothing: a turn cancelled while its jobs' issues
