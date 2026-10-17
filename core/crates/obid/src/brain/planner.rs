@@ -332,24 +332,31 @@ impl ClaudeBrain {
             } else {
                 format!("exit code {}", result.status.unwrap_or(-1))
             };
-            // What Claude said, like "Not logged in · Please run /login" (#626).
-            let reason = match answer.as_ref().and_then(|a| a["result"].as_str()) {
-                Some(said) if !said.trim().is_empty() => {
-                    let said: String = said.trim().chars().take(300).collect();
-                    format!("{reason}: {}", secrets.redact(&said))
+            // What Claude said, like "Not logged in · Please run /login" (#626): only its own
+            // error, never text the model wrote nor anything that looks like a credential, on one
+            // line, the vault's secrets taken out before it's cut (#640's security review).
+            let reason = match answer
+                .as_ref()
+                .filter(|a| a["is_error"] == true)
+                .and_then(|a| a["result"].as_str())
+            {
+                Some(said) if !said.trim().is_empty() && crate::scan::matches(said).is_empty() => {
+                    let said = secrets
+                        .redact(said)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!("{reason}: {}", said.chars().take(300).collect::<String>())
                 }
                 _ => reason,
             };
             let err = if result.err.is_empty() {
                 "<empty>".to_owned()
             } else {
-                let chars: Vec<char> = result.err.chars().collect();
+                let chars: Vec<char> = secrets.redact(&result.err).chars().collect();
                 chars[chars.len().saturating_sub(1000)..].iter().collect()
             };
-            failures.push(format!(
-                "attempt {attempt}: {reason}, stderr: {}",
-                secrets.redact(&err)
-            ));
+            failures.push(format!("attempt {attempt}: {reason}, stderr: {err}"));
             // One retry covers empty answers, Claude's exit 15, and a process that timed out.
             if !(attempt < attempts
                 && (text.is_empty() || result.status == Some(15) || result.timed_out))

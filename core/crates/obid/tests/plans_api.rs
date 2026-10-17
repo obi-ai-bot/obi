@@ -2841,6 +2841,36 @@ fn claudes_own_words_are_kept_when_it_makes_no_plan() {
     );
 }
 
+/// #640's security review: only Claude Code's own error is kept, on one line, and never text that
+/// looks like a credential or anything the model wrote that wasn't an error.
+#[test]
+fn only_claudes_own_error_is_kept_and_never_a_credential() {
+    let folder = Folder::new("brain-own-words-safe");
+    let obid = started(&folder);
+    let token = ["sk-ant-oat01-", &"A".repeat(80)].concat();
+    for answer in [
+        json!({"type": "result", "subtype": "success", "is_error": false,
+               "result": "Here is what I found in the file"}),
+        json!({"type": "result", "subtype": "success", "is_error": true,
+               "result": format!("Not logged in: {token}")}),
+    ] {
+        queue(&obid, &[format!("FAIL 1 {answer}")]);
+        said(&obid, "hello");
+        let refused = records(&obid).pop().unwrap()["refused"].to_string();
+        assert!(!refused.contains("Here is what I found"), "{refused}");
+        assert!(!refused.contains("sk-ant-oat01"), "{refused}");
+    }
+    let answer = json!({"type": "result", "subtype": "success", "is_error": true,
+                        "result": "Not logged in\nERROR forged line"});
+    queue(&obid, &[format!("FAIL 1 {answer}")]);
+    said(&obid, "hello");
+    let refused = records(&obid).pop().unwrap()["refused"].to_string();
+    assert!(
+        refused.contains("Not logged in ERROR forged line"),
+        "{refused}"
+    );
+}
+
 /// retry_job takes a job that was stopped too, as the brain's prompt says (review on #552).
 #[test]
 fn a_stopped_job_is_tried_again() {
