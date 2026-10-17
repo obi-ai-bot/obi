@@ -283,6 +283,7 @@ pub(super) fn context(shared: &Shared, turns: &[Turn], nonce: &str) -> Context {
         jobs: shared.jobs.list(usize::MAX),
         inbox: shared.link.waiting_items(now),
         accounts: told,
+        repos: config.repos.iter().map(|r| r.repo.clone()).collect(),
         max_running: shared.jobs.max_running(),
         now,
         nonce: nonce.to_owned(),

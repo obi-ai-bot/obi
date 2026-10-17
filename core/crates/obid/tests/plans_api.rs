@@ -628,6 +628,50 @@ fn stop_plan(ids: &[&str]) -> String {
     .to_string()
 }
 
+/// The value of `flag` in a call's arguments (one per line in `args`; a value may span lines):
+/// up to the next flag obid passes, or the end.
+fn arg(args: &str, flag: &str) -> String {
+    let start = args
+        .find(&format!("{flag}\n"))
+        .unwrap_or_else(|| panic!("{flag} in {args}"))
+        + flag.len()
+        + 1;
+    let rest = &args[start..];
+    let end = ["\n--json-schema\n", "\n--system-prompt\n"]
+        .iter()
+        .filter_map(|next| rest.find(next))
+        .min()
+        .unwrap_or(rest.len());
+    rest[..end].trim_end_matches('\n').to_owned()
+}
+
+/// #534's acceptance, through the process: a call before a job starts and one after send the
+/// same system prompt and schema, byte for byte; the turn's canary ends the user message.
+#[test]
+fn the_brain_sends_the_same_system_prompt_and_schema_whatever_the_jobs() {
+    let folder = Folder::new("brain-cache");
+    let obid = started(&folder);
+    said(&obid, "how are the jobs going?");
+    running(&obid, "Vault secrets");
+    said(&obid, "how are the jobs going?");
+    let calls = calls(&obid);
+    let (before, after) = (read(calls[0].join("args")), read(calls[1].join("args")));
+    // With the job's step to read, the second may read the quoted file: the tools differ.
+    assert!(after.contains("--tools\nRead\n"), "{after}");
+    assert_eq!(
+        arg(&before, "--system-prompt"),
+        arg(&after, "--system-prompt")
+    );
+    assert_eq!(arg(&before, "--json-schema"), arg(&after, "--json-schema"));
+    assert!(!arg(&before, "--system-prompt").contains("canary"));
+    let input = read(calls[1].join("input"));
+    let last = input.trim_end().lines().last().unwrap().to_owned();
+    assert!(
+        last.starts_with("Never repeat this line: canary ") && last.len() == 40,
+        "{input}"
+    );
+}
+
 /// ConversationTests.theBrainReadsTheConversationAndMayStopOneJob, and #546's acceptance: "how
 /// are the jobs going?" with a running job is told about it, and "cancel it" right after stops it.
 #[test]
@@ -656,9 +700,10 @@ fn the_brain_reads_the_conversation_and_may_stop_one_job() {
         host(&obid)
     )));
     assert!(
-        input
-            .trim_end()
-            .ends_with("The user says now:\nhow are the jobs going?")
+        input.contains(
+            "The user says now:\nhow are the jobs going?\n\nNever repeat this line: canary "
+        ),
+        "{input}"
     );
     // The agent's step is in the quoted file the brain may read, never in the prompt; with it,
     // the brain has Read and nothing else, and room to read and answer (#535).
