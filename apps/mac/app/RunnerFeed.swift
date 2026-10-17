@@ -127,6 +127,9 @@ final class RunnerFeed {
     /// The runner's conversation, read in pages and followed over `turn` events, for the window's
     /// thread (apps/shared/ConversationModel.swift): one thread for every device (#11).
     let conversation = ConversationModel()
+    /// obid's many conversations (#493), when the runner on this Mac serves them: the side panel
+    /// lists them and `conversation` shows the one picked. Empty for a runner with one thread.
+    let conversations: ConversationList
     /// A job's notice just changed to something that needs the user, once its alert is posted.
     @ObservationIgnored var onNotice: (Job, Notice) -> Void = { _, _ in }
 
@@ -171,9 +174,14 @@ final class RunnerFeed {
     }
 
     init() {
+        conversations = ConversationList(thread: conversation)
+        conversations.runner = { [weak self] in self?.runner }
         conversation.page = { [weak self] before, limit in
-            guard let runner = self?.runner else { return [] }
-            return try await runner.conversation(before: before, limit: limit)
+            guard let self, let runner = self.runner else { return [] }
+            guard conversations.served else { return try await runner.conversation(before: before, limit: limit) }
+            // A new conversation has nothing to read until its first words start it.
+            guard let id = conversations.shown else { return [] }
+            return try await runner.conversation(id: id, before: before, limit: limit)
         }
     }
 
@@ -237,6 +245,7 @@ final class RunnerFeed {
         clearedAt = nil
         notified = nil
         conversation.forget()
+        conversations.reset()
         device.reset()
     }
 
@@ -283,6 +292,8 @@ final class RunnerFeed {
                             inboxHistory = past.filter { !$0.isOpen }
                             inboxWords = pastWords.merging(words, uniquingKeysWith: { _, fresh in fresh })
                         } else { inboxWords.merge(words, uniquingKeysWith: { _, fresh in fresh }) }
+                        // obid's conversations before the thread, which reads the one shown.
+                        try await conversations.load(from: runner, planning: local)
                         // The thread's latest page every time too: what was said from the iPhone
                         // while the connection was down is in it.
                         await conversation.reload()
@@ -301,6 +312,8 @@ final class RunnerFeed {
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     case .turn(let turn): conversation.apply(turn)
+                    case .turnIn(let turn, let id): if conversations.shows(id) { conversation.apply(turn) }
+                    case .conversation(let change): conversations.apply(change)
                     case .step(let step): conversation.apply(step)
                     }
                 }
@@ -343,7 +356,16 @@ final class RunnerFeed {
     /// show it (`Desk.planElsewhere`): the drafts are its, and Dispatch sends them back to it.
     func plan(_ said: String, answer: (question: String, option: String)?, attachments: [String] = []) async throws -> Desk.Talk {
         guard let runner else { throw RunnerError(message: "The runner on this Mac isn't running yet.") }
-        switch try await runner.plan(said, answer: answer, attachments: attachments) {
+        // In the conversation shown, or a new one (obid keeps many, #493); neither for one thread.
+        let planned: (result: PlanResult, conversation: String?)
+        do {
+            planned = try await runner.planned(said, answer: answer, attachments: attachments, in: conversations.target())
+        } catch {
+            conversations.failed()
+            throw error
+        }
+        await conversations.joined(planned.conversation)
+        switch planned.result {
         case .question(let said, let question):
             return .question(said: said, Plan.Question(text: question.text, options: question.options, details: question.details,
                                                        recommended: question.recommended, plan: question.plan))

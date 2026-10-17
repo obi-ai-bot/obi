@@ -2,6 +2,9 @@ import AppKit
 import SwiftUI
 import WebKit
 
+/// The side panel's sections, picked by the icons on its left (Sangam's Sidebar.tsx).
+nonisolated enum PanelSection: Sendable { case home, conversations }
+
 /// The Settings window's tabs, so the sidebar's Accounts and keys, Integrations, Memory and
 /// Settings open the right one.
 nonisolated enum SettingsTab: String, CaseIterable, Sendable { case general, runner, remote, accounts, models, connectors, vault, about }
@@ -136,6 +139,8 @@ final class ChatState {
     /// The side panel's folded groups and those showing all their done tasks.
     var folded: Set<String> = []
     var more: Set<String> = []
+    /// What the side panel lists: Home's work, or (with obid's conversations, #493) the conversations.
+    var section = PanelSection.home
 
     /// A job's page, or the conversation with Oby, from a fresh start.
     func open(job: (id: String, local: Bool)? = nil) {
@@ -144,6 +149,7 @@ final class ChatState {
             trail.start(.job(id: job.id, local: job.local))
         } else {
             trail.start(.talk)
+            section = .conversations
             composerFocusRequest += 1
         }
     }
@@ -320,6 +326,8 @@ private struct HomeView: View {
     /// Asked in Home's box: it goes to Oby, and the conversation opens on it.
     private func ask() {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        // Home's box starts a conversation of its own (obid keeps many, #493).
+        model.feed.conversations.startNew()
         model.sendChat(text)
         text = ""
         state.open()
@@ -432,8 +440,11 @@ private struct TitleBar: View {
                     .help("Installs the update and relaunches Oby. While this Mac runs a check for the runner, it waits for the check to end.")
                     .padding(.trailing, state.trail.isHome ? Tokens.gutter : 8)
             }
-            if case .job(let id, _) = state.trail.top, ConversationModel.started(id, in: model.thread) {
-                Button("Go to conversation") { state.trail.push(.talk) }
+            if case .job(let id, let local) = state.trail.top, model.hasConversation(of: id, local: local) {
+                Button("Go to conversation") {
+                    model.showConversation(of: id, local: local)
+                    state.trail.push(.talk)
+                }
                     .buttonStyle(ChipButtonStyle())
                     .padding(.trailing, Tokens.gutter)
             }
@@ -495,7 +506,7 @@ enum WindowLabels {
     static func label(_ step: WindowStep, model: IslandModel) -> String {
         switch step {
         case .group(let kind): kind.label
-        case .talk: "Oby"
+        case .talk: model.feed.conversationsOn ? model.feed.conversations.shownTitle : "Oby"
         case .job(let id, let local):
             (local ? model.desk.jobs : model.feed.jobs).first { $0.id == id }?.heading ?? "Task"
         }
