@@ -19,6 +19,10 @@ use crate::api::{ApiError, Shared};
 /// The permission rule that lets a job's agent call the broker's tools (`mcp__oby__<connection>_<tool>`),
 /// in the job's rules only when it was given the broker.
 pub const BROKER_RULE: &str = "mcp__oby__*";
+/// The calls a job's report keeps: the latest ones (the use log has them all).
+pub const KEPT_USES: usize = 500;
+/// How large the use log grows before it starts again, the one before kept as `uses.1.jsonl`.
+const USES_LOG_MAX: u64 = 4 << 20;
 const ACTING: &str = "Acting as you needs your OK, which arrives with permission modes.";
 const LONGEST: usize = 256 * 1024;
 const MCP_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -83,6 +87,15 @@ impl Connection {
                 "{text} isn't a URL a connection can use: https://host/path, with no login, query or fragment in it."
             ));
         };
+        // The phone signs this text, and the secret goes where the parsed URL points: they must
+        // be the same. WHATWG parsing reads `\` as `/`, drops tabs and newlines, lower-cases the
+        // host and spells a non-ASCII one as xn--, so a URL that isn't already in that form
+        // could show the owner one host and send the login to another.
+        if url.as_str() != text {
+            return Some(format!(
+                "{text:?} isn't written the way it's read. Write it as {url}: that is where the secret would go."
+            ));
+        }
         let loopback = matches!(
             url.host_str().unwrap_or("").to_ascii_lowercase().as_str(),
             "127.0.0.1" | "localhost" | "::1" | "[::1]"
@@ -195,6 +208,8 @@ impl ConnectionUse {
 pub struct Connections {
     file: PathBuf,
     uses_file: PathBuf,
+    /// [`USES_LOG_MAX`]; smaller in tests.
+    uses_max: u64,
     vault_file: PathBuf,
     all: Mutex<Vec<Connection>>,
     last_used: Mutex<HashMap<String, String>>,
@@ -217,13 +232,13 @@ struct Upstream {
 impl Connections {
     pub fn open(home: &Path, jobs: &Arc<crate::jobs::Jobs>, api_url: String) -> Arc<Connections> {
         let file = home.join("connections.json");
-        let all = std::fs::read(&file)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Vec<Connection>>(&b).ok())
-            .unwrap_or_default();
+        let all = load(&file);
         let uses_file = home.join("vault/uses.jsonl");
         let mut last_used = HashMap::new();
-        if let Ok(text) = std::fs::read_to_string(&uses_file) {
+        for text in [&previous_log(&uses_file), &uses_file]
+            .into_iter()
+            .filter_map(|f| std::fs::read_to_string(f).ok())
+        {
             for line in text.lines() {
                 if let Ok(value) = serde_json::from_str::<ConnectionUse>(line) {
                     last_used
@@ -245,6 +260,7 @@ impl Connections {
         Arc::new(Connections {
             file,
             uses_file,
+            uses_max: USES_LOG_MAX,
             vault_file: home.join("vault/secrets.json"),
             all: Mutex::new(all),
             last_used: Mutex::new(last_used),
@@ -344,14 +360,27 @@ impl Connections {
     }
 
     pub fn open_job(&self, id: &str) -> Option<(String, String)> {
-        let snapshot = self
+        let current = self.all.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let kept = self
             .snapshots
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(id.to_owned())
-            .or_insert_with(|| self.all.lock().unwrap_or_else(|e| e.into_inner()).clone())
-            .clone();
-        let current = self.all.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            .get(id)
+            .cloned();
+        // The snapshot the job started with: in memory while it works, and kept on the job, so
+        // a later round, a message or a restart doesn't take a new one.
+        let snapshot = kept.unwrap_or_else(|| {
+            let started = match self.jobs.upgrade() {
+                Some(jobs) => jobs.connections_of(id, current.clone()),
+                None => current.clone(),
+            };
+            self.snapshots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(id.to_owned())
+                .or_insert(started)
+                .clone()
+        });
         if !snapshot
             .iter()
             .any(|s| current.contains(s) && self.vault_value(&s.secret).ok().flatten().is_some())
@@ -428,6 +457,12 @@ impl Connections {
             .insert(use_record.connection.clone(), use_record.date.clone());
         if let Ok(mut line) = serde_json::to_vec(&use_record) {
             line.push(b'\n');
+            // Full: it starts again, the one before kept (a rename keeps its 0600 and owner).
+            if std::fs::symlink_metadata(&self.uses_file)
+                .is_ok_and(|m| m.is_file() && m.len() + line.len() as u64 > self.uses_max)
+            {
+                let _ = std::fs::rename(&self.uses_file, previous_log(&self.uses_file));
+            }
             let _ = append_private(&self.uses_file, &line);
         }
     }
@@ -884,6 +919,42 @@ impl Connections {
     }
 }
 
+/// Where the use log before this one is kept: `uses.1.jsonl` next to `uses.jsonl`.
+fn previous_log(file: &Path) -> PathBuf {
+    file.with_extension("1.jsonl")
+}
+
+/// `use_record` added to a job's report, which keeps the latest [`KEPT_USES`].
+pub fn keep_use(uses: &mut Vec<ConnectionUse>, use_record: ConnectionUse) {
+    uses.push(use_record);
+    if uses.len() > KEPT_USES {
+        uses.drain(..uses.len() - KEPT_USES);
+    }
+}
+
+/// The connections in `file`, each one `problem` lets through (so `Connection::url` never fails
+/// on one); the others are left out.
+fn load(file: &Path) -> Vec<Connection> {
+    let all = std::fs::read(file)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Vec<Connection>>(&b).ok())
+        .unwrap_or_default();
+    // Logged by name only: a hand-edited URL could hold a login.
+    all.into_iter()
+        .filter(|c| {
+            let fine = c.problem().is_none();
+            if !fine {
+                tracing::error!(
+                    "left connection {:?} out of {}: it wouldn't save",
+                    c.name,
+                    file.display()
+                );
+            }
+            fine
+        })
+        .collect()
+}
+
 fn connection_json(connection: &Connection, saved: bool, last_used: Option<&String>) -> Value {
     json!({"name": connection.name, "mcp": connection.mcp, "api": connection.api, "secret": connection.secret,
         "header": connection.header.as_deref().unwrap_or("Authorization"), "created": connection.created,
@@ -1275,6 +1346,7 @@ mod tests {
         Connections {
             file: home.join("connections.json"),
             uses_file: home.join("vault/uses.jsonl"),
+            uses_max: 1024,
             vault_file: home.join("vault/secrets.json"),
             all: Mutex::new(all),
             last_used: Mutex::new(HashMap::new()),
@@ -1413,6 +1485,55 @@ mod tests {
         }
     }
 
+    /// The sentence the phone signs names the URL the secret goes to, as it goes: a URL that
+    /// reads one way and parses another (a backslash, a tab or newline, a look-alike or upper-case
+    /// host, a missing `/`) is refused, and the refusal says how to write it.
+    #[test]
+    fn the_signed_sentence_names_where_the_secret_goes() {
+        for (text, goes) in [
+            (
+                "https://evil.example\\@slack.com/mcp",
+                "https://evil.example/@slack.com/mcp",
+            ),
+            (
+                "https://slack.com\n.evil.example/mcp",
+                "https://slack.com.evil.example/mcp",
+            ),
+            (
+                "https://slack.com\t.evil.example/mcp",
+                "https://slack.com.evil.example/mcp",
+            ),
+            (
+                "https://sl\u{0430}ck.com/mcp",
+                "https://xn--slck-63d.com/mcp",
+            ),
+            ("https://Slack.com/mcp", "https://slack.com/mcp"),
+            ("https://slack.com", "https://slack.com/"),
+            ("https://slack.com:443/mcp", "https://slack.com/mcp"),
+            (" https://slack.com/mcp", "https://slack.com/mcp"),
+            ("https://slack.com/a/../mcp", "https://slack.com/mcp"),
+        ] {
+            let c = connection("mail", text, "mail-token");
+            let problem = c
+                .problem()
+                .unwrap_or_else(|| panic!("{text:?} was let through"));
+            assert!(problem.contains(goes), "{text:?}: {problem}");
+            let mut api = c.clone();
+            (api.mcp, api.api) = (None, Some(text.into()));
+            assert!(api.problem().is_some(), "{text:?} as an API");
+        }
+        // Written the way it's read: the host the secret goes to, in its ASCII (xn--) form.
+        let idn = connection("mail", "https://xn--slck-63d.com/mcp", "mail-token");
+        assert_eq!(idn.problem(), None);
+        assert!(
+            idn.action()
+                .contains("the MCP server https://xn--slck-63d.com/mcp "),
+            "{}",
+            idn.action()
+        );
+        assert_eq!(idn.host(), "xn--slck-63d.com");
+    }
+
     /// The vault is read only when its folder and file are the owner's alone, never through a
     /// symbolic link.
     #[test]
@@ -1481,6 +1602,84 @@ mod tests {
             .block_on(broker.close_job("job1"));
         let tokens = broker.tokens.lock().unwrap();
         assert!(!tokens.contains_key(&token) && tokens.contains_key(&other));
+    }
+
+    /// A connections file with an entry no API request could have saved (edited by hand, or by
+    /// an older runner) loads without it, instead of failing a request later.
+    #[test]
+    fn a_connection_that_wouldnt_save_doesnt_load() {
+        let home = folder("load");
+        let file = home.join("connections.json");
+        let good = connection("mail", "https://mail.example.com/mcp", "mail-token");
+        let bad = [
+            connection("web", "not a url", "mail-token"),
+            connection("plain", "http://example.com/mcp", "mail-token"),
+            connection(
+                "slack",
+                "https://evil.example\\@slack.com/mcp",
+                "mail-token",
+            ),
+        ];
+        let mut all = vec![good.clone()];
+        all.extend(bad);
+        std::fs::write(&file, serde_json::to_vec(&all).unwrap()).unwrap();
+        assert_eq!(load(&file), [good]);
+        std::fs::write(&file, b"not json").unwrap();
+        assert!(load(&file).is_empty());
+    }
+
+    /// The job's report keeps its latest calls and the use log starts again when full, the one
+    /// before kept: neither grows without end, and the last use of each connection survives it.
+    #[test]
+    fn the_use_records_are_bounded() {
+        let one = |n: usize| ConnectionUse {
+            job: "job1".into(),
+            connection: if n.is_multiple_of(2) {
+                "mail"
+            } else {
+                "people"
+            }
+            .into(),
+            tool: format!("tool{n}"),
+            access: "read".into(),
+            allowed: true,
+            secret: "mail-token".into(),
+            host: "mail.example.com".into(),
+            date: format!("2026-10-16T00:{:02}:{:02}Z", n / 60 % 60, n % 60),
+        };
+        let mut uses = Vec::new();
+        for n in 0..KEPT_USES + 7 {
+            keep_use(&mut uses, one(n));
+        }
+        assert_eq!(uses.len(), KEPT_USES);
+        assert_eq!(uses[0].tool, "tool7");
+        assert_eq!(uses.last().unwrap().tool, format!("tool{}", KEPT_USES + 6));
+
+        let home = folder("uses");
+        vault(&home, &[]);
+        let broker = broker(&home, vec![]);
+        for n in 0..200 {
+            broker.record(one(n));
+        }
+        let log = home.join("vault/uses.jsonl");
+        let before = home.join("vault/uses.1.jsonl");
+        for file in [&log, &before] {
+            let meta = std::fs::metadata(file).unwrap();
+            assert!(
+                meta.len() <= broker.uses_max,
+                "{}: {}",
+                file.display(),
+                meta.len()
+            );
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        }
+        let lines = |f: &Path| std::fs::read_to_string(f).unwrap().lines().count();
+        assert!(lines(&log) > 0 && lines(&before) > 0);
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("\"tool199\"")
+        );
     }
 
     /// With nothing connected, or no secret in the vault for it, a job gets no broker.

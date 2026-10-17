@@ -98,7 +98,8 @@ rl.on("line", (line) => {
     const at = process.argv.indexOf("--resume");
     result(`heard: ${prompt} resume=${at >= 0 ? process.argv[at + 1] : "none"}`);
   } else if (prompt.includes("REPORT")) {
-    report(prompt).then(() => result("Reported."), (e) => result(`report failed: ${e}`, true));
+    // LINGER: the turn goes on after the report, until obid ends it.
+    report(prompt).then(() => (prompt.includes("LINGER") ? setInterval(() => {}, 1000) : result("Reported.")), (e) => result(`report failed: ${e}`, true));
   } else if (prompt.match(/PAUSE: (\d+)/)) {
     setTimeout(() => result("Paused."), Number(prompt.match(/PAUSE: (\d+)/)[1]));
   } else if (prompt.includes("SLEEP")) {

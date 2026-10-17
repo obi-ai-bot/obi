@@ -271,9 +271,25 @@ impl Jobs {
         self.connections.get()?.open_job(id)
     }
 
+    /// The connections job `id` started with, kept on the job the first time its broker opens.
+    pub fn connections_of(
+        &self,
+        id: &str,
+        current: Vec<crate::connections::Connection>,
+    ) -> Vec<crate::connections::Connection> {
+        let mut kept = current;
+        self.update(id, |job| match &job.connections {
+            Some(started) => kept = started.clone(),
+            None => job.connections = Some(kept.clone()),
+        });
+        kept
+    }
+
     /// A broker call belongs in the job report even after the call is over.
     pub fn connection_used(&self, id: &str, use_record: crate::connections::ConnectionUse) {
-        self.update(id, |job| job.connection_uses.push(use_record));
+        self.update(id, |job| {
+            crate::connections::keep_use(&mut job.connection_uses, use_record)
+        });
     }
 
     /// The MCP servers of the ready `agent-mcp` plug-ins, for a `tool` agent of the owner's own

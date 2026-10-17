@@ -329,6 +329,8 @@ fn agents_use_connected_apps_without_ever_seeing_the_login() {
         json!({"name":"Mail_2","mcp":"https://example.com/mcp","secret":secret_name}),
         json!({"name":"both","mcp":"https://example.com/mcp","api":"https://example.com","secret":secret_name}),
         json!({"name":"hosty","api":"https://example.com","secret":secret_name,"header":"Host"}),
+        // Reads as slack.com, goes to evil.example: the phone would sign the wrong host.
+        json!({"name":"slack","mcp":"https://evil.example\\@slack.com/mcp","secret":secret_name}),
     ] {
         let refused = call(&obid, "POST", "/v1/connections", Some(&wrong));
         assert_eq!(refused.status, 422, "{wrong}: {}", refused.text);
@@ -695,6 +697,111 @@ fn agents_use_connected_apps_without_ever_seeing_the_login() {
     let logged = std::fs::read_to_string(&obid.stderr).unwrap();
     assert!(!logged.is_empty(), "obid logged nothing to check");
     assert_eq!(leaks(&logged, &secrets), Vec::<String>::new());
+}
+
+/// A job keeps the connections it started with when obid restarts under it: one connected while
+/// obid was down reaches only jobs that start after.
+#[test]
+fn a_job_keeps_its_connections_across_a_restart() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let folder = Folder::new("connections-restart");
+    let remote = fixture(&folder.0.join("fixture"));
+    let secret = format!("mail-{}-secret", uuid::Uuid::new_v4().simple());
+    let (mcp_url, _, _, _) = connected_mcp(secret.clone(), String::new());
+    let config = plugin_config(&folder.0, &remote, None);
+    let home = Path::new(config["home"].as_str().unwrap()).to_owned();
+    let vault = home.join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let vault_file = vault.join("secrets.json");
+    std::fs::write(
+        &vault_file,
+        json!({"secrets": {"mail-token": secret}}).to_string(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&vault_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // What an approved POST /v1/connections writes.
+    let connected = |names: &[&str]| {
+        let all: Vec<Value> = names
+            .iter()
+            .map(|n| json!({"name": n, "mcp": mcp_url, "secret": "mail-token", "created": "2026-10-16T00:00:00Z"}))
+            .collect();
+        std::fs::write(home.join("connections.json"), Value::Array(all).to_string()).unwrap();
+    };
+    connected(&["mail"]);
+    let tools_in = |id: &str| -> Option<Vec<String>> {
+        let text =
+            std::fs::read_to_string(home.join("worktrees").join(id).join(".obi/report.json"))
+                .ok()?;
+        let report: Value = serde_json::from_str(&text).ok()?;
+        let mut names: Vec<String> = report["answers"]["oby"]["result"]["tools"]
+            .as_array()?
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        Some(names)
+    };
+    let until_reported = |id: &str| {
+        for _ in 0..400 {
+            if let Some(names) = tools_in(id) {
+                return names;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("job {id} never reported");
+    };
+
+    let mut obid = start(&folder.0, &config, None);
+    let made = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "REPORT LINGER"}}),
+        ),
+    );
+    assert_eq!(made.status, 201, "{}", made.text);
+    let id = made.body["id"].as_str().unwrap().to_owned();
+    let started = [
+        "mail_search",
+        "mail_send_draft",
+        "mail_send_message",
+        "mail_whoami",
+    ];
+    assert_eq!(until_reported(&id), started);
+    assert!(obid.stop().success());
+
+    // Connected while obid was down; the job carries on when it starts again.
+    connected(&["late", "mail"]);
+    std::fs::remove_file(home.join("worktrees").join(&id).join(".obi/report.json")).unwrap();
+    obid = start(&folder.0, &config, None);
+    assert_eq!(until_reported(&id), started, "the resumed job's tools");
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert!(job.get("connections").is_none(), "{job}");
+    assert_eq!(
+        leaks(&job.to_string(), &[("mail-token", &secret)]),
+        Vec::<String>::new()
+    );
+
+    // A job that starts now has it: the connection is good, only later.
+    let (fresh, report) = run_job(&obid, "investigate", "REPORT", None);
+    assert_eq!(fresh["status"], "done", "{fresh}");
+    let report = report.unwrap();
+    assert!(
+        report["answers"]["oby"]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "late_search"),
+        "{report}"
+    );
+    assert_eq!(
+        call(&obid, "POST", &format!("/v1/jobs/{id}/stop"), None).status,
+        200
+    );
+    assert!(obid.stop().success());
 }
 
 /// A local stub MCP server: it answers every POST with a `tools/list` result and keeps

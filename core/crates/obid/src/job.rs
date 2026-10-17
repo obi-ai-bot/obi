@@ -176,6 +176,11 @@ pub struct Job {
     /// Calls an agent made through the user's connected apps; names only, never secret values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connection_uses: Vec<crate::connections::ConnectionUse>,
+    /// The connected apps the job started with (names, URLs and secret names, never a value):
+    /// what its broker offers for as long as the job lives, across rounds, messages and restarts.
+    /// Never in the API's job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<Vec<crate::connections::Connection>>,
     /// The owner's words (`POST /v1/jobs/{id}/messages`) the agent hasn't heard yet: its next
     /// turn's prompt. Never in the API's job (`notes` has them all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -256,6 +261,7 @@ impl Job {
             apple_ran: None,
             apple_token: None,
             connection_uses: Vec::new(),
+            connections: None,
             heard: Vec::new(),
             offers: Vec::new(),
             asked: false,
