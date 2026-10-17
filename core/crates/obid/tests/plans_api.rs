@@ -2844,3 +2844,205 @@ fn a_repository_without_a_clone_adds_nothing_and_starts_no_fetch() {
     );
     assert_eq!(tip(), before);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The completion check (#539): before Oby answers, everything the user named was handled.
+
+/// One fix job per issue of the fixture's repository.
+fn fixes(issues: &[i64]) -> String {
+    let dispatches: Vec<serde_json::Value> = issues
+        .iter()
+        .map(|n| {
+            json!({"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app",
+                   "issue": n, "kind": "fix", "task": format!("Fix #{n}"), "rounds": 1})
+        })
+        .collect();
+    json!({"action": "dispatch", "reply": "", "question": null, "jobs": [],
+           "dispatches": dispatches})
+    .to_string()
+}
+
+/// The issues of the jobs an answer started.
+fn issues(answer: &serde_json::Value) -> Vec<serde_json::Value> {
+    answer["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|job| job["issue"].clone())
+        .collect()
+}
+
+/// Whether any of the brain's calls was the completion check's.
+fn checked(obid: &Obid) -> bool {
+    calls(obid)
+        .into_iter()
+        .any(|call| read(call.join("input")).contains("You haven't handled"))
+}
+
+/// #539's acceptance: a brain that stops after two of three issues is asked once more, naming
+/// the third, and the third starts. The answer has all three.
+#[test]
+fn a_brain_that_stops_early_is_asked_once_more_and_the_rest_starts() {
+    let folder = Folder::new("brain-check-asks");
+    let obid = started(&folder);
+    queue(&obid, &[fixes(&[12, 15]), fixes(&[18])]);
+    let answer = said(&obid, "fix fixture-app #12, #15 and #18");
+    let calls = calls(&obid);
+    assert_eq!(calls.len(), 2);
+    let second = read(calls[1].join("input"));
+    assert!(
+        second.contains("You haven't handled: #18. Plan it, or reply saying why not."),
+        "{second}"
+    );
+    assert!(
+        second.contains("(Oby already did this for the request, step by step: On it."),
+        "{second}"
+    );
+    assert_eq!(issues(&answer), [json!(12), json!(15), json!(18)]);
+    let text = answer["text"].as_str().unwrap();
+    for named in ["#12", "#15", "#18"] {
+        assert!(text.contains(named), "{text}");
+    }
+    assert!(!text.contains("didn't"), "{text}");
+    let turns = call(&obid, "GET", "/v1/conversation", None).body;
+    assert_eq!(
+        turns.as_array().unwrap().last().unwrap()["jobs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(ends(&obid), ["started_jobs"]);
+}
+
+/// #539's acceptance: a brain that stops again leaves the third unstarted, and the answer says
+/// so in Oby's words. It's asked once only.
+#[test]
+fn a_brain_that_stops_again_is_told_what_didnt_start() {
+    let folder = Folder::new("brain-check-again");
+    let obid = started(&folder);
+    queue(&obid, &[fixes(&[12, 15]), reply(""), reply("Never heard.")]);
+    let answer = said(&obid, "fix fixture-app #12, #15 and #18");
+    assert_eq!(calls(&obid).len(), 2);
+    assert_eq!(issues(&answer), [json!(12), json!(15)]);
+    let text = answer["text"].as_str().unwrap();
+    assert!(text.starts_with("On it. "), "{text}");
+    assert!(text.ends_with(" I didn't start #18."), "{text}");
+}
+
+/// #539's acceptance: no extra step when nothing named is left out, nor when a reply says why.
+#[test]
+fn no_extra_step_when_nothing_named_is_left_out() {
+    let folder = Folder::new("brain-check-none");
+    let obid = started(&folder);
+    queue(&obid, &[fixes(&[12, 15, 18])]);
+    let answer = said(&obid, "fix fixture-app #12, #15 and #18");
+    assert_eq!(issues(&answer), [json!(12), json!(15), json!(18)]);
+    assert_eq!(calls(&obid).len(), 1);
+    // Asked once more, the brain says why it left #18: that's handled.
+    queue(
+        &obid,
+        &[fixes(&[21]), reply("#22 is already fixed on main.")],
+    );
+    let answer = said(&obid, "fix fixture-app #21 and #22");
+    assert_eq!(calls(&obid).len(), 3);
+    let text = answer["text"].as_str().unwrap();
+    assert!(text.ends_with(" #22 is already fixed on main."), "{text}");
+    assert!(!checked_after(&obid, 3), "asked twice");
+}
+
+/// Whether a call after the first `n` was the completion check's.
+fn checked_after(obid: &Obid, n: usize) -> bool {
+    calls(obid)
+        .into_iter()
+        .skip(n)
+        .any(|call| read(call.join("input")).contains("You haven't handled"))
+}
+
+/// #539's acceptance: no extra step after a brain failure. The turn acted, then the brain
+/// failed: #18 stays unasked, and the answer is what was done.
+#[test]
+fn no_extra_step_after_a_brain_failure() {
+    let folder = Folder::new("brain-check-failed");
+    let obid = started(&folder);
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    queue(
+        &obid,
+        &[
+            set_mode(&id, "ask"),
+            "EXIT 15".into(),
+            "EXIT 15".into(),
+            fixes(&[18]),
+        ],
+    );
+    let answer = said(
+        &obid,
+        "ask before anything on Vault secrets, then fix fixture-app #18",
+    );
+    assert_eq!(answer["text"], "Vault secrets is in Ask mode now.");
+    assert!(!checked(&obid));
+    assert_eq!(calls(&obid).len(), 3);
+    assert_eq!(ends(&obid), ["brain_failed"]);
+}
+
+/// #539's acceptance: no extra step after a stop.
+#[test]
+fn no_extra_step_after_a_stop() {
+    let folder = Folder::new("brain-check-stopped");
+    let obid = started(&folder);
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let events = follow_events(&obid);
+    queue(
+        &obid,
+        &[set_mode(&id, "ask"), format!("SLEEP 2 {}", reply(""))],
+    );
+    let answer = std::thread::scope(|scope| {
+        let asking = scope.spawn(|| {
+            said(
+                &obid,
+                "ask before anything on Vault secrets, then fix fixture-app #18",
+            )
+        });
+        events_named(&events, "step", 10, |got| got.len() == 2);
+        call(&obid, "POST", "/v1/conversation/stop", None);
+        asking.join().unwrap()
+    });
+    assert_eq!(answer["text"], "Vault secrets is in Ask mode now.");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(!checked(&obid));
+    assert_eq!(calls(&obid).len(), 2);
+    assert_eq!(ends(&obid), ["stopped"]);
+}
+
+/// #539's acceptance: no extra step once the turn's budget is spent.
+#[test]
+fn no_extra_step_when_the_budget_ran_out() {
+    let folder = Folder::new("brain-check-budget");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    config["turnBudget"] = json!(2);
+    let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let late = format!("SLEEP 3 {}", reply(""));
+    queue(&obid, &[set_mode(&id, "ask"), late.clone(), late]);
+    let answer = said(
+        &obid,
+        "ask before anything on Vault secrets, then fix fixture-app #18",
+    );
+    assert_eq!(
+        answer["text"],
+        "Vault secrets is in Ask mode now. That's as far as Oby got in one go: say “continue” for the rest."
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(!checked(&obid));
+    assert_eq!(ends(&obid), ["budget_spent"]);
+}
