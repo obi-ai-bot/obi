@@ -96,4 +96,22 @@ struct WindowScreens {
         state.trail.start(.group(.review))
         try await shoot("mac-group", model: model(), state: state)
     }
+
+    @Test func conversation() async throws {
+        let model = model()
+        let turns = [
+            Turn(id: "t1", date: now - 600, who: .user, text: "Ernesto asked you to review tetrix-ee #412."),
+            Turn(id: "t2", date: now - 590, who: .oby, text: "On it. Claude Code has it in tetrix-ee on Deskree.", jobs: ["r2"]),
+            Turn(id: "t3", date: now - 420, who: .user, text: "focus on the jitter math, I trust the rest"),
+            Turn(id: "t4", date: now - 410, who: .oby, text: "Got it. Claude Code is starting with `src/queue/retry.ts`.\n\n- the backoff cap\n- the jitter range", jobs: ["i2"]),
+        ]
+        for turn in turns { model.feed.conversation.apply(turn) }
+        var ask = InboxItem(id: "q1", kind: .question, job: "i2", title: "#251 Attention queue",
+                            text: "Should a job that commits nothing end as failed, or get a new status?", options: ["Failed", "A new status"], created: now - 300)
+        ask.details = ["It ends as failed and shows under Needs you.", "A new status: Empty, which needs nothing from you."]
+        model.feed.apply(ask)
+        let state = ChatState()
+        state.trail.start(.talk)
+        try await shoot("mac-convo", model: model, state: state)
+    }
 }

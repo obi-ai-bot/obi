@@ -18,20 +18,22 @@ nonisolated enum BoxMetrics {
     static let radius: CGFloat = 23
 
     /// The text's width on one row, between + and voice-or-send, in a box `width` wide.
-    static func rowWidth(_ width: CGFloat) -> CGFloat { max(1, width - 2 * inset - 2 * button - 2 * 4 - 8) }
+    static func rowWidth(_ width: CGFloat, gauge: Bool = false) -> CGFloat {
+        max(1, width - 2 * inset - CGFloat(gauge ? 3 : 2) * (button + 4) - 8)
+    }
     /// Stacked, the text's width.
     static func stackedWidth(_ width: CGFloat) -> CGFloat { max(1, width - 2 * inset - stackedPadding.leading - stackedPadding.trailing) }
 
     /// Whether the box stacks: the text doesn't fit on the row's one line. Measured at the row's
     /// width whichever way it shows, so it never flips back and forth at the edge.
-    @MainActor static func stacked(_ text: String, width: CGFloat) -> Bool {
-        ComposerMetrics.lines(text, width: rowWidth(width)) > 1
+    @MainActor static func stacked(_ text: String, width: CGFloat, gauge: Bool = false) -> Bool {
+        ComposerMetrics.lines(text, width: rowWidth(width, gauge: gauge)) > 1
     }
 
     /// The text's height: a line per line, up to what's left of `maximum` once the box's own room
     /// is taken; past that it scrolls.
-    @MainActor static func textHeight(_ text: String, width: CGFloat, maximum: CGFloat) -> CGFloat {
-        guard stacked(text, width: width) else { return lineHeight }
+    @MainActor static func textHeight(_ text: String, width: CGFloat, maximum: CGFloat, gauge: Bool = false) -> CGFloat {
+        guard stacked(text, width: width, gauge: gauge) else { return lineHeight }
         let lines = ComposerMetrics.lines(text, width: stackedWidth(width))
         let room = maximum - 2 * inset - stackedPadding.top - stackedPadding.bottom - button
         return min(max(lineHeight, room), CGFloat(lines) * lineHeight)
@@ -57,12 +59,14 @@ struct MessageBox: View {
     let onStop: () -> Bool
     /// Esc in the box with nothing to stop.
     var onEscape: (() -> Void)? = nil
+    /// Each account's week, for the gauge by voice-or-send; none, no gauge.
+    var usage: [UsageRow] = []
     @State private var width: CGFloat = 480
     @State private var hovering = false
 
     private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    private var stacked: Bool { BoxMetrics.stacked(text, width: width) }
-    private var textHeight: CGFloat { BoxMetrics.textHeight(text, width: width, maximum: maximumHeight) }
+    private var stacked: Bool { BoxMetrics.stacked(text, width: width, gauge: !usage.isEmpty) }
+    private var textHeight: CGFloat { BoxMetrics.textHeight(text, width: width, maximum: maximumHeight, gauge: !usage.isEmpty) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -72,12 +76,14 @@ struct MessageBox: View {
                 HStack(spacing: 4) {
                     plus
                     Spacer(minLength: 0)
+                    gauge
                     end
                 }
             } else {
                 HStack(alignment: .bottom, spacing: 4) {
                     plus
                     editor.padding(.horizontal, 4).padding(.vertical, BoxMetrics.textInset - BoxMetrics.inset)
+                    gauge
                     end
                 }
             }
@@ -122,6 +128,10 @@ struct MessageBox: View {
         }
         .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
         .accessibilityLabel("Add attachment")
+    }
+
+    @ViewBuilder private var gauge: some View {
+        if !usage.isEmpty { UsageGauge(rows: usage) }
     }
 
     /// Voice while the box is empty: the talk key does it, so it says how. Send once there's text.
@@ -196,5 +206,86 @@ struct BoxIcon: View {
             .contentShape(Circle())
             .onHover { hovering = $0 }
             .animation(Tokens.fade, value: hovering)
+    }
+}
+
+/// One account's week, for the message box's gauge.
+struct UsageRow: Identifiable, Equatable {
+    var id: String
+    var agent: String
+    var name: String
+    var week: Double?
+    var resets: Date?
+}
+
+extension IslandModel {
+    /// The accounts a plan can use (the runner's when it plans, else this Mac's), with their week.
+    var usageRows: [UsageRow] {
+        planAccounts.map { UsageRow(id: $0.account.id, agent: $0.account.agent, name: $0.account.name, week: $0.sevenDay, resets: $0.sevenDayResets) }
+    }
+}
+
+/// How much the accounts have used this week (Sangam's UsageGauge): a gauge with a dot while any
+/// is past 80% (yellow) or 90% (red); a click shows each account's week, and the way to Accounts.
+private struct UsageGauge: View {
+    let rows: [UsageRow]
+    @State private var open = false
+
+    var body: some View {
+        let dot = UsageDot.of(weeks: rows.map(\.week))
+        Button { open.toggle() } label: {
+            BoxIcon(symbol: "gauge.with.dots.needle.33percent")
+                .overlay(alignment: .topTrailing) {
+                    if dot != .none {
+                        Circle().fill(dot == .over ? Tokens.over : Tokens.full).frame(width: 6, height: 6)
+                            .offset(x: -4, y: 5).accessibilityHidden(true)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .help("Usage this week")
+        .accessibilityLabel("Usage this week" + (dot == .none ? "" : ", an account is nearly full"))
+        .popover(isPresented: $open, arrowEdge: .top) { panel }
+    }
+
+    private var panel: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Usage this week").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.label)
+                Spacer()
+                IconButton(symbol: "gearshape", size: 28) { open = false; SettingsSelection.open(.accounts) }
+                    .help("Manage accounts").accessibilityLabel("Manage accounts")
+            }
+            .padding(.leading, 8)
+            ForEach(rows) { row in
+                let used = row.week ?? 0
+                let level = UsageDot.of(weeks: [row.week])
+                HStack(alignment: .top, spacing: 10) {
+                    AgentMark(agent: row.agent).font(Tokens.font(13)).frame(width: 16).foregroundStyle(Tokens.muted)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text("\(Usage.tool(row.agent)) · \(row.name)").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.ink).fadeOut()
+                            if let resets = row.resets {
+                                Text(Usage.resetText(resets)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fixedSize()
+                            }
+                            Text(row.week == nil ? "–" : Usage.percent(used)).font(Tokens.font(Tokens.textBase)).monospacedDigit()
+                                .foregroundStyle(level == .over ? Tokens.over : level == .high ? Tokens.full : Tokens.text)
+                                .frame(minWidth: 32, alignment: .trailing)
+                        }
+                        Capsule().fill(Tokens.line).frame(height: 4)
+                            .overlay(alignment: .leading) {
+                                GeometryReader { geometry in
+                                    Capsule().fill(level == .over ? Tokens.over : level == .high ? Tokens.full : Tokens.text)
+                                        .frame(width: geometry.size.width * min(1, max(0, used)))
+                                }
+                            }
+                    }
+                }
+                .padding(8)
+            }
+        }
+        .padding(.horizontal, 8).padding(.top, 8).padding(.bottom, 20)
+        .frame(width: 340)
+        .background(Tokens.surface)
     }
 }

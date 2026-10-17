@@ -22,33 +22,24 @@ struct InlinePermission: View {
     }
 
     private var card: some View {
-        VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
-            if let receipt = Self.receipt(record) {
-                Button { expanded.toggle() } label: {
-                    Label(receipt, systemImage: "checkmark.circle.fill")
-                        .font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
-                }
-                .buttonStyle(.plain)
-            }
+        VStack(alignment: .leading, spacing: 0) {
+            if let receipt = Self.receipt(record) { Receipt(text: receipt, expanded: $expanded) }
             if record.done == nil || expanded {
-                DecisionCard(title: record.permission.title, detail: record.permission.detail,
-                             options: CardOption.permission(record.permission), busy: busy || record.done != nil,
-                             keyboardEnabled: keyboardEnabled && record.done == nil, focusRequest: focusRequest,
-                             onLater: record.done == nil ? { feed.laterPermission(record.id) } : nil,
-                             wordsNote: CardOption.denyWords,
-                             onChoose: { option in
-                                 if let decision = RunnerPermission.Decision(rawValue: option.answer) { answer(decision) }
-                             }, onWords: { answer(.deny, note: $0) })
+                AskCard(kind: "Permission", title: record.permission.title, detail: record.permission.detail,
+                        options: CardOption.permission(record.permission), busy: busy || record.done != nil, answered: record.done != nil,
+                        keyboardEnabled: keyboardEnabled && record.done == nil, focusRequest: focusRequest,
+                        hint: record.done == nil && onTell != nil ? "No, and tell the agent what to do differently" : nil, onHint: onTell,
+                        onChoose: { option in
+                            if let decision = RunnerPermission.Decision(rawValue: option.answer) { answer(decision) }
+                        },
+                        onLater: record.done == nil ? { feed.laterPermission(record.id) } : nil)
+                    .padding(.top, record.done == nil ? 0 : 12)
             }
-            if record.done == nil, let onTell {
-                Button("No, and tell the agent what to do differently", action: onTell)
-                    .buttonStyle(.plain).font(OBYStyle.caption).disabled(busy)
-            }
-            if let problem { Text(problem).font(OBYStyle.caption).foregroundStyle(.red) }
+            if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.top, 8) }
         }
-        .padding(OBYStyle.Space.lg)
-        .frame(maxWidth: OBYStyle.replyWidth, alignment: .leading)
-        .background(OBYStyle.surface, in: RoundedRectangle(cornerRadius: OBYStyle.card))
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
     }
 
     private func answer(_ decision: RunnerPermission.Decision, note: String? = nil) {

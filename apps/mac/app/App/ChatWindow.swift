@@ -300,7 +300,7 @@ private struct HomeView: View {
         MessageBox(text: $text, focused: $typing, tray: model.tray,
                    placeholder: HomeLine.placeholder(fullName: NSFullUserName()),
                    maximumHeight: height * 0.5, focusRequest: state.homeFocusRequest,
-                   onSend: ask, onScreenshot: screenshot, onStop: { false })
+                   onSend: ask, onScreenshot: screenshot, onStop: { false }, usage: model.usageRows)
             .frame(maxWidth: Tokens.homeBox - 2 * Tokens.gutter)
             .padding(.horizontal, Tokens.gutter).padding(.bottom, Tokens.gutter)
     }
@@ -325,8 +325,8 @@ private struct HomeView: View {
     @ViewBuilder private func page(_ step: WindowStep) -> some View {
         switch step {
         case .talk:
-            ConversationColumn(model: model, composerFocusRequest: state.composerFocusRequest,
-                               onOpenJob: { state.trail.push(.job(id: $0, local: $1)) }, onBack: back)
+            ConversationPage(model: model, composerFocusRequest: state.composerFocusRequest,
+                             onOpenJob: { state.trail.push(.job(id: $0, local: $1)) }, onBack: back)
         case .job(let id, let local):
             JobPane(model: model, id: id, local: local).takesKeys()
         case .group(let kind):
@@ -516,12 +516,15 @@ struct EyeLevel: Layout {
 /// Chips in rows, each row centred, wrapping when the next one doesn't fit.
 struct CenteredFlow: Layout {
     var spacing: CGFloat = 8
+    /// Off: each row starts at the left, as a card's choices do.
+    var centred = true
 
     private func rows(_ subviews: Subviews, width: CGFloat) -> [[(index: Int, size: CGSize)]] {
         var rows: [[(index: Int, size: CGSize)]] = [[]]
         var used: CGFloat = 0
         for (index, view) in subviews.enumerated() {
-            let size = view.sizeThatFits(.unspecified)
+            var size = view.sizeThatFits(.unspecified)
+            if size.width > width { size = view.sizeThatFits(ProposedViewSize(width: width, height: nil)) }
             if !rows[rows.count - 1].isEmpty && used + spacing + size.width > width {
                 rows.append([]); used = 0
             }
@@ -543,7 +546,7 @@ struct CenteredFlow: Layout {
         var y = bounds.minY
         for row in rows(subviews, width: bounds.width) {
             let width = row.map(\.size.width).reduce(0, +) + spacing * CGFloat(max(0, row.count - 1))
-            var x = bounds.midX - width / 2
+            var x = centred ? bounds.midX - width / 2 : bounds.minX
             let height = row.map(\.size.height).max() ?? 0
             for item in row {
                 subviews[item.index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(item.size))
@@ -554,262 +557,7 @@ struct CenteredFlow: Layout {
     }
 }
 
-/// The conversation with Oby: the header, the thread by day (newest at the bottom), the turn under
-/// way, the plan or question card, the inbox's decision cards, and the composer.
-private struct ConversationColumn: View {
-    let model: IslandModel
-    let composerFocusRequest: Int
-    let onOpenJob: (_ job: String, _ local: Bool) -> Void
-    /// Esc with nothing to stop: back a page.
-    let onBack: () -> Void
-    @State private var text = ""
-    struct ReplyTarget {
-        var title: String
-        var send: @MainActor (String) async throws -> Void
-    }
-    @State private var replyTarget: ReplyTarget?
-    @State private var sendingAnswer = false
-    @State private var sendProblem: String?
-    @State private var decisionFocus = 0
-    @State private var columnHeight: CGFloat = 600
-    @State private var typing = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private var desk: Desk { model.desk }
-    private var feed: RunnerFeed { model.feed }
-    private var conversation: ConversationModel { feed.conversation }
-    private var thinking: Bool { if case .thinking = desk.talk { true } else { false } }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            thread
-            composer.padding(.horizontal, 28).padding(.vertical, 16)
-        }
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { columnHeight = $0 }
-        // Escape cancels the turn Oby is thinking about.
-        .onExitCommand { if thinking { desk.cancel() } else { onBack() } }
-        .onAppear { typing = true; model.markChatRead() }
-        .onChange(of: composerFocusRequest) { typing = true }
-        .onChange(of: model.thread.last?.id) { if model.chatWindowVisible { model.markChatRead() } }
-    }
-
-    // MARK: The thread
-
-    private var thread: some View {
-        // Every half minute: "Today" turns into "Yesterday" at midnight, and the inbox's waits move on.
-        TimelineView(.periodic(from: .now, by: 30)) { context in
-            let turns = conversation.thread(with: desk.turns)
-            let days = ConversationModel.days(turns, now: context.date)
-            let entries = (desk.inbox.map { IslandInbox.Entry(item: $0, local: true) }
-                + (feed.inbox + feed.inboxHistory).map { IslandInbox.Entry(item: $0, local: false) })
-                .filter { $0.item.isDecision && ($0.item.later == nil || $0.item.later! <= context.date) }
-                .sorted { $0.item.created < $1.item.created }
-            let waiting = entries.filter { $0.item.isOpen }
-            let permissions = feed.chatPermissions.filter { $0.done != nil || $0.waits(at: context.date) }
-            let permissionWaits = permissions.filter { $0.waits(at: context.date) }
-            let oldest = (waiting.map { ($0.id, $0.item.created) } + permissionWaits.map { ($0.id, $0.created) })
-                .min { $0.1 < $1.1 }?.0
-            let waitingCount = waiting.count + permissionWaits.count
-            let anchors = Dictionary(uniqueKeysWithValues: entries.map {
-                ($0.id, ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns))
-            })
-            ScrollViewReader { proxy in
-                VStack(spacing: 0) {
-                    if feed.down {
-                        RunnerOfflineNotice(name: feed.name)
-                    }
-                    if let oldest {
-                        Button { typing = false; decisionFocus += 1; proxy.scrollTo(oldest, anchor: .center) } label: {
-                            HStack {
-                                Image(systemName: "exclamationmark.bubble")
-                                Text("\(waitingCount) waiting for you")
-                                Spacer()
-                                Text("⌘J")
-                            }
-                            .font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
-                            .padding(.horizontal, OBYStyle.Space.xl).padding(.vertical, OBYStyle.Space.sm)
-                        }
-                        .buttonStyle(.plain).keyboardShortcut("j", modifiers: .command)
-                        .background(OBYStyle.sidebar)
-                    }
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 6) {
-                        if conversation.hasOlder {
-                            Button(conversation.loading ? "Loading…" : "Earlier") { Task { await conversation.loadOlder() } }
-                                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(OBYStyle.secondary)
-                                .disabled(conversation.loading)
-                                .frame(maxWidth: .infinity)
-                        }
-                        if let problem = conversation.problem {
-                            Text("The runner's thread couldn't be read: \(problem)").font(OBYStyle.caption).foregroundStyle(.orange)
-                        }
-                        if turns.isEmpty, !thinking {
-                            Text("Ask Oby anything. Hold fn to talk.")
-                                .font(.system(size: 14)).foregroundStyle(OBYStyle.tertiary).padding(.top, 20)
-                        }
-                        ForEach(entries.filter { anchors[$0.id] == .some(nil) }) { entry in
-                            decision(entry, active: oldest == entry.id)
-                        }
-                        ForEach(permissions.filter { ConversationModel.decisionAnchor(job: $0.job, created: $0.created, turns: turns) == nil }) { record in
-                            permission(record, active: oldest == record.id).id(record.id)
-                        }
-                        ForEach(days) { day in
-                            ForEach(Array(day.turns.enumerated()), id: \.element.id) { index, turn in
-                                TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? day.turns[index - 1] : nil), jobs: ConversationModel.jobs(of: turn, among: desk.jobs + feed.jobs),
-                                        account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
-                                        isLocal: { id in desk.jobs.contains { $0.id == id } },
-                                        onOpenJob: onOpenJob,
-                                        onStopJob: { model.stopChatJob($0, local: $1) },
-                                        showTime: ConversationModel.showsTime(turn, after: index > 0 ? day.turns[index - 1] : nil),
-                                        steps: conversation.steps(under: turn, in: turns))
-                                    .task(id: turn.jobs ?? []) {
-                                        // A runner's job older than its list: fetched, so its card shows.
-                                        for id in ConversationModel.missing(of: turn, among: desk.jobs + feed.jobs) { try? await feed.fetch(id) }
-                                    }
-                                ForEach(entries.filter { anchors[$0.id] == .some(turn.id) }) { entry in
-                                    decision(entry, active: oldest == entry.id)
-                                }
-                                ForEach(permissions.filter { ConversationModel.decisionAnchor(job: $0.job, created: $0.created, turns: turns) == turn.id }) { record in
-                                    permission(record, active: oldest == record.id).id(record.id)
-                                }
-                            }
-                        }
-                        if thinking || conversation.working { pending }
-                        cards
-                        if model.speaker.speaking {
-                            Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(OBYStyle.tertiary)
-                        }
-                        Color.clear.frame(height: 1).id("end")
-                    }
-                    .frame(maxWidth: OBYStyle.threadWidth)
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, OBYStyle.Space.xl).padding(.vertical, OBYStyle.Space.lg)
-                }
-                .defaultScrollAnchor(.bottom)
-                .onChange(of: turns.count) { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("end", anchor: .bottom) } }
-                .onChange(of: desk.talk) { proxy.scrollTo("end", anchor: .bottom) }
-                .onChange(of: conversation.steps) { proxy.scrollTo("end", anchor: .bottom) }
-                }
-            }
-        }
-        .accessibilityLabel("Conversation")
-    }
-
-    private func decision(_ entry: IslandInbox.Entry, active: Bool) -> some View {
-        InlineDecision(entry: entry, desk: desk, feed: feed, keyboardEnabled: active, focusRequest: decisionFocus, onOpen: onOpenJob,
-                       onTell: {
-                           guard !sendingAnswer else { return }
-                           replyTarget = ReplyTarget(title: entry.item.title, send: { value in
-                               if entry.local { try await desk.answer(entry.item.id, .answer(value)) }
-                               else { try await feed.settle(entry.item.id, answer: value) }
-                           })
-                           sendProblem = nil
-                           typing = true
-                       })
-            .id(entry.id)
-    }
-
-    private func permission(_ record: RunnerFeed.PermissionRecord, active: Bool) -> some View {
-        InlinePermission(record: record, feed: feed, keyboardEnabled: active, focusRequest: decisionFocus,
-                         onTell: {
-                             guard !sendingAnswer else { return }
-                             replyTarget = ReplyTarget(title: record.permission.title, send: { value in
-                                 guard feed.extras[record.job]?.permission?.id == record.permission.id else {
-                                     throw RunnerError(message: "This request has already been answered.")
-                                 }
-                                 try await feed.answer(record.job, .deny, message: value)
-                             })
-                             sendProblem = nil
-                             typing = true
-                         })
-    }
-
-    /// "Thinking" while the desk plans, "Working" while the runner's steps go; Stop ends the
-    /// runner's turn (#304) as well as the desk's.
-    private var pending: some View {
-        ThinkingLine(working: conversation.working, problem: feed.stopProblem, onStop: {
-            if thinking { desk.cancel() }
-            if conversation.working { Task { await feed.stopTurn() } }
-        })
-    }
-
-    /// The plan before anything runs, or the brain's question, under the thread, as the island shows them.
-    @ViewBuilder private var cards: some View {
-        switch desk.talk {
-        case .question(let said, let question):
-            DecisionCard(title: question.text, options: question.cardOptions, keyboardEnabled: true, onLater: { desk.cancel() },
-                         onChoose: { desk.answer($0.answer, said: said, question: question.text) },
-                         onWords: { desk.answer($0, said: said, question: question.text) })
-                .padding(14)
-                .background(OBYStyle.surface, in: RoundedRectangle(cornerRadius: OBYStyle.card, style: .continuous))
-                .frame(maxWidth: 720)
-        default:
-            EmptyView()
-        }
-    }
-
-    // MARK: The composer
-
-    private var composer: some View {
-        VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
-            if let replyTarget {
-                HStack {
-                    Text("Replying to \(replyTarget.title)").font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary).lineLimit(1)
-                    Spacer()
-                    Button { self.replyTarget = nil; sendProblem = nil } label: { Image(systemName: "xmark") }
-                        .buttonStyle(.plain).disabled(sendingAnswer).accessibilityLabel("Cancel reply")
-                }
-            }
-            if let sendProblem {
-                HStack {
-                    Text(sendProblem).font(OBYStyle.caption).foregroundStyle(.red)
-                    Button("Try again", action: send).buttonStyle(.plain).font(OBYStyle.caption)
-                }
-            }
-            if sendingAnswer { ProgressView().controlSize(.small).accessibilityLabel("Sending answer") }
-            ChatComposer(text: $text, focused: $typing, tray: model.tray,
-                         maximumHeight: columnHeight * 0.5, focusRequest: composerFocusRequest,
-                         onSend: send, onScreenshot: screenshot,
-                         onStop: { if thinking { desk.cancel(); return true }; return false }, onEscape: onBack)
-                .disabled(sendingAnswer)
-        }
-    }
-
-    private func send() {
-        let value = text
-        guard !sendingAnswer, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        guard let target = replyTarget else {
-            model.sendChat(value)
-            text = ""
-            return
-        }
-        sendingAnswer = true
-        sendProblem = nil
-        Task {
-            defer { sendingAnswer = false }
-            do {
-                try await target.send(value)
-                if text == value { text = "" }
-                replyTarget = nil
-            } catch { sendProblem = error.localizedDescription }
-        }
-    }
-
-    /// Your words without the line about the chips, to edit them: it's added again when you send.
-    private func typed(_ said: String) -> String {
-        said.range(of: "\n\n(The user attached ").map { String(said[..<$0.lowerBound]) } ?? said
-    }
-
-    /// The camera: the overlay takes the keyboard while you pick, so the field takes it back after.
-    private func screenshot() {
-        Task {
-            await model.tray.screenshot()
-            typing = true
-        }
-    }
-}
-
-/// Shared messenger bubbles: no per-message chrome, one centered timestamp above each group.
+/// The notch's messenger bubbles (Island.swift): no per-message chrome, one centered timestamp above each group.
 struct TurnRow: View {
     let turn: Turn
     var grouped = false
