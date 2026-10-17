@@ -4,7 +4,8 @@ import SwiftUI
 /// The conversation with Oby (Sangam's ChatView.tsx): your words in bubbles on the right, Oby's
 /// as plain text on the left under its face, in runs with the time under each; the tasks an answer
 /// started as cards under it; decisions as cards where they belong, answerable in place; Oby at
-/// work last; and the message box at the foot. The runner keeps one conversation, so this is it.
+/// work last; and the message box at the foot. It shows the conversation picked in the side panel (obid
+/// keeps many, #493), or the runner's one thread.
 struct ConversationPage: View {
     let model: IslandModel
     let composerFocusRequest: Int
