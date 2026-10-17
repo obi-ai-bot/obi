@@ -67,6 +67,9 @@ struct File {
     web: Option<PathBuf>,
     #[serde(default)]
     telemetry: bool,
+    /// How long one conversation turn may act, in seconds: 1 to 110, 110 when left out.
+    #[serde(default)]
+    turn_budget: Option<u64>,
     /// Where the vault is (crate::vault): `{"store": "file"}` or `{"store": "keychain", "service":
     /// "…"}`; left out, [`crate::vault::Location::default_for`].
     #[serde(default)]
@@ -152,6 +155,9 @@ pub struct Config {
     pub telemetry: bool,
     /// Where the owner's vault is (crate::vault).
     pub vault: crate::vault::Location,
+    /// How long one conversation turn may plan and act (`Desk.turnBudget`): 110 seconds unless
+    /// `turnBudget` says less, under the apps' 120-second wait.
+    pub turn_budget: std::time::Duration,
 }
 
 /// Where the plug-ins obid ships are when the configuration doesn't say: the `plugins/` folder
@@ -313,6 +319,13 @@ impl Config {
                 }
             }
         };
+        let turn_budget = file.turn_budget.unwrap_or(110);
+        if !(1..=110).contains(&turn_budget) {
+            return invalid(format!(
+                "turnBudget is {turn_budget}: it is 1 to 110 seconds, under the apps' 120-second wait."
+            ));
+        }
+
         Ok(Config {
             listen,
             home: file.home,
@@ -324,6 +337,7 @@ impl Config {
             web: file.web.unwrap_or_else(default_web),
             telemetry: file.telemetry,
             vault,
+            turn_budget: std::time::Duration::from_secs(turn_budget),
         })
     }
 }
@@ -517,6 +531,19 @@ mod tests {
         assert!(!config.telemetry);
         let config = Config::parse(&with(serde_json::json!({"telemetry": true}))).unwrap();
         assert!(config.telemetry);
+    }
+
+    /// A conversation turn plans and acts for 110 seconds, or less when `turnBudget` says so.
+    #[test]
+    fn the_turn_budget_is_1_to_110_seconds() {
+        let config = Config::parse(&with(serde_json::json!({}))).unwrap();
+        assert_eq!(config.turn_budget, std::time::Duration::from_secs(110));
+        let config = Config::parse(&with(serde_json::json!({"turnBudget": 5}))).unwrap();
+        assert_eq!(config.turn_budget, std::time::Duration::from_secs(5));
+        for wrong in [0, 111] {
+            let text = with(serde_json::json!({"turnBudget": wrong}));
+            assert!(problem(&text).contains("turnBudget"), "{wrong}");
+        }
     }
 
     #[test]

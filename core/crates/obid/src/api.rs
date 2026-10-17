@@ -38,6 +38,8 @@ pub struct Shared {
     pub events: Events,
     /// The conversations, shared by every device and plan request (#493).
     pub conversations: crate::conversation::Conversations,
+    /// The conversation turns under way, for Stop and cancel (#546).
+    pub turns: crate::brain::turn::Turns,
     /// Its Sphere: membership, exchanges, the inbox and decisions.
     pub link: Arc<crate::sphere::Link>,
     /// The plug-in host (`GET` and `PUT /v1/obid/plugins`).
@@ -135,6 +137,8 @@ pub fn router(shared: Arc<Shared>) -> Router {
             axum::routing::patch(crate::conversation::update).delete(crate::conversation::remove),
         )
         .route("/v1/plans", post(crate::brain::plan))
+        .route("/v1/plans/cancel", post(crate::brain::cancel))
+        .route("/v1/conversation/stop", post(crate::brain::stop))
         .route("/v1/inbox", get(crate::sphere::routes::inbox))
         .route("/v1/failures", get(crate::failures::list_route))
         .route("/v1/failures/{id}", get(crate::failures::get_route))

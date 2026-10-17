@@ -2387,6 +2387,126 @@ impl Link {
         Value::Array(items.into_iter().map(Item::to_json).collect())
     }
 
+    /// Something Oby's brain planned that persists or widens trust waits in the inbox for the
+    /// owner's own `Confirm` (#546): the brain never carries it out itself.
+    pub fn add_confirm(&self, item: Item) -> Item {
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        item
+    }
+
+    /// `POST /v1/inbox/{id}/answer` on a `confirm` item: `Confirm` carries out what its title
+    /// says; `Cancel`, done or later do nothing.
+    async fn answer_confirm(
+        self: &Arc<Self>,
+        mut item: Item,
+        answer: Option<String>,
+        later: Option<i64>,
+    ) -> Result<Value, ApiError> {
+        if let Some(at) = later {
+            item.later = Some(at);
+        } else {
+            if let Some(answer) = &answer {
+                if answer != inbox::CONFIRM && answer != inbox::CANCEL {
+                    return Err(api(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("The answer is {} or {}.", inbox::CONFIRM, inbox::CANCEL),
+                    ));
+                }
+                if answer == inbox::CONFIRM {
+                    let done = match item.confirm.clone() {
+                        Some(confirmed) => self.carry_out(*confirmed).await,
+                        None => Err(api(StatusCode::CONFLICT, "That item says nothing to do.")),
+                    };
+                    // What it was for moved on (the permission was answered, the job ended): the
+                    // item is closed with why, never left open to fail again.
+                    if let Err(why) = done {
+                        item.done = Some(time::now());
+                        item.answer = Some(answer.clone());
+                        item.text = format!("{} It couldn't happen: {}", item.text, why.message);
+                        self.lock().inbox.insert(item.id.clone(), item.clone());
+                        self.save_item(&item);
+                        return Err(why);
+                    }
+                }
+            }
+            item.done = Some(time::now());
+            item.answer = answer;
+        }
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        Ok(item.to_json())
+    }
+
+    /// What a confirmed `confirm` item does: one dispatcher, a case per action.
+    async fn carry_out(self: &Arc<Self>, confirmed: inbox::Confirmed) -> Result<(), ApiError> {
+        let target = confirmed.target.as_str();
+        match confirmed.action.as_str() {
+            inbox::action::ALWAYS_ALLOW => {
+                use crate::jobs::PermissionRefused;
+                let permission = confirmed.payload["permission"].as_str().unwrap_or("");
+                match self.jobs.answer_permission(
+                    target,
+                    permission,
+                    crate::permissions::Decision::Always,
+                    None,
+                ) {
+                    Ok(_) => Ok(()),
+                    Err(PermissionRefused::NoJob) => {
+                        Err(api(StatusCode::CONFLICT, "Its job is gone."))
+                    }
+                    Err(PermissionRefused::NotWaiting(why)) => Err(api(StatusCode::CONFLICT, why)),
+                    Err(PermissionRefused::Refused(why)) => {
+                        Err(api(StatusCode::UNPROCESSABLE_ENTITY, why))
+                    }
+                }
+            }
+            inbox::action::SET_MODE_BYPASS => {
+                if !self.jobs.get(target).is_some_and(|j| j.status.is_active()) {
+                    return Err(api(
+                        StatusCode::CONFLICT,
+                        "That job isn't running any more.",
+                    ));
+                }
+                self.jobs
+                    .set_mode(target, crate::permissions::Mode::Bypass)
+                    .map(|_| ())
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone."))
+            }
+            inbox::action::START_JOB => {
+                let new: crate::jobs::NewJob =
+                    serde_json::from_value(confirmed.payload["job"].clone())
+                        .map_err(|_| api(StatusCode::CONFLICT, "That job's plan was lost."))?;
+                self.jobs
+                    .create(new)
+                    .map(|_| ())
+                    .map_err(|e| api(StatusCode::UNPROCESSABLE_ENTITY, e.0))
+            }
+            other => Err(api(
+                StatusCode::CONFLICT,
+                format!("obid doesn't know the action {other:?}."),
+            )),
+        }
+    }
+
+    /// The items waiting for the owner now (not done, and not put off past `now`), in the order
+    /// they came: what the brain is told about the inbox (#546).
+    pub fn waiting_items(&self, now: i64) -> Vec<Item> {
+        let state = self.lock();
+        let mut items: Vec<Item> = state
+            .inbox
+            .values()
+            .filter(|i| i.done.is_none() && i.later.is_none_or(|later| later <= now))
+            .cloned()
+            .collect();
+        items.sort_by(|a, b| {
+            a.arrival_order()
+                .cmp(&b.arrival_order())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        items
+    }
+
     /// `POST /v1/inbox/{id}/answer`.
     pub async fn answer(self: &Arc<Self>, id: &str, body: &[u8]) -> Result<Value, ApiError> {
         let map = object(body, &["answer", "done", "later"])?;
@@ -2421,6 +2541,20 @@ impl Link {
             }
             _ => return Err(api(StatusCode::UNPROCESSABLE_ENTITY, one_of)),
         };
+        // What Oby's brain planned that only the owner may do: carried out on their Confirm.
+        let confirm = self
+            .lock()
+            .inbox
+            .get(id)
+            .filter(|i| i.done.is_none() && i.kind == "confirm")
+            .cloned();
+        if let Some(item) = confirm {
+            return match given {
+                Given::Answer(answer) => self.answer_confirm(item, Some(answer), None).await,
+                Given::Done => self.answer_confirm(item, None, None).await,
+                Given::Later(at) => self.answer_confirm(item, None, Some(at)).await,
+            };
+        }
         // A question's item, answered or declined: the words pass the publish gate first, with
         // no lock held.
         let question = self

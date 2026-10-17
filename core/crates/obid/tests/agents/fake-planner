@@ -1,11 +1,70 @@
 #!/bin/sh
-# Run as a job's agent rather than as the brain (no --json-schema), it fails at once.
+# A stand-in for Claude Code as obid's brain (`claude -p … --json-schema …`) in obid's tests.
+# Run as a job's agent (no --json-schema), it is fake-claude.
+#
+# Its state is in its account's folder ($CLAUDE_CONFIG_DIR, else $HOME): the one place it can
+# write both as it is and boxed (when the brain may read its quoted file).
+#   plans        a queue, one line per call, the first taken each time:
+#                  EXIT <code> <stderr…>   prints the words on stderr, nothing on stdout, exits
+#                  PRINT <text>            prints the text as it is, and exits 0
+#                  FAIL <code> <text>      prints the text as it is, and exits with the code
+#                  SLEEP <seconds> <line>  waits, then does what the rest of the line says
+#                  PEEK <path>             replies "read" when it could read the file, else "hidden"
+#                  <plan>                  answers {"structured_output": <plan>}
+#                When it's empty, the words the user says now choose (below).
+#   calls/<n>/   what call n got: args (one per line), input (stdin), pwd, and work.md when
+#                its directory had one.
 case " $* " in
   *" --json-schema "*) ;;
-  *) echo "fake-planner plans; it doesn't do the work" >&2; exit 1 ;;
+  *) exec "$(dirname "$0")/fake-claude" "$@" ;;
 esac
 input=$(cat)
 printf '%s\n' "$input" > "$HOME/plan-input"
+state=${CLAUDE_CONFIG_DIR:-$HOME}
+mkdir -p "$state/calls"
+until mkdir "$state/lock" 2>/dev/null; do sleep 0.05; done
+n=$(($(ls "$state/calls" | wc -l) + 1))
+call="$state/calls/$n"
+mkdir -p "$call"
+for arg in "$@"; do printf '%s\n' "$arg"; done > "$call/args"
+printf '%s\n' "$input" > "$call/input"
+pwd > "$call/pwd"
+[ -f work.md ] && cp work.md "$call/work.md"
+line=""
+if [ -s "$state/plans" ]; then
+  line=$(head -n 1 "$state/plans")
+  tail -n +2 "$state/plans" > "$state/plans.next"
+  mv "$state/plans.next" "$state/plans"
+fi
+rmdir "$state/lock"
+while :; do
+  case "$line" in
+    "SLEEP "*)
+      rest=${line#SLEEP }
+      sleep "${rest%% *}"
+      line=${rest#* } ;;
+    *) break ;;
+  esac
+done
+case "$line" in
+  "EXIT "*)
+    set -- $line
+    code=$2; shift 2
+    [ $# -gt 0 ] && printf '%s\n' "$*" >&2
+    exit "$code" ;;
+  "PRINT "*) printf '%s\n' "${line#PRINT }"; exit 0 ;;
+  "FAIL "*)
+    rest=${line#FAIL }
+    printf '%s\n' "${rest#* }"
+    exit "${rest%% *}" ;;
+  "PEEK "*)
+    if cat "${line#PEEK }" >/dev/null 2>&1; then seen=read; else seen=hidden; fi
+    line="{\"action\":\"reply_only\",\"reply\":\"$seen\",\"dispatches\":[],\"question\":null}" ;;
+esac
+if [ -n "$line" ]; then
+  printf '{"structured_output":%s}\n' "$line"
+  exit 0
+fi
 current=$(printf '%s\n' "$input" | sed -n '/The user says now:/,$p')
 case "$current" in
   *none-case*) plan='{"action":"ignore","reply":"","dispatches":[],"question":null}' ;;
