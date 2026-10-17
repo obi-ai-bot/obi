@@ -1239,6 +1239,8 @@ credential is refreshed, so a stale file does not prevent connecting to a runnin
 and rotating obid's token does not require restarting the app. Other obid homes and ports remain
 valid for other clients; This Mac mode uses the fixed home and address above.
 
+**Installing it (#585).** `install/install.sh` makes `home` (0700) and `home/api-token` (0600), writes this configuration and runs obid as a launchd agent (macOS, home `~/Library/Application Support/Oby/Runner`) or a systemd user service (Linux): docs/install.md, which also says how to update, uninstall and migrate from the Swift runner.
+
 ### obid only: the vault
 
 The owner's secrets for connections they make (#457), kept and used as the Swift runner keeps them (Engine/Vault.swift):
