@@ -1302,6 +1302,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64",
+ "core-foundation",
  "futures-util",
  "gethostname",
  "getrandom 0.4.3",
@@ -1313,6 +1314,7 @@ dependencies = [
  "obi-protocol",
  "p256",
  "regex",
+ "security-framework",
  "serde",
  "serde_json",
  "thiserror",

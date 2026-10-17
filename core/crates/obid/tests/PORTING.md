@@ -52,6 +52,7 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 | SafeTests.theRunnerStopsEveryJob | jobs_api.rs `stop_and_stop_all_end_the_agents` |  |
 | TitleTests.theJobKeepsItsTitleAndTheAPISendsIt | runner_api.rs `jobs_have_iso_dates_and_every_key` | the title's API half; its push-alert half needs `POST /v1/notifications` |
 | UsageTests.accountJSONCarriesResetTimes | status.rs `status_answers_with_engine_obid` | the account object's keys, null before any job; obid reads no usage yet, so no reset time is ever set |
+| VaultTests.theAPIsJSONHasTheVaultsSecretsTakenOut | vault_api.rs `the_apis_json_has_the_vaults_secrets_taken_out` | the secret added with `obid vault add` while obid runs; every answer and the event stream, in every encoded form; a clean answer byte for byte as it was; `503` when the vault can't be read. Its Swift half (`API.encode` throwing) is src/vault.rs `a_vault_others_can_read_isnt_read` |
 | WaitingTests.theAPISendsWhatItWaitsFor | runner_api.rs `a_seventh_job_waits_for_a_slot_and_says_so` | and the null half in `jobs_have_iso_dates_and_every_key` |
 
 Also from the Mac app's side: tests/mac_app.rs builds the Mac app's own client (apps/shared/Runner.swift and the Engine/ and apps/shared/ files it needs) and follows obid as apps/mac/app/RunnerFeed.swift does.
@@ -76,7 +77,7 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 - #454 The Watch API and /v1/watches
 - #455 startWhen: jobs that wait to start
 - #456 Self-update: status.update
-- #457 The vault
+- #457 The vault (served now; no RunnerTests test is left on it)
 - #458 Xcode Cloud: following builds, stages and the API
 - #525 Oby's review of the owner's published work (split out of #451)
 
@@ -102,7 +103,6 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 | SpeechTests.endpointIsOwnerGatedAndValidatesBinaryRequests | `POST /v1/speech` | #453 |
 | StartWhenTests.theAPITakesStartWhen | `startWhen`, `POST /v1/jobs/{id}/start`, `/start-when` (obid refuses a non-empty `startWhen` with 422) | #455 |
 | UpdateTests.statusExposesVersionCommitAndPendingUpdate | self-update (`status.update`): obid doesn't update itself | #456 |
-| VaultTests.theAPIsJSONHasTheVaultsSecretsTakenOut | the vault: obid has none yet | #457 |
 | WatchTests.aReplayedRequestFails | the Watch API | #454 |
 | WatchTests.bothTheAccessTokenAndTheSignatureAreNeeded | the Watch API | #454 |
 | WatchTests.pairingNeedsTheWatchAPISetUp | `POST /v1/watches` | #454 |

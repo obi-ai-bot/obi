@@ -1,4 +1,6 @@
-//! `obid serve --config /path/to/config.json` (docs/runner-api.md, "obid only: configuration").
+//! `obid serve --config /path/to/config.json` (docs/runner-api.md, "obid only: configuration"),
+//! and `obid vault --config /path/to/config.json list | add NAME | remove NAME`: the owner's vault
+//! from a terminal on the machine, a value only ever on stdin (obid::vault).
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -6,10 +8,16 @@ use std::process::ExitCode;
 
 use obid::config::Config;
 
-const USAGE: &str = "usage: obid serve --config /path/to/config.json\n       obid --version";
+const USAGE: &str = "usage: obid serve --config /path/to/config.json\n       obid vault --config /path/to/config.json list | add NAME (the value on stdin) | remove NAME\n       obid --version";
 
 enum Command {
-    Serve { config: PathBuf },
+    Serve {
+        config: PathBuf,
+    },
+    Vault {
+        config: PathBuf,
+        action: obid::vault::Action,
+    },
     Version,
     Help,
 }
@@ -24,6 +32,19 @@ fn parse(args: &[String]) -> Result<Command, String> {
         [serve, flag] if serve == "serve" && flag.starts_with("--config=") => Ok(Command::Serve {
             config: PathBuf::from(&flag["--config=".len()..]),
         }),
+        [vault, flag, path, rest @ ..] if vault == "vault" && flag == "--config" => {
+            Ok(Command::Vault {
+                config: PathBuf::from(path),
+                action: obid::vault::Action::parse(rest)?,
+            })
+        }
+        [vault, flag, rest @ ..] if vault == "vault" && flag.starts_with("--config=") => {
+            Ok(Command::Vault {
+                config: PathBuf::from(&flag["--config=".len()..]),
+                action: obid::vault::Action::parse(rest)?,
+            })
+        }
+        [vault, ..] if vault == "vault" => Err(obid::vault::USAGE.into()),
         _ => Err(USAGE.into()),
     }
 }
@@ -60,6 +81,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Command::Serve { config } => config,
+        Command::Vault { config, action } => return vault(&config, &action),
     };
 
     // The runtime, then SIGTERM and SIGINT caught, before anything else: from here on a stop
@@ -138,6 +160,26 @@ fn main() -> ExitCode {
     }
 }
 
+/// `obid vault`: the vault in the configuration's `home`, run as obid's user. Nothing it prints
+/// holds a value.
+fn vault(config: &std::path::Path, action: &obid::vault::Action) -> ExitCode {
+    let config = match Config::load(config) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("obid: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    ExitCode::from(obid::vault::run(
+        &config.home,
+        &config.vault,
+        action,
+        obid::vault::read_value,
+        |line| println!("{line}"),
+        |line| eprintln!("obid: {line}"),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,12 +198,33 @@ mod tests {
             matches!(parse(&args(&["serve", "--config=/c.json"])), Ok(Command::Serve { config }) if config.as_path() == Path::new("/c.json"))
         );
         assert!(matches!(parse(&args(&["--version"])), Ok(Command::Version)));
+        assert!(
+            matches!(parse(&args(&["vault", "--config", "/c.json", "add", "staging-key"])), Ok(Command::Vault { config, action: obid::vault::Action::Add(name) }) if config.as_path() == Path::new("/c.json") && name == "staging-key")
+        );
+        assert!(matches!(
+            parse(&args(&["vault", "--config=/c.json", "list"])),
+            Ok(Command::Vault {
+                action: obid::vault::Action::List,
+                ..
+            })
+        ));
         for wrong in [
             &[][..],
             &["serve"],
             &["serve", "--config"],
             &["serve", "/c.json"],
             &["run", "--config", "/c.json"],
+            // A value is never an argument.
+            &[
+                "vault",
+                "--config",
+                "/c.json",
+                "add",
+                "staging-key",
+                "the-value",
+            ],
+            &["vault", "add", "staging-key"],
+            &["vault", "--config", "/c.json"],
         ] {
             assert!(parse(&args(wrong)).is_err(), "{wrong:?}");
         }

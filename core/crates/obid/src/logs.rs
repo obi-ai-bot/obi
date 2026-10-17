@@ -1,8 +1,10 @@
 //! obid's log layer (docs/ARCHITECTURE.md 5.4, decision D6): what the plug-in host logs under
 //! the `tracing` target `obi_plugin` (a plug-in's stderr and `log` messages, and what the host
 //! says about it) goes through [`Redacting`] before anything is written, which takes the secrets
-//! obid holds (`crate::secrets`), plain and encoded, out of the whole line. The host has no
-//! secrets and writes no log of its own: this layer is the only place they are taken out.
+//! obid holds (`crate::secrets`: its own and the owner's vault, `crate::vault`, read again when
+//! it changed), plain and encoded, out of the whole line. When the vault can't be read, the values
+//! learned last are still taken out. The host has no secrets and writes no log of its own: this
+//! layer is the only place they are taken out.
 
 use std::io::Write;
 use std::sync::Arc;
