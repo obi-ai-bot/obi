@@ -785,17 +785,23 @@ pub fn known_secrets_in_file(text: &str, name: &str) -> Vec<Finding> {
 
 /// gitleaks on names, each on a line of its own (a newline or carriage return in a name is written
 /// as `\n` or `\r`, so no name spills onto the next line): each finding as the index of the name
-/// it was in, and its rule.
+/// it was in (none when gitleaks couldn't say: it still counts), and its rule.
 pub async fn gitleaks_names(
     names: &[String],
     scratch: &Path,
-) -> Result<Vec<(usize, String)>, String> {
-    let lines = name_lines(names);
-    Ok(gitleaks_lines(&lines, scratch)
-        .await?
+) -> Result<Vec<(Option<usize>, String)>, String> {
+    Ok(name_findings(
+        gitleaks_lines(&name_lines(names), scratch).await?,
+    ))
+}
+
+/// What gitleaks found in the names, each with the index of its name, or none when gitleaks
+/// couldn't say which (no report it could read, a line it wasn't given): that one still counts.
+fn name_findings(found: Vec<Finding>) -> Vec<(Option<usize>, String)> {
+    found
         .into_iter()
-        .filter_map(|f| Some((f.name.parse().ok()?, f.rule)))
-        .collect())
+        .map(|f| (f.name.parse().ok(), f.rule))
+        .collect()
 }
 
 /// Each name as one line, named by its index.
@@ -1381,6 +1387,23 @@ exit 99"#,
                 .filter(|f| !f.rule.ends_with(" in a name"))
                 .all(|f| secret_file(&f.name).is_some()),
             "{found:?}"
+        );
+    }
+
+    /// A finding gitleaks couldn't place in a name (`?`) still counts, with no name.
+    #[test]
+    fn a_name_finding_with_no_place_still_counts() {
+        let found = |name: &str| Finding {
+            name: name.into(),
+            line: None,
+            rule: "gitleaks".into(),
+        };
+        assert_eq!(
+            name_findings(vec![found("2"), found("?")]),
+            [
+                (Some(2), "gitleaks".to_owned()),
+                (None, "gitleaks".to_owned())
+            ]
         );
     }
 

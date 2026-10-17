@@ -451,6 +451,7 @@ pub struct Target {
 /// sends, files named as they are.
 const DIFF: &[&str] = &[
     "--no-color",
+    "--ignore-submodules=none",
     "--no-ext-diff",
     "--no-textconv",
     "--text",
@@ -767,11 +768,12 @@ async fn scan_changes(
         .collect();
     let names: Vec<String> = pushed.names.iter().map(|n| n.name.clone()).collect();
     let mut hidden: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    // Every one counts, whether or not gitleaks could say which name it was in.
     for (index, rule) in scan::gitleaks_names(&names, scratch)
         .await
         .map_err(|why| could_not_run(&why))?
     {
-        if let Some(name) = names.get(index) {
+        if let Some(name) = index.and_then(|i| names.get(i)) {
             hidden.insert(name);
         }
         found.push(Found::of(
@@ -937,13 +939,16 @@ async fn pushed_objects(clone: &Path, range: &str) -> Result<Pushed, String> {
         }
     }
     // Every path a commit adds (`A`, folders too with `-t`), against each parent of a merge
-    // (`-m`), and everything a root commit holds (`--root`): its last part is the new name.
+    // (below), and everything a root commit holds (`--root`): its last part is the new name.
     let added = git_bytes(
         clone,
         &[
             "log",
             "--root",
-            "-m",
+            // Against each parent of a merge, whatever the clone's `log.diffMerges` says, and
+            // every submodule's name, whatever `diff.ignoreSubmodules` or a `.gitmodules` says.
+            "--diff-merges=separate",
+            "--ignore-submodules=none",
             "-r",
             "-t",
             "--no-renames",

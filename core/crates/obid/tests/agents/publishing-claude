@@ -10,6 +10,12 @@
 //   SLOW: <file>     waits 3 seconds, then commits the file
 //   FOLDER           commits hello.txt in a folder named `<that token> b/y`, which git's
 //                    `diff --git a/… b/…` header can't be split back into
+//   EMPTY: <file>    commits an empty file: a commit with no line of content
+//   EVIL: <file>     merges a side branch that adds side.txt, and adds the file in the merge
+//                    commit itself (in neither parent)
+//   SIDE: <file>     commits the file on a side branch and merges it in (--no-ff)
+//   MOVE: <a> <b>    moves the file a to b (git mv) and commits
+//   GITLINK          commits a submodule entry (a gitlink) named with the made-up GitHub token
 //   ORPHAN           merges in an unrelated history whose only (root) commit adds root.txt with
 //                    the made-up AWS key id in it
 //   the publish gate's fix prompt ("secret scan blocked publishing … commit <sha>"): takes the key
@@ -51,6 +57,11 @@ rl.on("line", (line) => {
   const slow = prompt.match(/SLOW: (\S+)/);
   const folder = prompt.includes("FOLDER");
   const orphan = prompt.includes("ORPHAN");
+  const empty = prompt.match(/EMPTY: (\S+)/);
+  const evil = prompt.match(/EVIL: (\S+)/);
+  const side = prompt.match(/SIDE: (\S+)/);
+  const move = prompt.match(/MOVE: (\S+) (\S+)/);
+  const gitlink = prompt.includes("GITLINK");
   try {
     if (fix) {
       const file = git("show", "--name-only", "--format=", fix[1]).trim().split("\n")[0];
@@ -81,6 +92,41 @@ rl.on("line", (line) => {
       git("update-ref", "--no-deref", "HEAD", commit);
       git("reset", "-q");
       result(`Added ${header[1]}.`);
+    } else if (empty) {
+      writeFileSync(empty[1], "");
+      git("add", "--", empty[1]);
+      git("commit", "-q", "-m", `Add ${empty[1]}`);
+      result(`Added ${empty[1]}.`);
+    } else if (evil || side) {
+      const base = git("rev-parse", "HEAD").trim();
+      const file = evil ? "side.txt" : side[1];
+      writeFileSync(file, "side\n");
+      git("add", "--", file);
+      git("commit", "-q", "-m", `Add ${file}`);
+      const tip = git("rev-parse", "HEAD").trim();
+      git("checkout", "-q", "--detach", base);
+      writeFileSync("main.txt", "main\n");
+      git("add", "main.txt");
+      git("commit", "-q", "-m", "Add main.txt");
+      if (evil) {
+        git("merge", "-q", "--no-ff", "--no-commit", tip);
+        writeFileSync(evil[1], "MODE=local\n");
+        git("add", "--", evil[1]);
+        git("commit", "-q", "-m", "Merge the side branch");
+      } else {
+        git("merge", "-q", "--no-ff", "--no-edit", tip);
+      }
+      result("Merged the side branch.");
+    } else if (move) {
+      execFileSync("mkdir", ["-p", move[2].split("/").slice(0, -1).join("/") || "."]);
+      git("mv", "--", move[1], move[2]);
+      git("commit", "-q", "-m", `Move ${move[1]}`);
+      result(`Moved ${move[1]}.`);
+    } else if (gitlink) {
+      const head = git("rev-parse", "HEAD").trim();
+      git("update-index", "--add", "--cacheinfo", `160000,${head},${MADE_UP}`);
+      git("commit", "-q", "-m", "Add a submodule");
+      result("Added a submodule.");
     } else if (folder) {
       const dir = `${MADE_UP} b/y`;
       execFileSync("mkdir", ["-p", dir]);

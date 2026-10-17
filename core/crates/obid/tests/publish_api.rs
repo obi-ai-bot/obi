@@ -951,3 +951,143 @@ fn names_already_on_the_base_are_the_bases() {
     );
     assert_eq!(remote_branch(&remote, &format!("oby/build-{env}")), None);
 }
+
+/// A gitleaks that reports a finding in the names without saying which (no report it could read,
+/// or a line it wasn't given) still stops the publish: nothing is dropped as clean.
+#[test]
+fn a_name_finding_gitleaks_cant_place_still_counts() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = Folder::new("publish-unplaced");
+    let bin = fake_gh(&folder.0);
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    for (file, report) in [
+        ("trigger-one", "[]"),
+        (
+            "trigger-two",
+            r#"[{"StartLine": 999, "RuleID": "github-pat"}]"#,
+        ),
+    ] {
+        // It finds something only in the names (a line that reads exactly the file's name).
+        std::fs::write(
+            bin.join("gitleaks"),
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in --report-path=*) r=\"${{a#--report-path=}}\";; esac; done\n\
+                 grep -qx '{file}' \"$2\" || exit 0\necho '{report}' > \"$r\"\nexit 99\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join("gitleaks"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let id = dispatch(
+            &obid,
+            json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": format!("EMPTY: {file}")}),
+        );
+        let job = ended(&obid, &id);
+        assert_eq!(job["status"], "failed", "{file}: {job}");
+        let summary = job["summary"].as_str().unwrap();
+        assert!(summary.contains("(gitleaks"), "{file}: {summary}");
+        assert!(summary.contains("in a name)"), "{file}: {summary}");
+        assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
+    }
+}
+
+/// The clone's own settings can't hide a name: with `log.diffMerges = off` a `.env.local` added
+/// in a merge commit itself (in neither parent) is still found, and with
+/// `diff.ignoreSubmodules = all` a submodule named with a token is too.
+#[test]
+fn the_clones_settings_cant_hide_a_merge_or_a_submodule() {
+    let folder = Folder::new("publish-clone-settings");
+    let bin = fake_gh(&folder.0);
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    // A first job makes the clone; then its settings are changed.
+    let warm = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: warm.txt"}),
+    );
+    assert_eq!(ended(&obid, &warm)["published"], PULL);
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    git(&clone, &["config", "log.diffMerges", "off"]);
+    git(&clone, &["config", "diff.ignoreSubmodules", "all"]);
+    let evil = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "EVIL: .env.local"}),
+    );
+    let job = ended(&obid, &evil);
+    assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
+    assert!(
+        job["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("Not published: possible secret in .env.local (.env file)"),
+        "{job}"
+    );
+    assert_eq!(remote_branch(&remote, &format!("oby/build-{evil}")), None);
+    let link = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "GITLINK"}),
+    );
+    let job = ended(&obid, &link);
+    assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
+    let summary = job["summary"].as_str().unwrap();
+    assert!(summary.contains("GitHub token in a name"), "{summary}");
+    assert!(!summary.contains(&made_up_token()), "{summary}");
+    assert_eq!(remote_branch(&remote, &format!("oby/build-{link}")), None);
+}
+
+/// A name that holds secrets by itself is found however it arrives: a `.env` moved into a new
+/// folder, and an `id_ed25519` brought in through a merged side branch.
+#[test]
+fn a_moved_env_and_a_key_from_a_side_branch_are_found() {
+    let folder = Folder::new("publish-moves");
+    let bin = fake_gh(&folder.0);
+    let remote = fixture(&folder.0.join("fixture"));
+    let theirs = folder.0.join("theirs");
+    git(
+        &folder.0,
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            theirs.to_str().unwrap(),
+        ],
+    );
+    git(&theirs, &["checkout", "-q", "main"]);
+    std::fs::write(theirs.join(".env"), "MODE=dev\n").unwrap();
+    git(&theirs, &["add", "-A"]);
+    git(
+        &theirs,
+        &[
+            "-c",
+            "user.name=Someone",
+            "-c",
+            "user.email=someone@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "An env",
+        ],
+    );
+    git(&theirs, &["push", "-q", "origin", "main"]);
+    let obid = start(&folder.0, &config(&folder.0, &remote, &agent()), Some(&bin));
+    for (task, place) in [
+        ("MOVE: .env newdir/.env", ".env (.env file)"),
+        ("SIDE: id_ed25519", "id_ed25519 (private key file)"),
+    ] {
+        let id = dispatch(
+            &obid,
+            json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": task}),
+        );
+        let job = ended(&obid, &id);
+        assert_eq!(job["status"], "failed", "{task}: {job}\n{}", obid.log());
+        assert!(
+            job["summary"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("Not published: possible secret in {place}")),
+            "{task}: {job}"
+        );
+        assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
+    }
+}
