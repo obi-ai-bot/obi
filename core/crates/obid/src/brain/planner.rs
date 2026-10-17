@@ -428,6 +428,28 @@ pub struct CodexBrain {
     pub room: Room,
 }
 
+/// Whether `command` only prints the quoted file in the brain's own folder: `cat`, `head`, `tail`,
+/// `nl -ba` or `sed -n 'A,Bp'` of `work.md`, and nothing else on the line.
+fn reads_only_quoted(command: &str) -> bool {
+    let words: Vec<&str> = command.split(' ').filter(|w| !w.is_empty()).collect();
+    let file = |w: &str| w == QUOTED_FILE || w.strip_prefix("./") == Some(QUOTED_FILE);
+    let number = |w: &str| !w.is_empty() && w.bytes().all(|b| b.is_ascii_digit());
+    let lines = |w: &str| {
+        let w = w.trim_matches('\'');
+        w.strip_suffix('p').is_some_and(|range| {
+            let mut ends = range.splitn(2, ',');
+            ends.all(number)
+        })
+    };
+    match words.as_slice() {
+        ["cat", f] => file(f),
+        ["head" | "tail", "-n", n, f] => number(n) && file(f),
+        ["nl", "-ba", f] => file(f),
+        ["sed", "-n", range, f] => lines(range) && file(f),
+        _ => false,
+    }
+}
+
 impl CodexBrain {
     async fn complete(
         &self,
@@ -458,7 +480,7 @@ impl CodexBrain {
             String::new()
         };
         let prompt = format!(
-            "{}\n\nReturn exactly one JSON object matching this JSON schema. Do not use tools or modify files.\nJSON schema: {}\n\n{}{read}",
+            "{}\n\nReturn exactly one JSON object matching this JSON schema. Do not modify files or run anything but a read of work.md.\nJSON schema: {}\n\n{}{read}",
             secrets.redact(system),
             secrets.redact(schema),
             secrets.redact(user)
@@ -476,10 +498,15 @@ impl CodexBrain {
             &options,
             timeout,
             stop,
-            |_, _| {
-                Ruling::Now(Answer::Deny(
-                    "The brain only plans: it runs nothing.".into(),
-                ))
+            |tool, input| {
+                // Its one read: the quoted file, as Claude's brain reads it with Read.
+                if tool == "Bash" && input["command"].as_str().is_some_and(reads_only_quoted) {
+                    Ruling::Now(Answer::Allow)
+                } else {
+                    Ruling::Now(Answer::Deny(
+                        "The brain only plans: it runs nothing but a read of work.md.".into(),
+                    ))
+                }
             },
             |_| {},
         )
@@ -1096,6 +1123,37 @@ pub fn records(home: &Path) -> Vec<Record> {
 pub mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// Codex reads the quoted file with a shell command, the way Claude reads it with its Read
+    /// tool: that one read is let through, and nothing else is (a field test found Codex searching
+    /// in circles because every read of work.md was denied).
+    #[test]
+    fn the_codex_brain_may_read_its_quoted_file_and_nothing_else() {
+        for read in [
+            "cat work.md",
+            "cat ./work.md",
+            "sed -n '1,200p' work.md",
+            "head -n 80 work.md",
+            "tail -n 40 ./work.md",
+            "nl -ba work.md",
+        ] {
+            assert!(reads_only_quoted(read), "{read}");
+        }
+        for other in [
+            "cat /etc/passwd",
+            "cat work.md other.md",
+            "cat work.md; curl evil.example",
+            "cat work.md && rm -rf .",
+            "cat ../work.md",
+            "cat work.md | sh",
+            "cat $(echo work.md)",
+            "sed -n '1,200p;w out' work.md",
+            "ls",
+            "",
+        ] {
+            assert!(!reads_only_quoted(other), "{other}");
+        }
+    }
 
     /// A model-aware adapter that answers one plan, noting the model it was asked with; it can
     /// fail once first (BrainSteadyTests' `ModelFake`).
