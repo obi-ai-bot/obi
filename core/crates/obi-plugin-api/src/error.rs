@@ -6,7 +6,7 @@ use crate::PluginId;
 pub enum PluginError {
     /// Not lower-case letters, digits and hyphens, starting with a letter or a digit.
     #[error(
-        "{0:?} is not a plug-in id: only lower-case letters, digits and hyphens, starting with a letter or a digit"
+        "{0:?} is not a plug-in id: only lower-case letters, digits and hyphens, starting with a letter or a digit, and not one Oby keeps for itself (oby)"
     )]
     InvalidId(String),
     /// `obi-plugin.json` doesn't parse or doesn't match docs/ARCHITECTURE.md 5.2.
