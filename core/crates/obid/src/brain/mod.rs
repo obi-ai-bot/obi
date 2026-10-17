@@ -6,6 +6,7 @@
 
 pub mod actions;
 pub mod briefing;
+pub mod find;
 pub mod plan;
 pub mod planner;
 pub mod read;

@@ -12,6 +12,8 @@
 #                  PEEK <path>             replies "read" when it could read the file, else "hidden"
 #                  CHECK <repo>            dispatches tests in the repository, its `check` the first
 #                                          `command` under its own instructions in work.md
+#                  QUOTE <words>           replies with the first line of work.md holding the words
+#                                          (any case) and the conversation found above it
 #                  <plan>                  answers {"structured_output": <plan>}
 #                When it's empty, the words the user says now choose (below).
 #   calls/<n>/   what call n got: args (one per line), input (stdin), pwd, and work.md when
@@ -69,6 +71,11 @@ case "$line" in
       on && /^## / { exit }
       on && match($0, /`[^`]+`/) { print substr($0, RSTART + 1, RLENGTH - 2); exit }' work.md 2>/dev/null)
     line="{\"action\":\"dispatch\",\"reply\":\"\",\"question\":null,\"jobs\":[],\"dispatches\":[{\"agent\":\"auto\",\"account\":\"auto\",\"repo\":\"$repo\",\"kind\":\"test\",\"title\":\"Run the tests\",\"task\":\"Run the tests\",\"rounds\":1,\"check\":\"$check\"}]}" ;;
+  "QUOTE "*)
+    found=$(awk -v w="${line#QUOTE }" '
+      /^### Conversation / { c = $0; sub(/^### Conversation /, "", c) }
+      index(tolower($0), tolower(w)) && !/^#/ && !/^Turn / { gsub(/"/, "'"'"'"); print c " said: " $0; exit }' work.md 2>/dev/null)
+    line="{\"action\":\"reply_only\",\"reply\":\"${found:-nothing found}\",\"dispatches\":[],\"question\":null}" ;;
 esac
 if [ -n "$line" ]; then
   printf '{"structured_output":%s}\n' "$line"

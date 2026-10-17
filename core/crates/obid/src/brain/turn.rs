@@ -16,6 +16,7 @@ use std::time::Instant;
 use serde_json::json;
 
 use super::actions::{self, Asked, Outcome, Talk};
+use super::find::{self, Finds};
 use super::plan::{Action, Plan};
 use super::planner::{Planner, Record, Room};
 use super::read::{self, JobReads};
@@ -568,6 +569,7 @@ pub async fn run(
     let mut request = said.to_owned();
     let mut details: Option<String> = None;
     let mut reads = JobReads::default();
+    let mut finds = Finds::default();
     let mut research = research::Log::default();
     let tools = research::Tools::new(shared.jobs.clone());
     // Work the brain wants after looking things up waits for the user's Start.
@@ -603,8 +605,11 @@ pub async fn run(
             context.found = research.found();
             // What the turn read and looked up goes into the next step's quoted file.
             context.quoted = research.quoted(
-                reads.quoted(
-                    super::briefing::with_own(context.quoted.take(), &own, &nonce),
+                finds.quoted(
+                    reads.quoted(
+                        super::briefing::with_own(context.quoted.take(), &own, &nonce),
+                        &nonce,
+                    ),
                     &nonce,
                 ),
                 &nonce,
@@ -673,7 +678,26 @@ pub async fn run(
                 if checking {
                     break 'step (End::Checked, finish(&done));
                 }
-                request = reads.continued(&so_far());
+                request = finds.continued(&reads.continued(&so_far()));
+                continue 'turn;
+            }
+            // The chat finds past conversations before it answers (#593), never the one asking.
+            if plan.action == Action::FindConversation {
+                finds.find(plan.message.as_deref(), |words| {
+                    shared.conversations.search(
+                        words,
+                        Some(asked.conversation),
+                        None,
+                        find::CONVERSATIONS,
+                    )
+                });
+                if Instant::now() >= deadline {
+                    break 'step (End::BudgetSpent, finish(&done));
+                }
+                if checking {
+                    break 'step (End::Checked, finish(&done));
+                }
+                request = finds.continued(&reads.continued(&so_far()));
                 continue 'turn;
             }
             if plan.action == Action::Research {
@@ -718,7 +742,7 @@ pub async fn run(
                 if checking {
                     break 'step (End::Checked, finish(&done));
                 }
-                request = research.continued(&reads.continued(&so_far()));
+                request = research.continued(&finds.continued(&reads.continued(&so_far())));
                 continue 'turn;
             }
             if matches!(plan.action, Action::ReplyOnly | Action::AskUser) {
@@ -757,7 +781,7 @@ pub async fn run(
             if checking {
                 break 'step (End::Checked, finish(&done));
             }
-            request = reads.continued(&continued(said, &done));
+            request = finds.continued(&reads.continued(&continued(said, &done)));
             continue 'turn;
         };
         // Before Oby answers, everything the user named was handled (#539): what's left goes
@@ -773,7 +797,7 @@ pub async fn run(
                     earlier.extend(jobs);
                     done = if text.is_empty() { vec![] } else { vec![text] };
                 }
-                request = reads.continued(&unfinished(said, &done, &missing));
+                request = finds.continued(&reads.continued(&unfinished(said, &done, &missing)));
                 checking = true;
                 continue 'turn;
             }

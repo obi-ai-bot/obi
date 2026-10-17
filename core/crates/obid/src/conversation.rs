@@ -20,6 +20,12 @@ const KEPT: usize = 500;
 pub const CONVERSATIONS: usize = 200;
 /// The longest title a rename may set.
 const TITLE: usize = 100;
+/// The longest search a list takes, in characters (#593).
+pub const QUERY: usize = 200;
+/// The turns a search returns per conversation, the latest first.
+pub const HITS: usize = 3;
+/// The most of a found turn's text a search returns, in characters.
+pub const EXCERPT: usize = 500;
 /// Where the thread of obid before #493 is kept once it's a conversation, for a rollback.
 const PRE_493: &str = "conversation.json.pre-493";
 
@@ -77,10 +83,22 @@ impl Thread {
     }
 }
 
+/// A conversation a search found (#593): what the list says of it, and the turns that hold the
+/// words, the latest first, each with its place in the conversation from 1.
+#[derive(Debug, Clone)]
+pub struct Found {
+    pub id: String,
+    pub title: String,
+    pub summary: Value,
+    /// How many turns it keeps.
+    pub turns: usize,
+    pub hits: Vec<(usize, Turn)>,
+}
+
 /// A conversation's place in the list, as `after` takes it: `1-42` (pinned, sequence 42) or
 /// `0-42`. Ordered as the list is, first to last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Cursor {
+pub struct Cursor {
     pinned: bool,
     sequence: u64,
 }
@@ -424,16 +442,56 @@ impl Conversations {
     /// moved since is skipped or listed again, never anything else.
     fn list(&self, after: Option<Cursor>, limit: usize) -> Vec<Value> {
         let threads = self.lock();
-        let mut order: Vec<&Thread> = threads
+        ordered(&threads, after)
             .iter()
-            .filter(|t| after.is_none_or(|cursor| t.key().after(cursor)))
-            .collect();
-        order.sort_by(|a, b| {
-            (b.pinned, b.sequence)
-                .cmp(&(a.pinned, a.sequence))
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        order.iter().take(limit).map(|t| t.summary()).collect()
+            .take(limit)
+            .map(|t| t.summary())
+            .collect()
+    }
+
+    /// Up to `limit` conversations, in the list's order after `after`, whose title or one of
+    /// whose turns holds every one of `words` (any case): a plain text match, no model (#593).
+    /// Each comes with up to [`HITS`] of its turns that hold them, the latest first; none when
+    /// only the title does. `except` is left out: the conversation asking. Deleted conversations
+    /// are gone from the list, so they're never found.
+    pub fn search(
+        &self,
+        words: &[String],
+        except: Option<&str>,
+        after: Option<Cursor>,
+        limit: usize,
+    ) -> Vec<Found> {
+        if words.is_empty() {
+            return vec![];
+        }
+        let holds = |text: &str| {
+            let text = text.to_lowercase();
+            words.iter().all(|w| text.contains(w.as_str()))
+        };
+        let threads = self.lock();
+        ordered(&threads, after)
+            .into_iter()
+            .filter(|t| except != Some(t.id.as_str()))
+            .filter_map(|t| {
+                let hits: Vec<(usize, Turn)> = t
+                    .turns
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter(|(_, turn)| holds(&turn.text))
+                    .take(HITS)
+                    .map(|(index, turn)| (index + 1, turn.clone()))
+                    .collect();
+                (!hits.is_empty() || holds(&t.title)).then(|| Found {
+                    id: t.id.clone(),
+                    title: t.title.clone(),
+                    summary: t.summary(),
+                    turns: t.turns.len(),
+                    hits,
+                })
+            })
+            .take(limit)
+            .collect()
     }
 
     /// Renames or pins the conversation `id`.
@@ -486,6 +544,59 @@ impl Conversations {
             .send("conversation", json!({"id": id, "deleted": true}));
         Ok(())
     }
+}
+
+/// The conversations as the list orders them, after `after` (or from the first): the pinned
+/// ones, then the rest, each newest first.
+fn ordered(threads: &[Thread], after: Option<Cursor>) -> Vec<&Thread> {
+    let mut order: Vec<&Thread> = threads
+        .iter()
+        .filter(|t| after.is_none_or(|cursor| t.key().after(cursor)))
+        .collect();
+    order.sort_by(|a, b| {
+        (b.pinned, b.sequence)
+            .cmp(&(a.pinned, a.sequence))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    order
+}
+
+/// The words a search looks for: `q` split on spaces, lower-case, each without the punctuation
+/// around it ("target?" is "target"; "off-limits" stays whole).
+pub fn search_words(q: &str) -> Vec<String> {
+    q.split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// At most [`EXCERPT`] characters of `text` around the first of `words` it holds, `…` where
+/// it's cut.
+pub fn excerpt(text: &str, words: &[String]) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= EXCERPT {
+        return text.to_owned();
+    }
+    let lower = text.to_lowercase();
+    // Where the first word is, in characters (lower-casing can change byte lengths).
+    let at = words
+        .iter()
+        .filter_map(|w| lower.find(w.as_str()))
+        .min()
+        .map_or(0, |byte| lower[..byte].chars().count());
+    let start = at.saturating_sub(EXCERPT / 4).min(chars.len() - EXCERPT);
+    let end = start + EXCERPT;
+    let mut cut: String = chars[start..end].iter().collect();
+    if start > 0 {
+        cut.insert(0, '…');
+    }
+    if end < chars.len() {
+        cut.push('…');
+    }
+    cut
 }
 
 /// The conversation with the latest turn.
@@ -583,9 +694,12 @@ pub async fn get(
 pub struct ListPage {
     after: Option<String>,
     limit: Option<String>,
+    q: Option<String>,
 }
 
-/// `GET /v1/conversations?after=&limit=`: the conversations, pinned first, then newest first.
+/// `GET /v1/conversations?after=&limit=&q=`: the conversations, pinned first, then newest
+/// first. With `q`, only those whose title or a turn holds every word of it, each with the latest
+/// turn that does (`turn`, null when only the title does), its text cut to [`EXCERPT`] (#593).
 pub async fn list(
     State(shared): State<std::sync::Arc<Shared>>,
     Query(query): Query<ListPage>,
@@ -600,8 +714,35 @@ pub async fn list(
             )
         })?),
     };
-    let list = shared.conversations.list(after, limit);
-    Ok((StatusCode::OK, axum::Json(json!(list))).into_response())
+    let Some(q) = query.q else {
+        let list = shared.conversations.list(after, limit);
+        return Ok((StatusCode::OK, axum::Json(json!(list))).into_response());
+    };
+    let words = search_words(&q);
+    if words.is_empty() || q.chars().count() > QUERY {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "q is 1 to 200 characters, with a word to find.",
+        ));
+    }
+    let found: Vec<Value> = shared
+        .conversations
+        .search(&words, None, after, limit)
+        .into_iter()
+        .map(|found| {
+            let mut item = found.summary;
+            item["turn"] = found.hits.first().map_or(Value::Null, |(_, turn)| {
+                json!({
+                    "id": turn.id,
+                    "who": turn.who,
+                    "at": turn.at,
+                    "text": excerpt(&turn.text, &words),
+                })
+            });
+            item
+        })
+        .collect();
+    Ok((StatusCode::OK, axum::Json(json!(found))).into_response())
 }
 
 #[derive(Deserialize)]
