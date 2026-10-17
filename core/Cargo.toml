@@ -33,6 +33,7 @@ axum = "0.8.9"
 # The API token obid makes on first start, and the host name `GET /v1/status` reports.
 getrandom = "0.4.3"
 hex = "0.4.3"
+libc = "0.2"
 gethostname = "1.1.0"
 # The Obi-to-Obi protocol (crates/obi-protocol): Ed25519, SHA-256, base64url, its JSON Schemas,
 # and ECMAScript number formatting for canonical JSON (RFC 8785).
@@ -47,7 +48,7 @@ p256 = { version = "0.13.2", default-features = false, features = ["arithmetic",
 # Ids for jobs and messages.
 uuid = { version = "1.28.0", features = ["v4"] }
 # Process groups for agents and checks: SIGTERM, then SIGKILL, to everything one started.
-nix = { version = "0.31", features = ["signal", "process", "user"] }
+nix = { version = "0.31", features = ["signal", "process", "term", "user"] }
 # The Sphere client (crates/obi-protocol, client.rs): HTTP and HTTPS, no proxy from the environment.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "form"] }
 # The publish gate's secret scan: the built-in rules (Engine/Publish.swift's).

@@ -303,6 +303,18 @@ fn value_names_a_path(value: &Value) -> bool {
 /// (`crate::plugins::rules`). Every other MCP tool is refused (Engine/Jobs.swift's
 /// `Policy.tetrixTools`, made per plug-in: docs/ARCHITECTURE.md 5.1).
 pub fn fixed_denial(tool: &str, input: &Value, worktree: &Path, mcp: &[String]) -> Option<String> {
+    // The broker itself checks every upstream tool's read-only annotation and holds each login
+    // outside the job sandbox. Its tool calls are therefore the only non-plug-in MCP calls Oby
+    // accepts, and only in a job given the broker (its rule is in `mcp`): a plug-in whose id is
+    // `oby` gets no more than the tools its manifest allows. The job-scoped broker token still
+    // limits them to this job.
+    if tool.starts_with("mcp__oby__")
+        && mcp
+            .iter()
+            .any(|rule| rule == crate::connections::BROKER_RULE)
+    {
+        return None;
+    }
     if tool.starts_with("mcp__") || tool == "mcp" {
         return (!mcp.iter().any(|rule| rule == tool)).then(|| format!(
             "obid's agents use only the MCP tools of the plug-ins the owner enabled, and only the ones each allows. Say in your summary what you'd have done with {tool}."
@@ -723,5 +735,69 @@ mod tests {
             ),
             Answer::Deny(_)
         ));
+    }
+
+    /// ConnectionTests.agentsMayCallTheBrokersToolsAndNoOtherServersOwn, in a job given the
+    /// broker; and in a job without it, `mcp__oby__…` is any other server's tool: a plug-in whose
+    /// id is `oby` gets only the tools its manifest allows.
+    #[test]
+    fn agents_may_call_the_brokers_tools_and_no_other_servers_own() {
+        let worktree = Path::new("/tmp/work");
+        let brokered = vec![
+            "mcp__tetrix__get_entity".to_owned(),
+            crate::connections::BROKER_RULE.to_owned(),
+        ];
+        for allowed in ["mcp__oby__mail_send_message", "mcp__oby__mail__weird"] {
+            assert_eq!(
+                decide(allowed, &json!({}), worktree, false, &brokered),
+                Answer::Allow,
+                "{allowed}"
+            );
+        }
+        for refused in [
+            "mcp__gmail__send_message",
+            "mcp__obyx__search",
+            "mcp__tetrix__x",
+        ] {
+            assert!(
+                matches!(
+                    decide(refused, &json!({}), worktree, false, &brokered),
+                    Answer::Deny(_)
+                ),
+                "{refused}"
+            );
+        }
+        // A review another Obi asked for never reaches the broker.
+        assert!(matches!(
+            decide(
+                "mcp__oby__mail_search",
+                &json!({}),
+                worktree,
+                true,
+                &brokered
+            ),
+            Answer::Deny(_)
+        ));
+        // No broker: a plug-in named `oby`, with one tool allowed.
+        let plugin = vec!["mcp__oby__search".to_owned()];
+        assert_eq!(
+            decide("mcp__oby__search", &json!({}), worktree, false, &plugin),
+            Answer::Allow
+        );
+        for rules in [&plugin[..], &[]] {
+            assert!(
+                matches!(
+                    decide(
+                        "mcp__oby__delete_everything",
+                        &json!({}),
+                        worktree,
+                        false,
+                        rules
+                    ),
+                    Answer::Deny(_)
+                ),
+                "{rules:?}"
+            );
+        }
     }
 }

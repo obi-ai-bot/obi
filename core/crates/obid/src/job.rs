@@ -80,6 +80,26 @@ pub struct ObiRef {
     pub request_id: String,
 }
 
+/// One thing Oby found before the job started (#540): a file a lookup showed, the lines, and
+/// what Oby saw there or ruled out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finding {
+    pub path: String,
+    #[serde(default)]
+    pub lines: Option<String>,
+    pub note: String,
+}
+
+/// What the brain's research handed the job (#540): where to look and what done means. Written
+/// from what repositories, GitHub and the web said, so its agent reads it as quoted data.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Brief {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<Finding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done: Option<String>,
+}
+
 /// A job as obid keeps it (`home/jobs/<id>.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,6 +193,14 @@ pub struct Job {
     /// Per-job bearer for `POST` and `GET /v1/agent/apple-check`; never sent to the API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apple_token: Option<String>,
+    /// Calls an agent made through the user's connected apps; names only, never secret values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connection_uses: Vec<crate::connections::ConnectionUse>,
+    /// The connected apps the job started with (names, URLs and secret names, never a value):
+    /// what its broker offers for as long as the job lives, across rounds, messages and restarts.
+    /// Never in the API's job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<Vec<crate::connections::Connection>>,
     /// The owner's words (`POST /v1/jobs/{id}/messages`) the agent hasn't heard yet: its next
     /// turn's prompt. Never in the API's job (`notes` has them all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -186,9 +214,19 @@ pub struct Job {
     /// committed. Never in the API's job.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub asked: bool,
+    /// What Oby found before it started, for the first prompt (#540). Never in the API's job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<Brief>,
 }
 
 impl Job {
+    /// Whether its pull request was merged, as the job's `pullRequest` says: it's finished for
+    /// good and takes no more words (#542). obid follows no pull request yet, so none reads
+    /// merged until it does.
+    pub fn merged(&self) -> bool {
+        self.to_json()["pullRequest"]["state"] == "MERGED"
+    }
+
     /// A new job, queued now.
     pub fn new(
         id: String,
@@ -252,9 +290,12 @@ impl Job {
             apple_check: None,
             apple_ran: None,
             apple_token: None,
+            connection_uses: Vec::new(),
+            connections: None,
             heard: Vec::new(),
             offers: Vec::new(),
             asked: false,
+            brief: None,
         }
     }
 
@@ -460,7 +501,7 @@ impl Job {
             "waiting": self.waiting.as_ref().filter(|_| self.status == Status::Queued),
             "mode": self.mode.as_deref().unwrap_or("bypass"),
             "permission": self.permission,
-            "connectionUses": [],
+            "connectionUses": self.connection_uses,
             "pipeline": self.pipeline(),
             "title": self.short_title(),
             "mergeNeedsYou": false,

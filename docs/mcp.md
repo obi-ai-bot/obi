@@ -48,7 +48,7 @@ Moving a job to another account (`move`) comes when the runner can do it (#118).
 
 ### The inbox, as the apps settle it
 
-`answer` takes only an item's own options, whatever its kind: `Try again`, `Dismiss`, `One more round`, `Fix it`, and a permission prompt's choices (allow, deny, a mode). Kinds it doesn't know yet, like permission items before the runner sends them, are handled the same way. The runner then does what the app would. A permission it fences off stays refused, whatever the answer. Any other words are refused with "answer that in Oby", except on a `question`, where they become the agent's next message. An item with no options (an `audit`) takes only `done` or `later`.
+`answer` takes only an item's own options, whatever its kind: `Try again`, `Dismiss`, `One more round`, `Fix it`, and a permission prompt's choices (allow, deny, a mode). Kinds it doesn't know yet, like permission items before the runner sends them, are handled the same way. The runner then does what the app would. A permission it fences off stays refused, whatever the answer. Any other words are refused with "answer that in Oby", except on a `question`, where they become the agent's next message. An item with no options (an `audit`) takes only `done` or `later`. A `confirm` item (obid only, #546: something Oby's brain planned that persists or widens trust, like always allowing a command) is refused whatever the answer, `Confirm` and `Cancel` alike: only the user's own answer in Oby carries it out.
 
 `Try again` on a `merge` item asks the runner to retry its own merge. That merge keeps all of its gates: Oby's review approved, the Mac check passed on the same commit, and a clean secret scan, as it does from the apps.
 

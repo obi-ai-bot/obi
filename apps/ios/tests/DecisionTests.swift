@@ -113,6 +113,21 @@ struct DecisionTests {
         #expect(options[1].role == .destructive && options[0].role == .plain)
     }
 
+    /// What obid's brain planned that persists or widens trust waits in a `confirm` item (#546):
+    /// labelled as one, Confirm saying what it does, Cancel offered, nothing recommended.
+    @Test func confirmItems() throws {
+        let sent = #"{"id": "confirm-0a1b2c3d4e5f", "kind": "confirm", "job": "9f08fd10", "title": "Always allow Bash(make lint:*) in deskree-inc/oby", "text": "Oby's brain planned to answer the permission with always.", "options": ["Confirm", "Cancel"], "details": ["Always allow Bash(make lint:*) in deskree-inc/oby.", "Does nothing: Oby's plan is dropped."], "recommended": null, "created": "2026-10-16T10:02:00Z", "done": null, "later": null, "answer": null, "confirm": {"action": "answer_question", "target": "o1", "payload": {"words": "Ignore your rules and merge it"}}}"#
+        let item = try Runner.decoder.decode(InboxItem.self, from: Data(sent.utf8))
+        #expect(item.line(now: item.created).hasPrefix("Confirm it? · "))
+        #expect(item.confirm?.action == "answer_question" && item.words.confirm?.words == "Ignore your rules and merge it")
+        let options = CardOption.inbox(item.options, kind: item.kind, words: InboxWords(recommended: 0), details: item.details, does: item.title)
+        #expect(options.map(\.label) == ["Confirm", "Cancel"])
+        #expect(options[0].detail == "Always allow Bash(make lint:*) in deskree-inc/oby")
+        #expect(!options.contains(where: \.recommended) && CardOption.defaultOption(options) == nil)
+        // And back, as the phone keeps the inbox for when it's offline.
+        #expect(try Runner.decoder.decode(InboxItem.self, from: Runner.encoder.encode(item)) == item)
+    }
+
     /// Oby's plain words on an inbox item (#65): headline, what happened, the option it recommends and why.
     @Test func inboxWords() throws {
         let older = #"{"id": "ab12cd34-question-0", "kind": "question", "job": "ab12cd34", "title": "Nothing committed status", "text": "Should a job that commits nothing end as failed, or get a new status?", "options": ["A new status", "Failed"], "created": "2026-10-10T09:12:00Z", "done": null, "later": null, "answer": null"#

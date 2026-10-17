@@ -34,10 +34,14 @@ pub struct Shared {
     pub cleared: crate::clear::Cleared,
     /// The devices that may approve publishing (`POST /v1/devices`).
     pub devices: crate::devices::Devices,
+    /// Connected apps and their job-scoped MCP broker.
+    pub connections: Arc<crate::connections::Connections>,
     pub jobs: Arc<Jobs>,
     pub events: Events,
     /// The conversations, shared by every device and plan request (#493).
     pub conversations: crate::conversation::Conversations,
+    /// The conversation turns under way, for Stop and cancel (#546).
+    pub turns: crate::brain::turn::Turns,
     /// Its Sphere: membership, exchanges, the inbox and decisions.
     pub link: Arc<crate::sphere::Link>,
     /// The plug-in host (`GET` and `PUT /v1/obid/plugins`).
@@ -117,6 +121,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/stop-all", post(crate::routes::stop_all))
         .route("/v1/clear", post(crate::routes::clear))
         .route("/v1/devices", post(crate::routes::register_device))
+        .merge(crate::connections::router())
         .route("/v1/checks/next", get(crate::routes::next_check))
         .route("/v1/checks/{id}/bundle", get(crate::routes::check_bundle))
         .route("/v1/checks/{id}/result", post(crate::routes::check_result))
@@ -136,7 +141,12 @@ pub fn router(shared: Arc<Shared>) -> Router {
             axum::routing::patch(crate::conversation::update).delete(crate::conversation::remove),
         )
         .route("/v1/plans", post(crate::brain::plan))
+        .route("/v1/plans/cancel", post(crate::brain::cancel))
+        .route("/v1/conversation/stop", post(crate::brain::stop))
         .route("/v1/inbox", get(crate::sphere::routes::inbox))
+        .route("/v1/failures", get(crate::failures::list_route))
+        .route("/v1/failures/{id}", get(crate::failures::get_route))
+        .route("/v1/failures/{id}/fix", post(crate::failures::fix_route))
         .route("/v1/inbox/{id}/answer", post(crate::sphere::routes::answer))
         .route("/v1/obid/sphere", get(crate::sphere::routes::membership))
         .route("/v1/obid/sphere/key", post(crate::sphere::routes::key))
@@ -185,6 +195,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(middleware::from_fn(crate::vault::answers))
         .layer(middleware::from_fn_with_state(shared.clone(), gate))
         .with_state(shared)
 }
@@ -234,8 +245,17 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
     }
     let api = request.uri().path().starts_with("/v1/");
     let agent_check = request.uri().path() == "/v1/agent/apple-check";
+    let agent_mcp = request
+        .uri()
+        .path()
+        .strip_prefix("/v1/agent/mcp/")
+        .filter(|id| !id.is_empty() && !id.contains('/'));
     let admitted = admit(request.uri(), request.headers(), &shared.token).or_else(|error| {
-        if !agent_check || !loopback_request(request.uri(), request.headers()) {
+        if (!agent_check && agent_mcp.is_none())
+            || (!loopback_request(request.uri(), request.headers())
+                && !agent_mcp
+                    .is_some_and(|_| agent_gateway_request(request.uri(), request.headers())))
+        {
             return Err(error);
         }
         let mut values = request.headers().get_all(header::AUTHORIZATION).iter();
@@ -243,7 +263,10 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
             (Some(value), None) => value.to_str().ok().and_then(bearer),
             _ => None,
         };
-        if given.is_some_and(|token| shared.jobs.is_apple_check_token(token)) {
+        if given.is_some_and(|token| {
+            (agent_check && shared.jobs.is_apple_check_token(token))
+                || agent_mcp.is_some_and(|id| shared.connections.allows(id, token))
+        }) {
             Ok(())
         } else {
             Err(error)
@@ -281,6 +304,29 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
         );
     }
     response
+}
+
+/// On Linux, sandboxed agents reach the host through slirp4netns at 10.0.2.2. Admit that fixed
+/// host only for the job-token MCP route; normal app API requests still require a loopback Host.
+fn agent_gateway_request(uri: &axum::http::Uri, headers: &HeaderMap) -> bool {
+    cfg!(target_os = "linux") && gateway_host(uri, headers)
+}
+
+/// The request names the slirp4netns host alias, `10.0.2.2` (any port), in its one `Host`, and
+/// no other authority.
+fn gateway_host(uri: &axum::http::Uri, headers: &HeaderMap) -> bool {
+    if uri.authority().is_some() {
+        return false;
+    }
+    let mut hosts = headers.get_all(header::HOST).iter();
+    let Some(host) = hosts.next().and_then(|h| h.to_str().ok()) else {
+        return false;
+    };
+    if hosts.next().is_some() {
+        return false;
+    }
+    let host = host.trim_matches(|c| c == ' ' || c == '\t');
+    host == "10.0.2.2" || host.strip_prefix("10.0.2.2:").is_some_and(is_port)
 }
 
 /// Throws the refusal, or lets the request through.
@@ -613,6 +659,45 @@ fn disk_usage_unless(path: &Path, cancelled: &AtomicBool) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the slirp4netns host alias, alone in one `Host`, is the agents' gateway; the gate
+    /// admits it on Linux, and only on `/v1/agent/mcp/{job}` with that job's token.
+    #[test]
+    fn the_agents_gateway_is_only_the_slirp_host() {
+        let ask = |uri: &str, hosts: &[&str]| {
+            let mut headers = HeaderMap::new();
+            for host in hosts {
+                headers.append(header::HOST, host.parse().unwrap());
+            }
+            gateway_host(&uri.parse().unwrap(), &headers)
+        };
+        for host in ["10.0.2.2", "10.0.2.2:7777", " 10.0.2.2:1 "] {
+            assert!(ask("/v1/agent/mcp/job1", &[host]), "{host}");
+        }
+        for hosts in [
+            &["10.0.2.3"][..],
+            &["10.0.2.2.evil.example"],
+            &["10.0.2.2:"],
+            &["10.0.2.2:x"],
+            &["10.0.2.2:7777:1"],
+            &["evil.example"],
+            &["127.0.0.1"],
+            &["10.0.2.2", "10.0.2.2"],
+            &[],
+        ] {
+            assert!(!ask("/v1/agent/mcp/job1", hosts), "{hosts:?}");
+        }
+        assert!(!ask("http://evil.example/v1/agent/mcp/job1", &["10.0.2.2"]));
+        assert_eq!(
+            agent_gateway_request(&"/v1/agent/mcp/job1".parse().unwrap(), &{
+                let mut headers = HeaderMap::new();
+                headers.insert(header::HOST, "10.0.2.2".parse().unwrap());
+                headers
+            }),
+            cfg!(target_os = "linux"),
+            "the gateway is Linux's alone"
+        );
+    }
 
     #[test]
     fn loopback_names() {

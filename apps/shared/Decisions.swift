@@ -202,8 +202,18 @@ extension CardOption {
     /// recommended one first, a permission's with the rule Always allow saves and Deny in red.
     /// Oby's own recommendation (`words`, #65) comes before the job question's, and its why goes
     /// under the option it recommends.
+    /// A `confirm` item's (obid only, #546) keep their order with none recommended, so Return
+    /// picks nothing: it's the user's call. Its Confirm says under it what it does (`does`, the
+    /// item's title).
     static func inbox(_ options: [String], kind: String, question: Question? = nil, permission: RunnerPermission? = nil,
-                      words: InboxWords? = nil, details: [String]? = nil) -> [CardOption] {
+                      words: InboxWords? = nil, details: [String]? = nil, does: String? = nil) -> [CardOption] {
+        if kind == RunnerConfirm.kind {
+            let lines = details.flatMap { $0.count == options.count ? $0 : nil }
+            return Array(options.enumerated().map { index, option in
+                CardOption(label: option, answer: option,
+                           detail: option == RunnerConfirm.confirm ? InboxWords.plain(does) : InboxWords.plain(lines?[index]))
+            }.prefix(most))
+        }
         let ours = words?.recommended.flatMap { options.indices.contains($0) ? $0 : nil }
         var list = ours.map { of(options, recommended: $0) } ?? of(options, recommending: kind == "question" ? question?.recommendedOption : nil)
         // What each option does, under it (#215), as Claude Code describes its options.
@@ -234,14 +244,18 @@ nonisolated struct InboxWords: Decodable, Equatable, Sendable {
     var happened: String?
     var recommended: Int?
     var why: String?
+    /// On a `confirm` item (obid only, #546), what its Confirm carries out. The Mac reads the
+    /// item into Engine's InboxItem, which has no such kind: this says what it really is.
+    var confirm: RunnerConfirm?
 
-    private enum Keys: String, CodingKey { case headline, happened, recommended, why }
+    private enum Keys: String, CodingKey { case headline, happened, recommended, why, confirm }
 
-    init(headline: String? = nil, happened: String? = nil, recommended: Int? = nil, why: String? = nil) {
+    init(headline: String? = nil, happened: String? = nil, recommended: Int? = nil, why: String? = nil, confirm: RunnerConfirm? = nil) {
         self.headline = headline
         self.happened = happened
         self.recommended = recommended
         self.why = why
+        self.confirm = confirm
     }
 
     init(from decoder: any Decoder) throws {
@@ -250,6 +264,7 @@ nonisolated struct InboxWords: Decodable, Equatable, Sendable {
         happened = try? keys.decodeIfPresent(String.self, forKey: .happened)
         recommended = try? keys.decodeIfPresent(Int.self, forKey: .recommended)
         why = try? keys.decodeIfPresent(String.self, forKey: .why)
+        confirm = try? keys.decodeIfPresent(RunnerConfirm.self, forKey: .confirm)
     }
 
     /// The card's title: the headline, else the item's text, as before.
@@ -284,6 +299,39 @@ nonisolated struct InboxWords: Decodable, Equatable, Sendable {
         return Dictionary(list.compactMap { item in item.id.flatMap { id in item.words.map { (id, $0) } } }, uniquingKeysWith: { $1 })
     }
     #endif
+}
+
+/// What a `confirm` inbox item's Confirm carries out (obid only, #546; docs/runner-api.md, "Inbox
+/// item"): a typed action, what it acts on (a job's or an inbox item's id) and what else it needs.
+/// Oby's brain never does what persists or widens trust in a turn; only the user's own Confirm
+/// does. So no app recommends Confirm, picks it on Return, or lets anything press it for them.
+nonisolated struct RunnerConfirm: Codable, Equatable, Sendable {
+    static let kind = "confirm"
+    static let confirm = "Confirm"
+    static let cancel = "Cancel"
+
+    var action: String
+    var target: String
+    /// The payload's text by key: `words` (an answer to another Oby's question), `answer` (an
+    /// answer to an item), `permission` (the one Always allow answers). Nil when it has none.
+    var payload: [String: String]?
+
+    init(action: String, target: String, payload: [String: String]? = nil) {
+        self.action = action
+        self.target = target
+        self.payload = payload
+    }
+
+    init(from decoder: any Decoder) throws {
+        let keys = try decoder.container(keyedBy: CodingKeys.self)
+        action = try keys.decode(String.self, forKey: .action)
+        target = (try? keys.decodeIfPresent(String.self, forKey: .target)) ?? ""
+        payload = try? keys.decodeIfPresent([String: String].self, forKey: .payload)
+    }
+
+    /// The words it would send for the user: data someone wrote, which the card quotes apart
+    /// from its title, or nil.
+    var words: String? { InboxWords.plain(payload?["words"]) ?? InboxWords.plain(payload?["answer"]) }
 }
 
 extension Question {

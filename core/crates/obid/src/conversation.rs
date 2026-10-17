@@ -122,6 +122,8 @@ pub enum Target {
 /// Where a plan request's words went.
 pub struct Begun {
     pub conversation: String,
+    /// The user's turn: what the turn's step events name (#546).
+    pub turn: String,
     /// Its turns before them, oldest first.
     pub before: Vec<Turn>,
     /// True when the words started it.
@@ -286,21 +288,31 @@ impl Conversations {
             threads.len() - 1
         });
         let before = threads[index].turns.clone();
-        if let Err(e) = self.add(&mut threads, index, "user", said, vec![]) {
-            if found.is_none() {
-                threads.remove(index);
+        let turn = match self.add(&mut threads, index, "user", said, vec![]) {
+            Ok(turn) => turn.id,
+            Err(e) => {
+                if found.is_none() {
+                    threads.remove(index);
+                }
+                return Err(e);
             }
-            return Err(e);
-        }
+        };
         let conversation = threads[index].id.clone();
         if found.is_none() {
             self.prune(&mut threads);
         }
         Ok(Begun {
             conversation,
+            turn,
             before,
             started: found.is_none(),
         })
+    }
+
+    /// The conversation with the latest turn, if there is one.
+    pub fn latest_id(&self) -> Option<String> {
+        let threads = self.lock();
+        latest(&threads).map(|index| threads[index].id.clone())
     }
 
     /// Adds a turn to the conversation `id`.

@@ -61,22 +61,28 @@ struct IslandInbox: View {
     /// own words, and the ways out.
     private func card(_ entry: Entry, now: Date) -> some View {
         let item = entry.item
-        // The Mac's `kind` is Engine's enum, the runner's a string: both read the same.
-        let kind = "\(item.kind)"
-        let extras = entry.local ? nil : feed.extras[item.job]
-        let permission = kind == "permission" ? extras?.permission : nil
         // Oby's plain words (#65), when the runner wrote them; the item as it is otherwise.
         let words = entry.local ? InboxWords() : feed.inboxWords[item.id] ?? InboxWords()
+        // The Mac's `kind` is Engine's enum, the runner's a string: both read the same.
+        let kind = item.shownKind(words)
+        // A confirm item (obid only, #546): its title is what Confirm does, why it waits under it,
+        // the words it would send quoted apart; Confirm or Cancel, nothing recommended, no words.
+        let confirming = kind == RunnerConfirm.kind
+        let extras = entry.local ? nil : feed.extras[item.job]
+        let permission = kind == "permission" ? extras?.permission : nil
         // A permission's words go with a deny; anything else's are the answer. An item without a job takes none.
-        let answerWords: ((String) -> Void)? = item.job.isEmpty ? nil : { words in
+        let answerWords: ((String) -> Void)? = item.job.isEmpty || confirming ? nil : { words in
             if permission != nil { deny(entry, words) } else { settle(entry, answer: words) }
         }
         return VStack(alignment: .leading, spacing: 8) {
-            Text(item.line(now: now)).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.5))
-            DecisionCard(title: words.title(item.text), happened: words.body, behindDetails: words.details(item.text),
-                         detail: permission?.detail,
+            Text(item.line(now: now, words: words)).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.5))
+            DecisionCard(title: confirming ? item.title : words.title(item.text),
+                         happened: confirming ? InboxWords.plain(item.text) : words.body,
+                         behindDetails: confirming ? nil : words.details(item.text),
+                         detail: confirming ? words.confirm?.words : permission?.detail,
                          plan: kind == "question" ? extras?.question?.plan : nil,
-                         options: CardOption.inbox(item.options, kind: kind, question: extras?.question, permission: permission, words: words, details: item.details),
+                         options: CardOption.inbox(item.options, kind: kind, question: extras?.question, permission: permission, words: words,
+                                                   details: item.details, does: item.title),
                          busy: busy, wordsNote: kind == "permission" ? CardOption.denyWords : nil,
                          onChoose: { option in
                              if option.answer == "Open the PR",
@@ -114,8 +120,8 @@ struct IslandInbox: View {
             problem = nil
         } label: {
             VStack(alignment: .leading, spacing: 2) {
-                Text(entry.item.text).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                Text(entry.item.line(now: now)).font(.system(size: 11)).foregroundStyle(.white.opacity(0.45)).lineLimit(1)
+                Text(entry.local || !feed.isConfirm(entry.item) ? entry.item.text : entry.item.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                Text(entry.item.line(now: now, words: entry.local ? nil : feed.inboxWords[entry.item.id])).font(.system(size: 11)).foregroundStyle(.white.opacity(0.45)).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14).padding(.vertical, 8)

@@ -159,7 +159,7 @@ actor Server {
         Tool(name: "stop", description: "Stops a queued or running job.", properties: ["id": job], required: ["id"]),
         Tool(name: "dismiss", description: "Lets go of a job that needs the user (failed, interrupted, or done with commits it couldn't publish): it stays as it ended and needs nothing.",
              properties: ["id": job], required: ["id"]),
-        Tool(name: "answer", description: "Settles an inbox item with one of its own options (like Try again, Dismiss, Fix it, or a permission's choices), exactly as Oby's apps do; a question also takes the user's own words.",
+        Tool(name: "answer", description: "Settles an inbox item with one of its own options (like Try again, Dismiss, Fix it, or a permission's choices), exactly as Oby's apps do; a question also takes the user's own words. A confirm item is the user's alone to answer, in Oby.",
              properties: ["id": item, "answer": string("One of the item's options, or on a question the user's own words.")], required: ["id", "answer"]),
         Tool(name: "later", description: "Puts an inbox item off until a time; it comes back then.",
              properties: ["id": item, "until": string("When, as ISO 8601 (2026-10-11T18:00:00Z)."),
@@ -423,6 +423,11 @@ actor Server {
     func answer(_ id: String, _ given: String) async throws -> Reply {
         guard let item = try await inbox().first(where: { $0["id"]?.string == id }) else {
             throw Refusal(message: "There's no open inbox item \(id): call inbox for the ones there are.")
+        }
+        // What obid's brain planned that persists or widens trust (#546): its Confirm is the user's
+        // own decision, never an assistant's, and so is its Cancel.
+        if item["kind"]?.string == "confirm" {
+            throw Refusal(message: "This item waits for the user's own Confirm: it carries out something that persists or widens trust. Only the user confirms or cancels it, in Oby; tell them it's waiting there.")
         }
         let options = item["options"]?.array?.compactMap(\.string) ?? []
         let fold = { (text: String) in text.trimmingCharacters(in: .whitespacesAndNewlines).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }

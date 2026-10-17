@@ -2,8 +2,10 @@
 //! as obid keeps it: one file per item in `home/inbox/` (0600). obid makes three kinds so far:
 //! `obiRequest` (runner-api.md, "obid only: Obi-to-Obi requests in the inbox"), a request from
 //! another Obi that no remembered decision covers; `permission`, a job's agent waiting for the
-//! owner's OK (runner-api.md, "Permission modes"); and `pluginEvent`, an event a plug-in emitted
-//! (runner-api.md, "obid only: plug-ins").
+//! owner's OK (runner-api.md, "Permission modes"); `pluginEvent`, an event a plug-in emitted
+//! (runner-api.md, "obid only: plug-ins"); `confirm`, something Oby's brain planned that
+//! persists or widens trust, which only the owner's own answer carries out (#546); and `start`,
+//! work the brain planned after looking things up, which waits for the owner's Start (#546).
 //!
 //! An item's `title` and `text` are built from the request's or the event's typed fields only;
 //! every data field is quoted, unchanged, under `obi.quoted` or `plugin.quoted`.
@@ -22,6 +24,92 @@ pub const ACCEPT_REMEMBER: &str = "Accept, and remember for this repo";
 pub const DECLINE: &str = "Decline";
 pub const DECLINE_REMEMBER: &str = "Decline, and remember for this repo";
 pub const OBI_OPTIONS: [&str; 4] = [ACCEPT, ACCEPT_REMEMBER, DECLINE, DECLINE_REMEMBER];
+
+/// The two answers to a `start` item.
+pub const START: &str = "Start";
+pub const CANCEL_START: &str = "Cancel";
+
+/// The two answers to a `confirm` item.
+pub const CONFIRM: &str = "Confirm";
+pub const CANCEL: &str = "Cancel";
+
+/// What a `confirm` item does on the owner's Confirm (runner-api.md, "Inbox item"): a typed
+/// action, what it acts on, and what it needs. One dispatcher carries every action out
+/// (`Link::carry_out`); a new action is a new name and a new case there, the shape the same.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Confirmed {
+    /// The action, by name: one of [`action`].
+    pub action: String,
+    /// What it acts on: a job's id or an inbox item's id, as the action says.
+    pub target: String,
+    /// What the action needs besides its target, like the permission it answers.
+    #[serde(default)]
+    pub payload: Value,
+}
+
+/// The actions a `confirm` item may carry out.
+pub mod action {
+    /// Always allow a job's waiting permission, saving its rule: `target` the job, `payload`
+    /// `{"permission": "<id>"}`.
+    pub const ALWAYS_ALLOW: &str = "always_allow";
+    /// Put a running job in Bypass mode: `target` the job.
+    pub const SET_MODE_BYPASS: &str = "set_mode_bypass";
+    /// Start a job the brain planned in Bypass mode: `target` the conversation that planned it,
+    /// `payload` `{"job": <the job as POST /v1/jobs takes it>}`.
+    pub const START_JOB: &str = "start_job";
+    /// Accept another Obi's request: `target` its `obiRequest` item.
+    pub const ACCEPT: &str = "accept";
+    /// Accept it and remember for its repository: `target` its `obiRequest` item.
+    pub const ACCEPT_REMEMBER: &str = "accept_remember";
+    /// Decline it and remember for its repository: `target` its `obiRequest` item.
+    pub const DECLINE_REMEMBER: &str = "decline_remember";
+    /// Answer another Obi's question in words: `target` its `obiRequest` item, `payload`
+    /// `{"words": "…"}`.
+    pub const ANSWER_QUESTION: &str = "answer_question";
+    /// Start the work the brain proposed after looking things up: `target` its `start` item.
+    pub const START: &str = "start";
+    /// Answer any other item: `target` the item, `payload` `{"answer": "…"}`.
+    pub const ANSWER_ITEM: &str = "answer_item";
+    /// Tell a job that ended the owner's words, for one more round in its own worktree (#542):
+    /// `target` the job, `payload` `{"words": "…"}`, already taken out of the vault's secrets.
+    pub const MESSAGE_JOB: &str = "message_job";
+}
+
+/// A `confirm` item: `title` says exactly what `Confirm` does, `confirmed` is what obid carries
+/// out then. No option is recommended: it's the owner's call.
+pub fn confirm_item(
+    job: &str,
+    title: String,
+    text: String,
+    confirmed: Confirmed,
+    now: i64,
+) -> Item {
+    Item {
+        id: format!(
+            "confirm-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ),
+        kind: "confirm".into(),
+        job: job.into(),
+        details: Some(vec![
+            format!("{title}."),
+            "Does nothing: Oby's plan is dropped.".into(),
+        ]),
+        title,
+        text,
+        options: vec![CONFIRM.into(), CANCEL.into()],
+        recommended: None,
+        created: now,
+        done: None,
+        later: None,
+        answer: None,
+        obi: None,
+        plugin: None,
+        arrived: Some(arrival()),
+        confirm: Some(Box::new(confirmed)),
+        start: None,
+    }
+}
 
 /// An inbox item as obid keeps it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,6 +138,15 @@ pub struct Item {
     /// made in the same second. Kept, never shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrived: Option<u64>,
+    /// On a `confirm` item: what Oby's brain planned that only the owner may do, carried out on
+    /// their `Confirm` (#546), shown as `confirm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Boxed: an item is kept by value in enums, and most items have none.
+    pub confirm: Option<Box<Confirmed>>,
+    /// On a `start` item: the job the brain planned after looking things up, which starts only
+    /// on the owner's Start (#546). Kept, never shown; boxed like `confirm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<Box<Value>>,
 }
 
 /// Now in nanoseconds since the epoch, strictly later than any earlier answer in this process:
@@ -115,6 +212,9 @@ impl Item {
         });
         if let Some(plugin) = &self.plugin {
             shown["plugin"] = plugin.clone();
+        }
+        if let Some(confirmed) = &self.confirm {
+            shown["confirm"] = serde_json::to_value(confirmed).unwrap_or_default();
         }
         shown
     }
@@ -242,6 +342,8 @@ pub fn review_request_item(
         })),
         plugin: None,
         arrived: None,
+        confirm: None,
+        start: None,
     }
 }
 
@@ -334,6 +436,8 @@ pub fn question_item(
         })),
         plugin: None,
         arrived: Some(arrival()),
+        confirm: None,
+        start: None,
     }
 }
 
@@ -367,6 +471,8 @@ pub fn permission_item(
         obi: None,
         plugin: None,
         arrived: None,
+        confirm: None,
+        start: None,
     }
 }
 
@@ -436,6 +542,8 @@ pub fn plugin_event_item(event: &obi_plugin_api::PluginEvent, now: i64) -> Item 
             "quoted": {"actor": ev.actor, "title": ev.data.title, "url": ev.data.url},
         })),
         arrived: Some(arrival()),
+        confirm: None,
+        start: None,
     }
 }
 

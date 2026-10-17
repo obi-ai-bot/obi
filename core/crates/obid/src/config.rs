@@ -67,6 +67,22 @@ struct File {
     web: Option<PathBuf>,
     #[serde(default)]
     telemetry: bool,
+    /// How long one conversation turn may act, in seconds: 1 to 110, 110 when left out.
+    #[serde(default)]
+    turn_budget: Option<u64>,
+    /// Where the vault is (crate::vault): `{"store": "file"}` or `{"store": "keychain", "service":
+    /// "…"}`; left out, [`crate::vault::Location::default_for`].
+    #[serde(default)]
+    vault: Option<VaultSetting>,
+}
+
+/// `vault` as written.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VaultSetting {
+    store: String,
+    #[serde(default)]
+    service: Option<String>,
 }
 
 /// The agents' adapters, each the same shape: Claude Code (stream-json), Codex (`codex
@@ -137,6 +153,11 @@ pub struct Config {
     pub web: PathBuf,
     /// False unless the owner turns it on; obid sends nothing to anyone otherwise.
     pub telemetry: bool,
+    /// Where the owner's vault is (crate::vault).
+    pub vault: crate::vault::Location,
+    /// How long one conversation turn may plan and act (`Desk.turnBudget`): 110 seconds unless
+    /// `turnBudget` says less, under the apps' 120-second wait.
+    pub turn_budget: std::time::Duration,
 }
 
 /// Where the plug-ins obid ships are when the configuration doesn't say: the `plugins/` folder
@@ -297,6 +318,22 @@ impl Config {
             ));
         }
 
+        let vault = match &file.vault {
+            None => crate::vault::Location::default_for(&file.home),
+            Some(setting) => {
+                match crate::vault::Location::parse(&setting.store, setting.service.as_deref()) {
+                    Ok(location) => location,
+                    Err(why) => return invalid(format!("vault: {why}")),
+                }
+            }
+        };
+        let turn_budget = file.turn_budget.unwrap_or(110);
+        if !(1..=110).contains(&turn_budget) {
+            return invalid(format!(
+                "turnBudget is {turn_budget}: it is 1 to 110 seconds, under the apps' 120-second wait."
+            ));
+        }
+
         Ok(Config {
             listen,
             home: file.home,
@@ -307,6 +344,8 @@ impl Config {
             bundled_plugins: file.bundled_plugins.unwrap_or_else(default_bundled_plugins),
             web: file.web.unwrap_or_else(default_web),
             telemetry: file.telemetry,
+            vault,
+            turn_budget: std::time::Duration::from_secs(turn_budget),
         })
     }
 }
@@ -500,6 +539,19 @@ mod tests {
         assert!(!config.telemetry);
         let config = Config::parse(&with(serde_json::json!({"telemetry": true}))).unwrap();
         assert!(config.telemetry);
+    }
+
+    /// A conversation turn plans and acts for 110 seconds, or less when `turnBudget` says so.
+    #[test]
+    fn the_turn_budget_is_1_to_110_seconds() {
+        let config = Config::parse(&with(serde_json::json!({}))).unwrap();
+        assert_eq!(config.turn_budget, std::time::Duration::from_secs(110));
+        let config = Config::parse(&with(serde_json::json!({"turnBudget": 5}))).unwrap();
+        assert_eq!(config.turn_budget, std::time::Duration::from_secs(5));
+        for wrong in [0, 111] {
+            let text = with(serde_json::json!({"turnBudget": wrong}));
+            assert!(problem(&text).contains("turnBudget"), "{wrong}");
+        }
     }
 
     #[test]

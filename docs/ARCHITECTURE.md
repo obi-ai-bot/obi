@@ -85,6 +85,7 @@ What crosses into Oby, and what it may become:
 | The owner (a shell, the MCP server) | Runner API calls with the API token | Anything the API offers: goals, answers, settings, publishing by hand with a device signature. |
 | Another Oby | A signed, typed action through the Sphere, checked against the spec (schema, signature, expiry, policy) | Only what the receiver's decision rule allows (spec `protocol.md` section 11): an inbox item, work a remembered decision covers, or, for a `question`, an `answer` the Oby writes by itself from what one of its owner's sharing rules allows (a model run on the owner's account, limited per sender), and then only the typed reply to that action. Never a merge, a push, a published change, a changed setting or a changed decision. |
 | GitHub, Slack, web pages, plug-ins, other people | Data | Quoted to agents as files (`.obi/inputs/`, `.obi/context/`), shown to the owner. Never part of a prompt's instructions. |
+| Connected apps (through `obid`'s broker) and `agent-mcp` plug-ins' servers | MCP tool results the agent asked for, with the vault's secrets taken out | Untrusted data inside the agent's context: unlike the row above, not a quoted file and not yet marked as data (#575). It can steer the agent within what the agent may do, never past `obid`'s rules: the broker forwards only read-only tools, and agents can't publish. |
 | Agents (their output, their questions) | Data and typed requests (permission prompts, `QUESTION:` lines) | What `obid`'s fixed rules and the owner's saved rules allow; everything else waits in the inbox. |
 
 The rules every component keeps:
@@ -133,7 +134,7 @@ Each plug-in is a folder with `obi-plugin.json`:
 }
 ```
 
-- `id`: lower-case letters, digits and hyphens, unique; the folder's name.
+- `id`: lower-case letters, digits and hyphens, unique; the folder's name. `oby` is reserved: it is the connected-app broker's server name in an agent's MCP config.
 - `kinds`: one or more of `context`, `events`, `agent-mcp`.
 - `run`: the process to start, relative to the plug-in's folder: needed for `context` and `events`; an `agent-mcp`-only plug-in may leave it out.
 - `agentMcp`: for `agent-mcp`, the server (`{"type": "http", "url"}`, `{"type": "http", "urlFromConfig": "<config key>"}` or `{"type": "stdio", "command", "args"}`) and the only tools agents may call. With `urlFromConfig` the server's URL is the owner's setting under that key: the manifest's `config` schema must require the key and give it no default, so the plug-in can't be enabled (`422`) until the owner has set it. A server that needs a secret in its configuration is refused: logins are the server's own (OAuth in its own store), never a vault secret.

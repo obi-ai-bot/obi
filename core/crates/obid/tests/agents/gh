@@ -2,5 +2,6 @@
 case "$3" in
   176) printf '%s\n' '{"title":"fix accounts review","body":"Files: `Engine/Accounts.swift`, `Engine/Review.swift`, `RunnerTests/`"}' ;;
   198) printf '%s\n' '{"title":"fix checks review","body":"Files: `Engine/Review.swift`, `Engine/CheckRuns.swift`"}' ;;
+  777) sleep 2; printf '%s\n' '{"title":"slow issue","body":"Files: `Engine/Slow.swift`"}' ;;
   *) exit 1 ;;
 esac

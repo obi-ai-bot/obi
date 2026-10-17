@@ -2387,6 +2387,259 @@ impl Link {
         Value::Array(items.into_iter().map(Item::to_json).collect())
     }
 
+    /// Something Oby's brain planned that persists or widens trust waits in the inbox for the
+    /// owner's own `Confirm` (#546): the brain never carries it out itself.
+    pub fn add_confirm(&self, item: Item) -> Item {
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        item
+    }
+
+    /// `POST /v1/inbox/{id}/answer` on a `confirm` item: `Confirm` carries out what its title
+    /// says; `Cancel`, done or later do nothing.
+    async fn answer_confirm(
+        self: &Arc<Self>,
+        mut item: Item,
+        answer: Option<String>,
+        later: Option<i64>,
+    ) -> Result<Value, ApiError> {
+        if let Some(at) = later {
+            item.later = Some(at);
+        } else {
+            if let Some(answer) = &answer {
+                if answer != inbox::CONFIRM && answer != inbox::CANCEL {
+                    return Err(api(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("The answer is {} or {}.", inbox::CONFIRM, inbox::CANCEL),
+                    ));
+                }
+                if answer == inbox::CONFIRM {
+                    let done = match item.confirm.clone() {
+                        Some(confirmed) => self.carry_out(*confirmed).await,
+                        None => Err(api(StatusCode::CONFLICT, "That item says nothing to do.")),
+                    };
+                    // What it was for moved on (the permission was answered, the job ended): the
+                    // item is closed with why, never left open to fail again.
+                    if let Err(why) = done {
+                        item.done = Some(time::now());
+                        item.answer = Some(answer.clone());
+                        item.text = format!("{} It couldn't happen: {}", item.text, why.message);
+                        self.lock().inbox.insert(item.id.clone(), item.clone());
+                        self.save_item(&item);
+                        return Err(why);
+                    }
+                }
+            }
+            item.done = Some(time::now());
+            item.answer = answer;
+        }
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        Ok(item.to_json())
+    }
+
+    /// What a confirmed `confirm` item does: one dispatcher, a case per action.
+    async fn carry_out(self: &Arc<Self>, confirmed: inbox::Confirmed) -> Result<(), ApiError> {
+        let target = confirmed.target.as_str();
+        match confirmed.action.as_str() {
+            inbox::action::ALWAYS_ALLOW => {
+                use crate::jobs::PermissionRefused;
+                let permission = confirmed.payload["permission"].as_str().unwrap_or("");
+                match self.jobs.answer_permission(
+                    target,
+                    permission,
+                    crate::permissions::Decision::Always,
+                    None,
+                ) {
+                    Ok(_) => Ok(()),
+                    Err(PermissionRefused::NoJob) => {
+                        Err(api(StatusCode::CONFLICT, "Its job is gone."))
+                    }
+                    Err(PermissionRefused::NotWaiting(why)) => Err(api(StatusCode::CONFLICT, why)),
+                    Err(PermissionRefused::Refused(why)) => {
+                        Err(api(StatusCode::UNPROCESSABLE_ENTITY, why))
+                    }
+                }
+            }
+            inbox::action::SET_MODE_BYPASS => {
+                if !self.jobs.get(target).is_some_and(|j| j.status.is_active()) {
+                    return Err(api(
+                        StatusCode::CONFLICT,
+                        "That job isn't running any more.",
+                    ));
+                }
+                self.jobs
+                    .set_mode(target, crate::permissions::Mode::Bypass)
+                    .map(|_| ())
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone."))
+            }
+            inbox::action::START_JOB => {
+                let new: crate::jobs::NewJob =
+                    serde_json::from_value(confirmed.payload["job"].clone())
+                        .map_err(|_| api(StatusCode::CONFLICT, "That job's plan was lost."))?;
+                self.jobs
+                    .create(new)
+                    .map(|_| ())
+                    .map_err(|e| api(StatusCode::UNPROCESSABLE_ENTITY, e.0))
+            }
+            inbox::action::MESSAGE_JOB => {
+                let job = self
+                    .jobs
+                    .get(target)
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone."))?;
+                if job.merged() {
+                    return Err(api(
+                        StatusCode::CONFLICT,
+                        "Its pull request was merged: start a new job instead.",
+                    ));
+                }
+                let words = confirmed.payload["words"].as_str().unwrap_or("");
+                match self.jobs.message(target, words) {
+                    Some(Ok(_)) => Ok(()),
+                    Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
+                    None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
+                }
+            }
+            // The ones that answer an inbox item, as the owner would have.
+            inbox::action::ACCEPT
+            | inbox::action::ACCEPT_REMEMBER
+            | inbox::action::DECLINE_REMEMBER
+            | inbox::action::ANSWER_QUESTION
+            | inbox::action::START
+            | inbox::action::ANSWER_ITEM => {
+                let answer = match confirmed.action.as_str() {
+                    inbox::action::ACCEPT => inbox::ACCEPT.to_owned(),
+                    inbox::action::ACCEPT_REMEMBER => inbox::ACCEPT_REMEMBER.to_owned(),
+                    inbox::action::DECLINE_REMEMBER => inbox::DECLINE_REMEMBER.to_owned(),
+                    inbox::action::START => inbox::START.to_owned(),
+                    inbox::action::ANSWER_QUESTION => {
+                        confirmed.payload["words"].as_str().unwrap_or("").to_owned()
+                    }
+                    _ => confirmed.payload["answer"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_owned(),
+                };
+                // A confirm item never confirms another.
+                if self
+                    .lock()
+                    .inbox
+                    .get(target)
+                    .is_none_or(|i| i.kind == "confirm")
+                {
+                    return Err(api(StatusCode::CONFLICT, "That item is gone."));
+                }
+                let body = json!({"answer": answer}).to_string();
+                Box::pin(self.answer(target, body.as_bytes()))
+                    .await
+                    .map(|_| ())
+            }
+            other => Err(api(
+                StatusCode::CONFLICT,
+                format!("obid doesn't know the action {other:?}."),
+            )),
+        }
+    }
+
+    /// Work the brain planned after looking things up waits for the owner's Start, as a `start`
+    /// item (Engine/Inbox.swift, `Inbox.proposal`): nothing starts until they say so.
+    pub fn propose(&self, new: &crate::jobs::NewJob, title: String, text: String) -> Item {
+        let item = Item {
+            id: format!("start-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+            kind: "start".into(),
+            job: String::new(),
+            title,
+            text,
+            options: vec![inbox::START.into(), inbox::CANCEL_START.into()],
+            details: Some(vec![
+                "Starts it now, as planned.".into(),
+                "Drops the plan. Nothing starts; say it another way.".into(),
+            ]),
+            recommended: Some(0),
+            created: time::now(),
+            done: None,
+            later: None,
+            answer: None,
+            obi: None,
+            plugin: None,
+            arrived: Some(inbox::arrival()),
+            confirm: None,
+            start: serde_json::to_value(new).ok().map(Box::new),
+        };
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        item
+    }
+
+    /// `POST /v1/inbox/{id}/answer` on a `start` item: Start queues the job as planned; Cancel,
+    /// done or later start nothing.
+    fn answer_start(
+        &self,
+        mut item: Item,
+        answer: Option<String>,
+        later: Option<i64>,
+    ) -> Result<Value, ApiError> {
+        if let Some(at) = later {
+            item.later = Some(at);
+        } else {
+            if let Some(answer) = &answer {
+                if answer != inbox::START && answer != inbox::CANCEL_START {
+                    return Err(api(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("The answer is {} or {}.", inbox::START, inbox::CANCEL_START),
+                    ));
+                }
+                if answer == inbox::START {
+                    // `answer` claimed it; what couldn't start leaves it open again.
+                    let open_again = |why: ApiError| {
+                        self.lock().inbox.insert(item.id.clone(), item.clone());
+                        why
+                    };
+                    let new: crate::jobs::NewJob = item
+                        .start
+                        .clone()
+                        .and_then(|s| serde_json::from_value(*s).ok())
+                        .ok_or_else(|| {
+                            open_again(api(StatusCode::CONFLICT, "That plan was lost."))
+                        })?;
+                    let job = self
+                        .jobs
+                        .create(new)
+                        .map_err(|e| open_again(api(StatusCode::UNPROCESSABLE_ENTITY, e.0)))?;
+                    item.job = job.id;
+                }
+            }
+            item.done = Some(time::now());
+            item.answer = answer;
+        }
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        Ok(item.to_json())
+    }
+
+    /// The inbox item `id`, whatever its state.
+    pub fn item(&self, id: &str) -> Option<Item> {
+        self.lock().inbox.get(id).cloned()
+    }
+
+    /// The items waiting for the owner now (not done, and not put off past `now`), in the order
+    /// they came: what the brain is told about the inbox (#546).
+    pub fn waiting_items(&self, now: i64) -> Vec<Item> {
+        let state = self.lock();
+        let mut items: Vec<Item> = state
+            .inbox
+            .values()
+            .filter(|i| i.done.is_none() && i.later.is_none_or(|later| later <= now))
+            .cloned()
+            .collect();
+        items.sort_by(|a, b| {
+            a.arrival_order()
+                .cmp(&b.arrival_order())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        items
+    }
+
     /// `POST /v1/inbox/{id}/answer`.
     pub async fn answer(self: &Arc<Self>, id: &str, body: &[u8]) -> Result<Value, ApiError> {
         let map = object(body, &["answer", "done", "later"])?;
@@ -2421,6 +2674,31 @@ impl Link {
             }
             _ => return Err(api(StatusCode::UNPROCESSABLE_ENTITY, one_of)),
         };
+        // What Oby's brain planned that only the owner may do: carried out on their Confirm.
+        // A Confirm claims the item under the lock, so a second one at the same moment finds it
+        // done and carries out nothing (review on #552).
+        let confirm = {
+            let mut state = self.lock();
+            let item = state
+                .inbox
+                .get(id)
+                .filter(|i| i.done.is_none() && i.kind == "confirm")
+                .cloned();
+            if item.is_some()
+                && matches!(&given, Given::Answer(a) if a == inbox::CONFIRM)
+                && let Some(kept) = state.inbox.get_mut(id)
+            {
+                kept.done = Some(time::now());
+            }
+            item
+        };
+        if let Some(item) = confirm {
+            return match given {
+                Given::Answer(answer) => self.answer_confirm(item, Some(answer), None).await,
+                Given::Done => self.answer_confirm(item, None, None).await,
+                Given::Later(at) => self.answer_confirm(item, None, Some(at)).await,
+            };
+        }
         // A question's item, answered or declined: the words pass the publish gate first, with
         // no lock held.
         let question = self
@@ -2453,6 +2731,21 @@ impl Link {
                     Given::Answer(answer) => self.answer_permission_item(item, Some(answer), None),
                     Given::Done => self.answer_permission_item(item, None, None),
                     Given::Later(at) => self.answer_permission_item(item, None, Some(at)),
+                };
+            }
+            if item.kind == "start" {
+                // Start claims the item under the lock: a second Start at the same moment finds
+                // it done and starts nothing (review on #552).
+                if matches!(&given, Given::Answer(a) if a == inbox::START)
+                    && let Some(kept) = state.inbox.get_mut(id)
+                {
+                    kept.done = Some(now);
+                }
+                drop(state);
+                return match given {
+                    Given::Answer(answer) => self.answer_start(item, Some(answer), None),
+                    Given::Done => self.answer_start(item, None, None),
+                    Given::Later(at) => self.answer_start(item, None, Some(at)),
                 };
             }
             if item.kind == "pluginEvent" {

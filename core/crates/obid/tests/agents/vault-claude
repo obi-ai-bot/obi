@@ -1,0 +1,95 @@
+#!/usr/bin/env node
+// A stand-in for Claude Code in obid's vault tests (tests/vault_api.rs): stream-json in and out,
+// as obid runs `claude`. It knows one value, VALUE, which the tests put in obid's vault, as an
+// agent might have it from somewhere else. What it does comes from the prompt:
+//   PLAIN            commits ordinary files: .env.example (names, no values), a fixture key that
+//                    isn't the vault's, VALUE cut short (not the secret), and a compose file with
+//                    `image: postgres:16` and a `changeme` password
+//   FILE: <form>     commits config.txt holding VALUE as <form>: plain, base64, hex or url
+//   MESSAGE: <form>  commits notes.txt with VALUE as <form> in the commit message
+//   WRAPPED          commits config.b64: LONG (a second value, 64 bytes), base64 wrapped at 76 characters
+//                    as GNU base64 writes it
+//   SLOW             waits 3 seconds, then commits hello.txt
+//   WAIT             waits 60 seconds, then ends the turn
+//   anything else    ends the turn with "Nothing to do."
+// Every turn writes the prompt it got to .obi/seen-prompt.txt in the worktree (.obi/ is never part
+// of the work), so a test can read what reached the agent.
+
+import { execFileSync } from "node:child_process";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { createInterface } from "node:readline";
+
+const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
+const session = "00000000-0000-4000-8000-000000000003";
+const result = (text) =>
+  emit({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: text, session_id: session, total_cost_usd: 0 });
+const git = (...args) => execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { encoding: "utf8" });
+
+// tests/vault_api.rs's VALUE, put together only when the agent runs.
+const VALUE = ["vault-", "fixture/", "Q7m2+a=b?c&d"].join("");
+// tests/vault_api.rs's `long()`: 64 bytes, so GNU base64 puts it on no line whole.
+const LONG = ["long-vault-", "value/"].join("") + "Z9+k=x?y&w".repeat(5) + "-end";
+const forms = {
+  plain: VALUE,
+  base64: Buffer.from(VALUE).toString("base64"),
+  hex: Buffer.from(VALUE).toString("hex"),
+  url: encodeURIComponent(VALUE),
+};
+
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", (line) => {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (message.type !== "user") return;
+  const prompt = typeof message.message.content === "string" ? message.message.content : "";
+  emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Bash", "Read", "Edit"], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
+  mkdirSync(".obi", { recursive: true });
+  writeFileSync(".obi/seen-prompt.txt", prompt);
+  const file = prompt.match(/FILE: (\w+)/);
+  const commitMessage = prompt.match(/MESSAGE: (\w+)/);
+  try {
+    if (prompt.includes("PLAIN")) {
+      writeFileSync(".env.example", "API_URL=http://localhost:3000\nAPI_KEY=\nSTAGING_API_KEY=\n");
+      mkdirSync("fixtures", { recursive: true });
+      writeFileSync("fixtures/test-key.txt", "fixture key for the tests: test-fixture-key-0000\n");
+      writeFileSync("near.txt", `${VALUE.slice(0, -3)}\n`);
+      writeFileSync("compose.yml", "services:\n  db:\n    image: postgres:16\n    environment:\n      POSTGRES_PASSWORD: changeme\n");
+      git("add", ".env.example", "fixtures/test-key.txt", "near.txt", "compose.yml");
+      git("commit", "-q", "-m", "chore: add the example settings");
+      result("Added the example settings.");
+    } else if (file) {
+      writeFileSync("config.txt", `value: ${forms[file[1]]}\n`);
+      git("add", "config.txt");
+      git("commit", "-q", "-m", "chore: add config.txt");
+      result("Added config.txt.");
+    } else if (commitMessage) {
+      writeFileSync("notes.txt", "hello\n");
+      git("add", "notes.txt");
+      git("commit", "-q", "-m", `chore: add notes.txt\n\nwith ${forms[commitMessage[1]]}`);
+      result("Added notes.txt.");
+    } else if (prompt.includes("WRAPPED")) {
+      const encoded = Buffer.from(LONG).toString("base64");
+      writeFileSync("config.b64", `${encoded.match(/.{1,76}/g).join("\n")}\n`);
+      git("add", "config.b64");
+      git("commit", "-q", "-m", "chore: add config.b64");
+      result("Added config.b64.");
+    } else if (prompt.includes("WAIT")) {
+      execFileSync("sleep", ["60"]);
+      result("Waited.");
+    } else if (prompt.includes("SLOW")) {
+      execFileSync("sleep", ["3"]);
+      writeFileSync("hello.txt", "hello\n");
+      git("add", "hello.txt");
+      git("commit", "-q", "-m", "chore: add hello.txt");
+      result("Added hello.txt.");
+    } else {
+      result("Nothing to do.");
+    }
+  } catch (error) {
+    result(`Failed: ${error.message}`);
+  }
+});

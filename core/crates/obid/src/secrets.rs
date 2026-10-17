@@ -3,10 +3,12 @@
 //! plain, base64 (standard or URL-safe, at any offset in a longer run), hex and URL-encoded, as
 //! Engine/Vault.swift's `Leaks` finds them.
 //!
-//! obid has no vault yet (#457). The secrets it holds today are its API token (`home/api-token`),
-//! its Obi key, and the Sphere's delegation and access token; [`known`] holds them once obid has
-//! read or been given them. When the vault is ported, its values join the same set, so the log
-//! layer (`crate::logs`) takes them out too.
+//! The secrets obid holds are its API token (`home/api-token`), its Obi key, the Sphere's
+//! delegation and access token, and the owner's vault (`crate::vault`, #457); [`known`] holds them
+//! once obid has read or been given them. The vault's values join that set as `vault <name>`, and
+//! the set reads the vault again before each use when it changed (a value `obid vault add` put
+//! there while obid runs), so the log layer (`crate::logs`), the publish gate (`crate::scan`) and
+//! every text obid redacts take them out too.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -24,10 +26,16 @@ pub fn known() -> Arc<Secrets> {
     KNOWN.get_or_init(|| Arc::new(Secrets::default())).clone()
 }
 
+/// What brings a set up to date before it is read: the vault, for [`known`].
+type Refresh = Arc<dyn Fn() + Send + Sync>;
+
 /// Secret values by name, and what they look like in every form [`Secrets::redact`] takes out.
 #[derive(Default)]
 pub struct Secrets {
     inner: RwLock<Learned>,
+    /// What a marker says before the names: `redacted` unless [`Secrets::labelled`] says otherwise.
+    label: Option<&'static str>,
+    refresh: RwLock<Option<Refresh>>,
 }
 
 #[derive(Default)]
@@ -50,6 +58,35 @@ struct Needle {
 }
 
 impl Secrets {
+    /// A set whose markers read `[<label>: <name>]`: the vault's, `[vault: staging-api-key]`.
+    pub fn labelled(label: &'static str) -> Secrets {
+        Secrets {
+            label: Some(label),
+            ..Secrets::default()
+        }
+    }
+
+    /// Runs `refresh` before every read of the set ([`Secrets::redact`], [`Secrets::is_empty`],
+    /// [`Secrets::names_in`]), in place of the one set before. It must not read this set.
+    pub fn refresh_with(&self, refresh: Refresh) {
+        *self.refresh.write().unwrap_or_else(|e| e.into_inner()) = Some(refresh);
+    }
+
+    fn refreshed(&self) {
+        let refresh = self
+            .refresh
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(refresh) = refresh {
+            refresh();
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        self.label.unwrap_or("redacted")
+    }
+
     /// Learns `value` as `name`, in place of what `name` held before. A value shorter than
     /// [`SHORTEST`] bytes is not learned (and the one held before under `name` is forgotten).
     pub fn learn(&self, name: &str, value: impl AsRef<[u8]>) {
@@ -82,6 +119,7 @@ impl Secrets {
     }
 
     pub fn is_empty(&self) -> bool {
+        self.refreshed();
         self.inner
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -93,13 +131,27 @@ impl Secrets {
     /// each copy of a value, plain or encoded, first; then any base64, hex or URL-encoded run
     /// that decodes to text holding one.
     pub fn redact(&self, text: &str) -> String {
+        self.refreshed();
+        let label = self.label();
         let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         if inner.needles.is_empty() {
             return text.to_owned();
         }
         let mut text = text.to_owned();
+        // A value over lines first, whole (a key as a log writes it); then wrapped runs, judged
+        // whole: a shorter value's needle inside one line would break the run and leave the rest.
+        if text.contains('\n') || text.contains("\\n") {
+            for needle in inner
+                .needles
+                .iter()
+                .filter(|n| n.text.contains('\n') || n.text.contains("\\n"))
+            {
+                text = replace(&text, needle, label);
+            }
+            text = unwrapped(&inner.needles, &text, label);
+        }
         for needle in &inner.needles {
-            text = replace(&text, needle);
+            text = replace(&text, needle, label);
         }
         // What is left: runs that decode to a value (hex inside base64, a value partly
         // URL-encoded, base64 cut where the needles' offsets don't reach).
@@ -111,17 +163,165 @@ impl Secrets {
                     if names.is_empty() {
                         whole.to_owned()
                     } else {
-                        marker(&names)
+                        marker(label, &names)
                     }
                 })
                 .into_owned();
         }
         text
     }
+
+    /// The names of the values `text` holds, as it is or decoded whole (URL-encoded, base64, hex),
+    /// each once: what is left after [`Secrets::redact`] when a value hides in a way it doesn't
+    /// take apart.
+    pub fn names_in(&self, text: &str) -> Vec<String> {
+        self.refreshed();
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let mut names = hits(&inner.needles, text);
+        let lower = text.to_ascii_lowercase();
+        for needle in &inner.needles {
+            let found = if needle.any_case {
+                lower.contains(&needle.text.to_ascii_lowercase())
+            } else {
+                text.contains(&needle.text)
+            };
+            if found && !names.contains(&needle.name) {
+                names.push(needle.name.clone());
+            }
+        }
+        names
+    }
+
+    /// The marker [`Secrets::redact`] writes for `names`.
+    pub fn marker(&self, names: &[String]) -> String {
+        marker(self.label(), names)
+    }
 }
 
-fn marker(names: &[String]) -> String {
-    format!("[redacted: {}]", names.join(", "))
+/// `text` with base64 or hex wrapped over lines taken out (Engine/Vault.swift, `Leaks.unwrapped`):
+/// each run of lines that hold nothing else, joined with the end of the line before as the scan
+/// joins them (`crate::scan`), and when the joined run holds a value, every line of it, and the
+/// line it continues, is the marker. GNU base64 wraps at 76, so a value of 58 bytes or more is on
+/// no line whole. A line break written as `\n` inside one line (a JSON string) breaks it too, and
+/// the runs are read twice: as they are, and with one diff or quote mark (`+`, `-`, `>`) taken
+/// off the front of each line (`+` is a base64 character itself, so it would break the run).
+fn unwrapped(needles: &[Needle], text: &str, label: &str) -> String {
+    let mut pieces: Vec<String> = Vec::new();
+    let mut breaks: Vec<String> = Vec::new();
+    let mut at = 0;
+    for found in line_breaks().find_iter(text) {
+        pieces.push(text[at..found.start()].to_owned());
+        breaks.push(found.as_str().to_owned());
+        at = found.end();
+    }
+    pieces.push(text[at..].to_owned());
+    for marked in [false, true] {
+        for (first, end, joined) in encoded_runs(&pieces, marked) {
+            let mut names = hits(needles, &joined);
+            let lower = joined.to_ascii_lowercase();
+            for needle in needles {
+                let found = if needle.any_case {
+                    lower.contains(&needle.text.to_ascii_lowercase())
+                } else {
+                    joined.contains(&needle.text)
+                };
+                if found && !names.contains(&needle.name) {
+                    names.push(needle.name.clone());
+                }
+            }
+            if !names.is_empty() {
+                for piece in &mut pieces[first..=end] {
+                    *piece = marker(label, &names);
+                }
+            }
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    for (i, piece) in pieces.iter().enumerate() {
+        out.push_str(piece);
+        if let Some(line_break) = breaks.get(i) {
+            out.push_str(line_break);
+        }
+    }
+    out
+}
+
+/// A line break, real or written inside a JSON string (`\n`, `\r\n`).
+pub(crate) fn line_breaks() -> &'static Regex {
+    static BREAKS: OnceLock<Regex> = OnceLock::new();
+    BREAKS.get_or_init(|| Regex::new(r"\r?\n|\\r\\n|\\n").expect("the line break pattern compiles"))
+}
+
+/// `line` as the runs read it: without spaces, quotes, commas and backslashes around it, and with
+/// `marked`, without one diff or quote mark (`+`, `-`, `>`) in front.
+fn run_text(line: &str, marked: bool) -> String {
+    let trim = |s: &str| -> String {
+        s.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\r' | '"' | '\'' | ',' | '\\'))
+            .to_owned()
+    };
+    let text = trim(line);
+    if !marked {
+        return text;
+    }
+    match text.strip_prefix(['+', '-', '>']) {
+        Some(rest) => trim(rest),
+        None => text,
+    }
+}
+
+/// Each run of lines that hold only base64 or hex: its first line (the one it continues, when
+/// the run takes that line's end), its last, and the run joined.
+pub(crate) fn encoded_runs(lines: &[String], marked: bool) -> Vec<(usize, usize, String)> {
+    let texts: Vec<String> = lines.iter().map(|l| run_text(l, marked)).collect();
+    let encoded: Vec<bool> = texts
+        .iter()
+        .map(|text| {
+            !text.is_empty()
+                && text.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-')
+                })
+        })
+        .collect();
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < lines.len() {
+        if !encoded[start] {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end + 1 < lines.len() && encoded[end + 1] {
+            end += 1;
+        }
+        let lead = if start == 0 {
+            String::new()
+        } else {
+            let before = &texts[start - 1];
+            let tail = before
+                .bytes()
+                .rev()
+                .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'_' | b'-'))
+                .count();
+            if tail >= 8 {
+                before[before.len() - tail..].to_owned()
+            } else {
+                String::new()
+            }
+        };
+        if end > start || !lead.is_empty() {
+            let joined: String = std::iter::once(lead.as_str())
+                .chain(texts[start..=end].iter().map(String::as_str))
+                .collect();
+            let first = if lead.is_empty() { start } else { start - 1 };
+            runs.push((first, end, joined));
+        }
+        start = end + 1;
+    }
+    runs
+}
+
+fn marker(label: &str, names: &[String]) -> String {
+    format!("[{label}: {}]", names.join(", "))
 }
 
 /// A character a base64 run (standard or URL-safe) is made of, padding aside.
@@ -131,8 +331,8 @@ fn is_base64_char(b: u8) -> bool {
 
 /// `text` with every copy of `needle` replaced by its marker; for a base64 form, the whole run
 /// of base64 characters (and its padding) around each copy.
-fn replace(text: &str, needle: &Needle) -> String {
-    let marker = marker(std::slice::from_ref(&needle.name));
+fn replace(text: &str, needle: &Needle, label: &str) -> String {
+    let marker = marker(label, std::slice::from_ref(&needle.name));
     // ASCII lower case keeps every byte where it was, so positions found in the lower-cased
     // copy are the same in `text`.
     let (haystack, wanted) = if needle.any_case {
@@ -203,7 +403,12 @@ fn decodings(run: &str) -> Vec<String> {
             let Some(end) = trimmed.len().checked_sub(cut) else {
                 break;
             };
-            if let Ok(bytes) = engine.decode(&trimmed[..end]) {
+            // Cut by byte: a run with text that isn't ASCII in it (a URL-encoded one) is no
+            // base64 anyway, and is never cut inside a character.
+            let Some(cut_run) = trimmed.get(..end) else {
+                continue;
+            };
+            if let Ok(bytes) = engine.decode(cut_run) {
                 out.push(String::from_utf8_lossy(&bytes).into_owned());
                 break;
             }
@@ -469,6 +674,102 @@ mod tests {
         assert_eq!(secrets.redact("second-value-5678"), "[redacted: t]");
         secrets.forget("t");
         assert_eq!(secrets.redact("second-value-5678"), "second-value-5678");
+    }
+
+    /// A URL-encoded run with text that isn't ASCII in it ("…" after a cut title) is read by
+    /// character, never cut inside one.
+    #[test]
+    fn a_run_with_characters_that_arent_ascii_is_read_whole() {
+        let secrets = secrets();
+        let encoded = percent_encode(TOKEN, false);
+        for text in [
+            "Use tok%2Fabc…".to_owned(),
+            "a%41é".to_owned(),
+            format!("{encoded}…"),
+            format!("é{encoded}é"),
+        ] {
+            let redacted = secrets.redact(&text);
+            assert!(!redacted.contains(TOKEN), "{redacted}");
+            assert_eq!(
+                redacted.contains("[redacted: api-token]"),
+                text.contains(&encoded),
+                "{text}"
+            );
+        }
+    }
+
+    /// Base64 wrapped over lines (GNU base64 wraps at 76) holds the value on no line whole: the
+    /// lines of the run go, and nothing around them.
+    #[test]
+    fn base64_wrapped_over_lines_is_taken_out() {
+        let secrets = Secrets::default();
+        let value = format!("wrapped-vault-value/{}", "q7+m2=a?b&c".repeat(6));
+        secrets.learn("long", &value);
+        let encoded = b64(value.as_bytes());
+        let lines: Vec<&str> = encoded
+            .as_bytes()
+            .chunks(76)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        assert!(lines.len() >= 2);
+        for text in [
+            format!("the start\n{}\nthe end", lines.join("\n")),
+            format!("the start\n{}\r\nthe end", lines.join("\r\n")),
+            format!("key = \"{}\n{}\"\nthe end", lines[0], lines[1..].join("\n")),
+        ] {
+            let redacted = secrets.redact(&text);
+            for line in &lines {
+                assert!(!redacted.contains(line), "{redacted}");
+            }
+            assert!(
+                redacted.starts_with(if text.starts_with("key") {
+                    "[redacted: long]"
+                } else {
+                    "the start\n[redacted: long]"
+                }),
+                "{redacted}"
+            );
+            assert!(redacted.ends_with("\nthe end"), "{redacted}");
+        }
+        // Encoded lines that hold no value stay.
+        let other = format!("a b\n{}\n{}\nc d", "QUJD".repeat(19), "REVG".repeat(19));
+        assert_eq!(secrets.redact(&other), other);
+    }
+
+    /// The same wrapped base64 as a diff adds it (`+` before each line, itself a base64
+    /// character), as a quoted reply has it (`> `), and as a JSON string writes it (`\n` inside
+    /// one line): every piece goes.
+    #[test]
+    fn wrapped_base64_in_a_diff_a_quote_or_a_json_string_is_taken_out() {
+        let secrets = Secrets::default();
+        let value = format!("wrapped-vault-value/{}", "q7+m2=a?b&c".repeat(6));
+        secrets.learn("long", &value);
+        let encoded = b64(value.as_bytes());
+        let lines: Vec<&str> = encoded
+            .as_bytes()
+            .chunks(64)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        assert!(lines.len() >= 2);
+        let prefixed = |p: &str| {
+            lines
+                .iter()
+                .map(|l| format!("{p}{l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for text in [
+            format!("@@ -0,0 +1,{} @@\n{}\n the end", lines.len(), prefixed("+")),
+            format!("you wrote:\n{}\nthanks, bye", prefixed("> ")),
+            format!("{{\"key\": \"{}\\n\"}}", lines.join("\\n")),
+            format!("{{\"key\": \"{}\\r\\n\"}}", lines.join("\\r\\n")),
+        ] {
+            let redacted = secrets.redact(&text);
+            for line in &lines {
+                assert!(!redacted.contains(line), "{redacted}");
+            }
+            assert!(redacted.contains("[redacted: long]"), "{redacted}");
+        }
     }
 
     #[test]

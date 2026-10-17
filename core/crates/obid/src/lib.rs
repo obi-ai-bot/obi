@@ -15,9 +15,11 @@ pub mod clear;
 pub mod codex;
 pub mod config;
 pub mod conn;
+pub mod connections;
 pub mod conversation;
 pub mod devices;
 pub mod events;
+pub mod failures;
 pub mod git;
 pub mod github;
 pub mod job;
@@ -38,6 +40,7 @@ pub mod settings;
 pub mod sphere;
 pub mod store;
 pub mod token;
+pub mod vault;
 pub mod web;
 
 use std::future::Future;
@@ -167,6 +170,7 @@ pub async fn serve(
     };
     // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
     secrets::known().learn("api-token", &token);
+    vault::install(&config.home, &config.vault);
     let events = events::Events::new();
     let sandbox = std::env::current_exe()
         .map_err(|e| format!("obid can't find its own executable: {e}"))
@@ -198,6 +202,13 @@ pub async fn serve(
     jobs.use_plugins(plugins.clone());
     let cleared = clear::Cleared::open(&config.home);
     let devices = devices::Devices::open(&config.home);
+    let broker_host = if cfg!(target_os = "linux") {
+        format!("http://10.0.2.2:{}", bound.port())
+    } else {
+        format!("http://127.0.0.1:{}", bound.port())
+    };
+    let connections = connections::Connections::open(&config.home, &jobs, broker_host);
+    jobs.use_connections(connections.clone());
     let conversations = conversation::Conversations::open(&config.home, events.clone());
     let shared = Arc::new(api::Shared {
         config,
@@ -206,9 +217,11 @@ pub async fn serve(
         cleanup,
         cleared,
         devices,
+        connections,
         jobs: jobs.clone(),
         events,
         conversations,
+        turns: brain::turn::Turns::default(),
         link: link.clone(),
         plugins: plugins.clone(),
         pages: web::Sessions::default(),

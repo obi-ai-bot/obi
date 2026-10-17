@@ -16,8 +16,10 @@ axum.workspace = true
 base64.workspace = true
 futures-util.workspace = true
 jsonschema.workspace = true
+libc.workspace = true
 nix.workspace = true
 p256.workspace = true
+reqwest.workspace = true
 tokio-stream.workspace = true
 getrandom.workspace = true
 gethostname.workspace = true
@@ -30,6 +32,11 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The vault's Keychain store (src/vault.rs), as the Swift runner's KeychainVault.
+core-foundation = "0.10.1"
+security-framework = "3.7.0"
 
 [lints]
 workspace = true

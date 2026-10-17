@@ -33,6 +33,8 @@ export const AGENTS: Record<Agent, { name: string; brand: Brand }> = {
 
 // What a task needs from you: an inbox item (its options are what the API offers for its kind),
 // or, for a job that failed with no item, letting it go.
+// A `confirm` item (obid only, #546) is headed by its title, which says exactly what Confirm does;
+// the words it would send for the owner are `quoted`, shown as data, and nothing is recommended.
 export type Ask = {
   kind: string;
   headline: string;
@@ -40,13 +42,15 @@ export type Ask = {
   options: string[];
   recommended?: number;
   detail?: string;
+  quoted?: string;    // words someone else wrote, shown as quoted data
   item?: string;      // the inbox item that settles it, if any
   later: boolean;     // put off, still open
+  answer?: string;    // answered from this page, until obid settles it
 };
 export const ASK_LABEL: Record<string, string> = {
   question: 'Question', permission: 'Permission', review: 'Out of reviews', failed: 'Failed',
   limit: 'Out of usage', start: 'Start it?', merge: 'Not merged', obiRequest: 'Another Oby asks',
-  pluginEvent: 'From a plug-in', audit: 'Issue audit', failure: 'Oby failure',
+  pluginEvent: 'From a plug-in', audit: 'Issue audit', failure: 'Oby failure', confirm: 'Confirm it?',
 };
 
 // A job as the screens show it. created and finished are minutes ago.
@@ -63,7 +67,8 @@ export type JobView = {
   step: string;
   round?: [number, number];
   stages: Stage[];
-  ask?: Ask;
+  ask?: Ask;            // the first of asks
+  asks: Ask[];          // every decision it needs from you, oldest first: a permission and a confirm about it both show
   summary?: string;
   commits?: number;
   published?: string;     // the pull request's URL
@@ -72,7 +77,7 @@ export type JobView = {
   created: number;
   finished?: number;
 };
-export type Task = { id: string; type: string; title: string; who?: string; brand: Brand; status: Status; fresh: boolean; job: JobView; answer?: string };
+export type Task = { id: string; type: string; title: string; who?: string; brand: Brand; status: Status; fresh: boolean; job: JobView };
 
 // The kinds of work, as Sangam's design has them (design/app tasks.ts), each teammate's group
 // between Issues and Tasks
@@ -94,36 +99,51 @@ const minutesAgo = (iso: string | null | undefined, now: number) => (iso ? Math.
 const accountName = (s: Live, j: Job) => s.status?.accounts.find((a) => a.id === j.account)?.name ?? j.account;
 const modelOf = (s: Live, j: Job) => j.model ?? s.status?.models[j.agent]?.model ?? 'default';
 
-function askOf(j: Job, item: InboxItem | undefined): Ask | undefined {
-  if (item) {
-    // Oby's plain-words headline over the item's text; with none (obid writes none yet), the text
-    return {
-      kind: item.kind, headline: item.headline ?? item.text, text: item.headline ? item.text : '', options: item.options,
-      recommended: item.recommended ?? undefined, item: item.id, later: item.state === 'later',
-      detail: item.kind === 'permission' ? j.permission?.detail : undefined,
-    };
-  }
+// An inbox item as a decision; the job's permission's detail goes with a permission item
+function itemAsk(s: Live, item: InboxItem, j?: Job): Ask {
+  const base = { kind: item.kind, options: item.options, item: item.id, later: item.state === 'later', answer: s.answering[item.id] };
+  // what Confirm does, in obid's words, over why it waits; never a recommendation: it's the owner's call
+  if (item.kind === 'confirm') return { ...base, headline: item.title, text: item.text, quoted: confirmWords(item) };
+  // Oby's plain-words headline over the item's text; with none (obid writes none yet), the text
+  return {
+    ...base, headline: item.headline ?? item.text, text: item.headline ? item.text : '', recommended: item.recommended ?? undefined,
+    detail: item.kind === 'permission' ? j?.permission?.detail : undefined,
+  };
+}
+
+// the words a confirm item would send for the owner (another Oby's question's answer, or an
+// item's), from its payload
+function confirmWords(item: InboxItem): string | undefined {
+  const payload = item.confirm?.payload as { words?: unknown; answer?: unknown } | null | undefined;
+  const words = payload?.words ?? payload?.answer;
+  return typeof words === 'string' && words.trim() ? words : undefined;
+}
+
+function asksOf(s: Live, j: Job): Ask[] {
+  // every open item of the job, oldest first: a confirm item about its permission doesn't hide it
+  const items = s.inbox.filter((i) => i.job === j.id);
+  if (items.length) return items.map((i) => itemAsk(s, i, j));
   // failed or interrupted, not let go: it needs you even with no item (docs/runner-api.md, "What needs you")
   if ((j.status === 'failed' || j.status === 'interrupted') && !j.dismissed) {
-    return { kind: 'failed', headline: j.status === 'failed' ? 'It failed' : 'It was interrupted', text: j.summary.split('\n')[0] || j.step, options: ['Dismiss'], later: false };
+    return [{ kind: 'failed', headline: j.status === 'failed' ? 'It failed' : 'It was interrupted', text: j.summary.split('\n')[0] || j.step, options: ['Dismiss'], later: false }];
   }
-  return undefined;
+  return [];
 }
 
 export function toTask(s: Live, j: Job, now = Date.now()): Task {
-  const item = [...s.inbox].reverse().find((i) => i.job === j.id);
-  const ask = askOf(j, item);
+  const asks = asksOf(s, j);
+  const ask = asks[0];
   const status: Status = ask ? 'needs' : j.status === 'queued' || j.status === 'running' ? 'running' : 'done';
   const view: JobView = {
     id: j.id, agent: j.agent, account: accountName(s, j), model: modelOf(s, j), repo: j.repo, branch: j.branch || '—',
     base: j.base ?? '—', check: j.check ?? undefined, status: j.status, step: j.step,
-    round: j.rounds > 1 ? [j.round, j.rounds] : undefined, stages: j.pipeline?.stages ?? [], ask,
+    round: j.rounds > 1 ? [j.round, j.rounds] : undefined, stages: j.pipeline?.stages ?? [], ask, asks,
     summary: j.summary || undefined, commits: j.commits ?? undefined, published: j.published ?? undefined,
     request: j.request, notes: j.notes ?? [], created: minutesAgo(j.created, now)!, finished: minutesAgo(j.finished, now),
   };
   return {
     id: j.id, type: typeOf(j), title: j.title, who: ownerOf(j.obi?.fromOwner), brand: AGENTS[j.agent]?.brand ?? BRANDS.claude, status,
-    fresh: !s.firstJobs.has(j.id) && !s.seen.has(j.id), job: view, answer: s.answering[j.id],
+    fresh: !s.firstJobs.has(j.id) && !s.seen.has(j.id), job: view,
   };
 }
 
@@ -131,14 +151,17 @@ export function toTask(s: Live, j: Job, now = Date.now()): Task {
 // plug-in's event (Inbox)
 function itemTask(s: Live, i: InboxItem, now: number): Task {
   const owner = i.kind === 'obiRequest' ? ownerOf(i.obi?.fromOwner) : undefined;
+  const ask: Ask = i.kind === 'confirm' ? itemAsk(s, i) : {
+    kind: i.kind, headline: i.headline ?? i.title, text: i.text, options: i.options, recommended: i.recommended ?? undefined, item: i.id,
+    later: i.state === 'later', answer: s.answering[i.id],
+  };
   return {
     // (no agent's mark: it shows Oby's, TaskMark)
-    id: `inbox:${i.id}`, type: owner ? teammate(owner).id : 'inbox', title: i.headline ?? i.title, who: owner, brand: BRANDS.github, status: 'needs',
-    fresh: false, answer: s.answering[`inbox:${i.id}`],
+    id: `inbox:${i.id}`, type: owner ? teammate(owner).id : 'inbox', title: ask.headline, who: owner, brand: BRANDS.github, status: 'needs',
+    fresh: false,
     job: {
       id: i.id, agent: null, account: '', model: '', repo: '', branch: '—', base: '—', status: 'queued', step: '', stages: [],
-      ask: { kind: i.kind, headline: i.headline ?? i.title, text: i.text, options: i.options, recommended: i.recommended ?? undefined, item: i.id, later: i.state === 'later' },
-      request: i.text, notes: [], created: minutesAgo(i.created, now)!,
+      ask, asks: [ask], request: i.text, notes: [], created: minutesAgo(i.created, now)!,
     },
   };
 }

@@ -109,11 +109,12 @@ nonisolated enum AskKind {
         case "merge": "Not merged"
         case "audit": "Issue audit"
         case "failure": "Oby failure"
+        case RunnerConfirm.kind: "Confirm it?"
         default: "Failed"
         }
     }
 
-    static func failed(_ kind: String) -> Bool { !["question", "permission", "review", "limit", "start", "audit"].contains(kind) }
+    static func failed(_ kind: String) -> Bool { !["question", "permission", "review", "limit", "start", "audit", RunnerConfirm.kind].contains(kind) }
 }
 
 /// A task's card under the answer that started it (Sangam's ThreadTask): where it stands, then

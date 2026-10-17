@@ -330,19 +330,54 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
     var happened: String?
     var recommended: Int?
     var why: String?
+    /// On a `confirm` item (obid only, #546), what its Confirm carries out.
+    var confirm: RunnerConfirm? = nil
 
     var isOpen: Bool { done == nil }
     /// Those words, for its card.
-    var words: InboxWords { InboxWords(headline: headline, happened: happened, recommended: recommended, why: why) }
+    var words: InboxWords { InboxWords(headline: headline, happened: happened, recommended: recommended, why: why, confirm: confirm) }
     func waiting(at now: Date = .now) -> Bool { done == nil && (later.map { $0 <= now } ?? true) }
 }
 #endif
 
+#if os(macOS)
 extension InboxItem {
+    /// A runner's item as Engine's InboxItem, or nil for a kind Engine doesn't know yet (a newer
+    /// runner may add one; permissions also come through job extras).
+    ///
+    /// Engine has no `confirm` kind (obid only, #546), and Engine is frozen: a confirm item reads
+    /// as a `start`, the kind closest to it (two options, no words, the user's go-ahead), and its
+    /// `InboxWords.confirm`, read from the same JSON, says what it really is. Every screen shows it
+    /// by that (`shownKind`), and the brain's briefing leaves it out (`RunnerFeed.briefingInbox`).
+    nonisolated static func runner(_ json: Data) -> InboxItem? {
+        if let item = try? Runner.decoder.decode(InboxItem.self, from: json) { return item }
+        guard var object = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any],
+              object["kind"] as? String == RunnerConfirm.kind, object["confirm"] is [String: Any] else { return nil }
+        object["kind"] = Kind.start.rawValue
+        return (try? JSONSerialization.data(withJSONObject: object)).flatMap { try? Runner.decoder.decode(InboxItem.self, from: $0) }
+    }
+
+    /// `GET /v1/inbox`'s items, each as `runner(_:)` reads it: the ones Engine knows, and confirm items.
+    nonisolated static func runnerList(_ data: Data) throws -> [InboxItem] {
+        guard let list = try JSONSerialization.jsonObject(with: data) as? [Any] else {
+            throw RunnerError(message: "The runner's inbox couldn't be read.")
+        }
+        return list.compactMap { (try? JSONSerialization.data(withJSONObject: $0)).flatMap(runner) }
+    }
+}
+#endif
+
+extension InboxItem {
+    /// Its kind as the runner names it. The Mac's `kind` is Engine's enum, the iPhone's a string:
+    /// both read the same. Engine has no `confirm` kind (obid only, #546): on the Mac, `words`
+    /// (`InboxWords.confirm`) says an item is one.
+    nonisolated func shownKind(_ words: InboxWords? = nil) -> String {
+        words?.confirm != nil ? RunnerConfirm.kind : "\(kind)"
+    }
+
     /// "Failed · Mac runner notifications · waiting 3m": what kind of item, its job, how long it waited.
-    nonisolated func line(now: Date = .now) -> String {
-        // The Mac's `kind` is Engine's enum, the iPhone's a string: both read the same.
-        let label = switch "\(kind)" {
+    nonisolated func line(now: Date = .now, words: InboxWords? = nil) -> String {
+        let label = switch shownKind(words) {
         case "question": "Question"
         case "review": "Out of reviews"
         case "limit": "Out of usage"
@@ -351,6 +386,7 @@ extension InboxItem {
         case "failure": "Oby failure"
         case "start": "Start it?"
         case "permission": "Permission"
+        case RunnerConfirm.kind: "Confirm it?"
         default: "Failed"
         }
         return "\(label) · \(title) · \(Elapsed.waiting(since: created, now: now))"
@@ -830,7 +866,13 @@ nonisolated struct Runner: Sendable {
     /// `done` lets it go without one; `later` puts it off until then. Send one of them.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws -> InboxItem {
         struct Body: Encodable { var answer: String?; var done: Bool?; var later: Date? }
+        #if os(macOS)
+        let data = try await send("POST", "v1/inbox/\(id)/answer", body: Body(answer: answer, done: done, later: later))
+        guard let item = InboxItem.runner(data) else { throw RunnerError(message: "The runner's answer couldn't be read.") }
+        return item
+        #else
         return try await call("POST", "v1/inbox/\(id)/answer", body: Body(answer: answer, done: done, later: later))
+        #endif
     }
 
     /// Moves a job to another tool, account or model (each nil to keep it or let the runner pick):
@@ -1127,13 +1169,7 @@ nonisolated struct Runner: Sendable {
     func inboxWithWords(state: String = "open") async throws -> ([InboxItem], [String: InboxWords]) {
         do {
             let data = try await send("GET", state == "done" ? "v1/inbox?state=done&limit=1000" : "v1/inbox")
-            // A newer runner may add an inbox kind Engine doesn't know yet (permissions come
-            // through job extras). Keep the known items and their history readable.
-            struct Item: Decodable {
-                var value: InboxItem?
-                init(from decoder: any Decoder) throws { value = try? InboxItem(from: decoder) }
-            }
-            return (try Self.decoder.decode([Item].self, from: data).compactMap(\.value), InboxWords.of(data))
+            return (try InboxItem.runnerList(data), InboxWords.of(data))
         } catch let error as RunnerError where error.status == 404 {
             return ([], [:])
         }
@@ -1298,7 +1334,7 @@ nonisolated struct EventParser {
             case "accounts": return (try? Runner.decoder.decode([RunnerAccount].self, from: json)).map(RunnerEvent.accounts)
             case "clear": return (try? Runner.decoder.decode(ClearedAt.self, from: json)).map { .cleared($0.clearedAt) }
             #if os(macOS)
-            case "inbox": return (try? Runner.decoder.decode(InboxItem.self, from: json)).map { RunnerEvent.inbox($0, try? Runner.decoder.decode(InboxWords.self, from: json)) }
+            case "inbox": return InboxItem.runner(json).map { RunnerEvent.inbox($0, try? Runner.decoder.decode(InboxWords.self, from: json)) }
             #else
             case "inbox": return (try? Runner.decoder.decode(InboxItem.self, from: json)).map(RunnerEvent.inbox)
             #endif
