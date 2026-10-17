@@ -78,6 +78,17 @@ impl Devices {
         &self.pairing
     }
 
+    /// The publishing key (X9.63, base64) of the registered device `id`, or none for a device obid
+    /// doesn't know: what checks its approval to publish by hand (crate::approval).
+    pub fn public_key(&self, id: &str) -> Option<String> {
+        let saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
+        saved
+            .devices
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.public_key.clone())
+    }
+
     /// Registers a device's publishing key and answers its id: the one it has for a key it knows,
     /// a new one for a new key while pairing is open (and pairing is closed again).
     pub fn register(

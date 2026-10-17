@@ -3,7 +3,8 @@
 //! and the repository's check in the job sandbox (`sandbox`).
 //!
 //! Two kinds of job run here. The owner's own work (`POST /v1/jobs`): a branch from the base, rounds
-//! of the agent and the check, commits counted. And a review another Obi asked for
+//! of the agent and the check, commits counted, then published (crate::publish) and its pull
+//! request followed (crate::github). And a review another Obi asked for
 //! ([`Jobs::start_obi_review`]): a fresh worktree detached at the request's commit, the request
 //! quoted as data, the agent reading only, the check in the sandbox, a typed result body.
 
@@ -153,6 +154,11 @@ struct State {
     asks: HashMap<String, VecDeque<Ask>>,
     /// Failing Apple-check output is transient and only included in the asking job's response.
     apple_logs: HashMap<String, String>,
+    /// The jobs publishing now: one publish at a time per job.
+    publishing: std::collections::HashSet<String>,
+    /// When obid last tried to read each published pull request, and which one: an unavailable
+    /// GitHub isn't asked again on every pass.
+    followed: HashMap<String, (String, i64)>,
 }
 
 /// Every job obid has, and the workers running them.
@@ -180,6 +186,10 @@ pub struct Jobs {
     plugins: std::sync::OnceLock<Arc<crate::plugins::Plugins>>,
     /// Loopback endpoint given to agents for `oby-check apple`.
     api_url: Mutex<String>,
+    /// The approvals devices gave to publish by hand, each let through once.
+    approvals: crate::approval::Approvals,
+    /// Wakes the pull request follower: a job just published.
+    follow: Notify,
 }
 
 impl Jobs {
@@ -207,6 +217,7 @@ impl Jobs {
         let max_running = crate::settings::load(&config.home).max_running as usize;
         let kept = permissions::load(&config.home);
         let api_url = format!("http://{}", config.listen);
+        let approvals = crate::approval::Approvals::open(&config.home);
         Ok(Arc::new(Jobs {
             config,
             store,
@@ -218,6 +229,8 @@ impl Jobs {
                 wrapping: std::collections::HashSet::new(),
                 asks: HashMap::new(),
                 apple_logs: HashMap::new(),
+                publishing: std::collections::HashSet::new(),
+                followed: HashMap::new(),
             }),
             changed: Notify::new(),
             max_running: std::sync::atomic::AtomicUsize::new(max_running),
@@ -229,6 +242,8 @@ impl Jobs {
             permissions: Mutex::new(kept),
             plugins: std::sync::OnceLock::new(),
             api_url: Mutex::new(api_url),
+            approvals,
+            follow: Notify::new(),
         }))
     }
 
@@ -292,9 +307,11 @@ impl Jobs {
         }
     }
 
-    /// Starts the queued jobs there are slots for.
+    /// Starts the queued jobs there are slots for, and follows the published pull requests.
     pub fn resume(self: &Arc<Self>) {
         self.schedule();
+        let jobs = self.clone();
+        tokio::spawn(async move { jobs.follow_pull_requests().await });
     }
 
     /// One job.
@@ -1318,6 +1335,11 @@ impl Jobs {
                 "This is a review another Oby asked for: its answer goes back to that Oby, so it takes no words of yours.".into(),
             )));
         }
+        if self.lock().publishing.contains(id) {
+            return Some(Err(Refused(
+                "obid is publishing it. Tell it again once that's done.".into(),
+            )));
+        }
         let tool = Tool::from_id(&job.agent)
             .map(Tool::name)
             .unwrap_or("The agent");
@@ -1376,7 +1398,16 @@ impl Jobs {
                 "This job never started, so there's no session to pick up.".into(),
             )));
         }
-        let resumed = self.update(id, |job| {
+        // Checked and changed under one lock: a job being published by hand takes no words, and
+        // one that took them can't be published by hand until it ends again.
+        let resumed = {
+            let mut state = self.lock();
+            if state.publishing.contains(id) {
+                return Some(Err(Refused(
+                    "obid is publishing it. Tell it again once that's done.".into(),
+                )));
+            }
+            let job = state.jobs.get_mut(id)?;
             heard(job);
             job.status = Status::Queued;
             job.phase = Some(Phase::Work);
@@ -1389,9 +1420,15 @@ impl Jobs {
             job.limit = None;
             job.waiting = None;
             job.asked = true;
-        });
+            job.clone()
+        };
+        if let Err(e) = self.store.save(&resumed) {
+            tracing::error!("can't keep job {id}: {e}");
+        }
+        self.events.send("job", resumed.to_json());
+        self.changed.notify_waiters();
         self.schedule();
-        resumed.map(Ok)
+        Some(Ok(resumed))
     }
 
     /// The owner's words the agent hasn't heard yet, taken: what its next turn hears.
@@ -1728,18 +1765,34 @@ impl Jobs {
     }
 
     /// Lets go of a job that needs the owner. `Err` when it doesn't need them.
+    /// Checked and changed under one lock: a job being published by hand isn't dismissed.
     pub fn dismiss(&self, id: &str) -> Option<Result<Job, Refused>> {
-        let job = self.get(id)?;
-        if job.dismissed.is_some() {
-            return Some(Ok(job));
+        let dismissed = {
+            let mut state = self.lock();
+            let publishing = state.publishing.contains(id);
+            let job = state.jobs.get_mut(id)?;
+            if job.dismissed.is_some() {
+                return Some(Ok(job.clone()));
+            }
+            if publishing {
+                return Some(Err(Refused(
+                    "obid is publishing it: there's nothing to dismiss until that's done.".into(),
+                )));
+            }
+            if !job.needs_you() {
+                return Some(Err(Refused(
+                    "This job doesn't need you: there's nothing to dismiss.".into(),
+                )));
+            }
+            job.dismissed = Some(obi_protocol::time::now());
+            job.clone()
+        };
+        if let Err(e) = self.store.save(&dismissed) {
+            tracing::error!("can't keep job {id}: {e}");
         }
-        if !job.needs_you() {
-            return Some(Err(Refused(
-                "This job doesn't need you: there's nothing to dismiss.".into(),
-            )));
-        }
-        self.update(id, |job| job.dismissed = Some(obi_protocol::time::now()))
-            .map(Ok)
+        self.events.send("job", dismissed.to_json());
+        self.changed.notify_waiters();
+        Some(Ok(dismissed))
     }
 
     /// The job once it has ended (done, failed, stopped or interrupted), or `None` for one obid
@@ -1961,6 +2014,7 @@ impl Jobs {
                 self.update(id, |job| {
                     job.status = Status::Failed;
                     job.asked = false;
+                    job.publish_step = None;
                     job.step = String::new();
                     job.summary = why;
                     job.finished = Some(obi_protocol::time::now());
@@ -2662,6 +2716,20 @@ impl Jobs {
         drop(prepared);
         let job = self.get(id).ok_or("the job is gone")?;
         let start_commit = job.start_commit.clone().unwrap_or_default();
+        // Where its branch was when this run started: a job whose own publish failed is tried
+        // again by itself only when this run made new commits (runner-api.md, "Job").
+        let clone = git::clone_path(&self.config.home, &repo.repo);
+        let before_head = git::git(
+            &clone,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{}", job.branch),
+            ],
+        )
+        .await
+        .ok();
         if let Some(paths) = &job.attachments {
             let allowed = self.config.home.join("attachments");
             let root = allowed.canonicalize().unwrap_or(allowed);
@@ -2768,129 +2836,169 @@ impl Jobs {
             }
             message
         };
-        loop {
-            let job = self.get(id).ok_or("the job is gone")?;
-            let round = job.current_round();
-            let mut flags: Vec<OsString> = [
-                "-p",
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--permission-prompt-tool",
-                "stdio",
-                "--permission-mode",
-                if job.mode.as_deref() == Some("plan") {
-                    "plan"
-                } else {
-                    "default"
-                },
-                "--setting-sources",
-                "",
-                "--strict-mcp-config",
-                "--max-turns",
-                MAX_TURNS,
-            ]
-            .iter()
-            .map(OsString::from)
-            .collect();
-            if let Some(model) = &job.model {
-                flags.extend(["--model".into(), model.into()]);
-            }
-            if let Some(session) = &job.session {
-                flags.extend(["--resume".into(), session.into()]);
-            }
-            // The ready agent-mcp plug-ins' servers, from a file in the job's own folder, and
-            // one permission rule per tool each allows, each its own argument (last, since
-            // --allowedTools takes every argument after it).
-            let servers = self.agent_mcp(tool);
-            let mcp_rules = crate::plugins::rules(&servers);
-            if !servers.is_empty() {
-                let file = spec.temp.join(MCP_CONFIG_FILE);
-                let text = serde_json::to_vec(&crate::plugins::claude_mcp_config(&servers))
-                    .map_err(|e| e.to_string())?;
-                let _ = std::fs::remove_file(&file);
-                crate::store::write_private(&file, &text)
-                    .map_err(|e| format!("obid can't write the agent's MCP config: {e}"))?;
-                flags.extend(["--mcp-config".into(), file.into_os_string()]);
-                if !mcp_rules.is_empty() {
-                    flags.push("--allowedTools".into());
-                    flags.extend(mcp_rules.iter().map(OsString::from));
+        // What the secret scan found the last time it blocked publishing: the same again stops.
+        let mut blocked_before: Option<Vec<crate::publish::Found>> = None;
+        'rounds: loop {
+            loop {
+                let job = self.get(id).ok_or("the job is gone")?;
+                let round = job.current_round();
+                let mut flags: Vec<OsString> = [
+                    "-p",
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--permission-prompt-tool",
+                    "stdio",
+                    "--permission-mode",
+                    if job.mode.as_deref() == Some("plan") {
+                        "plan"
+                    } else {
+                        "default"
+                    },
+                    "--setting-sources",
+                    "",
+                    "--strict-mcp-config",
+                    "--max-turns",
+                    MAX_TURNS,
+                ]
+                .iter()
+                .map(OsString::from)
+                .collect();
+                if let Some(model) = &job.model {
+                    flags.extend(["--model".into(), model.into()]);
                 }
-            }
-            let launch = self.launch(&job, &spec, tool, flags, &account)?;
-            if *signal.borrow() != Signal::Run {
-                return Ok(());
-            }
-            self.update(id, |job| {
-                if job.status == Status::Queued {
-                    job.status = Status::Running;
+                if let Some(session) = &job.session {
+                    flags.extend(["--resume".into(), session.into()]);
                 }
-                job.started.get_or_insert_with(obi_protocol::time::now);
-                job.phase = Some(Phase::Work);
-                if !job.step.starts_with("You: ") {
-                    job.step = format!("Starting {}", tool.name());
+                // The ready agent-mcp plug-ins' servers, from a file in the job's own folder, and
+                // one permission rule per tool each allows, each its own argument (last, since
+                // --allowedTools takes every argument after it).
+                let servers = self.agent_mcp(tool);
+                let mcp_rules = crate::plugins::rules(&servers);
+                if !servers.is_empty() {
+                    let file = spec.temp.join(MCP_CONFIG_FILE);
+                    let text = serde_json::to_vec(&crate::plugins::claude_mcp_config(&servers))
+                        .map_err(|e| e.to_string())?;
+                    let _ = std::fs::remove_file(&file);
+                    crate::store::write_private(&file, &text)
+                        .map_err(|e| format!("obid can't write the agent's MCP config: {e}"))?;
+                    flags.extend(["--mcp-config".into(), file.into_os_string()]);
+                    if !mcp_rules.is_empty() {
+                        flags.push("--allowedTools".into());
+                        flags.extend(mcp_rules.iter().map(OsString::from));
+                    }
                 }
-            });
-            let turn = self
-                .turn(
-                    id,
-                    tool,
-                    launch,
-                    &message,
-                    signal,
-                    Gate::Owner { mcp: &mcp_rules },
-                )
-                .await?;
-            if *signal.borrow() != Signal::Run {
-                return Ok(());
-            }
-            if turn.timed_out {
-                self.update(id, |job| {
-                    job.limit = Some("the round ran past 45 minutes".into())
-                });
-                return Err("Stopped at a limit: the round ran past 45 minutes. The branch is kept and nothing was pushed; one more round is possible.".into());
-            }
-            let said = turn.text();
-            if !turn.succeeded() {
-                let first = said.lines().next().unwrap_or("").trim().to_owned();
-                return Err(if first.is_empty() {
-                    format!(
-                        "{} stopped without finishing ({}).{}",
-                        tool.name(),
-                        turn.exit,
-                        self.agent_note(id)
-                    )
-                } else {
-                    first
-                });
-            }
-            self.update(id, |job| {
-                job.summary = said.clone();
-                job.summaries
-                    .get_or_insert_with(Vec::new)
-                    .push(said.clone());
-            });
-            // Words the owner sent while it worked: the agent hears them now, in another turn of
-            // this round, before the check.
-            let words = self.take_heard(id);
-            if !words.is_empty() {
-                message = words.join("\n\n");
-                continue;
-            }
-            let job = self.get(id).ok_or("the job is gone")?;
-            let more_rounds = round < job.max_rounds();
-            if let Some(command) = &job.check {
-                self.update(id, |job| {
-                    job.phase = Some(Phase::Check);
-                    job.step = format!("Running {command}");
-                });
-                let run = self.check(id, command, &spec, signal).await?;
+                let launch = self.launch(&job, &spec, tool, flags, &account)?;
                 if *signal.borrow() != Signal::Run {
                     return Ok(());
                 }
-                if run.passed {
+                self.update(id, |job| {
+                    if job.status == Status::Queued {
+                        job.status = Status::Running;
+                    }
+                    job.started.get_or_insert_with(obi_protocol::time::now);
+                    job.phase = Some(Phase::Work);
+                    if !job.step.starts_with("You: ") {
+                        job.step = format!("Starting {}", tool.name());
+                    }
+                });
+                let turn = self
+                    .turn(
+                        id,
+                        tool,
+                        launch,
+                        &message,
+                        signal,
+                        Gate::Owner { mcp: &mcp_rules },
+                    )
+                    .await?;
+                if *signal.borrow() != Signal::Run {
+                    return Ok(());
+                }
+                if turn.timed_out {
+                    self.update(id, |job| {
+                        job.limit = Some("the round ran past 45 minutes".into())
+                    });
+                    return Err("Stopped at a limit: the round ran past 45 minutes. The branch is kept and nothing was pushed; one more round is possible.".into());
+                }
+                let said = turn.text();
+                if !turn.succeeded() {
+                    let first = said.lines().next().unwrap_or("").trim().to_owned();
+                    return Err(if first.is_empty() {
+                        format!(
+                            "{} stopped without finishing ({}).{}",
+                            tool.name(),
+                            turn.exit,
+                            self.agent_note(id)
+                        )
+                    } else {
+                        first
+                    });
+                }
+                self.update(id, |job| {
+                    job.summary = said.clone();
+                    job.summaries
+                        .get_or_insert_with(Vec::new)
+                        .push(said.clone());
+                });
+                // Words the owner sent while it worked: the agent hears them now, in another turn of
+                // this round, before the check.
+                let words = self.take_heard(id);
+                if !words.is_empty() {
+                    message = words.join("\n\n");
+                    continue;
+                }
+                let job = self.get(id).ok_or("the job is gone")?;
+                let more_rounds = round < job.max_rounds();
+                if let Some(command) = &job.check {
+                    self.update(id, |job| {
+                        job.phase = Some(Phase::Check);
+                        job.step = format!("Running {command}");
+                    });
+                    let run = self.check(id, command, &spec, signal).await?;
+                    if *signal.borrow() != Signal::Run {
+                        return Ok(());
+                    }
+                    if run.passed {
+                        // The last turn, unless the owner's words came meanwhile: those are the next.
+                        let words = self.last_turn(id);
+                        if words.is_empty() {
+                            break;
+                        }
+                        message = words.join("\n\n");
+                        continue;
+                    }
+                    if !more_rounds {
+                        let limit = format!("`{command}` still fails after {round} round(s)");
+                        self.update(id, |job| job.limit = Some(limit.clone()));
+                        return Err(format!(
+                            "Stopped at a limit: {limit}. The branch is kept and nothing was pushed; one more round is possible."
+                        ));
+                    }
+                    message = format!(
+                        "`{command}` failed after your last round. Its output, from the end:\n\n```\n{}\n```\n\nFix what it shows, run it again in the foreground, commit, and finish with a short summary.",
+                        tail(&run.output, 8_000)
+                    );
+                } else if job.max_rounds() > 1 {
+                    let last = said
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("")
+                        .trim();
+                    if last == "GOAL MET" || !more_rounds {
+                        // The last turn, unless the owner's words came meanwhile: those are the next.
+                        let words = self.last_turn(id);
+                        if words.is_empty() {
+                            break;
+                        }
+                        message = words.join("\n\n");
+                        continue;
+                    }
+                    message = "Your last line didn't say `GOAL MET`: carry on with what's left, then end with `GOAL MET` or `GOAL NOT MET: <what's left>`.".into();
+                } else {
                     // The last turn, unless the owner's words came meanwhile: those are the next.
                     let words = self.last_turn(id);
                     if words.is_empty() {
@@ -2899,83 +3007,454 @@ impl Jobs {
                     message = words.join("\n\n");
                     continue;
                 }
-                if !more_rounds {
-                    let limit = format!("`{command}` still fails after {round} round(s)");
-                    self.update(id, |job| job.limit = Some(limit.clone()));
+                // What obid declined last round, for a tool whose answers carry no words (ACP).
+                if !turn.notes.is_empty() {
+                    message = format!("{}\n\n{message}", turn.notes.join("\n"));
+                }
+                self.update(id, |job| job.round = Some(round + 1));
+            }
+
+            let head = self.keep_commits(id).await?;
+            let commits = if start_commit.is_empty() || head == start_commit {
+                0
+            } else {
+                git::git(
+                    &worktree,
+                    &["rev-list", "--count", &format!("{start_commit}..HEAD")],
+                )
+                .await
+                .ok()
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0)
+            };
+            let job = self.get(id).ok_or("the job is gone")?;
+            let first_line = job.summary.lines().next().unwrap_or("").trim().to_owned();
+            // A round the owner asked for may end with nothing committed: their words decide.
+            if COMMITTING.contains(&job.kind.as_str()) && commits == 0 && !job.asked {
+                return Err(format!("Nothing committed: {first_line}"));
+            }
+            let pushed = self.still_pushed(&job, &head, commits).await;
+            // The job as it would end, which is what gets published.
+            let mut ended = job.clone();
+            ended.status = Status::Done;
+            ended.commits = Some(commits);
+            ended.pushed = pushed;
+            // One whose own publish failed isn't tried again by itself, unless this run made new
+            // commits; one a restart cut short (its publish never ran) carries on and publishes.
+            let made_now = before_head.as_deref() != Some(head.as_str());
+            if !ended.can_publish() || (!made_now && job.publish_error.is_some()) {
+                // Still waiting for Publish by hand: why its own publish failed still holds.
+                let waiting = ended.can_publish();
+                self.end_done(id, commits, pushed, |job| {
+                    if !waiting {
+                        job.publish_error = None;
+                    }
+                });
+                return Ok(());
+            }
+            self.update(id, |job| {
+                job.commits = Some(commits);
+                job.pushed = pushed;
+                job.phase = Some(Phase::Publish);
+                job.publish_step = Some(crate::publish::Step::Scan);
+                job.step = "Publishing".into();
+            });
+            let published = self.publish_job(id, Some(signal.clone()), |_| Ok(())).await;
+            if *signal.borrow() != Signal::Run {
+                return Ok(());
+            }
+            use crate::publish::Failure;
+            match published {
+                Ok(url) => {
+                    self.end_done(id, commits, Some(commits), |job| {
+                        job.was_published(url);
+                    });
+                    self.follow.notify_one();
+                }
+                Err(Failure::AlreadyOnBase(base)) => {
+                    let line = Failure::AlreadyOnBase(base).line();
+                    self.end_done(id, 0, pushed, |job| {
+                        job.summary = format!("{line}\n\n{}", job.summary);
+                        job.publish_error = None;
+                    });
+                }
+                Err(Failure::Blocked(found)) => {
+                    let job = self.get(id).ok_or("the job is gone")?;
+                    // One bounded round to rewrite the commits that hold it, while rounds are left and
+                    // it found something else than last time.
+                    if job.current_round() < job.max_rounds()
+                        && blocked_before.as_ref() != Some(&found)
+                        && found.iter().all(crate::publish::Found::fixable)
+                    {
+                        let base = job
+                            .base
+                            .clone()
+                            .unwrap_or_else(|| repo.default_branch.clone());
+                        message = crate::publish::fix_prompt(&found, &base);
+                        blocked_before = Some(found);
+                        self.lock().wrapping.remove(id);
+                        self.update(id, |job| {
+                            job.phase = Some(Phase::Work);
+                            job.publish_step = None;
+                            job.round = Some(job.current_round() + 1);
+                            job.step = format!(
+                                "Round {} of {}: the secret scan blocked publishing",
+                                job.current_round(),
+                                job.max_rounds()
+                            );
+                        });
+                        continue 'rounds;
+                    }
                     return Err(format!(
-                        "Stopped at a limit: {limit}. The branch is kept and nothing was pushed; one more round is possible."
+                        "{}\n\n{}",
+                        crate::publish::blocked(&found),
+                        job.summary
                     ));
                 }
-                message = format!(
-                    "`{command}` failed after your last round. Its output, from the end:\n\n```\n{}\n```\n\nFix what it shows, run it again in the foreground, commit, and finish with a short summary.",
-                    tail(&run.output, 8_000)
-                );
-            } else if job.max_rounds() > 1 {
-                let last = said
-                    .lines()
-                    .rev()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("")
-                    .trim();
-                if last == "GOAL MET" || !more_rounds {
-                    // The last turn, unless the owner's words came meanwhile: those are the next.
-                    let words = self.last_turn(id);
-                    if words.is_empty() {
-                        break;
-                    }
-                    message = words.join("\n\n");
-                    continue;
+                Err(Failure::Stopped) => return Ok(()),
+                Err(failure @ (Failure::Failed(_) | Failure::Busy | Failure::Refused(_))) => {
+                    let why = failure.line();
+                    self.end_done(id, commits, pushed, |job| job.publish_error = Some(why));
                 }
-                message = "Your last line didn't say `GOAL MET`: carry on with what's left, then end with `GOAL MET` or `GOAL NOT MET: <what's left>`.".into();
-            } else {
-                // The last turn, unless the owner's words came meanwhile: those are the next.
-                let words = self.last_turn(id);
-                if words.is_empty() {
-                    break;
-                }
-                message = words.join("\n\n");
-                continue;
             }
-            // What obid declined last round, for a tool whose answers carry no words (ACP).
-            if !turn.notes.is_empty() {
-                message = format!("{}\n\n{message}", turn.notes.join("\n"));
-            }
-            self.update(id, |job| job.round = Some(round + 1));
+            return Ok(());
         }
+    }
 
-        let head = self.keep_commits(id).await?;
-        let commits = if start_commit.is_empty() || head == start_commit {
-            0
-        } else {
-            git::git(
-                &worktree,
-                &["rev-list", "--count", &format!("{start_commit}..HEAD")],
-            )
-            .await
-            .ok()
-            .and_then(|n| n.parse::<u64>().ok())
-            .unwrap_or(0)
-        };
-        let job = self.get(id).ok_or("the job is gone")?;
-        let first_line = job.summary.lines().next().unwrap_or("").trim().to_owned();
-        // A round the owner asked for may end with nothing committed: their words decide.
-        if COMMITTING.contains(&job.kind.as_str()) && commits == 0 && !job.asked {
-            return Err(format!("Nothing committed: {first_line}"));
-        }
+    /// Ends the job `id` done with `commits` (and `pushed` of them on its pull request), then
+    /// `change`: unless it was stopped meanwhile.
+    fn end_done(&self, id: &str, commits: u64, pushed: Option<u64>, change: impl FnOnce(&mut Job)) {
         self.update(id, |job| {
+            if !job.status.is_active() {
+                return;
+            }
             job.status = Status::Done;
             job.step = String::new();
             job.asked = false;
             job.commits = Some(commits);
-            if commits > 0 {
-                job.publish_error = Some(format!(
-                    "obid doesn't publish yet: the branch {} keeps the {commits} commit(s).",
-                    job.branch
-                ));
-            }
+            job.pushed = pushed;
+            job.publish_step = None;
             job.finished = Some(obi_protocol::time::now());
+            change(job);
         });
-        Ok(())
+    }
+
+    /// How many of `commits` (up to `head`) its pull request has: those in the commit obid pushed
+    /// last. A rebase rewrites them, so then it's none, and they're published again. The count from
+    /// its last publish when there's no pushed commit to compare with or git can't say.
+    async fn still_pushed(&self, job: &Job, head: &str, commits: u64) -> Option<u64> {
+        let (Some(_), Some(pushed_head)) = (&job.published, job.pushed_head()) else {
+            return job.pushed;
+        };
+        let clone = git::clone_path(&self.config.home, &job.repo);
+        let unpushed = git::git(
+            &clone,
+            &["rev-list", "--count", &format!("{pushed_head}..{head}")],
+        )
+        .await
+        .ok()
+        .and_then(|n| n.parse::<u64>().ok());
+        match unpushed {
+            Some(unpushed) => Some(commits.saturating_sub(unpushed)),
+            None => job.pushed,
+        }
+    }
+
+    /// Where the job `id` publishes from and to.
+    fn publish_target(&self, job: &Job) -> Result<crate::publish::Target, String> {
+        let repo = self
+            .repo(&job.repo)
+            .ok_or_else(|| format!("Not published: {} isn't a repository obid knows.", job.repo))?;
+        let scratch = self
+            .config
+            .home
+            .join("tmp")
+            .join(format!("publish-{}", job.id));
+        let _ = std::fs::remove_dir_all(&scratch);
+        crate::store::make_private_dir(&scratch)
+            .map_err(|e| format!("Not published: obid couldn't make its scan's folder ({e})."))?;
+        Ok(crate::publish::Target {
+            clone: git::clone_path(&self.config.home, &repo.repo),
+            remote: repo.remote.clone(),
+            default_branch: repo.default_branch.clone(),
+            scratch,
+            gh: crate::github::gh(),
+            fetching: self.preparing(&repo.repo),
+        })
+    }
+
+    /// Publishes the job `id` now (crate::publish): `signal`, when the job's worker runs it, stops
+    /// it before the push and before the pull request. One publish at a time per job.
+    async fn publish_job(
+        self: &Arc<Self>,
+        id: &str,
+        signal: Option<watch::Receiver<Signal>>,
+        may: impl FnOnce(&Job) -> Result<(), crate::publish::Failure>,
+    ) -> Result<String, crate::publish::Failure> {
+        use crate::publish::Failure;
+        // `may` and the claim under one lock: nothing changes the job between them.
+        let job = {
+            let mut state = self.lock();
+            let job = state
+                .jobs
+                .get(id)
+                .cloned()
+                .ok_or_else(|| Failure::Failed("There's no such job.".into()))?;
+            may(&job)?;
+            if !state.publishing.insert(id.to_owned()) {
+                return Err(Failure::Busy);
+            }
+            job
+        };
+        let Some(base) = job.base.clone() else {
+            self.lock().publishing.remove(id);
+            return Err(Failure::Failed(
+                "Nothing to publish: it has no base.".into(),
+            ));
+        };
+        let outcome = match self.publish_target(&job) {
+            Ok(target) => {
+                let hooks = PublishHooks {
+                    jobs: self.clone(),
+                    id: id.to_owned(),
+                    signal,
+                };
+                let outcome = crate::publish::publish(&job, &base, &target, &hooks).await;
+                let _ = std::fs::remove_dir_all(&target.scratch);
+                outcome
+            }
+            Err(why) => Err(Failure::Failed(why)),
+        };
+        self.lock().publishing.remove(id);
+        if let Err(failure) = &outcome {
+            tracing::info!("job {id}: not published: {}", failure.line());
+        }
+        outcome
+    }
+
+    /// What publishing the job `id` by hand would do: obid's own sentence and the base, or why
+    /// there's nothing to publish (`409`).
+    pub fn publish_action(&self, id: &str) -> Option<Result<(String, String), String>> {
+        Some(publish_action_of(&self.get(id)?))
+    }
+
+    /// [`Jobs::publish_action`], said to a device that will ask its owner to approve it: obid
+    /// keeps, with the job, which of its runs it described and when (`Job::offers`).
+    pub fn offer_publish(&self, id: &str) -> Option<Result<(String, String), String>> {
+        let answer = publish_action_of(&self.get(id)?);
+        if answer.is_ok() {
+            self.update(id, |job| job.offered(obi_protocol::time::now()));
+        }
+        Some(answer)
+    }
+
+    /// The approvals devices give to publish by hand.
+    pub fn approvals(&self) -> &crate::approval::Approvals {
+        &self.approvals
+    }
+
+    /// Publishes the job `id` by hand, once a device approved `action` at `signed_at`: only when
+    /// that is still obid's own sentence for it, and it can only have been said of the job's
+    /// latest run (`Job::approvable_at`: the sentence names the branch, not its commits). Answers
+    /// the pull request's URL, or the line saying why not. Never a merge.
+    pub async fn publish_by_hand(
+        self: &Arc<Self>,
+        id: &str,
+        action: &str,
+        signed_at: i64,
+    ) -> Result<String, String> {
+        use crate::publish::Failure;
+        // Still obid's own sentence for the run that was approved, checked as it's claimed.
+        let may = |job: &Job| {
+            match publish_action_of(job) {
+            Ok(_) if !job.approvable_at(signed_at) => Err(Failure::Refused(
+                "The job ran again since obid said what publishing it would do. Approve it again in two minutes.".into(),
+            )),
+            Ok((now, _)) if now == action => Ok(()),
+            Ok(_) => Err(Failure::Refused(
+                "The job changed since it was approved. Approve it again.".into(),
+            )),
+            Err(why) => Err(Failure::Refused(why)),
+        }
+        };
+        match self.publish_job(id, None, may).await {
+            Ok(url) => {
+                self.update(id, |job| {
+                    job.publish_step = None;
+                    job.pushed = job.commits;
+                    job.was_published(url.clone());
+                });
+                self.follow.notify_one();
+                Ok(url)
+            }
+            Err(Failure::AlreadyOnBase(base)) => {
+                let line = Failure::AlreadyOnBase(base).line();
+                self.update(id, |job| {
+                    job.publish_step = None;
+                    if job.can_publish() {
+                        job.summary = format!("{line}\n\n{}", job.summary);
+                        job.commits = Some(0);
+                        job.publish_error = None;
+                    }
+                });
+                Err(line)
+            }
+            // Nothing ran: the job is as it was (the publish under way says how it went).
+            Err(failure @ (Failure::Busy | Failure::Refused(_))) => Err(failure.line()),
+            Err(failure) => {
+                let line = failure.line();
+                self.update(id, |job| {
+                    job.publish_step = None;
+                    if job.can_publish() {
+                        job.publish_error = Some(line.clone());
+                    }
+                });
+                Err(line)
+            }
+        }
+    }
+
+    /// Follows the published pull requests (runner-api.md, "Job pipeline and pull request
+    /// following"): when obid starts, right after it publishes one, and every three minutes while
+    /// they're open, with the owner's `gh`. Read only: it never posts, pushes or merges.
+    async fn follow_pull_requests(self: Arc<Self>) {
+        loop {
+            if self
+                .shutting_down
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return;
+            }
+            self.read_pull_requests().await;
+            let woken = self.follow.notified();
+            tokio::select! {
+                _ = tokio::time::sleep(FOLLOW_TICK) => {}
+                _ = woken => {}
+            }
+        }
+    }
+
+    /// One pass: every published pull request that's open (or not read yet), unless it was read,
+    /// or tried, in the last three minutes.
+    async fn read_pull_requests(&self) {
+        let now = obi_protocol::time::now();
+        let due: Vec<Job> = {
+            let state = self.lock();
+            state
+                .jobs
+                .values()
+                .filter(|job| {
+                    let Some(url) = &job.published else {
+                        return false;
+                    };
+                    if job.pull_request.as_ref().is_some_and(|pr| !pr.is_open()) {
+                        return false;
+                    }
+                    let fresh = |at: i64| now - at < FOLLOW_INTERVAL;
+                    let tried = state
+                        .followed
+                        .get(&job.id)
+                        .is_some_and(|(u, at)| u == url && fresh(*at));
+                    let read = job
+                        .pull_request
+                        .as_ref()
+                        .is_some_and(|pr| fresh(pr.checked_at));
+                    !tried && !read
+                })
+                .cloned()
+                .collect()
+        };
+        let gh = crate::github::gh();
+        for job in due {
+            let Some(url) = job.published.clone() else {
+                continue;
+            };
+            self.lock()
+                .followed
+                .insert(job.id.clone(), (url.clone(), now));
+            let read = match (&gh, crate::github::pull_request_number(&url, &job.repo)) {
+                (Some(gh), Some(number)) => crate::github::view(gh, &job.repo, number, now).await,
+                (None, _) => Err(
+                    "Couldn't refresh the pull request: GitHub's CLI (gh) isn't installed.".into(),
+                ),
+                (_, None) => Err(
+                    "Couldn't refresh the pull request: it isn't one of this repository's.".into(),
+                ),
+            };
+            self.update(&job.id, |job| {
+                if job.published.as_deref() != Some(url.as_str()) {
+                    return;
+                }
+                match read {
+                    Ok(pull_request) => {
+                        job.pull_request = Some(pull_request);
+                        job.pull_request_error = None;
+                    }
+                    Err(why) => job.pull_request_error = Some(why),
+                }
+            });
+        }
+    }
+}
+
+/// What publishing `job` by hand would do: obid's own sentence and the base, or why there's
+/// nothing to publish.
+fn publish_action_of(job: &Job) -> Result<(String, String), String> {
+    match (&job.base, job.can_publish()) {
+        (Some(base), true) => Ok((crate::publish::action(job, base), base.clone())),
+        _ => Err(if job.dismissed.is_some() {
+            "It was dismissed: there's nothing to publish.".into()
+        } else if job.status != Status::Done {
+            "Nothing to publish: the job hasn't finished.".into()
+        } else if job.kind == "review" || job.kind == "research" {
+            format!("Nothing to publish: a {} job doesn't publish.", job.kind)
+        } else if job.published.is_some() && job.unpublished() == 0 {
+            "It's already published, with every commit.".into()
+        } else if job.stranded() {
+            "Nothing to publish: its pull request was merged or closed.".into()
+        } else {
+            "Nothing to publish: the job made no commits.".into()
+        }),
+    }
+}
+
+/// How often the pull request follower looks for one that's due.
+const FOLLOW_TICK: Duration = Duration::from_secs(30);
+/// How long a read of a pull request (or a try) stands before it's read again: three minutes.
+const FOLLOW_INTERVAL: i64 = 180;
+
+/// What publishing tells a job as it goes (crate::publish::Hooks).
+struct PublishHooks {
+    jobs: Arc<Jobs>,
+    id: String,
+    /// The job's worker's signal, when it publishes by itself: a stop means nothing more goes out.
+    signal: Option<watch::Receiver<Signal>>,
+}
+
+impl crate::publish::Hooks for PublishHooks {
+    fn progress(&self, step: crate::publish::Step) {
+        self.jobs
+            .update(&self.id, |job| job.publish_step = Some(step));
+    }
+
+    fn proceed(&self) -> bool {
+        self.signal
+            .as_ref()
+            .is_none_or(|signal| *signal.borrow() == Signal::Run)
+    }
+
+    fn sent(&self, outgoing: crate::publish::Outgoing) {
+        // The journal: one line per action, ids only.
+        tracing::info!(
+            "job {}: sent {} {} {} {}",
+            self.id,
+            outgoing.action,
+            outgoing.repo,
+            outgoing.branch.as_deref().unwrap_or(""),
+            outgoing.id
+        );
+        self.jobs
+            .update(&self.id, |job| job.outgoing.push(outgoing));
     }
 }
 

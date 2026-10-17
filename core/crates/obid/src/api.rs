@@ -111,7 +111,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         )
         .route(
             "/v1/jobs/{id}/publish",
-            get(crate::routes::publish_action).post(crate::routes::publish_action),
+            get(crate::routes::publish_action).post(crate::routes::publish),
         )
         .route("/v1/stop-all", post(crate::routes::stop_all))
         .route("/v1/clear", post(crate::routes::clear))

@@ -2,7 +2,9 @@
 //! every text before it leaves, ported from Engine/Publish.swift (`Publish.rules`, `matches`,
 //! `decoded`, `wrapped`, `gitleaks`). Its built-in rules on each line, in plain text and in the
 //! base64, hex and URL-encoded copies a line hides; runs of encoded lines joined; and gitleaks on
-//! the same lines when it's installed. If the scan can't run, nothing goes out.
+//! the same lines when it's installed. If the scan can't run, nothing goes out. A diff is read as
+//! the lines it adds, at their line in the new file, and the names of the files it touches
+//! (`in_diff`, for publishing: crate::publish).
 //!
 //! A token split with spaces, dashes or zero-width characters, or written backwards, is checked
 //! too: the separators come out and the line is read both ways (#476). obid has no vault yet
@@ -535,27 +537,330 @@ pub fn built_in(texts: &[(String, String)]) -> Vec<Finding> {
     all
 }
 
+/// A line a diff adds, and where it lands in the new file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Added {
+    pub file: String,
+    pub number: usize,
+    pub text: String,
+}
+
+/// The files a `git diff` or `git log -p` touches, and the lines it adds (Engine/Publish.swift,
+/// `Publish.parse`).
+pub fn parse_diff(diff: &str) -> (Vec<String>, Vec<Added>) {
+    let mut files = Vec::new();
+    let mut lines = Vec::new();
+    let mut file = String::new();
+    let mut number = 0usize;
+    let mut in_hunk = false;
+    for line in diff.split('\n') {
+        if line.starts_with("diff --git ") {
+            // A name with a tab, newline, quote or backslash in it, git writes quoted, with C
+            // escapes.
+            file = match (line.ends_with('"'), line.rfind(" \"b/")) {
+                (true, Some(at)) => unquoted(&line[at + 1..])
+                    .strip_prefix("b/")
+                    .unwrap_or_default()
+                    .to_owned(),
+                _ => {
+                    let names = line.replace('"', "");
+                    match names.rfind(" b/") {
+                        Some(at) => names[at + 3..].to_owned(),
+                        None => names,
+                    }
+                }
+            };
+            files.push(file.clone());
+            in_hunk = false;
+        } else if !in_hunk && let Some(name) = line.strip_prefix("+++ ") {
+            // The new file's name as git writes it on its own line: exact, where the header's
+            // `a/… b/…` can't be split when a name holds " b/". Quoted when it holds a tab, a
+            // newline, a quote or a backslash; a tab after it when it holds a space.
+            let name = name.strip_suffix('\t').unwrap_or(name);
+            let name = if name.starts_with('"') {
+                unquoted(name)
+            } else {
+                name.to_owned()
+            };
+            if let Some(name) = name.strip_prefix("b/") {
+                file = name.to_owned();
+                if let Some(last) = files.last_mut() {
+                    *last = file.clone();
+                }
+            }
+        } else if let Some(captures) = cached!(r"^@@ -\d+(?:,\d+)? \+(\d+)").captures(line) {
+            number = captures[1].parse().unwrap_or(0);
+            in_hunk = true;
+        } else if in_hunk && let Some(text) = line.strip_prefix('+') {
+            lines.push(Added {
+                file: file.clone(),
+                number,
+                text: text.to_owned(),
+            });
+            number += 1;
+        } else if in_hunk && line.starts_with(' ') {
+            number += 1;
+        }
+    }
+    (files, lines)
+}
+
+/// A path as git quotes it (`"b/a\tb\303\251"`: C escapes, octal bytes), as it is.
+fn unquoted(quoted: &str) -> String {
+    let Some(inner) = quoted
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    else {
+        return quoted.to_owned();
+    };
+    let mut bytes = Vec::new();
+    let mut rest = inner.bytes().peekable();
+    while let Some(byte) = rest.next() {
+        if byte != b'\\' {
+            bytes.push(byte);
+            continue;
+        }
+        let Some(next) = rest.next() else {
+            bytes.push(byte);
+            break;
+        };
+        if (b'0'..=b'7').contains(&next) {
+            let mut value = u32::from(next - b'0');
+            for _ in 0..2 {
+                match rest.peek() {
+                    Some(digit) if (b'0'..=b'7').contains(digit) => {
+                        value = value * 8 + u32::from(*digit - b'0');
+                        rest.next();
+                    }
+                    _ => break,
+                }
+            }
+            bytes.push(value as u8);
+        } else {
+            bytes.push(match next {
+                b't' => 9,
+                b'n' => 10,
+                b'r' => 13,
+                b'a' => 7,
+                b'b' => 8,
+                b'f' => 12,
+                b'v' => 11,
+                other => other,
+            });
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// A file that holds secrets by its name alone (Engine/Publish.swift, `Publish.secretFile`).
+pub fn secret_file(path: &str) -> Option<&'static str> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if name == ".env"
+        || (name.starts_with(".env.")
+            && ![".env.example", ".env.sample", ".env.template"].contains(&name))
+    {
+        return Some(".env file");
+    }
+    if ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"].contains(&name)
+        || name.ends_with(".p12")
+        || name.ends_with(".pfx")
+    {
+        return Some("private key file");
+    }
+    None
+}
+
+/// What the built-in rules and the secrets obid holds find in the lines a diff adds, each place
+/// once, at their line in the new file, runs of encoded lines joined. Each is named by its file,
+/// as [`shown_name`] shows it. The names themselves are [`in_names`]'.
+pub fn in_diff(diff: &str) -> Vec<Finding> {
+    let (_, added) = parse_diff(diff);
+    let mut all = Vec::new();
+    let lines: Vec<Line<'_>> = added
+        .iter()
+        .map(|a| Line {
+            name: &a.file,
+            number: a.number,
+            text: &a.text,
+        })
+        .collect();
+    for line in &lines {
+        all.extend(line_rules(line.text).into_iter().map(|rule| Finding {
+            name: line.name.to_owned(),
+            line: Some(line.number),
+            rule,
+        }));
+        if holds_known_secret(line.text) {
+            all.push(Finding {
+                name: line.name.to_owned(),
+                line: Some(line.number),
+                rule: "vault secret".into(),
+            });
+        }
+    }
+    all.extend(wrapped(&lines));
+    for finding in &mut all {
+        finding.name = shown_name(&finding.name);
+    }
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|f| seen.insert(f.clone()));
+    all
+}
+
+/// What a finding in a file is called: the file's path, unless the path itself holds a possible
+/// secret (by the rules, or one obid holds): then never the path, which is what would leak.
+pub fn shown_name(path: &str) -> String {
+    if risky_name(path) {
+        HIDDEN_NAME.into()
+    } else {
+        path.to_owned()
+    }
+}
+
+/// What a file whose name holds a possible secret is called, wherever obid says where it found one.
+pub const HIDDEN_NAME: &str = "a file whose name obid won't show";
+
+/// Whether a name holds what the rules or the secrets obid holds flag.
+pub fn risky_name(name: &str) -> bool {
+    !line_rules(name).is_empty() || holds_known_secret(name)
+}
+
+/// A name a push adds: a file's (or a submodule's) own name, or a folder's.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Name {
+    pub name: String,
+    pub folder: bool,
+}
+
+/// What the rules find in the names a push adds (each a file's or a folder's own name): a file
+/// that holds secrets by its name alone (`.env`, a private key's file; not a folder named so), the
+/// built-in rules on it as on a line, and the secrets obid holds. A finding is named by the entry,
+/// or [`HIDDEN_NAME`] when the name is the secret.
+pub fn in_names(names: &[Name]) -> Vec<Finding> {
+    let mut all = Vec::new();
+    for Name { name, folder } in names {
+        let shown = shown_name(name);
+        if let Some(rule) = secret_file(name).filter(|_| !folder) {
+            all.push(Finding {
+                name: shown.clone(),
+                line: None,
+                rule: rule.into(),
+            });
+        }
+        if holds_known_secret(name) {
+            all.push(Finding {
+                name: shown.clone(),
+                line: None,
+                rule: "vault secret in a name".into(),
+            });
+        }
+        all.extend(line_rules(name).into_iter().map(|rule| Finding {
+            name: shown.clone(),
+            line: None,
+            rule: format!("{rule} in a name"),
+        }));
+    }
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|f| seen.insert(f.clone()));
+    all
+}
+
+/// The secrets obid holds in a whole file (`name`), line by line, in every form [`holds_known_secret`]
+/// reads: what a push sends in a file even where no hunk of the diff shows it.
+pub fn known_secrets_in_file(text: &str, name: &str) -> Vec<Finding> {
+    if crate::secrets::known().is_empty() {
+        return Vec::new();
+    }
+    let name = shown_name(name);
+    text.split('\n')
+        .enumerate()
+        .filter(|(_, line)| holds_known_secret(line))
+        .map(|(i, _)| Finding {
+            name: name.clone(),
+            line: Some(i + 1),
+            rule: "vault secret".into(),
+        })
+        .collect()
+}
+
+/// gitleaks on names, each on a line of its own (a newline or carriage return in a name is written
+/// as `\n` or `\r`, so no name spills onto the next line): each finding as the index of the name
+/// it was in (none when gitleaks couldn't say: it still counts), and its rule.
+pub async fn gitleaks_names(
+    names: &[String],
+    scratch: &Path,
+) -> Result<Vec<(Option<usize>, String)>, String> {
+    Ok(name_findings(
+        gitleaks_lines(&name_lines(names), scratch).await?,
+    ))
+}
+
+/// What gitleaks found in the names, each with the index of its name, or none when gitleaks
+/// couldn't say which (no report it could read, a line it wasn't given): that one still counts.
+fn name_findings(found: Vec<Finding>) -> Vec<(Option<usize>, String)> {
+    found
+        .into_iter()
+        .map(|f| (f.name.parse().ok(), f.rule))
+        .collect()
+}
+
+/// Each name as one line, named by its index.
+fn name_lines(names: &[String]) -> Vec<(String, usize, String)> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            (
+                i.to_string(),
+                1,
+                name.replace('\n', "\\n").replace('\r', "\\r"),
+            )
+        })
+        .collect()
+}
+
 /// gitleaks on the same lines, when it's installed: `Ok` with what it found (nothing when it isn't
 /// installed), `Err` when it is and couldn't run. It runs in a folder of its own under `scratch`,
 /// with only `PATH`, `HOME` and `TMPDIR` (that folder), so no configuration of the machine's or
 /// the person's changes what it looks for.
 pub async fn gitleaks(texts: &[(String, String)], scratch: &Path) -> Result<Vec<Finding>, String> {
+    gitleaks_lines(&lines_of(texts), scratch).await
+}
+
+/// [`gitleaks`] on lines that already know where they are: each `(name, line, text)`, like the
+/// lines a diff adds, each at its line in the new file.
+pub async fn gitleaks_lines(
+    lines: &[(String, usize, String)],
+    scratch: &Path,
+) -> Result<Vec<Finding>, String> {
     match crate::process::resolve_bin("gitleaks") {
-        Some(bin) => gitleaks_with(&bin, texts, scratch).await,
+        Some(bin) => gitleaks_with(&bin, lines, scratch).await,
         None => Ok(Vec::new()),
     }
 }
 
-/// [`gitleaks`] with the binary `bin`.
+/// Every line of every text, in order, numbered from 1 within its text.
+fn lines_of(texts: &[(String, String)]) -> Vec<(String, usize, String)> {
+    texts
+        .iter()
+        .flat_map(|(name, text)| {
+            text.split('\n')
+                .enumerate()
+                .map(move |(i, line)| (name.clone(), i + 1, line.to_owned()))
+        })
+        .collect()
+}
+
+/// [`gitleaks_lines`] with the binary `bin`.
 async fn gitleaks_with(
     bin: &Path,
-    texts: &[(String, String)],
+    lines: &[(String, usize, String)],
     scratch: &Path,
 ) -> Result<Vec<Finding>, String> {
     let folder = scratch.join(format!("scan-{}", hex::encode(random_bytes())));
     crate::store::make_private_dir(&folder)
         .map_err(|e| format!("can't make the scan's folder: {e}"))?;
-    let result = run_gitleaks(bin, texts, &folder).await;
+    let result = run_gitleaks(bin, lines, &folder).await;
     let _ = std::fs::remove_dir_all(&folder);
     result
 }
@@ -568,18 +873,12 @@ fn random_bytes() -> [u8; 8] {
 
 async fn run_gitleaks(
     bin: &Path,
-    texts: &[(String, String)],
+    lines: &[(String, usize, String)],
     folder: &Path,
 ) -> Result<Vec<Finding>, String> {
-    // Every line of every text, in order, and where each came from.
-    let mut places: Vec<(String, usize)> = Vec::new();
-    let mut joined: Vec<&str> = Vec::new();
-    for (name, text) in texts {
-        for (i, line) in text.split('\n').enumerate() {
-            places.push((name.clone(), i + 1));
-            joined.push(line);
-        }
-    }
+    // Every line, in order, and where each came from.
+    let places: Vec<(String, usize)> = lines.iter().map(|(n, i, _)| (n.clone(), *i)).collect();
+    let joined: Vec<&str> = lines.iter().map(|(_, _, text)| text.as_str()).collect();
     let input = folder.join("texts.txt");
     let report = folder.join("report.json");
     std::fs::write(&input, joined.join("\n")).map_err(|e| format!("can't write the texts: {e}"))?;
@@ -779,7 +1078,9 @@ exit 99"#,
             ("summary".to_owned(), "one\ntwo".to_owned()),
             ("finding 1 detail".to_owned(), "three".to_owned()),
         ];
-        let found = gitleaks_with(&bin, &texts, &folder).await.unwrap();
+        let found = gitleaks_with(&bin, &lines_of(&texts), &folder)
+            .await
+            .unwrap();
         assert_eq!(
             found,
             [Finding {
@@ -802,7 +1103,7 @@ exit 99"#,
     async fn a_gitleaks_that_fails_is_a_scan_that_couldnt_run() {
         let folder = scratch("broken");
         let bin = fake_gitleaks(&folder, "echo 'config is broken' >&2\nexit 1");
-        let why = gitleaks_with(&bin, &texts("clean text"), &folder)
+        let why = gitleaks_with(&bin, &lines_of(&texts("clean text")), &folder)
             .await
             .unwrap_err();
         assert!(
@@ -811,7 +1112,7 @@ exit 99"#,
         );
         let clean = fake_gitleaks(&folder, "exit 0");
         assert_eq!(
-            gitleaks_with(&clean, &texts("clean"), &folder).await,
+            gitleaks_with(&clean, &lines_of(&texts("clean")), &folder).await,
             Ok(Vec::new())
         );
         let _ = std::fs::remove_dir_all(&folder);
@@ -920,6 +1221,211 @@ exit 99"#,
                 "{rel} is not clean: {verdict:?}"
             );
         }
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Engine/Publish.swift's `parse`: the lines a diff adds, at their line in the new file, under
+    /// the name its `+++` line gives, quoted ones and ones holding " b/" too.
+    #[test]
+    fn a_diff_is_read_as_its_added_lines() {
+        let aws = format!("{}{}", "AKIA", "ABCDEFGHIJKLMNOP");
+        let diff = format!(
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +10,4 @@ fn x\n context\n-gone\n+let key = \"{aws}\";\n context\n+added\ndiff --git \"a/t\\tb\\303\\251\" \"b/t\\tb\\303\\251\"\n--- /dev/null\n+++ \"b/t\\tb\\303\\251\"\n@@ -0,0 +1 @@\n+hello\ndiff --git a/x b/y b/x b/y\n--- /dev/null\n+++ b/x b/y\t\n@@ -0,0 +1 @@\n+hi\n"
+        );
+        let (files, added) = parse_diff(&diff);
+        assert_eq!(files, ["src/a.rs", "t\tbé", "x b/y"]);
+        assert_eq!(
+            added
+                .iter()
+                .map(|a| (a.file.as_str(), a.number))
+                .collect::<Vec<_>>(),
+            [
+                ("src/a.rs", 11),
+                ("src/a.rs", 13),
+                ("t\tbé", 1),
+                ("x b/y", 1)
+            ]
+        );
+        let found = in_diff(&diff);
+        assert_eq!(
+            found,
+            [Finding {
+                name: "src/a.rs".into(),
+                line: Some(11),
+                rule: "AWS access key".into()
+            }]
+        );
+        assert_eq!(secret_file("keys/id_ed25519"), Some("private key file"));
+        assert_eq!(secret_file(".env.example"), None);
+    }
+
+    /// A key split over added lines in base64 is found at the run's first line, and a secret obid
+    /// holds is found in a name, which is never shown: not in the name's finding, not in a
+    /// finding in the file's content.
+    #[test]
+    fn a_diff_hides_nothing_in_wrapped_lines_or_names() {
+        let b64 =
+            base64::engine::general_purpose::STANDARD.encode(format!("ghp_{}", "b".repeat(36)));
+        let (a, b) = b64.split_at(20);
+        let diff = format!("diff --git a/k b/k\n@@ -0,0 +4,2 @@\n+{a}\n+{b}\n");
+        assert!(
+            in_diff(&diff)
+                .iter()
+                .any(|f| f.rule == "GitHub token, base64" && f.line == Some(4)),
+            "{:?}",
+            in_diff(&diff)
+        );
+        // Learned under a name of this test's own: tests run side by side.
+        struct Forget;
+        impl Drop for Forget {
+            fn drop(&mut self) {
+                crate::secrets::known().forget("scan-diff-test");
+            }
+        }
+        let vault = format!("vaultname{}", "d".repeat(16));
+        crate::secrets::known().learn("scan-diff-test", &vault);
+        let _forget = Forget;
+        let named = in_names(&[file(&format!("{vault}.txt"))]);
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert_eq!(named[0].rule, "vault secret in a name");
+        assert_eq!(named[0].name, HIDDEN_NAME);
+        let whole = known_secrets_in_file(&format!("one\nx = {vault}\n"), "f.txt");
+        assert_eq!(whole.len(), 1);
+        assert_eq!(whole[0].line, Some(2));
+        let content = in_diff(&format!(
+            "diff --git a/{vault}/k b/{vault}/k\n--- /dev/null\n+++ b/{vault}/k\n@@ -0,0 +1 @@\n+{}{}\n",
+            "AKIA", "ABCDEFGHIJKLMNOP"
+        ));
+        assert_eq!(content.len(), 1, "{content:?}");
+        assert_eq!(content[0].name, HIDDEN_NAME);
+    }
+
+    fn file(name: &str) -> Name {
+        Name {
+            name: name.into(),
+            folder: false,
+        }
+    }
+
+    /// A name goes out as it is: the rules read it like a line, and the finding never repeats it.
+    /// A file named `.env` holds secrets by its name; a folder named `.env.d` doesn't.
+    #[test]
+    fn a_token_in_a_name_is_found_and_never_shown() {
+        let token = format!("ghp_{}", "e".repeat(36));
+        let found = in_names(&[
+            file(&format!("{token}.txt")),
+            file(".env"),
+            Name {
+                name: ".env.d".into(),
+                folder: true,
+            },
+        ]);
+        assert_eq!(
+            found,
+            [
+                Finding {
+                    name: HIDDEN_NAME.into(),
+                    line: None,
+                    rule: "GitHub token in a name".into()
+                },
+                Finding {
+                    name: ".env".into(),
+                    line: None,
+                    rule: ".env file".into()
+                }
+            ]
+        );
+    }
+
+    /// The names of this repository's own files and folders, read as a push would add them, raise
+    /// nothing but what a file's name holds by itself; and a token named among them is found, and
+    /// only it.
+    #[test]
+    fn this_repositorys_names_are_clean_and_a_token_among_them_is_found() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let files = std::process::Command::new("git")
+            .args(["ls-files", "-z"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let mut names: Vec<Name> = Vec::new();
+        for path in String::from_utf8_lossy(&files.stdout)
+            .split('\0')
+            .filter(|p| !p.is_empty())
+        {
+            let parts: Vec<&str> = path.split('/').collect();
+            for (i, part) in parts.iter().enumerate() {
+                names.push(Name {
+                    name: (*part).into(),
+                    folder: i + 1 < parts.len(),
+                });
+            }
+        }
+        names.sort();
+        names.dedup();
+        assert!(names.len() > 100, "{}", names.len());
+        let token = format!("ghp_{}", "f".repeat(36));
+        names.push(file(&format!("{token}.txt")));
+        let found = in_names(&names);
+        let by_rules: Vec<&Finding> = found
+            .iter()
+            .filter(|f| f.rule.ends_with(" in a name"))
+            .collect();
+        assert_eq!(
+            by_rules,
+            [&Finding {
+                name: HIDDEN_NAME.into(),
+                line: None,
+                rule: "GitHub token in a name".into()
+            }],
+            "{found:?}"
+        );
+        // The rest: files that hold secrets by their name alone, each a file of this repository.
+        assert!(
+            found
+                .iter()
+                .filter(|f| !f.rule.ends_with(" in a name"))
+                .all(|f| secret_file(&f.name).is_some()),
+            "{found:?}"
+        );
+    }
+
+    /// A finding gitleaks couldn't place in a name (`?`) still counts, with no name.
+    #[test]
+    fn a_name_finding_with_no_place_still_counts() {
+        let found = |name: &str| Finding {
+            name: name.into(),
+            line: None,
+            rule: "gitleaks".into(),
+        };
+        assert_eq!(
+            name_findings(vec![found("2"), found("?")]),
+            [
+                (Some(2), "gitleaks".to_owned()),
+                (None, "gitleaks".to_owned())
+            ]
+        );
+    }
+
+    /// Names go to gitleaks one per line: a newline in a name doesn't move the next name's line,
+    /// so a finding names the right one.
+    #[tokio::test]
+    async fn a_newline_in_a_name_moves_no_other_name() {
+        let folder = scratch("names");
+        // It reports the line that reads `c`, wherever that is in what it was given.
+        let bin = fake_gitleaks(
+            &folder,
+            r#"for a in "$@"; do case "$a" in --report-path=*) report="${a#--report-path=}";; esac; done
+line=$(grep -n '^c$' "$2" | cut -d: -f1)
+echo "[{\"StartLine\": $line, \"RuleID\": \"github-pat\"}]" > "$report"
+exit 99"#,
+        );
+        let names = vec!["a\nb".to_owned(), "c".to_owned()];
+        let found = gitleaks_with(&bin, &name_lines(&names), &folder)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "1", "{found:?}");
         let _ = std::fs::remove_dir_all(&folder);
     }
 

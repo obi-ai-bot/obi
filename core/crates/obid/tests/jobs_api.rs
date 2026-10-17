@@ -119,6 +119,17 @@ fn put_token(config: &Value, token: &str) {
 }
 
 fn start(folder: &Path, config: &Value) -> Obid {
+    start_with(folder, config, None)
+}
+
+/// [`start`] with `path_first` first on obid's `PATH`.
+fn start_with(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
+    let mut search = std::env::var_os("PATH").unwrap_or_default();
+    if let Some(first) = path_first {
+        let mut dirs = vec![first.to_path_buf()];
+        dirs.extend(std::env::split_paths(&search));
+        search = std::env::join_paths(dirs).unwrap();
+    }
     let path = folder.join("config.json");
     put_token(config, TOKEN);
     std::fs::write(&path, config.to_string()).unwrap();
@@ -129,7 +140,7 @@ fn start(folder: &Path, config: &Value) -> Obid {
         .args(["serve", "--config"])
         .arg(&path)
         .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("PATH", search)
         .env("HOME", folder.join("env-home"))
         .env("TMPDIR", folder.join("tmp"))
         // What obid must keep from its agents, whatever its own environment holds.
@@ -367,15 +378,34 @@ fn dispatch_takes_only_whole_jobs() {
     assert_eq!(request(&obid, "GET", "/v1/jobs", None).body, json!([]));
 }
 
+/// A stand-in `gh` in `folder/bin` that keeps its arguments (`folder/gh-calls`) and environment
+/// (`folder/gh-env`), and opens pull request 7.
+fn fake_gh(folder: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = folder.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\nenv >> '{env}'\ncase \"$1 $2\" in\n  \"pr list\") exit 0 ;;\n  \"pr create\") echo https://github.com/obi-e2e/fixture-app/pull/7 ;;\n  *) exit 1 ;;\nesac\n",
+        calls = folder.join("gh-calls").display(),
+        env = folder.join("gh-env").display()
+    );
+    std::fs::write(bin.join("gh"), script).unwrap();
+    std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
 /// A build job: its own branch from the base, the agent commits in the sandbox, the check passes,
-/// and the job ends done with its commit counted. obid publishes nothing yet: the remote is as it
-/// was, and the job says so.
+/// the job ends done with its commit counted, and publishes it: its branch pushed to the remote and
+/// its pull request opened with the owner's `gh` (a stand-in here), which gets no token from
+/// obid's environment. The base on the remote never moves: obid never merges. (A job whose scan
+/// finds a possible secret, or can't run, publishes nothing: tests/publish_api.rs.)
 #[test]
 fn a_build_job_commits_and_ends_done() {
     let folder = Folder::new("build");
     let remote = fixture(&folder.0.join("fixture"));
-    let refs = git(&remote, &["for-each-ref"]);
-    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let main = git(&remote, &["rev-parse", "refs/heads/main"]);
+    let bin = fake_gh(&folder.0);
+    let obid = start_with(&folder.0, &config(&folder.0, &remote), Some(&bin));
     let answer = post_job(
         &obid,
         json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: hello.txt", "check": "test -f hello.txt", "title": "Hello file"}),
@@ -392,12 +422,12 @@ fn a_build_job_commits_and_ends_done() {
     assert_eq!(job["commits"], 1);
     assert_eq!(job["summary"], "Added hello.txt.");
     assert_eq!(job["session"], "00000000-0000-4000-8000-000000000001");
-    assert!(
-        job["publishError"]
-            .as_str()
-            .unwrap()
-            .contains("doesn't publish yet")
+    assert_eq!(job["publishError"], Value::Null, "{job}");
+    assert_eq!(
+        job["published"],
+        "https://github.com/obi-e2e/fixture-app/pull/7"
     );
+    assert_eq!(job["pushed"], 1);
     assert_eq!(
         job["startCommit"],
         "aeab70f3025191d31993e778dba0eacc96c3b913"
@@ -431,7 +461,48 @@ fn a_build_job_commits_and_ends_done() {
     );
     // Its own objects aside, the clone has every object of the branch.
     git(&clone, &["fsck", "--connectivity-only", "--no-dangling"]);
-    assert_eq!(git(&remote, &["for-each-ref"]), refs);
+    // Published: the branch on the remote is the job's commit, its pull request opened into the
+    // base, both listed in `outgoing`; the base is where it was.
+    let head = git(&worktree, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git(
+            &remote,
+            &["rev-parse", &format!("refs/heads/oby/build-{id}")]
+        ),
+        head
+    );
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), main);
+    let actions: Vec<(&str, &str)> = job["outgoing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| (o["action"].as_str().unwrap(), o["id"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            ("push", head.as_str()),
+            (
+                "pullRequest",
+                "https://github.com/obi-e2e/fixture-app/pull/7"
+            )
+        ]
+    );
+    let calls = std::fs::read_to_string(folder.0.join("gh-calls")).unwrap();
+    assert!(
+        calls.contains(&format!(
+            "pr create -R obi-e2e/fixture-app --base main --head oby/build-{id} --title=feat: added hello.txt --body-file "
+        )),
+        "{calls}"
+    );
+    // obid's environment holds GH_TOKEN (start_with): gh never gets it.
+    let gh_env = std::fs::read_to_string(folder.0.join("gh-env")).unwrap();
+    assert!(
+        !gh_env.contains("GH_TOKEN")
+            && !gh_env.contains("ANTHROPIC_API_KEY")
+            && !gh_env.contains("CLAUDECODE"),
+        "{gh_env}"
+    );
     let stages: Vec<(String, String)> = job["pipeline"]["stages"]
         .as_array()
         .unwrap()
@@ -451,7 +522,7 @@ fn a_build_job_commits_and_ends_done() {
             ("check".into(), "done".into())
         ]
     );
-    assert_eq!(stages[3], ("publish".into(), "failed".into()));
+    assert_eq!(stages[3], ("publish".into(), "done".into()));
     // The list, newest first, and the job by id, the same.
     let list = request(&obid, "GET", "/v1/jobs?limit=5", None).body;
     assert_eq!(list[0]["id"], id.as_str());

@@ -1190,8 +1190,7 @@ fn a_running_job_hears_the_words_next_and_the_owners_round_may_commit_nothing() 
 }
 
 /// DismissTests.theAPIDismissesAndSaysWhenItCant, its last line: publishing a dismissed job by hand
-/// is off, `409` (and `404` for an unknown job). obid publishes nothing for its owner yet, so every
-/// job answers `409`, saying why.
+/// is off, `409`, saying so (and `404` for an unknown job).
 #[test]
 fn publish_by_hand_is_off_a_dismissed_job() {
     let folder = Folder::new("publish");
