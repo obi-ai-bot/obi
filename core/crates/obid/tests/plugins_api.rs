@@ -183,6 +183,26 @@ fn obid_runs_with_no_plugin_enabled_and_tetrix_listed_disabled() {
     assert!(obid.stop().success());
 }
 
+/// A plug-in host that started with no plug-in to find lists none: `200 []`. (One that didn't
+/// start answers `503` instead, #548; no home given to obid makes the host fail, so that is
+/// `plugins::tests::a_host_that_didnt_start_is_said_not_listed_as_empty`.)
+#[test]
+fn a_host_with_no_plugin_lists_none() {
+    let folder = Folder::new("plugins-empty");
+    let remote = fixture(&folder.0.join("fixture"));
+    let bundled = folder.0.join("bundled");
+    std::fs::create_dir_all(&bundled).unwrap();
+    let mut obid = start(
+        &folder.0,
+        &plugin_config(&folder.0, &remote, Some(&bundled)),
+        None,
+    );
+    let listed = call(&obid, "GET", "/v1/obid/plugins", None);
+    assert_eq!(listed.status, 200, "{}", listed.text);
+    assert_eq!(listed.body, json!([]));
+    assert!(obid.stop().success());
+}
+
 /// Tetrix is enabled and disabled through `PUT /v1/obid/plugins/tetrix` like any plug-in, and
 /// while it is enabled each job's agent gets its server, from the owner's URL, and exactly one
 /// permission rule per tool its manifest allows.
@@ -630,9 +650,13 @@ fn past_100_open_events_the_oldest_are_settled() {
         Some(&json!({"enabled": true, "config": {"burst": 105}})),
     );
     assert_eq!(enabled.body["state"], "ready", "{}", enabled.text);
+    // Settled first, then open: once the settled ones and the open ones read after them add up
+    // to 107, every event had come before the open ones were read, so they are the last word.
+    // The other way round, the 107th can come between the two reads and leave a stale open
+    // list that still adds up (#566).
     let open = within(30, "107 events in the inbox", || {
-        let open = plugin_events(&obid, false);
         let done = plugin_events(&obid, true);
+        let open = plugin_events(&obid, false);
         (open.len() + done.len() >= 107).then_some(open)
     });
     let done = plugin_events(&obid, true);
