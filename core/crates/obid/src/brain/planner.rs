@@ -459,6 +459,30 @@ impl Planner {
             user.push_str("The user says now:\n");
             user.push_str(said);
         }
+        // No vault secret reaches the brain: its prompt, system prompt, schema and quoted file
+        // go through the vault first, and a vault that can't be read runs no brain at all (fail
+        // closed, #570). Rules don't stand in either: the turn says why.
+        let (system, user, schema, quoted) = match for_brain(
+            &system,
+            &user,
+            &schema,
+            context.quoted.as_deref(),
+        ) {
+            Ok(parts) => parts,
+            Err(why) => {
+                tracing::warn!("brain: not asked: {why}");
+                return Planned {
+                    plan: Plan::of(
+                        Action::ReplyOnly,
+                        &format!(
+                            "The vault can't be read, so Oby asked its brain nothing: {why} Once it's fixed, say it again."
+                        ),
+                    ),
+                    by: "none".into(),
+                    refused: vec![format!("the vault can't be read: {why}")],
+                };
+            }
+        };
         let mut refused: Vec<String> = vec![];
         let deep = context.turn_step > 0
             || context.turn_length.unwrap_or_else(|| said.chars().count()) > 600;
@@ -479,7 +503,7 @@ impl Planner {
                         model,
                         &system,
                         &message,
-                        context.quoted.as_deref(),
+                        quoted.as_deref(),
                         &schema,
                         left,
                         halted,
@@ -547,6 +571,29 @@ impl Planner {
             refused,
         }
     }
+}
+
+/// What the brain gets, with the vault's secrets taken out ([`crate::vault::for_agent`]), or why
+/// the vault can't be read.
+fn for_brain(
+    system: &str,
+    user: &str,
+    schema: &str,
+    quoted: Option<&str>,
+) -> Result<(String, String, String, Option<String>), String> {
+    crate::vault::check().map_err(|why| {
+        why.trim_start_matches("the vault can't be read: ")
+            .to_owned()
+    })?;
+    let clean = |text: &str| {
+        crate::vault::for_agent(text).map_err(|_| "it couldn't be read just now.".to_owned())
+    };
+    Ok((
+        clean(system)?,
+        clean(user)?,
+        clean(schema)?,
+        quoted.map(clean).transpose()?,
+    ))
 }
 
 /// The brain's system prompt. `canary` is the turn's own word, which no plan may repeat; `quoted`

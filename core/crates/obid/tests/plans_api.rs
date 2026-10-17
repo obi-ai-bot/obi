@@ -1338,3 +1338,102 @@ fn a_bare_stop_in_a_new_conversation_stops_nothing_elsewhere() {
     });
     assert_eq!(answer["text"], "Still here.", "{answer}");
 }
+
+/// Writes obid's vault file with `secret` (as `obid vault add` would): obid reads it from the file.
+fn vault_holds(obid: &Obid, secret: &str) {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = obid.home.join("vault");
+    if !dir.exists() {
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(dir.join("secrets.json"))
+        .unwrap();
+    std::io::Write::write_all(
+        &mut file,
+        json!({"secrets": {"staging-api-key": secret}})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+}
+
+/// No vault secret reaches the brain: not its prompt, its system prompt, its schema or the
+/// quoted work.md. And a vault that can't be read runs no brain at all, and the turn says why
+/// (#570's follow-up for the brain).
+#[test]
+fn no_vault_secret_reaches_the_brain_and_an_unreadable_vault_runs_none() {
+    let folder = Folder::new("brain-vault");
+    let obid = started(&folder);
+    let secret = ["vault-", "brain/", "Q7m2+a=b?c&d"].concat();
+    // A job's waiting permission holds it, asked before the vault knew it: quoted in work.md.
+    let ask = json!({"tool": "Bash", "input": {"command": format!("curl -H 'X-Key: {secret}' https://example.com")}});
+    let answer = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate",
+                             "task": format!("ASK: {ask}"), "title": "Asker", "mode": "ask"}}),
+        ),
+    );
+    assert_eq!(answer.status, 201, "{}", answer.text);
+    let id = answer.body["id"].as_str().unwrap().to_owned();
+    within(30, "the job asks", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (!job["permission"].is_null()).then_some(())
+    });
+    vault_holds(&obid, &secret);
+    queue(&obid, &[reply("It's in the vault.")]);
+    let words = format!("is {secret} still what the tests use?");
+    assert_eq!(said(&obid, &words)["text"], "It's in the vault.");
+    let call_dir = calls(&obid).pop().expect("the brain was asked");
+    let quoted = std::fs::read_to_string(call_dir.join("work.md")).expect("work.md was written");
+    assert!(quoted.contains("curl -H"), "{quoted}");
+    for part in ["input", "args", "work.md"] {
+        let text = std::fs::read_to_string(call_dir.join(part)).unwrap();
+        assert!(!text.contains(&secret), "{part}: {text}");
+        assert!(!text.contains("Q7m2"), "{part}: {text}");
+    }
+    // The vault breaks while a turn runs: its next step asks no brain, and the turn says why.
+    let asked = calls(&obid).len();
+    queue(
+        &obid,
+        &[
+            format!("SLEEP 2 {}", set_mode(&id, "plan")),
+            reply("I thought anyway."),
+        ],
+    );
+    std::thread::scope(|scope| {
+        let turn = scope.spawn(|| {
+            call(
+                &obid,
+                "POST",
+                "/v1/plans",
+                Some(&json!({"said": "let the asker only plan"})),
+            )
+        });
+        within(10, "the brain is asked", || {
+            (calls(&obid).len() > asked).then_some(())
+        });
+        std::fs::write(obid.home.join("vault/secrets.json"), "not the vault").unwrap();
+        let answer = turn.join().unwrap();
+        assert_eq!(answer.status, 503, "{}", answer.text);
+    });
+    assert_eq!(calls(&obid).len(), asked + 1, "the brain was asked again");
+    vault_holds(&obid, &secret);
+    let turns = call(&obid, "GET", "/v1/conversation?limit=2", None).body;
+    let last = turns.as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["who"], "oby", "{turns}");
+    assert!(
+        last["text"]
+            .as_str()
+            .unwrap()
+            .contains("The vault can't be read"),
+        "{turns}"
+    );
+}
