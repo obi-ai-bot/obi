@@ -38,10 +38,17 @@ struct OfflineMessage: Codable, Equatable, Sendable {
     var voice: Bool
     var target: String?
     var queuedAt: Date = .now
+    /// The conversation the words were for (obid, #493), or whether they start one; nil on words
+    /// queued before conversations, which join the latest.
+    var conversation: String?
+    var new: Bool?
 
-    private enum CodingKeys: String, CodingKey { case id, said, question, option, voice, target, queuedAt }
+    private enum CodingKeys: String, CodingKey { case id, said, question, option, voice, target, queuedAt, conversation, new }
 
-    init(id: String, said: String, question: String?, option: String?, voice: Bool, target: String? = nil, queuedAt: Date = .now) {
+    init(id: String, said: String, question: String?, option: String?, voice: Bool, target: String? = nil, queuedAt: Date = .now,
+         conversation: String? = nil, new: Bool? = nil) {
+        self.conversation = conversation
+        self.new = new
         self.id = id
         self.said = said
         self.question = question
@@ -60,6 +67,8 @@ struct OfflineMessage: Codable, Equatable, Sendable {
         voice = try values.decode(Bool.self, forKey: .voice)
         target = try values.decodeIfPresent(String.self, forKey: .target)
         queuedAt = try values.decodeIfPresent(Date.self, forKey: .queuedAt) ?? .now
+        conversation = try? values.decodeIfPresent(String.self, forKey: .conversation)
+        new = try? values.decodeIfPresent(Bool.self, forKey: .new)
     }
 }
 

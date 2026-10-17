@@ -24,6 +24,7 @@ struct ConnectScreen: View {
 
     var body: some View {
         Form {
+            Group {
             Section {
                 if let link = phone.link {
                     LabeledContent("Mac", value: link.name)
@@ -85,7 +86,11 @@ struct ConnectScreen: View {
             } footer: {
                 Text("Pair with the QR code or six-digit code first. The tunnel and local network both require the device token pairing stores in this iPhone's keychain. This form can update the name for the same paired Mac.")
             }
+            }
+            .listRowBackground(Tokens.surface)
         }
+        .environment(\.defaultMinListRowHeight, 56)
+        .obyPage()
         .navigationTitle("Your Mac")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {

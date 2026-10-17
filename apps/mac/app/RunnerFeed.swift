@@ -302,6 +302,8 @@ final class RunnerFeed {
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     case .turn(let turn): conversation.apply(turn)
                     case .step(let step): conversation.apply(step)
+                    // The Mac shows one thread until it runs on obid.
+                    case .conversation: break
                     }
                 }
             } catch {

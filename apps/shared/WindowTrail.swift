@@ -84,6 +84,15 @@ nonisolated enum HomeLine {
         let first = fullName.split(separator: " ").first.map(String.init) ?? ""
         return first.isEmpty ? "What do you want me to work on?" : "What do you want me to work on, \(first)?"
     }
+
+    /// The iPhone doesn't know its owner's name: the linked Mac's own name often says it
+    /// ("Wellington's MacBook Pro"). Nil when it doesn't.
+    static func owner(ofMac name: String?) -> String? {
+        guard let name, let mark = name.firstIndex(where: { $0 == "'" || $0 == "’" }),
+              name[mark...].dropFirst().hasPrefix("s ") else { return nil }
+        let owner = name[..<mark].trimmingCharacters(in: .whitespaces)
+        return owner.isEmpty || owner.contains(" ") ? nil : owner
+    }
 }
 
 extension WindowTrail {

@@ -1,12 +1,14 @@
 import SwiftUI
 
-/// The field where you type a task or dictate one, with Send: at the bottom of Home and of Chat,
-/// one and the same. Tap the mic and what you say goes into the field as it's heard; tap Stop and
-/// the words stay there to edit and send (apps/ios/app/README.md, "Voice input").
+/// The message box (Sangam's Composer.tsx): a 46-point pill with a thin edge, the words growing to
+/// five lines, and at its end the mic, which turns into Send ↑ once there's text. The same box on
+/// Home, in a conversation and on a task's page. Tap the mic and what you say goes into the field
+/// as it's heard; tap Stop and the words stay there to edit and send (apps/ios/app/README.md,
+/// "Voice input"). There's no + : the iPhone sends no attachments yet.
 struct Composer: View {
     @Environment(Phone.self) private var phone
     @Binding var text: String
-    var prompt = "Type a task, like “Review oby PR #12”"
+    var prompt = "Reply to Oby…"
     /// The keyboard's focus, owned by the screen so it can take it after an edit or let it go.
     var typing: FocusState<Bool>.Binding
     /// Sends the field; true when it has dictated words, so Oby may speak its reply.
@@ -19,48 +21,71 @@ struct Composer: View {
     @State private var written: String?
 
     private var sendable: Bool { ChatThread.words(text) != nil }
+    private var dictating: Bool { phone.voice.active || phone.voice.finishing }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if phone.voice.active || phone.voice.finishing {
+            if dictating {
                 Text(phone.voice.finishing ? "Writing down…" : phone.voice.listening ? "Listening…" : "Getting ready…")
-                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12)
+                    .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.horizontal, 16)
             }
             if let problem = phone.voice.problem {
-                Text(problem).font(.footnote).foregroundStyle(.red).padding(.horizontal, 12)
+                Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.horizontal, 16)
             }
-            HStack(spacing: 8) {
-                TextField(prompt, text: $text, selection: $selection, axis: .vertical)
-                    .lineLimit(1...4)
+            HStack(alignment: .bottom, spacing: 2) {
+                TextField("", text: $text, selection: $selection, prompt: Text(prompt).foregroundStyle(Tokens.muted), axis: .vertical)
+                    .lineLimit(1...5)
+                    .font(Tokens.font(Tokens.textLg))
+                    .foregroundStyle(Color.white.opacity(0.9))
+                    .tint(Tokens.ink)
                     .focused(typing)
-                    .submitLabel(.send)
-                    .onSubmit(send)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .frame(minHeight: 32)
                     .accessibilityAddTraits(phone.voice.listening ? .updatesFrequently : [])
-                DictationMic(active: phone.voice.active, listening: phone.voice.listening,
-                             finishing: phone.voice.finishing, level: phone.voice.level, toggle: toggleDictation)
-                Button(action: send) {
-                    Image(systemName: "arrow.up")
-                        .font(.body.weight(.bold))
-                        .foregroundStyle(Color(uiColor: .systemBackground))
-                        .frame(width: 34, height: 34)
-                        .background(Color.primary.opacity(sendable ? 1 : 0.4), in: Circle())
-                }
-                .disabled(!sendable)
-                .accessibilityLabel("Send")
+                end
             }
-            .padding(.leading, 18)
-            .padding(.trailing, 7)
-            .padding(.vertical, 7)
-            .background(Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .padding(6)
+            .frame(minHeight: 46)
+            .overlay {
+                RoundedRectangle(cornerRadius: 23, style: .continuous)
+                    .strokeBorder(typing.wrappedValue ? Tokens.fieldEdgeOn : Tokens.line)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 23, style: .continuous))
+            .onTapGesture { typing.wrappedValue = true }
+            .animation(Tokens.fade, value: typing.wrappedValue)
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, Tokens.gutter)
+        .padding(.top, 8)
         .padding(.bottom, 8)
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(Tokens.bg)
         .onChange(of: text) {
             // Typed, sent or filled from elsewhere: the words heard so far stay, later ones don't come.
-            if text != written, phone.voice.active || phone.voice.finishing { phone.voice.cancel() }
+            if text != written, dictating { phone.voice.cancel() }
             if text.isEmpty { dictated = false }
         }
+    }
+
+    /// The mic while the box is empty (Stop while it listens), Send once there's text.
+    @ViewBuilder private var end: some View {
+        ZStack {
+            if dictating || !sendable {
+                DictationMic(active: phone.voice.active, listening: phone.voice.listening,
+                             finishing: phone.voice.finishing, level: phone.voice.level, toggle: toggleDictation)
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
+            } else {
+                Button(action: send) {
+                    Image(systemName: "arrow.up").font(Tokens.font(16, .semibold))
+                        .foregroundStyle(Color(hex: 0x111111))
+                        .frame(width: 32, height: 32)
+                        .background(Tokens.ink, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Send")
+                .transition(.scale(scale: 0.4).combined(with: .opacity))
+            }
+        }
+        .frame(width: 32, height: 32)
+        .animation(Tokens.spring, value: sendable)
     }
 
     private func send() {
@@ -92,7 +117,7 @@ struct Composer: View {
     }
 }
 
-/// The composer's mic: Dictate, or Stop with the input's level under it while it listens.
+/// The box's mic: Dictate, or a red Stop with the input's level under it while it listens.
 private struct DictationMic: View {
     let active: Bool
     let listening: Bool
@@ -102,18 +127,19 @@ private struct DictationMic: View {
 
     var body: some View {
         Button(action: toggle) {
-            VStack(spacing: 3) {
-                Image(systemName: active ? "stop.fill" : "mic.fill")
-                    .font(.body)
+            VStack(spacing: 2) {
+                Image(systemName: active ? "stop.fill" : "waveform")
+                    .font(Tokens.font(active ? 13 : 16, .regular))
                 if listening {
                     Capsule()
-                        .fill(Color.red.opacity(0.5))
-                        .frame(width: 6 + CGFloat(level) * 18, height: 3)
+                        .fill(Tokens.danger.opacity(0.6))
+                        .frame(width: 6 + CGFloat(level) * 14, height: 2)
                 }
             }
-            .foregroundStyle(active ? Color.red : Color.primary)
-            .frame(width: 44, height: 44)
-            .contentShape(Rectangle())
+            .foregroundStyle(active ? Tokens.danger : Tokens.muted)
+            .frame(width: 32, height: 32)
+            .background(active ? Tokens.active : .clear, in: Circle())
+            .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .disabled(finishing)

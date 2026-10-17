@@ -14,6 +14,7 @@ struct SettingsScreen: View {
     var body: some View {
         NavigationStack {
             Form {
+                Group {
                 Section {
                     TextField("https://…", text: $address)
                         .keyboardType(.URL)
@@ -91,7 +92,17 @@ struct SettingsScreen: View {
                 } footer: {
                     Text("Oby opens a pull request by itself once a job's check passes and the secret scan is clean. Publishing by hand, when that failed, needs Face ID on this iPhone. Oby merges only into dev, once its review approves and your Mac's checks pass.")
                 }
+
+                Section("About") {
+                    LabeledContent("Version", value: Self.version)
+                    LabeledContent("Runner", value: phone.host.isEmpty ? "Not reached yet" : phone.host)
+                }
+                }
+                // Sangam's settings cards: the surface colour, rows at least 56 tall.
+                .listRowBackground(Tokens.surface)
             }
+            .environment(\.defaultMinListRowHeight, 56)
+            .obyPage()
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .task {
@@ -101,6 +112,13 @@ struct SettingsScreen: View {
                 try? await watchPairing.load(phone)
             }
         }
+    }
+
+    /// "0.9 (42)", as the bundle says it.
+    static var version: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        return info?["CFBundleVersion"].map { "\(short) (\($0))" } ?? short
     }
 
     private func saveAddress() {
