@@ -2,7 +2,7 @@
 //! Engine/Connected.swift). Connection files contain names and URLs only; the separate vault
 //! holds the values, and the agent reaches this process with a per-job token.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -210,7 +210,8 @@ pub struct Connections {
     uses_file: PathBuf,
     /// [`USES_LOG_MAX`]; smaller in tests.
     uses_max: u64,
-    vault_file: PathBuf,
+    /// How a vault secret is read: `crate::vault::value`, a fake in tests.
+    vault: fn(&str) -> Result<Option<String>, String>,
     all: Mutex<Vec<Connection>>,
     last_used: Mutex<HashMap<String, String>>,
     tokens: Mutex<HashMap<String, String>>,
@@ -261,7 +262,7 @@ impl Connections {
             file,
             uses_file,
             uses_max: USES_LOG_MAX,
-            vault_file: home.join("vault/secrets.json"),
+            vault: crate::vault::value,
             all: Mutex::new(all),
             last_used: Mutex::new(last_used),
             tokens: Mutex::new(HashMap::new()),
@@ -274,21 +275,12 @@ impl Connections {
         })
     }
 
+    /// The vault secret `name`, through obid's vault (`crate::vault::value`): it fails whenever
+    /// the vault can't be read, and its value is already in `crate::secrets::known()` as
+    /// `vault <name>`, so nothing is learned here (a secret named like one of obid's own,
+    /// `api-token`, would replace it).
     fn vault_value(&self, name: &str) -> Result<Option<String>, String> {
-        let Some(secrets) = secure_vault(&self.vault_file)? else {
-            return Ok(None);
-        };
-        let value = secrets
-            .get(name)
-            .filter(|value| {
-                (crate::secrets::SHORTEST..=64 * 1024).contains(&value.len())
-                    && !value.trim().is_empty()
-            })
-            .cloned();
-        if let Some(value) = &value {
-            crate::secrets::known().learn(name, value);
-        }
-        Ok(value)
+        (self.vault)(name)
     }
 
     fn list_json(&self) -> Result<Value, ApiError> {
@@ -1070,45 +1062,6 @@ fn failure(text: impl Into<String>) -> Value {
     json!({"content":[{"type":"text","text":text.into()}],"isError":true})
 }
 
-fn secure_vault(path: &Path) -> Result<Option<BTreeMap<String, String>>, String> {
-    use std::os::unix::fs::MetadataExt;
-    let parent = path.parent().unwrap();
-    let Ok(dir) = std::fs::symlink_metadata(parent) else {
-        return Ok(None);
-    };
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return Ok(None);
-    };
-    let uid = nix::unistd::geteuid().as_raw();
-    if !dir.is_dir() || dir.file_type().is_symlink() || dir.mode() & 0o077 != 0 || dir.uid() != uid
-    {
-        return Err(format!(
-            "The vault folder {} isn't private.",
-            parent.display()
-        ));
-    }
-    if !meta.is_file()
-        || meta.file_type().is_symlink()
-        || meta.mode() & 0o077 != 0
-        || meta.uid() != uid
-    {
-        return Err(format!("The vault file {} isn't private.", path.display()));
-    }
-    let data =
-        std::fs::read(path).map_err(|_| format!("Can't read the vault at {}.", path.display()))?;
-    let value: Value = serde_json::from_slice(&data)
-        .map_err(|_| format!("Can't read the vault at {}.", path.display()))?;
-    let values = value
-        .get("secrets")
-        .and_then(Value::as_object)
-        .ok_or_else(|| format!("Can't read the vault at {}.", path.display()))?;
-    Ok(Some(
-        values
-            .iter()
-            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_owned())))
-            .collect(),
-    ))
-}
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let parent = path.parent().unwrap();
@@ -1190,7 +1143,7 @@ async fn add(State(shared): State<Arc<Shared>>, Json(body): Json<Add>) -> Respon
         return ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!(
-                "The API never takes a secret value. Add it with `oby-runner vault add {}` first.",
+                "The API never takes a secret value. Add it to the vault first: `obid vault --config <path> add {}`, the value on stdin.",
                 body.secret
             ),
         )
@@ -1316,18 +1269,27 @@ mod tests {
         path
     }
 
-    /// A private vault in `home` holding `secrets`.
-    fn vault(home: &Path, secrets: &[(&str, &str)]) {
-        let dir = home.join("vault");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let values: serde_json::Map<String, Value> = secrets
+    std::thread_local! {
+        /// This test's vault: its secrets, or none when it can't be read.
+        static VAULT: std::cell::RefCell<Option<HashMap<String, String>>> =
+            std::cell::RefCell::new(Some(HashMap::new()));
+    }
+
+    /// What `crate::vault::value` answers, from this thread's [`VAULT`].
+    fn fake_vault(name: &str) -> Result<Option<String>, String> {
+        VAULT.with(|v| match &*v.borrow() {
+            Some(secrets) => Ok(secrets.get(name).cloned()),
+            None => Err("the vault can't be read: test".into()),
+        })
+    }
+
+    /// This test's vault holds `secrets` (the vault itself is #570's, tested in vault.rs).
+    fn vault(_home: &Path, secrets: &[(&str, &str)]) {
+        let all = secrets
             .iter()
-            .map(|(k, v)| ((*k).to_owned(), json!(v)))
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
-        let file = dir.join("secrets.json");
-        std::fs::write(&file, json!({ "secrets": values }).to_string()).unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        VAULT.with(|v| *v.borrow_mut() = Some(all));
     }
 
     fn connection(name: &str, mcp: &str, secret: &str) -> Connection {
@@ -1347,7 +1309,7 @@ mod tests {
             file: home.join("connections.json"),
             uses_file: home.join("vault/uses.jsonl"),
             uses_max: 1024,
-            vault_file: home.join("vault/secrets.json"),
+            vault: fake_vault,
             all: Mutex::new(all),
             last_used: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
@@ -1534,32 +1496,29 @@ mod tests {
         assert_eq!(idn.host(), "xn--slck-63d.com");
     }
 
-    /// The vault is read only when its folder and file are the owner's alone, never through a
-    /// symbolic link.
+    /// When the vault can't be read, the broker fails closed: no secret, no broker for a job,
+    /// no list (`503`), no call with a login.
     #[test]
-    fn a_vault_that_isnt_private_is_refused() {
-        let home = folder("vault");
-        let file = home.join("vault/secrets.json");
-        assert_eq!(secure_vault(&file), Ok(None), "no vault yet");
+    fn a_vault_that_cant_be_read_fails_closed() {
+        let home = folder("unreadable");
+        let mail = connection("mail", "https://mail.example.com/mcp", "mail-token");
         vault(&home, &[("mail-token", "mail-0123456789")]);
+        let broker = broker(&home, vec![mail.clone()]);
         assert_eq!(
-            secure_vault(&file).unwrap().unwrap()["mail-token"],
-            "mail-0123456789"
+            broker.vault_value("mail-token"),
+            Ok(Some("mail-0123456789".into()))
         );
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(secure_vault(&file).is_err(), "a file others can read");
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        std::fs::set_permissions(home.join("vault"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-        assert!(secure_vault(&file).is_err(), "a folder others can read");
-        std::fs::set_permissions(home.join("vault"), std::fs::Permissions::from_mode(0o700))
-            .unwrap();
-        let elsewhere = home.join("elsewhere.json");
-        std::fs::rename(&file, &elsewhere).unwrap();
-        std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
-        assert!(secure_vault(&file).is_err(), "a symbolic link");
-        let broker = broker(&home, vec![]);
+        VAULT.with(|v| *v.borrow_mut() = None);
         assert!(broker.vault_value("mail-token").is_err());
+        assert_eq!(broker.open_job("job1"), None);
+        assert!(broker.list_json().is_err());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(
+            rt.block_on(broker.authorized(&mail, reqwest::Client::new().get(mail.url())))
+                .is_err()
+        );
     }
 
     /// A job uses the connections it started with: one added since never reaches it, and one

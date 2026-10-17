@@ -76,6 +76,32 @@ fn allowed_tools(argv: &[Value]) -> Option<Vec<String>> {
     )
 }
 
+/// Adds a vault secret the way the owner does, `obid vault --config <config> add NAME` with the
+/// value on stdin, into the vault of `obid`'s configuration (#570's store).
+fn vault_add(obid: &Obid, name: &str, value: &str) {
+    let mut child = std::process::Command::new(OBID)
+        .args(["vault", "--config"])
+        .arg(obid.folder.join("config.json"))
+        .args(["add", name])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(value.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// `secret` as an agent could be handed it: plain, base64 (standard and URL-safe, padded or
 /// not), hex (either case) and URL-encoded byte by byte.
 fn forms(secret: &str) -> Vec<String> {
@@ -230,7 +256,8 @@ fn connected_mcp(
                                "structuredContent":{secret.clone(): "a key", "token": secret.clone(), "forms": forms(&secret)}})
                     }
                     "tools/call" if message["params"]["name"] == "search" => {
-                        json!({"content":[{"type":"text","text":format!("Found mail. Bearer {secret} {}",base64::engine::general_purpose::STANDARD.encode(&secret))}]})
+                        // And obid's own API token, which no vault secret's name may unlearn.
+                        json!({"content":[{"type":"text","text":format!("Found mail. Bearer {secret} {} obid: {TOKEN}",base64::engine::general_purpose::STANDARD.encode(&secret))}]})
                     }
                     "tools/call" => {
                         sent.lock()
@@ -267,7 +294,7 @@ fn connection_approval(action: &str, device: &str, key: &p256::ecdsa::SigningKey
 /// API keeps the login in its private vault and gives Claude only a per-job broker token.
 #[test]
 fn agents_use_connected_apps_without_ever_seeing_the_login() {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
 
     let folder = Folder::new("connections");
     let remote = fixture(&folder.0.join("fixture"));
@@ -281,32 +308,16 @@ fn agents_use_connected_apps_without_ever_seeing_the_login() {
     ];
     let config = plugin_config(&folder.0, &remote, None);
     let home = Path::new(config["home"].as_str().unwrap());
-    let vault = home.join("vault");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&vault)
-        .unwrap();
-    let vault_file = vault.join("secrets.json");
-    let mut vf = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&vault_file)
-        .unwrap();
-    use std::io::Write as _;
-    write!(
-        vf,
-        "{{\"secrets\":{{\"{secret_name}\":\"{secret}\",\"people-key\":\"{api_secret}\"}}}}"
-    )
-    .unwrap();
     let key = p256::ecdsa::SigningKey::from_slice(&[9; 32]).unwrap();
     let public = key.verifying_key().to_encoded_point(false);
     let device = "test-phone";
+    std::fs::create_dir_all(home).unwrap();
     let devices = home.join("devices.json");
     std::fs::write(&devices,json!({"devices":[{"id":device,"name":"Test phone","publicKey":base64::engine::general_purpose::STANDARD.encode(public.as_bytes()),"registered":obi_protocol::time::format(obi_protocol::time::now())}]}).to_string()).unwrap();
     std::fs::set_permissions(&devices, std::fs::Permissions::from_mode(0o600)).unwrap();
     let mut obid = start(&folder.0, &config, None);
+    vault_add(&obid, secret_name, &secret);
+    vault_add(&obid, "people-key", &api_secret);
 
     assert_eq!(call(&obid, "GET", "/v1/connections", None).status, 200);
     // Only the owner manages them: without the API token, nothing.
@@ -469,7 +480,10 @@ fn agents_use_connected_apps_without_ever_seeing_the_login() {
     );
     let called = &report["toolCalls"]["oby"]["result"]["content"][0]["text"];
     assert!(
-        called.as_str().unwrap().contains("[redacted: mail-token]"),
+        called
+            .as_str()
+            .unwrap()
+            .contains("[redacted: vault mail-token]"),
         "{called}"
     );
     assert!(!called.as_str().unwrap().contains(&secret));
@@ -479,13 +493,13 @@ fn agents_use_connected_apps_without_ever_seeing_the_login() {
     let whoami = &report["toolCalls"]["oby_whoami"]["result"];
     let said = whoami["content"][0]["text"].as_str().unwrap();
     assert!(
-        said.starts_with("You are signed in with Bearer [redacted: mail-token]"),
+        said.starts_with("You are signed in with Bearer [redacted: vault mail-token]"),
         "{said}"
     );
     assert_eq!(leaks(&whoami.to_string(), &secrets), Vec::<String>::new());
     assert_eq!(
         whoami["structuredContent"]["token"],
-        "[redacted: mail-token]"
+        "[redacted: vault mail-token]"
     );
     // Acting as the user is refused, even by a tool whose hint says it only reads; the server
     // was never asked to act.
@@ -525,7 +539,10 @@ fn agents_use_connected_apps_without_ever_seeing_the_login() {
         .as_str()
         .unwrap();
     assert!(api_call.contains("HTTP 200"), "{api_call}");
-    assert!(api_call.contains("[redacted: people-key]"), "{api_call}");
+    assert!(
+        api_call.contains("[redacted: vault people-key]"),
+        "{api_call}"
+    );
     assert!(!api_call.contains(&api_secret));
     // The job's report and the vault's use log: every call, never a value.
     let lines: Vec<String> = job["connectionUses"]
@@ -699,28 +716,63 @@ fn agents_use_connected_apps_without_ever_seeing_the_login() {
     assert_eq!(leaks(&logged, &secrets), Vec::<String>::new());
 }
 
+/// A vault secret may have any name the vault takes, `api-token` too: the broker's use of it
+/// doesn't replace obid's own API token in what obid takes out of every text, so the token is
+/// still taken out of what a connected app answers (and of the log and the publish scan, which
+/// read the same list).
+#[test]
+fn a_vault_secret_named_like_obids_own_doesnt_unlearn_them() {
+    let folder = Folder::new("connections-names");
+    let remote = fixture(&folder.0.join("fixture"));
+    let secret = format!("lin-{}-key", uuid::Uuid::new_v4().simple());
+    let (mcp_url, _, _, _) = connected_mcp(secret.clone(), String::new());
+    let config = plugin_config(&folder.0, &remote, None);
+    let home = Path::new(config["home"].as_str().unwrap()).to_owned();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("connections.json"),
+        json!([{"name": "linear", "mcp": mcp_url, "secret": "api-token", "created": "2026-10-16T00:00:00Z"}]).to_string(),
+    )
+    .unwrap();
+    let mut obid = start(&folder.0, &config, None);
+    vault_add(&obid, "api-token", &secret);
+    let (job, report) = run_job(&obid, "investigate", "REPORT MCP_CALL", None);
+    assert_eq!(job["status"], "done", "{job}");
+    let report = report.unwrap();
+    let said = report["toolCalls"]["oby"]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{report}"));
+    assert!(
+        !said.contains(TOKEN),
+        "obid's API token reached the agent: {said}"
+    );
+    assert!(!said.contains(&secret), "{said}");
+    assert_eq!(
+        leaks(
+            &report.to_string(),
+            &[("api-token", &secret), ("obid", TOKEN)]
+        ),
+        Vec::<String>::new()
+    );
+    assert!(obid.stop().success());
+    let logged = std::fs::read_to_string(&obid.stderr).unwrap();
+    assert_eq!(
+        leaks(&logged, &[("api-token", &secret), ("obid", TOKEN)]),
+        Vec::<String>::new()
+    );
+}
+
 /// A job keeps the connections it started with when obid restarts under it: one connected while
 /// obid was down reaches only jobs that start after.
 #[test]
 fn a_job_keeps_its_connections_across_a_restart() {
-    use std::os::unix::fs::PermissionsExt;
-
     let folder = Folder::new("connections-restart");
     let remote = fixture(&folder.0.join("fixture"));
     let secret = format!("mail-{}-secret", uuid::Uuid::new_v4().simple());
     let (mcp_url, _, _, _) = connected_mcp(secret.clone(), String::new());
     let config = plugin_config(&folder.0, &remote, None);
     let home = Path::new(config["home"].as_str().unwrap()).to_owned();
-    let vault = home.join("vault");
-    std::fs::create_dir_all(&vault).unwrap();
-    std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let vault_file = vault.join("secrets.json");
-    std::fs::write(
-        &vault_file,
-        json!({"secrets": {"mail-token": secret}}).to_string(),
-    )
-    .unwrap();
-    std::fs::set_permissions(&vault_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
     // What an approved POST /v1/connections writes.
     let connected = |names: &[&str]| {
         let all: Vec<Value> = names
@@ -754,6 +806,7 @@ fn a_job_keeps_its_connections_across_a_restart() {
     };
 
     let mut obid = start(&folder.0, &config, None);
+    vault_add(&obid, "mail-token", &secret);
     let made = call(
         &obid,
         "POST",
