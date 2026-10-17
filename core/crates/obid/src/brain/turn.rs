@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::json;
 
@@ -21,8 +21,6 @@ use crate::conversation::Turn;
 
 /// The most actions one turn takes.
 pub const MOST_STEPS: usize = 8;
-/// How long a turn may act (`Desk.turnBudget`), under the apps' 120-second wait.
-pub const TURN_BUDGET: Duration = Duration::from_secs(110);
 /// What a turn says when it ran out of time.
 pub const AS_FAR_AS: &str = "That's as far as Oby got in one go: say “continue” for the rest.";
 
@@ -225,7 +223,7 @@ pub async fn run(
         jobs: shared.jobs.clone(),
     };
     let home = &shared.config.home;
-    let deadline = Instant::now() + TURN_BUDGET;
+    let deadline = Instant::now() + shared.config.turn_budget;
     let live = || control.live();
     let halted = || !control.live();
     let mut done: Vec<String> = vec![];
@@ -238,12 +236,17 @@ pub async fn run(
         if control.stopped() {
             return answered(finish(&done), details);
         }
+        if Instant::now() >= deadline {
+            done.push(AS_FAR_AS.into());
+            break;
+        }
         let mut context = super::context(shared, given);
         context.turn_step = step;
         context.turn_length = Some(said.chars().count());
         let planner = Planner {
             adapters: Planner::of(&shared.config, &room),
             falls_back_to_rules: step == 0,
+            deadline: Some(deadline),
         };
         let mut planned = planner.plan(&request, &context, &halted).await;
         if !live() {
@@ -257,6 +260,15 @@ pub async fn run(
                 finish(&done)
             };
             return answered(talk, details);
+        }
+        // The turn's budget ran out while the brain thought: its plan does nothing.
+        if Instant::now() >= deadline {
+            planned
+                .refused
+                .push("the plan came after the turn's budget: nothing done".into());
+            Record::new(&request, &planned).keep(home);
+            done.push(AS_FAR_AS.into());
+            return answered(finish(&done), details);
         }
         Record::new(&request, &planned).keep(home);
         if let Some(refusal) = super::rules::acting_refusal(&planned, step) {

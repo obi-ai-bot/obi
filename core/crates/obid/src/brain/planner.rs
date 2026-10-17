@@ -419,6 +419,8 @@ pub struct Planner {
     /// turns this off: rules only read the user's own words, so there they would guess at work
     /// the turn already did, and are told to do nothing.
     pub falls_back_to_rules: bool,
+    /// When the turn's budget ends, if it has one: no adapter thinks past it.
+    pub deadline: Option<Instant>,
 }
 
 impl Planner {
@@ -464,7 +466,8 @@ impl Planner {
         let budget = Duration::from_secs(if deep { 40 } else { 20 });
         let model = if deep { DEEP_MODEL } else { QUICK_MODEL };
         for adapter in &self.adapters {
-            let deadline = Instant::now() + budget;
+            let own = Instant::now() + budget;
+            let deadline = self.deadline.map_or(own, |turn| own.min(turn));
             let mut message = user.clone();
             for _ in 0..2 {
                 let left = deadline.saturating_duration_since(Instant::now());
@@ -795,6 +798,7 @@ pub mod tests {
         Planner {
             adapters: vec![Adapter::Fake(fake.clone())],
             falls_back_to_rules: true,
+            deadline: None,
         }
     }
 

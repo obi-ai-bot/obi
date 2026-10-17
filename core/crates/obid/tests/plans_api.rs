@@ -926,7 +926,10 @@ fn stop_everything_stops_running_and_queued_jobs() {
 fn a_failed_action_ends_the_turn_and_its_step_fails() {
     let folder = Folder::new("brain-failed-step");
     let obid = started(&folder);
-    let id = running(&obid, "Vault secrets")["id"].as_str().unwrap().to_owned();
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let events = follow_events(&obid);
     let move_it = json!({"action": "move_job", "reply": "", "dispatches": [], "question": null,
                          "jobs": [id], "move": {"agent": "claude", "account": "auto", "model": "claude-opus-5-5"}});
@@ -935,6 +938,47 @@ fn a_failed_action_ends_the_turn_and_its_step_fails() {
     let heard = events_named(&events, "step", 10, |got| got.len() == 2);
     assert_eq!(steps(&heard), ["1:move_job:running", "1:move_job:failed"]);
     assert_eq!(heard[0]["text"], "Moving Vault secrets to Claude Code");
-    assert!(answer["text"].as_str().unwrap().contains("obid can't"), "{answer}");
+    assert!(
+        answer["text"].as_str().unwrap().contains("obid can't"),
+        "{answer}"
+    );
     assert_eq!(calls(&obid).len(), 1);
+}
+
+/// The turn's budget bounds the planning too (review on #551): a plan that comes after it is
+/// kept as refused and does nothing, and the answer says the turn ran out of time.
+#[test]
+fn a_plan_that_comes_after_the_turn_budget_does_nothing() {
+    let folder = Folder::new("brain-late-plan");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    config["turnBudget"] = json!(2);
+    let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Claude's attempt and its one retry are both slow: the stop comes after the budget.
+    let late = format!("SLEEP 3 {}", stop_plan(&[&id]));
+    queue(&obid, &[late.clone(), late]);
+    let started = std::time::Instant::now();
+    let answer = said(&obid, "stop the vault job");
+    // The planner itself kept to the budget: it didn't wait for the slow brain.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        answer["text"], "That's as far as Oby got in one go: say “continue” for the rest.",
+        "{answer}"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["status"], "running");
+    let refused = records(&obid).pop().unwrap()["refused"].to_string();
+    assert!(
+        refused.contains("the plan came after the turn's budget: nothing done"),
+        "{refused}"
+    );
 }
