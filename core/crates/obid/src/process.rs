@@ -59,6 +59,14 @@ pub fn is_forbidden(name: &str) -> bool {
         || name.starts_with("OBY_GITHUB_APP")
 }
 
+/// The [`KEPT`] variables `get` has (obid's own environment): what every process obid starts
+/// keeps of it, a job's and the brain's alike.
+pub fn kept(get: impl Fn(&str) -> Option<OsString>) -> Vec<(OsString, OsString)> {
+    KEPT.iter()
+        .filter_map(|name| Some(((*name).into(), get(name)?)))
+        .collect()
+}
+
 /// The environment of a process in the job sandbox: `PATH`, `HOME` and `TMPDIR` (the job's
 /// temporary folder), an empty GitHub CLI configuration, git that never prompts, the kept
 /// variables above, then `extra` (an account's `CLAUDE_CONFIG_DIR`).
@@ -67,12 +75,7 @@ pub fn sandbox_env(
     temp: &Path,
     extra: &[(&str, OsString)],
 ) -> Vec<(OsString, OsString)> {
-    let mut env: Vec<(OsString, OsString)> = Vec::new();
-    for name in KEPT {
-        if let Some(value) = std::env::var_os(name) {
-            env.push((name.into(), value));
-        }
-    }
+    let mut env = kept(|name| std::env::var_os(name));
     env.push(("PATH".into(), path.to_os_string()));
     env.push(("HOME".into(), temp.as_os_str().to_os_string()));
     env.push(("TMPDIR".into(), temp.as_os_str().to_os_string()));
