@@ -80,7 +80,7 @@ nonisolated enum TaskFacts {
     static func facts(_ job: Job) -> [(name: String, value: String, mono: Bool)] {
         var facts: [(String, String, Bool)] = [
             ("Repository", job.repo, false), ("Branch", job.branch, true), ("Base", job.base ?? "Repository default", job.base != nil),
-            ("Model", job.model.map(AgentModels.name) ?? "Account default", false),
+            ("Model", job.model.map(ModelChoice.name) ?? "Account default", false),
         ]
         if job.maxRounds > 1 { facts.append(("Rounds", "Round \(job.currentRound) of \(job.maxRounds)", false)) }
         if let check = job.check { facts.append(("Done when", "\(check) passes", true)) }

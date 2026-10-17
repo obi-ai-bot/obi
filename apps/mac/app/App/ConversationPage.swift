@@ -297,88 +297,6 @@ private struct MessageRow: View {
     }
 }
 
-/// Your bubble hugs its words, at most 80% of the column.
-private struct BubbleLayout: Layout {
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let width = proposal.width ?? Tokens.column
-        let size = subviews[0].sizeThatFits(ProposedViewSize(width: width * 0.8, height: nil))
-        return CGSize(width: width, height: size.height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let size = subviews[0].sizeThatFits(ProposedViewSize(width: bounds.width * 0.8, height: nil))
-        subviews[0].place(at: CGPoint(x: bounds.maxX - size.width, y: bounds.minY), proposal: ProposedViewSize(size))
-    }
-}
-
-/// What Oby (or you) said: paragraphs a blank line apart, lines starting "- " as a list, and
-/// links, references, paths and `code` set apart as Sangam's message box does.
-struct SaidText: View {
-    let text: String
-    var color: Color = Tokens.item
-    /// Yours: as typed, no paragraphs or lists.
-    var plain = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                if block.allSatisfy({ $0.hasPrefix("- ") }) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(block.enumerated()), id: \.offset) { _, line in
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text("•").foregroundStyle(Tokens.muted)
-                                Text(Self.styled(String(line.dropFirst(2))))
-                            }
-                        }
-                    }
-                } else {
-                    Text(Self.styled(block.joined(separator: "\n")))
-                }
-            }
-        }
-        .font(Tokens.font(Tokens.textBase)).foregroundStyle(color).lineSpacing(6)
-        .textSelection(.enabled)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private var blocks: [[String]] {
-        if plain { return [[text]] }
-        return text.components(separatedBy: "\n\n").map { $0.trimmingCharacters(in: .newlines) }.filter { !$0.isEmpty }
-            .map { $0.components(separatedBy: "\n") }
-    }
-
-    /// Inline markdown as Oby writes it (bold, links, `code`), then what the message box
-    /// recognises set apart on top: links and references in blue, paths and code in coral monospace.
-    static func styled(_ text: String) -> AttributedString {
-        var string = Reading.markdown(text, code: Tokens.mono(13))
-        for run in string.runs where run.inlinePresentationIntent?.contains(.code) == true { coral(&string, run.range) }
-        let plain = String(string.characters)
-        for match in SaidTokens.matches(plain) {
-            let start = plain.distance(from: plain.startIndex, to: match.range.lowerBound)
-            let count = plain.distance(from: match.range.lowerBound, to: match.range.upperBound)
-            let lower = string.characters.index(string.startIndex, offsetBy: start)
-            let range = lower..<string.characters.index(lower, offsetBy: count)
-            // Already code or a link in the markdown: left as it is.
-            if string[range].runs.contains(where: { $0.inlinePresentationIntent?.contains(.code) == true || $0.link != nil }) { continue }
-            switch match.kind {
-            case .url:
-                string[range].foregroundColor = Tokens.link
-                if let url = URL(string: String(plain[match.range])) { string[range].link = url }
-            case .ref: string[range].foregroundColor = Tokens.link
-            case .code, .path: coral(&string, range)
-            }
-        }
-        for run in string.runs where run.link != nil { string[run.range].foregroundColor = Tokens.link }
-        return string
-    }
-
-    private static func coral(_ string: inout AttributedString, _ range: Range<AttributedString.Index>) {
-        string[range].foregroundColor = Tokens.code
-        string[range].font = Tokens.mono(13)
-        string[range].backgroundColor = Tokens.pill
-    }
-}
-
 /// What Oby did for your words (#304), folded into one line over its answer: a click opens them,
 /// each with its mark.
 private struct Steps: View {
@@ -493,35 +411,6 @@ private struct ObyAtWork: View {
     }
 }
 
-/// A line being worked on: a lighter band sweeps across it, left to right, every 1.6 seconds
-/// (Sangam's `sheen`); still, in ink, with Reduce Motion.
-struct Sheen: View {
-    let text: String
-    var size: CGFloat = Tokens.textMd
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        let label = Text(text).font(Tokens.font(size))
-        if reduceMotion {
-            label.foregroundStyle(Tokens.ink)
-        } else {
-            TimelineView(.animation) { context in
-                let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.6) / 1.6
-                // The band's middle crosses from before the start to past the end.
-                let middle = phase * 1.6 - 0.3
-                label.foregroundStyle(LinearGradient(stops: [
-                    .init(color: Tokens.muted, location: 0),
-                    .init(color: Tokens.muted, location: min(1, max(0, middle - 0.15))),
-                    .init(color: Tokens.ink, location: min(1, max(0, middle))),
-                    .init(color: Tokens.muted, location: min(1, max(0, middle + 0.15))),
-                    .init(color: Tokens.muted, location: 1),
-                ], startPoint: .leading, endPoint: .trailing))
-            }
-            .accessibilityLabel(text)
-        }
-    }
-}
-
 /// "2 waiting for you", over the thread: a click (or ⌘J) scrolls to the oldest and gives it the keys.
 private struct WaitingBar: View {
     let count: Int
@@ -561,31 +450,5 @@ private struct BrainQuestion: View {
         }
         .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 12)
         .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
-    }
-}
-
-/// Oby's small face in a conversation (Sangam's ObyFace.tsx): its soft white block, a little wider
-/// than tall, two tall dark eyes, and two short ears on top leaning toward each other. Drawn in a
-/// 24-unit square.
-struct ObyMark: View {
-    var size: CGFloat = 22
-
-    var body: some View {
-        Canvas { context, canvas in
-            let unit = canvas.width / 24
-            let body = Color(hex: 0xF1F1EE), eye = Color(hex: 0x0D0D0E)
-            func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: x * unit, y: y * unit) }
-            var ears = Path()
-            ears.addLines([point(5, 6.6), point(7.9, 3.6), point(8.9, 6.6)]); ears.closeSubpath()
-            ears.addLines([point(19, 6.6), point(16.1, 3.6), point(15.1, 6.6)]); ears.closeSubpath()
-            context.fill(ears, with: .color(body))
-            context.stroke(ears, with: .color(body), style: StrokeStyle(lineWidth: 1.2 * unit, lineJoin: .round))
-            context.fill(Path(roundedRect: CGRect(x: 1.5 * unit, y: 6 * unit, width: 21 * unit, height: 16.5 * unit), cornerRadius: 5 * unit), with: .color(body))
-            for x in [6.0, 14.6] {
-                context.fill(Path(roundedRect: CGRect(x: x * unit, y: 10.6 * unit, width: 2.8 * unit, height: 5 * unit), cornerRadius: 1.4 * unit), with: .color(eye))
-            }
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
     }
 }

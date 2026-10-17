@@ -648,28 +648,3 @@ private struct DottedLine: View {
         }
     }
 }
-
-/// A pill button (Sangam's `.tc-option`): white 8% at rest, ink filled for the main one, red
-/// words for a destructive one, no fill for a quiet one.
-struct PillButton: View {
-    let title: String
-    var primary = false
-    var danger = false
-    var quiet = false
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Text(title).font(Tokens.font(Tokens.textMd, primary ? .medium : .regular)).lineLimit(1)
-                .foregroundStyle(primary ? Color(hex: 0x111111) : danger ? Tokens.danger : quiet && !hovering ? Tokens.muted : hovering ? Tokens.ink : Tokens.item)
-                .padding(.horizontal, 14).frame(height: 32)
-                .background(primary ? (hovering ? .white : Tokens.ink) : quiet ? (hovering ? Tokens.hover : .clear) : hovering ? Color.white.opacity(0.13) : Tokens.pill,
-                            in: Capsule())
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .animation(Tokens.fade, value: hovering)
-    }
-}
