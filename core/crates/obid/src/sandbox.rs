@@ -238,13 +238,10 @@ impl Sandbox {
         match &self.tool {
             Tool::Bubblewrap(bwrap) => {
                 let mut bwrap_argv = vec![bwrap.clone().into_os_string()];
-                bwrap_argv.extend(bubblewrap_args_reading(&spec, confined));
+                let resolver = spec.network.then(Resolver::for_this_machine).flatten();
+                bwrap_argv.extend(bubblewrap_args_reading(&spec, confined, resolver.as_ref()));
                 bwrap_argv.push("--".into());
                 if spec.network {
-                    // What the sandbox reads as `/etc/resolv.conf` ([`resolver_file`]). Should
-                    // it fail to write, bwrap finds no source and nothing runs.
-                    let _ =
-                        std::fs::write(resolver_file(&spec), format!("nameserver {SLIRP_DNS}\n"));
                     let ready = spec.temp.join(".obid-net-ready");
                     let _ = std::fs::remove_file(&ready);
                     bwrap_argv.extend([
@@ -386,7 +383,7 @@ impl Spec {
 /// (read-only or writable), and finally the empty folders made read-only.
 #[cfg(test)]
 fn bubblewrap_args(spec: &Spec) -> Vec<OsString> {
-    bubblewrap_args_reading(spec, false)
+    bubblewrap_args_reading(spec, false, None)
 }
 
 /// What a confined process reads of the system on Linux ([`Sandbox::wrap_reading_only_its_own`]):
@@ -413,7 +410,11 @@ pub const SYSTEM_READS_MACOS: [&str; 11] = [
     "/dev",
 ];
 
-fn bubblewrap_args_reading(spec: &Spec, confined: bool) -> Vec<OsString> {
+fn bubblewrap_args_reading(
+    spec: &Spec,
+    confined: bool,
+    resolver: Option<&Resolver>,
+) -> Vec<OsString> {
     let mut args: Vec<OsString> = Vec::new();
     let mut push = |items: &[&std::ffi::OsStr]| args.extend(items.iter().map(|s| s.to_os_string()));
     // A session of its own inside too (no controlling terminal, whatever started bwrap), and
@@ -481,10 +482,13 @@ fn bubblewrap_args_reading(spec: &Spec, confined: bool) -> Vec<OsString> {
         ]);
     }
     if spec.network
-        && let Some(target) = resolver_target(Path::new("/etc/resolv.conf"))
+        && let Some(resolver) = resolver
     {
-        let file = resolver_file(spec);
-        push(&["--ro-bind".as_ref(), file.as_os_str(), target.as_os_str()]);
+        push(&[
+            "--ro-bind".as_ref(),
+            resolver.file.as_os_str(),
+            resolver.over.as_os_str(),
+        ]);
     }
     for path in &spec.read_only {
         if path.exists() {
@@ -700,16 +704,101 @@ exit "$status"
 /// confined form it is a link into `/run`, which isn't there.
 pub const SLIRP_DNS: &str = "10.0.2.3";
 
-/// The file a sandbox with the network reads as `/etc/resolv.conf`: it names [`SLIRP_DNS`].
-fn resolver_file(spec: &Spec) -> PathBuf {
-    spec.temp.join(".obid-resolv.conf")
+/// What a sandbox with the network reads as `/etc/resolv.conf`: obid's own file, which names only
+/// [`SLIRP_DNS`] (the host's `search` and `options` lines aren't carried over), bound read-only over
+/// the one file the host's `/etc/resolv.conf` leads to, so nothing else of where that lives
+/// (`/run`) is shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Resolver {
+    /// obid's file: in a folder only obid's user can open, which no sandbox shows (the user's
+    /// runtime folder and `/tmp` are empty inside), never in a folder a job writes, where it could
+    /// leave a link for obid to write through or for bubblewrap to bind.
+    file: PathBuf,
+    /// Where the host's `/etc/resolv.conf` leads.
+    over: PathBuf,
 }
 
-/// The file `/etc/resolv.conf` leads to on this machine, which the sandbox's own is bound over, so
-/// nothing else of where it lives (`/run`) is shown. None when it leads nowhere: bubblewrap could
-/// make no file there, and the host has no resolver to ask either.
+impl Resolver {
+    /// This machine's. None when the host's `/etc/resolv.conf` leads to no file (bubblewrap could
+    /// make none there, and the host has no resolver to ask either) or obid can't keep a file of
+    /// its own safely: then the sandbox has no resolver, as before.
+    fn for_this_machine() -> Option<Resolver> {
+        let over = resolver_target(Path::new("/etc/resolv.conf"))?;
+        let uid = nix::unistd::getuid().as_raw();
+        let runtime = PathBuf::from(format!("/run/user/{uid}"));
+        let base = if private_folder(&runtime, uid) {
+            runtime
+        } else {
+            std::env::temp_dir()
+        };
+        match write_resolver(&base.join(format!("obid-resolver-{uid}")), uid) {
+            Ok(file) => Some(Resolver { file, over }),
+            Err(why) => {
+                tracing::warn!("sandbox: no resolver for the sandbox's network ({why})");
+                None
+            }
+        }
+    }
+}
+
+/// The file `/etc/resolv.conf` leads to on this machine, if it is one.
 fn resolver_target(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok().filter(|p| p.is_file())
+}
+
+/// Writes obid's resolver file in `folder`, which is made for `uid` alone (0700) when it isn't
+/// there, and must be a real folder that only `uid` can open, so nobody else can leave a link in
+/// it. The file is replaced with a rename, never written through whatever is at its path.
+fn write_resolver(folder: &Path, uid: u32) -> Result<PathBuf, String> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    match std::fs::DirBuilder::new().mode(0o700).create(folder) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("can't make {}: {e}", folder.display())),
+    }
+    if !private_folder(folder, uid) {
+        return Err(format!(
+            "{} isn't a folder only obid's user can open",
+            folder.display()
+        ));
+    }
+    let file = folder.join("resolv.conf");
+    let text = format!("nameserver {SLIRP_DNS}\n");
+    let current = std::fs::symlink_metadata(&file)
+        .ok()
+        .filter(|m| m.is_file())
+        .and_then(|_| std::fs::read_to_string(&file).ok());
+    if current.as_deref() == Some(text.as_str()) {
+        return Ok(file);
+    }
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let staged = folder.join(format!(
+        ".resolv.conf.{}.{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&staged)
+        .and_then(|mut out| out.write_all(text.as_bytes()))
+        .and_then(|()| std::fs::rename(&staged, &file));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!("can't write {}: {e}", file.display()));
+    }
+    Ok(file)
+}
+
+/// Whether `path` is a folder (not a link to one) of `uid`'s that nobody else can open.
+fn private_folder(path: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o077 == 0)
 }
 
 /// Where Docker's socket is.
@@ -1167,7 +1256,7 @@ mod tests {
             assert!(!profile.contains(never), "{never}\n{profile}");
         }
         // bubblewrap binds the system's software, never `/`.
-        let args: Vec<String> = bubblewrap_args_reading(&spec, true)
+        let args: Vec<String> = bubblewrap_args_reading(&spec, true, None)
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
@@ -1215,10 +1304,10 @@ mod tests {
         );
     }
 
-    /// With the network, both forms read a resolv.conf naming slirp4netns's DNS forwarder, bound
-    /// over the one file the host's leads to, and nothing else of `/run`. Without it, none.
+    /// With the network, both forms bind obid's resolver file over where the host's leads, and
+    /// nothing else of `/run`. Without it, neither does, even with a resolver at hand.
     #[test]
-    fn a_sandbox_with_the_network_asks_slirps_resolver() {
+    fn a_sandbox_with_the_network_binds_obids_resolver() {
         let spec = Spec {
             worktree: "/h/answers/x/question".into(),
             temp: "/h/answers/x/tmp".into(),
@@ -1226,16 +1315,17 @@ mod tests {
             network: true,
             ..Spec::default()
         };
-        let Some(target) = resolver_target(Path::new("/etc/resolv.conf")) else {
-            panic!("this machine's /etc/resolv.conf leads to no file");
+        let resolver = Resolver {
+            file: "/r/obid-resolver-1/resolv.conf".into(),
+            over: "/run/systemd/resolve/stub-resolv.conf".into(),
         };
         let bind = [
-            "--ro-bind".to_owned(),
-            "/h/answers/x/tmp/.obid-resolv.conf".to_owned(),
-            target.to_string_lossy().into_owned(),
+            "--ro-bind",
+            "/r/obid-resolver-1/resolv.conf",
+            "/run/systemd/resolve/stub-resolv.conf",
         ];
         for confined in [false, true] {
-            let args: Vec<String> = bubblewrap_args_reading(&spec, confined)
+            let args: Vec<String> = bubblewrap_args_reading(&spec, confined, Some(&resolver))
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect();
@@ -1247,12 +1337,78 @@ mod tests {
                 network: false,
                 ..spec.clone()
             };
-            let args: Vec<String> = bubblewrap_args_reading(&offline, confined)
+            let args: Vec<String> = bubblewrap_args_reading(&offline, confined, Some(&resolver))
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect();
-            assert!(!args.iter().any(|a| a.ends_with(".obid-resolv.conf")));
+            assert!(
+                !args.iter().any(|a| a.contains("obid-resolver")),
+                "{args:?}"
+            );
         }
+    }
+
+    /// A folder of the test's own, removed when it ends.
+    fn scratch(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("obid-resolver-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    /// The host's `/etc/resolv.conf` is followed to the file it leads to; a link to nothing gives
+    /// nothing to bind over.
+    #[test]
+    fn the_resolver_is_bound_over_the_file_the_hosts_leads_to() {
+        let root = scratch("target");
+        let stub = root.join("run/stub-resolv.conf");
+        std::fs::create_dir_all(stub.parent().unwrap()).unwrap();
+        std::fs::write(&stub, "nameserver 127.0.0.53\n").unwrap();
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        let link = root.join("etc/resolv.conf");
+        std::os::unix::fs::symlink("../run/stub-resolv.conf", &link).unwrap();
+        assert_eq!(resolver_target(&link), Some(stub.clone()));
+        std::fs::remove_file(&stub).unwrap();
+        assert_eq!(resolver_target(&link), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// obid's resolver file is never written through a link at its path, and its folder must be
+    /// a real one only obid's user can open.
+    #[test]
+    fn obids_resolver_file_is_never_written_through_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let uid = nix::unistd::getuid().as_raw();
+        let root = scratch("write");
+        let victim = root.join("victim");
+        std::fs::write(&victim, "the owner's file").unwrap();
+        let folder = root.join("obid-resolver");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&victim, folder.join("resolv.conf")).unwrap();
+        let file = write_resolver(&folder, uid).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "the owner's file"
+        );
+        assert!(std::fs::symlink_metadata(&file).unwrap().is_file());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            format!("nameserver {SLIRP_DNS}\n")
+        );
+        // Others can open it: refused.
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(write_resolver(&folder, uid).is_err());
+        // A link to a folder: refused, and nothing is written in the folder it points at.
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let linked = root.join("linked");
+        std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+        assert!(write_resolver(&linked, uid).is_err());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

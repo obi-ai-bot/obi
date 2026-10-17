@@ -1249,11 +1249,17 @@ setTimeout(() => {{
     );
 }
 
-/// A run with the network resolves its model API's host name, in both forms (an agent's, and the
-/// confined one an answer to a question is written in, #494): the host's own `/etc/resolv.conf`
-/// can't serve inside the namespace (on Ubuntu it names systemd-resolved's stub, 127.0.0.53, the
-/// namespace's own loopback there; and the confined form has no `/run` for its link to lead into).
-/// The confined run still sees nothing of `/run/systemd/resolve` but the one file bound there.
+/// A run with the network resolves its model API's host name, in both forms: agent jobs'
+/// (`Sandbox::wrap`) and the answering run's, confined (`wrap_reading_only_its_own`, #494).
+///
+/// It shows the fix on hosts whose `/etc/resolv.conf` names a resolver on loopback (Ubuntu's
+/// systemd-resolved stub, 127.0.0.53), which inside the sandbox's own network namespace is the
+/// namespace's own loopback, or leads outside what the confined form binds (into `/run`), where
+/// the confined form would find nothing. A host whose resolv.conf is a plain file in `/etc` naming
+/// a resolver slirp4netns can reach resolved before the fix too, and proves nothing here.
+///
+/// Confined, the folder that file is in shows that one file and nothing else, wherever it is
+/// (unless it is in a system folder the confined form binds anyway).
 #[cfg(target_os = "linux")]
 #[test]
 fn a_run_with_the_network_resolves_a_host_name() {
@@ -1266,12 +1272,33 @@ fn a_run_with_the_network_resolves_a_host_name() {
         control.status.success(),
         "this machine can't resolve {HOST} itself: {control:?}"
     );
+    let resolver = std::fs::canonicalize("/etc/resolv.conf").unwrap();
+    let folder = resolver.parent().unwrap().to_path_buf();
+    let in_system_reads = obid::sandbox::SYSTEM_READS_LINUX
+        .iter()
+        .any(|read| folder.starts_with(read));
+    let named = std::fs::read_to_string(&resolver).unwrap();
+    eprintln!(
+        "/etc/resolv.conf leads to {} ({}): {}",
+        resolver.display(),
+        if in_system_reads {
+            "inside the confined form's system reads"
+        } else {
+            "outside the confined form's system reads"
+        },
+        named
+            .lines()
+            .filter(|l| l.starts_with("nameserver"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     let world = world("dns");
     let sandbox = Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))).unwrap();
     let job = spec(&world, true, false, false);
     let probe = format!(
         "if getent ahosts {HOST} >/dev/null; then echo 'resolved yes'; else echo 'resolved no'; fi; \
-         echo \"beside $(ls -A /run/systemd/resolve 2>/dev/null | tr '\\n' ' ')\""
+         echo \"beside $(ls -A '{}' 2>/dev/null | tr '\\n' ' ')\"",
+        folder.display()
     );
     for confined in [false, true] {
         let argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), probe.clone().into()];
@@ -1298,20 +1325,78 @@ fn a_run_with_the_network_resolves_a_host_name() {
             text.contains("resolved yes"),
             "confined: {confined}: {HOST} didn't resolve inside the sandbox\n{text}"
         );
-        if confined {
-            let resolver = std::fs::canonicalize("/etc/resolv.conf").unwrap();
+        if confined && !in_system_reads {
             let seen: Vec<&str> = text
                 .lines()
                 .find_map(|l| l.strip_prefix("beside "))
                 .unwrap_or("")
                 .split_whitespace()
                 .collect();
-            let allowed: Vec<&str> = if resolver.starts_with("/run/systemd/resolve") {
-                vec![resolver.file_name().unwrap().to_str().unwrap()]
+            assert_eq!(
+                seen,
+                [resolver.file_name().unwrap().to_str().unwrap()],
+                "the confined run sees more of {}\n{text}",
+                folder.display()
+            );
+        }
+    }
+}
+
+/// The resolver file is obid's own, out of every job's reach. A link a job leaves in a folder it
+/// writes (its temporary folder is its `HOME`, and it lives for every turn), where an earlier
+/// version of obid wrote that file, is never written through, and what it points at is never
+/// shown as `/etc/resolv.conf`: not a file obid's user can write (obid's API token), nor one it
+/// can only read (the person's secret). Both forms: agent jobs, and the answering run.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_link_a_job_leaves_is_never_written_or_read_through() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = world("resolver-link");
+    let sandbox = Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))).unwrap();
+    let job = spec(&world, true, false, false);
+    let token = world.home.join("api-token");
+    let token_text = std::fs::read_to_string(&token).unwrap();
+    let secret = world.person.join("secret.txt");
+    let secret_text = std::fs::read_to_string(&secret).unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o400)).unwrap();
+    let planted = world.temp.join(".obid-resolv.conf");
+    let probe: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), "cat /etc/resolv.conf".into()];
+    for confined in [false, true] {
+        for (target, text) in [(&token, &token_text), (&secret, &secret_text)] {
+            let _ = std::fs::remove_file(&planted);
+            std::os::unix::fs::symlink(target, &planted).unwrap();
+            let argv = if confined {
+                sandbox.wrap_reading_only_its_own(&job, &probe)
             } else {
-                Vec::new()
+                sandbox.wrap(&job, &probe)
             };
-            assert_eq!(seen, allowed, "the confined run sees more of /run\n{text}");
+            let env = obid::process::sandbox_env(&obid::process::tools_path(), &world.temp, &[]);
+            let ran = Command::new(&argv[0])
+                .args(&argv[1..])
+                .env_clear()
+                .envs(env)
+                .current_dir(&world.worktree)
+                .output()
+                .unwrap();
+            let out = format!(
+                "{}{}",
+                String::from_utf8_lossy(&ran.stdout),
+                String::from_utf8_lossy(&ran.stderr)
+            );
+            assert_eq!(
+                std::fs::read_to_string(&token).unwrap(),
+                token_text,
+                "confined: {confined}: obid wrote through the job's link\n{out}"
+            );
+            assert!(
+                !out.contains(text.as_str()),
+                "confined: {confined}: the sandbox read what the job's link points at\n{out}"
+            );
+            assert!(
+                out.contains("nameserver 10.0.2.3"),
+                "confined: {confined}: no resolver of obid's own\n{out}"
+            );
         }
     }
 }
