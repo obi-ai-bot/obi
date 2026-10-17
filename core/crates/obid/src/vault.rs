@@ -736,8 +736,11 @@ struct Learned {
     checked: Option<Instant>,
     /// When the values were last read from the store.
     read: Option<Instant>,
-    /// Counts what was learned, so a read that started before a newer one was learned is dropped.
-    generation: u64,
+    /// The ticket the last check took when it started; each check takes the next one.
+    ticket: u64,
+    /// The ticket of the read last learned: a read with an older ticket (it started earlier) is
+    /// dropped when it finishes after a newer one was learned, never the other way round.
+    learned: u64,
 }
 
 /// The name a vault secret has in `known()`: apart from obid's own secrets (`api-token`, …).
@@ -792,7 +795,8 @@ impl Vault {
         self.secrets.learn(name, value);
         learned.names.insert(name.to_owned());
         learned.stamp = None;
-        learned.generation += 1;
+        learned.ticket += 1;
+        learned.learned = learned.ticket;
         Ok(())
     }
 
@@ -807,7 +811,8 @@ impl Vault {
         self.secrets.forget(name);
         learned.names.remove(name);
         learned.stamp = None;
-        learned.generation += 1;
+        learned.ticket += 1;
+        learned.learned = learned.ticket;
         Ok(had)
     }
 
@@ -822,22 +827,23 @@ impl Vault {
         let lock = || self.learned.lock().unwrap_or_else(|e| e.into_inner());
         lock().checked = Some(Instant::now());
         let stamp = self.store.stamp()?;
-        let started = {
-            let learned = lock();
+        let ticket = {
+            let mut learned = lock();
             let fresh =
                 self.store.exact() || learned.read.is_some_and(|at| at.elapsed() < READ_EVERY);
             if fresh && learned.stamp.as_deref() == Some(stamp.as_str()) {
                 return Ok(());
             }
-            learned.generation
+            learned.ticket += 1;
+            learned.ticket
         };
         let values = self.store.read()?;
         let mut learned = lock();
-        if learned.generation != started {
-            // A read that started later was learned meanwhile.
+        if ticket < learned.learned {
+            // A read that started later was learned meanwhile: it is the newer one.
             return Ok(());
         }
-        learned.generation += 1;
+        learned.learned = ticket;
         learned.read = Some(Instant::now());
         for gone in learned.names.iter().filter(|n| !values.contains_key(*n)) {
             self.known.forget(&known_name(gone));
@@ -1424,6 +1430,101 @@ mod tests {
         } else {
             assert!(Location::parse("keychain", None).is_err());
         }
+    }
+
+    /// A store whose reads each wait to be let go, so a test can order two checks' reads.
+    struct Held {
+        state: Mutex<(String, BTreeMap<String, String>)>,
+        reads: Mutex<std::collections::VecDeque<std::sync::mpsc::Receiver<()>>>,
+        entered: Mutex<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl Store for Held {
+        fn stamp(&self) -> Result<String, String> {
+            Ok(self.state.lock().unwrap().0.clone())
+        }
+        fn read(&self) -> Result<BTreeMap<String, String>, String> {
+            // The values as they are when the read starts; returned once the test lets it go.
+            let values = self.state.lock().unwrap().1.clone();
+            let gate = self.reads.lock().unwrap().pop_front();
+            self.entered.lock().unwrap().send(()).unwrap();
+            if let Some(gate) = gate {
+                gate.recv().unwrap();
+            }
+            Ok(values)
+        }
+        fn save(&self, _: &str, _: &str) -> Result<(), String> {
+            Err("read only".into())
+        }
+        fn remove(&self, _: &str) -> Result<bool, String> {
+            Err("read only".into())
+        }
+    }
+
+    /// Two checks overlap: one starts reading before a change and finishes first, the other
+    /// starts after the change. The newer read must be what is learned, not dropped because an
+    /// older one was learned meanwhile (the race behind #570's flaky Keychain test).
+    #[test]
+    fn a_read_that_started_later_is_learned_when_an_older_one_finishes_first() {
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (let_first, first_gate) = std::sync::mpsc::channel();
+        let (let_second, second_gate) = std::sync::mpsc::channel();
+        let store = Arc::new(Held {
+            state: Mutex::new((
+                "one".into(),
+                BTreeMap::from([("key".to_owned(), "the-first-value-91".to_owned())]),
+            )),
+            reads: Mutex::new([first_gate, second_gate].into()),
+            entered: Mutex::new(entered_tx),
+        });
+        struct Shared(Arc<Held>);
+        impl Store for Shared {
+            fn stamp(&self) -> Result<String, String> {
+                self.0.stamp()
+            }
+            fn read(&self) -> Result<BTreeMap<String, String>, String> {
+                self.0.read()
+            }
+            fn save(&self, v: &str, n: &str) -> Result<(), String> {
+                self.0.save(v, n)
+            }
+            fn remove(&self, n: &str) -> Result<bool, String> {
+                self.0.remove(n)
+            }
+        }
+        let vault = Arc::new(Vault::new(
+            Box::new(Shared(store.clone())),
+            Arc::new(Secrets::default()),
+        ));
+        // The older check reads the first value, and waits.
+        let older = {
+            let vault = vault.clone();
+            std::thread::spawn(move || vault.check())
+        };
+        entered.recv().unwrap();
+        // The value changes; the newer check reads the second value, and waits.
+        *store.state.lock().unwrap() = (
+            "two".into(),
+            BTreeMap::from([("key".to_owned(), "the-second-value-27".to_owned())]),
+        );
+        let newer = {
+            let vault = vault.clone();
+            std::thread::spawn(move || vault.check())
+        };
+        entered.recv().unwrap();
+        // The older read finishes first, then the newer one.
+        let_first.send(()).unwrap();
+        older.join().unwrap().unwrap();
+        let_second.send(()).unwrap();
+        newer.join().unwrap().unwrap();
+        assert_eq!(
+            vault.redact_checked("now the-second-value-27"),
+            "now [vault: key]"
+        );
+        assert_eq!(
+            vault.redact_checked("was the-first-value-91"),
+            "was the-first-value-91"
+        );
     }
 
     #[test]
