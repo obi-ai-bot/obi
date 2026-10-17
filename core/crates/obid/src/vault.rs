@@ -733,6 +733,8 @@ struct Learned {
     /// The store's stamp when the values were read from it; none until then and after a change here.
     stamp: Option<String>,
     names: BTreeSet<String>,
+    /// Values from the same store read already learned by both redactors.
+    values: BTreeMap<String, String>,
     checked: Option<Instant>,
     /// When the values were last read from the store.
     read: Option<Instant>,
@@ -764,12 +766,20 @@ impl Vault {
         Vault::new(Box::new(FileStore::new(folder)), known)
     }
 
-    /// The value of the secret `name`, read from the store as it is now, after the same check
-    /// every reader gets: fails when the vault can't be read, and is none when it has no such
-    /// secret. Its value is in `known()` already, as `vault <name>`.
+    /// The checked value of `name`, from the same store read the redactors learned. A second
+    /// read here could return an externally changed credential before redaction knows it.
+    /// Fails when the vault can't be read, and is none when it has no such secret.
     pub fn value(&self, name: &str) -> Result<Option<String>, String> {
-        self.check()?;
-        self.store.value(name)
+        // Broker access rechecks readability even when the Keychain's metadata stamp is
+        // unchanged: a lock or an edit within the same second must take effect immediately.
+        self.check_with_force(true)?;
+        Ok(self
+            .learned
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values
+            .get(name)
+            .cloned())
     }
 
     /// The secrets' names, sorted. Never their values.
@@ -794,6 +804,7 @@ impl Vault {
         self.known.learn(&known_name(name), value);
         self.secrets.learn(name, value);
         learned.names.insert(name.to_owned());
+        learned.values.insert(name.to_owned(), value.to_owned());
         learned.stamp = None;
         learned.ticket += 1;
         learned.learned = learned.ticket;
@@ -810,6 +821,7 @@ impl Vault {
         self.known.forget(&known_name(name));
         self.secrets.forget(name);
         learned.names.remove(name);
+        learned.values.remove(name);
         learned.stamp = None;
         learned.ticket += 1;
         learned.learned = learned.ticket;
@@ -824,6 +836,10 @@ impl Vault {
     /// holds up only whoever asked, never the answers and log lines that only read what was
     /// learned.
     pub fn check(&self) -> Result<(), String> {
+        self.check_with_force(false)
+    }
+
+    fn check_with_force(&self, force: bool) -> Result<(), String> {
         let lock = || self.learned.lock().unwrap_or_else(|e| e.into_inner());
         lock().checked = Some(Instant::now());
         let stamp = self.store.stamp()?;
@@ -831,7 +847,7 @@ impl Vault {
             let mut learned = lock();
             let fresh =
                 self.store.exact() || learned.read.is_some_and(|at| at.elapsed() < READ_EVERY);
-            if fresh && learned.stamp.as_deref() == Some(stamp.as_str()) {
+            if !force && fresh && learned.stamp.as_deref() == Some(stamp.as_str()) {
                 return Ok(());
             }
             learned.ticket += 1;
@@ -853,7 +869,8 @@ impl Vault {
             self.known.learn(&known_name(name), value);
             self.secrets.learn(name, value);
         }
-        learned.names = values.into_keys().collect();
+        learned.names = values.keys().cloned().collect();
+        learned.values = values;
         learned.stamp = Some(stamp);
         Ok(())
     }
@@ -1430,6 +1447,71 @@ mod tests {
         } else {
             assert!(Location::parse("keychain", None).is_err());
         }
+    }
+
+    /// A Keychain modification date may stay the same within a second. The broker must
+    /// receive the already-learned snapshot, never a newer credential from another read.
+    #[test]
+    fn a_connection_gets_only_a_value_the_redactors_already_know() {
+        struct Changing {
+            values: Arc<Mutex<BTreeMap<String, String>>>,
+            failed: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Store for Changing {
+            fn stamp(&self) -> Result<String, String> {
+                Ok("same modification second".into())
+            }
+            fn read(&self) -> Result<BTreeMap<String, String>, String> {
+                if self.failed.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err("fixture store can't be read".into());
+                }
+                Ok(self.values.lock().unwrap().clone())
+            }
+            fn value(&self, _: &str) -> Result<Option<String>, String> {
+                panic!("a second store read could return an unlearned credential")
+            }
+            fn save(&self, value: &str, name: &str) -> Result<(), String> {
+                self.values
+                    .lock()
+                    .unwrap()
+                    .insert(name.into(), value.into());
+                Ok(())
+            }
+            fn remove(&self, name: &str) -> Result<bool, String> {
+                Ok(self.values.lock().unwrap().remove(name).is_some())
+            }
+            fn exact(&self) -> bool {
+                false
+            }
+        }
+        let first = "checked-fixture-value-one";
+        let second = "checked-fixture-value-two";
+        let values = Arc::new(Mutex::new(BTreeMap::from([("key".into(), first.into())])));
+        let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let known = Arc::new(Secrets::default());
+        let vault = Vault::new(
+            Box::new(Changing {
+                values: values.clone(),
+                failed: failed.clone(),
+            }),
+            known.clone(),
+        );
+        assert_eq!(vault.value("key").unwrap().as_deref(), Some(first));
+        values.lock().unwrap().insert("key".into(), second.into());
+        // No sleep or metadata change: broker access forces a fresh read before use.
+        assert_eq!(vault.value("key").unwrap().as_deref(), Some(second));
+        assert_eq!(known.redact(second), "[redacted: vault key]");
+        assert_eq!(vault.redact(second).unwrap(), "[vault: key]");
+        assert_eq!(vault.redact(first).unwrap(), first);
+        vault.add("checked-fixture-value-three", "key").unwrap();
+        assert_eq!(
+            vault.value("key").unwrap().as_deref(),
+            Some("checked-fixture-value-three")
+        );
+        assert!(vault.remove("key").unwrap());
+        assert_eq!(vault.value("key").unwrap(), None);
+        failed.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(vault.value("key").is_err());
     }
 
     /// A store whose reads each wait to be let go, so a test can order two checks' reads.
