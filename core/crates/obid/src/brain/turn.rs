@@ -600,6 +600,7 @@ pub async fn run(
             context.turn_step = step;
             context.turn_length = Some(said.chars().count());
             context.said = said.to_owned();
+            context.found = research.found();
             // What the turn read and looked up goes into the next step's quoted file.
             context.quoted = research.quoted(
                 reads.quoted(

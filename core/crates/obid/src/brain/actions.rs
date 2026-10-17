@@ -151,6 +151,7 @@ async fn dispatch(
             conversation: Some(asked.conversation.to_owned()),
             base: d.base_branch.clone(),
             mode: d.mode.map(|m| m.as_str().to_owned()),
+            brief: d.brief(),
             ..NewJob::default()
         };
         // Work found by research waits in the inbox for the user's Start (#374).

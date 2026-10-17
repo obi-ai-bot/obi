@@ -14,6 +14,12 @@ pub const REPLY_LENGTH: usize = 400;
 pub const MOST_OPTIONS: usize = 3;
 /// How many jobs one plan starts, at most.
 pub const MOST_DISPATCHES: usize = 10;
+/// The most findings one job is handed (#540).
+pub const MOST_FINDINGS: usize = 10;
+/// How long a job's `done` may be: one line.
+pub const DONE_LENGTH: usize = 300;
+/// How long one finding's note may be.
+pub const NOTE_LENGTH: usize = 500;
 /// The range of `maxRunning` (Engine/Jobs.swift, `JobSlots.range`).
 pub const MAX_RUNNING: std::ops::RangeInclusive<i64> = 1..=20;
 
@@ -259,6 +265,29 @@ pub struct Dispatch {
     /// Other repositories a research job must read (never writable).
     #[serde(default)]
     pub reads: Option<Vec<String>>,
+    /// What this turn's lookups showed, for the agent to start from (#540): up to 10, each a path
+    /// a lookup showed, its lines and a note.
+    #[serde(default)]
+    pub findings: Option<Vec<Finding>>,
+    /// One line saying what must be true when the job is finished (#540).
+    #[serde(default)]
+    pub done: Option<String>,
+}
+
+pub use crate::job::Finding;
+
+impl Dispatch {
+    /// What the job's agent is handed from the turn's research, or none.
+    pub fn brief(&self) -> Option<crate::job::Brief> {
+        let findings = self.findings.clone().unwrap_or_default();
+        let done = self
+            .done
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(str::to_owned);
+        (!findings.is_empty() || done.is_some()).then_some(crate::job::Brief { findings, done })
+    }
 }
 
 /// A question for the user: at most 3 options, and the user may answer in words of their own.
@@ -468,6 +497,9 @@ pub struct Context {
     /// The user's own words this turn, where "new job", "from scratch" or "start over" is read
     /// (#541). Never the brain's restatement.
     pub said: String,
+    /// What this turn's lookups found, their titles and results: a finding's path must be in it
+    /// (#540).
+    pub found: String,
     /// The briefing's jobs that failed, were stopped or ran out of rounds in the last two days:
     /// more work on their issue or pull request goes on in them (#541).
     pub ended: Vec<Ended>,
@@ -548,6 +580,13 @@ impl Plan {
         ];
         texts.extend(self.dispatches.iter().map(|d| d.task.as_str()));
         texts.extend(self.dispatches.iter().filter_map(|d| d.title.as_deref()));
+        texts.extend(self.dispatches.iter().filter_map(|d| d.done.as_deref()));
+        texts.extend(
+            self.dispatches
+                .iter()
+                .flat_map(|d| d.findings.iter().flatten())
+                .map(|f| f.note.as_str()),
+        );
         if let Some(question) = &self.question {
             texts.extend(question.options.iter().map(String::as_str));
         }
@@ -1305,11 +1344,66 @@ fn dispatch_problems(dispatch: &Dispatch, context: &Context) -> Vec<String> {
         problems
             .push("reads is null: obid's research jobs can't read other repositories yet".into());
     }
+    problems.extend(brief_problems(dispatch, context));
     // obid can't hold a job until something happens yet (#455).
     if dispatch.start_when.as_ref().is_some_and(|c| !c.is_empty()) {
         problems.push("start_when is empty: obid can't wait to start a job yet".into());
     }
     problems
+}
+
+/// What's wrong with what a job is handed from the turn's research (#540).
+fn brief_problems(dispatch: &Dispatch, context: &Context) -> Vec<String> {
+    let mut problems = vec![];
+    let findings = dispatch.findings.as_deref().unwrap_or(&[]);
+    if findings.len() > MOST_FINDINGS {
+        problems.push(format!("findings holds at most {MOST_FINDINGS}"));
+    }
+    for finding in findings {
+        let path = finding.path.as_str();
+        if !is_relative_path(path) {
+            problems.push("a finding's path must be relative, at most 300 characters, and contain no .. segment or leading slash or hyphen".into());
+        } else if !context.found.contains(path) {
+            problems.push(format!("path {path} isn't in what you read"));
+        }
+        if let Some(lines) = &finding.lines
+            && !is_line_range(lines)
+        {
+            problems.push("a finding's lines are a line or a range, like 120 or 120-134".into());
+        }
+        let note = finding.note.trim();
+        if note.is_empty() || count(note) > NOTE_LENGTH || note.contains(['\n', '\r']) {
+            problems.push(format!(
+                "a finding's note is one line of 1 to {NOTE_LENGTH} characters"
+            ));
+        }
+    }
+    if let Some(done) = &dispatch.done {
+        let done = done.trim();
+        if done.is_empty() || count(done) > DONE_LENGTH || done.contains(['\n', '\r']) {
+            problems.push(format!("done is one line of 1 to {DONE_LENGTH} characters"));
+        }
+    }
+    problems
+}
+
+/// A path inside a repository, as lookups take them.
+fn is_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && count(path) <= 300
+        && !path.starts_with('/')
+        && !path.starts_with('-')
+        && !path.split('/').any(|piece| piece == "..")
+        && !path.contains(['\n', '\r'])
+}
+
+/// "120" or "120-134".
+fn is_line_range(lines: &str) -> bool {
+    let number = |n: &str| !n.is_empty() && n.len() <= 7 && n.bytes().all(|b| b.is_ascii_digit());
+    match lines.split_once('-') {
+        Some((start, end)) => number(start) && number(end),
+        None => number(lines),
+    }
 }
 
 /// A branch name git accepts and Oby is happy to create: no option-looking or odd names.
@@ -1355,7 +1449,7 @@ pub fn schema(context: &Context) -> Value {
     let string = json!({"type": "string"});
     let dispatch = json!({
         "type": "object", "additionalProperties": false,
-        "required": ["agent", "account", "repo", "base_branch", "pr", "issue", "epic", "kind", "title", "task", "inputs", "rounds", "check", "complexity", "start_when", "mode", "reads"],
+        "required": ["agent", "account", "repo", "base_branch", "pr", "issue", "epic", "kind", "title", "task", "inputs", "rounds", "check", "complexity", "start_when", "mode", "reads", "findings", "done"],
         "properties": {
             "agent": {"enum": tools},
             "account": string,
@@ -1376,6 +1470,12 @@ pub fn schema(context: &Context) -> Value {
             "start_when": {"type": "array", "maxItems": 0},
             "mode": nullable(json!({"enum": modes})),
             "reads": {"type": "null"},
+            "findings": {"type": "array", "maxItems": MOST_FINDINGS, "items": {
+                "type": "object", "additionalProperties": false, "required": ["path", "lines", "note"],
+                "properties": {"path": {"type": "string", "maxLength": 300},
+                               "lines": {"type": ["string", "null"], "maxLength": 15},
+                               "note": {"type": "string", "maxLength": NOTE_LENGTH}}}},
+            "done": {"type": ["string", "null"], "maxLength": DONE_LENGTH},
         },
     });
     let question = json!({
@@ -1962,6 +2062,105 @@ mod tests {
         }
         let system = crate::brain::planner::system(false);
         assert!(system.contains("retry_job on it, never a new fix, build or test dispatch"));
+    }
+
+    /// #540: a job is handed what this turn's lookups showed, and only that.
+    #[test]
+    fn findings_cite_only_what_the_turn_read() {
+        let mut context = context();
+        let briefed = |findings: Value, done: Value| {
+            let mut plan = Plan::of(Action::Dispatch, "");
+            plan.dispatches = vec![
+                serde_json::from_value(json!({
+                "agent": "claude", "account": "default", "repo": "deskree-inc/oby",
+                "kind": "fix", "task": "Fix the vault", "findings": findings, "done": done}))
+                .unwrap(),
+            ];
+            plan
+        };
+        let vault = json!([{"path": "Engine/Vault.swift", "lines": "120-134",
+                            "note": "the key is read before unlock"}]);
+        // Nothing read this turn: no path can be cited.
+        assert_eq!(
+            briefed(vault.clone(), json!(null)).problems(&context, "zq9"),
+            ["path Engine/Vault.swift isn't in what you read"]
+        );
+        context.found =
+            "Engine/Vault.swift\nread_file deskree-inc/oby@origin/dev Engine/Vault.swift (sha abc1234)\n120: let key".into();
+        let plan = briefed(vault.clone(), json!("the vault tests pass"));
+        assert!(plan.problems(&context, "zq9").is_empty());
+        assert_eq!(
+            plan.dispatches[0].brief(),
+            Some(crate::job::Brief {
+                findings: vec![Finding {
+                    path: "Engine/Vault.swift".into(),
+                    lines: Some("120-134".into()),
+                    note: "the key is read before unlock".into(),
+                }],
+                done: Some("the vault tests pass".into()),
+            })
+        );
+        assert_eq!(
+            briefed(
+                json!([{"path": "Engine/Keys.swift", "lines": null, "note": "n"}]),
+                json!(null)
+            )
+            .problems(&context, "zq9"),
+            ["path Engine/Keys.swift isn't in what you read"]
+        );
+        assert_eq!(
+            briefed(
+                json!([{"path": "../Vault.swift", "lines": "x", "note": " "}]),
+                json!("two\nlines")
+            )
+            .problems(&context, "zq9"),
+            [
+                "a finding's path must be relative, at most 300 characters, and contain no .. segment or leading slash or hyphen",
+                "a finding's lines are a line or a range, like 120 or 120-134",
+                "a finding's note is one line of 1 to 500 characters",
+                "done is one line of 1 to 300 characters",
+            ]
+        );
+        let eleven: Vec<Value> = (0..11)
+            .map(|_| json!({"path": "Engine/Vault.swift", "lines": "1", "note": "n"}))
+            .collect();
+        assert_eq!(
+            briefed(json!(eleven), json!(null)).problems(&context, "zq9"),
+            ["findings holds at most 10"]
+        );
+        assert_eq!(
+            briefed(json!([]), json!("x".repeat(301))).problems(&context, "zq9"),
+            ["done is one line of 1 to 300 characters"]
+        );
+        assert_eq!(
+            briefed(json!([]), json!("canary zq9")).problems(&context, "zq9"),
+            ["the plan repeats the canary"]
+        );
+        // A dispatch with no research keeps working as before, with nothing to hand over.
+        let plain = briefed(json!(null), json!(null));
+        assert!(
+            plain
+                .problems(
+                    &Context {
+                        found: String::new(),
+                        ..context.clone()
+                    },
+                    "zq9"
+                )
+                .is_empty()
+        );
+        assert_eq!(plain.dispatches[0].brief(), None);
+        let schema = schema(&context);
+        let dispatch = &schema["properties"]["dispatches"]["items"];
+        assert_eq!(dispatch["properties"]["findings"]["maxItems"], 10);
+        assert!(
+            dispatch["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("done"))
+        );
+        let system = crate::brain::planner::system(false);
+        assert!(system.contains("Never write \"based on your findings\""));
     }
 
     #[test]
