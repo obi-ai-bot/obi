@@ -710,6 +710,22 @@ fn on_a_mac_the_vault_can_be_the_keychain() {
     assert!(!request.contains(&second), "{request}");
     assert!(request.contains(&format!("Old: {first} .")), "{request}");
 
+    // A Keychain item's date has whole seconds: a change in the same second as the one obid
+    // learned keeps the stamp, and is read all the same within a few seconds.
+    let third = format!("{first}-third");
+    add(&path, "staging-api-key", &format!("{first}-between"));
+    call(&obid, "GET", "/v1/status", None);
+    add(&path, "staging-api-key", &third);
+    let now = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate",
+               "task": format!("Now: {third}")}),
+    );
+    within(10, "the third value is taken out", || {
+        let answer = call(&obid, "GET", &format!("/v1/jobs/{now}"), None);
+        (answer.body["request"] == "Now: [vault: staging-api-key]").then_some(())
+    });
+
     let (code, out, err) = vault(&path, &["remove", "staging-api-key"], None);
     assert_eq!(
         (code, out.as_str()),
@@ -723,4 +739,56 @@ fn on_a_mac_the_vault_can_be_the_keychain() {
         answer.text
     );
     assert!(!obid.home.join("vault").exists());
+}
+
+/// When the vault can't be read, a request that would act isn't carried out: no job is made, and
+/// the brain hears nothing (the words never join the conversation). Only stopping work is carried
+/// out (`stop_all_stops_the_job_even_when_the_vault_cant_be_read`).
+#[test]
+fn an_unreadable_vault_carries_out_nothing() {
+    let (_folder, obid, _) = publishing("vault-acts");
+    let jobs = || {
+        std::fs::read_dir(obid.home.join("jobs"))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+    let before = jobs();
+    chmod(&vault_file(&obid), 0o644);
+    let answer = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate",
+                             "task": "made while the vault can't be read"}}),
+        ),
+    );
+    assert_eq!(answer.status, 503, "{}", answer.text);
+    let words = "plan this while the vault can't be read";
+    let answer = call(&obid, "POST", "/v1/plans", Some(&json!({"said": words})));
+    assert_eq!(answer.status, 503, "{}", answer.text);
+    // A permission answered with words would reach an agent: not carried out either.
+    let answer = call(
+        &obid,
+        "POST",
+        "/v1/jobs/nope/permission",
+        Some(&json!({"id": "p", "decision": "deny", "message": "use the staging key"})),
+    );
+    assert_eq!(answer.status, 503, "{}", answer.text);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(jobs(), before, "a job was made");
+    chmod(&vault_file(&obid), 0o600);
+    let conversation = call(&obid, "GET", "/v1/conversation", None);
+    assert_eq!(conversation.status, 200, "{}", conversation.text);
+    assert!(!conversation.text.contains(words), "{}", conversation.text);
+    // Without words, a denial only stops the agent: carried out, and answered 503.
+    chmod(&vault_file(&obid), 0o644);
+    let answer = call(
+        &obid,
+        "POST",
+        "/v1/jobs/nope/permission",
+        Some(&json!({"id": "p", "decision": "deny"})),
+    );
+    assert_eq!(answer.status, 503, "{}", answer.text);
+    chmod(&vault_file(&obid), 0o600);
 }

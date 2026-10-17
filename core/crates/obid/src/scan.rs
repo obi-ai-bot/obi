@@ -475,51 +475,39 @@ fn wrapped(lines: &[Line<'_>]) -> Vec<Finding> {
 }
 
 /// Each run of two or more adjacent lines that hold only base64 or hex (or one such line after
-/// the line whose end it continues), as the text's name, the run's first line and the run joined.
+/// the line whose end it continues), as the text's name, the run's first line and the run joined
+/// (`crate::secrets::encoded_runs`, which redaction reads the same way). A line break written as
+/// `\n` inside one line (a JSON string) breaks it too, and the runs are read as they are and with
+/// one diff or quote mark (`+`, `-`, `>`) taken off the front of each line.
 fn wrapped_runs(lines: &[Line<'_>]) -> Vec<(String, usize, String)> {
-    let trim = |s: &str| -> String {
-        s.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\r' | '"' | '\'' | ',' | '\\'))
-            .to_owned()
-    };
     let mut found = Vec::new();
-    let mut run: Vec<&Line<'_>> = Vec::new();
-    let mut lead = String::new();
-    let mut flush = |run: &mut Vec<&Line<'_>>, lead: &mut String| {
-        if run.len() + usize::from(!lead.is_empty()) > 1
-            && let Some(first) = run.first()
-        {
-            let joined = format!(
-                "{lead}{}",
-                run.iter().map(|l| trim(l.text)).collect::<String>()
-            );
-            found.push((first.name.to_owned(), first.number, joined));
+    let mut block: Vec<(String, usize)> = Vec::new();
+    let mut flush = |block: &mut Vec<(String, usize)>, name: &str| {
+        let texts: Vec<String> = block.iter().map(|(text, _)| text.clone()).collect();
+        for marked in [false, true] {
+            for (first, _, joined) in crate::secrets::encoded_runs(&texts, marked) {
+                found.push((name.to_owned(), block[first].1, joined));
+            }
         }
-        run.clear();
-        lead.clear();
+        block.clear();
     };
     let mut previous: Option<&Line<'_>> = None;
     for line in lines {
-        let text = trim(line.text);
-        let encoded = !text.is_empty() && cached!(r"^[A-Za-z0-9+/=_-]+$").is_match(&text);
-        let adjacent = previous.is_some_and(|p| p.name == line.name && p.number + 1 == line.number);
-        if encoded && adjacent && !run.is_empty() {
-            run.push(line);
-        } else {
-            flush(&mut run, &mut lead);
-            if encoded {
-                run.push(line);
-                // The first part may end the line before, after `=` or `:`.
-                if adjacent
-                    && let Some(previous) = previous
-                    && let Some(tail) = cached!(r"[A-Za-z0-9+/_-]{8,}$").find(&trim(previous.text))
-                {
-                    lead = tail.as_str().to_owned();
-                }
-            }
+        if let Some(previous) = previous
+            && (previous.name != line.name || previous.number + 1 != line.number)
+        {
+            flush(&mut block, previous.name);
+        }
+        for piece in crate::secrets::line_breaks().split(line.text) {
+            block.push((piece.to_owned(), line.number));
         }
         previous = Some(line);
     }
-    flush(&mut run, &mut lead);
+    if let Some(previous) = previous {
+        flush(&mut block, previous.name);
+    }
+    found.sort();
+    found.dedup();
     found
 }
 
@@ -1235,6 +1223,52 @@ exit 99"#,
                 .iter()
                 .any(|f| f.rule == "vault secret"),
         );
+    }
+
+    /// Wrapped base64 behind a diff's `+`, a quote's `> `, or written as `\n` inside one JSON
+    /// string, is found too.
+    #[test]
+    fn a_vault_secret_wrapped_in_a_diff_a_quote_or_a_json_string_is_found() {
+        struct Forget;
+        impl Drop for Forget {
+            fn drop(&mut self) {
+                crate::secrets::known().forget("scan-wrap-shapes-test");
+            }
+        }
+        let value = format!("shaped-vault-value/{}", "z9+k=x?y&w".repeat(6));
+        crate::secrets::known().learn("scan-wrap-shapes-test", &value);
+        let _forget = Forget;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&value);
+        let lines: Vec<&str> = encoded
+            .as_bytes()
+            .chunks(64)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        let prefixed = |p: &str| {
+            lines
+                .iter()
+                .map(|l| format!("{p}{l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for text in [
+            format!("the diff:\n{}\nthe end", prefixed("+")),
+            format!("you wrote:\n{}\nthe end", prefixed("> ")),
+            format!("{{\"key\": \"{}\\n\"}}", lines.join("\\n")),
+        ] {
+            assert!(
+                built_in(&texts(&text))
+                    .iter()
+                    .any(|f| f.rule == "vault secret"),
+                "{text}"
+            );
+            assert!(
+                known_secrets_in_file(&text, "f.json")
+                    .iter()
+                    .any(|f| f.rule == "vault secret"),
+                "{text}"
+            );
+        }
     }
 
     /// A secret learned for one test, forgotten however the test ends.

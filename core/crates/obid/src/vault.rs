@@ -18,9 +18,10 @@
 //!   (`crate::logs`), the publish gate (`crate::scan`, `crate::publish`) and every text obid
 //!   redacts take them out, plain and in every encoded form `crate::secrets` knows. obid's own
 //!   calls read one with [`value`].
-//! - **Answers.** Every `/v1` answer has them taken out (`[vault: <name>]`), and is `503` with the
-//!   reason when the vault can't be read, after the request was carried out, so a stop always
-//!   stops ([`answers`]; docs/runner-api.md, "No vault secret").
+//! - **Answers.** Every `/v1` answer has them taken out (`[vault: <name>]`). When the vault can't
+//!   be read a request is `503` with the reason and isn't carried out, except what only stops work
+//!   (a stop, stop-all, dismiss, a permission denied without words), so the owner can always stop
+//!   ([`answers`]; docs/runner-api.md, "No vault secret").
 //! - **Agents.** [`for_agent`] and [`for_agent_bytes`] are what an agent may get, and fail when the
 //!   vault can't be read.
 //! - **Failing closed.** [`check`] says why the vault can't be read: the publish gate and the scan
@@ -174,7 +175,14 @@ impl Location {
             .ok()
             .flatten()
             .map(|user| user.dir.join("Library/Application Support/Oby/Runner"));
-        if cfg!(target_os = "macos") && runner_home.as_deref() == Some(home) {
+        // The same folder however it is written: links resolved, and letter case ignored, as a
+        // Mac's file system ignores it by default.
+        let same = |a: &Path, b: &Path| {
+            let a = std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
+            let b = std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
+            a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+        };
+        if cfg!(target_os = "macos") && runner_home.is_some_and(|runner| same(&runner, home)) {
             Location::Keychain {
                 service: RUNNER_SERVICE.into(),
             }
@@ -192,8 +200,8 @@ impl Location {
             ("keychain", _) if !cfg!(target_os = "macos") => {
                 Err("the Keychain is macOS's: on this machine the vault is a file (\"store\": \"file\").".into())
             }
-            ("keychain", Some(service)) if service.trim().is_empty() => {
-                Err("service is empty.".into())
+            ("keychain", Some(service)) if service.trim().is_empty() || service.trim() != service => {
+                Err(format!("service is {service:?}: a name with no spaces around it, like com.deskree.oby.runner.vault."))
             }
             ("keychain", service) => Ok(Location::Keychain {
                 service: service.unwrap_or(RUNNER_SERVICE).to_owned(),
@@ -230,7 +238,21 @@ pub trait Store: Send + Sync {
     fn remove(&self, name: &str) -> Result<bool, String>;
     /// Tidies what an interrupted save left, when obid starts.
     fn tidy(&self) {}
+    /// The secrets' names, never their values where the store can say so.
+    fn names(&self) -> Result<Vec<String>, String> {
+        Ok(self.read()?.into_keys().collect())
+    }
+    /// Whether the stamp changes with every change. When it doesn't (a Keychain item's date has
+    /// whole seconds only, so a second change in the same second keeps it), the values are read
+    /// again at least every [`READ_EVERY`] all the same.
+    fn exact(&self) -> bool {
+        true
+    }
 }
+
+/// How often, at most, a store whose stamp isn't [`Store::exact`] goes without its values being
+/// read again.
+const READ_EVERY: Duration = Duration::from_secs(2);
 
 /// A Keychain asked for where there's none: every read fails, so nothing goes out.
 #[cfg(not(target_os = "macos"))]
@@ -536,6 +558,18 @@ mod keychain {
     }
 
     impl Store for KeychainStore {
+        fn names(&self) -> Result<Vec<String>, String> {
+            Ok(self
+                .items(None)?
+                .into_iter()
+                .filter_map(|mut item| item.remove("acct"))
+                .collect())
+        }
+
+        fn exact(&self) -> bool {
+            false
+        }
+
         /// Each item's name and when it last changed: Keychain Access, `security` or the Swift
         /// runner can change one outside obid.
         fn stamp(&self) -> Result<String, String> {
@@ -596,8 +630,10 @@ mod keychain {
                     .set_label(format!("Oby vault: {name}"))
                     .set_location(Location::FileKeychain(self.login()?));
                 // kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly, as the Swift
-                // runner sets it ("pdmn" and "aku" are those constants' values). ItemAddOptions
-                // can't carry it, so its query is added to by hand (the deprecated way in).
+                // runner sets it ("pdmn" and "aku" are those constants' values: the named
+                // constants are extern statics, which only `unsafe` reads, and this workspace
+                // forbids it). ItemAddOptions can't carry it, so its query is added to by hand
+                // (the deprecated way in).
                 let accessible = CFString::from_static_string("pdmn");
                 let when_unlocked = CFString::from_static_string("aku");
                 #[allow(deprecated)]
@@ -698,6 +734,10 @@ struct Learned {
     stamp: Option<String>,
     names: BTreeSet<String>,
     checked: Option<Instant>,
+    /// When the values were last read from the store.
+    read: Option<Instant>,
+    /// Counts what was learned, so a read that started before a newer one was learned is dropped.
+    generation: u64,
 }
 
 /// The name a vault secret has in `known()`: apart from obid's own secrets (`api-token`, …).
@@ -731,7 +771,9 @@ impl Vault {
 
     /// The secrets' names, sorted. Never their values.
     pub fn names(&self) -> Result<Vec<String>, String> {
-        Ok(self.store.read()?.into_keys().collect())
+        let mut names = self.store.names()?;
+        names.sort();
+        Ok(names)
     }
 
     /// Adds `value` as `name`, or replaces it. Line breaks around it (a paste) are dropped. Errors
@@ -750,6 +792,7 @@ impl Vault {
         self.secrets.learn(name, value);
         learned.names.insert(name.to_owned());
         learned.stamp = None;
+        learned.generation += 1;
         Ok(())
     }
 
@@ -764,20 +807,38 @@ impl Vault {
         self.secrets.forget(name);
         learned.names.remove(name);
         learned.stamp = None;
+        learned.generation += 1;
         Ok(had)
     }
 
     /// Reads the vault again when its file changed, and says why it can't be read. Then the
     /// values learned before stay learned (a log line is still redacted with them), and whatever
     /// asked sends nothing.
+    ///
+    /// The store is asked without the lock held: a Keychain that is slow to answer (a prompt)
+    /// holds up only whoever asked, never the answers and log lines that only read what was
+    /// learned.
     pub fn check(&self) -> Result<(), String> {
-        let mut learned = self.learned.lock().unwrap_or_else(|e| e.into_inner());
-        learned.checked = Some(Instant::now());
+        let lock = || self.learned.lock().unwrap_or_else(|e| e.into_inner());
+        lock().checked = Some(Instant::now());
         let stamp = self.store.stamp()?;
-        if learned.stamp.as_deref() == Some(stamp.as_str()) {
+        let started = {
+            let learned = lock();
+            let fresh =
+                self.store.exact() || learned.read.is_some_and(|at| at.elapsed() < READ_EVERY);
+            if fresh && learned.stamp.as_deref() == Some(stamp.as_str()) {
+                return Ok(());
+            }
+            learned.generation
+        };
+        let values = self.store.read()?;
+        let mut learned = lock();
+        if learned.generation != started {
+            // A read that started later was learned meanwhile.
             return Ok(());
         }
-        let values = self.store.read()?;
+        learned.generation += 1;
+        learned.read = Some(Instant::now());
         for gone in learned.names.iter().filter(|n| !values.contains_key(*n)) {
             self.known.forget(&known_name(gone));
             self.secrets.forget(gone);
@@ -917,6 +978,15 @@ pub fn install(home: &Path, location: &Location) -> Arc<Vault> {
         }
     }));
     *SHARED.write().unwrap_or_else(|e| e.into_inner()) = Some(vault.clone());
+    // Which store, and how many secrets it holds: never a name or a value.
+    let place = match location {
+        Location::File => format!("the file {}", folder(home).join("secrets.json").display()),
+        Location::Keychain { service } => format!("the login Keychain, service {service}"),
+    };
+    match vault.names() {
+        Ok(names) => tracing::info!(secrets = names.len(), "the vault is {place}"),
+        Err(_) => tracing::info!("the vault is {place}"),
+    }
     if let Err(why) = vault.check() {
         tracing::warn!(
             "the vault can't be read, so obid answers 503 and publishes nothing until it's fixed: {why}"
@@ -988,14 +1058,17 @@ fn unreadable_for_agents(why: &str) -> String {
     )
 }
 
-/// Every `/v1` answer, after the gate let the request in (docs/runner-api.md, "No vault secret"):
-/// the request is always carried out first, so a stop, a stop-all or a permission's answer takes
-/// effect whatever the vault (Runner/API.swift does the same); then its answer is `503` with the
-/// reason when the vault can't be read, and otherwise every string of a JSON answer,
-/// and every other text answer, with the vault's secrets taken out. An answer with a length is
-/// scrubbed whole; a streamed one (the event stream, `/wait`) a frame at a time, and it ends at the
-/// first frame the vault can't be read for. Files that aren't text (a check's bundle) go as they
-/// are, and so do the web app's files under `/app/`, which hold no data.
+/// Every `/v1` answer, after the gate let the request in (docs/runner-api.md, "No vault secret").
+/// When the vault can't be read, the request isn't carried out: it is `503` with the reason, so
+/// nothing reaches an agent, the brain, a plug-in or another Oby without the vault's secrets taken
+/// out. The exceptions are what only stops work and sends nothing anywhere ([`stops_only`]): a job's
+/// stop, stop-all, dismissing a job, and a permission denied without words. Those are carried
+/// out first, so the owner can always stop work, and only their answer is the `503`. Otherwise
+/// every string of a JSON answer, and every other text answer, has the vault's secrets taken
+/// out. An answer with a length is scrubbed whole; a streamed one (the event stream, `/wait`) a
+/// frame at a time, and it ends at the first frame the vault can't be read for. Files that
+/// aren't text (a check's bundle) go as they are, and so do the web app's files under `/app/`,
+/// which hold no data.
 pub async fn answers(request: Request, next: Next) -> Response {
     if !request.uri().path().starts_with("/v1/") {
         return next.run(request).await;
@@ -1003,6 +1076,10 @@ pub async fn answers(request: Request, next: Next) -> Response {
     let Some(vault) = shared() else {
         return next.run(request).await;
     };
+    let (request, stops) = stops_only(request).await;
+    if !stops && let Err(why) = vault.check() {
+        return unreadable(&why);
+    }
     let response = next.run(request).await;
     if let Err(why) = vault.check() {
         return unreadable(&why);
@@ -1054,6 +1131,45 @@ pub async fn answers(request: Request, next: Next) -> Response {
         .take_while(|frame| std::future::ready(frame.is_some()))
         .filter_map(std::future::ready);
     Response::from_parts(parts, Body::from_stream(frames))
+}
+
+/// Whether `request` only stops work and sends nothing anywhere: `POST /v1/stop-all`,
+/// `/v1/jobs/{id}/stop`, `/v1/jobs/{id}/dismiss`, and `/v1/jobs/{id}/permission` denying without
+/// words (`message` absent, null or blank). The request comes back whole, its body read once.
+async fn stops_only(request: Request) -> (Request, bool) {
+    if request.method() != axum::http::Method::POST {
+        return (request, false);
+    }
+    let path = request.uri().path().to_owned();
+    if path == "/v1/stop-all" {
+        return (request, true);
+    }
+    let Some(rest) = path.strip_prefix("/v1/jobs/") else {
+        return (request, false);
+    };
+    match rest.split_once('/') {
+        Some((id, "stop" | "dismiss")) if !id.is_empty() && !id.contains('/') => (request, true),
+        Some((id, "permission")) if !id.is_empty() && !id.contains('/') => {
+            let (parts, body) = request.into_parts();
+            let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024).await else {
+                return (Request::from_parts(parts, Body::empty()), false);
+            };
+            let denies_without_words =
+                serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .is_some_and(|body| {
+                        body["decision"] == "deny"
+                            && body.get("message").is_none_or(|m| {
+                                m.is_null() || m.as_str().is_some_and(|m| m.trim().is_empty())
+                            })
+                    });
+            (
+                Request::from_parts(parts, Body::from(bytes)),
+                denies_without_words,
+            )
+        }
+        _ => (request, false),
+    }
 }
 
 fn unreadable(why: &str) -> Response {
@@ -1286,7 +1402,7 @@ mod tests {
         assert!(Location::parse("file", Some("x")).is_err());
         assert!(Location::parse("cloud", None).is_err());
         if cfg!(target_os = "macos") {
-            assert_eq!(Location::parse("keychain", None), Ok(expected));
+            assert_eq!(Location::parse("keychain", None), Ok(expected.clone()));
             assert_eq!(
                 Location::parse("keychain", Some("com.example.test")),
                 Ok(Location::Keychain {
@@ -1294,6 +1410,17 @@ mod tests {
                 })
             );
             assert!(Location::parse("keychain", Some(" ")).is_err());
+            assert!(Location::parse("keychain", Some(" com.example.test")).is_err());
+            assert!(Location::parse("keychain", Some("com.example.test ")).is_err());
+            // The runner home however it is written: another letter case, or through a link.
+            let upper = PathBuf::from(runner_home.to_string_lossy().to_uppercase());
+            assert_eq!(Location::default_for(&upper), expected);
+            let scratch = Scratch::new();
+            let link = scratch.0.join("runner-link");
+            if runner_home.is_dir() {
+                std::os::unix::fs::symlink(&runner_home, &link).unwrap();
+                assert_eq!(Location::default_for(&link), expected);
+            }
         } else {
             assert!(Location::parse("keychain", None).is_err());
         }

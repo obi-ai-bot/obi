@@ -138,9 +138,16 @@ impl Secrets {
             return text.to_owned();
         }
         let mut text = text.to_owned();
-        // Wrapped runs first, judged whole: a shorter value's needle inside one line would break
-        // the run and leave the rest of it.
-        if text.contains('\n') {
+        // A value over lines first, whole (a key as a log writes it); then wrapped runs, judged
+        // whole: a shorter value's needle inside one line would break the run and leave the rest.
+        if text.contains('\n') || text.contains("\\n") {
+            for needle in inner
+                .needles
+                .iter()
+                .filter(|n| n.text.contains('\n') || n.text.contains("\\n"))
+            {
+                text = replace(&text, needle, label);
+            }
             text = unwrapped(&inner.needles, &text, label);
         }
         for needle in &inner.needles {
@@ -195,52 +202,21 @@ impl Secrets {
 /// each run of lines that hold nothing else, joined with the end of the line before as the scan
 /// joins them (`crate::scan`), and when the joined run holds a value, every line of it, and the
 /// line it continues, is the marker. GNU base64 wraps at 76, so a value of 58 bytes or more is on
-/// no line whole.
+/// no line whole. A line break written as `\n` inside one line (a JSON string) breaks it too, and
+/// the runs are read twice: as they are, and with one diff or quote mark (`+`, `-`, `>`) taken
+/// off the front of each line (`+` is a base64 character itself, so it would break the run).
 fn unwrapped(needles: &[Needle], text: &str, label: &str) -> String {
-    let trim = |s: &str| -> String {
-        s.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\r' | '"' | '\'' | ',' | '\\'))
-            .to_owned()
-    };
-    let mut lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
-    let encoded: Vec<bool> = lines
-        .iter()
-        .map(|line| {
-            let text = trim(line);
-            !text.is_empty()
-                && text.bytes().all(|b| {
-                    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-')
-                })
-        })
-        .collect();
-    let mut start = 0;
-    while start < lines.len() {
-        if !encoded[start] {
-            start += 1;
-            continue;
-        }
-        let mut end = start;
-        while end + 1 < lines.len() && encoded[end + 1] {
-            end += 1;
-        }
-        let lead = if start == 0 {
-            String::new()
-        } else {
-            let before = trim(&lines[start - 1]);
-            let tail = before
-                .bytes()
-                .rev()
-                .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'_' | b'-'))
-                .count();
-            if tail >= 8 {
-                before[before.len() - tail..].to_owned()
-            } else {
-                String::new()
-            }
-        };
-        if end > start || !lead.is_empty() {
-            let joined: String = std::iter::once(lead.clone())
-                .chain(lines[start..=end].iter().map(|l| trim(l)))
-                .collect();
+    let mut pieces: Vec<String> = Vec::new();
+    let mut breaks: Vec<String> = Vec::new();
+    let mut at = 0;
+    for found in line_breaks().find_iter(text) {
+        pieces.push(text[at..found.start()].to_owned());
+        breaks.push(found.as_str().to_owned());
+        at = found.end();
+    }
+    pieces.push(text[at..].to_owned());
+    for marked in [false, true] {
+        for (first, end, joined) in encoded_runs(&pieces, marked) {
             let mut names = hits(needles, &joined);
             let lower = joined.to_ascii_lowercase();
             for needle in needles {
@@ -254,15 +230,94 @@ fn unwrapped(needles: &[Needle], text: &str, label: &str) -> String {
                 }
             }
             if !names.is_empty() {
-                let first = if lead.is_empty() { start } else { start - 1 };
-                for line in &mut lines[first..=end] {
-                    *line = marker(label, &names);
+                for piece in &mut pieces[first..=end] {
+                    *piece = marker(label, &names);
                 }
             }
         }
+    }
+    let mut out = String::with_capacity(text.len());
+    for (i, piece) in pieces.iter().enumerate() {
+        out.push_str(piece);
+        if let Some(line_break) = breaks.get(i) {
+            out.push_str(line_break);
+        }
+    }
+    out
+}
+
+/// A line break, real or written inside a JSON string (`\n`, `\r\n`).
+pub(crate) fn line_breaks() -> &'static Regex {
+    static BREAKS: OnceLock<Regex> = OnceLock::new();
+    BREAKS.get_or_init(|| Regex::new(r"\r?\n|\\r\\n|\\n").expect("the line break pattern compiles"))
+}
+
+/// `line` as the runs read it: without spaces, quotes, commas and backslashes around it, and with
+/// `marked`, without one diff or quote mark (`+`, `-`, `>`) in front.
+fn run_text(line: &str, marked: bool) -> String {
+    let trim = |s: &str| -> String {
+        s.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\r' | '"' | '\'' | ',' | '\\'))
+            .to_owned()
+    };
+    let text = trim(line);
+    if !marked {
+        return text;
+    }
+    match text.strip_prefix(['+', '-', '>']) {
+        Some(rest) => trim(rest),
+        None => text,
+    }
+}
+
+/// Each run of lines that hold only base64 or hex: its first line (the one it continues, when
+/// the run takes that line's end), its last, and the run joined.
+pub(crate) fn encoded_runs(lines: &[String], marked: bool) -> Vec<(usize, usize, String)> {
+    let texts: Vec<String> = lines.iter().map(|l| run_text(l, marked)).collect();
+    let encoded: Vec<bool> = texts
+        .iter()
+        .map(|text| {
+            !text.is_empty()
+                && text.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-')
+                })
+        })
+        .collect();
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < lines.len() {
+        if !encoded[start] {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end + 1 < lines.len() && encoded[end + 1] {
+            end += 1;
+        }
+        let lead = if start == 0 {
+            String::new()
+        } else {
+            let before = &texts[start - 1];
+            let tail = before
+                .bytes()
+                .rev()
+                .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'_' | b'-'))
+                .count();
+            if tail >= 8 {
+                before[before.len() - tail..].to_owned()
+            } else {
+                String::new()
+            }
+        };
+        if end > start || !lead.is_empty() {
+            let joined: String = std::iter::once(lead.as_str())
+                .chain(texts[start..=end].iter().map(String::as_str))
+                .collect();
+            let first = if lead.is_empty() { start } else { start - 1 };
+            runs.push((first, end, joined));
+        }
         start = end + 1;
     }
-    lines.join("\n")
+    runs
 }
 
 fn marker(label: &str, names: &[String]) -> String {
@@ -679,6 +734,42 @@ mod tests {
         // Encoded lines that hold no value stay.
         let other = format!("a b\n{}\n{}\nc d", "QUJD".repeat(19), "REVG".repeat(19));
         assert_eq!(secrets.redact(&other), other);
+    }
+
+    /// The same wrapped base64 as a diff adds it (`+` before each line, itself a base64
+    /// character), as a quoted reply has it (`> `), and as a JSON string writes it (`\n` inside
+    /// one line): every piece goes.
+    #[test]
+    fn wrapped_base64_in_a_diff_a_quote_or_a_json_string_is_taken_out() {
+        let secrets = Secrets::default();
+        let value = format!("wrapped-vault-value/{}", "q7+m2=a?b&c".repeat(6));
+        secrets.learn("long", &value);
+        let encoded = b64(value.as_bytes());
+        let lines: Vec<&str> = encoded
+            .as_bytes()
+            .chunks(64)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        assert!(lines.len() >= 2);
+        let prefixed = |p: &str| {
+            lines
+                .iter()
+                .map(|l| format!("{p}{l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for text in [
+            format!("@@ -0,0 +1,{} @@\n{}\n the end", lines.len(), prefixed("+")),
+            format!("you wrote:\n{}\nthanks, bye", prefixed("> ")),
+            format!("{{\"key\": \"{}\\n\"}}", lines.join("\\n")),
+            format!("{{\"key\": \"{}\\r\\n\"}}", lines.join("\\r\\n")),
+        ] {
+            let redacted = secrets.redact(&text);
+            for line in &lines {
+                assert!(!redacted.contains(line), "{redacted}");
+            }
+            assert!(redacted.contains("[redacted: long]"), "{redacted}");
+        }
     }
 
     #[test]
