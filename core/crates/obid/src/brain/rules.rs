@@ -105,6 +105,13 @@ pub fn plan(said: &str, context: &Context) -> Plan {
     if text.trim().is_empty() {
         return Plan::of(Action::Ignore, "");
     }
+    // Only the brain can pick up the last turn: rules never ask which repository for it (#632).
+    if super::turn::continues(&context.said) {
+        return Plan::of(
+            Action::ReplyOnly,
+            "Oby couldn't think that through: say “continue” again in a moment.",
+        );
+    }
     let words = words(&text);
     if let Some(moved) = move_plan(&words, context) {
         return moved;
@@ -494,6 +501,21 @@ mod tests {
             [&repos[0], &repos[1]]
         );
         assert!(repos_named(&words("fix tetrix-frontend #2"), &repos).is_empty());
+    }
+
+    /// #632: "continue" is never answered "Which repository?": rules can't pick up a turn.
+    #[test]
+    fn rules_never_ask_which_repository_for_continue() {
+        let mut context = context();
+        for words in ["continue", "Continue.", "go on", "keep going"] {
+            context.said = words.into();
+            let plan = plan(words, &context);
+            assert_eq!(plan.action, Action::ReplyOnly, "{words}");
+            assert_eq!(
+                plan.reply,
+                "Oby couldn't think that through: say “continue” again in a moment."
+            );
+        }
     }
 
     #[test]

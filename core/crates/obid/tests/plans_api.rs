@@ -3748,3 +3748,178 @@ fn the_brain_cannot_settle_a_secret_by_changing_the_mode() {
     assert_eq!(job["status"], "running");
     assert_eq!(job["summary"], "", "the agent heard an answer: {job}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// A turn always ends with words (#615), and research isn't wasted (#632).
+
+fn search(query: &str) -> String {
+    research(vec![lookup(
+        "search_code",
+        json!({"repo": "obi-e2e/fixture-app", "query": query}),
+    )])
+}
+
+/// The last turn Oby kept in the conversation.
+fn last_oby_turn(obid: &Obid) -> serde_json::Value {
+    call(obid, "GET", "/v1/conversation?limit=500", None)
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|t| t["who"] == "oby")
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// #615: a later step left with too little time to think ends `budget_spent`, after what was
+/// done, with "say continue", never `brain_failed`.
+#[test]
+fn a_later_step_with_no_time_left_to_think_ends_budget_spent() {
+    let folder = Folder::new("brain-no-time-left");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    config["turnBudget"] = json!(3);
+    let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Step 0's first try times out at half the budget; its retry plans with under a second left
+    // for step 1, which no adapter starts.
+    queue(
+        &obid,
+        &[
+            format!("SLEEP 5 {}", reply("")),
+            format!("SLEEP 0.9 {}", set_mode(&id, "ask")),
+        ],
+    );
+    let answer = said(&obid, "ask before anything on Vault secrets");
+    assert_eq!(
+        answer["text"],
+        "Vault secrets is in Ask mode now. That's as far as Oby got in one go: say “continue” for the rest.",
+        "{answer}"
+    );
+    assert_eq!(ends(&obid), ["budget_spent"]);
+}
+
+/// #615: the brain failed after research only: the turn says what it looked at, and is kept.
+#[test]
+fn a_brain_failure_after_research_says_what_was_looked_at() {
+    let folder = Folder::new("brain-failed-research");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &[search("Hello"), "EXIT 15".into(), "EXIT 15".into()],
+    );
+    let answer = said(&obid, "where does the app say hello?");
+    let words = "Oby searched obi-e2e/fixture-app for “Hello”, then couldn't think it through: say “continue” to pick up from there.";
+    assert_eq!(answer["text"], words, "{answer}");
+    assert_eq!(last_oby_turn(&obid)["text"], words);
+    assert_eq!(ends(&obid), ["brain_failed"]);
+}
+
+/// #615: stopped after research only, the turn says what it looked at.
+#[test]
+fn a_stop_after_research_says_what_was_looked_at() {
+    let folder = Folder::new("brain-stopped-research");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &[search("Hello"), format!("SLEEP 2 {}", reply("Late."))],
+    );
+    let answer = std::thread::scope(|scope| {
+        let asking = scope.spawn(|| said(&obid, "where does the app say hello?"));
+        within(10, "the second step's call starts", || {
+            (calls(&obid).len() == 2).then_some(())
+        });
+        call(&obid, "POST", "/v1/conversation/stop", None);
+        asking.join().unwrap()
+    });
+    let words = "Oby searched obi-e2e/fixture-app for “Hello”, then stopped.";
+    assert_eq!(answer["text"], words, "{answer}");
+    assert_eq!(last_oby_turn(&obid)["text"], words);
+    assert_eq!(ends(&obid), ["stopped"]);
+}
+
+/// #632: "continue" picks up the last turn's research: what it found is quoted in the first
+/// step's work.md, with the words it was for, and the same lookup isn't run again.
+#[test]
+fn continue_picks_up_the_last_turns_research() {
+    let folder = Folder::new("brain-continue");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &[search("Hello"), "EXIT 15".into(), "EXIT 15".into()],
+    );
+    said(&obid, "where does the app say hello?");
+    queue(
+        &obid,
+        &[search("Hello"), reply("greet is in src/greet.js.")],
+    );
+    assert_eq!(said(&obid, "continue")["text"], "greet is in src/greet.js.");
+    let calls = calls(&obid);
+    assert_eq!(calls.len(), 5);
+    let first = read(calls[3].join("work.md"));
+    assert!(first.contains("## Lookup 1: search_code"), "{first}");
+    assert!(first.contains("src/greet.js:2: "), "{first}");
+    let input = read(calls[3].join("input"));
+    assert!(
+        input.contains("Oby looked up for “where does the app say hello?” last turn"),
+        "{input}"
+    );
+    let next = read(calls[4].join("work.md"));
+    assert_eq!(next.matches("## Lookup ").count(), 1, "{next}");
+    assert!(read(calls[4].join("input")).contains("already in work.md"));
+}
+
+/// #632: a phrase no line has falls back to its words, the most specific first.
+#[test]
+fn a_search_that_finds_nothing_tries_its_words() {
+    let folder = Folder::new("brain-search-words");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &[
+            search("Hello nowhereatall"),
+            reply("greet is in src/greet.js."),
+        ],
+    );
+    said(&obid, "where does the app say hello?");
+    let file = read(calls(&obid)[1].join("work.md"));
+    assert!(file.contains("status: ok"), "{file}");
+    assert!(
+        file.contains("No line has “Hello nowhereatall”; these have “Hello”:"),
+        "{file}"
+    );
+    assert!(file.contains("src/greet.js:2: "), "{file}");
+}
+
+/// #632: a brain that asks again for what it already read is told to answer from it; the second
+/// time, the turn ends, saying what it looked at.
+#[test]
+fn reading_the_same_job_again_and_again_ends_the_turn() {
+    let folder = Folder::new("brain-read-again");
+    let obid = started(&folder);
+    let id = job_that(&obid, "Vault secrets", "Nothing", None, "done")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    queue(
+        &obid,
+        &[
+            read_plan(&id),
+            read_plan(&id),
+            read_plan(&id),
+            reply("Never heard."),
+        ],
+    );
+    let answer = said(&obid, "what did the vault job do?");
+    assert_eq!(
+        answer["text"],
+        "Oby read Vault secrets, then kept going over the same ground: say “continue” to pick up from there.",
+        "{answer}"
+    );
+    assert_eq!(calls(&obid).len(), 3);
+    assert_eq!(ends(&obid), ["repeated"]);
+}

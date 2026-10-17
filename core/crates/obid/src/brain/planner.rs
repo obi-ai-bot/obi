@@ -591,6 +591,9 @@ pub struct Planned {
     pub calls: Vec<Call>,
 }
 
+/// The least time an adapter is asked to think in: with less left, none is (#615).
+pub const LEAST: Duration = Duration::from_secs(1);
+
 /// The adapters and whether rules stand in.
 pub struct Planner {
     pub adapters: Vec<Adapter>,
@@ -688,7 +691,7 @@ impl Planner {
             let mut message = user.clone();
             for _ in 0..2 {
                 let left = deadline.saturating_duration_since(Instant::now());
-                if left <= Duration::from_secs(1) {
+                if left <= LEAST {
                     break;
                 }
                 let before = calls.len();
