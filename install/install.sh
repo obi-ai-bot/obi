@@ -35,6 +35,9 @@ warn() { printf 'obid install: %s\n' "$*" >&2; }
 die() { warn "$*"; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is needed and isn't installed."; }
 
+# Everything runs from main, called on the script's last line: a download cut short (curl | sh)
+# is a function that never closes, so sh runs none of it.
+main() {
 command_word="install"
 case "${1:-}" in
 install | uninstall) command_word="$1"; shift ;;
@@ -76,6 +79,12 @@ target="$kind-$arch"
 uid="$(id -u)"
 user="$(id -un)"
 [ -n "${HOME:-}" ] || die "HOME isn't set."
+# Root with another user's HOME (sudo -E) would leave root's files in that user's home. Root in its
+# own home (a container's /root) is fine.
+if [ "$uid" = 0 ]; then
+  home_owner="$(stat -c %u "$HOME" 2>/dev/null || stat -f %u "$HOME" 2>/dev/null || true)"
+  [ "$home_owner" = 0 ] || die "this runs as root with HOME=$HOME, which isn't root's. Run it as the user obid is for, without sudo: it needs no root."
+fi
 
 if [ "$kind" = linux ]; then
   config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -123,6 +132,30 @@ fi
 [ -n "$obid_home" ] || obid_home="$default_home"
 [ -n "$listen" ] || listen="127.0.0.1:7777"
 token_file="$obid_home/api-token"
+
+# Whether obid version $1 is older than $2 ("obid 1.2.3", anything after - or + ignored). False
+# when either doesn't read as one.
+older() {
+  set -- "$(release "$1")" "$(release "$2")"
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  old_ifs="$IFS"
+  IFS=.
+  # shellcheck disable=SC2086
+  set -- $1 $2
+  IFS="$old_ifs"
+  [ $# = 6 ] || return 1
+  if [ "$1" != "$4" ]; then [ "$1" -lt "$4" ]; return; fi
+  if [ "$2" != "$5" ]; then [ "$2" -lt "$5" ]; return; fi
+  [ "$3" -lt "$6" ]
+}
+release() {
+  v="${1#obid }"
+  v="${v%%[-+ ]*}"
+  case "$v" in
+  *[!0-9.]* | .* | *. | *..*) v="" ;;
+  esac
+  printf '%s' "$v"
+}
 
 # Paths go into a JSON file, a systemd unit and a property list: keep them to characters that mean
 # the same in all three.
@@ -179,10 +212,26 @@ if [ "$command_word" = uninstall ]; then
     # What --purge deletes is what the configuration says obid's home is (read above), never a
     # guess, and never a folder the Swift runner keeps its own data in too (the Mac's Runner
     # folder can be both): checked before anything is stopped.
-    case "$obid_home" in
-    / | "$HOME" | "$HOME/" | "") die "Not deleting $obid_home: it isn't a folder of obid's. Nothing was removed." ;;
-    esac
-    if [ -e "$obid_home/oby.sqlite" ]; then
+    # A folder is obid's when obid's token is in it, and it is checked where it really is (links
+    # and .. resolved): never /, your home folder or a folder that holds it.
+    purge_home="$(cd "$obid_home" 2>/dev/null && pwd -P)" || purge_home=""
+    real_home="$(cd "$HOME" 2>/dev/null && pwd -P)" || real_home="$HOME"
+    refusal=""
+    if [ -z "$purge_home" ]; then
+      refusal="it isn't a folder"
+    elif ! [ -f "$purge_home/api-token" ] || [ -L "$purge_home/api-token" ]; then
+      refusal="it has no api-token of obid's, so it isn't obid's home"
+    elif [ "$purge_home" = / ]; then
+      refusal="it is /"
+    else
+      case "$real_home/" in
+      "$purge_home"/*) refusal="it is your home folder, or holds it" ;;
+      esac
+    fi
+    if [ -n "$refusal" ]; then
+      die "Not deleting $obid_home: $refusal. Nothing was removed. If it is obid's, delete it yourself."
+    fi
+    if [ -e "$purge_home/oby.sqlite" ]; then
       die "Not deleting $obid_home: the Swift runner keeps its data there too (oby.sqlite). Nothing was removed. Uninstall without --purge, and delete obid's own files by hand (docs/install.md, Uninstall)."
     fi
   fi
@@ -199,8 +248,9 @@ if [ "$command_word" = uninstall ]; then
   rmdir "$prefix/bin" "$prefix/share" 2>/dev/null || true
   say "obid is stopped and removed from $prefix; the service is gone."
   if [ "$purge" = 1 ]; then
-    say "Deleting obid's home $obid_home (jobs, clones, worktrees, the token, the vault file) and $config."
-    rm -rf "$obid_home"
+    say "Deleting obid's home $purge_home (jobs, clones, worktrees, the token, the vault file) and $config."
+    rm -rf "$purge_home"
+    if [ -L "$obid_home" ]; then rm -f "$obid_home"; fi
     rm -f "$config"
     if [ "$kind" = macos ]; then rm -f "$log"; fi
     rmdir "$config_dir" 2>/dev/null || true
@@ -266,10 +316,17 @@ if [ -z "$owner" ]; then owner="$user"; fi
 case "$owner" in
 "" | *[!A-Za-z0-9_.@-]*) die "--owner ($owner) may hold only letters, digits and _ . @ -." ;;
 esac
+port="${listen#127.0.0.1:}"
 case "$listen" in
-127.0.0.1:[0-9]*) ;;
-*) die "--listen ($listen) must be an address on 127.0.0.1 with a port, like 127.0.0.1:7777." ;;
+127.0.0.1:*) ;;
+*) port="" ;;
 esac
+case "$port" in
+"" | 0* | *[!0-9]* | ??????*) port="" ;;
+esac
+if [ -z "$port" ] || [ "$port" -gt 65535 ]; then
+  die "--listen ($listen) must be 127.0.0.1 and a port from 1 to 65535, like 127.0.0.1:7777."
+fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/obid-install.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -277,12 +334,24 @@ trap 'exit 1' INT TERM HUP
 
 if [ -z "$archive" ]; then
   need curl
+  # Over https only, redirects too. Another scheme only with --sha256: then what arrives is
+  # checked against the digest you gave, not one from the same place.
+  protocols="=https"
+  case "$from" in
+  https://*) ;;
+  *)
+    [ -n "$sha256" ] || die "--from ($from) must be an https:// address, or give --sha256 with the archive's digest."
+    protocols="=http,https"
+    ;;
+  esac
   say "Downloading obid-$target from $from"
   archive="$work/obid.tar.gz"
-  curl -fsSL -o "$archive" "$from/obid-$target.tar.gz" || die "couldn't download $from/obid-$target.tar.gz."
-  curl -fsSL -o "$work/obid.sha256" "$from/obid-$target.tar.gz.sha256" || die "couldn't download the checksum $from/obid-$target.tar.gz.sha256."
-  read -r sha256 _ <"$work/obid.sha256" || true
-  [ -n "$sha256" ] || die "the checksum file is empty."
+  curl -fsSL --proto "$protocols" --proto-redir =https -o "$archive" "$from/obid-$target.tar.gz" || die "couldn't download $from/obid-$target.tar.gz."
+  if [ -z "$sha256" ]; then
+    curl -fsSL --proto "$protocols" --proto-redir =https -o "$work/obid.sha256" "$from/obid-$target.tar.gz.sha256" || die "couldn't download the checksum $from/obid-$target.tar.gz.sha256."
+    read -r sha256 _ <"$work/obid.sha256" || true
+    [ -n "$sha256" ] || die "the checksum file is empty."
+  fi
 fi
 [ -f "$archive" ] || die "$archive isn't a file."
 if [ -n "$sha256" ] && [ "$(digest "$archive")" != "$sha256" ]; then
@@ -293,12 +362,19 @@ tar -xzf "$archive" -C "$work/new" || die "couldn't unpack $archive."
 [ -x "$work/new/bin/obid" ] || die "$archive has no bin/obid."
 version="$("$work/new/bin/obid" --version 2>/dev/null)" || die "the obid in $archive doesn't run on this machine."
 say "Installing $version for $target."
+if [ -x "$prefix/bin/obid" ]; then
+  installed="$("$prefix/bin/obid" --version 2>/dev/null || true)"
+  if older "$version" "$installed"; then
+    warn "$version is older than the $installed installed here. Installing it anyway (going back to an earlier obid is how you roll back)."
+  fi
+fi
 
 stop_service
 
 mkdir -p "$prefix/bin" "$prefix/share"
 # Folders an earlier install made under a looser umask are narrowed too.
 chmod 755 "$prefix/bin" "$prefix/share"
+rm -f "$prefix/bin/obid.new"
 cp "$work/new/bin/obid" "$prefix/bin/obid.new"
 chmod 755 "$prefix/bin/obid.new"
 mv -f "$prefix/bin/obid.new" "$prefix/bin/obid"
@@ -319,6 +395,8 @@ if [ -e "$token_file" ]; then
   chmod 600 "$token_file"
   say "Kept the API token in $token_file."
 else
+  # A leftover .new (an earlier run cut short) would keep its own mode, or be a link to follow.
+  rm -f "$token_file.new"
   (
     umask 077
     head -c 32 /dev/urandom | od -An -vtx1 | tr -d ' \n' >"$token_file.new"
@@ -337,6 +415,7 @@ else
     codex=',
     "codex": {"bin": "codex", "accounts": [{"id": "codex", "name": "Codex", "configDir": null}]}'
   fi
+  rm -f "$config.new"
   (
     umask 077
     cat >"$config.new" <<EOF
@@ -360,6 +439,7 @@ found claude || warn "Claude Code isn't on your login shell's PATH. Install it a
 
 if [ "$kind" = linux ]; then
   mkdir -p "$(dirname "$unit")"
+  rm -f "$unit.new"
   cat >"$unit.new" <<EOF
 # obid, Oby's server (docs/install.md). Written by install/install.sh; running it again rewrites
 # this file. obid reads its API token only from home/api-token: nothing secret is set here, and
@@ -394,6 +474,7 @@ else
     : >>"$log"
   )
   chmod 600 "$log"
+  rm -f "$plist.new"
   cat >"$plist.new" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -429,7 +510,9 @@ EOF
   where="tail $log"
 fi
 
+checked=0
 if [ "$wait_for_obid" = 1 ] && command -v curl >/dev/null 2>&1; then
+  checked=1
   # Ask obid who it is, with the token in a file (curl -H @file), not in an argument. The Swift
   # runner answers on the same port, so the answer must say it is obid.
   header="$work/header"
@@ -438,7 +521,8 @@ if [ "$wait_for_obid" = 1 ] && command -v curl >/dev/null 2>&1; then
     printf 'Authorization: Bearer %s\n' "$(cat "$token_file")" >"$header"
   )
   tries=0
-  until curl -fsS -H "@$header" "http://$listen/v1/status" 2>/dev/null | grep -q '"engine" *: *"obid"'; do
+  # --noproxy: curl would send 127.0.0.1 through http_proxy too, and the token with it.
+  until curl -fsS --noproxy '*' --max-time 5 -H "@$header" "http://$listen/v1/status" 2>/dev/null | grep -q '"engine" *: *"obid"'; do
     tries=$((tries + 1))
     if [ "$tries" -ge 30 ]; then
       die "obid didn't answer on http://$listen within 30 seconds. See: $where. If the Swift runner (Oby's login item) holds that port, stop it first (docs/install.md, Migrating)."
@@ -447,8 +531,15 @@ if [ "$wait_for_obid" = 1 ] && command -v curl >/dev/null 2>&1; then
   done
 fi
 
-say "obid is running on http://$listen as a service. Its API token is in $token_file."
+if [ "$checked" = 1 ]; then
+  say "obid is running on http://$listen as a service. Its API token is in $token_file."
+else
+  say "obid's service is started, on http://$listen; whether obid answers wasn't checked. Its API token is in $token_file."
+fi
 # Removing it takes the names it was installed under.
 same=""
 if [ "$service" != obid ] && [ "$service" != com.deskree.obid ]; then same=" --service $service --prefix '$prefix' --config '$config'"; fi
 say "Update: run this script again with a newer archive. Remove: sh install.sh uninstall$same. See docs/install.md."
+}
+
+main "$@"

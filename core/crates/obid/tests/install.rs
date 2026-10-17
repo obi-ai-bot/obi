@@ -21,7 +21,7 @@ const OBID: &str = env!("CARGO_BIN_EXE_obid");
 /// linked into the test's `PATH`.
 const TOOLS: &[&str] = &[
     "sh", "tar", "gzip", "od", "head", "tr", "sed", "mkdir", "chmod", "cat", "cp", "mv", "rm",
-    "rmdir", "mktemp", "id", "dirname", "grep", "sleep", "pgrep", "kill", "env",
+    "rmdir", "mktemp", "id", "dirname", "grep", "sleep", "pgrep", "kill", "stat", "env",
 ];
 
 struct Folder(PathBuf);
@@ -231,9 +231,14 @@ impl Rig {
     }
 
     fn command(&self, script_name: &str) -> Command {
+        self.command_for(&script(script_name))
+    }
+
+    /// The given script under this machine's `sh`, `HOME`, `PATH` and `TMPDIR`.
+    fn command_for(&self, script: &Path) -> Command {
         let mut command = Command::new(tools_sh(&self.tools()));
         command
-            .arg(script(script_name))
+            .arg(script)
             .env_clear()
             .env("HOME", self.user_home())
             .env("PATH", self.tools())
@@ -713,7 +718,7 @@ fn a_download_is_checked_against_its_checksum() {
         format!("{digest}  {name}\n"),
     )
     .unwrap();
-    // `curl -fsSL -o FILE URL` copies what the URL names from the folder.
+    // `curl … -o FILE URL` copies what the URL names from the folder.
     rig.stand_in(
         "curl",
         &format!(
@@ -753,7 +758,13 @@ fn a_download_is_checked_against_its_checksum() {
     let good = run(&rig);
     assert!(good.status.success(), "{}", text(&good));
     assert!(rig.prefix().join("bin/obid").is_file());
-    assert!(rig.calls().contains("curl -fsSL -o"), "{}", rig.calls());
+    // Over https only, redirects included (R3).
+    assert!(
+        rig.calls()
+            .contains("curl -fsSL --proto =https --proto-redir =https -o"),
+        "{}",
+        rig.calls()
+    );
     assert!(
         rig.calls()
             .contains(&format!("https://example.invalid/obid/{name}"))
@@ -1268,5 +1279,346 @@ fn the_packager_builds_the_archive_the_installer_reads() {
         !String::from_utf8(listing.stdout)
             .unwrap()
             .contains("share/web")
+    );
+}
+
+/// The installed service, started for real: the `systemctl` stand-in runs the unit's `ExecStart`
+/// in the background and writes its pid down. Ends it on drop.
+struct RealService {
+    pid: PathBuf,
+}
+
+impl RealService {
+    fn new(rig: &Rig) -> RealService {
+        let pid = rig.folder.0.join("obid.pid");
+        rig.stand_in(
+            "systemctl",
+            &format!(
+                "case \"$*\" in *enable*--now*) \
+                 line=$(grep '^ExecStart=' \"$HOME/.config/systemd/user/obid.service\"); \
+                 eval \"${{line#ExecStart=}} >/dev/null 2>&1 &\"; echo $! > '{}' ;; esac",
+                pid.display()
+            ),
+        );
+        RealService { pid }
+    }
+}
+
+impl Drop for RealService {
+    fn drop(&mut self) {
+        if let Ok(pid) = std::fs::read_to_string(&self.pid) {
+            let _ = Command::new("kill").arg(pid.trim()).status();
+        }
+    }
+}
+
+/// R1: curl sends even 127.0.0.1 through `http_proxy`, so the readiness check would hand the
+/// token to whatever the proxy is.
+#[test]
+fn the_token_never_goes_through_a_proxy() {
+    let Some(curl) = find_tool("curl") else {
+        eprintln!("no curl on this machine: skipped");
+        return;
+    };
+    let rig = Rig::linux("proxy");
+    rig.real_archive();
+    std::os::unix::fs::symlink(curl, rig.tools().join("curl")).unwrap();
+    let _service = RealService::new(&rig);
+    // A proxy that writes down every byte it is sent and answers nothing.
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    proxy.set_nonblocking(true).unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let listener = {
+        let (seen, stop) = (seen.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                match proxy.accept() {
+                    Ok((mut stream, _)) => {
+                        use std::io::Read;
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_millis(300)))
+                            .unwrap();
+                        let mut buf = [0u8; 4096];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        seen.lock().unwrap().extend_from_slice(&buf[..n]);
+                        seen.lock().unwrap().extend_from_slice(b"<connection>");
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                }
+            }
+        })
+    };
+    let port = free_port();
+    let mut command = rig.command("install.sh");
+    command
+        .arg("--archive")
+        .arg(rig.archive_path())
+        .args(["--listen", &format!("127.0.0.1:{port}")]);
+    for name in ["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"] {
+        command.env(name, &proxy_url);
+    }
+    let out = command.output().unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    listener.join().unwrap();
+    let seen = String::from_utf8_lossy(&seen.lock().unwrap()).to_string();
+    assert!(seen.is_empty(), "the proxy was sent: {seen}");
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("obid is running"), "{}", text(&out));
+}
+
+/// R2: --purge deletes only a folder that is obid's home, judged where it really is.
+#[test]
+fn purging_refuses_a_folder_that_isnt_obids_home_wherever_it_points() {
+    // Your home folder, named through `..`, with an api-token in it.
+    let rig = Rig::linux("purge-dotdot");
+    let user = rig.user_home();
+    std::fs::write(user.join("api-token"), "a".repeat(64)).unwrap();
+    std::fs::write(user.join("keep.txt"), "mine").unwrap();
+    let dotdot = format!("{}/../user", user.display());
+    let out = rig.uninstall(&["--purge", "--home", &dotdot]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("Nothing was removed"), "{}", text(&out));
+    assert_eq!(
+        std::fs::read_to_string(user.join("keep.txt")).unwrap(),
+        "mine"
+    );
+
+    // A folder that holds your home folder.
+    let parent = rig.folder.0.clone();
+    std::fs::write(parent.join("api-token"), "a".repeat(64)).unwrap();
+    let out = rig.uninstall(&["--purge", "--home", parent.to_str().unwrap()]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(user.join("keep.txt").is_file());
+    assert!(rig.tools().join("sh").exists());
+
+    // A configuration whose home is a folder of yours with no token in it.
+    let rig = Rig::linux("purge-projects");
+    let projects = rig.user_home().join("Projects");
+    std::fs::create_dir_all(projects.join("app")).unwrap();
+    std::fs::write(projects.join("app/main.rs"), "fn main() {}").unwrap();
+    std::fs::create_dir_all(rig.config().parent().unwrap()).unwrap();
+    std::fs::write(
+        rig.config(),
+        format!(
+            "{{\"listen\": \"127.0.0.1:7777\", \"home\": \"{}\", \"owner\": \"me\"}}\n",
+            projects.display()
+        ),
+    )
+    .unwrap();
+    let out = rig.uninstall(&["--purge"]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("no api-token"), "{}", text(&out));
+    assert!(projects.join("app/main.rs").is_file());
+    assert!(rig.config().is_file());
+
+    // A link to obid's home: what it points at goes, checked there.
+    let rig = Rig::linux("purge-link");
+    let real = rig.folder.0.join("disk/obid");
+    assert!(
+        rig.install(&["--home", real.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let out = rig.uninstall(&["--purge"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!real.exists());
+}
+
+/// R4: anything but 127.0.0.1 and a port from 1 to 65535 is refused, before anything is made.
+#[test]
+fn listen_takes_only_127_0_0_1_and_a_port() {
+    let rig = Rig::linux("listen");
+    for listen in [
+        "127.0.0.1:7@evil.example",
+        "127.0.0.1:7777x",
+        "127.0.0.1:7777\", \"owner\": \"x",
+        "127.0.0.1:",
+        "127.0.0.1:0",
+        "127.0.0.1:07777",
+        "127.0.0.1:65536",
+        "127.0.0.1:123456",
+        "127.0.0.2:7777",
+    ] {
+        let out = rig.install(&["--listen", listen]);
+        assert!(!out.status.success(), "{listen}: {}", text(&out));
+        assert!(
+            text(&out).contains("1 to 65535"),
+            "{listen}: {}",
+            text(&out)
+        );
+    }
+    assert!(!rig.prefix().exists());
+    assert!(!rig.obid_home().exists());
+    for listen in ["127.0.0.1:1", "127.0.0.1:65535"] {
+        let out = rig.install(&["--listen", listen]);
+        assert!(out.status.success(), "{listen}: {}", text(&out));
+        assert_eq!(
+            Config::load(&rig.config()).unwrap().listen.to_string(),
+            listen
+        );
+        std::fs::remove_file(rig.config()).unwrap();
+    }
+}
+
+/// R5: root with another user's HOME (`sudo -E`) is refused before anything is written.
+#[test]
+fn root_with_someone_elses_home_is_refused() {
+    let rig = Rig::linux("root");
+    rig.remove_tool("id");
+    write_executable(
+        &rig.tools().join("id"),
+        "#!/bin/sh\ncase \"$1\" in -u) echo 0 ;; -un) echo root ;; esac\n",
+    );
+    // HOME belongs to whoever runs the tests, not to root.
+    let out = rig.install(&[]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("as root"), "{}", text(&out));
+    assert!(!rig.prefix().exists());
+    assert!(!rig.obid_home().exists());
+    assert!(rig.calls().is_empty(), "{}", rig.calls());
+}
+
+/// R6: `curl | sh` with the download cut short runs none of it.
+#[test]
+fn a_script_cut_short_runs_nothing() {
+    let rig = Rig::linux("cut");
+    let whole = std::fs::read_to_string(script("install.sh")).unwrap();
+    let lines: Vec<&str> = whole.lines().collect();
+    for tenth in 1..10 {
+        let cut = lines.len() * tenth / 10;
+        let part = rig.folder.0.join(format!("install-{tenth}.sh"));
+        std::fs::write(&part, lines[..cut].join("\n") + "\n").unwrap();
+        let out = rig
+            .command_for(&part)
+            .arg("--archive")
+            .arg(rig.archive_path())
+            .arg("--no-wait")
+            .output()
+            .unwrap();
+        assert!(
+            !rig.prefix().exists() && !rig.obid_home().exists() && !rig.unit().exists(),
+            "cut at line {cut} of {}: {}",
+            lines.len(),
+            text(&out)
+        );
+        assert!(rig.calls().is_empty(), "cut at line {cut}: {}", rig.calls());
+    }
+}
+
+/// R7: a `.new` left by a run cut short is never written through: not its mode, not its link.
+#[test]
+fn a_leftover_new_file_is_never_written_through() {
+    let rig = Rig::linux("leftover-new");
+    std::fs::create_dir_all(rig.obid_home()).unwrap();
+    let token_new = rig.obid_home().join("api-token.new");
+    std::fs::write(&token_new, "old").unwrap();
+    std::fs::set_permissions(&token_new, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::create_dir_all(rig.config().parent().unwrap()).unwrap();
+    let victim = rig.folder.0.join("victim");
+    std::fs::write(&victim, "untouched").unwrap();
+    std::os::unix::fs::symlink(&victim, rig.config().with_extension("json.new")).unwrap();
+    let out = rig.install(&[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(mode(&rig.obid_home().join("api-token")), 0o600);
+    assert_eq!(mode(&rig.config()), 0o600);
+    assert!(
+        !std::fs::symlink_metadata(rig.config())
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+}
+
+/// R8: an older archive is a rollback: it installs, and says so.
+#[test]
+fn an_older_archive_warns_and_still_installs() {
+    let rig = Rig::linux("rollback");
+    assert!(rig.install(&[]).status.success());
+    // The same version again says nothing.
+    let same = rig.install(&[]);
+    assert!(same.status.success(), "{}", text(&same));
+    assert!(!text(&same).contains("is older than"), "{}", text(&same));
+    rig.archive("#!/bin/sh\ncase \"$1\" in --version) echo \"obid 9.10.0-test\" ;; esac\n");
+    let newer = rig.install(&[]);
+    assert!(!text(&newer).contains("is older than"), "{}", text(&newer));
+    rig.archive("#!/bin/sh\ncase \"$1\" in --version) echo \"obid 1.0.0-test\" ;; esac\n");
+    let out = rig.install(&[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("obid 1.0.0-test is older than the obid 9.10.0-test"),
+        "{}",
+        text(&out)
+    );
+    let installed = Command::new(rig.prefix().join("bin/obid"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&installed.stdout).contains("1.0.0-test"));
+}
+
+/// The nit: without waiting, it doesn't claim obid is running.
+#[test]
+fn without_waiting_it_doesnt_say_obid_is_running() {
+    let rig = Rig::linux("no-wait");
+    let out = rig.install(&[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!text(&out).contains("obid is running"), "{}", text(&out));
+    assert!(text(&out).contains("wasn't checked"), "{}", text(&out));
+}
+
+/// R3: a download over anything but https needs a digest you give, and then that digest is the one
+/// checked, not one fetched from the same place.
+#[test]
+fn a_download_that_isnt_https_needs_a_digest_you_give() {
+    let rig = Rig::linux("http-from");
+    let served = rig.folder.0.join("served");
+    std::fs::create_dir_all(&served).unwrap();
+    let name = format!("obid-{}.tar.gz", rig.target());
+    std::fs::copy(rig.archive_path(), served.join(&name)).unwrap();
+    let digest = sha256(&served.join(&name));
+    // The server's own checksum file agrees with what it serves.
+    std::fs::write(
+        served.join(format!("{name}.sha256")),
+        format!("{digest}  {name}\n"),
+    )
+    .unwrap();
+    rig.stand_in(
+        "curl",
+        &format!(
+            "while [ $# -gt 0 ]; do case \"$1\" in -o) out=\"$2\"; shift 2 ;; --proto|--proto-redir) shift 2 ;; -*) shift ;; *) url=\"$1\"; shift ;; esac; done\n\
+             cp '{}'/\"${{url##*/}}\" \"$out\"",
+            served.display()
+        ),
+    );
+    let run = |args: &[&str]| {
+        rig.command("install.sh")
+            .args(["--from", "http://mirror.example/obid", "--no-wait"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let bare = run(&[]);
+    assert!(!bare.status.success(), "{}", text(&bare));
+    assert!(text(&bare).contains("https://"), "{}", text(&bare));
+    assert!(!rig.calls().contains("curl"), "{}", rig.calls());
+
+    // A digest that isn't the archive's: refused, though the server's checksum file agrees.
+    let wrong = run(&["--sha256", &"0".repeat(64)]);
+    assert!(!wrong.status.success(), "{}", text(&wrong));
+    assert!(text(&wrong).contains("checksum"), "{}", text(&wrong));
+    assert!(!rig.prefix().exists());
+    assert!(!rig.calls().contains(".sha256"), "{}", rig.calls());
+
+    let pinned = run(&["--sha256", &digest]);
+    assert!(pinned.status.success(), "{}", text(&pinned));
+    assert!(
+        rig.calls()
+            .contains("--proto =http,https --proto-redir =https"),
+        "{}",
+        rig.calls()
     );
 }
