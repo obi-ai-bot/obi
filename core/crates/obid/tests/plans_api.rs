@@ -3525,3 +3525,47 @@ fn no_extra_step_when_the_budget_ran_out() {
     assert!(!checked(&obid));
     assert_eq!(ends(&obid), ["budget_spent"]);
 }
+
+/// #586: `sandbox` stops a job asking the owner about what stays inside its sandbox, so it widens
+/// trust, and it is the owner's to set (`PUT /v1/settings/permissions`, `POST /v1/jobs/{id}/mode`).
+/// The brain's plan can't name it: a plan that sets it, or dispatches a job in it, is refused, and
+/// the job's mode stays as it was, with nothing started and nothing to confirm.
+#[test]
+fn the_brain_cannot_set_sandbox_mode() {
+    let folder = Folder::new("brain-no-sandbox");
+    let obid = started(&folder);
+    let id = job_in(&obid, "Vault secrets", "SLEEP", "ask");
+    within(30, "the job runs", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["status"] == "running").then_some(())
+    });
+    let dispatch = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "fix", "title": "Greeting fix",
+         "task": "Fix the greeting", "rounds": 1, "check": "node --test", "mode": "sandbox"}]});
+    queue(&obid, &[set_mode(&id, "sandbox"), dispatch.to_string()]);
+    // Both plans miss the schema, so the rules answer instead.
+    let answer = said(&obid, "stop asking me about commands");
+    assert_eq!(answer["kind"], "question", "{answer}");
+    assert_eq!(answer["jobs"], json!([]));
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["by"], "rules");
+    let refused: Vec<&str> = record["refused"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert_eq!(refused.len(), 2, "{record}");
+    for plan in refused {
+        assert!(
+            plan.starts_with("claude plan refused (the output doesn't match the schema)")
+                && plan.contains(r#""mode":"sandbox""#),
+            "{plan}"
+        );
+    }
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["mode"], "ask", "{job}");
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
+    assert!(items_of(&obid, "confirm").is_empty());
+}

@@ -924,6 +924,61 @@ fn only_the_owner_saves_a_rule_and_never_for_secrets() {
     );
 }
 
+/// Upgrading doesn't change a mode the owner chose: an install whose `permissions.json` saved
+/// `bypass` keeps it, and its jobs don't ask about an install. Only an unset mode (no file, or a
+/// file with rules and no mode) becomes `sandbox` (#586).
+#[test]
+fn an_install_that_chose_bypass_keeps_it() {
+    for (kept, mode) in [
+        (Some(json!({"mode": "bypass", "rules": []})), "bypass"),
+        (Some(json!({"rules": []})), "sandbox"),
+        (None, "sandbox"),
+    ] {
+        let folder = Folder::new("sandbox-upgrade");
+        let remote = fixture(&folder.0.join("fixture"));
+        let home = folder.0.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        if let Some(kept) = &kept {
+            std::fs::write(home.join("permissions.json"), kept.to_string()).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    home.join("permissions.json"),
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+            }
+        }
+        let obid = start(&folder.0, &config(&folder.0, &remote));
+        assert_eq!(
+            request(&obid, "GET", "/v1/settings/permissions", None).body,
+            json!({"mode": mode}),
+            "{kept:?}"
+        );
+        let task = format!(
+            "ASK: {}",
+            json!({"tool": "Bash", "input": {"command": "npm install left-pad"}})
+        );
+        let id = post_job(
+            &obid,
+            json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task}),
+        )
+        .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        if mode == "bypass" {
+            let job = settled(&obid, &id);
+            assert_eq!(job["mode"], "bypass");
+            assert_eq!(job["summary"], "answer: allow", "{job}");
+        } else {
+            let job = until(&obid, &id, |j| j["permission"].is_object());
+            assert_eq!(job["mode"], "sandbox");
+        }
+    }
+}
+
 /// Settings › Permissions: the default is Sandbox, and the owner can go back to asking for
 /// commands (Accept edits): then a test run waits for them (#586).
 #[test]
