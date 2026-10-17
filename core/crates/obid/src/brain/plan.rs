@@ -465,6 +465,42 @@ pub struct Context {
     /// These additional actions are available only while processing a runner event.
     pub orchestrator: bool,
     pub orchestrator_context: Option<String>,
+    /// The user's own words this turn, where "new job", "from scratch" or "start over" is read
+    /// (#541). Never the brain's restatement.
+    pub said: String,
+    /// The briefing's jobs that failed, were stopped or ran out of rounds in the last two days:
+    /// more work on their issue or pull request goes on in them (#541).
+    pub ended: Vec<Ended>,
+}
+
+/// A job of the briefing that ended without finishing its work, and what it was about.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ended {
+    pub id: String,
+    pub repo: String,
+    pub issue: Option<i64>,
+    pub pr: Option<i64>,
+}
+
+/// Whether the user asked for a fresh job in so many words (#541): then work on the issue of a
+/// job that failed is a new job, not that job's next round.
+pub fn starts_over(said: &str) -> bool {
+    let words = said
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    [
+        "new job",
+        "from scratch",
+        "start over",
+        "start it over",
+        "start again from",
+        "fresh job",
+    ]
+    .iter()
+    .any(|phrase| format!(" {words} ").contains(&format!(" {phrase} ")))
 }
 
 fn count(text: &str) -> usize {
@@ -1188,6 +1224,26 @@ fn dispatch_problems(dispatch: &Dispatch, context: &Context) -> Vec<String> {
     if dispatch.issue.is_some_and(|issue| issue <= 0) {
         problems.push("issue must be a positive number".into());
     }
+    // The agent that wrote the code is the one to fix it (#541): it knows what it tried. A
+    // review stays a fresh pair of eyes.
+    if dispatch.kind.commits()
+        && !starts_over(&context.said)
+        && let Some(ended) = context.ended.iter().find(|e| {
+            e.repo == dispatch.repo
+                && ((dispatch.issue.is_some() && e.issue == dispatch.issue)
+                    || (dispatch.pr.is_some() && e.pr == dispatch.pr))
+        })
+    {
+        let about = match (dispatch.issue, dispatch.pr) {
+            (Some(issue), _) if ended.issue == Some(issue) => format!("issue #{issue}"),
+            (_, Some(pr)) => format!("PR #{pr}"),
+            _ => "that work".to_owned(),
+        };
+        problems.push(format!(
+            "{about} has job {id}, which failed, was stopped or ran out of rounds; use retry_job on {id} (a new job only when the user says new job, from scratch or start over)",
+            id = ended.id
+        ));
+    }
     // Both is an issue's work started from a pull request's head (#219): work that commits.
     if dispatch.pr.is_some() && dispatch.issue.is_some() && !dispatch.kind.commits() {
         problems.push("a job is about a pr or an issue, not both, unless it's a fix, build or test of the issue that starts from the pr".into());
@@ -1816,6 +1872,96 @@ mod tests {
         assert!(!finish("investigate").is_empty());
         let system = crate::brain::planner::system(false);
         assert!(system.contains("finish #19 from PR #124") && !system.contains("(never both)"));
+    }
+
+    /// #541: work on the issue or pull request of a job that failed, stopped or ran out of rounds
+    /// goes on in that job, unless the user starts over; a review is still a fresh one.
+    #[test]
+    fn work_a_job_left_unfinished_goes_on_in_that_job() {
+        let mut context = context();
+        context.ended = vec![Ended {
+            id: "va11e7".into(),
+            repo: "deskree-inc/oby".into(),
+            issue: Some(12),
+            pr: Some(33),
+        }];
+        let dispatch = |kind: &str, fields: Value| {
+            let mut job = json!({"agent": "claude", "account": "default", "repo": "deskree-inc/oby",
+                                 "kind": kind, "task": "Fix the vault tests"});
+            for (key, value) in fields.as_object().unwrap() {
+                job[key] = value.clone();
+            }
+            let mut plan = Plan::of(Action::Dispatch, "");
+            plan.dispatches = vec![serde_json::from_value(job).unwrap()];
+            plan
+        };
+        context.said = "fix the vault job's failing tests".into();
+        for kind in ["fix", "build", "test"] {
+            assert_eq!(
+                dispatch(kind, json!({"issue": 12})).problems(&context, "zq9"),
+                [
+                    "issue #12 has job va11e7, which failed, was stopped or ran out of rounds; use retry_job on va11e7 (a new job only when the user says new job, from scratch or start over)"
+                ],
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            dispatch("fix", json!({"pr": 33})).problems(&context, "zq9"),
+            [
+                "PR #33 has job va11e7, which failed, was stopped or ran out of rounds; use retry_job on va11e7 (a new job only when the user says new job, from scratch or start over)"
+            ]
+        );
+        // Someone else's review of the job's pull request, other issues and other repositories.
+        assert!(
+            dispatch("review", json!({"pr": 33}))
+                .problems(&context, "zq9")
+                .is_empty()
+        );
+        assert!(
+            dispatch("investigate", json!({"issue": 12}))
+                .problems(&context, "zq9")
+                .is_empty()
+        );
+        assert!(
+            dispatch("fix", json!({"issue": 13}))
+                .problems(&context, "zq9")
+                .is_empty()
+        );
+        assert!(
+            dispatch("fix", json!({}))
+                .problems(&context, "zq9")
+                .is_empty()
+        );
+        context.repos.push("deskree-inc/other".into());
+        assert!(
+            dispatch("fix", json!({"issue": 12, "repo": "deskree-inc/other"}))
+                .problems(&context, "zq9")
+                .is_empty()
+        );
+        for words in [
+            "Start the vault fix over from scratch",
+            "make a new job for #12",
+            "start over on the vault fix",
+            "Start it over.",
+        ] {
+            context.said = words.into();
+            assert!(
+                dispatch("fix", json!({"issue": 12}))
+                    .problems(&context, "zq9")
+                    .is_empty(),
+                "{words}"
+            );
+        }
+        for words in [
+            "fix the vault job",
+            "renew jobs",
+            "restart overnight",
+            "start overflow fix",
+        ] {
+            assert!(!starts_over(words), "{words}");
+        }
+        let system = crate::brain::planner::system(false);
+        assert!(system.contains("retry_job on it, never a new fix, build or test dispatch"));
     }
 
     #[test]

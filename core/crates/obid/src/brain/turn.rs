@@ -599,6 +599,7 @@ pub async fn run(
             let mut context = super::context(shared, given, &nonce);
             context.turn_step = step;
             context.turn_length = Some(said.chars().count());
+            context.said = said.to_owned();
             // What the turn read and looked up goes into the next step's quoted file.
             context.quoted = research.quoted(
                 reads.quoted(

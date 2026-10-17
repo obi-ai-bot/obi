@@ -1787,6 +1787,72 @@ fn one_message_tries_a_failed_job_again_and_dismisses_the_old_one() {
     assert!(read(calls[1].join("input")).contains("Started Notch three screens again"));
 }
 
+/// A plan that starts one fix of `issue` in the fixture's repository.
+fn fix_issue(issue: u64) -> String {
+    json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "issue": issue, "kind": "fix",
+         "title": "Vault tests", "task": format!("Fix the failing tests of #{issue}"), "rounds": 1}]})
+    .to_string()
+}
+
+/// #541: "fix the vault job's failing tests", with the vault job failed in the briefing, ends as
+/// retry_job on it: the brain that dispatches a new fix is refused and told so. In so many words
+/// ("from scratch"), a new job starts.
+#[test]
+fn work_a_failed_job_left_goes_on_in_it_unless_the_user_starts_over() {
+    let folder = Folder::new("brain-continue");
+    let obid = started(&folder);
+    let answer = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "fix", "issue": 176,
+                             "task": "FAIL", "title": "Vault tests"}}),
+        ),
+    );
+    assert!(
+        answer.status == 200 || answer.status == 201,
+        "{}",
+        answer.text
+    );
+    let vault = answer.body["id"].as_str().unwrap().to_owned();
+    within(30, "the vault job failed", || {
+        (get_job(&obid, &vault)["status"] == "failed").then_some(())
+    });
+    queue(
+        &obid,
+        &[fix_issue(176), on_jobs("retry_job", &[&vault]), reply("")],
+    );
+    let answer = said(&obid, "fix the vault job's failing tests");
+    assert_eq!(
+        answer["text"], "Started Vault tests again on Claude Code · Stub.",
+        "{answer}"
+    );
+    let calls = calls(&obid);
+    assert!(
+        read(calls[1].join("input")).trim_end().ends_with(&format!(
+            "Your last plan was refused: issue #176 has job {vault}, which failed, was stopped or ran out of rounds; use retry_job on {vault} (a new job only when the user says new job, from scratch or start over). Make a new one."
+        )),
+        "{}",
+        read(calls[1].join("input"))
+    );
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
+
+    // The user starts over: the same plan starts a new job.
+    within(30, "the vault job's round ended", || {
+        let status = get_job(&obid, &vault)["status"].clone();
+        (status != "queued" && status != "running").then_some(())
+    });
+    queue(&obid, &[fix_issue(176)]);
+    let answer = said(&obid, "Start the vault fix over from scratch");
+    let jobs = answer["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1, "{answer}");
+    assert_ne!(jobs[0]["id"], json!(vault));
+    assert_eq!(jobs[0]["issue"], 176);
+}
+
 /// JobActionTests.aJobThatIsStillRunningCantBeTriedAgain, aJobThatNeedsNothingSaysWhyItStays and
 /// startNowStartsAJobWaitingForItsStartWhen's last half: what can't happen says why, and fails.
 #[test]
