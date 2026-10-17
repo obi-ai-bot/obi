@@ -394,6 +394,25 @@ final class Clock: @unchecked Sendable {
         #expect(sent(stub).isEmpty)
     }
 
+    /// What obid's brain planned that persists or widens trust waits in a `confirm` item (#546):
+    /// only the owner's own answer carries it out, so an assistant holding the token can't press
+    /// Confirm, or Cancel, for them.
+    @Test func refusesToAnswerAConfirmItem() async {
+        let stub = StubRunner()
+        let confirm: JSON = ["id": "confirm-0a1b2c3d4e5f", "kind": "confirm", "job": "ab12cd34", "title": "Always allow Bash(make lint:*) in acme/app",
+                             "text": "Oby's brain planned to answer the permission with always.", "options": ["Confirm", "Cancel"], "state": "open",
+                             "confirm": ["action": "always_allow", "target": "ab12cd34", "payload": ["permission": "p1a2b3c"]]]
+        stub.answer("GET /v1/inbox", [confirm])
+        stub.answer("POST /v1/inbox/confirm-0a1b2c3d4e5f/answer", confirm)
+        let server = server(stub)
+        for words in ["Confirm", "confirm", "Cancel", "yes"] {
+            let reply = await server.call("answer", ["id": "confirm-0a1b2c3d4e5f", "answer": .string(words)])
+            #expect(reply.isError)
+            #expect(reply.text.contains("Only the user confirms or cancels it, in Oby"))
+        }
+        #expect(sent(stub).isEmpty)
+    }
+
     @Test func aQuestionTakesTheUsersWords() async {
         let stub = stub()
         let server = server(stub)

@@ -71,6 +71,9 @@ export type InboxItem = {
   why: string | null;
   // obid only: on an `obiRequest`, the request's typed fields; this app reads who asked
   obi?: { fromOwner?: string } | null;
+  // obid only (#546): on a `confirm` item, what its Confirm carries out: a typed action, what it
+  // acts on and what else it needs (docs/runner-api.md, "Inbox item")
+  confirm?: { action: string; target: string; payload: unknown } | null;
 };
 
 // "GET /v1/conversation"

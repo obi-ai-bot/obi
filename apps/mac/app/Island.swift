@@ -192,7 +192,7 @@ final class IslandController {
         // The brain's briefing takes in the runner's jobs, inbox and accounts too, and "stop" reaches its jobs.
         desk.elsewhere = { [weak self] in
             guard let self else { return [] }
-            return [Briefing.Place(name: feed.name, jobs: feed.jobs, inbox: feed.inbox, accounts: feed.accounts)]
+            return [Briefing.Place(name: feed.name, jobs: feed.jobs, inbox: feed.briefingInbox, accounts: feed.accounts)]
         }
         desk.loadSettingOptions = {
             guard let codex = try? await CodexAgent.models(home: nil), !codex.isEmpty else { return nil }
@@ -259,7 +259,12 @@ final class IslandController {
         desk.actElsewhere = { [weak self] remote in
             guard let self, let runner = feed.runner else { throw RunnerError(message: "The runner isn't set up.") }
             switch remote {
-            case .settle(let item, let words): try await feed.settle(item, answer: words)
+            case .settle(let item, let words):
+                // A confirm item (#546) is the user's own call: never the brain's, even named by id.
+                if feed.inboxWords[item]?.confirm != nil || feed.inbox.contains(where: { $0.id == item && self.feed.isConfirm($0) }) {
+                    throw RunnerError(message: "That waits for your own Confirm in the inbox: Oby doesn't answer it for you.")
+                }
+                try await feed.settle(item, answer: words)
             case .tell(let job, let words): feed.apply(try await feed.about(job) { try await $0.tell(job, words) })
             case .dismiss(let job): feed.apply(try await feed.about(job) { try await $0.dismiss(job) })
             case .startNow(let job): feed.apply(try await feed.about(job) { try await $0.startNow(job) })

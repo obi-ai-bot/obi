@@ -41,8 +41,22 @@ final class RunnerFeed {
     private(set) var inbox: [InboxItem] = []
     /// Confirmed decisions stay in the messenger even after leaving the attention inbox.
     private(set) var inboxHistory: [InboxItem] = []
-    /// Oby's plain words for each of those items (#65), which Engine's InboxItem doesn't read, by item id.
+    /// Oby's plain words for each of those items (#65), which Engine's InboxItem doesn't read, by item
+    /// id; on a `confirm` item, also what its Confirm carries out.
     private(set) var inboxWords: [String: InboxWords] = [:]
+
+    /// The item's kind as the runner names it: `confirm` for one Engine reads as a `start` (`InboxItem.runner`).
+    func kind(of item: InboxItem) -> String { item.shownKind(inboxWords[item.id]) }
+
+    /// Whether the item is a `confirm` (obid only, #546): only the user's own answer carries it out,
+    /// never the brain's. With no words for it, an item read as a `start` that offers Confirm counts too.
+    func isConfirm(_ item: InboxItem) -> Bool {
+        inboxWords[item.id]?.confirm != nil || (item.kind == .start && item.options.contains(RunnerConfirm.confirm))
+    }
+
+    /// What the brain's briefing may read of the inbox: everything but confirm items, which only the
+    /// user answers (the brain can't name what it doesn't see).
+    var briefingInbox: [InboxItem] { inbox.filter { !isConfirm($0) } }
     /// The runner's accounts and their usage, as it last said: the brain tells them too.
     private(set) var accounts: [AccountState] = []
     /// What each job carries that Engine's Job doesn't read yet (its mode, the permission it waits
@@ -283,8 +297,7 @@ final class RunnerFeed {
                         apply(job)
                     case .cleared(let date): clearedAt = date
                     case .inbox(let item, let words):
-                        if let words { inboxWords[item.id] = words }
-                        apply(item)
+                        apply(item, words: words)
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     case .turn(let turn): conversation.apply(turn)
@@ -413,6 +426,12 @@ final class RunnerFeed {
         guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
         try await runner.setDefaultMode(mode)
         defaultMode = mode
+    }
+
+    /// An inbox item as the runner last said it, with its words (an `inbox` event's).
+    func apply(_ item: InboxItem, words: InboxWords?) {
+        if let words { inboxWords[item.id] = words }
+        apply(item)
     }
 
     /// An inbox item as the runner last said it: one that's done leaves the list.

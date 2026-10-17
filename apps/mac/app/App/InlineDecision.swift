@@ -23,6 +23,11 @@ struct InlineDecision: View {
             : feed.inboxWords[item.id] ?? InboxWords()
     }
     private var extras: RunnerJobExtras? { entry.local ? nil : feed.extras[item.job] }
+    /// Its kind as the runner names it: Engine reads a `confirm` item (#546) as a `start`.
+    private var kind: String { entry.local ? "\(item.kind)" : item.shownKind(words) }
+    /// A confirm item: its title is what Confirm does, the words it would send are quoted apart,
+    /// and it takes Confirm or Cancel, nothing recommended, no words of the user's own.
+    private var confirming: Bool { kind == RunnerConfirm.kind }
 
     private var livePermission: RunnerPermission? {
         guard item.kind == .permission else { return nil }
@@ -67,11 +72,14 @@ struct InlineDecision: View {
                 Receipt(text: receipt, expanded: $expanded)
             }
             if !settled || expanded {
-                AskCard(kind: AskKind.label("\(item.kind)", plan: question?.plan != nil), failed: AskKind.failed("\(item.kind)"),
-                        source: item.title, title: words.title(item.text), happened: words.body,
-                        behindDetails: words.details(item.text), detail: permission?.detail, plan: question?.plan,
-                        options: CardOption.inbox(item.options, kind: "\(item.kind)", question: question,
-                                                  permission: permission, words: words, details: item.details),
+                AskCard(kind: AskKind.label(kind, plan: question?.plan != nil), failed: AskKind.failed(kind),
+                        source: confirming ? feed.jobs.first { $0.id == item.job }?.shortTitle : item.title,
+                        title: confirming ? item.title : words.title(item.text),
+                        happened: confirming ? InboxWords.plain(item.text) : words.body,
+                        behindDetails: confirming ? nil : words.details(item.text),
+                        detail: confirming ? words.confirm?.words : permission?.detail, plan: question?.plan,
+                        options: CardOption.inbox(item.options, kind: kind, question: question,
+                                                  permission: permission, words: words, details: item.details, does: item.title),
                         busy: busy || settled, answered: settled, keyboardEnabled: keyboardEnabled && !settled, focusRequest: focusRequest,
                         hint: !settled && item.kind.takesWords && onTell != nil
                             ? (item.kind == .permission ? "No, and tell the agent what to do differently" : "Answer in your own words…") : nil,

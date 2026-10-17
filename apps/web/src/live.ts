@@ -31,7 +31,7 @@ export type Live = {
   steps: Step[];               // what the turn under way is doing
   // Oby's question back, in the conversation it asked in, until answered
   waiting: { said: string; question: Question; conversation: string | null } | null;
-  answering: Record<string, string>;  // a decision answered from this page, by task id, until it's settled
+  answering: Record<string, string>;  // a decision answered from this page, by inbox item id, until it's settled
   clearedAt: string | null;
 };
 
@@ -65,7 +65,7 @@ export function apply(s: Live, e: Event): Live {
     case 'inbox': {
       const rest = s.inbox.filter((i) => i.id !== e.item.id);
       const settled = !isOpen(e.item);
-      const answering = settled && e.item.job ? omit(s.answering, e.item.job) : s.answering;
+      const answering = settled ? omit(s.answering, e.item.id) : s.answering;
       return { ...s, inbox: settled ? rest : [...rest, e.item].sort((a, b) => a.created.localeCompare(b.created)), answering };
     }
     case 'turn': {
@@ -457,19 +457,19 @@ export async function dismissJob(id: string) {
 }
 
 // A decision answered (POST /v1/inbox/{id}/answer): Later puts it off an hour
-export async function answerItem(taskId: string, itemId: string, option: string) {
+export async function answerItem(itemId: string, option: string) {
   const session = authSession;
-  set({ answering: { ...state.answering, [taskId]: option } });
+  set({ answering: { ...state.answering, [itemId]: option } });
   try {
     const body = option === 'Later' ? { later: new Date(Date.now() + 3600_000).toISOString().replace(/\.\d+Z$/, 'Z') } : { answer: option };
     const item = await api.answer(itemId, body);
     if (session !== authSession) return;
     // settled, it leaves the inbox; put off, it's updated, unless an event settled it meanwhile
     if (item.state === 'done' || state.inbox.some((i) => i.id === item.id)) set(apply(state, { kind: 'inbox', item }));
-    if (option === 'Later') set({ answering: omit(state.answering, taskId) });
+    if (option === 'Later') set({ answering: omit(state.answering, itemId) });
   } catch (e) {
     if (session !== authSession) return;
-    set({ answering: omit(state.answering, taskId) });
+    set({ answering: omit(state.answering, itemId) });
     failed(e);
   }
 }
