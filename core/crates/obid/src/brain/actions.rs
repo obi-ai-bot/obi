@@ -450,6 +450,19 @@ fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
     }
 }
 
+/// Whether obid's configuration still has the account `account` for the tool `agent`.
+fn account_exists(shared: &Arc<Shared>, agent: &str, account: &str) -> bool {
+    let agents = &shared.config.agents;
+    let tool = match agent {
+        "claude" => &agents.claude,
+        "codex" => &agents.codex,
+        "cursor" => &agents.cursor,
+        _ => return false,
+    };
+    tool.as_ref()
+        .is_some_and(|tool| tool.accounts.iter().any(|a| a.id == account))
+}
+
 /// message_job (#542): the user's own words reach the job's agent, with the secrets obid knows
 /// taken out, never the brain's restatement of them (obid has no event orchestrator to speak
 /// for itself yet, #351). A running job hears them at its next turn; one that ended picks its
@@ -469,6 +482,19 @@ fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
         ));
     }
     let active = job.status.is_active();
+    // A job the owner let go, or whose account isn't set up any more, isn't picked up again: that
+    // would wait on a Confirm for work that can't or shouldn't run. The brain starts a new job.
+    if !active && job.dismissed.is_some() {
+        return Outcome::Failed(format!(
+            "Couldn't tell {name}: you let it go, so start a new job instead."
+        ));
+    }
+    if !active && !account_exists(shared, &job.agent, &job.account) {
+        return Outcome::Failed(format!(
+            "Couldn't tell {name}: its account {} isn't set up any more, so start a new job instead.",
+            job.account
+        ));
+    }
     if !active
         && job
             .worktree

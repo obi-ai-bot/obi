@@ -1952,6 +1952,28 @@ fn the_user_tells_a_running_job_something() {
     assert!(items_of(&obid, "confirm").is_empty());
 }
 
+/// A job the owner let go (Dismiss) isn't picked up again by "tell it…": the brain hears that it
+/// should start a new job, and nothing waits for a Confirm (a field test, 2026-10-17, kept being
+/// offered one more round of a dismissed job that had failed for good).
+#[test]
+fn a_dismissed_job_is_not_told_anything() {
+    let folder = Folder::new("brain-message-dismissed");
+    let obid = started(&folder);
+    let job = job_that(&obid, "Docs line", "FAIL", None, "failed");
+    let id = job["id"].as_str().unwrap().to_owned();
+    let dismissed = call(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None);
+    assert_eq!(dismissed.status, 200, "{}", dismissed.text);
+    queue(&obid, &[message_plan(&id), reply("")]);
+    let text = said(&obid, "Tell the docs job to add one more line")["text"].clone();
+    assert!(
+        text.as_str()
+            .unwrap_or("")
+            .contains("start a new job instead"),
+        "{text}"
+    );
+    assert!(items_of(&obid, "confirm").is_empty());
+}
+
 /// #542, with the owner's decision of 2026-10-16: telling a job that ended done something starts
 /// nothing by itself. It's a confirm item with the user's words (a secret obid holds taken out);
 /// Cancel starts nothing, and the owner's Confirm runs one more round that starts with them, in
