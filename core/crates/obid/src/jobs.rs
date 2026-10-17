@@ -2290,7 +2290,12 @@ impl Jobs {
                 })?;
                 spec.accounts.push(dir.clone());
                 match tool {
-                    Tool::Claude => extra.push(("CLAUDE_CONFIG_DIR", dir.clone().into_os_string())),
+                    Tool::Claude => {
+                        refresh_keychain_login(dir).map_err(|e| {
+                            format!("obid can't copy Claude Code's login for this job: {e}")
+                        })?;
+                        extra.push(("CLAUDE_CONFIG_DIR", dir.clone().into_os_string()))
+                    }
                     Tool::Codex => extra.push(("CODEX_HOME", dir.clone().into_os_string())),
                     Tool::Cursor => {
                         acp::cursor::warn_if_long(dir);
@@ -2354,7 +2359,12 @@ impl Jobs {
         };
         Ok(Launch {
             argv: sandbox.wrap(&spec, &argv),
-            env: process::sandbox_env(&process::tools_path(), &spec.temp, &extra),
+            env: {
+                if tool == Tool::Claude {
+                    extra.push((process::CLAUDE_TMPDIR, spec.temp.clone().into_os_string()));
+                }
+                process::sandbox_env(&process::tools_path(), &spec.temp, &extra)
+            },
             cwd: spec.worktree.clone(),
             stderr: self.log_path(&job.id, "agent.log"),
         })
@@ -2413,6 +2423,10 @@ impl Jobs {
             Some(folder) => {
                 std::fs::create_dir_all(folder)
                     .map_err(|e| format!("obid can't make the account's folder: {e}"))?;
+                if tool == Tool::Claude {
+                    refresh_keychain_login(folder)
+                        .map_err(|e| format!("obid can't copy Claude Code's login: {e}"))?;
+                }
                 spec.accounts.push(folder.clone());
                 extra.push(match tool {
                     Tool::Codex => ("CODEX_HOME", folder.clone().into_os_string()),
@@ -2439,7 +2453,12 @@ impl Jobs {
         };
         Ok(Launch {
             argv: sandbox.wrap(&spec, &argv),
-            env: process::sandbox_env(&process::tools_path(), &spec.temp, &extra),
+            env: {
+                if tool == Tool::Claude {
+                    extra.push((process::CLAUDE_TMPDIR, spec.temp.clone().into_os_string()));
+                }
+                process::sandbox_env(&process::tools_path(), &spec.temp, &extra)
+            },
             cwd: dir.to_path_buf(),
             stderr: dir.join("stderr.log"),
         })
@@ -3835,9 +3854,9 @@ pub(crate) fn login_home() -> Option<PathBuf> {
 
 /// Whether `account` has a login a boxed run can use (#626): its login file is there, in its
 /// `configDir` or else in `home` (Claude Code's `.credentials.json`, Codex's `auth.json`), the file
-/// [`copy_login`] would copy. obid only looks whether it exists, never at what it holds. A login only
-/// in the macOS Keychain doesn't count: the sandbox denies the Keychain. Cursor's login is found
-/// out when it runs (`crate::acp`).
+/// [`copy_login`] would copy, or Claude Code's item in the macOS Keychain, which obid copies in its
+/// place ([`keychain_login`]). obid only looks whether it exists here. Cursor's login is found out
+/// when it runs (`crate::acp`).
 pub(crate) fn signed_in(tool: Tool, account: &crate::config::Account, home: Option<&Path>) -> bool {
     let (folder, file) = match tool {
         Tool::Claude => (".claude", ".credentials.json"),
@@ -3849,8 +3868,99 @@ pub(crate) fn signed_in(tool: Tool, account: &crate::config::Account, home: Opti
         (None, Some(home)) => home.join(folder).join(file),
         (None, None) => return false,
     };
-    // A regular file only, as copy_login takes it.
+    // A regular file only, as copy_login takes it; or, on macOS, Claude Code's own Keychain item,
+    // which obid copies in its place (keychain_login).
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
+        || (tool == Tool::Claude && keychain_has(account.config_dir.as_deref()))
+}
+
+/// The name Claude Code gives its login in the macOS Keychain for a `CLAUDE_CONFIG_DIR` (none: its
+/// default `~/.claude`): `Claude Code-credentials`, then `-` and the first 8 hex digits of the
+/// folder's SHA-256 for any other folder.
+pub(crate) fn keychain_service(config_dir: Option<&Path>) -> String {
+    match config_dir {
+        None => "Claude Code-credentials".into(),
+        Some(dir) => {
+            let digest = obi_protocol::keys::sha256(dir.as_os_str().as_encoded_bytes());
+            format!("Claude Code-credentials-{}", &hex::encode(digest)[..8])
+        }
+    }
+}
+
+/// Whether obid copies Claude Code's Keychain login (`claudeKeychain` in the configuration, set
+/// when obid starts): off unless the owner turns it on.
+static KEYCHAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns the Keychain copy on or off (crate::serve, from the configuration).
+pub fn use_keychain(on: bool) {
+    KEYCHAIN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `security`'s answer for Claude Code's Keychain item for `config_dir`, as the person (`-a`):
+/// the item itself with `-w`, else only whether it's there.
+#[cfg(target_os = "macos")]
+fn keychain(config_dir: Option<&Path>, value: bool) -> Option<Vec<u8>> {
+    if !KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()??
+        .name;
+    let mut command = std::process::Command::new("/usr/bin/security");
+    command
+        .args(["find-generic-password", "-s"])
+        .arg(keychain_service(config_dir))
+        .args(["-a", &user])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if value {
+        command.arg("-w");
+    }
+    let output = command.output().ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain(_config_dir: Option<&Path>, _value: bool) -> Option<Vec<u8>> {
+    None
+}
+
+/// Whether Claude Code keeps a login for `config_dir` in the Keychain (macOS only).
+fn keychain_has(config_dir: Option<&Path>) -> bool {
+    keychain(config_dir, false).is_some()
+}
+
+/// Claude Code's own login for `config_dir` from the macOS Keychain, the owner's decision of
+/// 2026-10-17: the sandbox denies the Keychain, and Claude Code no longer writes a login file when
+/// it can't use the Keychain, so obid copies the Keychain's item into the place a boxed run reads
+/// its `.credentials.json` from, as it copies a login file. Never logged, shown or kept anywhere
+/// else; none on other systems.
+pub(crate) fn keychain_login(config_dir: Option<&Path>) -> Option<Vec<u8>> {
+    let mut bytes = keychain(config_dir, true)?;
+    while bytes.last().is_some_and(|b| b.is_ascii_whitespace()) {
+        bytes.pop();
+    }
+    (!bytes.is_empty()).then_some(bytes)
+}
+
+/// Writes `bytes` to `path` as only the person may read it (0600), replacing what's there; never
+/// through a link left in its place.
+fn write_login(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::io::Write::write_all(&mut options.open(path)?, bytes)
+}
+
+/// Before a boxed Claude Code run on an account with a folder of its own: its `.credentials.json`
+/// from the Keychain, fresh, when the Keychain has one (else the folder is left as it is).
+pub(crate) fn refresh_keychain_login(folder: &Path) -> std::io::Result<()> {
+    match keychain_login(Some(folder)) {
+        Some(bytes) => write_login(&folder.join(".credentials.json"), &bytes),
+        None => Ok(()),
+    }
 }
 
 /// The tool's own login, copied from `home` into the job's `login` folder, for an account with no
@@ -3859,8 +3969,8 @@ pub(crate) fn signed_in(tool: Tool, account: &crate::config::Account, home: Opti
 /// commands or sessions of the person's). The credentials are copied again before every start (the
 /// person may have signed in again) and removed when the job's run ends
 /// ([`forget_login_secrets`]); the rest is copied once, then the job's own. Answers the names to
-/// show in the job's `HOME`. On macOS a login that lives only in the keychain is not copied, and
-/// the account isn't [`signed_in`]: a job can use only `.credentials.json`.
+/// show in the job's `HOME`. On macOS a login that lives only in the Keychain is copied from there
+/// as `.credentials.json` ([`keychain_login`]).
 pub(crate) fn copy_login(
     home: Option<&Path>,
     login: &Path,
@@ -3903,6 +4013,13 @@ pub(crate) fn copy_login(
     };
     for name in secret {
         copy(name)?;
+    }
+    // On macOS Claude Code's login may be only in the Keychain (keychain_login).
+    if tool == Tool::Claude
+        && std::fs::symlink_metadata(home.join(secret[0])).is_err()
+        && let Some(bytes) = keychain_login(None)
+    {
+        write_login(&login.join(secret[0]), &bytes)?;
     }
     for name in once {
         if std::fs::symlink_metadata(login.join(name)).is_err() {
@@ -4366,6 +4483,20 @@ fn tail_chars(text: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Claude Code's Keychain names, as it makes them: the default folder's, and any other's with
+    /// the first 8 hex digits of its SHA-256 (seen on 2026-10-17 for an account's folder).
+    #[test]
+    fn claude_codes_keychain_items_are_named_as_it_names_them() {
+        assert_eq!(keychain_service(None), "Claude Code-credentials");
+        let folder = Path::new(
+            "/Users/wellprado/Library/Application Support/Oby/accounts/32203c5b-b24c-4353-bdcb-f34797790d0a",
+        );
+        assert_eq!(
+            keychain_service(Some(folder)),
+            "Claude Code-credentials-2e25c0fb"
+        );
+    }
     use super::*;
 
     /// A job from before modes is in Bypass; a mode this obid can't read asks (security review
