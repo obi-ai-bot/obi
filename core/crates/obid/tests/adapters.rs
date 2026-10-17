@@ -547,3 +547,26 @@ fn codex_and_cursor_ask_the_owner_in_ask_mode() {
     assert_eq!(summary(&ended(&obid, &codex)), "answer: accept");
     assert_eq!(summary(&ended(&obid, &cursor)), "answer: reject-once");
 }
+
+#[test]
+fn codex_initial_rate_limits_reach_the_accounts_api() {
+    let folder = Folder::new("codex-usage");
+    let obid = obid(&folder, false);
+    let home = folder.0.join("home/accounts/codex-work");
+    std::fs::create_dir_all(&home).unwrap();
+    let reset = obi_protocol::time::now() + 86400;
+    std::fs::write(home.join("fake-rate-limits.json"), json!({"primary": {"windowDurationMins": 10080, "usedPercent": 82, "resetsAt": reset}, "secondary": {"windowDurationMins": 300, "usedPercent": 20, "resetsAt": reset - 3600}}).to_string()).unwrap();
+    let id = dispatch(&obid, json!({"agent": "codex", "task": "Nothing to do"}));
+    ended(&obid, &id);
+    let status = call(&obid, "GET", "/v1/status", None);
+    let account = status.body["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "work")
+        .unwrap();
+    assert_eq!(account["sevenDay"], 0.82);
+    assert_eq!(account["fiveHour"], 0.2);
+    assert_eq!(account["sevenDayResets"], obi_protocol::time::format(reset));
+    assert_eq!(account["reserved"], true);
+}

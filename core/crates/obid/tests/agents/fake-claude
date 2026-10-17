@@ -62,6 +62,8 @@ rl.on("line", (line) => {
   const prompt = typeof message.message.content === "string" ? message.message.content : "";
   emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Bash", "Read", "Edit"], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
   if (leaked.length) return result(`leaked: ${leaked.join(", ")}`, true);
+  const usage = prompt.match(/USAGE: (\{.*\})/);
+  if (usage) emit({ type: "rate_limit_event", rate_limit_info: JSON.parse(usage[1]) });
   const commit = prompt.match(/COMMIT: (\S+)/);
   const ask = prompt.match(/ASK: (\{.*\})/);
   const asks = prompt.match(/ASKS: (\[.*\])/);

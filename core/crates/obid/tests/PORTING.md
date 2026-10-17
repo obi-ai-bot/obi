@@ -50,7 +50,8 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 | RunnerTests.waitAnswersWithTheJobOnceItEnded | jobs_api.rs `nothing_committed_fails_and_dismiss_lets_it_go` | `GET /v1/jobs/{id}/wait` is how every jobs_api.rs test waits; the 404 is in `dispatch_takes_only_whole_jobs` |
 | SafeTests.theRunnerStopsEveryJob | jobs_api.rs `stop_and_stop_all_end_the_agents` |  |
 | TitleTests.theJobKeepsItsTitleAndTheAPISendsIt | runner_api.rs `jobs_have_iso_dates_and_every_key` | the title's API half; its push-alert half needs `POST /v1/notifications` |
-| UsageTests.accountJSONCarriesResetTimes | status.rs `status_answers_with_engine_obid` | the account object's keys, null before any job; obid reads no usage yet, so no reset time is ever set |
+| ReserveTests.theAPILiftsAndRestoresTheReserve | jobs_api.rs `the_api_lifts_and_restores_the_reserve` | real Claude usage event, lift/restore, persistence, automatic vs named dispatch |
+| UsageTests.accountJSONCarriesResetTimes | status.rs `status_answers_with_engine_obid` | the account object's keys, null before any job; actual reset times from an agent are covered in jobs_api.rs `the_api_lifts_and_restores_the_reserve` |
 | WaitingTests.theAPISendsWhatItWaitsFor | runner_api.rs `a_seventh_job_waits_for_a_slot_and_says_so` | and the null half in `jobs_have_iso_dates_and_every_key` |
 
 Also from the Mac app's side: tests/mac_app.rs builds the Mac app's own client (apps/shared/Runner.swift and the Engine/ and apps/shared/ files it needs) and follows obid as apps/mac/app/RunnerFeed.swift does.
@@ -94,7 +95,7 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 | ResearchTests.anUnknownReadIsRejectedByJobsAPI | research `reads` (obid refuses every `reads` with 422) | #449 |
 | ResearchTests.proposalsFileOnlyOnTapAndAreScanned | `POST /v1/jobs/{id}/proposals/{index}/file` | #449 |
 | ResearchTests.theReportIsStoredAndServed | `GET /v1/jobs/{id}/report` | #449 |
-| ReserveTests.theAPILiftsAndRestoresTheReserve | `POST /v1/accounts/{id}/reserve` | #450 |
+
 | ReviewTests.theAPIShowsTheReviewAndTheReviewJob | Oby's review of a published job (`reviewing`, `review`, the review job's `reviewOf`): obid publishes its owner's work now (tests/publish_api.rs), and Oby's review of it is #525 | #525 |
 | RunnerTests.theAppHandsOverItsDeviceToken | `POST /v1/activities`, `POST /v1/notifications` | #452 |
 | RunnerTests.withoutAKeyThereIsNoPush | `POST /v1/activities` | #452 |

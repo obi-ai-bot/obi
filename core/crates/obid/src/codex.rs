@@ -132,6 +132,12 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         .await?
         .map_err(|e| Stop::Failed(format!("Codex couldn't start: {}", e.message)))?;
         self.conn.notify("initialized", None).await;
+        // Older servers may not implement this method; notifications still update usage.
+        if let Ok(limits) = self.call("account/rateLimits/read", json!({})).await?
+            && let Some(usage) = crate::accounts::codex(&limits["rateLimits"])
+        {
+            (self.on_event)(Event::Usage(usage));
+        }
 
         let cwd = self.worktree.to_string_lossy().into_owned();
         let mut params = thread_params(&cwd);
@@ -198,6 +204,11 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             return;
         }
         match message["method"].as_str() {
+            Some("account/rateLimits/updated") => {
+                if let Some(usage) = crate::accounts::codex(&params["rateLimits"]) {
+                    (self.on_event)(Event::Usage(usage));
+                }
+            }
             Some("item/started") => {
                 if let Some(step) = step(&params["item"]) {
                     (self.on_event)(Event::Step(step));

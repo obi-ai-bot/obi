@@ -218,6 +218,14 @@ impl Config {
                     "agents.{key}.bin is empty: it is the adapter's binary, a path or a command name."
                 ));
             }
+            if agent.accounts.is_empty() && key != "cursor" {
+                let id = if key == "claude" { "default" } else { "codex" };
+                if !seen.insert(id) {
+                    return invalid(format!(
+                        "agents.{key}.accounts: the implicit id {id:?} is listed twice."
+                    ));
+                }
+            }
             for account in &agent.accounts {
                 if account.id.trim().is_empty() {
                     return invalid(format!(
@@ -651,6 +659,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn implicit_account_ids_are_unique_too() {
+        for agents in [
+            serde_json::json!({"claude": {"bin": "claude", "accounts": [{"id": "codex", "name": "A"}]}, "codex": {"bin": "codex"}}),
+            serde_json::json!({"claude": {"bin": "claude"}, "codex": {"bin": "codex", "accounts": [{"id": "default", "name": "A"}]}}),
+        ] {
+            assert!(problem(&with(serde_json::json!({"agents": agents}))).contains("twice"));
+        }
+    }
     #[test]
     fn account_ids_are_unique() {
         let agents = serde_json::json!({"claude": {"bin": "claude", "accounts": [

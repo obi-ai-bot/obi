@@ -163,6 +163,7 @@ struct State {
 
 /// Every job obid has, and the workers running them.
 pub struct Jobs {
+    pub accounts: crate::accounts::Accounts,
     config: Config,
     store: Store,
     events: Events,
@@ -218,7 +219,9 @@ impl Jobs {
         let kept = permissions::load(&config.home);
         let api_url = format!("http://{}", config.listen);
         let approvals = crate::approval::Approvals::open(&config.home);
+        let accounts = crate::accounts::Accounts::open(&config.home);
         Ok(Arc::new(Jobs {
+            accounts,
             config,
             store,
             events,
@@ -1017,8 +1020,20 @@ impl Jobs {
         let named = named
             .map(str::trim)
             .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("auto"));
+        let mut held_for_usage = false;
         for tool in &tools {
-            let accounts = self.accounts(*tool);
+            let accounts = self
+                .accounts(*tool)
+                .into_iter()
+                .filter(|a| {
+                    if named.is_some_and(|name| a.id != name && a.name != name) {
+                        return false;
+                    }
+                    let eligible = self.accounts.eligible(&a.id, named.is_some());
+                    held_for_usage |= !eligible;
+                    eligible
+                })
+                .collect::<Vec<_>>();
             let found = match named {
                 None => accounts.into_iter().next(),
                 Some(named) => accounts
@@ -1028,6 +1043,9 @@ impl Jobs {
             if let Some(account) = found {
                 return Ok((*tool, account));
             }
+        }
+        if held_for_usage {
+            return Err(Refused("No matching account has room: check its usage limits and weekly reserve in Settings › Accounts.".into()));
         }
         Err(Refused(match (named, tools.as_slice()) {
             (Some(named), _) => format!("There's no account {named}."),
@@ -2209,6 +2227,16 @@ impl Jobs {
             }
         };
         let on_event = |event| match event {
+            AgentEvent::Usage(usage) => {
+                if let Err(error) = jobs.accounts.record(&job.account, &usage) {
+                    tracing::warn!("could not keep account usage: {error}");
+                }
+                jobs.events.send(
+                    "accounts",
+                    serde_json::to_value(crate::api::account_list(&jobs.config, jobs))
+                        .unwrap_or_default(),
+                );
+            }
             AgentEvent::Session(session) => {
                 jobs.update(id, |job| job.session = Some(session));
             }

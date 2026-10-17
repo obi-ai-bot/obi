@@ -89,6 +89,8 @@ impl From<Answer> for Ruling {
 pub enum Event {
     /// Its session id, from the `init` line.
     Session(String),
+    /// Subscription usage reported by the tool.
+    Usage(crate::accounts::Usage),
     /// What it is doing now, like `Reading greet.js`.
     Step(String),
     /// A permission obid refused, and why.
@@ -215,6 +217,9 @@ pub async fn run_turn(
                         )));
                     }
                 }
+            }
+            Some("rate_limit_event") => {
+                on_event(Event::Usage(crate::accounts::claude(&message)));
             }
             Some("result") => {
                 if let Some(session) = message.get("session_id").and_then(Value::as_str) {

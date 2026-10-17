@@ -86,6 +86,7 @@ impl Cleanup {
 pub fn router(shared: Arc<Shared>) -> Router {
     Router::new()
         .route("/v1/status", get(status))
+        .route("/v1/accounts/{id}/reserve", post(crate::routes::reserve))
         .route(
             "/v1/jobs",
             get(crate::routes::jobs).post(crate::routes::dispatch),
@@ -474,40 +475,74 @@ pub fn worktrees(home: &Path) -> PathBuf {
     home.join("worktrees")
 }
 
-async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>, ApiError> {
-    let agents = &shared.config.agents;
-    let accounts = [
+pub fn account_list(config: &Config, jobs: &Jobs) -> Vec<AccountJson> {
+    let agents = &config.agents;
+    [
         ("claude", &agents.claude),
         ("codex", &agents.codex),
         ("cursor", &agents.cursor),
     ]
     .into_iter()
     .flat_map(|(agent, configured)| {
-        configured
-            .iter()
-            .flat_map(|tool| &tool.accounts)
-            .map(move |account| (agent, account))
+        let accounts = configured
+            .as_ref()
+            .map(|tool| {
+                if tool.accounts.is_empty() && agent != "cursor" {
+                    vec![crate::config::Account {
+                        id: if agent == "claude" {
+                            "default"
+                        } else {
+                            "codex"
+                        }
+                        .into(),
+                        name: if agent == "claude" {
+                            "Default"
+                        } else {
+                            "Codex"
+                        }
+                        .into(),
+                        config_dir: None,
+                    }]
+                } else {
+                    tool.accounts.clone()
+                }
+            })
+            .unwrap_or_default();
+        accounts.into_iter().map(move |a| (agent, a))
     })
-    .map(|(agent, account)| AccountJson {
-        id: account.id.clone(),
-        agent,
-        name: account.name.clone(),
-        label: None,
-        // A listed account is usable until one of its jobs fails on its login.
-        signed_in: true,
-        five_hour: None,
-        seven_day: None,
-        five_hour_resets: None,
-        seven_day_resets: None,
-        running: shared.jobs.running_on(&account.id) as u32,
-        full_until: None,
-        tetrix: None,
-        tetrix_jobs: 0,
-        tetrix_used: 0,
-        reserved: false,
-        reserve_lifted_until: None,
+    .map(|(agent, account)| {
+        let usage = jobs.accounts.get(&account.id);
+        let now = obi_protocol::time::now();
+        AccountJson {
+            id: account.id.clone(),
+            agent,
+            name: account.name,
+            label: None,
+            signed_in: true,
+            five_hour: usage.five_hour,
+            seven_day: usage.seven_day,
+            five_hour_resets: usage.five_hour_resets.map(obi_protocol::time::format),
+            seven_day_resets: usage.seven_day_resets.map(obi_protocol::time::format),
+            running: jobs.running_on(&account.id) as u32,
+            full_until: usage
+                .full_until
+                .filter(|at| *at > now)
+                .map(obi_protocol::time::format),
+            tetrix: None,
+            tetrix_jobs: 0,
+            tetrix_used: 0,
+            reserved: usage.reserved(now),
+            reserve_lifted_until: usage
+                .reserve_lifted_until
+                .filter(|at| *at > now)
+                .map(obi_protocol::time::format),
+        }
     })
-    .collect();
+    .collect()
+}
+
+async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>, ApiError> {
+    let accounts = account_list(&shared.config, &shared.jobs);
     Ok(axum::Json(Status {
         runner: RunnerJson {
             version: API_VERSION,

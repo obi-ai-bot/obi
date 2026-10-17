@@ -721,3 +721,49 @@ pub async fn forget_permission_rule(
         )),
     }
 }
+
+/// Lifts the weekly reserve until reset, or restores it immediately.
+pub async fn reserve(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let value: Value = serde_json::from_slice(&body).map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Expected a JSON object with lift: true or false.",
+        )
+    })?;
+    let lift = value
+        .get("lift")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "lift is true or false."))?;
+    if !crate::api::account_list(&shared.config, &shared.jobs)
+        .iter()
+        .any(|a| a.id == id)
+    {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "There's no such account.",
+        ));
+    }
+    shared.jobs.accounts.lift(&id, lift).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not save the account reserve.",
+        )
+    })?;
+    let accounts = crate::api::account_list(&shared.config, &shared.jobs);
+    let account = accounts
+        .iter()
+        .find(|a| a.id == id)
+        .expect("configured account");
+    shared.events.send(
+        "accounts",
+        serde_json::to_value(&accounts).unwrap_or_default(),
+    );
+    Ok(json(
+        StatusCode::OK,
+        serde_json::to_value(account).unwrap_or_default(),
+    ))
+}

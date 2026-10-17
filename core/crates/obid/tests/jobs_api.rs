@@ -900,3 +900,80 @@ fn the_default_login_is_a_copy_the_person_keeps_unchanged() {
     assert!(!login.join(".claude/.credentials.json").exists());
     assert!(login.join(".claude.json").exists());
 }
+
+/// Ports ReserveTests.theAPILiftsAndRestoresTheReserve, including reset persistence and routing.
+#[test]
+fn the_api_lifts_and_restores_the_reserve() {
+    let folder = Folder::new("reserves");
+    let remote = fixture(&folder.0);
+    let config = config(&folder.0, &remote);
+    let mut obid = start(&folder.0, &config);
+    let reset = obi_protocol::time::now() + 2 * 86400;
+    let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 0.1, "resetsAt": reset - 86400}, "seven_day": {"utilization": 0.82, "resetsAt": reset}}});
+    let dispatched = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": format!("USAGE: {usage}"), "check": "true"}),
+    );
+    assert_eq!(dispatched.status, 201, "{}", dispatched.text);
+    let id = dispatched.body["id"].as_str().unwrap();
+    assert_eq!(
+        request(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None).status,
+        200
+    );
+    let account =
+        |obid: &Obid| request(obid, "GET", "/v1/status", None).body["accounts"][0].clone();
+    assert_eq!(account(&obid)["reserved"], true);
+    assert_eq!(account(&obid)["sevenDay"], 0.82);
+    assert_eq!(
+        account(&obid)["sevenDayResets"],
+        obi_protocol::time::format(reset)
+    );
+    let automatic = || json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Nothing to do", "check": "true"});
+    assert_ne!(post_job(&obid, automatic()).status, 201);
+    let lifted = request(
+        &obid,
+        "POST",
+        "/v1/accounts/stub/reserve",
+        Some(r#"{"lift":true}"#),
+    );
+    assert_eq!(lifted.status, 200, "{}", lifted.text);
+    assert_eq!(lifted.body["reserved"], false);
+    assert_eq!(
+        lifted.body["reserveLiftedUntil"],
+        obi_protocol::time::format(reset)
+    );
+    assert_eq!(post_job(&obid, automatic()).status, 201);
+    obid.child.kill().unwrap();
+    obid.child.wait().unwrap();
+    drop(obid);
+    let obid = start(&folder.0, &config);
+    assert_eq!(account(&obid)["reserved"], false);
+    let restored = request(
+        &obid,
+        "POST",
+        "/v1/accounts/stub/reserve",
+        Some(r#"{"lift":false}"#),
+    );
+    assert_eq!(restored.status, 200);
+    assert_eq!(restored.body["reserved"], true);
+    assert!(restored.body["reserveLiftedUntil"].is_null());
+    assert_eq!(
+        request(
+            &obid,
+            "POST",
+            "/v1/accounts/nobody/reserve",
+            Some(r#"{"lift":true}"#)
+        )
+        .status,
+        404
+    );
+    for body in ["{}", r#"{"lift":"true"}"#, "false", "{"] {
+        assert_eq!(
+            request(&obid, "POST", "/v1/accounts/stub/reserve", Some(body)).status,
+            400
+        );
+    }
+    let mut named = automatic();
+    named["account"] = json!("stub");
+    assert_eq!(post_job(&obid, named).status, 201);
+}

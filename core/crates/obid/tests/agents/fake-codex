@@ -141,6 +141,10 @@ rl.on("line", (line) => {
   switch (method) {
     case "initialize":
       return send({ id, result: { userAgent: "fake-codex/0.0.0" } });
+    case "account/rateLimits/read": {
+      const file = join(home, "fake-rate-limits.json");
+      return send({ id, result: { rateLimits: existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {} } });
+    }
     case "initialized":
       return;
     case "thread/start":

@@ -671,6 +671,8 @@ Changes what a job that hasn't started waits for:
 
 The list replaces the job's (Start when); `[]` starts it now. A condition on an account moves the job to that account. A job waiting to be asked about a condition that can't hold stops asking. Returns the job. `404` for an unknown job; `422` with why for a job that started already, one of Oby's own reviews, or conditions that can't be.
 
+obid keeps the usage reported during Claude Code jobs and Codex's `account/rateLimits/read` / `account/rateLimits/updated` in `home/account-usage.json` (0600). The two windows and their reset times survive a restart; a partial report keeps the other window. Its account list includes implicit default Claude and Codex accounts. Automatic dispatch skips weekly reserves; an explicitly named account can use its reserve, while neither path takes an account at 95% of either unexpired window or marked full. If none has room, dispatch is refused. Waiting for room and starting an already queued job on another account remain part of #455 / #447.
+
 ### `POST /v1/accounts/{id}/reserve`
 
 Lifts an account's weekly reserve, or puts it back (#278):
