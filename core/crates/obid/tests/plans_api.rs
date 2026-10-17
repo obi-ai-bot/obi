@@ -374,6 +374,26 @@ fn the_brain_thinks_with_haiku_and_long_requests_with_sonnet() {
     assert!(read(calls[1].join("args")).contains("--model\nclaude-sonnet-5-5\n"));
 }
 
+/// #536's acceptance: a Haiku step thinks at low effort, a Sonnet step at medium.
+#[test]
+fn haiku_steps_think_at_low_effort_and_sonnet_steps_at_medium() {
+    let folder = Folder::new("brain-effort");
+    let obid = started(&folder);
+    said(&obid, "how is it going?");
+    said(&obid, &"x".repeat(700));
+    let calls = calls(&obid);
+    let quick = read(calls[0].join("args"));
+    assert!(
+        quick.contains("--model\nclaude-haiku-5-5\n--effort\nlow\n"),
+        "{quick}"
+    );
+    let deep = read(calls[1].join("args"));
+    assert!(
+        deep.contains("--model\nclaude-sonnet-5-5\n--effort\nmedium\n"),
+        "{deep}"
+    );
+}
+
 /// Codex plans when Claude can't, with the same schema and checks.
 #[test]
 fn codex_plans_when_claude_cannot() {

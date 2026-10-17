@@ -19,6 +19,15 @@ use crate::agent::{Answer, Launch, Ruling, Tool};
 pub const QUICK_MODEL: &str = "claude-haiku-5-5";
 /// The model for long requests and every later step of a turn.
 pub const DEEP_MODEL: &str = "claude-sonnet-5-5";
+/// How hard the brain thinks with each model (#536), Claude Code's `--effort`: quick questions
+/// only read the briefing, while long requests and later steps have to keep the thread. The one
+/// place to tune them, with the numbers each turn records (#533).
+pub const EFFORTS: [(&str, &str); 2] = [(QUICK_MODEL, "low"), (DEEP_MODEL, "medium")];
+
+/// The effort the brain thinks at with `model`: [`EFFORTS`], else the CLI's own default.
+pub fn effort(model: &str) -> Option<&'static str> {
+    EFFORTS.iter().find(|(m, _)| *m == model).map(|(_, e)| *e)
+}
 /// The file in the brain's directory that quotes what agents wrote, when there is any.
 pub const QUOTED_FILE: &str = "work.md";
 /// How many turns the brain may take when it may read the quoted file: one to read, more to
@@ -155,6 +164,9 @@ impl ClaudeBrain {
         let secrets = crate::secrets::known();
         let folder = self.room.folder().map_err(Failure::Failed)?;
         let mut flags: Vec<OsString> = vec!["-p".into(), "--model".into(), model.into()];
+        if let Some(effort) = effort(model) {
+            flags.extend(["--effort".into(), effort.into()]);
+        }
         if let Some(quoted) = quoted {
             std::fs::write(folder.0.join(QUOTED_FILE), secrets.redact(quoted)).map_err(|e| {
                 Failure::Failed(format!("the quoted file couldn't be written: {e}"))
@@ -1086,6 +1098,14 @@ pub mod tests {
         next.turn_length = Some(20);
         planner(&fake).plan("what now?", &next, &going).await;
         assert_eq!(*fake.models.lock().unwrap(), [DEEP_MODEL, QUICK_MODEL]);
+    }
+
+    /// #536: Haiku thinks at low effort, Sonnet at medium, any other model at the CLI's default.
+    #[test]
+    fn each_model_has_its_effort() {
+        assert_eq!(effort(QUICK_MODEL), Some("low"));
+        assert_eq!(effort(DEEP_MODEL), Some("medium"));
+        assert_eq!(effort("claude-opus-5-5"), None);
     }
 
     /// The system prompt says what each tool is called, and the quoted file only when there is one.
