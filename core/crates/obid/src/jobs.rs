@@ -156,9 +156,6 @@ struct State {
     apple_logs: HashMap<String, String>,
     /// The jobs publishing now: one publish at a time per job.
     publishing: std::collections::HashSet<String>,
-    /// For each job obid last said what publishing it by hand would do (`GET …/publish`): when
-    /// its last run had ended then. A job that ended another run since was approved unseen.
-    offered: HashMap<String, Option<i64>>,
     /// When obid last tried to read each published pull request, and which one: an unavailable
     /// GitHub isn't asked again on every pass.
     followed: HashMap<String, (String, i64)>,
@@ -233,7 +230,6 @@ impl Jobs {
                 asks: HashMap::new(),
                 apple_logs: HashMap::new(),
                 publishing: std::collections::HashSet::new(),
-                offered: HashMap::new(),
                 followed: HashMap::new(),
             }),
             changed: Notify::new(),
@@ -2018,6 +2014,7 @@ impl Jobs {
                 self.update(id, |job| {
                     job.status = Status::Failed;
                     job.asked = false;
+                    job.publish_step = None;
                     job.step = String::new();
                     job.summary = why;
                     job.finished = Some(obi_protocol::time::now());
@@ -3242,13 +3239,11 @@ impl Jobs {
     }
 
     /// [`Jobs::publish_action`], said to a device that will ask its owner to approve it: obid
-    /// remembers which run of the job it described.
+    /// keeps, with the job, which of its runs it described and when (`Job::offers`).
     pub fn offer_publish(&self, id: &str) -> Option<Result<(String, String), String>> {
-        let mut state = self.lock();
-        let job = state.jobs.get(id)?.clone();
-        let answer = publish_action_of(&job);
+        let answer = publish_action_of(&self.get(id)?);
         if answer.is_ok() {
-            state.offered.insert(id.to_owned(), job.finished);
+            self.update(id, |job| job.offered(obi_protocol::time::now()));
         }
         Some(answer)
     }
@@ -3259,9 +3254,9 @@ impl Jobs {
     }
 
     /// Publishes the job `id` by hand, once a device approved `action` at `signed_at`: only when
-    /// that is still obid's own sentence for it, and the job ended no run since the device signed
-    /// it or since obid last described it (the sentence names the branch, not its commits).
-    /// Answers the pull request's URL, or the line saying why not. Never a merge.
+    /// that is still obid's own sentence for it, and it can only have been said of the job's
+    /// latest run (`Job::approvable_at`: the sentence names the branch, not its commits). Answers
+    /// the pull request's URL, or the line saying why not. Never a merge.
     pub async fn publish_by_hand(
         self: &Arc<Self>,
         id: &str,
@@ -3269,22 +3264,18 @@ impl Jobs {
         signed_at: i64,
     ) -> Result<String, String> {
         use crate::publish::Failure;
-        let offered = self.lock().offered.get(id).copied();
         // Still obid's own sentence for the run that was approved, checked as it's claimed.
-        let may = |job: &Job| match publish_action_of(job) {
-            Ok(_)
-                if job.finished.is_some_and(|ended| ended > signed_at)
-                    || offered.is_some_and(|seen| seen != job.finished) =>
-            {
-                Err(Failure::Refused(
-                    "The job ran again since it was approved. Approve it again.".into(),
-                ))
-            }
+        let may = |job: &Job| {
+            match publish_action_of(job) {
+            Ok(_) if !job.approvable_at(signed_at) => Err(Failure::Refused(
+                "The job ran again since obid said what publishing it would do. Approve it again in two minutes.".into(),
+            )),
             Ok((now, _)) if now == action => Ok(()),
             Ok(_) => Err(Failure::Refused(
                 "The job changed since it was approved. Approve it again.".into(),
             )),
             Err(why) => Err(Failure::Refused(why)),
+        }
         };
         match self.publish_job(id, None, may).await {
             Ok(url) => {

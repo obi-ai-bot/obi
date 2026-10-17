@@ -724,6 +724,12 @@ fn a_token_in_a_folders_name_is_found_and_never_repeated() {
         "{summary}"
     );
     assert!(summary.contains("GitHub token in a name"), "{summary}");
+    // What the owner can do: where to look.
+    assert!(
+        summary.contains("it is among the names of the files and folders the branch adds"),
+        "{summary}"
+    );
+    assert_eq!(job["publishStep"], Value::Null);
     let token = made_up_token();
     let api = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).text;
     assert!(!api.contains(&token), "{api}");
@@ -760,8 +766,9 @@ fn the_owners_git_configuration_cant_hide_a_root_commit() {
 }
 
 /// Publishing by hand publishes the run that was approved: the sentence names the branch, not its
-/// commits, so a job that ran again after obid gave its sentence is refused, and the owner asks
-/// again. While a hand publish runs, the job can't be dismissed.
+/// commits, so when obid described an earlier run in the two minutes before the device signed, the
+/// approval could be of either and is refused, after a restart too. While a hand publish runs, the
+/// job can't be dismissed.
 #[test]
 fn a_hand_publish_is_for_the_run_that_was_approved() {
     use std::os::unix::fs::PermissionsExt;
@@ -776,11 +783,17 @@ fn a_hand_publish_is_for_the_run_that_was_approved() {
     .unwrap();
     std::fs::copy(bin.join("gh"), broken.join("gh")).unwrap();
     let (mut obid, remote, config) = obid_with(&folder, &broken);
-    let id = dispatch(
+    // Two jobs whose own publish failed (the scanner can't run).
+    let ran = dispatch(
         &obid,
         json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "COMMIT: hello.txt"}),
     );
-    assert!(ended(&obid, &id)["publishError"].is_string());
+    let held = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "COMMIT: other.txt"}),
+    );
+    assert!(ended(&obid, &ran)["publishError"].is_string());
+    assert!(ended(&obid, &held)["publishError"].is_string());
     std::fs::write(obid.home.join("pairing"), "").unwrap();
     let (key, public) = device(9);
     let device_id = call(
@@ -793,45 +806,53 @@ fn a_hand_publish_is_for_the_run_that_was_approved() {
         .as_str()
         .unwrap()
         .to_owned();
-    let sentence = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None).body["action"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    // The job runs again, and its own publish fails again: the same sentence, other commits.
+    let sentence_of = |obid: &Obid, id: &str| {
+        call(obid, "GET", &format!("/v1/jobs/{id}/publish"), None).body["action"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // obid describes the first job's run; then it runs again, and its own publish fails again:
+    // the same sentence, other commits. Another device asks again, and this one signs.
+    let sentence = sentence_of(&obid, &ran);
     let told = call(
         &obid,
         "POST",
-        &format!("/v1/jobs/{id}/messages"),
+        &format!("/v1/jobs/{ran}/messages"),
         Some(&json!({"text": "COMMIT: second.txt"})),
     );
     assert_eq!(told.status, 200, "{}", told.text);
-    let again = ended(&obid, &id);
-    assert_eq!(again["commits"], 2);
-    let now = obi_protocol::time::now();
-    let stale = call(
-        &obid,
-        "POST",
-        &format!("/v1/jobs/{id}/publish"),
-        Some(&approval(&key, &device_id, &id, &sentence, now)),
-    );
-    assert_eq!(stale.status, 409, "{}", stale.text);
-    assert_eq!(
-        stale.body["error"],
-        "The job ran again since it was approved. Approve it again."
-    );
-    assert_eq!(remote_branch(&remote, &format!("oby/fix-{id}")), None);
-
-    // A gitleaks that takes its time holds the hand publish open: no dismissing it meanwhile.
+    assert_eq!(ended(&obid, &ran)["commits"], 2);
+    assert_eq!(sentence_of(&obid, &ran), sentence);
+    let refused = |obid: &Obid, at: i64| {
+        let answer = call(
+            obid,
+            "POST",
+            &format!("/v1/jobs/{ran}/publish"),
+            Some(&approval(&key, &device_id, &ran, &sentence, at)),
+        );
+        assert_eq!(answer.status, 409, "{}", answer.text);
+        assert_eq!(
+            answer.body["error"],
+            "The job ran again since obid said what publishing it would do. Approve it again in two minutes."
+        );
+    };
+    refused(&obid, obi_protocol::time::now());
+    // What obid said is kept with the job: a restart doesn't forget it.
     obid.stop();
     std::fs::write(bin.join("gitleaks"), "#!/bin/sh\nsleep 2\nexit 0\n").unwrap();
     std::fs::set_permissions(bin.join("gitleaks"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let obid = start(&folder.0, &config, Some(&bin));
-    let offered = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None);
-    assert_eq!(offered.body["action"], sentence.as_str());
+    refused(&obid, obi_protocol::time::now() + 1);
+    assert_eq!(remote_branch(&remote, &format!("oby/fix-{ran}")), None);
+
+    // A gitleaks that takes its time holds the other job's hand publish open: no dismissing it
+    // meanwhile.
+    let sentence = sentence_of(&obid, &held);
     let good = approval(
         &key,
         &device_id,
-        &id,
+        &held,
         &sentence,
         obi_protocol::time::now() + 1,
     );
@@ -840,15 +861,15 @@ fn a_hand_publish_is_for_the_run_that_was_approved() {
             call(
                 &obid,
                 "POST",
-                &format!("/v1/jobs/{id}/publish"),
+                &format!("/v1/jobs/{held}/publish"),
                 Some(&good),
             )
         });
         within(30, "the hand publish is under way", || {
-            let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+            let job = call(&obid, "GET", &format!("/v1/jobs/{held}"), None).body;
             (job["publishStep"] == "scan").then_some(())
         });
-        let dismissed = call(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None);
+        let dismissed = call(&obid, "POST", &format!("/v1/jobs/{held}/dismiss"), None);
         assert_eq!(dismissed.status, 409, "{}", dismissed.text);
         assert!(
             dismissed.body["error"]
@@ -859,7 +880,74 @@ fn a_hand_publish_is_for_the_run_that_was_approved() {
         let published = publishing.join().unwrap();
         assert_eq!(published.status, 200, "{}", published.text);
     });
-    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    let job = call(&obid, "GET", &format!("/v1/jobs/{held}"), None).body;
     assert_eq!(job["dismissed"], Value::Null);
-    assert_eq!(job["pushed"], 2);
+    assert_eq!(job["pushed"], 1);
+}
+
+/// Only the names a job adds are its own: a base that already holds `.env.development` and a
+/// fixture `id_rsa` in a folder still publishes a job that adds a file next to them, and a job
+/// that adds a `.env` there is still stopped.
+#[test]
+fn names_already_on_the_base_are_the_bases() {
+    let folder = Folder::new("publish-base-names");
+    let bin = fake_gh(&folder.0);
+    let remote = fixture(&folder.0.join("fixture"));
+    // The base gets the files a person committed there before.
+    let theirs = folder.0.join("theirs");
+    git(
+        &folder.0,
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            theirs.to_str().unwrap(),
+        ],
+    );
+    git(&theirs, &["checkout", "-q", "main"]);
+    std::fs::create_dir_all(theirs.join("cfg/.env.d")).unwrap();
+    std::fs::write(theirs.join("cfg/.env.development"), "MODE=dev\n").unwrap();
+    std::fs::write(theirs.join("cfg/id_rsa"), "not a key, a fixture\n").unwrap();
+    std::fs::write(theirs.join("cfg/.env.d/a.txt"), "a\n").unwrap();
+    git(&theirs, &["add", "-A"]);
+    git(
+        &theirs,
+        &[
+            "-c",
+            "user.name=Someone",
+            "-c",
+            "user.email=someone@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "Fixtures",
+        ],
+    );
+    git(&theirs, &["push", "-q", "origin", "main"]);
+    let config = config(&folder.0, &remote, &agent());
+    let obid = start(&folder.0, &config, Some(&bin));
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: cfg/b.txt"}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    assert_eq!(job["publishError"], Value::Null, "{job}");
+    assert_eq!(job["published"], PULL);
+    let env = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: cfg/.env"}),
+    );
+    let job = ended(&obid, &env);
+    assert_eq!(job["status"], "failed", "{job}");
+    assert!(
+        job["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("Not published: possible secret in .env (.env file)"),
+        "{job}"
+    );
+    assert_eq!(remote_branch(&remote, &format!("oby/build-{env}")), None);
 }

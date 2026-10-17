@@ -725,15 +725,22 @@ pub fn risky_name(name: &str) -> bool {
     !line_rules(name).is_empty() || holds_known_secret(name)
 }
 
-/// What the rules find in the names a push sends (each entry of every tree it sends: a file's or a
-/// folder's own name): a name that holds secrets by itself (`.env`, a private key's file), the
+/// A name a push adds: a file's (or a submodule's) own name, or a folder's.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Name {
+    pub name: String,
+    pub folder: bool,
+}
+
+/// What the rules find in the names a push adds (each a file's or a folder's own name): a file
+/// that holds secrets by its name alone (`.env`, a private key's file; not a folder named so), the
 /// built-in rules on it as on a line, and the secrets obid holds. A finding is named by the entry,
 /// or [`HIDDEN_NAME`] when the name is the secret.
-pub fn in_names(names: &[String]) -> Vec<Finding> {
+pub fn in_names(names: &[Name]) -> Vec<Finding> {
     let mut all = Vec::new();
-    for name in names {
+    for Name { name, folder } in names {
         let shown = shown_name(name);
-        if let Some(rule) = secret_file(name) {
+        if let Some(rule) = secret_file(name).filter(|_| !folder) {
             all.push(Finding {
                 name: shown.clone(),
                 line: None,
@@ -772,6 +779,36 @@ pub fn known_secrets_in_file(text: &str, name: &str) -> Vec<Finding> {
             name: name.clone(),
             line: Some(i + 1),
             rule: "vault secret".into(),
+        })
+        .collect()
+}
+
+/// gitleaks on names, each on a line of its own (a newline or carriage return in a name is written
+/// as `\n` or `\r`, so no name spills onto the next line): each finding as the index of the name
+/// it was in, and its rule.
+pub async fn gitleaks_names(
+    names: &[String],
+    scratch: &Path,
+) -> Result<Vec<(usize, String)>, String> {
+    let lines = name_lines(names);
+    Ok(gitleaks_lines(&lines, scratch)
+        .await?
+        .into_iter()
+        .filter_map(|f| Some((f.name.parse().ok()?, f.rule)))
+        .collect())
+}
+
+/// Each name as one line, named by its index.
+fn name_lines(names: &[String]) -> Vec<(String, usize, String)> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            (
+                i.to_string(),
+                1,
+                name.replace('\n', "\\n").replace('\r', "\\r"),
+            )
         })
         .collect()
 }
@@ -1242,7 +1279,7 @@ exit 99"#,
         let vault = format!("vaultname{}", "d".repeat(16));
         crate::secrets::known().learn("scan-diff-test", &vault);
         let _forget = Forget;
-        let named = in_names(&[format!("{vault}.txt")]);
+        let named = in_names(&[file(&format!("{vault}.txt"))]);
         assert_eq!(named.len(), 1, "{named:?}");
         assert_eq!(named[0].rule, "vault secret in a name");
         assert_eq!(named[0].name, HIDDEN_NAME);
@@ -1257,12 +1294,26 @@ exit 99"#,
         assert_eq!(content[0].name, HIDDEN_NAME);
     }
 
+    fn file(name: &str) -> Name {
+        Name {
+            name: name.into(),
+            folder: false,
+        }
+    }
+
     /// A name goes out as it is: the rules read it like a line, and the finding never repeats it.
-    /// The names of this repository's own files are clean.
+    /// A file named `.env` holds secrets by its name; a folder named `.env.d` doesn't.
     #[test]
     fn a_token_in_a_name_is_found_and_never_shown() {
         let token = format!("ghp_{}", "e".repeat(36));
-        let found = in_names(&[format!("{token}.txt"), ".env".into()]);
+        let found = in_names(&[
+            file(&format!("{token}.txt")),
+            file(".env"),
+            Name {
+                name: ".env.d".into(),
+                folder: true,
+            },
+        ]);
         assert_eq!(
             found,
             [
@@ -1278,18 +1329,81 @@ exit 99"#,
                 }
             ]
         );
+    }
+
+    /// The names of this repository's own files and folders, read as a push would add them, raise
+    /// nothing but what a file's name holds by itself; and a token named among them is found, and
+    /// only it.
+    #[test]
+    fn this_repositorys_names_are_clean_and_a_token_among_them_is_found() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let files = std::process::Command::new("git")
-            .args(["ls-files"])
+            .args(["ls-files", "-z"])
             .current_dir(&root)
             .output()
             .unwrap();
-        let names: Vec<String> = String::from_utf8_lossy(&files.stdout)
-            .lines()
-            .flat_map(|f| f.split('/').map(str::to_owned).collect::<Vec<_>>())
-            .collect();
+        let mut names: Vec<Name> = Vec::new();
+        for path in String::from_utf8_lossy(&files.stdout)
+            .split('\0')
+            .filter(|p| !p.is_empty())
+        {
+            let parts: Vec<&str> = path.split('/').collect();
+            for (i, part) in parts.iter().enumerate() {
+                names.push(Name {
+                    name: (*part).into(),
+                    folder: i + 1 < parts.len(),
+                });
+            }
+        }
+        names.sort();
+        names.dedup();
+        assert!(names.len() > 100, "{}", names.len());
+        let token = format!("ghp_{}", "f".repeat(36));
+        names.push(file(&format!("{token}.txt")));
         let found = in_names(&names);
-        assert!(found.iter().all(|f| f.rule.ends_with("file")), "{found:?}");
+        let by_rules: Vec<&Finding> = found
+            .iter()
+            .filter(|f| f.rule.ends_with(" in a name"))
+            .collect();
+        assert_eq!(
+            by_rules,
+            [&Finding {
+                name: HIDDEN_NAME.into(),
+                line: None,
+                rule: "GitHub token in a name".into()
+            }],
+            "{found:?}"
+        );
+        // The rest: files that hold secrets by their name alone, each a file of this repository.
+        assert!(
+            found
+                .iter()
+                .filter(|f| !f.rule.ends_with(" in a name"))
+                .all(|f| secret_file(&f.name).is_some()),
+            "{found:?}"
+        );
+    }
+
+    /// Names go to gitleaks one per line: a newline in a name doesn't move the next name's line,
+    /// so a finding names the right one.
+    #[tokio::test]
+    async fn a_newline_in_a_name_moves_no_other_name() {
+        let folder = scratch("names");
+        // It reports the line that reads `c`, wherever that is in what it was given.
+        let bin = fake_gitleaks(
+            &folder,
+            r#"for a in "$@"; do case "$a" in --report-path=*) report="${a#--report-path=}";; esac; done
+line=$(grep -n '^c$' "$2" | cut -d: -f1)
+echo "[{\"StartLine\": $line, \"RuleID\": \"github-pat\"}]" > "$report"
+exit 99"#,
+        );
+        let names = vec!["a\nb".to_owned(), "c".to_owned()];
+        let found = gitleaks_with(&bin, &name_lines(&names), &folder)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "1", "{found:?}");
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

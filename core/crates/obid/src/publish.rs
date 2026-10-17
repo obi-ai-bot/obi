@@ -181,8 +181,14 @@ pub fn blocked(found: &[Found]) -> String {
         String::new()
     };
     let places: Vec<String> = found.iter().take(3).map(Found::to_string).collect();
+    // What the owner can do about a name obid won't repeat: where to look.
+    let hidden = if found.iter().any(|f| f.file == scan::HIDDEN_NAME) {
+        " obid won't repeat a name that holds a possible secret: it is among the names of the files and folders the branch adds to its base."
+    } else {
+        ""
+    };
     format!(
-        "Not published: possible secret in {}{more}.",
+        "Not published: possible secret in {}{more}.{hidden}",
         places.join(", ")
     )
 }
@@ -466,6 +472,9 @@ async fn git_in(clone: &Path, args: &[&str]) -> Result<String, String> {
 const SCAN_ENV: &[(&str, &str)] = &[
     ("GIT_CONFIG_NOSYSTEM", "1"),
     ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    // Nor what obid's own environment would add (`git -c` from a parent, `GIT_CONFIG_KEY_<n>`).
+    ("GIT_CONFIG_PARAMETERS", ""),
+    ("GIT_CONFIG_COUNT", "0"),
 ];
 
 /// The `-c` settings that let a push or `ls-remote` to an `https` remote sign in with the owner's
@@ -756,30 +765,20 @@ async fn scan_changes(
         .into_iter()
         .map(|f| Found::of(f, None))
         .collect();
-    let numbered: Vec<(String, usize, String)> = pushed
-        .names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| (i.to_string(), 1, name.clone()))
-        .collect();
+    let names: Vec<String> = pushed.names.iter().map(|n| n.name.clone()).collect();
     let mut hidden: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for leak in scan::gitleaks_lines(&numbered, scratch)
+    for (index, rule) in scan::gitleaks_names(&names, scratch)
         .await
         .map_err(|why| could_not_run(&why))?
     {
-        let name = leak
-            .name
-            .parse::<usize>()
-            .ok()
-            .and_then(|i| pushed.names.get(i));
-        if let Some(name) = name {
+        if let Some(name) = names.get(index) {
             hidden.insert(name);
         }
         found.push(Found::of(
             Finding {
                 name: scan::HIDDEN_NAME.into(),
                 line: None,
-                rule: format!("{} in a name", leak.rule),
+                rule: format!("{rule} in a name"),
             },
             None,
         ));
@@ -875,10 +874,11 @@ const BIGGEST_BLOB: usize = 32 << 20;
 
 /// What a push sends besides its commits, read from the objects themselves.
 struct Pushed {
-    /// Every entry's own name in every tree the push sends (a file's, a folder's, a
-    /// submodule's), each once: read from the raw tree objects, so no name can hide in how git
-    /// quotes or splits paths.
-    names: Vec<String>,
+    /// The own name of every entry a commit adds at a path its parent didn't have (a file's, a
+    /// folder's, a submodule's), each once, as git gives them (NUL-separated, never quoted or
+    /// split), and whether it's a folder. A name already on the base, at the same path, is the
+    /// base's, not the job's.
+    names: Vec<scan::Name>,
     /// Every file the push sends, by a path it has, read whole, when obid holds secrets to look
     /// for in it; none otherwise.
     files: Vec<(String, Vec<u8>)>,
@@ -915,12 +915,11 @@ async fn pushed_objects(clone: &Path, range: &str) -> Result<Pushed, String> {
         &order,
     )
     .await?;
-    let mut trees = Vec::new();
     let mut blobs = Vec::new();
     for line in String::from_utf8_lossy(&checked).lines() {
         let parts: Vec<&str> = line.split(' ').collect();
         match parts[..] {
-            [id, "tree", _] => trees.push(id.to_owned()),
+            [_, "tree", _] => {}
             [id, "blob", size] => {
                 let size: usize = size
                     .parse()
@@ -937,13 +936,44 @@ async fn pushed_objects(clone: &Path, range: &str) -> Result<Pushed, String> {
             _ => return Err(format!("git cat-file answered {line:?}")),
         }
     }
+    // Every path a commit adds (`A`, folders too with `-t`), against each parent of a merge
+    // (`-m`), and everything a root commit holds (`--root`): its last part is the new name.
+    let added = git_bytes(
+        clone,
+        &[
+            "log",
+            "--root",
+            "-m",
+            "-r",
+            "-t",
+            "--no-renames",
+            "--diff-filter=A",
+            "--raw",
+            "--no-abbrev",
+            "-z",
+            "--format=",
+            range,
+        ],
+    )
+    .await?;
+    // Each: ":<old mode> <new mode> <old id> <new id> A", then the path.
+    let fields: Vec<&[u8]> = added.split(|b| *b == 0).collect();
     let mut names = std::collections::BTreeSet::new();
-    if !trees.is_empty() {
-        let read = cat_file(clone, "--batch", &trees).await?;
-        for (id, tree) in batch_objects(&read)? {
-            // An id's bytes: 20 for SHA-1, 32 for SHA-256.
-            names.extend(tree_names(tree, id.len() / 2)?);
+    let mut fields = fields.iter();
+    while let Some(meta) = fields.next() {
+        if meta.is_empty() {
+            continue;
         }
+        let (Some(b':'), Some(path)) = (meta.first(), fields.next()) else {
+            return Err("git log --raw answered something else".into());
+        };
+        let mode = String::from_utf8_lossy(meta);
+        let folder = mode.split(' ').nth(1) == Some("040000");
+        let name = path.rsplit(|b| *b == b'/').next().unwrap_or(path);
+        names.insert(scan::Name {
+            name: String::from_utf8_lossy(name).into_owned(),
+            folder,
+        });
     }
     pushed.names = names.into_iter().collect();
     if crate::secrets::known().is_empty() {
@@ -979,28 +1009,15 @@ async fn cat_file(clone: &Path, how: &str, ids: &[String]) -> Result<Vec<u8>, St
     .map_err(|e| e.0)
 }
 
-/// The names in a raw tree object: each entry is `<mode> <name>\0<id>`, the id `id_len` bytes.
-/// Errs on a tree that doesn't read that way.
-fn tree_names(mut tree: &[u8], id_len: usize) -> Result<Vec<String>, String> {
-    let mut names = Vec::new();
-    while !tree.is_empty() {
-        let space = tree
-            .iter()
-            .position(|b| *b == b' ')
-            .ok_or("a tree entry has no mode")?;
-        let nul = tree
-            .iter()
-            .position(|b| *b == 0)
-            .filter(|nul| *nul > space)
-            .ok_or("a tree entry has no name")?;
-        names.push(String::from_utf8_lossy(&tree[space + 1..nul]).into_owned());
-        let rest = &tree[nul + 1..];
-        if rest.len() < id_len {
-            return Err("a tree entry's id is cut short".into());
-        }
-        tree = &rest[id_len..];
-    }
-    Ok(names)
+/// git in the clone, as the scan reads (only the clone's own configuration), answering its stdout
+/// as it is: not trimmed, so a name's own spaces and newlines stay.
+async fn git_bytes(clone: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let mut all = vec!["--no-replace-objects", "-c", "core.quotePath=false"];
+    all.extend_from_slice(args);
+    let all: Vec<&std::ffi::OsStr> = all.iter().map(std::ffi::OsStr::new).collect();
+    git::run_bytes(clone, &all, SCAN_ENV, None)
+        .await
+        .map_err(|e| e.0)
 }
 
 /// Every commit the push sends, read as git keeps it (`cat-file`), not as `git log` shows it: its

@@ -51,6 +51,17 @@ pub enum Phase {
     Publish,
 }
 
+/// How long what obid said about publishing a job by hand counts: the two minutes an approval is
+/// fresh.
+const OFFERS_KEPT: i64 = 120;
+
+/// What obid said a publish by hand would do: when, and of which run (its `finished`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Offer {
+    pub run: Option<i64>,
+    pub at: i64,
+}
+
 /// Why a queued job isn't running yet (`waiting`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Waiting {
@@ -166,6 +177,11 @@ pub struct Job {
     /// turn's prompt. Never in the API's job (`notes` has them all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub heard: Vec<String>,
+    /// When obid said what publishing it by hand would do (`GET /v1/jobs/{id}/publish`), and
+    /// which run it described (that run's `finished`): the last two minutes' worth. Never in the
+    /// API's job.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offers: Vec<Offer>,
     /// This round is one the owner asked for with their words: it may end `done` with nothing
     /// committed. Never in the API's job.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -237,8 +253,32 @@ impl Job {
             apple_ran: None,
             apple_token: None,
             heard: Vec::new(),
+            offers: Vec::new(),
             asked: false,
         }
+    }
+
+    /// obid said, at `now`, what publishing its latest run by hand would do.
+    pub fn offered(&mut self, now: i64) {
+        self.offers.retain(|offer| now - offer.at < OFFERS_KEPT);
+        self.offers.push(Offer {
+            run: self.finished,
+            at: now,
+        });
+    }
+
+    /// Whether a device's approval signed at `signed_at` can only be of the job's latest run: the
+    /// run ended before it was signed, and nothing obid said in the two minutes before it was of
+    /// an earlier run (one device may have shown that one while another asked again). The
+    /// sentence a device signs names the branch, not its commits, so an approval that could be of
+    /// either is refused; two minutes on, it can't be.
+    pub fn approvable_at(&self, signed_at: i64) -> bool {
+        self.finished.is_none_or(|ended| ended <= signed_at)
+            && !self.offers.iter().any(|offer| {
+                offer.at <= signed_at
+                    && signed_at - offer.at < OFFERS_KEPT
+                    && offer.run != self.finished
+            })
     }
 
     pub fn max_rounds(&self) -> u32 {
