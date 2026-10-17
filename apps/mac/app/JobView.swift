@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// One job, opened from the island's list: the same screen as the iPhone's (apps/ios/app/JobScreen.swift),
-/// in the island's own style. What its agent waits for (a decision card), its stages, the result
+/// One job, opened from the window's list: the same screen as the iPhone's (apps/ios/app/JobScreen.swift),
+/// in the window's own style. What its agent waits for (a decision card), its stages, the result
 /// (Publish after Touch ID, Dismiss for one that needs you), what you asked, its details, what you
 /// told the agent, Move to…, Stop, and a line to tell the agent more. A runner's job has a Mode menu too.
 struct JobView: View {
@@ -509,7 +509,7 @@ extension Desk {
 }
 
 /// Move to…: a tool, one of its accounts with its usage, and a model, then what the move will do.
-/// The notch's job screen and the window's task page both open it.
+/// The job screen and the window's task page both open it.
 struct MovePanel: View {
     let job: Job
     /// The accounts where it runs, with their usage.

@@ -20,14 +20,14 @@ final class SettingsSelection {
     }
 }
 
-/// The Oby window (Sangam's design, #11 and #270), opened from the notch, the menu or ⌘O: the side
-/// panel, and Home with pages opening over it.
+/// The Oby window (Sangam's design, #11 and #270), opened from the menu bar icon, an alert or ⌘O: the
+/// side panel, and Home with pages opening over it.
 final class ChatWindow: NSObject, NSWindowDelegate {
     private let island: IslandController
     private var window: NSWindow?
     /// What's open over Home, and where the title bar's content starts.
     private let state = ChatState()
-    /// Oby on Home's stage: its own page, apart from the notch's, paused while out of sight.
+    /// Oby on Home's stage: its own page, paused while out of sight.
     private lazy var character = ObyCharacter(query: "embed&size=1.23")
 
     init(island: IslandController) { self.island = island }
@@ -105,6 +105,12 @@ final class ChatWindow: NSObject, NSWindowDelegate {
     }
 
     var isOpen: Bool { window?.isVisible ?? false }
+
+    /// The window is in front on Home or the conversation, where what Oby hears and says shows (#528).
+    var showsTalk: Bool {
+        guard NSApp.isActive, window?.isVisible == true else { return false }
+        return state.trail.top == nil || state.trail.top == .talk
+    }
 }
 
 /// The title bar's height and where its content starts, from where macOS put the traffic lights.
@@ -244,7 +250,7 @@ private struct HomeView: View {
                 VStack(spacing: 0) {
                     stage
                         .opacity(away ? 0 : 1).scaleEffect(away && !reduceMotion ? 0.98 : 1)
-                    if model.state == .listening && !away {
+                    if model.listening && !away {
                         ListeningLine(voice: model.voice).frame(maxWidth: Tokens.homeBox - 2 * Tokens.gutter)
                             .padding(.horizontal, Tokens.gutter).padding(.bottom, 8)
                     }
@@ -571,7 +577,7 @@ struct CenteredFlow: Layout {
     }
 }
 
-/// The notch's messenger bubbles (Island.swift): no per-message chrome, one centered timestamp above each group.
+/// Messenger bubbles: no per-message chrome, one centered timestamp above each group.
 struct TurnRow: View {
     let turn: Turn
     var grouped = false

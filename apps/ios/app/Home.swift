@@ -58,7 +58,7 @@ struct HomeView: View {
                 // Only when it would take something: jobs that need you stay until you Dismiss them.
                 if jobs.contains(where: { $0.clearable(among: phone.jobs) }) {
                     ToolbarItem(placement: .topBarLeading) {
-                        // Through the runner, so the Mac's island clears too.
+                        // Through the runner, so the Mac's window clears too.
                         Button("Clear done") { Task { await clear() } }
                     }
                 }
@@ -149,7 +149,7 @@ struct HomeView: View {
                     ReadingText(reply, weight: .medium, alignment: centered ? .center : .leading)
                     Text("Type a task below.").font(.subheadline).foregroundStyle(.secondary)
                 default:
-                    // The same line as the Mac's notch and island (apps/shared/JobList.swift).
+                    // The same line as the Mac's window (apps/shared/JobList.swift).
                     Text(Summary.line(working: phone.active.count(where: \.isWorking), waiting: phone.active.count(where: \.isWaiting), needs: needs))
                         .font(.title3.weight(.semibold))
                     Text(subline).font(.subheadline).foregroundStyle(.secondary)
@@ -200,7 +200,7 @@ struct HomeView: View {
         }
     }
 
-    /// Clear done: the runner records the time, and the finished jobs go from here and from the Mac's island.
+    /// Clear done: the runner records the time, and the finished jobs go from here and from the Mac's window.
     private func clear() async {
         do {
             try await phone.clear()

@@ -1436,7 +1436,7 @@ pub fn is_check(command: &str) -> bool {
     !trimmed.is_empty() && count(trimmed) <= 200 && !trimmed.contains(['\n', '\r'])
 }
 
-/// A job's title: one line, short enough for a row on the iPhone and the notch.
+/// A job's title: one line, short enough for a row on the iPhone and the Mac window.
 pub fn is_title(title: &str) -> bool {
     let trimmed = title.trim_matches([' ', '\t']);
     !trimmed.is_empty() && count(trimmed) <= 60 && !trimmed.contains(['\n', '\r'])

@@ -1,3 +1,4 @@
+import ApplicationServices
 import SwiftUI
 import UserNotifications
 
@@ -7,25 +8,38 @@ struct ObyApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            // The window with the conversation, Agents and Live (apps/mac/app/App/ChatWindow.swift); the island opens on hover or click.
+            // What's working and what needs you, in the words Home on the iPhone uses.
+            Text(app.island.model.summary)
+            Divider()
+            // The window with the conversation, Agents and Live (apps/mac/app/App/ChatWindow.swift).
             Button("Open Oby") { app.chat.show() }
                 .keyboardShortcut("o")
+            // The drag-to-select overlay (apps/mac/app/Snapshot.swift); the screenshot goes with your next message.
+            Button("Show Oby Your Screen…") { app.showScreen() }
             // The same keys work from any app (apps/mac/app/StopAllKey.swift).
-            Button("Stop All Jobs") { app.island.stopAll() }
+            Button("Stop All Agents") { app.island.stopAll() }
                 .keyboardShortcut(".", modifiers: [.control, .option, .command])
+            // First launch was skipped or Accessibility refused: fn does nothing until it's allowed.
+            if !AXIsProcessTrusted() {
+                Button("To Talk With fn, Allow Accessibility…") { Task { await Permissions().ask(.accessibility) } }
+            }
             SettingsLink { Text("Settings…") }
                 .keyboardShortcut(",")
             Button("Show First Launch…") { app.firstLaunch.show() }
             Divider()
             // Updates (apps/mac/app/Updater.swift): the version, and Sparkle's window on demand.
             Text("Oby \(Updater.version)")
+            // An update is downloaded: Restart installs it and relaunches, after this Mac's check if one runs.
+            if let pill = app.island.model.updater.pill {
+                Button(pill) { app.island.model.updater.install() }
+                    .disabled(app.island.model.updater.waiting)
+            }
             Button("Check for Updates…") { app.island.updater.check() }
             Divider()
             Button("Quit Oby") { NSApp.terminate(nil) }
                 .keyboardShortcut("q")
         } label: {
-            Image(nsImage: .obyMenuBarIcon)
-                .accessibilityLabel("Oby")
+            MenuBarLabel(model: app.island.model)
         }
         // The app menu, when a window of Oby's is up: Check for Updates… under About.
         .commands {
@@ -37,6 +51,29 @@ struct ObyApp: App {
         Settings {
             SettingsTabs(app: app)
         }
+    }
+}
+
+/// Oby's icon, and beside it how many agents are working or need you (nothing when none do).
+struct MenuBarLabel: View {
+    let model: IslandModel
+
+    var body: some View {
+        let count = model.working + model.needsYou
+        HStack(spacing: 3) {
+            Image(nsImage: .obyMenuBarIcon)
+            if count > 0 { Text("\(count)").monospacedDigit() }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Self.label(working: model.working, needsYou: model.needsYou))
+    }
+
+    /// "Oby", or "Oby: 2 working, 1 needs you".
+    static func label(working: Int, needsYou: Int) -> String {
+        var parts: [String] = []
+        if working > 0 { parts.append("\(working) working") }
+        if needsYou > 0 { parts.append(needsYou == 1 ? "1 needs you" : "\(needsYou) need you") }
+        return parts.isEmpty ? "Oby" : "Oby: " + parts.joined(separator: ", ")
     }
 }
 
@@ -71,7 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Hosting the unit tests: no island, and no fight with the Oby that's already running.
+        // Hosting the unit tests: no desk, and no fight with the Oby that's already running.
         guard NSClassFromString("XCTestCase") == nil else { return }
         // A pipe to an agent that just exited must not take Oby down with it.
         signal(SIGPIPE, SIG_IGN)
@@ -80,10 +117,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
             .filter { $0 != .current }
         guard others.isEmpty else { NSApp.terminate(nil); return }
-        // Before the island starts, so a click on an alert that launched Oby still arrives.
+        // Before the desk starts, so a click on an alert that launched Oby still arrives.
         UNUserNotificationCenter.current().delegate = self
         RunnerFeed.registerCategories()
         island.openWindow = { [weak self] job in self?.chat.show(job: job) }
+        island.windowShowsTalk = { [weak self] in self.map { $0.chat.showsTalk || $0.firstLaunch.isOpen } ?? false }
         island.start()
         // Scheduled update checks (apps/mac/app/Updater.swift), in the build that ships. A Debug build from
         // Xcode checks only when asked, so a release never replaces it quietly.
@@ -93,10 +131,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if !FirstLaunch.done { firstLaunch.show() }
     }
 
-    /// A click on a runner's alert opens the island on its job; its Publish starts publishing there.
+    /// A click on an alert opens the window on its job (the runner's, or one of this Mac's); the runner's
+    /// Publish starts publishing there. An alert about nothing in particular opens the window.
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        guard let id = response.notification.request.content.userInfo[RunnerFeed.jobKey] as? String else { return }
-        island.open(job: id, publish: response.actionIdentifier == RunnerFeed.publishButton)
+        let info = response.notification.request.content.userInfo
+        if let id = info[RunnerFeed.jobKey] as? String {
+            island.model.publishing = response.actionIdentifier == RunnerFeed.publishButton ? id : nil
+            chat.show(job: (id: id, local: false))
+        } else if let id = info[IslandController.localJobKey] as? String {
+            chat.show(job: (id: id, local: true))
+        } else {
+            chat.show()
+        }
+    }
+
+    /// Show Oby your screen with the window closed: the overlay, then the window opens on the conversation with the screenshot attached.
+    func showScreen() {
+        Task {
+            await island.model.tray.screenshot()
+            chat.show()
+        }
     }
 
     /// While Oby runs (always, in the menu bar), the alert still shows, so it isn't missed.

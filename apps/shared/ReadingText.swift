@@ -29,7 +29,7 @@ nonisolated struct Reading: Sendable {
     /// What to add to SF Pro's own line height so lines sit `lineHeight` × `size` apart.
     static func lineSpacing(for size: CGFloat) -> CGFloat { size * (lineHeight - fontLineHeight) }
 
-    /// The island is small: 15 pt, in a column of about 640 pt.
+    /// The Mac reads small: 15 pt, in a column of about 640 pt.
     static let mac = Reading(size: 15, style: nil, lineSpacing: lineSpacing(for: 15), paragraphGap: 10, codeRatio: codeRatio, column: 640)
     /// Dynamic Type's body (17 pt at the default setting), spaced as the Mac's.
     static let phone = Reading(size: 17, style: .body, lineSpacing: lineSpacing(for: 17), paragraphGap: 10, codeRatio: codeRatio, column: .infinity)
@@ -158,7 +158,7 @@ private struct ReadingStyle: ViewModifier {
     }
 
     #if os(macOS)
-    // The island is always dark.
+    // The Mac's window is always dark.
     static let primary = Color.white
     static let secondary = Color.white.opacity(0.6)
     #else

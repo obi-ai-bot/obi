@@ -278,7 +278,7 @@ struct DecisionCard: View {
     }
     #endif
 
-    /// Each app's look around the text: the Mac's island is dark, the iPhone follows the system.
+    /// Each app's look around the text: the Mac's window is dark, the iPhone follows the system.
     /// Long text itself takes the reading style (apps/shared/ReadingText.swift).
     private enum Style {
         #if os(macOS)

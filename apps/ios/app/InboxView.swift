@@ -114,7 +114,7 @@ struct InboxSection: View {
         }
     }
 
-    /// Through the runner, so the Mac's island settles it too; then the next one opens.
+    /// Through the runner, so the Mac's window settles it too; then the next one opens.
     private func settle(_ item: InboxItem, answer: String? = nil, done: Bool? = nil, later: Date? = nil) {
         busy = true
         Task {

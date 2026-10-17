@@ -32,7 +32,7 @@ struct Attachment: Identifiable, Equatable {
 @Observable
 final class Tray {
     enum Problem: Equatable {
-        /// Screen Recording is off for Oby: the island says how to turn it on.
+        /// Screen Recording is off for Oby: the message box says how to turn it on.
         case screenRecording
         case other(String)
     }
@@ -81,7 +81,7 @@ final class Tray {
     }
 
     /// The camera: drag over part of any screen, or click for a whole one. Without Screen Recording,
-    /// macOS asks the first time, and the island says how to turn it on.
+    /// macOS asks the first time, and the message box says how to turn it on.
     func screenshot() async {
         guard !capturing else { return }
         guard CGPreflightScreenCaptureAccess() else {
@@ -242,7 +242,7 @@ final class SelectionOverlay {
     }
 }
 
-/// Above everything, the menu bar and the island included, without activating Oby.
+/// Above everything, the menu bar included, without activating Oby.
 private final class OverlayPanel: NSPanel {
     init(screen: NSScreen) {
         super.init(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)

@@ -21,7 +21,7 @@ struct RunnerJobsTests {
         #expect(try Runner.decoder.decode(RunnerStatus.self, from: Data(status.utf8)).runner.host == "tetrix-lab")
     }
 
-    /// Clear done on the island takes only settled jobs (#280): a published job whose pull request
+    /// Clear done in the window takes only settled jobs (#280): a published job whose pull request
     /// is open goes too since 2026-10-13 (Oby takes it to the merge); a dismissed one goes.
     @Test func clearDoneKeepsAnOpenPullRequest() {
         let cleared = Date.now

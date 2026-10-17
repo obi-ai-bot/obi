@@ -5,7 +5,7 @@ import SwiftUI
 
 /// Updates (#282): Sparkle reads the appcast (apps/mac/app/Info.plist, `SUFeedURL`) every 6 hours,
 /// downloads a new version quietly and installs it when Oby quits. Once one is downloaded, Sparkle
-/// hands Oby the installation (`willInstallUpdateOnQuit`), and the island offers "Update ready ·
+/// hands Oby the installation (`willInstallUpdateOnQuit`), and the menu bar offers "Update ready ·
 /// Restart", which installs it and relaunches Oby now, with no window. Check for Updates… in the
 /// menus asks at once, with Sparkle's own window.
 ///
@@ -56,7 +56,7 @@ final class Updater: NSObject {
         return version(short: info["CFBundleShortVersionString"] as? String, build: info["CFBundleVersion"] as? String)
     }
 
-    /// What the island's pill says, or nil when there's nothing to offer: "Update ready · Restart"
+    /// What the menu's update item says, or nil when there's nothing to offer: "Update ready · Restart"
     /// only once the update is downloaded.
     var pill: String? { Self.pill(offer, waiting: waiting) }
 
@@ -93,7 +93,7 @@ final class Updater: NSObject {
         }
     }
 
-    /// Sparkle found `offer`, or downloaded it: the island shows it.
+    /// Sparkle found `offer`, or downloaded it: the menu shows it.
     func found(_ offer: Offer) {
         self.offer = offer
     }
@@ -150,7 +150,7 @@ extension Updater: SPUUpdaterDelegate {
 }
 
 // Sparkle's gentle reminders: a scheduled update is never a window over the user's work, only the
-// island's pill; Check for Updates… and the pill bring Sparkle's window to it.
+// menu's update item; Check for Updates… and the item bring Sparkle's window to it.
 extension Updater: SPUStandardUserDriverDelegate {
     nonisolated var supportsGentleScheduledUpdateReminders: Bool { true }
 
@@ -189,7 +189,7 @@ struct AboutSettingsView: View {
             } header: {
                 Text("Oby")
             } footer: {
-                Text("Oby checks for updates every 6 hours, downloads them quietly and installs them when it quits. Once one is downloaded, the island offers to restart now; if this Mac is running a check for the runner, the restart waits for it.")
+                Text("Oby checks for updates every 6 hours, downloads them quietly and installs them when it quits. Once one is downloaded, the menu bar offers to restart now; if this Mac is running a check for the runner, the restart waits for it.")
             }
         }
         .formStyle(.grouped)

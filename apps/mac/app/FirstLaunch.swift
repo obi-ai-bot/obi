@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Say hi in two minutes (F14): hello, hold fn, permissions, agents and accounts, then which
 /// models Oby thinks and works with. Every step can be skipped, closing the window skips the
-/// rest, and the menu shows it again. Then Oby moves into the notch.
+/// rest, and the menu shows it again.
 final class FirstLaunch: NSObject, NSWindowDelegate {
     static let doneKey = "firstLaunchDone"
     static var done: Bool { UserDefaults.standard.bool(forKey: doneKey) }
@@ -12,6 +12,8 @@ final class FirstLaunch: NSObject, NSWindowDelegate {
     private var window: NSWindow?
 
     init(island: IslandController) { self.island = island }
+
+    var isOpen: Bool { window?.isVisible ?? false }
 
     func show() {
         NSApp.activate()
@@ -36,11 +38,11 @@ final class FirstLaunch: NSObject, NSWindowDelegate {
         self.window = window
     }
 
-    /// Finished, skipped or closed: it doesn't come back by itself, and Oby moves into the notch.
+    /// Finished, skipped or closed: it doesn't come back by itself, and Oby's window opens.
     func windowWillClose(_ notification: Notification) {
         UserDefaults.standard.set(true, forKey: Self.doneKey)
         window = nil
-        island.open()
+        island.openWindow(nil)
     }
 }
 
@@ -109,7 +111,7 @@ private struct FirstLaunchView: View {
                 .resizable().renderingMode(.template).frame(width: 72, height: 72)
                 .padding(.bottom, 8)
             title("Hi, I'm Oby.")
-            text("I live in the notch and hand your coding work to the tools you already use: Claude Code, Codex and Cursor. They work in their own copies of your repositories, and I tell you when they're done.")
+            text("I live in your menu bar and hand your coding work to the tools you already use: Claude Code, Codex and Cursor. They work in their own copies of your repositories, and I tell you when they're done.")
             text("Two minutes and we're set. You can skip any step.")
         }
     }
@@ -126,7 +128,7 @@ private struct FirstLaunchView: View {
                     .font(.system(size: 22)).frame(width: 32)
                     .symbolEffect(.variableColor, isActive: voice.phase == .listening)
                 Text(voice.phase == .listening ? (voice.words.isEmpty ? "Listening…" : voice.words)
-                     : heard.isEmpty ? "Try it now." : "You said “\(heard)”. Oby answers in the notch.")
+                     : heard.isEmpty ? "Try it now." : "You said “\(heard)”. Oby answers in its window.")
                     .font(.system(size: 15, weight: .medium))
             }
             .padding(16)
@@ -406,7 +408,7 @@ private struct FirstLaunchView: View {
         for agent in tools.connected {
             guard let model = routine[agent], !model.isEmpty else { continue }
             defaults.set(model, forKey: "\(agent).model")
-            // What the screen shows, even when it's the routine model: then the island offers nothing.
+            // What the screen shows, even when it's the routine model: then Oby offers nothing.
             if let stronger = complex[agent], !stronger.isEmpty { defaults.set(stronger, forKey: "\(agent).complexModel") }
         }
     }
