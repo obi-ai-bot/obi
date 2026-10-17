@@ -192,12 +192,14 @@ impl Seen {
     }
 
     /// An inbox item as it is now: one event when an open one first shows, unless it's the
-    /// orchestrator's own or one only the owner may answer.
+    /// orchestrator's own or the owner's decision already (a confirm, a start, a permission prompt
+    /// or an agent's question).
     pub fn item(&mut self, item: &Item) -> Vec<Event> {
         if !self.items.insert(item.id.clone())
             || item.done.is_some()
             || item.id.starts_with("orchestrator-")
-            || matches!(item.kind.as_str(), "confirm" | "start")
+            // Already the owner's to decide: escalating would only leave a second item for it.
+            || matches!(item.kind.as_str(), "confirm" | "start" | "permission" | "question")
         {
             return vec![];
         }
@@ -815,6 +817,35 @@ mod tests {
         assert_eq!(new.len(), 1);
         assert_eq!(new[0].item.as_deref(), Some("i2"));
         assert!(seen.item(&item("i2", "failed")).is_empty());
+    }
+
+    /// A permission prompt or an agent's question is the owner's decision already: it raises no
+    /// event, so the orchestrator never escalates a second item for it.
+    #[test]
+    fn the_owners_own_decisions_raise_no_event() {
+        let mut seen = Seen::default();
+        let item = |id: &str, kind: &str| Item {
+            id: id.into(),
+            kind: kind.into(),
+            job: "j1".into(),
+            title: "t".into(),
+            text: String::new(),
+            options: vec!["Allow".into(), "Deny".into()],
+            details: None,
+            recommended: None,
+            created: 0,
+            done: None,
+            later: None,
+            answer: None,
+            obi: None,
+            plugin: None,
+            arrived: None,
+            confirm: None,
+            start: None,
+        };
+        assert!(seen.item(&item("p1", "permission")).is_empty());
+        assert!(seen.item(&item("q1", "question")).is_empty());
+        assert_eq!(seen.item(&item("f1", "failed")).len(), 1);
     }
 
     /// Each job event is read as the job was when it was sent: a failure that comes back after a
