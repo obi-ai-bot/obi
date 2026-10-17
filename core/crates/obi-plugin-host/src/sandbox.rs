@@ -76,7 +76,8 @@ shift
 exec "$@"
 "#;
 
-/// Same launcher as obid's job sandbox: slirp4netns in the plug-in's network namespace.
+/// obid's job sandbox's launcher (but for how it finds bubblewrap's child): slirp4netns in the
+/// plug-in's network namespace.
 const NET_LAUNCH: &str = r#"
 ready=$1
 shift
@@ -86,19 +87,26 @@ rm -f "$ready" "$ready.log"
 # program SHLVL and _, which are not part of the sandbox environment.
 env -u SHLVL -u _ "$@" <&0 &
 bpid=$!
+# bubblewrap's child: the kernel's list of its children when it keeps one (one read), else
+# every process's parent (a sed for each process: about a second on a machine running 500).
+children=/proc/$bpid/task/$bpid/children
 child=
 i=0
 while [ -z "$child" ] && [ "$i" -lt 50 ]; do
   i=$((i + 1))
-  for status in /proc/[0-9]*/status; do
-    pid=${status#/proc/}
-    pid=${pid%/status}
-    ppid=$(sed -n 's/^PPid:[^0-9]*//p' "$status" 2>/dev/null) || continue
-    if [ "$ppid" = "$bpid" ]; then
-      child=$pid
-      break
-    fi
-  done
+  if [ -r "$children" ]; then
+    read -r child _ 2>/dev/null <"$children"
+  else
+    for status in /proc/[0-9]*/status; do
+      pid=${status#/proc/}
+      pid=${pid%/status}
+      ppid=$(sed -n 's/^PPid:[^0-9]*//p' "$status" 2>/dev/null) || continue
+      if [ "$ppid" = "$bpid" ]; then
+        child=$pid
+        break
+      fi
+    done
+  fi
   [ -n "$child" ] && break
   sleep 0.05
 done
@@ -576,7 +584,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 }
 
 /// Ends the process group `pgid` (the plug-in's first process and whatever it started that
-/// stayed in its group), with `kill -KILL -- -<pgid>` run by `/bin/sh`.
+/// stayed in its group), with `kill -s KILL -- -<pgid>` run by `/bin/sh`.
 pub(crate) async fn kill_group(pgid: u32) {
     if pgid > 1 {
         signal(&format!("-{pgid}"), "KILL").await;
@@ -657,12 +665,13 @@ pub(crate) async fn tell_watcher(pid: u32) {
     }
 }
 
-/// `kill -<signal> -- <target>`, run by `/bin/sh`.
+/// `kill -s <signal> -- <target>`, run by `/bin/sh`: POSIX's form, the one dash (Debian's and
+/// Ubuntu's `/bin/sh`) takes too; its `kill -<signal> -- <target>` is an error.
 async fn signal(target: &str, signal: &str) {
     let mut kill = Command::new("/bin/sh");
     kill.args([
         "-c",
-        "kill -\"$1\" -- \"$2\" 2>/dev/null",
+        "kill -s \"$1\" -- \"$2\" 2>/dev/null",
         "sh",
         signal,
         target,

@@ -910,7 +910,8 @@ async fn stop_gracefully(
 /// Ends the plug-in's process and everything it started, and its connection. On macOS the
 /// process is the sandbox's watcher: told to (`SIGTERM`), it kills everything in the sandbox,
 /// also what left the plug-in's process group or session. Then whatever is left of the process
-/// group is killed.
+/// group is killed: on Linux the launcher, bubblewrap (and with it the sandbox's PID namespace)
+/// and the slirp4netns that gives the sandbox its network.
 async fn end(
     conn: Option<&Arc<Conn>>,
     child: &mut Child,
@@ -937,8 +938,10 @@ async fn end(
         }
     }
     let _ = child.start_kill();
+    // Before it is waited for, so the group's id can't be another's yet. On Linux the group is
+    // also the launcher's slirp4netns, which outlives a launcher that is killed.
+    sandbox::kill_group(pgid).await;
     if sandbox.has_watcher() {
-        sandbox::kill_group(pgid).await;
         sandbox::reap_sandbox(&launch.obid_home, &launch.data_dir);
     }
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;

@@ -11,7 +11,10 @@ mod common;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use common::{Home, beats, id, options, sandbox_made, status, wait_for_state, wait_until};
+use common::{
+    Home, assert_no_slirp4netns_left, beats, id, options, sandbox_made, status, wait_for_state,
+    wait_until,
+};
 use obi_plugin_api::{Kind, PluginState};
 use obi_plugin_host::{Options, PluginHost};
 use serde_json::{Value, json};
@@ -57,6 +60,7 @@ async fn enabling_starts_it_in_its_sandbox_and_initializes_it() {
     assert_eq!(status(&host, "context-test").state, PluginState::Ready);
     assert_eq!(home.starts("context-test"), 1);
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 #[tokio::test]
@@ -104,6 +108,7 @@ async fn a_plugin_that_exits_is_restarted_and_failed_at_its_third_failure_in_a_r
     assert_eq!(status(&host, "context-test").state, PluginState::Ready);
     assert_eq!(home.starts("context-test"), 5);
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 #[tokio::test]
@@ -135,6 +140,7 @@ async fn a_failed_plugin_stays_stopped_when_obid_starts_again() {
     );
     assert_eq!(kept().as_deref(), Some(reason.as_str()));
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
     assert_eq!(home.starts("context-test"), 3);
 
     // obid starts again: it is listed as failed, with its reason, and not started.
@@ -164,6 +170,7 @@ async fn a_failed_plugin_stays_stopped_when_obid_starts_again() {
         json!(true)
     );
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 
     // Disabling it also takes `failed` out, and a disabled plug-in is listed as disabled.
     let home = Home::new("faileddisabled");
@@ -184,6 +191,7 @@ async fn a_failed_plugin_stays_stopped_when_obid_starts_again() {
         json!({"context-test": {"enabled": false}})
     );
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 #[tokio::test]
@@ -215,6 +223,7 @@ async fn a_plugin_that_does_not_answer_initialize_in_time_is_restarted_then_fail
     let reason = failed.last_error.unwrap();
     assert!(reason.contains("no answer to initialize"), "{reason}");
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 #[tokio::test]
@@ -239,6 +248,7 @@ async fn an_answer_that_is_not_obi_plugin_0_1_fails_initialize() {
         assert!(reason.contains(says), "{mode}: {reason}");
         assert_eq!(home.starts("context-test"), 3, "{mode}");
         host.shutdown().await;
+        assert_no_slirp4netns_left(&home).await;
     }
 }
 
@@ -267,6 +277,7 @@ async fn a_ping_not_answered_restarts_it() {
     assert_eq!(now.state, PluginState::Ready);
     assert_eq!(home.starts("context-test"), 2);
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 #[tokio::test]
@@ -297,6 +308,7 @@ async fn an_answered_ping_starts_the_count_again() {
     assert_eq!(status(&host, "context-test").state, PluginState::Ready);
     assert_eq!(home.starts("context-test"), 7);
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 #[tokio::test]
@@ -328,6 +340,7 @@ async fn disabling_sends_shutdown_and_ends_what_it_started() {
     assert_eq!(home.record("context-test", "shutdown"), Some(json!(true)));
     assert_stopped_beating(&home, "context-test").await;
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 #[tokio::test]
@@ -358,6 +371,7 @@ async fn a_plugin_still_running_after_shutdown_is_killed_with_what_it_started() 
     assert_eq!(home.record("context-test", "shutdown"), Some(json!(true)));
     assert_stopped_beating(&home, "context-test").await;
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 #[tokio::test]
@@ -381,6 +395,7 @@ async fn shutdown_stops_every_plugin() {
         .await
     );
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
     for plugin in ["context-test", "events-test"] {
         assert_eq!(
             home.record(plugin, "shutdown"),
@@ -401,6 +416,7 @@ async fn shutdown_stops_every_plugin() {
         assert_eq!(home.starts(plugin), 2);
     }
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 #[tokio::test]
@@ -433,6 +449,7 @@ async fn enabling_again_restarts_it_only_for_other_settings() {
         json!({"stderrLines": 1})
     );
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 #[tokio::test]
@@ -456,6 +473,7 @@ async fn a_plugin_that_floods_stderr_does_not_stop() {
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(status(&host, "context-test").state, PluginState::Ready);
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 #[tokio::test]
@@ -484,6 +502,7 @@ async fn a_run_command_outside_its_folder_is_failed() {
     assert_eq!(failed.state, PluginState::Failed);
     assert!(failed.last_error.unwrap().contains("bin/missing"));
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 
     manifest["run"]["command"] = json!("bin/link");
     home.install_manifest("context-test", &manifest);
@@ -495,6 +514,7 @@ async fn a_run_command_outside_its_folder_is_failed() {
     assert_eq!(failed.state, PluginState::Failed);
     assert!(failed.last_error.unwrap().contains("not a file inside"));
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 #[tokio::test]
@@ -536,6 +556,7 @@ async fn without_a_sandbox_a_plugin_with_a_process_is_not_started() {
     assert_eq!(host.agent_mcp_servers().len(), 1);
     assert_eq!(status(&host, "mcp-only").kinds, [Kind::AgentMcp]);
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 /// The child the test plug-in started has stopped appending to `beats`.
@@ -612,6 +633,7 @@ async fn killing_the_watcher_then_disabling_ends_what_left_its_session() {
     let _ = host.set_enabled(&id("context-test"), false, None).await;
     assert_file_stopped_growing(&home, "context-test", "detached-beats-1").await;
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 /// A plug-in disabled leaves nothing it started running, also a process that called `setsid`
@@ -640,6 +662,7 @@ async fn disabling_ends_what_left_its_session_and_nothing_of_another_plugin() {
     assert_file_stopped_growing(&home, "context-test", "detached-beats-1").await;
     assert_file_growing(&home, "events-test", "detached-beats-1").await;
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
     assert_file_stopped_growing(&home, "events-test", "detached-beats-1").await;
 }
 
@@ -668,6 +691,7 @@ async fn shutdown_ends_what_left_its_session() {
         wait_for_detached(&home, plugin, 1).await;
     }
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
     for plugin in ["context-test", "events-test"] {
         assert_eq!(
             home.record(plugin, "shutdown"),
@@ -709,6 +733,7 @@ async fn a_failed_start_leaves_nothing_running() {
         assert_file_stopped_growing(&home, "context-test", "detached-beats-1").await;
         assert_file_growing(&home, "context-test", "detached-beats-2").await;
         host.shutdown().await;
+        assert_no_slirp4netns_left(&home).await;
         assert_file_stopped_growing(&home, "context-test", "detached-beats-2").await;
     }
 }
@@ -763,6 +788,7 @@ async fn the_restart_policy_is_one_second_then_two_then_failed() {
     assert!((2000..2900).contains(&gaps[1]), "{gaps:?}");
     assert_eq!(status(&host, "context-test").state, PluginState::Failed);
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
 }
 
 /// Reads every process of this user (`KERN_PROCARGS2`) and writes the bytes to `argv[1]`.
@@ -883,6 +909,7 @@ async fn a_sandboxed_plugin_reads_other_processes_but_finds_no_secret() {
     let _ = decoy.kill();
     let _ = decoy.wait();
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
     assert!(
         text.contains(&marker),
         "a sandboxed plug-in could not read another process ({} bytes): {probe:?}",
@@ -977,6 +1004,7 @@ setTimeout(() => {{
         .record("context-test", "probe.json")
         .expect("the plug-in probed");
     host.shutdown().await;
+    assert_no_slirp4netns_left(&home).await;
     // Read the command's output, not the object key (which contains the probe's source).
     let result = probe.as_object().unwrap().values().next().unwrap();
     assert_eq!(result["ok"], true, "{result}");

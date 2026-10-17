@@ -222,3 +222,34 @@ pub fn beats(home: &Home, id: &str) -> u64 {
         .map(|m| m.len())
         .unwrap_or(0)
 }
+
+/// No slirp4netns the host started for a plug-in of `home` is still running (Linux; nothing
+/// to check elsewhere). Each one writes to `.obid-net-ready.log` in its plug-in's data folder,
+/// which is how one of this home's is told from another test's. Waits up to 2 seconds for the
+/// ones just killed to go.
+pub async fn assert_no_slirp4netns_left(home: &Home) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let left = || -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|entry| {
+                let dir = entry.path();
+                std::fs::read_to_string(dir.join("comm")).is_ok_and(|c| c.trim() == "slirp4netns")
+                    && std::fs::read_link(dir.join("fd/1"))
+                        .is_ok_and(|out| out.starts_with(&home.path))
+            })
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+    wait_until(Duration::from_secs(2), || left().is_empty()).await;
+    let left = left();
+    assert!(
+        left.is_empty(),
+        "slirp4netns still running for this home: pids {left:?}"
+    );
+}
