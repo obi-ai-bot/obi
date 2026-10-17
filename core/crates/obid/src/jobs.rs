@@ -1019,9 +1019,17 @@ impl Jobs {
         }
     }
 
+    /// `tool`'s first account that is [`signed_in`], if any.
+    pub fn signed_in_account(&self, tool: Tool) -> Option<crate::config::Account> {
+        let home = login_home();
+        self.accounts(tool)
+            .into_iter()
+            .find(|a| signed_in(tool, a, home.as_deref()))
+    }
+
     /// The tool and account a job runs on: the tool named (`claude`, `codex`, `cursor`; `auto` or
-    /// none for any), and the account named (by id or name), or the first account of the first
-    /// tool obid has (Claude Code, then Codex, then Cursor).
+    /// none for any), and the account named (by id or name), or the first [`signed_in`] account
+    /// of the tools in order (Claude Code, then Codex, then Cursor), else the first account.
     fn pick(
         &self,
         agent: Option<&str>,
@@ -1056,17 +1064,33 @@ impl Jobs {
         let named = named
             .map(str::trim)
             .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("auto"));
+        let home = login_home();
+        let mut first = None;
         for tool in &tools {
             let accounts = self.accounts(*tool);
-            let found = match named {
-                None => accounts.into_iter().next(),
-                Some(named) => accounts
-                    .into_iter()
-                    .find(|a| a.id == named || a.name == named),
-            };
-            if let Some(account) = found {
-                return Ok((*tool, account));
+            match named {
+                // Routing skips an account that isn't signed in (#626).
+                None => {
+                    for account in accounts {
+                        if signed_in(*tool, &account, home.as_deref()) {
+                            return Ok((*tool, account));
+                        }
+                        first.get_or_insert((*tool, account));
+                    }
+                }
+                Some(named) => {
+                    if let Some(account) = accounts
+                        .into_iter()
+                        .find(|a| a.id == named || a.name == named)
+                    {
+                        return Ok((*tool, account));
+                    }
+                }
             }
+        }
+        // None is signed in: the first, whose tool then says why it can't run.
+        if let Some(found) = first {
+            return Ok(found);
         }
         Err(Refused(match (named, tools.as_slice()) {
             (Some(named), _) => format!("There's no account {named}."),
@@ -2339,7 +2363,7 @@ impl Jobs {
     /// The brain's command line when it may read its quoted file (#65): boxed like a job's agent,
     /// so all it sees is `dir` (its working directory, `work.md` in it) and its account's login.
     /// `flags` follow Claude Code's binary; Codex runs `app-server`. The brain thinks with the
-    /// tool's first account. Throws why it can't run.
+    /// tool's first [`signed_in`] account, else its first. Throws why it can't run.
     pub fn brain_launch(
         &self,
         tool: Tool,
@@ -2354,9 +2378,8 @@ impl Jobs {
             .agent_bin(tool)
             .ok_or_else(|| format!("obid can't find {}'s binary.", tool.name()))?;
         let account = self
-            .accounts(tool)
-            .into_iter()
-            .next()
+            .signed_in_account(tool)
+            .or_else(|| self.accounts(tool).into_iter().next())
             .ok_or_else(|| format!("{} has no account.", tool.name()))?;
         let temp = dir.join("home");
         store::make_private_dir(&temp)
@@ -3810,14 +3833,34 @@ pub(crate) fn login_home() -> Option<PathBuf> {
         .or_else(|| homes.into_iter().next())
 }
 
+/// Whether `account` has a login a boxed run can use (#626): its login file is there, in its
+/// `configDir` or else in `home` (Claude Code's `.credentials.json`, Codex's `auth.json`), the file
+/// [`copy_login`] would copy. obid only looks whether it exists, never at what it holds. A login only
+/// in the macOS Keychain doesn't count: the sandbox denies the Keychain. Cursor's login is found
+/// out when it runs (`crate::acp`).
+pub(crate) fn signed_in(tool: Tool, account: &crate::config::Account, home: Option<&Path>) -> bool {
+    let (folder, file) = match tool {
+        Tool::Claude => (".claude", ".credentials.json"),
+        Tool::Codex => (".codex", "auth.json"),
+        Tool::Cursor => return true,
+    };
+    let path = match (&account.config_dir, home) {
+        (Some(dir), _) => dir.join(file),
+        (None, Some(home)) => home.join(folder).join(file),
+        (None, None) => return false,
+    };
+    // A regular file only, as copy_login takes it.
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
+}
+
 /// The tool's own login, copied from `home` into the job's `login` folder, for an account with no
 /// `configDir`: Claude Code's `~/.claude/.credentials.json` and `~/.claude.json`, Codex's
 /// `~/.codex/auth.json` and `config.toml`. Nothing else of those folders (no settings, hooks,
 /// commands or sessions of the person's). The credentials are copied again before every start (the
 /// person may have signed in again) and removed when the job's run ends
 /// ([`forget_login_secrets`]); the rest is copied once, then the job's own. Answers the names to
-/// show in the job's `HOME`. On macOS a login that lives only in the keychain is not copied: the
-/// job uses `.credentials.json`, which sign-in writes when the keychain's files are denied.
+/// show in the job's `HOME`. On macOS a login that lives only in the keychain is not copied, and
+/// the account isn't [`signed_in`]: a job can use only `.credentials.json`.
 pub(crate) fn copy_login(
     home: Option<&Path>,
     login: &Path,

@@ -76,6 +76,18 @@ impl Adapter {
         }
     }
 
+    /// Why it can't run boxed, when it can't (#626): no Claude Code account has its login in a
+    /// file, and the box denies the macOS Keychain.
+    fn cannot_box(&self) -> Option<&'static str> {
+        match self {
+            Adapter::Claude(c) if c.room.jobs.signed_in_account(Tool::Claude).is_none() => Some(
+                "no Claude Code account has its login in a file, \
+                 and a login only in the macOS Keychain can't reach the box",
+            ),
+            _ => None,
+        }
+    }
+
     /// The plan as JSON, or why there is none. `model` is for the adapters that take one. Each
     /// model call it makes, a retry included, is added to `calls` (#533).
     #[allow(clippy::too_many_arguments)]
@@ -320,16 +332,31 @@ impl ClaudeBrain {
             } else {
                 format!("exit code {}", result.status.unwrap_or(-1))
             };
+            // What Claude said, like "Not logged in · Please run /login" (#626): only its own
+            // error, never text the model wrote nor anything that looks like a credential, on one
+            // line, the vault's secrets taken out before it's cut (#640's security review).
+            let reason = match answer
+                .as_ref()
+                .filter(|a| a["is_error"] == true)
+                .and_then(|a| a["result"].as_str())
+            {
+                Some(said) if !said.trim().is_empty() && crate::scan::matches(said).is_empty() => {
+                    let said = secrets
+                        .redact(said)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!("{reason}: {}", said.chars().take(300).collect::<String>())
+                }
+                _ => reason,
+            };
             let err = if result.err.is_empty() {
                 "<empty>".to_owned()
             } else {
-                let chars: Vec<char> = result.err.chars().collect();
+                let chars: Vec<char> = secrets.redact(&result.err).chars().collect();
                 chars[chars.len().saturating_sub(1000)..].iter().collect()
             };
-            failures.push(format!(
-                "attempt {attempt}: {reason}, stderr: {}",
-                secrets.redact(&err)
-            ));
+            failures.push(format!("attempt {attempt}: {reason}, stderr: {err}"));
             // One retry covers empty answers, Claude's exit 15, and a process that timed out.
             if !(attempt < attempts
                 && (text.is_empty() || result.status == Some(15) || result.timed_out))
@@ -646,7 +673,16 @@ impl Planner {
         // Claude keeps half of this for its one process retry: Sonnet gets enough for each try.
         let budget = Duration::from_secs(if deep { 40 } else { 20 });
         let model = if deep { DEEP_MODEL } else { QUICK_MODEL };
-        for adapter in &self.adapters {
+        for (i, adapter) in self.adapters.iter().enumerate() {
+            // A read runs boxed: an adapter that can't goes unasked when another one follows.
+            if quoted.is_some()
+                && i + 1 < self.adapters.len()
+                && let Some(why) = adapter.cannot_box()
+            {
+                refused.push(format!("{} skipped: {why}", adapter.name()));
+                tracing::warn!("brain: {}", refused.last().unwrap_or(&String::new()));
+                continue;
+            }
             let own = Instant::now() + budget;
             let deadline = self.deadline.map_or(own, |turn| own.min(turn));
             let mut message = user.clone();
