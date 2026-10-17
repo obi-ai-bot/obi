@@ -1570,17 +1570,14 @@ fn without_waiting_it_doesnt_say_obid_is_running() {
     assert!(text(&out).contains("wasn't checked"), "{}", text(&out));
 }
 
-/// R3: a download over anything but https needs a digest you give, and then that digest is the one
-/// checked, not one fetched from the same place.
-#[test]
-fn a_download_that_isnt_https_needs_a_digest_you_give() {
-    let rig = Rig::linux("http-from");
+/// A folder served as a download host: `curl … -o FILE URL` copies what the URL names from it, and
+/// the server's own checksum file agrees with the archive. Returns the archive's digest.
+fn serve_archive(rig: &Rig) -> String {
     let served = rig.folder.0.join("served");
     std::fs::create_dir_all(&served).unwrap();
     let name = format!("obid-{}.tar.gz", rig.target());
     std::fs::copy(rig.archive_path(), served.join(&name)).unwrap();
     let digest = sha256(&served.join(&name));
-    // The server's own checksum file agrees with what it serves.
     std::fs::write(
         served.join(format!("{name}.sha256")),
         format!("{digest}  {name}\n"),
@@ -1594,6 +1591,14 @@ fn a_download_that_isnt_https_needs_a_digest_you_give() {
             served.display()
         ),
     );
+    digest
+}
+
+/// R3: a download over anything but https needs a digest you give.
+#[test]
+fn a_download_that_isnt_https_needs_a_digest_you_give() {
+    let rig = Rig::linux("http-from");
+    let digest = serve_archive(&rig);
     let run = |args: &[&str]| {
         rig.command("install.sh")
             .args(["--from", "http://mirror.example/obid", "--no-wait"])
@@ -1605,13 +1610,7 @@ fn a_download_that_isnt_https_needs_a_digest_you_give() {
     assert!(!bare.status.success(), "{}", text(&bare));
     assert!(text(&bare).contains("https://"), "{}", text(&bare));
     assert!(!rig.calls().contains("curl"), "{}", rig.calls());
-
-    // A digest that isn't the archive's: refused, though the server's checksum file agrees.
-    let wrong = run(&["--sha256", &"0".repeat(64)]);
-    assert!(!wrong.status.success(), "{}", text(&wrong));
-    assert!(text(&wrong).contains("checksum"), "{}", text(&wrong));
     assert!(!rig.prefix().exists());
-    assert!(!rig.calls().contains(".sha256"), "{}", rig.calls());
 
     let pinned = run(&["--sha256", &digest]);
     assert!(pinned.status.success(), "{}", text(&pinned));
@@ -1621,4 +1620,23 @@ fn a_download_that_isnt_https_needs_a_digest_you_give() {
         "{}",
         rig.calls()
     );
+}
+
+/// R3: the digest you give is the one checked, not one fetched from the same place.
+#[test]
+fn a_digest_you_give_is_the_one_checked() {
+    let rig = Rig::linux("pinned");
+    serve_archive(&rig);
+    // A digest that isn't the archive's, though the server's checksum file agrees with it.
+    let out = rig
+        .command("install.sh")
+        .args(["--from", "https://mirror.example/obid", "--no-wait"])
+        .args(["--sha256", &"0".repeat(64)])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("checksum"), "{}", text(&out));
+    assert!(!rig.prefix().exists());
+    assert!(!rig.obid_home().exists());
+    assert!(!rig.calls().contains(".sha256"), "{}", rig.calls());
 }
