@@ -264,7 +264,7 @@ pub async fn run(
             planned
                 .refused
                 .push("the turn was cancelled before the plan came: nothing done".into());
-            Record::new(&request, &planned).keep(home);
+            Record::new(&request, &planned).of(control, step).keep(home);
             let talk = if control.cancelled() {
                 Talk::None
             } else {
@@ -277,11 +277,11 @@ pub async fn run(
             planned
                 .refused
                 .push("the plan came after the turn's budget: nothing done".into());
-            Record::new(&request, &planned).keep(home);
+            Record::new(&request, &planned).of(control, step).keep(home);
             done.push(AS_FAR_AS.into());
             return answered(finish(&done), details);
         }
-        Record::new(&request, &planned).keep(home);
+        Record::new(&request, &planned).of(control, step).keep(home);
         if let Some(refusal) = super::rules::acting_refusal(&planned, step) {
             return answered(after(&done, Talk::reply(refusal)), details);
         }

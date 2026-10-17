@@ -332,6 +332,7 @@ mod tests {
             plan: Plan::of(Action::Dispatch, ""),
             by: "rules".into(),
             refused: vec![],
+            calls: vec![],
         };
         assert_eq!(
             acting_refusal(&planned, 0),
@@ -350,6 +351,7 @@ mod tests {
             plan: question,
             by: "rules".into(),
             refused: vec![],
+            calls: vec![],
         };
         assert_eq!(acting_refusal(&asked, 0), None);
         let brain = Planned {
@@ -394,6 +396,7 @@ mod tests {
             plan: plan("finish oby #19 from PR #124", &context),
             by: "claude".into(),
             refused: vec![],
+            calls: vec![],
         };
         let line =
             super::super::planner::Record::new("finish oby #19 from PR #124", &planned).line();
