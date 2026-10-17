@@ -30,6 +30,7 @@ pub mod plugins;
 pub mod policy;
 pub mod process;
 pub mod publish;
+pub mod questions;
 pub mod review;
 pub mod routes;
 pub mod sandbox;

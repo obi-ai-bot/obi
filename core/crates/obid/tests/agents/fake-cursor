@@ -78,7 +78,7 @@ async function prompt(id, text) {
     state.task = text;
     save();
   }
-  const task = state.task;
+  const task = state.task.split("What the user asked for: ")[1]?.split("\nCommit your changes")[0] ?? state.task;
   const commit = task.match(/COMMIT: (\S+)/);
   const command = task.match(/ASK: (.+)$/m);
   if (commit) {
@@ -130,7 +130,7 @@ async function prompt(id, text) {
   }
   if (task.includes("QUESTION")) {
     const answer = await ask("cursor/ask_question", { sessionId: session, questions: [{ id: "q", prompt: "Which?", options: ["a", "b"] }] });
-    say(`question: ${answer?.outcome?.outcome}`);
+    say(`native question: ${answer?.outcome?.outcome}`);
     return answered(id);
   }
   if (task.includes("FS")) {

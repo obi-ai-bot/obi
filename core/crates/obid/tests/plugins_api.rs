@@ -52,7 +52,15 @@ fn run_job(obid: &Obid, kind: &str, task: &str, mode: Option<&str>) -> (Value, O
     let made = call(obid, "POST", "/v1/jobs", Some(&json!({ "job": body })));
     assert_eq!(made.status, 201, "{}", made.text);
     let id = made.body["id"].as_str().unwrap().to_owned();
-    let job = call(obid, "GET", &format!("/v1/jobs/{id}/wait"), None).body;
+    let job = if mode == Some("plan") {
+        within(60, "the plan waits without running checks", || {
+            let job = call(obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+            job["question"]["plan"].is_string().then_some(job)
+        });
+        call(obid, "POST", &format!("/v1/jobs/{id}/stop"), None).body
+    } else {
+        call(obid, "GET", &format!("/v1/jobs/{id}/wait"), None).body
+    };
     let report = std::fs::read_to_string(
         obid.home
             .join("worktrees")
@@ -1330,7 +1338,15 @@ fn a_plugin_process_gives_quoted_context_inbox_events_and_a_redacted_log() {
         ("review", None, "review"),
     ] {
         let (job, report) = run_job(&obid, kind, "REPORT", mode);
-        assert_eq!(job["status"], "done", "{job}");
+        assert_eq!(
+            job["status"],
+            if mode == Some("plan") {
+                "stopped"
+            } else {
+                "done"
+            },
+            "{job}"
+        );
         let report = report.expect("the agent reported");
         assert_eq!(report["context"], json!(["notes.md"]), "{purpose}");
         let prompt = report["prompt"].as_str().unwrap();

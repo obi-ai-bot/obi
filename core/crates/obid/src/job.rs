@@ -183,6 +183,8 @@ pub struct Job {
     /// modes").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<crate::permissions::Permission>,
+    #[serde(default)]
+    pub question: Option<crate::questions::Question>,
     /// The latest Mac checks, kept on the job and sent on its JSON/event (`runner-api.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mac_check: Option<Value>,
@@ -286,6 +288,7 @@ impl Job {
             review_result: None,
             obi_request: None,
             permission: None,
+            question: None,
             mac_check: None,
             apple_check: None,
             apple_ran: None,
@@ -430,7 +433,8 @@ impl Job {
     /// failed or interrupted, and not dismissed.
     pub fn needs_you(&self) -> bool {
         self.dismissed.is_none()
-            && (self.can_publish()
+            && (self.question.is_some()
+                || self.can_publish()
                 || self.stranded()
                 || self.status == Status::Failed
                 || self.status == Status::Interrupted)
@@ -484,7 +488,7 @@ impl Job {
             "lead": null,
             "claim": null,
             "outgoing": self.outgoing.iter().map(crate::publish::Outgoing::to_json).collect::<Vec<_>>(),
-            "question": null,
+            "question": self.question,
             "limit": self.limit,
             "startCommit": self.start_commit,
             "firstSwiftBuildSeconds": null,

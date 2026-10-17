@@ -196,11 +196,17 @@ fn codex_in_plan_mode_changes_no_file() {
         &obid,
         json!({"agent": "codex", "kind": "build", "task": "COMMIT: plan.txt", "mode": "plan"}),
     );
-    let job = ended(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    let job = within(60, "Codex's plan waits for the owner", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        job["question"]["plan"].is_string().then_some(job)
+    });
+    assert_eq!(job["status"], "running", "{job}");
     assert_eq!(job["commits"], Value::Null);
     assert!(
-        summary(&job).contains("Nothing committed: edit: decline"),
+        job["question"]["plan"]
+            .as_str()
+            .unwrap()
+            .contains("edit: decline"),
         "{job}"
     );
     assert!(
@@ -210,6 +216,10 @@ fn codex_in_plan_mode_changes_no_file() {
             .join(&id)
             .join("plan.txt")
             .exists()
+    );
+    assert_eq!(
+        call(&obid, "POST", &format!("/v1/jobs/{id}/stop"), None).body["status"],
+        "stopped"
     );
 }
 
@@ -326,7 +336,10 @@ fn cursor_hears_what_obid_declined_at_its_next_prompt() {
             .starts_with("heard: obid declined git push: obid publishes the job's work itself."),
         "{job}"
     );
-    assert_eq!(ended(&obid, &question)["summary"], "question: skipped");
+    assert_eq!(
+        ended(&obid, &question)["summary"],
+        "native question: skipped"
+    );
     assert_eq!(ended(&obid, &fs)["summary"], "fs: error -32601");
     assert_eq!(ended(&obid, &fine)["summary"], "answer: allow-once");
 }
@@ -340,6 +353,21 @@ fn cursor_plans_then_goes_ahead() {
     let id = dispatch(
         &obid,
         json!({"agent": "cursor", "task": "PLAN", "mode": "plan"}),
+    );
+    let waiting = within(60, "Cursor's plan waits for its owner's approval", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["question"]["plan"] == "1. Do it.").then_some(job)
+    });
+    assert_eq!(waiting["mode"], "plan");
+    assert_eq!(
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/mode"),
+            Some(&json!({"mode":"acceptEdits"}))
+        )
+        .status,
+        200
     );
     let job = ended(&obid, &id);
     assert_eq!(job["status"], "done", "{job}");
