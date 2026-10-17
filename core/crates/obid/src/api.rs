@@ -42,6 +42,8 @@ pub struct Shared {
     pub conversations: crate::conversation::Conversations,
     /// The conversation turns under way, for Stop and cancel (#546).
     pub turns: crate::brain::turn::Turns,
+    /// When the owner last sent a message or tapped, and the recap kept for the next answer (#594).
+    pub presence: crate::brain::recap::Presence,
     /// Its Sphere: membership, exchanges, the inbox and decisions.
     pub link: Arc<crate::sphere::Link>,
     /// The plug-in host (`GET` and `PUT /v1/obid/plugins`).

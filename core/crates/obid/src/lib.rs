@@ -221,12 +221,13 @@ pub async fn serve(
         events,
         conversations,
         turns: brain::turn::Turns::default(),
+        presence: brain::recap::Presence::default(),
         link: link.clone(),
         plugins: plugins.clone(),
         pages: web::Sessions::default(),
         stopping: stopping_rx.clone(),
     });
-    let app = api::router(shared);
+    let app = api::router(shared.clone());
 
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         stop.await;
@@ -236,6 +237,8 @@ pub async fn serve(
     // Jobs that were queued or running when obid last stopped carry on, and so does its Sphere.
     jobs.resume();
     link.start();
+    // Job, check and inbox events go to the brain first (#590).
+    brain::orchestrator::spawn(shared);
     // Every event a plug-in emits becomes a `pluginEvent` inbox item. The receiver ends once
     // the host has shut down.
     if let Some(mut events) = plugins.take_events() {
