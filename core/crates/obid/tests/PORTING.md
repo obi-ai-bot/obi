@@ -4,7 +4,7 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 
 **API-level** means the test asks the runner through its HTTP API (`client.execute` on the router, or the API's own handlers), or checks what the API puts on the wire (a job's or account's JSON, the gate in front of every request). obid is checked the same way: the real binary, asked over HTTP (tests/*.rs), or a unit test of the same rule where the Swift test was one. Everything else is **Swift-internal**: it drives Swift types (Desk, the brain, the agent fakes, the stores), so it doesn't carry over; obid's own behaviour behind those is covered by its own tests.
 
-994 tests in all: **45 API-level and ported**, **30 API-level and not ported** (their endpoint or feature isn't in obid yet), **58 of the brain's, ported with it** (#546, below), **16 of the Lead's, ported with it** (#589, below; its 3 others are dropped there), and **845 Swift-internal and dropped**.
+994 tests in all: **50 API-level and ported**, **25 API-level and not ported** (their endpoint or feature isn't in obid yet), **58 of the brain's, ported with it** (#546, below), **16 of the Lead's, ported with it** (#589, below; its 3 others are dropped there), and **845 Swift-internal and dropped**.
 
 ## API-level, ported
 
@@ -54,6 +54,11 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 | TitleTests.theJobKeepsItsTitleAndTheAPISendsIt | runner_api.rs `jobs_have_iso_dates_and_every_key` | the title's API half; its push-alert half needs `POST /v1/notifications` |
 | UsageTests.accountJSONCarriesResetTimes | status.rs `status_answers_with_engine_obid` | the account object's keys, null before any job; obid reads no usage yet, so no reset time is ever set |
 | VaultTests.theAPIsJSONHasTheVaultsSecretsTakenOut | vault_api.rs `the_apis_json_has_the_vaults_secrets_taken_out` | the secret added with `obid vault add` while obid runs; every answer and the event stream, in every encoded form; a clean answer byte for byte as it was; `503` when the vault can't be read. Its Swift half (`API.encode` throwing) is src/vault.rs `a_vault_others_can_read_isnt_read` |
+| GatewayTests.pairingIsMadeOnTheLoopbackAPIWithTheRunnersToken | gateway_api.rs `pairing_is_made_on_the_loopback_api_with_the_api_token` | the device list and revoke too; devices are kept in `gateway-devices.json` (#446) |
+| GatewayTests.gatewayRouterRequiresTokensAndHidesUnlistedRoutes | gateway_api.rs `the_gateway_needs_a_device_token_and_passes_only_its_routes` |  |
+| GatewayTests.gatewayForwardsTheRunnersTokenToTheMacRunner | gateway_api.rs `the_gateway_needs_a_device_token_and_passes_only_its_routes` | obid forwards to its own router in process, with its API token |
+| GatewayTests.gatewayRouterRedactsSecretsInFiniteAndSSEResponses | gateway_api.rs `gateway_answers_lose_vault_secrets_session_ids_and_account_homes` | on obid's own answers and event stream |
+| GatewayTests.gatewayScrubsSessionIDsAndAccountHomes | gateway_api.rs `gateway_answers_lose_vault_secrets_session_ids_and_account_homes`; src/gateway.rs `answers_lose_session_ids_and_account_homes` | the Swift test's own answers in the unit test |
 | WaitingTests.theAPISendsWhatItWaitsFor | runner_api.rs `a_seventh_job_waits_for_a_slot_and_says_so` | and the null half in `jobs_have_iso_dates_and_every_key` |
 
 Also from the Mac app's side: tests/mac_app.rs builds the Mac app's own client (apps/shared/Runner.swift and the Engine/ and apps/shared/ files it needs) and follows obid as apps/mac/app/RunnerFeed.swift does.
@@ -157,7 +162,7 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 - #444 Connections: /v1/connections, /v1/me and agents' MCP through obid
 - #445 Failures: /v1/failures and their fixes (the records are served now; no RunnerTests test is left on it)
 - #571 Failures: post-mortems, `oby-failure` issues and Fix it starting a fix job (split out of #445; its FailureTests are Swift-internal)
-- #446 The LAN gateway and its pairing
+- #446 The LAN gateway and its pairing (served now on 127.0.0.1 behind `tailscale serve`; no RunnerTests test is left on it, Bonjour and a LAN listener are not served)
 - #447 Move: POST /v1/jobs/{id}/move
 - #448 A job's question: `question` on a job and its inbox item
 - #449 Research jobs: reads, reports and filed proposals
@@ -174,11 +179,6 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 
 | Swift test | Needs | Issue |
 |---|---|---|
-| GatewayTests.gatewayForwardsTheRunnersTokenToTheMacRunner | the LAN gateway | #446 |
-| GatewayTests.gatewayRouterRedactsSecretsInFiniteAndSSEResponses | the LAN gateway | #446 |
-| GatewayTests.gatewayRouterRequiresTokensAndHidesUnlistedRoutes | the LAN gateway and `/v1/pairing/…` (#284) | #446 |
-| GatewayTests.gatewayScrubsSessionIDsAndAccountHomes | the LAN gateway | #446 |
-| GatewayTests.pairingIsMadeOnTheLoopbackAPIWithTheRunnersToken | `/v1/pairing/invite`, `/v1/pairing/devices` | #446 |
 | MoveTests.theMoveEndpointMovesAJobOrSaysWhyNot | `POST /v1/jobs/{id}/move` | #447 |
 | PermissionTests.aQuestionSendsEveryKey | `question` on the job (an agent's question, a plan waiting for approval): obid sends `permission` and its inbox item (runner_api.rs `the_api_answers_permissions_and_modes`), and `question` is always null | #448 |
 | ResearchTests.aMissingScannerFilesNothing | `POST /v1/jobs/{id}/proposals/{index}/file` | #449 |

@@ -34,6 +34,8 @@ pub struct Shared {
     pub cleared: crate::clear::Cleared,
     /// The devices that may approve publishing (`POST /v1/devices`).
     pub devices: crate::devices::Devices,
+    /// The phones paired with the gateway, and the open invitation (crate::gateway).
+    pub gateway: crate::gateway::Gateway,
     /// Connected apps and their job-scoped MCP broker.
     pub connections: Arc<crate::connections::Connections>,
     pub jobs: Arc<Jobs>,
@@ -193,6 +195,12 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route(
             "/v1/obid/sharing/limits",
             axum::routing::put(crate::sphere::routes::limits),
+        )
+        .route("/v1/pairing/invite", post(crate::gateway::invite))
+        .route("/v1/pairing/devices", get(crate::gateway::devices))
+        .route(
+            "/v1/pairing/devices/{id}",
+            axum::routing::delete(crate::gateway::revoke),
         )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)

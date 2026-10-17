@@ -31,6 +31,8 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# The gateway calls obid's own router in process (src/gateway.rs).
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
 uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
