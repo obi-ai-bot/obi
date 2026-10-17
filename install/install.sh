@@ -34,6 +34,8 @@ say() { printf '%s\n' "$*"; }
 warn() { printf 'obid install: %s\n' "$*" >&2; }
 die() { warn "$*"; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is needed and isn't installed."; }
+# Every curl here starts with -q, which must be its first argument: it skips the user's ~/.curlrc,
+# where a line like trace-ascii would write the token's header to a file.
 
 # Everything runs from main, called on the script's last line: a download cut short (curl | sh)
 # is a function that never closes, so sh runs none of it.
@@ -214,10 +216,16 @@ if [ "$command_word" = uninstall ]; then
     # folder can be both): checked before anything is stopped.
     # A folder is obid's when obid's token is in it, and it is checked where it really is (links
     # and .. resolved): never /, your home folder or a folder that holds it.
+    # A home already gone (deleted by hand, or a purge cut short) has nothing to delete: the rest
+    # of the uninstall carries on.
+    home_gone=0
+    if ! [ -e "$obid_home" ] && ! [ -L "$obid_home" ]; then home_gone=1; fi
     purge_home="$(cd "$obid_home" 2>/dev/null && pwd -P)" || purge_home=""
     real_home="$(cd "$HOME" 2>/dev/null && pwd -P)" || real_home="$HOME"
     refusal=""
-    if [ -z "$purge_home" ]; then
+    if [ "$home_gone" = 1 ]; then
+      :
+    elif [ -z "$purge_home" ]; then
       refusal="it isn't a folder"
     elif ! [ -f "$purge_home/api-token" ] || [ -L "$purge_home/api-token" ]; then
       refusal="it has no api-token of obid's, so it isn't obid's home"
@@ -231,7 +239,7 @@ if [ "$command_word" = uninstall ]; then
     if [ -n "$refusal" ]; then
       die "Not deleting $obid_home: $refusal. Nothing was removed. If it is obid's, delete it yourself."
     fi
-    if [ -e "$purge_home/oby.sqlite" ]; then
+    if [ "$home_gone" = 0 ] && [ -e "$purge_home/oby.sqlite" ]; then
       die "Not deleting $obid_home: the Swift runner keeps its data there too (oby.sqlite). Nothing was removed. Uninstall without --purge, and delete obid's own files by hand (docs/install.md, Uninstall)."
     fi
   fi
@@ -248,9 +256,13 @@ if [ "$command_word" = uninstall ]; then
   rmdir "$prefix/bin" "$prefix/share" 2>/dev/null || true
   say "obid is stopped and removed from $prefix; the service is gone."
   if [ "$purge" = 1 ]; then
-    say "Deleting obid's home $purge_home (jobs, clones, worktrees, the token, the vault file) and $config."
-    rm -rf "$purge_home"
-    if [ -L "$obid_home" ]; then rm -f "$obid_home"; fi
+    if [ "$home_gone" = 1 ]; then
+      say "obid's home $obid_home is already gone. Deleting $config."
+    else
+      say "Deleting obid's home $purge_home (jobs, clones, worktrees, the token, the vault file) and $config."
+      rm -rf "$purge_home"
+      if [ -L "$obid_home" ]; then rm -f "$obid_home"; fi
+    fi
     rm -f "$config"
     if [ "$kind" = macos ]; then rm -f "$log"; fi
     rmdir "$config_dir" 2>/dev/null || true
@@ -346,9 +358,9 @@ if [ -z "$archive" ]; then
   esac
   say "Downloading obid-$target from $from"
   archive="$work/obid.tar.gz"
-  curl -fsSL --proto "$protocols" --proto-redir =https -o "$archive" "$from/obid-$target.tar.gz" || die "couldn't download $from/obid-$target.tar.gz."
+  curl -q -fsSL --proto "$protocols" --proto-redir =https -o "$archive" "$from/obid-$target.tar.gz" || die "couldn't download $from/obid-$target.tar.gz."
   if [ -z "$sha256" ]; then
-    curl -fsSL --proto "$protocols" --proto-redir =https -o "$work/obid.sha256" "$from/obid-$target.tar.gz.sha256" || die "couldn't download the checksum $from/obid-$target.tar.gz.sha256."
+    curl -q -fsSL --proto "$protocols" --proto-redir =https -o "$work/obid.sha256" "$from/obid-$target.tar.gz.sha256" || die "couldn't download the checksum $from/obid-$target.tar.gz.sha256."
     read -r sha256 _ <"$work/obid.sha256" || true
     [ -n "$sha256" ] || die "the checksum file is empty."
   fi
@@ -522,7 +534,7 @@ if [ "$wait_for_obid" = 1 ] && command -v curl >/dev/null 2>&1; then
   )
   tries=0
   # --noproxy: curl would send 127.0.0.1 through http_proxy too, and the token with it.
-  until curl -fsS --noproxy '*' --max-time 5 -H "@$header" "http://$listen/v1/status" 2>/dev/null | grep -q '"engine" *: *"obid"'; do
+  until curl -q -fsS --noproxy '*' --max-time 5 -H "@$header" "http://$listen/v1/status" 2>/dev/null | grep -q '"engine" *: *"obid"'; do
     tries=$((tries + 1))
     if [ "$tries" -ge 30 ]; then
       die "obid didn't answer on http://$listen within 30 seconds. See: $where. If the Swift runner (Oby's login item) holds that port, stop it first (docs/install.md, Migrating)."

@@ -761,7 +761,7 @@ fn a_download_is_checked_against_its_checksum() {
     // Over https only, redirects included (R3).
     assert!(
         rig.calls()
-            .contains("curl -fsSL --proto =https --proto-redir =https -o"),
+            .contains("curl -q -fsSL --proto =https --proto-redir =https -o"),
         "{}",
         rig.calls()
     );
@@ -1616,7 +1616,7 @@ fn a_download_that_isnt_https_needs_a_digest_you_give() {
     assert!(pinned.status.success(), "{}", text(&pinned));
     assert!(
         rig.calls()
-            .contains("--proto =http,https --proto-redir =https"),
+            .contains("curl -q -fsSL --proto =http,https --proto-redir =https"),
         "{}",
         rig.calls()
     );
@@ -1639,4 +1639,71 @@ fn a_digest_you_give_is_the_one_checked() {
     assert!(!rig.prefix().exists());
     assert!(!rig.obid_home().exists());
     assert!(!rig.calls().contains(".sha256"), "{}", rig.calls());
+}
+
+/// N1: the user's own ~/.curlrc never applies to the installer's curls, so a `trace-ascii` in it
+/// can't write the token's header to a file.
+#[test]
+fn a_curlrc_never_sees_the_token() {
+    let Some(curl) = find_tool("curl") else {
+        eprintln!("no curl on this machine: skipped");
+        return;
+    };
+    let rig = Rig::linux("curlrc");
+    rig.real_archive();
+    std::os::unix::fs::symlink(curl, rig.tools().join("curl")).unwrap();
+    let _service = RealService::new(&rig);
+    let trace = rig.folder.0.join("trace.txt");
+    std::fs::write(
+        rig.user_home().join(".curlrc"),
+        format!("trace-ascii \"{}\"\n", trace.display()),
+    )
+    .unwrap();
+    let port = free_port();
+    let out = rig
+        .command("install.sh")
+        .arg("--archive")
+        .arg(rig.archive_path())
+        .args(["--listen", &format!("127.0.0.1:{port}")])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("obid is running"), "{}", text(&out));
+    let token = std::fs::read_to_string(rig.obid_home().join("api-token")).unwrap();
+    let traced = std::fs::read_to_string(&trace).unwrap_or_default();
+    assert!(
+        !traced.contains(token.trim()),
+        "the token is in {}",
+        trace.display()
+    );
+    assert!(!trace.exists(), "~/.curlrc was read: {traced}");
+}
+
+/// N2: a home already gone (deleted by hand, a purge cut short) doesn't stop the rest of
+/// `uninstall --purge`.
+#[test]
+fn purging_after_the_home_is_gone_still_uninstalls() {
+    let rig = Rig::linux("home-gone");
+    assert!(rig.install(&[]).status.success());
+    std::fs::remove_dir_all(rig.obid_home()).unwrap();
+    let out = rig.uninstall(&["--purge"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("already gone"), "{}", text(&out));
+    assert!(!rig.unit().exists());
+    assert!(!rig.prefix().exists());
+    assert!(!rig.config().exists());
+    assert!(
+        rig.calls()
+            .contains("systemctl --user disable --now obid.service"),
+        "{}",
+        rig.calls()
+    );
+    // A home that is there but isn't obid's is still refused, as before.
+    let rig = Rig::linux("home-gone-other");
+    assert!(rig.install(&[]).status.success());
+    std::fs::remove_file(rig.obid_home().join("api-token")).unwrap();
+    let out = rig.uninstall(&["--purge"]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(rig.obid_home().is_dir());
+    assert!(rig.unit().exists());
 }
