@@ -31,29 +31,85 @@ fn regex(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("a valid pattern"))
 }
 
+/// The words of `text`, lower-case. Whole words only, so "tetrix-front-end" never matches
+/// "tetrix-frontend".
+pub fn words(text: &str) -> BTreeSet<String> {
+    text.to_lowercase()
+        .split(|c: char| !(c.is_alphanumeric() || "-_./".contains(c)))
+        .filter(|w| !w.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The repositories of `repos` that `words` name, by their full name or their own.
+pub fn repos_named<'a>(words: &BTreeSet<String>, repos: &'a [String]) -> Vec<&'a String> {
+    repos
+        .iter()
+        .filter(|repo| {
+            let lower = repo.to_lowercase();
+            words.contains(&lower) || words.contains(lower.rsplit('/').next().unwrap_or(""))
+        })
+        .collect()
+}
+
+/// An issue, pull request or epic number that words name, as [`plan`] reads them: "PR 12" and
+/// "pull request 12" are pull requests, "epic 7" an epic, "issue 42" and a bare #42 issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Number {
+    Issue(i64),
+    Pr(i64),
+    Epic(i64),
+}
+
+impl Number {
+    pub fn value(self) -> i64 {
+        match self {
+            Number::Issue(n) | Number::Pr(n) | Number::Epic(n) => n,
+        }
+    }
+
+    /// "#42", "PR #12", "epic #7".
+    pub fn label(self) -> String {
+        match self {
+            Number::Issue(n) => format!("#{n}"),
+            Number::Pr(n) => format!("PR #{n}"),
+            Number::Epic(n) => format!("epic #{n}"),
+        }
+    }
+}
+
+/// The numbers `text` names, in order, each once (#539).
+pub fn numbers(text: &str) -> Vec<Number> {
+    static ANY: OnceLock<Regex> = OnceLock::new();
+    let text = text.to_lowercase();
+    let mut found: Vec<Number> = vec![];
+    for c in regex(&ANY, r"\b(epic|pr|pull request|issue)\s*#?(\d+)|#(\d+)").captures_iter(&text) {
+        let Some(n) = c.get(2).or(c.get(3)).and_then(|m| m.as_str().parse().ok()) else {
+            continue;
+        };
+        let number = match c.get(1).map(|m| m.as_str()) {
+            Some("epic") => Number::Epic(n),
+            Some("pr" | "pull request") => Number::Pr(n),
+            _ => Number::Issue(n),
+        };
+        if !found.iter().any(|f| f.value() == n) {
+            found.push(number);
+        }
+    }
+    found
+}
+
 /// The plan rules make of the user's words.
 pub fn plan(said: &str, context: &Context) -> Plan {
     let text = said.to_lowercase();
     if text.trim().is_empty() {
         return Plan::of(Action::Ignore, "");
     }
-    // Whole words only, so "tetrix-front-end" never matches "tetrix-frontend".
-    let words: BTreeSet<String> = text
-        .split(|c: char| !(c.is_alphanumeric() || "-_./".contains(c)))
-        .filter(|w| !w.is_empty())
-        .map(str::to_owned)
-        .collect();
+    let words = words(&text);
     if let Some(moved) = move_plan(&words, context) {
         return moved;
     }
-    let repos: Vec<&String> = context
-        .repos
-        .iter()
-        .filter(|repo| {
-            let lower = repo.to_lowercase();
-            words.contains(&lower) || words.contains(lower.rsplit('/').next().unwrap_or(""))
-        })
-        .collect();
+    let repos = repos_named(&words, &context.repos);
     // "auto" whenever the context offers it, so obid routes the job.
     let agent = if context.accounts.contains_key("auto") {
         Some("auto".to_owned())
@@ -404,6 +460,38 @@ mod tests {
             line.contains("fix deskree-inc/oby #19 from PR #124"),
             "{line}"
         );
+    }
+
+    /// #539: what the completion check reads in the user's words and in Oby's reply.
+    #[test]
+    fn words_name_numbers_and_repositories_as_rules_read_them() {
+        assert_eq!(
+            numbers("Fix #12, PR 33, pull request #34, issue 5, epic #7 and #12 again"),
+            [
+                Number::Issue(12),
+                Number::Pr(33),
+                Number::Pr(34),
+                Number::Issue(5),
+                Number::Epic(7)
+            ]
+        );
+        assert_eq!(
+            numbers("Review PR #33 from issue #18")
+                .into_iter()
+                .map(Number::label)
+                .collect::<Vec<_>>(),
+            ["PR #33", "#18"]
+        );
+        assert!(numbers("how is it going? 12 jobs").is_empty());
+        let repos = context().repos;
+        assert_eq!(
+            repos_named(
+                &words("Fix Tetrix-Front-End #2 and deskree-inc/oby #3"),
+                &repos
+            ),
+            [&repos[0], &repos[1]]
+        );
+        assert!(repos_named(&words("fix tetrix-frontend #2"), &repos).is_empty());
     }
 
     #[test]
