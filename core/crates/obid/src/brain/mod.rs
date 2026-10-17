@@ -12,6 +12,7 @@ pub mod orchestrator;
 pub mod plan;
 pub mod planner;
 pub mod read;
+pub mod recap;
 pub mod research;
 pub mod rules;
 pub mod turn;
@@ -87,6 +88,9 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
         (None, false) => Target::Latest,
     };
     let turns = validate_turns(req.turns)?;
+    // The owner's message: after more than 30 minutes away, the answer starts with a recap (#594).
+    let now = obi_protocol::time::now();
+    let back = shared.presence.seen(now);
     // A bare "never mind", "stop" or "cancel" never reaches the brain: it stops the turn under
     // way, after the action it's doing, and is answered with nothing (no job stops on a word).
     if req.answer.is_none() && turn::cancels(words) {
@@ -99,6 +103,10 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
         };
         if let Some(id) = &underway {
             shared.turns.stop(Some(id));
+        }
+        // Its answer has no words: the recap waits for the next one.
+        if let Some(since) = back {
+            recap::keep(shared.clone(), since, now);
         }
         let conversation = underway.or_else(|| shared.conversations.latest_id());
         return Ok((
@@ -130,9 +138,21 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
             attachments: &attachments,
             conversation: &conversation,
         };
-        let answered = turn::run(&shared, &said, &given, &asked, &control).await;
+        // The recap is written while the brain thinks; a background call is bounded and
+        // tried once, and when it fails the answer is the same as without it.
+        let (answered, recap) = tokio::join!(
+            turn::run(&shared, &said, &given, &asked, &control),
+            recap::back(&shared, back, now)
+        );
         shared.turns.end(&control);
-        respond(&shared, &conversation, answered.talk, answered.details)
+        let recap = recap.or_else(|| shared.presence.take());
+        respond(
+            &shared,
+            &conversation,
+            answered.talk,
+            answered.details,
+            recap,
+        )
     });
     turn.await.map_err(|_| {
         ApiError::new(
@@ -190,7 +210,18 @@ fn respond(
     conversation: &str,
     talk: Talk,
     details: Option<String>,
+    recap: Option<String>,
 ) -> Result<Response, ApiError> {
+    // The recap is Oby's first line, never a turn the user wrote; an answer with no words keeps
+    // it for the next one.
+    let recap = match (&talk, recap) {
+        (Talk::None, Some(recap)) => {
+            shared.presence.hold(recap);
+            None
+        }
+        (_, recap) => recap,
+    };
+    let talk = recap::lead(talk, recap.as_deref());
     let mut body = match &talk {
         Talk::None => json!({"kind": "none", "jobs": [], "drafts": []}),
         Talk::Reply { text, jobs } => {
@@ -211,7 +242,11 @@ fn respond(
     let text = match &talk {
         Talk::None => None,
         Talk::Reply { text, .. } => Some(text.clone()),
-        Talk::Question { question, .. } => Some(question.text.clone()),
+        // A question keeps only its own words in the conversation: the recap goes before them.
+        Talk::Question { question, .. } => Some(match &recap {
+            Some(recap) => format!("{recap}\n\n{}", question.text),
+            None => question.text.clone(),
+        }),
     };
     if let Some(text) = text {
         let jobs = match &talk {
@@ -229,6 +264,9 @@ fn respond(
             }
             Err(e) => return Err(e.into()),
         }
+    }
+    if let Some(recap) = recap {
+        body["recap"] = json!(recap);
     }
     body["conversation"] = json!(conversation);
     Ok((StatusCode::OK, axum::Json(body)).into_response())
