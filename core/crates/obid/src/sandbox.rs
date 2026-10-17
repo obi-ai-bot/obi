@@ -241,6 +241,10 @@ impl Sandbox {
                 bwrap_argv.extend(bubblewrap_args_reading(&spec, confined));
                 bwrap_argv.push("--".into());
                 if spec.network {
+                    // What the sandbox reads as `/etc/resolv.conf` ([`resolver_file`]). Should
+                    // it fail to write, bwrap finds no source and nothing runs.
+                    let _ =
+                        std::fs::write(resolver_file(&spec), format!("nameserver {SLIRP_DNS}\n"));
                     let ready = spec.temp.join(".obid-net-ready");
                     let _ = std::fs::remove_file(&ready);
                     bwrap_argv.extend([
@@ -476,6 +480,12 @@ fn bubblewrap_args_reading(spec: &Spec, confined: bool) -> Vec<OsString> {
             socket.as_os_str(),
         ]);
     }
+    if spec.network
+        && let Some(target) = resolver_target(Path::new("/etc/resolv.conf"))
+    {
+        let file = resolver_file(spec);
+        push(&["--ro-bind".as_ref(), file.as_os_str(), target.as_os_str()]);
+    }
     for path in &spec.read_only {
         if path.exists() {
             push(&["--ro-bind".as_ref(), path.as_os_str(), path.as_os_str()]);
@@ -683,6 +693,24 @@ echo "$status" > "$TMPDIR/.obid-status"
 reap
 exit "$status"
 "#;
+
+/// The DNS forwarder slirp4netns gives the network namespace (`--configure`): it asks the host's
+/// own resolver. The host's `/etc/resolv.conf` can't serve inside: on Ubuntu it names
+/// systemd-resolved's stub, 127.0.0.53, which inside is the namespace's own loopback, and in the
+/// confined form it is a link into `/run`, which isn't there.
+pub const SLIRP_DNS: &str = "10.0.2.3";
+
+/// The file a sandbox with the network reads as `/etc/resolv.conf`: it names [`SLIRP_DNS`].
+fn resolver_file(spec: &Spec) -> PathBuf {
+    spec.temp.join(".obid-resolv.conf")
+}
+
+/// The file `/etc/resolv.conf` leads to on this machine, which the sandbox's own is bound over, so
+/// nothing else of where it lives (`/run`) is shown. None when it leads nowhere: bubblewrap could
+/// make no file there, and the host has no resolver to ask either.
+fn resolver_target(path: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path).ok().filter(|p| p.is_file())
+}
 
 /// Where Docker's socket is.
 const DOCKER_SOCKETS: [&str; 2] = ["/run/docker.sock", "/var/run/docker.sock"];
@@ -1185,6 +1213,46 @@ mod tests {
             args[args.len() - 2..],
             ["--chdir".to_owned(), "/h/worktrees/j1".to_owned()]
         );
+    }
+
+    /// With the network, both forms read a resolv.conf naming slirp4netns's DNS forwarder, bound
+    /// over the one file the host's leads to, and nothing else of `/run`. Without it, none.
+    #[test]
+    fn a_sandbox_with_the_network_asks_slirps_resolver() {
+        let spec = Spec {
+            worktree: "/h/answers/x/question".into(),
+            temp: "/h/answers/x/tmp".into(),
+            hidden: vec!["/h".into()],
+            network: true,
+            ..Spec::default()
+        };
+        let Some(target) = resolver_target(Path::new("/etc/resolv.conf")) else {
+            panic!("this machine's /etc/resolv.conf leads to no file");
+        };
+        let bind = [
+            "--ro-bind".to_owned(),
+            "/h/answers/x/tmp/.obid-resolv.conf".to_owned(),
+            target.to_string_lossy().into_owned(),
+        ];
+        for confined in [false, true] {
+            let args: Vec<String> = bubblewrap_args_reading(&spec, confined)
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert!(args.windows(3).any(|w| w == bind), "{args:?}");
+            for never in ["/run", "/run/systemd", "/run/systemd/resolve"] {
+                assert!(!args.iter().any(|a| a == never), "{never}\n{args:?}");
+            }
+            let offline = Spec {
+                network: false,
+                ..spec.clone()
+            };
+            let args: Vec<String> = bubblewrap_args_reading(&offline, confined)
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert!(!args.iter().any(|a| a.ends_with(".obid-resolv.conf")));
+        }
     }
 
     #[test]

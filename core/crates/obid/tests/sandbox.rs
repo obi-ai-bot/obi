@@ -1248,3 +1248,70 @@ setTimeout(() => {{
         "the sandbox connected to the host's abstract socket"
     );
 }
+
+/// A run with the network resolves its model API's host name, in both forms (an agent's, and the
+/// confined one an answer to a question is written in, #494): the host's own `/etc/resolv.conf`
+/// can't serve inside the namespace (on Ubuntu it names systemd-resolved's stub, 127.0.0.53, the
+/// namespace's own loopback there; and the confined form has no `/run` for its link to lead into).
+/// The confined run still sees nothing of `/run/systemd/resolve` but the one file bound there.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_with_the_network_resolves_a_host_name() {
+    const HOST: &str = "api.anthropic.com";
+    let control = Command::new("getent")
+        .args(["ahosts", HOST])
+        .output()
+        .unwrap();
+    assert!(
+        control.status.success(),
+        "this machine can't resolve {HOST} itself: {control:?}"
+    );
+    let world = world("dns");
+    let sandbox = Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))).unwrap();
+    let job = spec(&world, true, false, false);
+    let probe = format!(
+        "if getent ahosts {HOST} >/dev/null; then echo 'resolved yes'; else echo 'resolved no'; fi; \
+         echo \"beside $(ls -A /run/systemd/resolve 2>/dev/null | tr '\\n' ' ')\""
+    );
+    for confined in [false, true] {
+        let argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), probe.clone().into()];
+        let argv = if confined {
+            sandbox.wrap_reading_only_its_own(&job, &argv)
+        } else {
+            sandbox.wrap(&job, &argv)
+        };
+        let env = obid::process::sandbox_env(&obid::process::tools_path(), &world.temp, &[]);
+        let ran = Command::new(&argv[0])
+            .args(&argv[1..])
+            .env_clear()
+            .envs(env)
+            .current_dir(&world.worktree)
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert!(ran.status.success(), "confined: {confined}\n{text}");
+        assert!(
+            text.contains("resolved yes"),
+            "confined: {confined}: {HOST} didn't resolve inside the sandbox\n{text}"
+        );
+        if confined {
+            let resolver = std::fs::canonicalize("/etc/resolv.conf").unwrap();
+            let seen: Vec<&str> = text
+                .lines()
+                .find_map(|l| l.strip_prefix("beside "))
+                .unwrap_or("")
+                .split_whitespace()
+                .collect();
+            let allowed: Vec<&str> = if resolver.starts_with("/run/systemd/resolve") {
+                vec![resolver.file_name().unwrap().to_str().unwrap()]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(seen, allowed, "the confined run sees more of /run\n{text}");
+        }
+    }
+}
