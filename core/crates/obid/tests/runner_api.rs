@@ -197,8 +197,18 @@ fn jobs_have_iso_dates_and_every_key() {
             .filter(|k| !SWIFT_JOB_KEYS.contains(k))
             .collect();
         extra.sort_unstable();
-        assert_eq!(extra, ["conversation", "obi", "worktree"], "{body}");
-        assert_eq!(keys.len(), 68);
+        assert_eq!(
+            extra,
+            [
+                "answered",
+                "answeredCount",
+                "conversation",
+                "obi",
+                "worktree"
+            ],
+            "{body}"
+        );
+        assert_eq!(keys.len(), 70);
         // What obid never sets is there, as null.
         for key in [
             "published",
@@ -236,7 +246,7 @@ fn jobs_have_iso_dates_and_every_key() {
         assert_eq!(body["cloudNeedsYou"], false);
         assert_eq!(body["mergeNeedsYou"], false);
         assert_eq!(body["reviewNeedsYou"], false);
-        assert_eq!(body["mode"], "bypass");
+        assert_eq!(body["mode"], "sandbox");
         assert_eq!(body["outgoing"], json!([]));
         assert_eq!(body["moves"], json!([]));
         assert_eq!(body["connectionUses"], json!([]));
@@ -572,7 +582,7 @@ fn a_client_may_claim_files_at_dispatch() {
 }
 
 /// NoDispatchCardTests.startedJobsKeepTheirMode, its API half (the brain's half needs
-/// `POST /v1/plans`): a dispatched job keeps the mode it was given, takes the default (bypass,
+/// `POST /v1/plans`): a dispatched job keeps the mode it was given, takes the default (sandbox,
 /// Settings › Permissions) without one, and a mode that isn't one is refused.
 #[test]
 fn dispatched_jobs_keep_their_mode() {
@@ -592,7 +602,7 @@ fn dispatched_jobs_keep_their_mode() {
         defaulted["mode"],
         call(&obid, "GET", "/v1/status", None).body["permissions"]["mode"]
     );
-    assert_eq!(defaulted["mode"], "bypass");
+    assert_eq!(defaulted["mode"], "sandbox");
     let refused = call(
         &obid,
         "POST",
@@ -1391,7 +1401,7 @@ fn the_api_answers_permissions_and_modes() {
 
     assert_eq!(
         call(&obid, "GET", "/v1/status", None).body["permissions"]["mode"],
-        "bypass"
+        "sandbox"
     );
     assert_eq!(
         call(

@@ -568,7 +568,7 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         // obid has no GitHub app: its own GitHub calls, once it makes any, go as the owner.
         github: "owner",
         checks: "no app",
-        // Settings › Permissions: bypass until the owner picks another (Engine/Permissions.swift).
+        // Settings › Permissions: sandbox until the owner picks another (docs/runner-api.md, "Permission modes").
         permissions: ModeJson {
             mode: shared.jobs.default_mode().as_str(),
         },
