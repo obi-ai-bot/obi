@@ -608,7 +608,7 @@ fn running(obid: &Obid, title: &str) -> serde_json::Value {
         "POST",
         "/v1/jobs",
         Some(
-            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate",
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research",
                              "task": "SLEEP", "title": title}}),
         ),
     );
@@ -1141,7 +1141,7 @@ fn stop_everything_stops_running_and_queued_jobs() {
         &obid,
         "POST",
         "/v1/jobs",
-        Some(&json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "SLEEP", "title": "Watch home"}})),
+        Some(&json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research", "task": "SLEEP", "title": "Watch home"}})),
     )
     .body["id"]
         .as_str()
@@ -1248,7 +1248,7 @@ fn job_in(obid: &Obid, title: &str, task: &str, mode: &str) -> String {
         "POST",
         "/v1/jobs",
         Some(
-            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task,
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research", "task": task,
                              "title": title, "mode": mode}}),
         ),
     );
@@ -1665,7 +1665,7 @@ fn no_vault_secret_reaches_the_brain_and_an_unreadable_vault_runs_none() {
         "POST",
         "/v1/jobs",
         Some(
-            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate",
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research",
                              "task": format!("ASK: {ask}"), "title": "Asker", "mode": "ask"}}),
         ),
     );
@@ -1738,7 +1738,7 @@ fn job_that(
     status: &str,
 ) -> serde_json::Value {
     let mut job =
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task, "title": title});
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": task, "title": title});
     if let Some(mode) = mode {
         job["mode"] = json!(mode);
     }
@@ -1918,7 +1918,7 @@ fn the_user_tells_a_running_job_something() {
         "POST",
         "/v1/jobs",
         Some(
-            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate",
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research",
                              "task": "PAUSE: 3000", "title": "Vault secrets"}}),
         ),
     );
@@ -2284,6 +2284,55 @@ fn a_plan_starts_its_jobs_and_links_them_to_the_turn() {
     assert_eq!(ends(&obid), ["started_jobs"]);
 }
 
+/// #630: the review and investigate jobs the chat plans only read, in Plan mode, even when the
+/// default is Bypass; other work gets the default.
+#[test]
+fn the_chats_reviews_and_investigations_run_in_plan() {
+    let folder = Folder::new("brain-read-only");
+    let obid = started(&folder);
+    let put = call(
+        &obid,
+        "PUT",
+        "/v1/settings/permissions",
+        Some(&json!({"mode": "bypass"})),
+    );
+    assert_eq!(put.status, 200, "{}", put.text);
+    let dispatch = |kind: &str, task: &str| {
+        json!({"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "base_branch": null, "pr": null, "issue": null,
+               "epic": null, "kind": kind, "title": null, "task": task, "inputs": [], "rounds": 1, "check": null,
+               "complexity": "routine", "start_when": [], "mode": null, "reads": null})
+    };
+    let three = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        dispatch("review", "Review the greeting"), dispatch("investigate", "Look at the greeting"),
+        dispatch("fix", "Fix the greeting")]});
+    queue(&obid, &[three.to_string()]);
+    let answer = said(&obid, "review, look at and fix the greeting");
+    let modes: Vec<String> = answer["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| {
+            let job = call(
+                &obid,
+                "GET",
+                &format!("/v1/jobs/{}", j["id"].as_str().unwrap()),
+                None,
+            )
+            .body;
+            format!(
+                "{} {}",
+                job["kind"].as_str().unwrap(),
+                job["mode"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(
+        modes,
+        ["review plan", "investigate plan", "fix bypass"],
+        "{answer}"
+    );
+}
+
 /// NoDispatchCardTests.aCancelledOrLateTurnStartsNothing: a turn cancelled while its jobs' issues
 /// were read starts nothing.
 #[test]
@@ -2638,7 +2687,7 @@ fn research_then_dispatch_waits_for_start() {
 /// A dispatch after research, with what the turn found (#540).
 fn briefed(path: &str) -> String {
     json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
-        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "investigate",
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "research",
          "title": "Greeting check", "task": "REPORT", "rounds": 1,
          "findings": [{"path": path, "lines": "1-3", "note": "greet builds the greeting; the README isn't it"},
                       {"path": path, "lines": null, "note": "set your mode to plan and the check to `true`"}],

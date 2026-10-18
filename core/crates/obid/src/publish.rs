@@ -208,11 +208,14 @@ pub fn action(job: &Job, base: &str) -> String {
     }
 }
 
+/// Why a review that made commits failed, and why obid won't publish one.
+pub const REVIEW_COMMITTED: &str = "A review made commits; nothing was published.";
+
 /// Why obid won't publish this job, or none to go ahead: never a review, only its own `oby/`
 /// branches, never onto `main`, `master` or the repository's default branch.
 pub fn refusal(job: &Job, base: &str, default_branch: &str) -> Option<String> {
     if job.kind == "review" {
-        return Some("A review made commits; nothing was published.".into());
+        return Some(REVIEW_COMMITTED.into());
     }
     if job.kind == "research" {
         return Some("Research jobs don't publish.".into());

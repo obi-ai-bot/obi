@@ -854,12 +854,28 @@ fn set_mode(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
         ));
     }
     let mut done: Vec<String> = vec![];
+    let mut kept: Vec<String> = vec![];
     for id in plan.named() {
-        if shared.jobs.get(id).is_some_and(|j| j.status.is_active())
-            && let Some(job) = shared.jobs.set_mode(id, mode)
-        {
-            done.push(job.short_title());
+        match shared.jobs.get(id) {
+            Some(job) if job.status.is_active() && job.read_only() => kept.push(job.short_title()),
+            Some(job) if job.status.is_active() => {
+                if let Some(job) = shared.jobs.set_mode(id, mode) {
+                    done.push(job.short_title());
+                }
+            }
+            _ => {}
         }
+    }
+    if done.is_empty() && !kept.is_empty() {
+        return Outcome::Done(format!(
+            "{} only {} in Plan mode.",
+            kept.join(", "),
+            if kept.len() == 1 {
+                "reads: it stays"
+            } else {
+                "read: they stay"
+            }
+        ));
     }
     if done.is_empty() {
         return Outcome::Done("That job isn't running any more.".into());
