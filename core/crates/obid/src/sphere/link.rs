@@ -2492,6 +2492,25 @@ impl Link {
                     None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
                 }
             }
+            inbox::action::DISMISS_JOB => match self.jobs.dismiss(target) {
+                Some(Ok(_)) => Ok(()),
+                Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
+                None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
+            },
+            inbox::action::RETRY_JOB => {
+                if self.jobs.get(target).is_some_and(|j| j.status.is_active()) {
+                    return Err(api(StatusCode::CONFLICT, "That job is running again."));
+                }
+                match self.jobs.message(
+                    target,
+                    crate::brain::actions::TRY_AGAIN,
+                    crate::jobs::Source::Owner,
+                ) {
+                    Some(Ok(_)) => Ok(()),
+                    Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
+                    None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
+                }
+            }
             // The ones that answer an inbox item, as the owner would have.
             inbox::action::ACCEPT
             | inbox::action::ACCEPT_REMEMBER

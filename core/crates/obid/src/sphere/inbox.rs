@@ -74,6 +74,11 @@ pub mod action {
     /// already taken out of the vault's secrets. Made before 2026-10-18 for one more round; it
     /// starts a follow-up now, and obid makes none.
     pub const MESSAGE_JOB: &str = "message_job";
+    /// Dismiss a job whose commits aren't published, or another conversation's (#631): `target`
+    /// the job. Its commits stay on its branch.
+    pub const DISMISS_JOB: &str = "dismiss_job";
+    /// Try another conversation's job again (#631): `target` the job.
+    pub const RETRY_JOB: &str = "retry_job";
 }
 
 /// A `confirm` item: `title` says exactly what `Confirm` does, `confirmed` is what obid carries

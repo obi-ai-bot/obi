@@ -790,7 +790,7 @@ async fn run_with(
             if Instant::now() >= deadline {
                 break 'step (End::BudgetSpent, finish(&End::BudgetSpent, &done, &looked));
             }
-            let mut context = super::context(shared, given, &nonce);
+            let mut context = super::context(shared, &control.conversation, given, &nonce);
             context.turn_step = step;
             context.turn_length = Some(said.chars().count());
             context.said = said.to_owned();
@@ -1151,7 +1151,7 @@ async fn act(
 ) -> Outcome {
     let text = actions::step_text(shared, plan);
     step_event(shared, control, index, plan.action, &text, State::Running);
-    let outcome = actions::act(shared, plan, said, source).await;
+    let outcome = actions::act(shared, plan, said, source, &control.conversation).await;
     step_event(
         shared,
         control,
