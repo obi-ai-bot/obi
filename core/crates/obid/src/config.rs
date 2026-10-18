@@ -78,9 +78,10 @@ struct File {
     /// Where the gateway listens (crate::gateway), on 127.0.0.1; left out, there's none.
     #[serde(default)]
     gateway: Option<String>,
-    /// Whether obid copies Claude Code's login from the macOS Keychain (crate::jobs, keychain_login).
+    /// Whether obid copies Claude Code's login from the macOS Keychain (crate::jobs, keychain_login);
+    /// left out, obid decides when it starts (crate::jobs::keychain_wanted).
     #[serde(default)]
-    claude_keychain: bool,
+    claude_keychain: Option<bool>,
     /// How conversations run (crate::brain::harness): `{"agent", "model", "budget"}`.
     #[serde(default)]
     conversation: Option<ConversationSetting>,
@@ -214,8 +215,10 @@ pub struct Config {
     /// when it is left out.
     pub gateway: Option<SocketAddr>,
     /// `claudeKeychain`: obid copies Claude Code's macOS Keychain login into a boxed run's place
-    /// for it (crate::jobs, keychain_login). False unless the owner turns it on.
-    pub claude_keychain: bool,
+    /// for it (crate::jobs, keychain_login). `Some` as the owner set it; `None` when it's left out,
+    /// and then obid turns it on by itself on macOS when Claude Code's default login is only in the
+    /// Keychain (crate::jobs::keychain_wanted, the owner's decision of 2026-10-18).
+    pub claude_keychain: Option<bool>,
     /// How conversations run.
     pub conversation: Conversation,
 }
@@ -775,14 +778,17 @@ mod tests {
 
     /// The event orchestrator waits 30 seconds for nearby events, or 1 to 600 as configured.
     #[test]
-    fn the_keychain_is_used_only_when_the_owner_turns_it_on() {
-        assert!(
-            !Config::parse(&with(serde_json::json!({})))
-                .unwrap()
-                .claude_keychain
+    fn the_keychain_is_as_the_owner_set_it_or_left_to_obid() {
+        let parse = |extra| Config::parse(&with(extra)).unwrap().claude_keychain;
+        assert_eq!(parse(serde_json::json!({})), None);
+        assert_eq!(
+            parse(serde_json::json!({"claudeKeychain": true})),
+            Some(true)
         );
-        let on = with(serde_json::json!({"claudeKeychain": true}));
-        assert!(Config::parse(&on).unwrap().claude_keychain);
+        assert_eq!(
+            parse(serde_json::json!({"claudeKeychain": false})),
+            Some(false)
+        );
     }
 
     /// A Claude account's `configDir` is never the person's own `~/.claude` nor inside it (#651's

@@ -468,6 +468,14 @@ pub struct Status {
     pub checks: &'static str,
     pub permissions: ModeJson,
     pub cleanup: CleanupJson,
+    /// Whether obid copies Claude Code's Keychain login, and whether it chose that itself.
+    pub claude_keychain: KeychainJson,
+}
+
+#[derive(Serialize)]
+pub struct KeychainJson {
+    pub on: bool,
+    pub auto: bool,
 }
 
 #[derive(Serialize)]
@@ -641,6 +649,10 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
             bytes: shared.cleanup.bytes(),
             // obid has no cleanup pass yet; when it does, it sets this and calls `remeasure`.
             last_run: None,
+        },
+        claude_keychain: KeychainJson {
+            on: crate::jobs::keychain_on(),
+            auto: crate::jobs::keychain_auto(),
         },
     }))
 }

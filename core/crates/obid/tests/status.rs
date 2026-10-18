@@ -84,7 +84,11 @@ fn command(folder: &Path, config_path: &Path) -> Command {
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", folder.join("env-home"))
-        .env("TMPDIR", folder.join("tmp"));
+        .env("TMPDIR", folder.join("tmp"))
+        .env(
+            "OBID_SECURITY_BIN",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-security"),
+        );
     std::fs::create_dir_all(folder.join("env-home")).unwrap();
     std::fs::create_dir_all(folder.join("tmp")).unwrap();
     command
@@ -268,6 +272,8 @@ fn status_answers_with_engine_obid() {
     assert_eq!(status["github"], "owner");
     assert_eq!(status["checks"], "no app");
     assert_eq!(status["permissions"], json!({"mode": "sandbox"}));
+    // claudeKeychain left out: obid decided, and the stand-in Keychain holds no Claude login.
+    assert_eq!(status["claudeKeychain"], json!({"on": false, "auto": true}));
     let worktrees = folder.0.join("home").join("worktrees");
     assert_eq!(
         status["cleanup"],
@@ -802,6 +808,12 @@ fn a_signal_while_obid_starts_exits_0() {
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", folder.0.join("env-home"))
         .env("TMPDIR", folder.0.join("tmp"))
+        // Never the person's real Keychain (support::start): obid asks it at start when
+        // claudeKeychain is left out.
+        .env(
+            "OBID_SECURITY_BIN",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-security"),
+        )
         .stdout(Stdio::piped());
     let mut shell = shell.spawn().unwrap();
     exit_within_10_seconds(&mut shell, "SIGTERM while starting");
