@@ -409,6 +409,9 @@ struct ArrivingSaid: View {
                     let shown = WordReveal.shown(text, came: came, after: context.date.timeIntervalSince(since))
                     SaidText(text: shown.text, color: color, fading: shown.fading)
                 }
+                // VoiceOver reads the whole answer, not the half-built sentence on screen.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(text)
                 .task(id: text) {
                     try? await Task.sleep(for: .seconds(WordReveal.duration(text, came: came) - Date.now.timeIntervalSince(since)))
                     if !Task.isCancelled { done = true }

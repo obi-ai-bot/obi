@@ -55,8 +55,10 @@ final class ConversationModel {
     }
 
     /// The latest page, in place of what was loaded: on every connection to the runner, so what
-    /// was said elsewhere while the connection was down is here.
-    func reload() async {
+    /// was said elsewhere while the connection was down is here. `arriving`: the page of a new
+    /// conversation just started here, whose first answer comes in word by word; any other reload
+    /// (opening a conversation, reconnecting) shows its turns whole.
+    func reload(arriving: Bool = false) async {
         generation += 1
         let mine = generation
         loading = true
@@ -64,8 +66,7 @@ final class ConversationModel {
         do {
             let latest = try await page(nil, Self.pageSize)
             guard mine == generation else { return }
-            // A new conversation's first answer is read with its page, just after it was said.
-            for turn in latest where !runnerTurns.contains(where: { $0.id == turn.id }) { arrive(turn) }
+            if arriving { for turn in latest where !runnerTurns.contains(where: { $0.id == turn.id }) { arrive(turn) } }
             runnerTurns = Self.ordered(latest)
             hasOlder = latest.count >= Self.pageSize
             problem = nil
