@@ -34,6 +34,11 @@ const argv = process.argv.slice(2);
 // `features list`, as Codex prints it: shell_tool off when the -c settings turn it off, unless
 // FAKE_CODEX_SHELL_STAYS_ON is set (a Codex that ignores the setting).
 if (argv.slice(-2).join(" ") === "features list") {
+  // As Codex 0.162.1: a CODEX_HOME that isn't there is an error.
+  if (process.env.CODEX_HOME && !existsSync(process.env.CODEX_HOME)) {
+    process.stderr.write(`Error: CODEX_HOME points to "${process.env.CODEX_HOME}", but that path does not exist\n`);
+    process.exit(1);
+  }
   const off = (name) => argv.includes(`features.${name}=false`) && !(name === "shell_tool" && process.env.FAKE_CODEX_SHELL_STAYS_ON);
   for (const name of ["apps", "plugins", "shell_tool", "unified_exec"])
     process.stdout.write(`${name.padEnd(41)}stable             ${off(name) ? "false" : "true"}\n`);

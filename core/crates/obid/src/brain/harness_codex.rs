@@ -86,6 +86,10 @@ pub(super) async fn launch(
 /// Whether Codex, run with `flags`, says its shell is off (`codex <flags> features list`), with
 /// the conversation's own `CODEX_HOME` and nothing of obid's environment that matters.
 async fn shell_off(bin: &std::path::Path, flags: &[OsString], place: &Place) -> Result<(), String> {
+    // Codex refuses a CODEX_HOME that isn't there; on a first turn the login isn't copied yet.
+    crate::jobs::not_a_link(&place.config)?;
+    crate::store::make_private_dir(&place.config)
+        .map_err(|e| format!("the conversation's Codex folder couldn't be made: {e}"))?;
     let listed = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::process::Command::new(bin)
