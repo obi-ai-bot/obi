@@ -509,8 +509,8 @@ const ITEMS: &[&str] = &[
 ];
 
 /// The notifications that aren't an item's that a conversation's Codex may send (0.162.1's
-/// `ServerNotification`): the thread's and the turn's own news, usage, warnings, its MCP servers
-/// starting. An item's (`item/…`) pass when its kind is one of [`ITEMS`].
+/// `ServerNotification`): the thread's and the turn's own news, usage, warnings. Oby's MCP server
+/// starting passes in [`ran_outside`]. An item's (`item/…`) pass when its kind is one of [`ITEMS`].
 const NOTICES: &[&str] = &[
     "error",
     "warning",
@@ -530,7 +530,6 @@ const NOTICES: &[&str] = &[
     "turn/plan/updated",
     "turn/moderationMetadata",
     "serverRequest/resolved",
-    "mcpServer/startupStatus/updated",
     "account/updated",
     "account/rateLimits/updated",
     "model/rerouted",
@@ -578,6 +577,8 @@ fn ran_outside(message: &Value) -> Option<String> {
         _ if NOTICES.contains(&method) => {}
         // Codex says at start whether something remote drives it: only "nobody" passes.
         ["remoteControl", "status", "changed"] if message["params"]["status"] == "disabled" => {}
+        // Only Oby's MCP server starts: no other is given (ChatGPT's apps are off).
+        ["mcpServer", "startupStatus", "updated"] if message["params"]["name"] == "oby" => {}
         _ => return Some(format!("Codex sent {method}")),
     }
     if item["type"] == "mcpToolCall" {
@@ -918,6 +919,16 @@ exec sleep 30
         }
         let remote = |status: &str| json!({"method": "remoteControl/status/changed", "params": {"status": status}});
         assert_eq!(ran_outside(&remote("disabled")), None);
+        // Only Oby's own MCP server starts: another (ChatGPT's apps, the person's) ends the turn.
+        let starting = |name: &str| json!({"method": "mcpServer/startupStatus/updated", "params": {"name": name, "status": "starting"}});
+        assert_eq!(ran_outside(&starting("oby")), None);
+        for name in ["codex_apps", "elsewhere", ""] {
+            assert_eq!(
+                ran_outside(&starting(name)),
+                Some("Codex sent mcpServer/startupStatus/updated".into()),
+                "{name}"
+            );
+        }
         for status in ["connecting", "connected", "errored"] {
             assert_eq!(
                 ran_outside(&remote(status)),
