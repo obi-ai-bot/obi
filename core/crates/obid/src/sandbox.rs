@@ -1058,7 +1058,18 @@ pub fn path_software(path: &std::ffi::OsStr, hidden: &[PathBuf]) -> Vec<PathBuf>
             .filter(|n| *n == "bin" || *n == "sbin")
             .and_then(|_| entry.parent())
             .filter(|p| p.components().count() > 1 && !hidden.iter().any(|h| h.starts_with(p)));
-        out.extend(prefix.map(Path::to_path_buf));
+        // Not the whole install prefix (it can hold a user's own data), only the folders a tool
+        // runs from: its binaries, libraries and shared files (N8).
+        if let Some(prefix) = prefix {
+            for sub in [
+                "bin", "sbin", "lib", "lib64", "libexec", "share", "etc", "opt", "Cellar",
+            ] {
+                let dir = prefix.join(sub);
+                if dir.is_dir() {
+                    out.push(dir);
+                }
+            }
+        }
         out.push(entry);
     }
     out
@@ -1093,6 +1104,26 @@ pub fn install_root(bin: &Path, hidden: &[PathBuf], never: &[PathBuf]) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_software_brings_a_tools_folders_not_the_whole_prefix() {
+        let root = std::env::temp_dir().join(format!("obid-pathsw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let prefix = root.join("brew");
+        for dir in ["bin", "lib", "libexec", "share", "etc", "projects", "db"] {
+            std::fs::create_dir_all(prefix.join(dir)).unwrap();
+        }
+        let path = std::env::join_paths([prefix.join("bin")]).unwrap();
+        let got = path_software(&path, &[]);
+        // The tool's own folders, not the whole prefix nor a user-data folder beside them (N8).
+        for keep in ["bin", "lib", "libexec", "share", "etc"] {
+            assert!(got.contains(&prefix.join(keep)), "{keep}: {got:?}");
+        }
+        assert!(!got.contains(&prefix), "the prefix itself: {got:?}");
+        assert!(!got.contains(&prefix.join("projects")), "{got:?}");
+        assert!(!got.contains(&prefix.join("db")), "{got:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn an_agent_installed_in_a_hidden_home_brings_its_own_folder_only() {

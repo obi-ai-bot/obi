@@ -108,6 +108,7 @@ async fn call(
         "oby_job" => {
             let One { id } = parse(args)?;
             let job = shared.jobs.get(&id).ok_or("There's no job with that id.")?;
+            session.taint();
             Ok(quoted(
                 session,
                 "the job's agent",
@@ -126,7 +127,10 @@ async fn call(
             plan.jobs = Some(vec![id]);
             act(shared, session, plan, &session.said).await
         }
-        "oby_inbox" => Ok(inbox(shared, session)),
+        "oby_inbox" => {
+            session.taint();
+            Ok(inbox(shared, session))
+        }
         "oby_answer" => {
             let Reply { item, answer } = parse(args)?;
             if let Some(why) = shared
@@ -153,6 +157,7 @@ async fn call(
                 None,
                 super::find::CONVERSATIONS,
             );
+            session.taint();
             if found.is_empty() {
                 return Ok(format!(
                     "No other conversation says “{}”.",
@@ -281,11 +286,12 @@ fn capped(count: &AtomicUsize, what: &str) -> Result<(), String> {
 /// Why answering an item of `kind` with `answer` is the owner's own call in a conversation, when
 /// it is: letting a job's permission through, even once. Saying no to it is Oby's to say.
 fn owners_only(kind: &str, answer: &str) -> Option<&'static str> {
-    (kind == "permission"
-        && crate::permissions::inbox_decision(answer).0 != crate::permissions::Decision::Deny)
-        .then_some(
-            "Only the owner lets a job's permission through, in their inbox: Oby may only refuse it.",
-        )
+    use crate::permissions::{Decision, inbox_decision};
+    // A conversation may only refuse a job's permission, and only with a bare no: words to the
+    // job's agent, or anything but a plain deny, are the owner's own (N3).
+    (kind == "permission" && inbox_decision(answer) != (Decision::Deny, None)).then_some(
+        "Oby may only refuse a job's permission, with a bare \"Deny\" and no words. Allowing it, or sending the agent words, is the owner's own, in their inbox.",
+    )
 }
 
 /// What a job hears from this turn: the owner's own words, then what the conversation's agent
@@ -486,10 +492,18 @@ mod tests {
     /// A conversation may refuse a job's permission, never let it through, even once.
     #[test]
     fn only_the_owner_lets_a_permission_through() {
-        for yes in ["Allow", "Always allow", "allow", "Yes"] {
-            assert!(owners_only("permission", yes).is_some(), "{yes}");
+        // Allowing, and a no with words for the agent, are the owner's own (N3).
+        for owners in [
+            "Allow",
+            "Always allow",
+            "allow",
+            "Yes",
+            "no, run only the runner tests",
+        ] {
+            assert!(owners_only("permission", owners).is_some(), "{owners}");
         }
-        for no in ["Deny", "No", "no, run only the runner tests"] {
+        // Only a bare no is Oby's to give.
+        for no in ["Deny", "deny", "No", " no "] {
             assert_eq!(owners_only("permission", no), None, "{no}");
         }
         assert_eq!(owners_only("question", "Yes"), None);

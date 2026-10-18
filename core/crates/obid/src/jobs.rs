@@ -4146,7 +4146,9 @@ pub(crate) fn copy_account_login(tool: Tool, account: &Path, to: &Path) -> std::
     let bytes = match keychain {
         Some(bytes) => bytes,
         None if std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) => {
-            std::fs::read(&file)?
+            let bytes = std::fs::read(&file)?;
+            learn_claude_tokens(&bytes, &keychain_service(Some(account)));
+            bytes
         }
         None => return Ok(()),
     };
@@ -4215,6 +4217,11 @@ pub(crate) fn copy_login(
     for name in secret {
         copy(name)?;
     }
+    if tool == Tool::Claude
+        && let Ok(bytes) = std::fs::read(login.join(secret[0]))
+    {
+        learn_claude_tokens(&bytes, &keychain_service(None));
+    }
     // On macOS Claude Code's login may be only in the Keychain (keychain_login).
     if keychain
         && tool == Tool::Claude
@@ -4225,10 +4232,36 @@ pub(crate) fn copy_login(
     }
     for name in once {
         if std::fs::symlink_metadata(login.join(name)).is_err() {
-            copy(name)?;
+            if *name == ".claude.json" {
+                let trimmed = std::fs::read(home.join(name))
+                    .map(|bytes| trimmed_claude_json(&bytes))
+                    .unwrap_or_else(|_| b"{}".to_vec());
+                write_login(&login.join(name), &trimmed)?;
+            } else {
+                copy(name)?;
+            }
         }
     }
     Ok(shown.to_vec())
+}
+
+/// `~/.claude.json` with only the keys a boxed Claude Code needs to stay signed in: the account,
+/// the user id and the onboarding flags. Never the person's projects, history, MCP servers or
+/// anything else that could carry their data or instructions into a job or a conversation (N5).
+/// `{}` when it doesn't parse as an object.
+fn trimmed_claude_json(bytes: &[u8]) -> Vec<u8> {
+    let Ok(serde_json::Value::Object(all)) = serde_json::from_slice::<serde_json::Value>(bytes)
+    else {
+        return b"{}".to_vec();
+    };
+    let mut kept = serde_json::Map::new();
+    for (key, value) in all {
+        if key == "oauthAccount" || key == "userID" || key.to_ascii_lowercase().contains("onboard")
+        {
+            kept.insert(key, value);
+        }
+    }
+    serde_json::to_vec(&serde_json::Value::Object(kept)).unwrap_or_else(|_| b"{}".to_vec())
 }
 
 /// Removes the copied credentials from a job's login folder once its run ended: they are copied
@@ -4685,6 +4718,30 @@ fn tail_chars(text: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// N5: a copied `~/.claude.json` keeps only the keys a boxed run needs to stay signed in, never
+    /// the person's projects, history or MCP state.
+    #[test]
+    fn claude_json_is_trimmed_to_the_auth_keys() {
+        let full = serde_json::json!({
+            "oauthAccount": {"emailAddress": "a@b.c"},
+            "userID": "u1",
+            "hasCompletedOnboarding": true,
+            "projects": {"/Users/me/secret": {"history": ["did x"]}},
+            "mcpServers": {"evil": {}},
+            "tipsHistory": {"x": 1}
+        });
+        let trimmed: serde_json::Value =
+            serde_json::from_slice(&trimmed_claude_json(full.to_string().as_bytes())).unwrap();
+        assert_eq!(trimmed["oauthAccount"]["emailAddress"], "a@b.c");
+        assert_eq!(trimmed["userID"], "u1");
+        assert_eq!(trimmed["hasCompletedOnboarding"], true);
+        assert!(trimmed.get("projects").is_none());
+        assert!(trimmed.get("mcpServers").is_none());
+        assert!(trimmed.get("tipsHistory").is_none());
+        assert_eq!(trimmed_claude_json(b"not json"), b"{}");
+        assert_eq!(trimmed_claude_json(b"[1,2]"), b"{}");
+    }
 
     /// #643's security review: a job that put a link in place of its account folder can't make obid
     /// write the login wherever the link points; a real folder still gets it, as only the person

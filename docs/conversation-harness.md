@@ -64,6 +64,7 @@ Besides `step`, `thinking`, `reply` and `turn` (unchanged):
 - What it reads from the web or a repository is data. It can't act past Oby's tools, and those keep obid's rules (section 3).
 - No vault secret, token or agent login ever reaches the room, a tool result, an event or an artifact; obid's redaction runs on everything it passes on.
 - Every turn has a budget (time and the model's turns); Stop ends it and says what was done.
+- **Known gap: the web is a way out.** A conversation runs no code, and work it plans after reading anything untrusted waits for the owner, but WebFetch itself still goes anywhere: after a prompt injection (from a page, a repository's code, a job's report or an attachment) the agent could put what it read in the room or the repositories' checkouts into a URL it fetches. Secrets obid knows are redacted from what reaches the agent and from its words, but the code and text it reads are not. The next step is a domain allowlist for WebFetch (and WebSearch's results), set by the owner, with everything else refused.
 
 ## 7. Order of work
 
