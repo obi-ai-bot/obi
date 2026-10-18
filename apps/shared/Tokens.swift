@@ -79,6 +79,8 @@ nonisolated enum Tokens {
     static let track = Color(dark: Color.white.opacity(0.14), light: Color.black.opacity(0.12))
     /// A usage bar's track.
     static let meter = Color(dark: Color.white.opacity(0.08), light: Color.black.opacity(0.07))
+    /// A hairline round Oby's flat white face on a light ground; none on dark.
+    static let obyEdge = Color(dark: .clear, light: Color.black.opacity(0.16))
     /// The stage bar's done and current segments, and an upcoming stage's ring.
     static let stageDone = Color(dark: Color.white.opacity(0.55), light: Color.black.opacity(0.45))
     /// What the message box recognises: links and references, another Oby, paths and `code`.

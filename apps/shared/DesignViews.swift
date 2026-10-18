@@ -473,9 +473,15 @@ struct ObyMark: View {
             var ears = Path()
             ears.addLines([point(5, 6.6), point(7.9, 3.6), point(8.9, 6.6)]); ears.closeSubpath()
             ears.addLines([point(19, 6.6), point(16.1, 3.6), point(15.1, 6.6)]); ears.closeSubpath()
+            let face = Path(roundedRect: CGRect(x: 1.5 * unit, y: 6 * unit, width: 21 * unit, height: 16.5 * unit), cornerRadius: 5 * unit)
+            // On a light ground, a hairline round the white face so it holds its shape (`oby-edge`):
+            // stroked wide under the fill, so only its outer half shows.
+            let edge = StrokeStyle(lineWidth: 1.2 * unit + 1.5, lineJoin: .round)
+            context.stroke(ears, with: .color(Tokens.obyEdge), style: edge)
+            context.stroke(face, with: .color(Tokens.obyEdge), lineWidth: 1.5)
             context.fill(ears, with: .color(body))
             context.stroke(ears, with: .color(body), style: StrokeStyle(lineWidth: 1.2 * unit, lineJoin: .round))
-            context.fill(Path(roundedRect: CGRect(x: 1.5 * unit, y: 6 * unit, width: 21 * unit, height: 16.5 * unit), cornerRadius: 5 * unit), with: .color(body))
+            context.fill(face, with: .color(body))
             for x in [6.0, 14.6] {
                 context.fill(Path(roundedRect: CGRect(x: x * unit, y: 10.6 * unit, width: 2.8 * unit, height: 5 * unit), cornerRadius: 1.4 * unit), with: .color(eye))
             }
