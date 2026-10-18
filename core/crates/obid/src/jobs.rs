@@ -4420,7 +4420,7 @@ fn owner_prompt(job: &Job) -> String {
         lines.push(brief_section(brief));
     }
     lines.push("Commit your changes here when they're ready. Don't push, open pull requests or post anything to GitHub: obid publishes the work itself.".into());
-    lines.push("After a commit git may print `Unable to create '…/packed-refs.lock': Operation not permitted`: the sandbox keeps the clone's refs to obid, and the commit has landed. There's no need to check it.".into());
+    lines.push("A packed-refs.lock warning after a commit is harmless: the commit landed if `git log -1` shows it.".into());
     if COMMITTING.contains(&job.kind.as_str()) {
         lines.push(format!("If you can't commit, say why in your summary's first line: a {} job that ends with no commits counts as nothing committed.", job.kind));
     }
