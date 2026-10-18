@@ -234,7 +234,7 @@ fn oby_dispatch_starts_a_job_whose_card_is_on_the_turn() {
     let conversation = tools.body["conversation"].as_str().unwrap().to_owned();
     assert_eq!(
         tools.body["text"],
-        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_inbox,oby_answer,oby_conversations",
+        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_inbox,oby_answer,oby_conversations,oby_artifact",
         "{}",
         tools.text
     );
@@ -904,4 +904,120 @@ fn an_attachment_named_claude_md_survives_the_scrub() {
         "{}",
         answer.text
     );
+}
+
+/// What obid sends with every file of an artifact (crate::artifacts::POLICY).
+const ARTIFACT_POLICY: &str = "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' data: blob:; style-src 'self' 'unsafe-inline' data:; img-src 'self' data: blob:; connect-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts";
+
+/// One GET with the API token: the status, the head in lower case, and the body.
+fn raw_get(obid: &Obid, target: &str) -> (u16, String, String) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", obid.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let raw = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (status, head.to_ascii_lowercase(), body.to_owned())
+}
+
+/// oby_artifact publishes a folder of the room as this conversation's artifact: the answer and
+/// Oby's turn carry `artifacts: [{id, version}]`, an `artifact` event goes out, its files serve
+/// with the CSP, and publishing the agent's own output doesn't taint the turn. A path out of the
+/// room is #648's one-line refusal.
+#[test]
+fn oby_artifact_publishes_from_the_room_onto_the_turn() {
+    let (_folder, obid) = obid("harness-artifact", true);
+    let events = follow_events(&obid);
+    let answer = said(
+        &obid,
+        json!({"said": r#"MAKEPAGE OBY oby_artifact {"title": "Fixture functions", "path": "page"}"#,
+               "new": true}),
+    );
+    let text = answer.body["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("oby: Published artifact ") && text.ends_with(", version 1."),
+        "{}",
+        answer.text
+    );
+    let made = answer.body["artifacts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(made.len(), 1, "{}", answer.text);
+    let id = made[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(made[0]["version"], 1);
+    let conversation = answer.body["conversation"].as_str().unwrap().to_owned();
+
+    let seen = until_oby_turn(&events, 30);
+    assert!(
+        seen.iter().any(|(n, d)| n == "artifact"
+            && d["id"] == id.as_str()
+            && d["conversation"] == conversation.as_str()),
+        "an artifact event: {seen:?}"
+    );
+    let (_, turn) = seen.last().unwrap();
+    assert_eq!(
+        turn["artifacts"],
+        json!([{"id": id, "version": 1}]),
+        "{turn}"
+    );
+    let kept = call(
+        &obid,
+        "GET",
+        &format!("/v1/conversation?id={conversation}"),
+        None,
+    );
+    assert_eq!(
+        kept.body.as_array().unwrap().last().unwrap()["artifacts"],
+        json!([{"id": id, "version": 1}]),
+        "{}",
+        kept.text
+    );
+
+    let (status, head, body) = raw_get(&obid, &format!("/v1/artifacts/{id}/1/index.html"));
+    assert_eq!(status, 200, "{head}");
+    assert!(
+        head.contains(&format!(
+            "content-security-policy: {}",
+            ARTIFACT_POLICY.to_ascii_lowercase()
+        )),
+        "{head}"
+    );
+    assert!(body.contains("<li>greet</li>"), "{body}");
+
+    // The agent's own output: the turn isn't tainted.
+    let session: Value = serde_json::from_slice(
+        &std::fs::read(
+            obid.home
+                .join(format!("conversations/{conversation}/session.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(session["web"], false, "{session}");
+
+    // Out of the room: the publisher's own one line, as an error.
+    let refused = said(
+        &obid,
+        json!({"said": r#"OBY oby_artifact {"title": "Escape", "path": "../session.json"}"#,
+               "conversation": conversation}),
+    );
+    assert!(
+        refused.body["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("oby: refused: Not published: "),
+        "{}",
+        refused.text
+    );
+    assert!(refused.body.get("artifacts").is_none(), "{}", refused.text);
 }

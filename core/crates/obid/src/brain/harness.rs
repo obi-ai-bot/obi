@@ -72,6 +72,10 @@ pub struct Session {
     /// Where the session's [`Kept`] is (`session.json`), and the account it's on.
     pub kept: PathBuf,
     pub account: String,
+    /// The conversation's room: what `oby_artifact` publishes from.
+    pub room: PathBuf,
+    /// The artifacts its tools published this turn, `{id, version}` each: they go on the turn.
+    pub artifacts: Mutex<Vec<Value>>,
 }
 
 impl Session {
@@ -105,6 +109,8 @@ impl Session {
 #[derive(Default)]
 pub struct Sessions {
     open: Mutex<HashMap<String, Arc<Session>>>,
+    /// What each ended turn published, by the user's turn id, until its answer takes it.
+    made: Mutex<HashMap<String, Vec<Value>>>,
     /// One lock per conversation, so its turns run one at a time (N9).
     busy: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -127,6 +133,16 @@ impl Sessions {
 
     fn close(&self, token: &str) {
         self.lock().remove(token);
+    }
+
+    /// The artifacts the turn `turn` published (`{id, version}` each), taken once: its answer and
+    /// its Oby turn carry them.
+    pub fn take_made(&self, turn: &str) -> Vec<Value> {
+        self.made
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(turn)
+            .unwrap_or_default()
     }
 
     /// The lock that serializes `conversation`'s turns.
@@ -429,6 +445,8 @@ async fn session(
         told: AtomicUsize::new(0),
         kept: place.session.clone(),
         account: account.id.clone(),
+        room: place.room.clone(),
+        artifacts: Mutex::new(vec![]),
     });
     let token = shared.harness.open(session.clone());
     // Even on a panic, the token stops being valid and the login copy is taken out.
@@ -458,6 +476,16 @@ async fn session(
     // What Oby says goes out, and is kept, with every secret obid knows taken out.
     let text = crate::secrets::known().redact(&text);
     let jobs = std::mem::take(&mut *session.jobs.lock().unwrap_or_else(|e| e.into_inner()));
+    let made = std::mem::take(&mut *session.artifacts.lock().unwrap_or_else(|e| e.into_inner()));
+    let published = !made.is_empty();
+    if published {
+        shared
+            .harness
+            .made
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(control.turn.clone(), made);
+    }
     if control.cancelled() {
         return Ok(Answered {
             talk: Talk::None,
@@ -480,7 +508,7 @@ async fn session(
         end.as_str()
     );
     Ok(Answered {
-        talk: if text.is_empty() && jobs.is_empty() {
+        talk: if text.is_empty() && jobs.is_empty() && !published {
             Talk::None
         } else {
             Talk::Reply { text, jobs }
@@ -1372,6 +1400,8 @@ mod tests {
             told: AtomicUsize::new(0),
             kept: place.session.clone(),
             account: "a".into(),
+            room: place.room.clone(),
+            artifacts: Mutex::new(vec![]),
         };
         // The run names its session: kept at once, unmarked.
         session.keep(Some("c0000000-0000-4000-8000-000000000001"));
@@ -1566,6 +1596,8 @@ mod tests {
             told: AtomicUsize::new(0),
             kept: PathBuf::from("/nowhere/session.json"),
             account: "a".into(),
+            room: PathBuf::from("/nowhere/room"),
+            artifacts: Mutex::new(vec![]),
         }));
         assert!(sessions.session("conversation-c1", &token).is_some());
         assert!(sessions.session("conversation-c2", &token).is_none());
