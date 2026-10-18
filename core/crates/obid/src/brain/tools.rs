@@ -411,6 +411,12 @@ fn capped(count: &AtomicUsize, what: &str) -> Result<(), String> {
 /// it is: letting a job's permission through, even once. Saying no to it is Oby's to say.
 fn owners_only(kind: &str, answer: &str) -> Option<&'static str> {
     use crate::permissions::{Decision, inbox_decision};
+    // A job's plan is the owner's to approve or send back, either way (#609).
+    if kind == "plan" {
+        return Some(
+            "Only the owner approves a job's plan or sends it back, in their inbox: Oby can't answer it.",
+        );
+    }
     // A conversation may only refuse a job's permission, and only with a bare no: words to the
     // job's agent, or anything but a plain deny, are the owner's own (N3).
     (kind == "permission" && inbox_decision(answer) != (Decision::Deny, None)).then_some(
@@ -1375,6 +1381,10 @@ mod tests {
         // Only a bare no is Oby's to give.
         for no in ["Deny", "deny", "No", " no "] {
             assert_eq!(owners_only("permission", no), None, "{no}");
+        }
+        // A plan is the owner's either way (#609).
+        for any in ["Approve", "Keep planning", "Deny", "add tests first"] {
+            assert!(owners_only("plan", any).is_some(), "{any}");
         }
         assert_eq!(owners_only("question", "Yes"), None);
     }

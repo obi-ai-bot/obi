@@ -3052,6 +3052,65 @@ fn always_allow_in_the_inbox_waits_for_the_owners_confirm() {
     );
 }
 
+/// A job in Plan mode doesn't approve its own plan (#609): Claude Code's `ExitPlanMode` waits as
+/// a `plan` item holding the plan, which the brain never answers. Keep planning sends the
+/// owner's words back; Approve goes on in Ask mode.
+#[test]
+fn a_plan_waits_for_the_owners_approval() {
+    let folder = Folder::new("brain-plan-approval");
+    let obid = started(&folder);
+    let ask = r#"ASKS: [{"tool": "ExitPlanMode", "input": {"plan": "1. Add src/average.js"}}, {"tool": "ExitPlanMode", "input": {"plan": "1. Add src/average.js\n2. Test an empty list"}}]"#;
+    let id = job_in(&obid, "Average", ask, "plan");
+    let first = within(30, "the plan waits", || {
+        items_of(&obid, "plan")
+            .into_iter()
+            .find(|i| i["job"] == id.as_str())
+    });
+    let first_id = first["id"].as_str().unwrap().to_owned();
+    assert_eq!(first["options"], json!(["Approve", "Keep planning"]));
+    assert_eq!(first["details"], json!(["1. Add src/average.js"]));
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["status"], "running", "{job}");
+    assert_eq!(job["step"], "Waiting for your OK on the plan");
+    // The brain answers it neither way.
+    for option in [1, 2] {
+        queue(
+            &obid,
+            &[answer_item(&first_id, Some(option), None), reply("")],
+        );
+        said(&obid, "go ahead with the average plan");
+        assert!(
+            items_of(&obid, "plan")
+                .iter()
+                .any(|i| i["id"] == first_id.as_str()),
+            "the brain answered option {option}"
+        );
+    }
+    // Keep planning, in the owner's words: the agent hears them and plans again.
+    let kept = owner_answers(&obid, &first_id, "Cover an empty list too");
+    assert_eq!(kept.status, 200, "{}", kept.text);
+    let second = within(30, "the new plan waits", || {
+        items_of(&obid, "plan")
+            .into_iter()
+            .find(|i| i["job"] == id.as_str() && i["id"] != first_id.as_str())
+    });
+    assert_eq!(
+        second["details"],
+        json!(["1. Add src/average.js\n2. Test an empty list"])
+    );
+    let approved = owner_answers(&obid, second["id"].as_str().unwrap(), "Approve");
+    assert_eq!(approved.status, 200, "{}", approved.text);
+    let job = within(30, "the job ends", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["status"] == "done").then_some(job)
+    });
+    assert_eq!(
+        job["summary"],
+        "answers: deny: Cover an empty list too, allow"
+    );
+    assert_eq!(job["mode"], "ask");
+}
+
 /// The review's probe: answering another Obi's request with "Accept, and remember for this
 /// repo" saves no decision and starts no job; a confirm item waits, and the owner's Confirm does
 /// both. A plain Decline is done in the turn.

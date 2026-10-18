@@ -649,6 +649,10 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
     match item.kind.as_str() {
         // A confirm item is the owner's own decision: never answered by the brain.
         "confirm" => Owners::Refuse("only you can confirm it, in your inbox.".into()),
+        // A job's plan is the owner's to approve or send back, either way (#609).
+        "plan" => Owners::Refuse(
+            "it's a job's plan: only you can approve it or send it back, in your inbox.".into(),
+        ),
         // Letting a secret through is the owner's alone, even once (#586); saying no isn't.
         "permission"
             if job
@@ -885,6 +889,12 @@ fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     let Some(permission) = job.permission.as_ref() else {
         return Outcome::Done(format!("{name} isn't waiting for your OK."));
     };
+    // A plan is the owner's to approve or send back, either way (#609).
+    if permission.is_plan() {
+        return Outcome::Done(format!(
+            "{name} waits for you to approve its plan or send it back: only you can, in your inbox."
+        ));
+    }
     // Letting a secret through is the owner's alone, even once (#586); saying no isn't.
     if permission.is_secret() && decision != super::plan::Decision::Deny {
         return Outcome::Done(format!(
