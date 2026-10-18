@@ -85,6 +85,15 @@ struct RunnerTests {
         #expect(accounts.first?.title == "Deskree · Claude Code")
     }
 
+    /// obid sends `label: null` until a tool reports one (#626): its `signedIn` decides, so the usage
+    /// card doesn't say "Signed out" for an account obid signed in (docs/mac-design.md C1).
+    @Test func obidsSignedInAccountWithNoLabel() throws {
+        let json = #"{"id": "personal", "agent": "claude", "name": "Personal", "label": null, "signedIn": true, "fiveHour": null, "sevenDay": null, "running": 0}"#
+        let account = try Runner.decoder.decode(Account.self, from: Data(json.utf8))
+        #expect(account.usage.signedIn)
+        #expect(Usage.notice(account.usage) != "Signed out")
+    }
+
     /// An inbox item as the runner sends it (docs/runner-api.md), in its event and in the list.
     @Test func inboxItems() throws {
         let item = #"{"id": "ab12cd34-question-0", "kind": "question", "job": "ab12cd34", "title": "Nothing committed status", "text": "Failed, or a new status?", "options": ["Failed", "A new status"], "created": "2026-10-10T09:12:00Z", "done": null, "later": null, "answer": null, "state": "open"}"#

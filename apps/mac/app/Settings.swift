@@ -296,8 +296,46 @@ struct RemoteAccessSettingsView: View {
     }
 }
 
-/// Settings › Accounts: the logins Oby spreads jobs across, who pays for each, and how much each has
-/// used, on this Mac and on the runner, as the iPhone shows them (apps/shared/SettingsSections.swift).
+/// Sangam's look for the reserve switch (apps/shared/Usage.swift's `ReserveSwitch`): the switch and its
+/// words as a line under the account's meter, then what it does, and what went wrong.
+private struct ReserveLine: View {
+    let snapshot: Usage.Snapshot
+    let on: Bool
+    var lift: @MainActor (Bool) async throws -> Void
+    @State private var problem: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Toggle(Usage.liftText, isOn: Binding(get: { on }, set: { on in
+                    Task {
+                        problem = nil
+                        do { try await lift(on) } catch { problem = error.localizedDescription }
+                    }
+                }))
+                .toggleStyle(.set)
+                Text(Usage.liftText).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.text)
+            }
+            .padding(.top, 4)
+            SetAbout(Usage.liftNote(snapshot))
+            if let problem { SetAbout(problem, color: Tokens.danger) }
+        }
+    }
+}
+
+/// Where Settings › Accounts lists accounts from (docs/mac-design.md C1), as one list: with obid on
+/// this Mac (Settings › Runner › This Mac) only obid's, which it plans and runs every job on; with a
+/// remote runner this Mac's own and the runner's; with none, this Mac's.
+nonisolated enum AccountPlaces: Equatable, Sendable {
+    case mac, runner
+
+    static func of(local: Bool, runner: Bool) -> [AccountPlaces] {
+        local ? [.runner] : runner ? [.mac, .runner] : [.mac]
+    }
+}
+
+/// Settings › Accounts: the logins Oby spreads jobs across, who pays for each, and how much of its week
+/// each has used, as Sangam's usage rows, from where jobs run (`AccountPlaces`).
 struct AccountsSettingsView: View {
     let store: AccountStore
     let feed: RunnerFeed
@@ -307,9 +345,42 @@ struct AccountsSettingsView: View {
     @State private var removing: Account?
     @State private var problem: String?
 
+    private var places: [AccountPlaces] { AccountPlaces.of(local: feed.local, runner: feed.runner != nil) }
+
     var body: some View {
-        AccountSections("Accounts on this Mac", items: store.accounts, id: \.account.id, usage: \.usage,
-                        place: "on this Mac", row: row)
+        let both = places.count > 1
+        if places.contains(.mac) {
+            AccountSections("Accounts on this Mac", items: store.accounts, id: \.account.id, usage: \.usage,
+                            place: both ? "on this Mac" : nil) { state in
+                AccountUsageRow(state: state, payer: state.account.payer) { lift in _ = store.liftReserve(state.account.id, lift) } buttons: {
+                    if !state.signedIn {
+                        Button("Sign In") { attempt { try store.signIn(state.account) } }.buttonStyle(.set)
+                    } else if state.tetrix == false {
+                        Button("Sign In to Tetrix") { attempt { try store.signIn(state.account, tetrix: true) } }.buttonStyle(.set)
+                    }
+                    Button("Remove", role: .destructive) { removing = state.account }.buttonStyle(.set)
+                }
+            }
+            addAccount
+        }
+        if places.contains(.runner) {
+            // obid's own accounts, signed in on it through each tool's own login. Adding, signing in and
+            // removing them come with obid's accounts API (docs/mac-design.md A2, A3): their buttons go
+            // in this row's `buttons`, and the add form after this list.
+            AccountSections(feed.local ? "Accounts on this Mac" : "Accounts on \(feed.name)", items: feed.accounts, id: \.account.id,
+                            usage: \.usage, place: both ? "on \(feed.name)" : nil,
+                            footer: feed.local ? "Oby's runner on this Mac runs every job on these. Each signs in through its tool's own login." : nil) { state in
+                AccountUsageRow(state: state) { lift in
+                    // The runner's "accounts" event brings the change back.
+                    guard let runner = feed.runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+                    _ = try await runner.liftReserve(state.account.id, lift)
+                } buttons: {}
+            }
+        }
+    }
+
+    /// Adds to this Mac's own accounts, which only Oby on this Mac uses.
+    private var addAccount: some View {
         SetGroup("Add an account", problem: problem) {
             SetRow("Tool", about: agent == "cursor" && !CursorFacts.separateLogins ? "\(CursorFacts.oneLogin): one Cursor account." : nil) {
                 SetSelect("Tool", selection: $agent, options: [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor")])
@@ -340,53 +411,6 @@ struct AccountsSettingsView: View {
         } message: { account in
             Text(account.home == nil ? "Its login stays in the tool's own settings." : "Oby deletes this account's settings folder.")
         }
-        if feed.runner != nil {
-            AccountSections("Accounts on \(feed.name)", items: feed.accounts, id: \.account.id, usage: \.usage,
-                            place: "on \(feed.name)") { state in
-                VStack(alignment: .leading, spacing: 4) {
-                    UsageCard(snapshot: state.usage)
-                    // The runner's "accounts" event brings the change back.
-                    ReserveSwitch(snapshot: state.usage) { lift in
-                        guard let runner = feed.runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
-                        _ = try await runner.liftReserve(state.account.id, lift)
-                    }
-                    if state.signedIn {
-                        SetAbout(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed),
-                                 color: state.tetrix == false ? Tokens.needs : Tokens.muted)
-                    }
-                }
-            }
-        }
-    }
-
-    /// The account's usage card, who pays for it, and its buttons.
-    private func row(_ state: AccountState) -> some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                UsageCard(snapshot: state.usage)
-                ReserveSwitch(snapshot: state.usage) { lift in _ = store.liftReserve(state.account.id, lift) }
-                // A job of its hit the limit: no job goes to it until then.
-                if state.isFull(), let until = state.fullUntil {
-                    SetAbout("Full until \(Limits.clock(until))", color: Tokens.needs)
-                }
-                if !state.account.payer.isEmpty {
-                    SetAbout("Paid by \(state.account.payer)")
-                }
-                if state.signedIn {
-                    SetAbout(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed),
-                             color: state.tetrix == false ? Tokens.needs : Tokens.muted)
-                }
-            }
-            VStack(alignment: .trailing, spacing: 6) {
-                if !state.signedIn {
-                    Button("Sign In") { attempt { try store.signIn(state.account) } }.buttonStyle(.set)
-                } else if state.tetrix == false {
-                    Button("Sign In to Tetrix") { attempt { try store.signIn(state.account, tetrix: true) } }.buttonStyle(.set)
-                }
-                Button("Remove", role: .destructive) { removing = state.account }.buttonStyle(.set)
-            }
-            .padding(.top, 4)
-        }
     }
 
     private func attempt(_ action: () throws -> Void) {
@@ -395,6 +419,60 @@ struct AccountsSettingsView: View {
             problem = nil
         } catch {
             problem = error.localizedDescription
+        }
+    }
+}
+
+/// One account as Sangam's usage row (`.set-usage`, docs/mac-design.md B2): its tool's mark, its name,
+/// who pays and when its week resets, a meter of its week; the 5-hour window past 80%, its reserve,
+/// "Full until" and Tetrix as lines under it; "N% used" and its buttons at the top right.
+struct AccountUsageRow<Buttons: View>: View {
+    let state: AccountState
+    /// Who pays for it: this Mac's accounts know; obid's don't say yet.
+    var payer = ""
+    var lift: @MainActor (Bool) async throws -> Void
+    @ViewBuilder var buttons: Buttons
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            let usage = state.usage, now = context.date
+            SetRow(controlOnTop: true) {
+                HStack(alignment: .top, spacing: 16) {
+                    AgentMark(agent: state.account.agent).font(Tokens.font(13)).foregroundStyle(Tokens.muted)
+                        .frame(width: 16).padding(.top, 2).accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(usage.title)
+                        SetAbout(Usage.about(usage, payer: payer, now: now))
+                        if let week = Usage.week(usage, now: now) {
+                            SetMeter(used: week * 100).padding(.top, 4)
+                        }
+                        if let line = Usage.fiveHourLine(usage, now: now) {
+                            SetAbout(line, color: SetMeter.fill(used: (usage.fiveHour ?? 0) * 100))
+                        }
+                        if usage.reserved(at: now) {
+                            SetAbout(Usage.reservedText, color: Tokens.needs)
+                        } else if usage.inReserve(at: now), let until = usage.liftedUntil(at: now) {
+                            SetAbout(Usage.liftedText(until))
+                        }
+                        if usage.signedIn, usage.inReserve(at: now) {
+                            ReserveLine(snapshot: usage, on: usage.liftedUntil(at: now) != nil, lift: lift)
+                        }
+                        // A job of its hit the limit: no job goes to it until then.
+                        if state.isFull(at: now), let until = state.fullUntil {
+                            SetAbout("Full until \(Limits.clock(until))", color: Tokens.needs)
+                        }
+                        if state.signedIn {
+                            SetAbout(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed),
+                                     color: state.tetrix == false ? Tokens.needs : Tokens.muted)
+                        }
+                    }
+                }
+            } control: {
+                if let used = Usage.usedText(usage, now: now) { SetValue(used) }
+                buttons
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(Usage.spoken(usage, now: now))
         }
     }
 }
@@ -709,6 +787,29 @@ struct ModelsSettingsView: View {
     @State private var problem: String?
 
     var body: some View {
+        // With obid on this Mac it runs every job: its models are the only ones (docs/mac-design.md C2).
+        if feed.local {
+            // In a stack that's always there: the sections are empty until the options arrive, and a
+            // task on an empty view never runs.
+            VStack(alignment: .leading, spacing: 0) {
+                if runnerOptions == nil || feed.models == nil {
+                    SetGroup(problem: problem) { SetRow("Waiting for the runner on this Mac…", quiet: true) }
+                } else {
+                    RunnerModelsSections(options: runnerOptions, models: feed.models, save: feed.setModels,
+                                         footer: "New jobs use these. Oby's brain plans on Haiku, so it stays quick; conversations run on Sonnet in Claude Code.")
+                }
+            }
+            .task(id: feed.connection) { await loadOptions() }
+        } else {
+            mine
+            if feed.runner != nil {
+                RunnerModelsSections(options: runnerOptions, models: feed.models, save: feed.setModels, place: "on \(feed.name)")
+            }
+        }
+    }
+
+    /// This Mac's own models, for the jobs its desk runs.
+    @ViewBuilder private var mine: some View {
         let efforts = AgentModels.claudeEfforts.map { ($0, AgentModels.effortName($0)) }
         SetGroup("Claude Code on this Mac") {
             SetRow("Model") { SetSelect("Claude Code model", selection: $claudeModel, options: AgentModels.claude) }
@@ -733,17 +834,20 @@ struct ModelsSettingsView: View {
             cursorModels = await CursorModels.list(home: account.account.home)
         }
         // Once the runner answers, and again after it comes back or its URL changes.
-        .task(id: feed.connection) {
-            guard feed.connection == .live, let runner = feed.runner else { return }
-            do {
-                runnerOptions = try await runner.modelOptions()
-                problem = nil
-            } catch {
-                problem = error.localizedDescription
-            }
-        }
-        if feed.runner != nil {
-            RunnerModelsSections(options: runnerOptions, models: feed.models, save: feed.setModels, place: "on \(feed.name)")
+        .task(id: feed.connection) { await loadOptions() }
+    }
+
+    /// What the runner offers, once it answers.
+    private func loadOptions() async {
+        #if DEBUG
+        if let staged = feed.stagedOptions { runnerOptions = staged; return }
+        #endif
+        guard feed.connection == .live, let runner = feed.runner else { return }
+        do {
+            runnerOptions = try await runner.modelOptions()
+            problem = nil
+        } catch {
+            problem = error.localizedDescription
         }
     }
 
@@ -771,7 +875,7 @@ extension AccountState {
     var usage: Usage.Snapshot {
         Usage.Snapshot(agent: account.agent, name: account.name, label: label, fiveHour: fiveHour, sevenDay: sevenDay,
                        fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running,
-                       reserveLiftedUntil: reserveLifted)
+                       reserveLiftedUntil: reserveLifted, runnerSignedIn: runnerSignedIn)
     }
 }
 

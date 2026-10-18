@@ -222,6 +222,45 @@ struct WindowScreens {
         try await save("mac-settings-\(page.rawValue)", window: window)
     }
 
+    /// Settings › Accounts and Models with obid on this Mac (docs/mac-design.md C1, B2, C2): made-up
+    /// accounts and models staged on the feed, no runner asked. Home's box with its gauge after them.
+    @Test(arguments: ["accounts", "models", "home"])
+    func obid(_ screen: String) async throws {
+        let suite = try #require(UserDefaults(suiteName: "oby-screens-\(UUID().uuidString)"))
+        suite.set(true, forKey: "ObySidebarOpen")
+        suite.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
+        func account(_ id: String, _ agent: String, _ name: String, week: Double?, fiveHour: Double? = nil, signedIn: Bool = true,
+                     running: Int = 0, tetrix: Bool? = nil) -> AccountState {
+            AccountState(account: Account(id: id, agent: agent, name: name, payer: "", home: nil), label: nil,
+                         fiveHour: fiveHour, sevenDay: week, fiveHourResets: now + 7200, sevenDayResets: now + 3 * 86_400,
+                         running: running, tetrix: tetrix, runnerSignedIn: signedIn)
+        }
+        let model = model()
+        let efforts = ["low", "medium", "high", "xhigh", "max"]
+        model.feed.stage(
+            accounts: [account("personal", "claude", "Personal", week: 0.36, running: 1, tetrix: true),
+                       account("deskree", "claude", "Deskree", week: 0.84, fiveHour: 0.86, tetrix: true),
+                       account("lab", "codex", "Lab", week: 0.12),
+                       account("spare", "cursor", "Spare", week: nil, signedIn: false)],
+            models: ModelSettings(claude: ModelChoice(model: "claude-opus-5-5", effort: "xhigh"), codex: ModelChoice(model: "gpt-6.1-sol", effort: "high"),
+                                  cursor: CursorModelChoice(model: "auto")),
+            options: ModelOptions(claude: .init(models: [.init(id: "claude-opus-5-5", name: "Opus 5.5"), .init(id: "claude-sonnet-5-5", name: "Sonnet 5.5")], efforts: efforts),
+                                  codex: .init(models: [.init(id: "gpt-6.1-sol", name: "gpt-6.1-sol", efforts: ["low", "medium", "high", "xhigh"])]),
+                                  cursor: .init(models: [.init(id: "claude-opus-5-5", name: "Opus 5.5")])))
+        let state = ChatState()
+        if let page = SettingsPage(rawValue: screen) { state.openSettings(page) }
+        let character = ObyCharacter(query: "embed&size=1.23")
+        let window = ChatWindow.make(ChatView(model: model, state: state, character: character).defaultAppStorage(suite),
+                                     size: NSSize(width: 994, height: 900))
+        window.setFrameOrigin(NSPoint(x: 40, y: 40))
+        window.orderFrontRegardless()
+        defer { window.close() }
+        ChatWindow.measureLights(window, into: state)
+        for _ in 0..<50 where !character.ready { try await Task.sleep(for: .milliseconds(100)) }
+        try await Task.sleep(for: .milliseconds(1500))
+        try await save("mac-obid-\(screen)", window: window)
+    }
+
     @Test func taskNeedingYou() async throws {
         let state = ChatState()
         state.trail.start(.group(.review), .job(id: "r1", local: false))

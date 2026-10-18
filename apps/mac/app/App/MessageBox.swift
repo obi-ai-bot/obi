@@ -59,16 +59,16 @@ struct MessageBox: View {
     let onStop: () -> Bool
     /// Esc in the box with nothing to stop.
     var onEscape: (() -> Void)? = nil
-    /// Each account's week, for the gauge by voice-or-send; none, no gauge.
-    var usage: [UsageRow] = []
+    /// Each account's week, for the gauge by voice-or-send; nil where the box doesn't talk to Oby (no gauge).
+    var usage: [UsageRow]? = nil
     /// The + (a screenshot, the clipboard, a file): off where nothing can take them (a task's page).
     var attachments = true
     @State private var width: CGFloat = 480
     @State private var hovering = false
 
     private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    private var stacked: Bool { BoxMetrics.stacked(text, width: width, gauge: !usage.isEmpty) }
-    private var textHeight: CGFloat { BoxMetrics.textHeight(text, width: width, maximum: maximumHeight, gauge: !usage.isEmpty) }
+    private var stacked: Bool { BoxMetrics.stacked(text, width: width, gauge: usage != nil) }
+    private var textHeight: CGFloat { BoxMetrics.textHeight(text, width: width, maximum: maximumHeight, gauge: usage != nil) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -136,8 +136,9 @@ struct MessageBox: View {
         .accessibilityLabel("Add attachment")
     }
 
+    /// Always there where the box talks to Oby, even before an account reports usage (docs/mac-design.md B3).
     @ViewBuilder private var gauge: some View {
-        if !usage.isEmpty { UsageGauge(rows: usage) }
+        if let usage { UsageGauge(rows: usage) }
     }
 
     /// Voice while the box is empty: the talk key does it, so it says how. Send once there's text.
@@ -231,9 +232,13 @@ struct UsageRow: Identifiable, Equatable {
 }
 
 extension IslandModel {
-    /// The accounts a plan can use (the runner's when it plans, else this Mac's), with their week.
+    /// Every account where jobs run (the runner's on this Mac, else this Mac's own, as Settings ›
+    /// Accounts lists them), with its week: nil while it's unknown, signed out or reset.
     var usageRows: [UsageRow] {
-        planAccounts.map { UsageRow(id: $0.account.id, agent: $0.account.agent, name: $0.account.name, week: $0.sevenDay, resets: $0.sevenDayResets) }
+        (feed.local ? feed.accounts : desk.accounts.accounts).map {
+            UsageRow(id: $0.account.id, agent: $0.account.agent, name: $0.account.name,
+                     week: Usage.week($0.usage), resets: $0.sevenDayResets)
+        }
     }
 }
 
@@ -270,6 +275,9 @@ private struct UsageGauge: View {
                     .help("Manage accounts").accessibilityLabel("Manage accounts")
             }
             .padding(.leading, 8)
+            if rows.isEmpty {
+                Text("No accounts yet").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(8)
+            }
             ForEach(rows) { row in
                 let used = row.week ?? 0
                 let level = UsageDot.of(weeks: [row.week])
@@ -285,13 +293,7 @@ private struct UsageGauge: View {
                                 .foregroundStyle(level == .over ? Tokens.over : level == .high ? Tokens.full : Tokens.text)
                                 .frame(minWidth: 32, alignment: .trailing)
                         }
-                        Capsule().fill(Tokens.line).frame(height: 4)
-                            .overlay(alignment: .leading) {
-                                GeometryReader { geometry in
-                                    Capsule().fill(level == .over ? Tokens.over : level == .high ? Tokens.full : Tokens.text)
-                                        .frame(width: geometry.size.width * min(1, max(0, used)))
-                                }
-                            }
+                        SetMeter(used: used * 100)
                     }
                 }
                 .padding(8)

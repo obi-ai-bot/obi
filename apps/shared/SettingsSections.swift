@@ -52,7 +52,8 @@ struct VoiceSection: View {
 }
 
 /// Accounts and their usage: a line on the one with the most room, then each tool's accounts, each
-/// with its usage card (apps/shared/Usage.swift) or the row the device gives it.
+/// with its usage card (apps/shared/Usage.swift) or the row the device gives it. As cards (the Mac),
+/// the line is Sangam's "Most room: …" and each row is the device's own `SetRow`.
 struct AccountSections<Item, ID: Hashable, Row: View>: View {
     var title: String
     var items: [Item]
@@ -60,15 +61,18 @@ struct AccountSections<Item, ID: Hashable, Row: View>: View {
     var usage: (Item) -> Usage.Snapshot
     /// After each tool's name, like "on tetrix-lab", when a form lists accounts from two places.
     var place: String?
+    /// Under the line, as cards.
+    var footer: String?
     var row: (Item) -> Row
 
     init(_ title: String, items: [Item], id: KeyPath<Item, ID>, usage: @escaping (Item) -> Usage.Snapshot,
-         place: String? = nil, @ViewBuilder row: @escaping (Item) -> Row) {
+         place: String? = nil, footer: String? = nil, @ViewBuilder row: @escaping (Item) -> Row) {
         self.title = title
         self.items = items
         self.id = id
         self.usage = usage
         self.place = place
+        self.footer = footer
         self.row = row
     }
 
@@ -76,18 +80,14 @@ struct AccountSections<Item, ID: Hashable, Row: View>: View {
 
     var body: some View {
         if cards {
-            SetGroup(title) {
-                if items.isEmpty {
-                    SetRow("None yet", quiet: true)
-                } else {
-                    SetRow(Usage.summary(items.map(usage)))
+            SetGroup(title, footer: footer) {
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    SetRow(Usage.mostRoom(items.map(usage), now: context.date), quiet: items.isEmpty)
                 }
             }
             ForEach(Usage.agents(items.map { usage($0).agent }), id: \.self) { agent in
                 SetGroup(place.map { "\(Usage.tool(agent)) \($0)" } ?? Usage.tool(agent)) {
-                    ForEach(items.filter { usage($0).agent == agent }, id: id) { item in
-                        SetRow { row(item) }
-                    }
+                    ForEach(items.filter { usage($0).agent == agent }, id: id, content: row)
                 }
             }
         } else {
@@ -127,6 +127,8 @@ struct RunnerModelsSections: View {
     var save: (ModelSettings) async throws -> Void
     /// After each tool's name, like "on tetrix-lab", when the form has this device's models too.
     var place: String? = nil
+    /// Under the last group, as cards.
+    var footer: String? = nil
     /// The pickers' choice since the form opened.
     @State private var chosen: ModelSettings?
     @State private var problem: String?
@@ -149,11 +151,33 @@ struct RunnerModelsSections: View {
                 SetSelect("Claude Code complex job effort", selection: complexBinding(\.claude, choices: claudeComplex), options: claudeComplex.map { ($0, ModelChoice.effortName($0)) })
             }
         }
-        SetGroup(title("Codex"), problem: problem) {
+        let cursor = options.cursor.map { [("auto", "Auto")] + $0.models.filter { $0.id != "auto" }.map { ($0.id, $0.name) } }
+        SetGroup(title("Codex"), footer: cursor == nil ? footer : nil, problem: cursor == nil ? problem : nil) {
             SetRow("Model") { SetSelect("Codex model", selection: binding(\.codex.model), options: options.codex.models.map { ($0.id, $0.name) }) }
             SetRow("Effort") { SetSelect("Codex effort", selection: binding(\.codex.effort), options: codexEfforts.map { ($0, ModelChoice.effortName($0)) }) }
             SetRow("Complex job effort") {
                 SetSelect("Codex complex job effort", selection: complexBinding(\.codex, choices: codexEfforts), options: codexEfforts.map { ($0, ModelChoice.effortName($0)) })
+            }
+        }
+        // Cursor has a model and no effort; an older runner offers none.
+        if let cursor {
+            SetGroup(title("Cursor"), footer: footer, problem: problem) {
+                SetRow("Model") { SetSelect("Cursor model", selection: cursorBinding, options: cursor) }
+            }
+        }
+    }
+
+    /// Cursor's model on the runner, Auto while it has none.
+    private var cursorBinding: Binding<String> {
+        Binding {
+            (chosen ?? models)?.cursor?.model ?? "auto"
+        } set: { value in
+            guard var changed = chosen ?? models else { return }
+            changed.cursor = CursorModelChoice(model: value)
+            chosen = changed
+            Task {
+                do { try await save(changed); problem = nil }
+                catch { problem = error.localizedDescription }
             }
         }
     }

@@ -32,9 +32,11 @@ nonisolated enum Usage {
         var running = 0
         /// Until when the user let it past its weekly reserve (#278), or nil.
         var reserveLiftedUntil: Date? = nil
+        /// What the runner says about the login (`AccountState.runnerSignedIn`); nil: the label says.
+        var runnerSignedIn: Bool? = nil
 
         var tool: String { Usage.tool(agent) }
-        var signedIn: Bool { label != nil }
+        var signedIn: Bool { runnerSignedIn ?? (label != nil) }
         /// "Team" from "Team · name@example.com", or nil.
         var plan: String? { Usage.plan(label) }
         /// "Deskree · Team", or just the name while the plan is unknown.
@@ -255,6 +257,55 @@ nonisolated enum Usage {
         }
         guard jobs > 0 else { return state }
         return state + " · used in \(used) of \(jobs) recent job\(jobs == 1 ? "" : "s") (\(percent(Double(used) / Double(jobs))))"
+    }
+
+    // MARK: Sangam's usage rows (Settings › Accounts on the Mac, docs/mac-design.md B2)
+
+    /// How much of its week an account has used, 0...1: none once the week has reset; nil while
+    /// unknown or signed out.
+    static func week(_ snapshot: Snapshot, now: Date = .now) -> Double? {
+        guard snapshot.signedIn, let used = snapshot.sevenDay else { return nil }
+        return (snapshot.sevenDayResets ?? .distantFuture) > now ? used : 0
+    }
+
+    /// "36% used", at the row's right, or nil while its week is unknown.
+    static func usedText(_ snapshot: Snapshot, now: Date = .now) -> String? {
+        week(snapshot, now: now).map { percent($0) + " used" }
+    }
+
+    /// The line under the account's name: "Paid by Deskree · Resets Mon 21:42 · 1 agent running"; why
+    /// there's no meter in place of the reset ("Signed out", "No usage yet…"). With no payer (obid
+    /// has none yet), it starts at the reset.
+    static func about(_ snapshot: Snapshot, payer: String, now: Date = .now, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        var parts: [String] = []
+        if !payer.isEmpty { parts.append("Paid by \(payer)") }
+        if let notice = notice(snapshot) {
+            parts.append(notice)
+        } else if let resets = snapshot.sevenDayResets, resets > now, week(snapshot, now: now) != nil {
+            let text = resetText(resets, now: now, locale: locale, timeZone: timeZone)
+            parts.append(text.prefix(1).uppercased() + text.dropFirst())
+        }
+        if snapshot.running > 0 { parts.append(runningText(snapshot.running)) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The 5-hour window, only once it's past 80% (Sangam shows the week alone): "5-hour limit 85%
+    /// used · resets in 2 h".
+    static func fiveHourLine(_ snapshot: Snapshot, now: Date = .now, locale: Locale = .current, timeZone: TimeZone = .current) -> String? {
+        guard snapshot.signedIn, let used = snapshot.fiveHour, used > 0.8, (snapshot.fiveHourResets ?? .distantFuture) > now else { return nil }
+        let resets = snapshot.fiveHourResets.map { " · " + resetText($0, now: now, locale: locale, timeZone: timeZone) } ?? ""
+        return "5-hour limit \(percent(used)) used" + resets
+    }
+
+    /// The line over the accounts: the signed-in one with the most of its week left, "Most room:
+    /// Deskree on Codex, 88% left this week", until one reports usage.
+    static func mostRoom(_ snapshots: [Snapshot], now: Date = .now) -> String {
+        let weeks = snapshots.compactMap { snapshot in week(snapshot, now: now).map { (snapshot, $0) } }
+        guard let roomiest = weeks.min(by: { $0.1 < $1.1 }) else {
+            if snapshots.isEmpty { return "None yet" }
+            return snapshots.contains(where: \.signedIn) ? "No usage yet: it updates after the next job." : "No account is signed in."
+        }
+        return "Most room: \(roomiest.0.name) on \(roomiest.0.tool), \(percent(1 - roomiest.1)) left this week"
     }
 
     /// The line above the cards: "All limits under 50%", or the account with the most room left,
