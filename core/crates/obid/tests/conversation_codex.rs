@@ -230,7 +230,7 @@ fn what_codex_plants_for_its_next_run_is_taken_out() {
 fn codex_tokens_never_reach_what_obid_sends() {
     let (_folder, obid) = obid("codex-conv-leak", true);
     let (access, refresh, id, key) = (
-        format!("eyJhbGciOiJSUzI1NiJ9.{}", "a".repeat(40)),
+        access_token(10 * 24 * 3600),
         format!("rt_{}", "b".repeat(40)),
         format!("eyJhbGciOiJSUzI1NiJ9.{}", "c".repeat(40)),
         format!("sk-proj-{}", "d".repeat(40)),
@@ -303,7 +303,7 @@ fn codex_whose_shell_stays_on_is_refused() {
 }
 
 /// The login copy never carries the refresh token, which the provider rotates (G2); a login whose
-/// access token ends before the turn could is refused with why.
+/// access token ends within 5 minutes is refused with the one line that says so.
 #[test]
 fn codex_login_copies_have_no_refresh_token() {
     let login = |seconds| {
@@ -332,7 +332,7 @@ fn codex_login_copies_have_no_refresh_token() {
     let ending = said(&obid, json!({"said": "COPY", "new": true}));
     assert!(
         words(&ending).ends_with(
-            "\n(Oby's plan loop answered: Codex's login for Codex stub ends within this turn, and obid doesn't refresh a conversation's copy: run codex on that account to refresh it.)"
+            "\n(Oby's plan loop answered: The Mac's Codex login for Codex stub needs refreshing: run codex once.)"
         ),
         "{}",
         ending.text

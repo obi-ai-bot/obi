@@ -34,7 +34,8 @@ const SETTINGS: &[&str] = &[
 
 /// The `app-server` to run for one attempt of the turn, and what its thread is started with:
 /// `resume`'s thread when there is one, the conversation's orientation, the configured model.
-/// Refuses, saying why, a Codex whose shell stays on and a login that ends within the turn.
+/// Refuses, saying why, a Codex whose shell stays on and a login copy near its end
+/// ([`crate::jobs::codex_copy_ready`]).
 pub(super) async fn launch(
     shared: &Shared,
     account: &crate::config::Account,
@@ -70,15 +71,6 @@ pub(super) async fn launch(
         flags,
         place.folder.join("agent.log"),
     )?;
-    // The copy can't be refreshed: it must outlast the turn.
-    let login = std::fs::read(place.config.join("auth.json")).unwrap_or_default();
-    let turn_ends = now() + shared.config.conversation.budget.as_secs() + 5 * 60;
-    if ends(&login).is_some_and(|ends| ends <= turn_ends) {
-        return Err(format!(
-            "Codex's login for {} ends within this turn, and obid doesn't refresh a conversation's copy: run codex on that account to refresh it",
-            account.name
-        ));
-    }
     launch.env.push(("OBY_MCP_TOKEN".into(), token.into()));
     let model = &shared.config.conversation.model;
     let options = crate::codex::Options {
@@ -133,27 +125,6 @@ fn feature(listed: &str, name: &str) -> Option<bool> {
             .then(|| words.last().and_then(|w| w.parse().ok()))
             .flatten()
     })
-}
-
-/// When the access token in Codex's `auth.json` ends, in seconds since 1970, if it says (a JWT's
-/// `exp`).
-fn ends(login: &[u8]) -> Option<u64> {
-    use base64::Engine;
-    let login: serde_json::Value = serde_json::from_slice(login).ok()?;
-    let payload = login["tokens"]["access_token"]
-        .as_str()?
-        .split('.')
-        .nth(1)?;
-    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload.trim_end_matches('='))
-        .ok()?;
-    serde_json::from_slice::<serde_json::Value>(&claims).ok()?["exp"].as_u64()
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]

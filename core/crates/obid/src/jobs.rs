@@ -2362,6 +2362,9 @@ impl Jobs {
                     copy_login(login_home().as_deref(), &login, tool, true).map_err(|e| {
                         format!("obid can't copy {}'s login for this job: {e}", tool.name())
                     })?;
+                if tool == Tool::Codex {
+                    codex_copy_ready(&login.join(".codex/auth.json"), &account.name)?;
+                }
                 if copied.from_keychain {
                     keep_keychain_copy(login.join(".claude/.credentials.json"));
                 }
@@ -2564,6 +2567,7 @@ impl Jobs {
                     copy_account_login(tool, &from, login)
                         .map_err(|e| format!("obid can't copy Codex's login: {e}"))?;
                 }
+                codex_copy_ready(&login.join("auth.json"), &account.name)?;
                 spec.accounts.push(login.to_path_buf());
                 extra.push(("CODEX_HOME", login.as_os_str().to_owned()));
             }
@@ -2591,6 +2595,9 @@ impl Jobs {
                 // The tool's own login, copied into a folder of its own as a job's is.
                 let copied = copy_login(login_home().as_deref(), login, tool, true)
                     .map_err(|e| format!("obid can't copy {}'s login: {e}", tool.name()))?;
+                if tool == Tool::Codex {
+                    codex_copy_ready(&login.join(".codex/auth.json"), &account.name)?;
+                }
                 // A conversation's copy of the Keychain's default login is kept fresh by the
                 // keeper while its turn runs, as a job's is (#651); the brain's lives one call.
                 if confined && copied.from_keychain {
@@ -4650,6 +4657,45 @@ fn learn_claude_tokens(bytes: &[u8], service: &str) {
     }
 }
 
+/// Codex's `auth.json` as obid copies it, jobs' and conversations' alike: all of it but
+/// `tokens.refresh_token`, which the provider rotates, so a refresh inside a copy would sign the
+/// owner's own Codex out (as #651 for Claude). `None` when it isn't JSON. obid never writes a
+/// token back.
+fn codex_without_refresh(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut login: Value = serde_json::from_slice(bytes).ok()?;
+    if let Some(tokens) = login.get_mut("tokens").and_then(Value::as_object_mut) {
+        tokens.remove("refresh_token");
+    }
+    serde_json::to_vec(&login).ok()
+}
+
+/// Whether a copied Codex login (`copy`, its `auth.json`) can run: none was copied, an API-key
+/// login (no access token), or an access token whose JWT says it ends more than 5 minutes from now.
+/// A copy can't refresh itself, so else the run stops with the one line that says so.
+pub(crate) fn codex_copy_ready(copy: &Path, account: &str) -> Result<(), String> {
+    let Ok(bytes) = std::fs::read(copy) else {
+        return Ok(());
+    };
+    let login: Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let ready = match login["tokens"]["access_token"].as_str() {
+        None => login.is_object(),
+        Some(token) => jwt_ends(token).is_some_and(|ends| ends > now_ms() / 1000 + 5 * 60),
+    };
+    ready.then_some(()).ok_or_else(|| {
+        format!("The Mac's Codex login for {account} needs refreshing: run codex once.")
+    })
+}
+
+/// When a JWT ends (its `exp`, seconds since 1970), if it says.
+fn jwt_ends(token: &str) -> Option<u64> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    serde_json::from_slice::<Value>(&claims).ok()?["exp"].as_u64()
+}
+
 /// The tokens in Codex's login (`auth.json`: its ChatGPT access, refresh and id tokens, and an API
 /// key), learned as secrets obid knows, so whatever repeats them (an agent, a log) is redacted.
 fn learn_codex_tokens(bytes: &[u8], account: &str) {
@@ -4698,15 +4744,10 @@ pub(crate) fn copy_account_login(tool: Tool, account: &Path, to: &Path) -> std::
         }
         let bytes = std::fs::read(&file)?;
         learn_codex_tokens(&bytes, &account.display().to_string());
-        // Never the refresh token, which the provider rotates: a refresh inside the copy would sign
-        // the owner's own Codex out (as #651 for Claude). Nothing when it isn't JSON.
-        let Ok(mut login) = serde_json::from_slice::<Value>(&bytes) else {
+        let Some(copy) = codex_without_refresh(&bytes) else {
             return Ok(());
         };
-        if let Some(tokens) = login.get_mut("tokens").and_then(Value::as_object_mut) {
-            tokens.remove("refresh_token");
-        }
-        return write_login(&to.join("auth.json"), login.to_string().as_bytes());
+        return write_login(&to.join("auth.json"), &copy);
     }
     // Only what calls the API, never a refresh token, from the Keychain or the folder's file
     // ([`account_login`], #651). An account with a folder of its own isn't refreshed by obid
@@ -4772,7 +4813,14 @@ pub(crate) fn copy_login(
             Ok(meta) if meta.is_file() => {}
             _ => return Ok(()),
         }
-        let bytes = std::fs::read(&from)?;
+        let mut bytes = std::fs::read(&from)?;
+        if tool == Tool::Codex {
+            learn_codex_tokens(&bytes, "~/.codex");
+            let Some(copy) = codex_without_refresh(&bytes) else {
+                return Ok(());
+            };
+            bytes = copy;
+        }
         let _ = std::fs::remove_file(&to);
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -4783,11 +4831,10 @@ pub(crate) fn copy_login(
     for name in secret {
         copy(name)?;
     }
-    if let Ok(bytes) = std::fs::read(login.join(secret[0])) {
-        match tool {
-            Tool::Codex => learn_codex_tokens(&bytes, "~/.codex"),
-            _ => learn_claude_tokens(&bytes, &keychain_service(None)),
-        }
+    if tool == Tool::Claude
+        && let Ok(bytes) = std::fs::read(login.join(secret[0]))
+    {
+        learn_claude_tokens(&bytes, &keychain_service(None));
     }
     // On macOS Claude Code's login may be only in the Keychain (keychain_login).
     let mut from_keychain = false;
@@ -5653,6 +5700,75 @@ mod tests {
         let _ = std::fs::remove_file(root.join("config/.credentials.json"));
         copy_account_login(Tool::Claude, &account, &root.join("config")).unwrap();
         assert!(!root.join("config/.credentials.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A ChatGPT access token (a JWT) that ends `seconds` from now.
+    fn codex_access(seconds: i64) -> String {
+        use base64::Engine;
+        let encode =
+            |v: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+        let ends = (now_ms() / 1000) as i64 + seconds;
+        format!(
+            "{}.{}.sig",
+            encode(json!({"alg": "RS256"})),
+            encode(json!({ "exp": ends }))
+        )
+    }
+
+    /// No copy obid makes of a Codex login, a job's (`copy_login`) or a conversation's
+    /// (`copy_account_login`), carries the refresh token, which the provider rotates; the tokens
+    /// are learned all the same. A copy whose access token ends within 5 minutes, or doesn't say
+    /// when, doesn't run (G2).
+    #[test]
+    fn no_codex_login_copy_carries_a_refresh_token() {
+        let root = std::env::temp_dir().join(format!("obid-codex-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let access = codex_access(3600);
+        let refresh = format!("rt_{}", "q".repeat(40));
+        let login = json!({"auth_mode": "chatgpt", "OPENAI_API_KEY": null, "last_refresh": "2026-10-12T23:13:02Z",
+                           "tokens": {"access_token": access, "refresh_token": refresh, "id_token": "i", "account_id": "a"}});
+        std::fs::write(home.join(".codex/auth.json"), login.to_string()).unwrap();
+        copy_login(Some(&home), &root.join("job"), Tool::Codex, true).unwrap();
+        copy_account_login(
+            Tool::Codex,
+            &home.join(".codex"),
+            &root.join("conversation"),
+        )
+        .unwrap();
+        for copy in [
+            root.join("job/.codex/auth.json"),
+            root.join("conversation/auth.json"),
+        ] {
+            let copied: Value = serde_json::from_slice(&std::fs::read(&copy).unwrap()).unwrap();
+            assert!(copied["tokens"].get("refresh_token").is_none(), "{copied}");
+            assert_eq!(copied["tokens"]["access_token"], access.as_str());
+            assert_eq!(copied["last_refresh"], login["last_refresh"]);
+            assert_eq!(codex_copy_ready(&copy, "Codex"), Ok(()));
+        }
+        let said = crate::secrets::known().redact(&format!("{access} {refresh}"));
+        assert!(
+            !said.contains(&access) && !said.contains(&refresh),
+            "{said}"
+        );
+
+        let refused =
+            Err("The Mac's Codex login for Codex needs refreshing: run codex once.".into());
+        let copy = root.join("conversation/auth.json");
+        for token in [codex_access(60), codex_access(-60), "not-a-jwt".into()] {
+            std::fs::write(
+                &copy,
+                json!({"tokens": {"access_token": token}}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(codex_copy_ready(&copy, "Codex"), refused, "{token}");
+        }
+        // An API-key login has no access token to end; no copy at all is the tool's to report.
+        std::fs::write(&copy, json!({"OPENAI_API_KEY": "sk-x"}).to_string()).unwrap();
+        assert_eq!(codex_copy_ready(&copy, "Codex"), Ok(()));
+        assert_eq!(codex_copy_ready(&root.join("nowhere"), "Codex"), Ok(()));
         let _ = std::fs::remove_dir_all(&root);
     }
 

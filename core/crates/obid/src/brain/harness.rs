@@ -192,7 +192,7 @@ pub async fn run(
 
 /// The plan loop's answer, with the line that says why it answered.
 fn said_why(talk: Talk, why: &str) -> Talk {
-    let line = format!("(Oby's plan loop answered: {why}.)");
+    let line = format!("(Oby's plan loop answered: {}.)", why.trim_end_matches('.'));
     match talk {
         Talk::Reply { text, jobs } if text.is_empty() => Talk::Reply { text: line, jobs },
         Talk::Reply { text, jobs } => Talk::Reply {
