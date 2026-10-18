@@ -204,6 +204,23 @@ struct State {
     /// When obid last tried to read each published pull request, and which one: an unavailable
     /// GitHub isn't asked again on every pass.
     followed: HashMap<String, (String, i64)>,
+    /// The accounts being signed in or removed (crate::accounts): no job is dispatched to them or
+    /// starts on them meanwhile ([`Jobs::begin_change`]).
+    changing: std::collections::HashSet<String>,
+}
+
+/// An account being signed in or removed ([`Jobs::begin_change`]), until this is dropped.
+pub struct Changing {
+    jobs: Arc<Jobs>,
+    account: String,
+}
+
+impl Drop for Changing {
+    fn drop(&mut self) {
+        self.jobs.lock().changing.remove(&self.account);
+        // A job queued on it meanwhile starts now.
+        self.jobs.schedule();
+    }
 }
 
 /// Every job obid has, and the workers running them.
@@ -280,6 +297,7 @@ impl Jobs {
                 apple_logs: HashMap::new(),
                 publishing: std::collections::HashSet::new(),
                 followed: HashMap::new(),
+                changing: std::collections::HashSet::new(),
             }),
             changed: Notify::new(),
             max_running: std::sync::atomic::AtomicUsize::new(max_running),
@@ -494,6 +512,29 @@ impl Jobs {
     /// How many slots are taken: jobs a worker runs.
     pub fn running(&self) -> usize {
         self.lock().workers.len()
+    }
+
+    /// Marks `account` as being signed in or removed, unless a job that hasn't ended (queued or
+    /// running) is on it or it's being changed already: both looked at and set under the jobs'
+    /// lock, so no job slips in between. Until the [`Changing`] is dropped, no job is dispatched to
+    /// the account and none starts on it.
+    pub fn begin_change(self: &Arc<Self>, account: &str) -> Option<Changing> {
+        let mut state = self.lock();
+        let busy = state
+            .jobs
+            .values()
+            .any(|j| j.account == account && j.status.is_active());
+        if busy || !state.changing.insert(account.to_owned()) {
+            return None;
+        }
+        Some(Changing {
+            jobs: self.clone(),
+            account: account.to_owned(),
+        })
+    }
+
+    fn being_changed(&self, account: &str) -> bool {
+        self.lock().changing.contains(account)
     }
 
     /// How many of them run on the account `id`.
@@ -1099,12 +1140,14 @@ impl Jobs {
         }
     }
 
-    /// The configuration of `tool`'s adapter, when obid has one.
-    fn agent_config(&self, tool: Tool) -> Option<&crate::config::Agent> {
+    /// The configuration of `tool`'s adapter, when obid has one, with its accounts as they are now
+    /// (crate::accounts).
+    fn agent_config(&self, tool: Tool) -> Option<crate::config::Agent> {
+        let agents = self.config.agents.get();
         match tool {
-            Tool::Claude => self.config.agents.claude.as_ref(),
-            Tool::Codex => self.config.agents.codex.as_ref(),
-            Tool::Cursor => self.config.agents.cursor.as_ref(),
+            Tool::Claude => agents.claude,
+            Tool::Codex => agents.codex,
+            Tool::Cursor => agents.cursor,
         }
     }
 
@@ -1115,13 +1158,14 @@ impl Jobs {
             return Vec::new();
         };
         match tool {
-            Tool::Claude => claude_accounts(agent),
+            Tool::Claude => claude_accounts(&agent),
             Tool::Codex if agent.accounts.is_empty() => vec![crate::config::Account {
                 id: "codex".into(),
                 name: "Codex".into(),
                 config_dir: None,
+                payer: None,
             }],
-            _ => agent.accounts.clone(),
+            _ => agent.accounts,
         }
     }
 
@@ -1173,7 +1217,19 @@ impl Jobs {
         let home = login_home();
         let mut first = None;
         for tool in &tools {
-            let accounts = self.accounts(*tool);
+            let mut accounts = self.accounts(*tool);
+            if let Some(changing) = named.and_then(|named| {
+                accounts
+                    .iter()
+                    .find(|a| (a.id == named || a.name == named) && self.being_changed(&a.id))
+            }) {
+                return Err(Refused(format!(
+                    "{} is being signed in or removed: try again in a moment.",
+                    changing.name
+                )));
+            }
+            // Routing skips an account being signed in or removed.
+            accounts.retain(|a| !self.being_changed(&a.id));
             match named {
                 // Routing skips an account that isn't signed in (#626).
                 None => {
@@ -1443,6 +1499,15 @@ impl Jobs {
                 .collect();
             queued.sort();
             for (_, id) in queued {
+                // A job queued while its account is signed in or removed waits for that to end
+                // ([`Jobs::begin_change`]).
+                if state
+                    .jobs
+                    .get(&id)
+                    .is_some_and(|j| state.changing.contains(&j.account))
+                {
+                    continue;
+                }
                 if state.workers.len() < self.max_running() {
                     let (sender, receiver) = watch::channel(Signal::Run);
                     state.workers.insert(id.clone(), sender);
@@ -2381,7 +2446,7 @@ impl Jobs {
     ) -> Spec {
         let mut hidden = vec![self.config.home.clone()];
         hidden.extend(person_homes());
-        hidden.extend(account_folders(&self.config.agents, &self.config.home));
+        hidden.extend(self.config.agents.hidden_folders(&self.config.home));
         let mut read_only = sandbox::tool_roots(
             &process::tools_path(),
             &hidden,
@@ -2426,6 +2491,13 @@ impl Jobs {
         account: &crate::config::Account,
         broker: Option<&(String, String)>,
     ) -> Result<Launch, String> {
+        if self.being_changed(&account.id) {
+            return Err(format!(
+                "{} is being signed in or removed, so {} didn't start.",
+                account.name,
+                tool.name()
+            ));
+        }
         let sandbox = self
             .sandbox
             .as_ref()
@@ -2663,7 +2735,7 @@ impl Jobs {
         let temp = temp.to_path_buf();
         let mut hidden = vec![self.config.home.clone()];
         hidden.extend(person_homes());
-        hidden.extend(account_folders(&self.config.agents, &self.config.home));
+        hidden.extend(self.config.agents.hidden_folders(&self.config.home));
         let mut read_only = sandbox::tool_roots(
             &process::tools_path(),
             &hidden,
@@ -4236,6 +4308,7 @@ pub fn claude_accounts(claude: &crate::config::Agent) -> Vec<crate::config::Acco
             id: "default".into(),
             name: "Default".into(),
             config_dir: None,
+            payer: None,
         }]
     } else {
         claude.accounts.clone()
@@ -4382,7 +4455,7 @@ fn keychain(config_dir: Option<&Path>, value: bool) -> Option<Vec<u8>> {
     let user = nix::unistd::User::from_uid(nix::unistd::getuid())
         .ok()??
         .name;
-    let mut command = std::process::Command::new("/usr/bin/security");
+    let mut command = std::process::Command::new(security_bin());
     command
         .args(["find-generic-password", "-s"])
         .arg(keychain_service(config_dir))
@@ -4399,6 +4472,17 @@ fn keychain(config_dir: Option<&Path>, value: bool) -> Option<Vec<u8>> {
 #[cfg(not(target_os = "macos"))]
 fn keychain(_config_dir: Option<&Path>, _value: bool) -> Option<Vec<u8>> {
     None
+}
+
+/// The `security` obid reads the Keychain with: `/usr/bin/security`, or the absolute path in
+/// `OBID_SECURITY_BIN`, which obid's tests set to a stand-in so a test's obid never reads the
+/// person's real Keychain (tests/agents/fake-security).
+#[cfg(target_os = "macos")]
+fn security_bin() -> PathBuf {
+    std::env::var_os("OBID_SECURITY_BIN")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| PathBuf::from("/usr/bin/security"))
 }
 
 /// Whether Claude Code keeps a login for `config_dir` in the Keychain (macOS only).
@@ -6135,6 +6219,47 @@ mod tests {
 
     /// After a refresh, every live copy is written again from the Keychain: one whose run ended
     /// (its file removed) is forgotten, never made again.
+    /// A job queued while its account is signed in or removed waits (its account's change is
+    /// under way), and starts once the change ends, instead of failing.
+    #[tokio::test]
+    async fn a_job_queued_during_an_accounts_change_waits_for_it() {
+        let root = std::env::temp_dir().join(format!("obid-changing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let changing = jobs.begin_change("a").unwrap();
+        let job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        jobs.insert(job);
+        jobs.schedule();
+        assert!(!jobs.lock().workers.contains_key("j"));
+        assert_eq!(jobs.get("j").unwrap().status, Status::Queued);
+        drop(changing);
+        let started = (0..100).any(|_| {
+            jobs.lock().workers.contains_key("j")
+                || jobs.get("j").is_some_and(|j| j.status != Status::Queued)
+        });
+        assert!(started, "the job never started once the change ended");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_refresh_rewrites_the_live_copies_only() {
         let root = std::env::temp_dir().join(format!("obid-copies-{}", std::process::id()));

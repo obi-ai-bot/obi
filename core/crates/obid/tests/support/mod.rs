@@ -223,6 +223,12 @@ pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
         .env("HOME", folder.join("env-home"))
         .env("TMPDIR", folder.join("tmp"))
         .env("OBID_LOG", "info")
+        // Never the person's real Keychain: a stand-in `security` that finds nothing and says
+        // it was asked (tests/agents/fake-security).
+        .env(
+            "OBID_SECURITY_BIN",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-security"),
+        )
         .stdout(Stdio::piped())
         .stderr(
             std::fs::OpenOptions::new()

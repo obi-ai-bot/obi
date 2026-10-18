@@ -575,11 +575,15 @@ fn the_configuration_it_writes_is_obids_defaults() {
     assert!(!config.telemetry);
     assert_eq!(config.bundled_plugins, rig.prefix().join("share/plugins"));
     assert_eq!(config.web, rig.prefix().join("share/web"));
-    let claude = config.agents.claude.expect("Claude Code is configured");
+    let claude = config
+        .agents
+        .get()
+        .claude
+        .expect("Claude Code is configured");
     assert_eq!(claude.bin, "claude");
     assert_eq!(claude.accounts.len(), 1);
     assert_eq!(claude.accounts[0].config_dir, None);
-    assert!(config.agents.cursor.is_none());
+    assert!(config.agents.get().cursor.is_none());
     // The plug-ins and the web app obid ships are where the configuration says.
     assert!(
         rig.prefix()

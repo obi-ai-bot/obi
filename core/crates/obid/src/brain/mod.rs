@@ -448,11 +448,12 @@ fn left_unfinished(job: &crate::job::Job, now: i64) -> bool {
 fn tool_accounts(
     config: &crate::config::Config,
 ) -> Vec<(&'static str, Vec<crate::config::Account>)> {
+    let agents = config.agents.get();
     let mut out = vec![];
-    if let Some(claude) = &config.agents.claude {
+    if let Some(claude) = &agents.claude {
         out.push(("claude", crate::jobs::claude_accounts(claude)));
     }
-    if let Some(codex) = &config.agents.codex {
+    if let Some(codex) = &agents.codex {
         out.push((
             "codex",
             if codex.accounts.is_empty() {
@@ -460,13 +461,14 @@ fn tool_accounts(
                     id: "codex".into(),
                     name: "Codex".into(),
                     config_dir: None,
+                    payer: None,
                 }]
             } else {
                 codex.accounts.clone()
             },
         ));
     }
-    if let Some(cursor) = &config.agents.cursor {
+    if let Some(cursor) = &agents.cursor {
         out.push(("cursor", cursor.accounts.clone()));
     }
     out

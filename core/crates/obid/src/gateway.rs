@@ -507,20 +507,17 @@ async fn forward(State(through): State<Through>, request: Request) -> Response {
 
 /// The accounts' own folders, and the jobs' copies of their logins, which never leave in an answer.
 fn homes(config: &crate::config::Config) -> Vec<String> {
-    [
-        &config.agents.claude,
-        &config.agents.codex,
-        &config.agents.cursor,
-    ]
-    .into_iter()
-    .flatten()
-    .flat_map(|agent| &agent.accounts)
-    .filter_map(|account| account.config_dir.clone())
-    // Where obid copies a job's login for its agent (crate::jobs, `login_home`).
-    .chain([config.home.join("logins")])
-    .map(|dir| dir.to_string_lossy().into_owned())
-    .filter(|dir| !dir.is_empty())
-    .collect()
+    let agents = config.agents.get();
+    [agents.claude, agents.codex, agents.cursor]
+        .into_iter()
+        .flatten()
+        .flat_map(|agent| agent.accounts)
+        .filter_map(|account| account.config_dir)
+        // Where obid copies a job's login for its agent (crate::jobs, `login_home`).
+        .chain([config.home.join("logins")])
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .filter(|dir| !dir.is_empty())
+        .collect()
 }
 
 /// The API's answer, with its status and content type only, scrubbed: whole when it has a known
@@ -691,6 +688,14 @@ mod tests {
         assert!(allows(&Method::GET, "/v1/jobs/abc"));
         assert!(allows(&Method::POST, "/v1/jobs/abc/messages"));
         assert!(!allows(&Method::DELETE, "/v1/jobs/abc"));
+        // Accounts are added, changed, removed and signed in on the machine itself: a paired
+        // phone's token could otherwise sign obid into someone else's account (docs/runner-api.md,
+        // "POST /v1/accounts").
+        assert!(!allows(&Method::POST, "/v1/accounts"));
+        assert!(!allows(&Method::PATCH, "/v1/accounts/abc"));
+        assert!(!allows(&Method::DELETE, "/v1/accounts/abc"));
+        assert!(!allows(&Method::GET, "/v1/accounts/abc/sign-in"));
+        assert!(!allows(&Method::POST, "/v1/accounts/abc/sign-in"));
         assert!(!allows(&Method::GET, "/v1/jobs/abc/def/wait"));
         for (method, path) in [
             (Method::GET, "/v1/connections"),

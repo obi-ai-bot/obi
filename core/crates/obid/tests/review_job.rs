@@ -501,7 +501,9 @@ async fn a_review_agent_cant_search_its_account_folder() {
     let remote = fixture(&folder.0.join("fixture"));
     let mut config = config(&folder.0, &remote, Some("node --test"));
     let prying = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/prying-reviewer");
-    config.agents.claude.as_mut().unwrap().bin = prying.to_str().unwrap().to_owned();
+    let mut agents = config.agents.get();
+    agents.claude.as_mut().unwrap().bin = prying.to_str().unwrap().to_owned();
+    config.agents = obid::accounts::Live::new(agents);
     let account = config.home.join("accounts/stub");
     obid::prepare_home(&config).unwrap();
     std::fs::create_dir_all(&account).unwrap();
@@ -596,7 +598,9 @@ fn reading_jobs(folder: &Path, remote: &Path, agent: &str) -> (std::sync::Arc<Jo
     let bin = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/agents")
         .join(agent);
-    config.agents.claude.as_mut().unwrap().bin = bin.to_str().unwrap().to_owned();
+    let mut agents = config.agents.get();
+    agents.claude.as_mut().unwrap().bin = bin.to_str().unwrap().to_owned();
+    config.agents = obid::accounts::Live::new(agents);
     let account = config.home.join("accounts/stub");
     obid::prepare_home(&config).unwrap();
     std::fs::create_dir_all(&account).unwrap();

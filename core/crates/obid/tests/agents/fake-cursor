@@ -28,6 +28,11 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 
+// Its own sign-in, as obid runs the tool's login (fake-login.mjs).
+if (process.argv[2] === "login") {
+  await (await import(new URL("./fake-login.mjs", import.meta.url))).login("cursor");
+}
+
 if (process.argv.slice(2).join(" ") !== "--sandbox disabled acp") {
   process.stderr.write(`fake-cursor: run as \`fake-cursor --sandbox disabled acp\`, not ${process.argv.slice(2).join(" ")}\n`);
   process.exit(2);

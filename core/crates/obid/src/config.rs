@@ -157,6 +157,9 @@ pub struct Account {
     /// for Cursor its `CURSOR_CONFIG_DIR`, `HOME` and `XDG_CONFIG_HOME` (`<configDir>/.config`).
     /// Null for the tool's own default login (not for Cursor, whose accounts each need one).
     pub config_dir: Option<PathBuf>,
+    /// Who pays for it, as the owner put it ("Deskree"), or none.
+    #[serde(default)]
+    pub payer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -185,7 +188,9 @@ pub struct Config {
     pub home: PathBuf,
     /// The owner's id, as their Sphere knows them.
     pub owner: String,
-    pub agents: Agents,
+    /// The agents and their accounts as they are now: the configuration's, with what the API
+    /// changed laid over them (crate::accounts). Every copy of the configuration shares them.
+    pub agents: crate::accounts::Live,
     pub repos: Vec<Repo>,
     pub allow_file_remotes: bool,
     /// The plug-ins obid ships (`plugins/<id>`), installed into `home/plugins/<id>` at start when
@@ -316,6 +321,15 @@ impl Config {
                     Some(dir) if holds(dir, &file.home) => {
                         return invalid(format!(
                             "agents.{key}.accounts: {}'s configDir {dir:?} holds obid's home: every box would be hidden away with it.",
+                            account.id
+                        ));
+                    }
+                    Some(dir)
+                        if holds(&file.home, dir)
+                            && dir.parent() != Some(file.home.join("accounts").as_path()) =>
+                    {
+                        return invalid(format!(
+                            "agents.{key}.accounts: {}'s configDir {dir:?} is inside obid's home but not a folder of home/accounts: obid's home holds its database, clones and the jobs' worktrees.",
                             account.id
                         ));
                     }
@@ -458,7 +472,7 @@ impl Config {
             listen,
             home: file.home,
             owner: file.owner,
-            agents: file.agents,
+            agents: crate::accounts::Live::new(file.agents),
             repos: file.repos,
             allow_file_remotes: file.allow_file_remotes,
             bundled_plugins: file.bundled_plugins.unwrap_or_else(default_bundled_plugins),
@@ -675,14 +689,15 @@ mod tests {
         assert_eq!(config.listen, "127.0.0.1:7811".parse().unwrap());
         assert_eq!(config.home, PathBuf::from("/srv/obid-home"));
         assert_eq!(config.owner, "wellington");
-        let claude = config.agents.claude.unwrap();
+        let claude = config.agents.get().claude.unwrap();
         assert_eq!(claude.bin, "claude");
         assert_eq!(
             claude.accounts,
             vec![Account {
                 id: "default".into(),
                 name: "Default".into(),
-                config_dir: None
+                config_dir: None,
+                payer: None,
             }]
         );
         assert_eq!(config.repos[0].check.as_deref(), Some("node --test"));
@@ -786,6 +801,28 @@ mod tests {
                 .to_string();
             assert!(error.contains("holds obid's home"), "{dir}: {error}");
         }
+    }
+
+    /// A `configDir` inside obid's home is only a folder of `home/accounts` (where the accounts API
+    /// makes them): never its clones, the jobs' worktrees or anything else of obid's.
+    #[test]
+    fn a_config_dir_in_obids_home_is_only_one_of_its_accounts() {
+        let at = |dir: &str| {
+            let agents = serde_json::json!({"codex": {"bin": "codex",
+                "accounts": [{"id": "w", "name": "W", "configDir": dir}]}});
+            Config::parse(&with(serde_json::json!({"agents": agents})))
+        };
+        for dir in [
+            "/srv/obid-home/worktrees/abc/acct",
+            "/srv/obid-home/clones/o/r",
+            "/srv/obid-home/accounts/x/inner",
+            "/srv/obid-home/logins",
+        ] {
+            let error = at(dir).unwrap_err().to_string();
+            assert!(error.contains("inside obid's home"), "{dir}: {error}");
+        }
+        assert!(at("/srv/obid-home/accounts/work").is_ok());
+        assert!(at("/srv/elsewhere/work").is_ok());
     }
 
     #[test]
@@ -1031,10 +1068,10 @@ mod tests {
             "codex": {"bin": "codex", "accounts": [{"id": "work", "name": "Work", "configDir": "/srv/codex-work"}]},
             "cursor": {"bin": "cursor-agent", "accounts": [{"id": "c", "name": "Cursor", "configDir": "/srv/cursor"}]}});
         let config = Config::parse(&with(serde_json::json!({ "agents": agents }))).unwrap();
-        assert!(config.agents.claude.is_none());
-        assert_eq!(config.agents.codex.unwrap().accounts[0].id, "work");
+        assert!(config.agents.get().claude.is_none());
+        assert_eq!(config.agents.get().codex.unwrap().accounts[0].id, "work");
         assert_eq!(
-            config.agents.cursor.unwrap().accounts[0].config_dir,
+            config.agents.get().cursor.unwrap().accounts[0].config_dir,
             Some(PathBuf::from("/srv/cursor"))
         );
         let agents = serde_json::json!({"cursor": {"bin": "cursor-agent", "accounts": [{"id": "c", "name": "C", "configDir": null}]}});

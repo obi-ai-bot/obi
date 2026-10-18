@@ -217,8 +217,8 @@ async fn run(
         .map_err(|why| format!("there's no job sandbox: {why}"))?;
     let agent = config
         .agents
+        .get()
         .claude
-        .as_ref()
         .ok_or("Claude Code isn't configured")?;
     let account = agent.accounts.first().ok_or("Claude Code has no account")?;
     let bin = process::resolve_bin(&agent.bin).ok_or("Claude Code's binary isn't available")?;
@@ -250,7 +250,7 @@ async fn run(
 
     let mut hidden = vec![config.home.clone()];
     hidden.extend(crate::jobs::person_homes());
-    hidden.extend(crate::jobs::account_folders(&config.agents, &config.home));
+    hidden.extend(config.agents.hidden_folders(&config.home));
     let mut read_only = sandbox::tool_roots(
         &process::tools_path(),
         &hidden,

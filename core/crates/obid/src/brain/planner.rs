@@ -715,8 +715,9 @@ pub struct Planner {
 impl Planner {
     /// The adapters obid has: Claude Code's first account, then Codex's.
     pub fn of(config: &crate::config::Config, room: &Room) -> Vec<Adapter> {
+        let agents = config.agents.get();
         let mut adapters = vec![];
-        if let Some(claude) = &config.agents.claude
+        if let Some(claude) = &agents.claude
             && let Some(bin) = crate::process::resolve_bin(&claude.bin)
             // Run by its absolute path, never one a folder it starts in could change.
             && bin.is_absolute()
@@ -728,7 +729,7 @@ impl Planner {
                 room: room.clone(),
             }));
         }
-        if config.agents.codex.is_some() {
+        if agents.codex.is_some() {
             adapters.push(Adapter::Codex(CodexBrain { room: room.clone() }));
         }
         adapters

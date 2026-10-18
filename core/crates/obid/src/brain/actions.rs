@@ -325,7 +325,7 @@ fn tool_name(agent: &str) -> &str {
 
 /// An account's name, by its id.
 fn account_name(shared: &Shared, id: &str) -> String {
-    let agents = &shared.config.agents;
+    let agents = shared.config.agents.get();
     [&agents.claude, &agents.codex, &agents.cursor]
         .into_iter()
         .flatten()
