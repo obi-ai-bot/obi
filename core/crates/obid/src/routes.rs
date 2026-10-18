@@ -266,6 +266,7 @@ fn new_job(job: &Map<String, Value>) -> Result<NewJob, String> {
         rounds: rounds.map(|r| u32::try_from(r).unwrap_or(u32::MAX)),
         check: text("check")?,
         model: text("model")?,
+        effort: None,
         files,
         attachments: None,
         mode: text("mode")?,

@@ -152,6 +152,8 @@ async fn dispatch(
             base: d.base_branch.clone(),
             mode: d.mode.map(|m| m.as_str().to_owned()),
             brief: d.brief(),
+            effort: (d.complexity == super::plan::Complexity::Routine)
+                .then(|| crate::jobs::ROUTINE_EFFORT.into()),
             ..NewJob::default()
         };
         // Work found by research waits in the inbox for the user's Start (#374).

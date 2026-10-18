@@ -39,6 +39,10 @@ pub const CHECK_TOO_LONG: &str = "obid stopped it after 20 minutes, the most a t
 const CHECK_OUTPUT_MAX: usize = 64 * 1024;
 /// Claude Code's own turn limit for a round.
 const MAX_TURNS: &str = "200";
+/// The model and effort of a routine job's first round (#536's numbers for the brain hold here
+/// too: Sonnet keeps the thread of a small change at a fraction of Opus's time).
+pub const ROUTINE_MODEL: &str = "claude-sonnet-5-5";
+pub const ROUTINE_EFFORT: &str = "low";
 /// The agent's MCP configuration (`--mcp-config`), in the job's own folder (its `HOME`), written
 /// before each turn: the `agent-mcp` plug-ins' servers.
 pub const MCP_CONFIG_FILE: &str = "obi-mcp.json";
@@ -72,6 +76,9 @@ pub struct NewJob {
     pub rounds: Option<u32>,
     pub check: Option<String>,
     pub model: Option<String>,
+    /// The first round's effort: `low` for work the plan called routine, with [`ROUTINE_MODEL`].
+    #[serde(default)]
+    pub effort: Option<String>,
     pub files: Option<Vec<String>>,
     pub attachments: Option<Vec<String>>,
     pub mode: Option<String>,
@@ -1195,6 +1202,7 @@ impl Jobs {
             .or(repo.check.clone())
             .filter(|c| !c.trim().is_empty());
         job.model = new.model.map(|m| m.trim().to_owned());
+        job.effort = new.effort;
         job.files = files;
         job.attachments = new.attachments;
         job.conversation = new.conversation;
@@ -3158,9 +3166,7 @@ impl Jobs {
                 .iter()
                 .map(OsString::from)
                 .collect();
-                if let Some(model) = &job.model {
-                    flags.extend(["--model".into(), model.into()]);
-                }
+                flags.extend(model_flags(&job));
                 if let Some(session) = &job.session {
                     flags.extend(["--resume".into(), session.into()]);
                 }
@@ -4226,6 +4232,22 @@ fn tail(text: &str, max: usize) -> &str {
 }
 
 /// The first prompt of the owner's job (Engine/Jobs.swift, `Prompts.agent`, for what obid does).
+/// The model a Claude Code round runs with: the job's own, when it names one; else a routine job's
+/// first round (`effort` set from the plan's `complexity`) on [`ROUTINE_MODEL`], and every other
+/// round at Claude Code's own default.
+fn model_flags(job: &Job) -> Vec<OsString> {
+    match (&job.model, &job.effort) {
+        (Some(model), _) => vec!["--model".into(), model.into()],
+        (None, Some(effort)) if job.current_round() == 1 => vec![
+            "--model".into(),
+            ROUTINE_MODEL.into(),
+            "--effort".into(),
+            effort.into(),
+        ],
+        _ => vec![],
+    }
+}
+
 fn owner_prompt(job: &Job) -> String {
     let base = job
         .base
@@ -4622,6 +4644,41 @@ mod tests {
         );
     }
     use super::*;
+
+    /// A routine job's first round thinks with Sonnet at low effort: one-line changes waited 11
+    /// to 17 seconds on Opus. Its later rounds (a failed check, the owner's words), a complex job
+    /// and a job that names its model keep theirs.
+    #[test]
+    fn a_routine_first_round_runs_on_a_lighter_model() {
+        let mut job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        let flags = |job: &Job| -> Vec<String> {
+            model_flags(job)
+                .into_iter()
+                .map(|f| f.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert!(
+            flags(&job).is_empty(),
+            "a complex job keeps Claude Code's default"
+        );
+        job.effort = Some(ROUTINE_EFFORT.into());
+        assert_eq!(flags(&job), ["--model", ROUTINE_MODEL, "--effort", "low"]);
+        job.round = Some(2);
+        assert!(
+            flags(&job).is_empty(),
+            "a later round keeps Claude Code's default"
+        );
+        job.round = Some(1);
+        job.model = Some("claude-opus-5-5".into());
+        assert_eq!(flags(&job), ["--model", "claude-opus-5-5"]);
+    }
 
     /// A job from before modes is in Bypass; a mode this obid can't read asks (security review
     /// of #586, S4).
