@@ -1640,8 +1640,15 @@ impl Jobs {
             .lock()
             .asks
             .get(id)
-            .and_then(|asks| asks.front().map(|a| a.permission.id.clone()));
-        if let Some(permission) = waiting {
+            .and_then(|asks| asks.front().map(|a| a.permission.clone()));
+        // A plan goes back only on the owner's own words (#609).
+        if waiting.as_ref().is_some_and(Permission::is_plan) && source != Source::Owner {
+            return Some(Err(Refused(
+                "It waits for the owner to approve its plan or send it back, in their inbox."
+                    .into(),
+            )));
+        }
+        if let Some(Permission { id: permission, .. }) = waiting {
             return Some(
                 self.answer_permission(id, &permission, Decision::Deny, Some(text))
                     .map_err(|e| match e {
@@ -1901,12 +1908,18 @@ impl Jobs {
         };
         let call = Call::new(tool, input);
         let bounds = self.bounds(&job, worktree);
-        match permissions::decide(
-            &call,
-            Self::mode_of(&job),
-            &self.rules_for(&job.repo),
-            &bounds,
-        ) {
+        let mode = Self::mode_of(&job);
+        // Claude Code's plan in Plan mode waits for the owner's own answer (#609). Codex ends its
+        // turn with its plan, and Cursor's goes on as it did.
+        let plan = call.tool == "ExitPlanMode"
+            && mode == Mode::Plan
+            && Tool::from_id(&job.agent) == Some(Tool::Claude);
+        let verdict = if plan {
+            permissions::Verdict::Ask
+        } else {
+            permissions::decide(&call, mode, &self.rules_for(&job.repo), &bounds)
+        };
+        match verdict {
             permissions::Verdict::Allow => {
                 self.answered(id, &call, worktree, None);
                 Ruling::Now(Answer::Allow)
@@ -1977,7 +1990,9 @@ impl Jobs {
         }
         self.update(id, |job| {
             job.permission = first.clone();
-            if first.is_some() {
+            if first.as_ref().is_some_and(Permission::is_plan) {
+                job.step = "Waiting for your OK on the plan".into();
+            } else if first.is_some() {
                 job.step = "Waiting for your OK".into();
             } else if let Some(step) = step {
                 job.step = step;
@@ -2001,8 +2016,9 @@ impl Jobs {
             };
             let mut kept = VecDeque::new();
             while let Some(ask) = asks.pop_front() {
-                // A secret waits for the owner's own answer: a new mode or rule never settles it.
-                if ask.permission.is_secret() {
+                // A secret or a plan waits for the owner's own answer: a new mode or rule never
+                // settles it.
+                if ask.permission.is_secret() || ask.permission.is_plan() {
                     kept.push_back(ask);
                     continue;
                 }
@@ -2072,15 +2088,25 @@ impl Jobs {
             }
             asks.pop_front().expect("one waits")
         };
+        let plan = ask.permission.is_plan();
         let said = match decision {
+            Decision::Allow if plan => permissions::APPROVE.to_owned(),
             Decision::Allow => permissions::ALLOW.to_owned(),
             Decision::Always => permissions::ALWAYS_ALLOW.to_owned(),
+            Decision::Deny if plan => words.unwrap_or(permissions::KEEP_PLANNING).to_owned(),
             Decision::Deny => words.unwrap_or(permissions::DENY).to_owned(),
         };
         let answer = match decision {
+            Decision::Deny if plan => {
+                Answer::Deny(words.unwrap_or(permissions::PLAN_SENT_BACK).to_owned())
+            }
             Decision::Deny => Answer::Deny(words.unwrap_or(permissions::SAID_NO).to_owned()),
             _ => Answer::Allow,
         };
+        // An approved plan goes on in the default mode, before the agent's next call is judged.
+        if plan && matches!(answer, Answer::Allow) {
+            self.update(id, |job| job.mode = Some(Mode::Ask.as_str().to_owned()));
+        }
         let title = ask.permission.title.clone();
         // Its item settles, and its words are noted, before the agent hears the answer (and asks
         // its next).
@@ -2104,7 +2130,11 @@ impl Jobs {
         }
         self.show(
             id,
-            Some(if decision == Decision::Deny {
+            Some(if plan && decision == Decision::Deny {
+                "Planning again".to_owned()
+            } else if plan {
+                "Plan approved".to_owned()
+            } else if decision == Decision::Deny {
                 format!("You said no: {title}")
             } else {
                 format!("Allowed: {title}")
@@ -7083,6 +7113,76 @@ mod tests {
             );
         }
         assert_eq!(jobs.list(10).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #609: Claude Code's plan in Plan mode waits for the owner: a new mode or the brain's words
+    /// don't settle it, Keep planning sends it back and Approve goes on in Ask mode. Cursor's plan
+    /// goes on as before.
+    #[tokio::test]
+    async fn a_plan_in_plan_mode_waits_for_the_owner() {
+        let root = std::env::temp_dir().join(format!("obid-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        for (id, agent) in [("j", "claude"), ("c", "cursor")] {
+            let mut job = Job::new(
+                id.into(),
+                "o/r".into(),
+                "fix".into(),
+                "Fix it".into(),
+                agent.into(),
+                "a".into(),
+            );
+            job.status = Status::Running;
+            job.mode = Some("plan".into());
+            jobs.lock().jobs.insert(id.into(), job);
+        }
+        let worktree = root.join("worktree");
+        let plan = |id: &str, text: &str| {
+            jobs.rule_on(id, "ExitPlanMode", &json!({"plan": text}), &worktree)
+        };
+        assert!(matches!(plan("c", "1. Fix"), Ruling::Now(Answer::Allow)));
+        let Ruling::Ask(sent_back) = plan("j", "1. Fix") else {
+            panic!("the plan went through by itself");
+        };
+        let job = jobs.get("j").unwrap();
+        let permission = job.permission.clone().unwrap();
+        assert!(permission.is_plan() && permission.rule.is_none());
+        assert_eq!(
+            (permission.title.as_str(), permission.detail.as_str()),
+            ("Approve the plan?", "1. Fix")
+        );
+        assert_eq!(job.step, "Waiting for your OK on the plan");
+        jobs.set_mode("j", Mode::Bypass);
+        let refused = jobs.message("j", "looks good", Source::Untrusted).unwrap();
+        assert!(refused.is_err());
+        assert!(jobs.get("j").unwrap().permission.is_some(), "still waiting");
+        jobs.set_mode("j", Mode::Plan);
+        jobs.answer_permission("j", &permission.id, Decision::Deny, None)
+            .unwrap();
+        assert_eq!(
+            sent_back.await.unwrap(),
+            Answer::Deny(permissions::PLAN_SENT_BACK.into())
+        );
+        let Ruling::Ask(approved) = plan("j", "1. Fix\n2. Test") else {
+            panic!("the plan went through by itself");
+        };
+        let again = jobs.get("j").unwrap().permission.unwrap().id;
+        jobs.answer_permission("j", &again, Decision::Allow, None)
+            .unwrap();
+        assert_eq!(approved.await.unwrap(), Answer::Allow);
+        assert_eq!(jobs.get("j").unwrap().mode.as_deref(), Some("ask"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

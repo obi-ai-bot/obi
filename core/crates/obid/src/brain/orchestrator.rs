@@ -199,7 +199,7 @@ impl Seen {
             || item.done.is_some()
             || item.id.starts_with("orchestrator-")
             // Already the owner's to decide: escalating would only leave a second item for it.
-            || matches!(item.kind.as_str(), "confirm" | "start" | "permission" | "question")
+            || matches!(item.kind.as_str(), "confirm" | "start" | "permission" | "plan" | "question")
         {
             return vec![];
         }
@@ -430,7 +430,7 @@ impl Orchestration {
                 .and_then(|o| usize::try_from(o).ok()?.checked_sub(1))
                 .and_then(|o| item.options.get(o));
             let permitted = plan.answer.is_none()
-                && !matches!(item.kind.as_str(), "permission" | "question")
+                && !matches!(item.kind.as_str(), "permission" | "plan" | "question")
                 && picked.is_some_and(|o| INBOX_OPTIONS.contains(&o.as_str()));
             if !(belongs && permitted) {
                 return Err(escalate(

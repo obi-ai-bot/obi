@@ -238,6 +238,11 @@ impl Briefing {
                     "what it asks to do is quoted in {FILE}. Options: {}.",
                     item.options.join(" | ")
                 ),
+                // The agent's plan is its own: in the quoted file, with the job's permission.
+                "plan" => format!(
+                    "the plan is quoted in {FILE}. Options: {}.",
+                    item.options.join(" | ")
+                ),
                 // Other Obis' requests and plug-ins' events: obid's words from their typed
                 // fields; their data is quoted on the item, never here.
                 _ => format!(
@@ -713,6 +718,7 @@ pub fn with_own(file: Option<String>, own: &[Own], nonce: &str) -> Option<String
 fn kind(kind: &str) -> &str {
     match kind {
         "permission" => "Permission",
+        "plan" => "A job's plan, waiting for the user's own approval (Oby can't answer it)",
         "obiRequest" => "Request from another Obi",
         "pluginEvent" => "Plug-in event",
         "confirm" => "Waiting for the user's own Confirm (Oby can't answer it)",
