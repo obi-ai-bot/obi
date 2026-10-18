@@ -45,6 +45,10 @@ pub struct Turn {
     /// summary, which its agent may have written: the brain's briefing reads only the first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ended: bool,
+    /// The artifacts Oby made in this turn, `{id, version}` each (docs/conversation-harness.md,
+    /// section 4). Left out when it made none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Value>,
 }
 
 /// One conversation as obid keeps it.
@@ -311,7 +315,7 @@ impl Conversations {
             threads.len() - 1
         });
         let before = threads[index].turns.clone();
-        let turn = match self.add(&mut threads, index, "user", said, vec![], false) {
+        let turn = match self.add(&mut threads, index, "user", said, vec![], false, vec![]) {
             Ok(turn) => turn.id,
             Err(e) => {
                 if found.is_none() {
@@ -346,12 +350,23 @@ impl Conversations {
         text: String,
         jobs: Vec<String>,
     ) -> Result<Turn, Error> {
-        self.append_as(id, who, text, jobs, false)
+        self.append_as(id, who, text, jobs, false, vec![])
+    }
+
+    /// Oby's turn in the conversation `id`, with the artifacts it made (`{id, version}` each).
+    pub fn append_made(
+        &self,
+        id: &str,
+        text: String,
+        jobs: Vec<String>,
+        artifacts: Vec<Value>,
+    ) -> Result<Turn, Error> {
+        self.append_as(id, "oby", text, jobs, false, artifacts)
     }
 
     /// Oby's turn telling the conversation `id` how the job `job` ended ([`job_report`], #351).
     pub fn job_ended(&self, id: &str, text: String, job: String) -> Result<Turn, Error> {
-        self.append_as(id, "oby", text, vec![job], true)
+        self.append_as(id, "oby", text, vec![job], true, vec![])
     }
 
     fn append_as(
@@ -361,16 +376,18 @@ impl Conversations {
         text: String,
         jobs: Vec<String>,
         ended: bool,
+        artifacts: Vec<Value>,
     ) -> Result<Turn, Error> {
         let mut threads = self.lock();
         let index = threads
             .iter()
             .position(|t| t.id == id)
             .ok_or(Error::NoConversation)?;
-        self.add(&mut threads, index, who, text, jobs, ended)
+        self.add(&mut threads, index, who, text, jobs, ended, artifacts)
     }
 
     /// The turn, kept, written and announced: the conversation as it is now, then the turn.
+    #[allow(clippy::too_many_arguments)]
     fn add(
         &self,
         threads: &mut [Thread],
@@ -379,6 +396,7 @@ impl Conversations {
         text: String,
         jobs: Vec<String>,
         ended: bool,
+        artifacts: Vec<Value>,
     ) -> Result<Turn, Error> {
         let sequence = next_sequence(threads);
         let thread = &mut threads[index];
@@ -391,6 +409,7 @@ impl Conversations {
             jobs,
             conversation: thread.id.clone(),
             ended,
+            artifacts,
         };
         thread.turns.push(turn.clone());
         let excess = thread.turns.len().saturating_sub(KEPT);

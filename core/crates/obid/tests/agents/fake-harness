@@ -19,6 +19,7 @@
 //                  secret, a command that sends a file from outside the room, another MCP tool
 //   SAY <words>    streams <words> in three deltas and says them
 //   READREPO <w>   reads a file under repos/ (taints the turn), then does <w>
+//   MAKEPAGE <w>   writes page/index.html in its room (a list of functions), then does <w>
 //   GREP <w>       searches the room with no path (repos/ in it, taints the turn), then does <w>
 //   TOOLSEARCH     makes a ToolSearch tool call (the deferred-tool lookup), then says "searched"
 //   LINGER <ms>    waits that long, then says "waited" (not WAIT: a bare "wait" is a cancel word)
@@ -28,7 +29,7 @@
 //   FAIL           ends the turn with an error result
 //   anything else  says "Nothing to do." (what it says as a job's agent)
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
@@ -143,6 +144,12 @@ async function act(words, prompt = "") {
     use("r1", "Read", { file_path: join(room, "repos/obi-e2e/fixture-app/package.json") });
     used("r1", "{}");
     await act(words.slice(9));
+  } else if (words.startsWith("MAKEPAGE ")) {
+    mkdirSync(join(room, "page"), { recursive: true });
+    writeFileSync(join(room, "page/index.html"), "<!doctype html><title>Functions</title><ul><li>greet</li></ul>\n");
+    use("p1", "Write", { file_path: join(room, "page/index.html") });
+    used("p1", "ok");
+    await act(words.slice(9), prompt);
   } else if (words.startsWith("GREP ")) {
     use("g1", "Grep", { pattern: "greeting" });
     used("g1", "repos/obi-e2e/fixture-app/src/greet.js");

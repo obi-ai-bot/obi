@@ -153,6 +153,7 @@ mod tests {
                         jobs: vec![],
                         conversation: "c1".into(),
                         ended: false,
+                        artifacts: vec![],
                     },
                 )
             })

@@ -21,8 +21,6 @@ use crate::api::Shared;
 const VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Oby's tools, as `tools/list` gives them.
-// oby_artifact belongs to the artifacts lane (docs/conversation-harness.md, section 4): it joins
-// this list and `call` there.
 fn list() -> Value {
     let id = json!({"type": "string", "description": "The job's id, as oby_jobs gives it."});
     json!([
@@ -53,7 +51,14 @@ fn list() -> Value {
         {"name": "oby_answer", "description": "Answers an inbox item Oby may answer, with one of its options or words. A job's permission can only be refused here; the owner's own decisions (letting a permission through, confirms, secrets, publishing, what persists or widens trust) are refused, or wait for their OK.",
          "inputSchema": {"type": "object", "properties": {"item": {"type": "string"}, "answer": {"type": "string"}}, "required": ["item", "answer"]}},
         {"name": "oby_conversations", "description": "Finds Oby's past conversations by what was said in them. What was said is quoted data.",
-         "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}
+         "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
+        {"name": "oby_artifact", "description": "Publishes a file or folder of your room as an artifact the owner's apps show (a page, a doc, an image, a PDF, a canvas), or a new version of one this conversation made. HTML runs with no network. Answers its id and version.",
+         "inputSchema": {"type": "object", "properties": {
+             "title": {"type": "string", "description": "One line, 1 to 100 characters."},
+             "path": {"type": "string", "description": "A file or folder in your room, relative to it: a folder with index.html, a .html, .md, image or .pdf file, or a folder with canvas.json."},
+             "kind": {"type": "string", "enum": ["html", "markdown", "image", "pdf", "canvas"], "description": "Left out: from the file or folder."},
+             "artifact": {"type": "string", "description": "An artifact's id to publish a new version of it."}},
+             "required": ["title", "path"]}}
     ])
 }
 
@@ -170,6 +175,7 @@ async fn call(
                 &super::find::section(&super::briefing::line(&query, 200), &words, &found),
             ))
         }
+        "oby_artifact" => artifact(shared, session, args).await,
         other => Err(format!("Oby has no tool {other}.")),
     }
 }
@@ -198,6 +204,51 @@ struct Reply {
 #[serde(deny_unknown_fields)]
 struct Find {
     query: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Make {
+    title: String,
+    path: String,
+    kind: Option<String>,
+    artifact: Option<String>,
+}
+
+/// oby_artifact: a file or folder of the room published as an artifact of this conversation
+/// (crate::artifacts), or a new version of one it made. Its id and version go on the turn. The
+/// agent's own output, so it doesn't taint the turn. A refusal is #648's one line, "Not
+/// published: …".
+async fn artifact(shared: &Arc<Shared>, session: &Session, args: Value) -> Result<String, String> {
+    let Make {
+        title,
+        path,
+        kind,
+        artifact,
+    } = parse(args)?;
+    let kind = match kind.as_deref() {
+        None => None,
+        Some(text) => Some(crate::artifacts::Kind::parse(text).ok_or_else(|| {
+            format!("Not published: kind is html, markdown, image, pdf or canvas, not {text}.")
+        })?),
+    };
+    let (id, version) = shared
+        .artifacts
+        .publish(crate::artifacts::Publish {
+            root: &session.room,
+            path: &path,
+            title: &title,
+            kind,
+            conversation: Some(&session.conversation),
+            job: None,
+            artifact: artifact.as_deref(),
+        })
+        .await?;
+    let mut made = session.artifacts.lock().unwrap_or_else(|e| e.into_inner());
+    // One entry per artifact: a later version this turn replaces the earlier.
+    made.retain(|a| a["id"] != id.as_str());
+    made.push(json!({"id": id, "version": version}));
+    Ok(format!("Published artifact {id}, version {version}."))
 }
 
 #[derive(Deserialize)]
