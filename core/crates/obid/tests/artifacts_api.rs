@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use support::*;
 
-const POLICY: &str = "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' data: blob:; style-src 'self' 'unsafe-inline' data:; img-src 'self' data: blob:; connect-src 'none'; frame-ancestors 'none'; sandbox allow-scripts";
+const POLICY: &str = "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' data: blob:; style-src 'self' 'unsafe-inline' data:; img-src 'self' data: blob:; connect-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts";
 const PNG: [u8; 12] = [
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00, 0x80,
 ];
@@ -70,12 +70,17 @@ fn header<'a>(head: &'a str, name: &str) -> Vec<&'a str> {
 /// A research job whose agent writes `.obi/artifacts/` (tests/agents/fake-claude, ARTIFACTS),
 /// waited on to its end.
 fn job_with_artifacts(obid: &Obid) -> Value {
+    job_doing(obid, "ARTIFACTS")
+}
+
+/// A research job with `task`, waited on to its end.
+fn job_doing(obid: &Obid, task: &str) -> Value {
     let answer = call(
         obid,
         "POST",
         "/v1/jobs",
         Some(
-            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research", "task": "ARTIFACTS", "title": "Make artifacts"}}),
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research", "task": task, "title": "Make artifacts"}}),
         ),
     );
     assert_eq!(answer.status, 201, "{}", answer.text);
@@ -128,20 +133,26 @@ fn a_jobs_artifacts_are_published_when_it_ends() {
     let titles: Vec<&str> = artifacts.iter().map(|(t, _)| t.as_str()).collect();
     assert_eq!(titles, ["chart", "notes", "page"], "{job}");
     let problems = job["artifactProblems"].as_array().unwrap();
-    assert_eq!(problems.len(), 2, "{job}");
+    assert_eq!(problems.len(), 3, "{job}");
+    // The entry whose name is a key: refused, and its name never said (#648's review, F2).
+    assert_eq!(
+        problems[0], "Not published: a name in it looks like a secret, so obid doesn't say it.",
+        "{job}"
+    );
+    assert!(!job.to_string().contains("QWERTYUIOP"), "{job}");
     assert!(
-        problems[0]
+        problems[1]
             .as_str()
             .unwrap()
             .starts_with("away.md: Not published: .obi/artifacts/away.md is a link"),
         "{job}"
     );
     assert!(
-        problems[1]
+        problems[2]
             .as_str()
             .unwrap()
             .starts_with("leak.md: Not published: the secret scan found")
-            && problems[1].as_str().unwrap().contains("AWS access key"),
+            && problems[2].as_str().unwrap().contains("AWS access key"),
         "{job}"
     );
     let published = events_named(&events, "artifact", 30, |got| got.len() >= 3);
@@ -422,4 +433,23 @@ fn a_phone_reads_artifacts_through_the_gateway() {
         .body["title"],
         "page"
     );
+}
+
+/// A job publishes at most 20 entries of its `.obi/artifacts/`, the first by name; the rest are
+/// refused in one line (#648's review, F3).
+#[test]
+fn a_job_publishes_at_most_twenty_artifacts() {
+    let folder = Folder::new("artifacts-many");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote, &agent()), None);
+    let job = job_doing(&obid, "ARTIFACTS_MANY");
+    assert_eq!(job["artifacts"].as_array().unwrap().len(), 20, "{job}");
+    assert_eq!(
+        job["artifactProblems"],
+        json!(["5 more entries: Not published: a job publishes at most 20 artifacts."]),
+        "{job}"
+    );
+    let titles: Vec<String> = by_title(&obid, &job).into_iter().map(|(t, _)| t).collect();
+    assert_eq!(titles.first().map(String::as_str), Some("n00"));
+    assert_eq!(titles.last().map(String::as_str), Some("n19"));
 }

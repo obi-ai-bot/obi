@@ -7,14 +7,18 @@
 //! (crate::jobs) and for a conversation's `oby_artifact` tool. It copies from a folder the agent
 //! wrote, so nothing there is trusted: every folder and file is opened without following a link
 //! (`O_NOFOLLOW`, each one inside the folder already opened), so a link anywhere, on the way or
-//! inside, is refused, as is anything that isn't a plain file or folder; hidden names (`.git`,
-//! `.DS_Store`) are left out; a version holds at most [`MAX_FILES`] entries and [`MAX_BYTES`]. Then
-//! every file goes through the publish gate's secret scan (crate::scan): any finding, or a scan
-//! that can't run, and nothing is kept.
+//! inside, is refused, as is anything that isn't a plain file or folder, a file with another
+//! (hard) link to it, and anything on another disk; hidden names (`.git`, `.DS_Store`) are left
+//! out but counted; a version holds at most [`MAX_FILES`] entries and [`MAX_BYTES`], an artifact
+//! [`MAX_VERSIONS`] versions. Then every file, read as text whatever its bytes, and every name
+//! (the path, the title, each file's) go through the publish gate's secret scan (crate::scan):
+//! any finding, or a scan that can't run, and nothing is kept. A refusal that would repeat a name
+//! that looks like a secret says [`NAME_REFUSED`] instead.
 
 use std::ffi::CString;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -37,14 +41,23 @@ pub const MAX_BYTES: u64 = 50 * 1024 * 1024;
 pub const MAX_FILES: usize = 2000;
 /// How deep folders in one version go.
 const MAX_DEPTH: usize = 32;
+/// The most versions one artifact keeps: past it, a new one is refused.
+pub const MAX_VERSIONS: u32 = 50;
+/// The most entries of a job's `.obi/artifacts/` published at its end: the rest are refused.
+pub const MAX_JOB_ENTRIES: usize = 20;
+/// What a refusal says instead, when what it would say holds what looks like a secret (a name).
+pub const NAME_REFUSED: &str =
+    "Not published: a name in it looks like a secret, so obid doesn't say it.";
 /// The longest title.
 const TITLE: usize = 100;
 
-/// What every file obid serves from an artifact carries: its scripts run, but it reaches nothing
-/// past its own files (`connect-src 'none'`, no frame of it in another page), and `sandbox
-/// allow-scripts` gives it an origin of its own, so it can't read what obid's other pages keep
-/// on this origin (the web app's token in session storage), open windows or send forms.
-pub const POLICY: &str = "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' data: blob:; style-src 'self' 'unsafe-inline' data:; img-src 'self' data: blob:; connect-src 'none'; frame-ancestors 'none'; sandbox allow-scripts";
+/// What every file obid serves from an artifact carries: its scripts run, but it loads and
+/// fetches nothing past its own files (`connect-src 'none'`, no plug-in, no `<base>`, no form, no
+/// frame of it in another page), and `sandbox allow-scripts` gives it an origin of its own, so it
+/// can't read what obid's other pages keep on this origin (the web app's token in session
+/// storage) or open windows. A CSP can't stop it navigating itself, WebRTC, DNS prefetch or a
+/// meta refresh: the apps deny navigation (docs/conversation-harness.md, section 4).
+pub const POLICY: &str = "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' data: blob:; style-src 'self' 'unsafe-inline' data:; img-src 'self' data: blob:; connect-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -151,6 +164,14 @@ impl Artifacts {
     /// artifact's latest version, that version is the answer and nothing new is kept. `Err` is
     /// one line saying why nothing was published.
     pub async fn publish(&self, what: Publish<'_>) -> Result<(String, u32), String> {
+        match self.publish_unsaid(what).await {
+            Ok(made) => Ok(made),
+            // A refusal may name what it refused: never a name that looks like a secret.
+            Err(why) => Err(self.speakable(why).await),
+        }
+    }
+
+    async fn publish_unsaid(&self, what: Publish<'_>) -> Result<(String, u32), String> {
         let title = clean_title(what.title)
             .ok_or("Not published: the title is one line of 1 to 100 characters.")?;
         let before = match what.artifact {
@@ -196,6 +217,12 @@ impl Artifacts {
         copied: Result<Copied, String>,
     ) -> Result<(String, u32), String> {
         let copied = copied.map_err(|why| format!("Not published: {why}"))?;
+        // The names it would show (the path, the title, every file's) are scanned like its files.
+        let names: Vec<String> = [what.path.to_owned(), title.to_owned()]
+            .into_iter()
+            .chain(copied.files.iter().cloned())
+            .collect();
+        self.scan_names(&names).await?;
         let kind = check_kind(
             &copied,
             staging,
@@ -234,6 +261,12 @@ impl Artifacts {
                 versions: Vec::new(),
             },
         };
+        if artifact.versions.len() >= MAX_VERSIONS as usize {
+            return Err(format!(
+                "Not published: artifact {} has {MAX_VERSIONS} versions, the most obid keeps; publish it as a new one.",
+                artifact.id
+            ));
+        }
         let version = artifact.latest() + 1;
         let folder = self.dir.join(&artifact.id);
         make_private_dir(&folder)
@@ -255,41 +288,74 @@ impl Artifacts {
         Ok((artifact.id, version))
     }
 
-    /// The secret scan over every file: the text ones whole (the built-in rules, the secrets obid
-    /// holds, gitleaks), the others for the secrets obid holds.
+    /// The secret scan over every file, read as text whatever it holds (bytes that aren't UTF-8
+    /// become U+FFFD, so the ASCII runs a key is made of stay whole), and again without its NUL
+    /// bytes when it has some (UTF-16 text): the built-in rules, the secrets obid holds and
+    /// gitleaks. What a compressed stream holds (a PDF's Flate, a PNG's zTXt, gzip) isn't read.
     async fn scan(&self, staging: &Path, files: &[String]) -> Result<(), String> {
         let mut texts = Vec::new();
-        let mut found = Vec::new();
         for name in files {
             let bytes = std::fs::read(staging.join(name))
                 .map_err(|e| format!("Not published: obid couldn't read {name} ({e})."))?;
-            match String::from_utf8(bytes) {
-                Ok(text) => texts.push((name.clone(), text)),
-                Err(e) => found.extend(crate::scan::known_secrets_in_file(
-                    &String::from_utf8_lossy(e.as_bytes()),
-                    name,
-                )),
+            if bytes.contains(&0) {
+                let narrow: Vec<u8> = bytes.iter().copied().filter(|b| *b != 0).collect();
+                texts.push((name.clone(), String::from_utf8_lossy(&narrow).into_owned()));
             }
+            texts.push((name.clone(), String::from_utf8_lossy(&bytes).into_owned()));
         }
         make_private_dir(&self.scratch)
             .map_err(|e| format!("Not published: the secret scan couldn't run ({e})."))?;
-        match crate::scan::scan(&texts, &self.scratch).await {
-            crate::scan::Verdict::Clean => {}
-            crate::scan::Verdict::Found(more) => found.extend(more),
+        let found = match crate::scan::scan(&texts, &self.scratch).await {
+            crate::scan::Verdict::Clean => return Ok(()),
+            crate::scan::Verdict::Found(found) => found,
             crate::scan::Verdict::CouldNotRun(why) => {
                 return Err(format!(
                     "Not published: the secret scan couldn't run ({why})."
                 ));
             }
-        }
-        if found.is_empty() {
-            return Ok(());
-        }
-        let places: Vec<String> = found.iter().take(5).map(ToString::to_string).collect();
+        };
+        let mut places: Vec<String> = found.iter().map(ToString::to_string).collect();
+        places.dedup();
+        places.truncate(5);
         Err(format!(
             "Not published: the secret scan found what looks like a secret in {}.",
             places.join(", ")
         ))
+    }
+
+    /// The built-in rules, the secrets obid holds and gitleaks on `names`, each as a line of its
+    /// own: [`NAME_REFUSED`] when one looks like a secret.
+    async fn scan_names(&self, names: &[String]) -> Result<(), String> {
+        crate::vault::check()
+            .map_err(|why| format!("Not published: the secret scan couldn't run ({why})."))?;
+        let lines: Vec<(String, String)> = names
+            .iter()
+            .map(|n| ("name".to_owned(), n.clone()))
+            .collect();
+        if !crate::scan::built_in(&lines).is_empty() {
+            return Err(NAME_REFUSED.into());
+        }
+        make_private_dir(&self.scratch)
+            .map_err(|e| format!("Not published: the secret scan couldn't run ({e})."))?;
+        match crate::scan::gitleaks_names(names, &self.scratch).await {
+            Ok(found) if found.is_empty() => Ok(()),
+            Ok(_) => Err(NAME_REFUSED.into()),
+            Err(why) => Err(format!(
+                "Not published: the secret scan couldn't run ({why})."
+            )),
+        }
+    }
+
+    /// `line` as obid may say it, or [`NAME_REFUSED`] when it holds what looks like a secret (a
+    /// name a refusal repeats); when the scan can't run, it isn't said either.
+    pub async fn speakable(&self, line: String) -> String {
+        match self.scan_names(std::slice::from_ref(&line)).await {
+            Ok(()) => line,
+            Err(why) if why == NAME_REFUSED => why,
+            Err(_) => {
+                "Not published: the secret scan couldn't run, so obid doesn't say why.".into()
+            }
+        }
     }
 
     fn version_path(&self, id: &str, version: u32) -> PathBuf {
@@ -390,6 +456,10 @@ struct Copied {
     files: Vec<String>,
     bytes: u64,
     folder: bool,
+    /// Every name seen in its folders, hidden ones too.
+    entries: usize,
+    /// The disk its folder is on.
+    dev: u64,
 }
 
 /// The kind the copy is, when it is `wanted` too (or nothing was wanted).
@@ -520,13 +590,15 @@ fn copy(root: &Path, path: &str, to: &Path) -> Result<Copied, String> {
         files: Vec::new(),
         bytes: 0,
         folder: false,
+        entries: 0,
+        dev: metadata(&at)?.dev(),
     };
-    let mut entries = 0;
     make_private_dir(to).map_err(|e| format!("obid couldn't make its copy ({e})."))?;
     let meta = metadata(&entry)?;
+    plain(&meta, &shown, copied.dev)?;
     if meta.is_dir() {
         copied.folder = true;
-        copy_folder(entry, &shown, to, "", 0, &mut entries, &mut copied)?;
+        copy_folder(entry, &shown, to, "", 0, &mut copied)?;
     } else if meta.is_file() {
         // A single page is its folder's index.html.
         let name = if extension(last) == "html" || extension(last) == "htm" {
@@ -541,6 +613,22 @@ fn copy(root: &Path, path: &str, to: &Path) -> Result<Copied, String> {
     }
     copied.files.sort();
     Ok(copied)
+}
+
+/// A file or folder the copy may take: on the same disk as its folder, and a file with no other
+/// link to it (a hard link may be to a file outside the folder, which a link check can't see).
+fn plain(meta: &std::fs::Metadata, shown: &str, dev: u64) -> Result<(), String> {
+    if meta.dev() != dev {
+        return Err(format!(
+            "{shown} is on another disk: obid publishes only what is in its folder."
+        ));
+    }
+    if meta.is_file() && meta.nlink() > 1 {
+        return Err(format!(
+            "{shown} has another link to it (a hard link): obid publishes only files of their own."
+        ));
+    }
+    Ok(())
 }
 
 fn read_error(e: impl std::fmt::Display) -> String {
@@ -582,7 +670,6 @@ fn copy_folder(
     to: &Path,
     prefix: &str,
     depth: usize,
-    entries: &mut usize,
     copied: &mut Copied,
 ) -> Result<(), String> {
     if depth >= MAX_DEPTH {
@@ -592,9 +679,15 @@ fn copy_folder(
     let mut names: Vec<CString> = Vec::new();
     for entry in dir.iter() {
         let name = entry.map_err(read_error)?.file_name().to_owned();
-        if name.as_bytes() != b"." && name.as_bytes() != b".." {
-            names.push(name);
+        if name.as_bytes() == b"." || name.as_bytes() == b".." {
+            continue;
         }
+        // Every name counts, hidden ones too, before any is kept or sorted.
+        copied.entries += 1;
+        if copied.entries > MAX_FILES {
+            return Err(format!("it has more than {MAX_FILES} files."));
+        }
+        names.push(name);
     }
     names.sort();
     for name in names {
@@ -609,24 +702,13 @@ fn copy_folder(
         if name.contains(['\\', ':']) {
             return Err(format!("{path}: a name can't hold `\\` or `:`."));
         }
-        *entries += 1;
-        if *entries > MAX_FILES {
-            return Err(format!("it has more than {MAX_FILES} files."));
-        }
         let entry = open_in(&dir, &name, &path)?;
         let inside = format!("{prefix}{name}");
         let meta = metadata(&entry)?;
+        plain(&meta, &path, copied.dev)?;
         if meta.is_dir() {
             make_private_dir(&to.join(&inside)).map_err(read_error)?;
-            copy_folder(
-                entry,
-                &path,
-                to,
-                &format!("{inside}/"),
-                depth + 1,
-                entries,
-                copied,
-            )?;
+            copy_folder(entry, &path, to, &format!("{inside}/"), depth + 1, copied)?;
         } else if meta.is_file() {
             copy_file(entry, &to.join(&inside), copied)?;
             copied.files.push(inside);
@@ -786,7 +868,9 @@ pub fn job_entries(worktree: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(&folder) else {
         return Vec::new();
     };
+    // Hidden names count toward the most read, so a folder of millions is never all listed.
     let mut names: Vec<String> = entries
+        .take(MAX_FILES)
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| !n.starts_with('.'))
@@ -1090,6 +1174,129 @@ mod tests {
         assert!(why.contains("vault secret"), "{why}");
         assert!(!why.contains(held));
         crate::secrets::known().forget("vault ARTIFACT_TEST");
+        assert!(store.list(None, None).is_empty());
+    }
+
+    /// A key in a file that isn't UTF-8 (one 0xFF byte), or in UTF-16 text, is found by the rules
+    /// too, not only the secrets obid holds (#648's review, F1).
+    #[tokio::test]
+    async fn secrets_in_bytes_that_arent_utf8_are_found() {
+        let t = Temp::new("binary-secrets");
+        let key = format!("{}{}", "AKIA", "QWERTYUIOPASDFGH");
+        let mut image = vec![0x89, b'P', b'N', b'G', 0xff, 0x00, b'\n'];
+        image.extend_from_slice(format!("key: {key}\n").as_bytes());
+        t.write("chart.png", image);
+        let mut wide = vec![0xff, 0xfe];
+        for unit in format!("key: {key}\n").encode_utf16() {
+            wide.extend_from_slice(&unit.to_le_bytes());
+        }
+        t.write("wide.md", wide);
+        let (store, _) = t.store();
+        let room = t.room();
+        for path in ["chart.png", "wide.md"] {
+            let why = store.publish(what(&room, path)).await.unwrap_err();
+            assert!(why.contains("AWS access key"), "{path}: {why}");
+        }
+        assert!(store.list(None, None).is_empty());
+    }
+
+    /// A name or a title that holds a secret is refused like a file that does, and the refusal
+    /// never says the name (F2).
+    #[tokio::test]
+    async fn names_and_titles_are_scanned_and_never_said() {
+        let t = Temp::new("names");
+        let token = format!("ghp_{}", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8");
+        t.write("page/index.html", "<p>hi</p>");
+        t.write(&format!("page/{token}.txt"), "plain");
+        t.write("clean/index.html", "<p>hi</p>");
+        t.write(&format!("{token}.md"), "# Notes");
+        std::os::unix::fs::symlink("/etc/hosts", t.room().join(format!("{token}-link.md")))
+            .unwrap();
+        let (store, _) = t.store();
+        let room = t.room();
+        let link = format!("{token}-link.md");
+        let file = format!("{token}.md");
+        for (path, title) in [
+            ("page", "Page"),
+            ("clean", token.as_str()),
+            (file.as_str(), "Notes"),
+            (link.as_str(), "Notes"),
+        ] {
+            let why = store
+                .publish(Publish {
+                    title,
+                    ..what(&room, path)
+                })
+                .await
+                .unwrap_err();
+            assert!(why.starts_with("Not published: "), "{why}");
+            assert!(!why.contains(&token[4..20]), "{path}: {why}");
+        }
+        assert_eq!(
+            store
+                .speakable(format!("{token}.md: Not published: there's no {token}.md."))
+                .await,
+            NAME_REFUSED
+        );
+        assert_eq!(
+            store.speakable("notes.md: fine".into()).await,
+            "notes.md: fine"
+        );
+        assert!(store.list(None, None).is_empty());
+    }
+
+    /// At most MAX_VERSIONS versions of one artifact (F3).
+    #[tokio::test]
+    async fn an_artifact_has_at_most_so_many_versions() {
+        let t = Temp::new("versions-cap");
+        t.write("notes.md", "0");
+        let (store, _) = t.store();
+        let room = t.room();
+        let (id, _) = store.publish(what(&room, "notes.md")).await.unwrap();
+        for n in 2..=MAX_VERSIONS {
+            t.write("notes.md", n.to_string());
+            let again = Publish {
+                artifact: Some(&id),
+                ..what(&room, "notes.md")
+            };
+            assert_eq!(store.publish(again).await.unwrap().1, n);
+        }
+        t.write("notes.md", "one too many");
+        let again = Publish {
+            artifact: Some(&id),
+            ..what(&room, "notes.md")
+        };
+        let why = store.publish(again).await.unwrap_err();
+        assert!(why.contains(&format!("{MAX_VERSIONS} versions")), "{why}");
+        assert_eq!(store.get(&id).unwrap().versions.len() as u32, MAX_VERSIONS);
+    }
+
+    /// Hidden names count toward MAX_FILES too, before anything is sorted (F3); a file with
+    /// another link to it (a hard link, which may be to a file outside) is refused (F5).
+    #[tokio::test]
+    async fn hidden_names_count_and_hard_links_are_refused() {
+        let t = Temp::new("hidden-hard");
+        t.write("hidden/index.html", "x");
+        for i in 0..MAX_FILES {
+            t.write(&format!("hidden/.{i}"), "");
+        }
+        std::fs::create_dir_all(t.0.join("outside")).unwrap();
+        std::fs::write(t.0.join("outside/secret.md"), "outside").unwrap();
+        t.write("hard/index.html", "x");
+        std::fs::hard_link(
+            t.0.join("outside/secret.md"),
+            t.room().join("hard/notes.md"),
+        )
+        .unwrap();
+        std::fs::hard_link(t.0.join("outside/secret.md"), t.room().join("hard.md")).unwrap();
+        let (store, _) = t.store();
+        let room = t.room();
+        let why = store.publish(what(&room, "hidden")).await.unwrap_err();
+        assert!(why.contains("more than 2000 files"), "{why}");
+        for path in ["hard", "hard.md"] {
+            let why = store.publish(what(&room, path)).await.unwrap_err();
+            assert!(why.contains("has another link"), "{path}: {why}");
+        }
         assert!(store.list(None, None).is_empty());
     }
 

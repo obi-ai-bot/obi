@@ -14,7 +14,9 @@
 //   ARTIFACTS        writes .obi/artifacts/ in the worktree: a page (a folder with index.html,
 //                    a stylesheet and a hidden file), notes.md, chart.png (bytes that aren't
 //                    UTF-8), leak.md holding a made-up AWS key, and away.md, a link out of the
-//                    worktree; then ends the turn with "Made artifacts."
+//                    worktree, and an entry whose name is a made-up AWS key; then ends the turn
+//                    with "Made artifacts."
+//   ARTIFACTS_MANY   writes 25 Markdown files in .obi/artifacts/ instead
 //   REPORT           writes .obi/report.json in the worktree: its arguments, environment, prompt,
 //                    the MCP config it was given (--mcp-config), the tools it was allowed
 //                    (--allowedTools), what each http MCP server answered to `tools/list`, and
@@ -104,6 +106,10 @@ rl.on("line", (line) => {
   } else if (prompt.includes("REPORT")) {
     // LINGER: the turn goes on after the report, until obid ends it.
     report(prompt).then(() => (prompt.includes("LINGER") ? setInterval(() => {}, 1000) : result("Reported.")), (e) => result(`report failed: ${e}`, true));
+  } else if (prompt.includes("ARTIFACTS_MANY")) {
+    mkdirSync(".obi/artifacts", { recursive: true });
+    for (let i = 0; i < 25; i++) writeFileSync(`.obi/artifacts/n${String(i).padStart(2, "0")}.md`, `# ${i}\n`);
+    result("Made artifacts.");
   } else if (prompt.includes("ARTIFACTS")) {
     mkdirSync(".obi/artifacts/page", { recursive: true });
     writeFileSync(".obi/artifacts/page/index.html", '<link rel="stylesheet" href="style.css"><h1>Hello</h1>');
@@ -114,6 +120,7 @@ rl.on("line", (line) => {
     // Put together here, so this file holds no key a scanner flags.
     writeFileSync(".obi/artifacts/leak.md", `key: ${"AKIA" + "QWERTYUIOPASDFGH"}\n`);
     symlinkSync("/etc/hosts", ".obi/artifacts/away.md");
+    writeFileSync(`.obi/artifacts/${"AKIA" + "QWERTYUIOPASDFGH"}.md`, "# A plain note\n");
     result("Made artifacts.");
   } else if (prompt.match(/PAUSE: (\d+)/)) {
     setTimeout(() => result("Paused."), Number(prompt.match(/PAUSE: (\d+)/)[1]));

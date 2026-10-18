@@ -3449,7 +3449,11 @@ impl Jobs {
         let worktree = self.worktree_path(id);
         let mut listed = job.artifacts.clone();
         let mut problems = Vec::new();
-        for entry in crate::artifacts::job_entries(&worktree) {
+        let entries = crate::artifacts::job_entries(&worktree);
+        let more = entries
+            .len()
+            .saturating_sub(crate::artifacts::MAX_JOB_ENTRIES);
+        for entry in entries.into_iter().take(crate::artifacts::MAX_JOB_ENTRIES) {
             let path = format!("{}/artifacts/{entry}", crate::obi_dir::OBI);
             let title = crate::artifacts::title_of(&entry);
             let before = listed.iter().position(|a| a.entry == entry);
@@ -3477,8 +3481,17 @@ impl Jobs {
                     version,
                     entry,
                 }),
-                (Err(why), _) => problems.push(format!("{entry}: {why}")),
+                // Said only when it holds no name that looks like a secret.
+                (Err(why), _) => {
+                    problems.push(artifacts.speakable(format!("{entry}: {why}")).await)
+                }
             }
+        }
+        if more > 0 {
+            problems.push(format!(
+                "{more} more entries: Not published: a job publishes at most {} artifacts.",
+                crate::artifacts::MAX_JOB_ENTRIES
+            ));
         }
         if listed != job.artifacts || problems != job.artifact_problems {
             self.update(id, |job| {
