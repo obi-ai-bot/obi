@@ -148,6 +148,9 @@ pub struct Spec {
     pub hidden: Vec<PathBuf>,
     /// Whether it may reach the network at all.
     pub network: bool,
+    /// Folders inside the worktree that stay read-only: a conversation's checkouts of the
+    /// repositories in its room (`room/repos`). Each must exist before the process starts.
+    pub frozen: Vec<PathBuf>,
 }
 
 impl Sandbox {
@@ -341,6 +344,7 @@ impl Spec {
             read_only,
             hidden,
             network: self.network,
+            frozen: self.frozen.iter().map(real).collect(),
         }
     }
 
@@ -509,6 +513,11 @@ fn bubblewrap_args_reading(
     }
     let worktree = spec.worktree.as_os_str();
     push(&["--bind".as_ref(), worktree, worktree]);
+    // What stays read-only inside the worktree is bound over it again, read-only: a mount point,
+    // so it can't be renamed or removed either.
+    for frozen in &spec.frozen {
+        push(&["--ro-bind".as_ref(), frozen.as_os_str(), frozen.as_os_str()]);
+    }
     // The pointer that says where the worktree's git data is stays as obid wrote it.
     let pointer = spec.worktree.join(".git");
     if pointer.is_file() {
@@ -581,6 +590,10 @@ fn seatbelt_profile_reading(spec: &Spec, confined: bool) -> String {
         for file in ["commondir", "gitdir"] {
             profile.push_str(&format!(" (literal {})", sbpl_string(&admin.join(file))));
         }
+    }
+    // What stays read-only inside the worktree, itself included (it can't be removed or renamed).
+    for frozen in &spec.frozen {
+        profile.push_str(&format!(" (subpath {})", sbpl_string(frozen)));
     }
     profile.push_str(")\n");
     if confined {
@@ -1030,6 +1043,38 @@ pub fn tool_roots(path: &std::ffi::OsStr, hidden: &[PathBuf], never: &[PathBuf])
     roots
 }
 
+/// What a confined run ([`Sandbox::wrap_reading_only_its_own`]) reads of the software on `path`
+/// outside the hidden folders (`/opt/homebrew/bin`, `/usr/local/bin`): each folder, and the
+/// install prefix around a `bin` or `sbin` (its libraries, a symbolic link's target in it), never
+/// `/` itself nor a folder that holds a hidden one.
+pub fn path_software(path: &std::ffi::OsStr, hidden: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::env::split_paths(path) {
+        if !entry.is_absolute() || hidden.iter().any(|h| entry.starts_with(h)) {
+            continue;
+        }
+        let prefix = entry
+            .file_name()
+            .filter(|n| *n == "bin" || *n == "sbin")
+            .and_then(|_| entry.parent())
+            .filter(|p| p.components().count() > 1 && !hidden.iter().any(|h| h.starts_with(p)));
+        // Not the whole install prefix (it can hold a user's own data), only the folders a tool
+        // runs from: its binaries, libraries and shared files (N8).
+        if let Some(prefix) = prefix {
+            for sub in [
+                "bin", "sbin", "lib", "lib64", "libexec", "share", "etc", "opt", "Cellar",
+            ] {
+                let dir = prefix.join(sub);
+                if dir.is_dir() {
+                    out.push(dir);
+                }
+            }
+        }
+        out.push(entry);
+    }
+    out
+}
+
 /// The folder an agent's binary is installed in, when the sandbox hides it and the binary needs
 /// what is beside it: where `bin` leads (through its symbolic links), that file's folder. Cursor's
 /// `~/.local/bin/cursor-agent` leads to `~/.local/share/cursor-agent/versions/<v>/cursor-agent`,
@@ -1059,6 +1104,26 @@ pub fn install_root(bin: &Path, hidden: &[PathBuf], never: &[PathBuf]) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_software_brings_a_tools_folders_not_the_whole_prefix() {
+        let root = std::env::temp_dir().join(format!("obid-pathsw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let prefix = root.join("brew");
+        for dir in ["bin", "lib", "libexec", "share", "etc", "projects", "db"] {
+            std::fs::create_dir_all(prefix.join(dir)).unwrap();
+        }
+        let path = std::env::join_paths([prefix.join("bin")]).unwrap();
+        let got = path_software(&path, &[]);
+        // The tool's own folders, not the whole prefix nor a user-data folder beside them (N8).
+        for keep in ["bin", "lib", "libexec", "share", "etc"] {
+            assert!(got.contains(&prefix.join(keep)), "{keep}: {got:?}");
+        }
+        assert!(!got.contains(&prefix), "the prefix itself: {got:?}");
+        assert!(!got.contains(&prefix.join("projects")), "{got:?}");
+        assert!(!got.contains(&prefix.join("db")), "{got:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn an_agent_installed_in_a_hidden_home_brings_its_own_folder_only() {
@@ -1201,6 +1266,56 @@ mod tests {
         let real = root.canonicalize().unwrap();
         assert_eq!(spec.accounts, vec![real.join("accounts/real")]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A folder frozen inside the worktree (a conversation's `room/repos`) stays read-only: denied
+    /// after the worktree's writes on macOS, bound read-only over it on Linux.
+    #[test]
+    fn a_frozen_folder_inside_the_worktree_stays_read_only() {
+        let spec = Spec {
+            worktree: "/h/conversations/c/room".into(),
+            temp: "/h/conversations/c/home".into(),
+            frozen: vec!["/h/conversations/c/room/repos".into()],
+            hidden: vec!["/h".into()],
+            ..Spec::default()
+        };
+        let profile = seatbelt_profile(&spec);
+        let allow = profile
+            .find("(allow file-write* (subpath \"/h/conversations/c/room\")")
+            .unwrap();
+        let deny = profile
+            .find("(subpath \"/h/conversations/c/room/repos\"))\n")
+            .unwrap();
+        assert!(allow < deny, "{profile}");
+        assert!(
+            profile[..deny].rfind("(deny file-write*").unwrap() > allow,
+            "{profile}"
+        );
+        let args: Vec<String> = bubblewrap_args(&spec)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let bind = args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    "--bind",
+                    "/h/conversations/c/room",
+                    "/h/conversations/c/room",
+                ]
+            })
+            .unwrap();
+        let frozen = args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    "--ro-bind",
+                    "/h/conversations/c/room/repos",
+                    "/h/conversations/c/room/repos",
+                ]
+            })
+            .unwrap();
+        assert!(bind < frozen, "{args:?}");
     }
 
     #[test]

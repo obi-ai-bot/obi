@@ -193,6 +193,7 @@ fn spec(world: &World, network: bool, commits: bool, account: bool) -> Spec {
         read_only: Vec::new(),
         hidden: vec![world.home.clone(), world.person.clone()],
         network,
+        frozen: Vec::new(),
     }
 }
 

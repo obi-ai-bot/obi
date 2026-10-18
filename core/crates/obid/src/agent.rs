@@ -93,6 +93,17 @@ pub enum Event {
     Step(String),
     /// A permission obid refused, and why.
     Denied(String),
+    /// Words as the agent writes them: Claude Code's partial messages
+    /// (`--include-partial-messages`), which only a conversation's session asks for.
+    Delta(String),
+    /// A tool call, by its id, its tool's name and its input.
+    Tool {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    /// The answer to the tool call `id` came back; `failed` when it was an error.
+    ToolDone { id: String, failed: bool },
 }
 
 /// How a turn ended, for every adapter.
@@ -209,11 +220,37 @@ pub async fn run_turn(
                 {
                     if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                         let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-                        on_event(Event::Step(step(
-                            name,
-                            block.get("input").unwrap_or(&Value::Null),
-                        )));
+                        let input = block.get("input").cloned().unwrap_or(Value::Null);
+                        on_event(Event::Step(step(name, &input)));
+                        on_event(Event::Tool {
+                            id: text_of(block, "id"),
+                            name: name.to_owned(),
+                            input,
+                        });
                     }
+                }
+            }
+            // A tool's answer, in the user message that hands it back to the model.
+            Some("user") => {
+                for block in message["message"]["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+                {
+                    on_event(Event::ToolDone {
+                        id: text_of(block, "tool_use_id"),
+                        failed: block.get("is_error").and_then(Value::as_bool) == Some(true),
+                    });
+                }
+            }
+            Some("stream_event") => {
+                let event = &message["event"];
+                if event["type"] == "content_block_delta"
+                    && event["delta"]["type"] == "text_delta"
+                    && let Some(text) = event["delta"]["text"].as_str()
+                {
+                    on_event(Event::Delta(text.to_owned()));
                 }
             }
             Some("result") => {
@@ -231,6 +268,14 @@ pub async fn run_turn(
     turn.stopped = conn.stopped;
     turn.exit = conn.finish().await;
     Ok(turn)
+}
+
+fn text_of(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned()
 }
 
 /// What a tool call says the agent is doing (Engine/Jobs.swift, `StreamJSON.step`).

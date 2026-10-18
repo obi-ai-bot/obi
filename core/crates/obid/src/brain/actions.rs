@@ -160,8 +160,16 @@ async fn dispatch(
                 .title
                 .clone()
                 .unwrap_or_else(|| super::briefing::line(&d.task, 60));
-            // obid's own words for the job it keeps: mode, tool, account and check (N1).
-            let text = format!("Oby looked into it first. Start {}?", describe(&new));
+            // obid's own words for the job it keeps: mode, tool, account and check (N1); then the
+            // task it planned, quoted as data, so the owner sees what would run before they Start
+            // (the task is the agent's own words in a conversation; N9).
+            let nonce = super::briefing::nonce();
+            let text = format!(
+                "Oby looked into it first. Start {}?\n\n{}\n{}",
+                describe(&new),
+                super::briefing::fence_rule(&nonce, "the task Oby planned"),
+                super::briefing::fence(&nonce, &crate::secrets::known().redact(&d.task)),
+            );
             shared.link.propose(&new, title, text);
             continue;
         }
@@ -939,7 +947,7 @@ fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
 
 /// Puts what the brain planned, which only the user may do, in the inbox as a `confirm` item:
 /// carried out only on their own Confirm (`POST /v1/inbox/{id}/answer`).
-fn confirm(
+pub(super) fn confirm(
     shared: &Shared,
     job: &str,
     title: String,

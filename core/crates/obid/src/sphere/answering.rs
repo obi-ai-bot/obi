@@ -261,21 +261,7 @@ async fn run(
         std::slice::from_ref(&config.home),
     ));
     read_only.push(bin.clone());
-    // Software on `PATH` outside the hidden folders (`/opt/homebrew/bin`, `/usr/local/bin`): the
-    // confined run reads it, and the install prefix around a `bin` (its libraries, a symbolic
-    // link's target in it), never `/` itself.
-    for entry in std::env::split_paths(&process::tools_path()) {
-        if !entry.is_absolute() || hidden.iter().any(|h| entry.starts_with(h)) {
-            continue;
-        }
-        let prefix = entry
-            .file_name()
-            .filter(|n| *n == "bin" || *n == "sbin")
-            .and_then(|_| entry.parent())
-            .filter(|p| p.components().count() > 1 && !hidden.iter().any(|h| h.starts_with(p)));
-        read_only.extend(prefix.map(Path::to_path_buf));
-        read_only.push(entry);
-    }
+    read_only.extend(sandbox::path_software(&process::tools_path(), &hidden));
     let mut spec = Spec {
         worktree: reads.clone(),
         git_admin: None,
@@ -287,6 +273,7 @@ async fn run(
         hidden,
         // Its model's API.
         network: true,
+        frozen: Vec::new(),
     };
     let mut extra: Vec<(&str, OsString)> = Vec::new();
     // An account's folder may hold the login obid copied from the Keychain for its jobs: a run that

@@ -171,6 +171,33 @@ impl Secrets {
         text
     }
 
+    /// How many bytes at the end of `text` could be the start of a value still being written: the
+    /// longest end of it that one of the values begins with, in any form [`Secrets::redact`] takes
+    /// out. What streams out piece by piece holds that much back until the next piece comes.
+    pub fn held_tail(&self, text: &str) -> usize {
+        self.refreshed();
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let text = text.as_bytes();
+        let mut held = 0;
+        for needle in &inner.needles {
+            let value = needle.text.as_bytes();
+            let longest = value.len().saturating_sub(1).min(text.len());
+            for k in (held + 1..=longest).rev() {
+                let (tail, head) = (&text[text.len() - k..], &value[..k]);
+                let same = if needle.any_case {
+                    tail.eq_ignore_ascii_case(head)
+                } else {
+                    tail == head
+                };
+                if same {
+                    held = k;
+                    break;
+                }
+            }
+        }
+        held
+    }
+
     /// The names of the values `text` holds, as it is or decoded whole (URL-encoded, base64, hex),
     /// each once: what is left after [`Secrets::redact`] when a value hides in a way it doesn't
     /// take apart.
@@ -573,6 +600,24 @@ mod tests {
 
     fn b64(bytes: &[u8]) -> String {
         base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    /// What could be the start of a value is held back, and only that.
+    #[test]
+    fn the_start_of_a_value_is_held_back() {
+        let secrets = secrets();
+        assert_eq!(
+            secrets.held_tail("the token is s3cr3t-T0"),
+            "s3cr3t-T0".len()
+        );
+        assert_eq!(secrets.held_tail("the token is s"), 1);
+        assert_eq!(secrets.held_tail("the token is x"), 0);
+        // A whole value isn't held (`redact` takes it out); its last `s` could start another.
+        assert_eq!(secrets.held_tail(&format!("whole: {TOKEN}")), 1);
+        assert_eq!(secrets.held_tail(&format!("whole: {TOKEN}.")), 0);
+        assert_eq!(secrets.held_tail(""), 0);
+        let hex = hex::encode(TOKEN).to_ascii_uppercase();
+        assert_eq!(secrets.held_tail(&format!("a {}", &hex[..10])), 10);
     }
 
     #[test]

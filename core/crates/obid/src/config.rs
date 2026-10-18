@@ -81,6 +81,38 @@ struct File {
     /// Whether obid copies Claude Code's login from the macOS Keychain (crate::jobs, keychain_login).
     #[serde(default)]
     claude_keychain: bool,
+    /// How conversations run (crate::brain::harness): `{"agent", "model", "budget"}`.
+    #[serde(default)]
+    conversation: Option<ConversationSetting>,
+}
+
+/// `conversation` as written.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConversationSetting {
+    /// `claude` (an agent session, the default) or `plan` (obid's plan loop only).
+    #[serde(default)]
+    agent: Option<String>,
+    /// Claude Code's model for conversations; left out, [`CONVERSATION_MODEL`].
+    #[serde(default)]
+    model: Option<String>,
+    /// How long one turn may take, in seconds: 10 to 3,600, 600 when left out.
+    #[serde(default)]
+    budget: Option<u64>,
+}
+
+/// The model a conversation's session talks with unless `conversation.model` says another.
+pub const CONVERSATION_MODEL: &str = "claude-sonnet-5-5";
+
+/// How conversations run (docs/runner-api.md, "obid only: the conversation harness").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conversation {
+    /// True: each conversation is a Claude Code session in its room (the default); false: obid's
+    /// plan loop answers (`"agent": "plan"`).
+    pub harness: bool,
+    pub model: String,
+    /// One turn's budget: 10 minutes unless `budget` says otherwise. Stop ends it sooner.
+    pub budget: std::time::Duration,
 }
 
 /// `vault` as written.
@@ -174,6 +206,8 @@ pub struct Config {
     /// `claudeKeychain`: obid copies Claude Code's macOS Keychain login into a boxed run's place
     /// for it (crate::jobs, keychain_login). False unless the owner turns it on.
     pub claude_keychain: bool,
+    /// How conversations run.
+    pub conversation: Conversation,
 }
 
 /// Where the plug-ins obid ships are when the configuration doesn't say: the `plugins/` folder
@@ -366,6 +400,37 @@ impl Config {
             ));
         }
 
+        let setting = file.conversation.as_ref();
+        let harness = match setting.and_then(|c| c.agent.as_deref()) {
+            None | Some("claude") => true,
+            Some("plan") => false,
+            Some(other) => {
+                return invalid(format!(
+                    "conversation.agent is {other:?}: it is \"claude\" or \"plan\"."
+                ));
+            }
+        };
+        let model = setting
+            .and_then(|c| c.model.clone())
+            .unwrap_or_else(|| CONVERSATION_MODEL.to_owned());
+        if model.is_empty()
+            || model.len() > 64
+            || model.starts_with('-')
+            || !model
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._[]".contains(&b))
+        {
+            return invalid(format!(
+                "conversation.model is {model:?}: it is one of Claude Code's model names, like {CONVERSATION_MODEL}."
+            ));
+        }
+        let budget = setting.and_then(|c| c.budget).unwrap_or(600);
+        if !(10..=3600).contains(&budget) {
+            return invalid(format!(
+                "conversation.budget is {budget}: it is 10 to 3,600 seconds."
+            ));
+        }
+
         Ok(Config {
             listen,
             home: file.home,
@@ -381,6 +446,11 @@ impl Config {
             orchestrator_delay: std::time::Duration::from_secs(orchestrator_delay),
             gateway,
             claude_keychain: file.claude_keychain,
+            conversation: Conversation {
+                harness,
+                model,
+                budget: std::time::Duration::from_secs(budget),
+            },
         })
     }
 }
@@ -602,6 +672,41 @@ mod tests {
         for wrong in [0, 111] {
             let text = with(serde_json::json!({"turnBudget": wrong}));
             assert!(problem(&text).contains("turnBudget"), "{wrong}");
+        }
+    }
+
+    /// Conversations are agent sessions on Sonnet for 10 minutes a turn unless the owner says
+    /// otherwise; `plan` keeps obid's plan loop.
+    #[test]
+    fn conversations_are_sessions_unless_the_owner_says_plan() {
+        let config = Config::parse(&with(serde_json::json!({}))).unwrap();
+        assert!(config.conversation.harness);
+        assert_eq!(config.conversation.model, CONVERSATION_MODEL);
+        assert_eq!(
+            config.conversation.budget,
+            std::time::Duration::from_secs(600)
+        );
+        let set = with(serde_json::json!({"conversation":
+            {"agent": "plan", "model": "claude-opus-5-5", "budget": 60}}));
+        let config = Config::parse(&set).unwrap();
+        assert!(!config.conversation.harness);
+        assert_eq!(config.conversation.model, "claude-opus-5-5");
+        assert_eq!(
+            config.conversation.budget,
+            std::time::Duration::from_secs(60)
+        );
+        for (wrong, field) in [
+            (serde_json::json!({"agent": "codex"}), "conversation.agent"),
+            (
+                serde_json::json!({"model": "--dangerously"}),
+                "conversation.model",
+            ),
+            (serde_json::json!({"model": "a b"}), "conversation.model"),
+            (serde_json::json!({"budget": 5}), "conversation.budget"),
+            (serde_json::json!({"budget": 3601}), "conversation.budget"),
+        ] {
+            let text = with(serde_json::json!({"conversation": wrong}));
+            assert!(problem(&text).contains(field), "{text}");
         }
     }
 

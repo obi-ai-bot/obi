@@ -1346,6 +1346,13 @@ fn runs_through_git_settings(command: &str) -> bool {
     })
 }
 
+/// What [`reach`] reads of a command past the network: whether it names a file outside `bounds`
+/// or runs through git's settings. A conversation lets a command reach the web only when neither
+/// holds (crate::brain::harness), since `reach` says `Network` first.
+pub fn reads_beyond(command: &str, bounds: &Bounds) -> bool {
+    runs_through_git_settings(command) || reads_outside(command, bounds)
+}
+
 /// Whether a command names a file outside what the job may read without asking: an absolute path
 /// (or one from `~`) that isn't in its worktree, its temporary folder or the system's folders.
 fn reads_outside(command: &str, bounds: &Bounds) -> bool {

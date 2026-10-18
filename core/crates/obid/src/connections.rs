@@ -351,6 +351,11 @@ impl Connections {
             .any(|connection| connection.name == name)
     }
 
+    /// Where agents reach obid: `http://127.0.0.1:<port>`, or slirp4netns's host on Linux.
+    pub fn api_url(&self) -> &str {
+        &self.api_url
+    }
+
     pub fn open_job(&self, id: &str) -> Option<(String, String)> {
         let current = self.all.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let kept = self
@@ -1243,6 +1248,17 @@ async fn agent_mcp(
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
         .unwrap_or("");
+    // A conversation's session: Oby's own tools (crate::brain::tools), with its turn's token.
+    if job.starts_with("conversation-") {
+        let Some(session) = shared.harness.session(&job, token) else {
+            return ApiError::new(StatusCode::UNAUTHORIZED, crate::api::NO_TOKEN).into_response();
+        };
+        let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+        return match crate::brain::tools::handle(&shared, &session, value).await {
+            Some(answer) => (StatusCode::OK, Json(answer)).into_response(),
+            None => StatusCode::ACCEPTED.into_response(),
+        };
+    }
     if !shared.connections.allows(&job, token) {
         return ApiError::new(StatusCode::UNAUTHORIZED, crate::api::NO_TOKEN).into_response();
     }
