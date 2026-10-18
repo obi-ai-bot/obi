@@ -2950,6 +2950,8 @@ impl Jobs {
             .clone()
             .unwrap_or_else(|| repo.default_branch.clone());
         let worktree = self.worktree_path(id);
+        let stages = Stages::new(self.log_path(id, "stages.log"));
+        stages.begin("prepare");
 
         let preparing = self.preparing(&repo.repo);
         let prepared = preparing.lock().await;
@@ -3213,6 +3215,7 @@ impl Jobs {
                         job.step = format!("Starting {}", tool.name());
                     }
                 });
+                stages.begin(&format!("agent round {round}"));
                 let turn = self
                     .turn(
                         id,
@@ -3266,6 +3269,7 @@ impl Jobs {
                         job.phase = Some(Phase::Check);
                         job.step = format!("Running {command}");
                     });
+                    stages.begin("check");
                     let run = self.check(id, command, &spec, signal).await?;
                     if *signal.borrow() != Signal::Run {
                         return Ok(());
@@ -3323,6 +3327,7 @@ impl Jobs {
                 self.update(id, |job| job.round = Some(round + 1));
             }
 
+            stages.begin("keep commits");
             let head = self.keep_commits(id).await?;
             let commits = if start_commit.is_empty() || head == start_commit {
                 0
@@ -3368,6 +3373,8 @@ impl Jobs {
                 job.publish_step = Some(crate::publish::Step::Scan);
                 job.step = "Publishing".into();
             });
+            // Publish times its own steps (PublishHooks).
+            stages.end();
             let published = self.publish_job(id, Some(signal.clone()), |_| Ok(())).await;
             if *signal.borrow() != Signal::Run {
                 return Ok(());
@@ -3527,6 +3534,7 @@ impl Jobs {
                     jobs: self.clone(),
                     id: id.to_owned(),
                     signal,
+                    stages: Stages::new(self.log_path(id, "stages.log")),
                 };
                 let outcome = crate::publish::publish(&job, &base, &target, &hooks).await;
                 let _ = std::fs::remove_dir_all(&target.scratch);
@@ -3738,10 +3746,13 @@ struct PublishHooks {
     id: String,
     /// The job's worker's signal, when it publishes by itself: a stop means nothing more goes out.
     signal: Option<watch::Receiver<Signal>>,
+    /// Each step's time, in the job's stages.log.
+    stages: Stages,
 }
 
 impl crate::publish::Hooks for PublishHooks {
     fn progress(&self, step: crate::publish::Step) {
+        self.stages.begin(step.as_str());
         self.jobs
             .update(&self.id, |job| job.publish_step = Some(step));
     }
@@ -3764,6 +3775,68 @@ impl crate::publish::Hooks for PublishHooks {
         );
         self.jobs
             .update(&self.id, |job| job.outgoing.push(outgoing));
+    }
+}
+
+/// How long each stage of a job's run took, one line each in the job's `stages.log`
+/// (`prepare 0.81s`), so a run's time can be read without guessing: a stage ends when the next
+/// begins, or when this goes.
+struct Stages {
+    file: PathBuf,
+    open: Mutex<Option<(String, std::time::Instant)>>,
+}
+
+impl Stages {
+    fn new(file: PathBuf) -> Stages {
+        Stages {
+            file,
+            open: Mutex::new(None),
+        }
+    }
+
+    /// The stage under way ends, and `name` begins.
+    fn begin(&self, name: &str) {
+        let ended = self
+            .open
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace((name.to_owned(), std::time::Instant::now()));
+        self.write(ended);
+    }
+
+    /// The stage under way ends.
+    fn end(&self) {
+        let ended = self.open.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.write(ended);
+    }
+
+    fn write(&self, ended: Option<(String, std::time::Instant)>) {
+        use std::io::Write;
+        let Some((name, began)) = ended else { return };
+        let line = format!("{name} {:.2}s\n", began.elapsed().as_secs_f64());
+        let job = self
+            .file
+            .parent()
+            .and_then(Path::file_name)
+            .map(|id| id.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        tracing::info!("job {job}: {}", line.trim_end());
+        if let Some(folder) = self.file.parent() {
+            let _ = std::fs::create_dir_all(folder);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.file)
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+}
+
+impl Drop for Stages {
+    fn drop(&mut self) {
+        self.end();
     }
 }
 
@@ -4644,6 +4717,30 @@ mod tests {
         );
     }
     use super::*;
+
+    /// Each stage of a run is a line in the job's stages.log, with how long it took; the last ends
+    /// when the run does.
+    #[test]
+    fn a_runs_stages_are_timed_in_its_log() {
+        let root = std::env::temp_dir().join(format!("obid-stages-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let file = root.join("logs/j/stages.log");
+        {
+            let stages = Stages::new(file.clone());
+            stages.begin("prepare");
+            std::thread::sleep(Duration::from_millis(20));
+            stages.begin("agent round 1");
+        }
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(
+            lines[0].starts_with("prepare 0.0") && lines[0].ends_with('s'),
+            "{text}"
+        );
+        assert!(lines[1].starts_with("agent round 1 "), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// A routine job's first round thinks with Sonnet at low effort: one-line changes waited 11
     /// to 17 seconds on Opus. Its later rounds (a failed check, the owner's words), a complex job
