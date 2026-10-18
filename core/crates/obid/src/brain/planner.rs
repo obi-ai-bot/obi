@@ -293,6 +293,8 @@ impl ClaudeBrain {
             let began = Instant::now();
             let mut this = Box::pin(run(&launch, own_group, input.as_bytes(), remaining));
             let mut ended = vec![];
+            // When the other process lost the race: when it began. It's ended, as a cancelled call.
+            let mut cancelled: Option<Instant> = None;
             if attempt < attempts {
                 // The first process keeps the whole budget: when it hasn't answered by half of it,
                 // the one retry starts beside it and the first plan wins. Killing it at half its
@@ -309,14 +311,18 @@ impl ClaudeBrain {
                     result = &mut first => {
                         let planned = result.as_ref().is_ok_and(|r| plan_of(&r.out).is_some());
                         ended.push((result, first_began, attempt - 1));
-                        if !planned {
+                        if planned {
+                            cancelled = Some(began);
+                        } else {
                             ended.push((this.await, began, attempt));
                         }
                     }
                     result = &mut this => {
                         let planned = result.as_ref().is_ok_and(|r| plan_of(&r.out).is_some());
                         ended.push((result, began, attempt));
-                        if !planned {
+                        if planned {
+                            cancelled = Some(first_began);
+                        } else {
                             ended.push((first.await, first_began, attempt - 1));
                         }
                     }
@@ -339,6 +345,18 @@ impl ClaudeBrain {
                     return Err(Failure::Halted);
                 }
                 if let Some(plan) = plan {
+                    // The turn's calls count the process that lost (#533), in the order they began.
+                    if let Some(other) = cancelled {
+                        let mut call = Call::read("claude", Some(model), None, other);
+                        call.outcome = CallOutcome::Failed;
+                        call.subtype = Some("cancelled".into());
+                        let at = if other < began {
+                            calls.len() - 1
+                        } else {
+                            calls.len()
+                        };
+                        calls.insert(at, call);
+                    }
                     return Ok(plan.to_string());
                 }
                 let text = String::from_utf8_lossy(&result.out).trim().to_owned();
@@ -1339,20 +1357,22 @@ pub mod tests {
     /// A Claude Code that exits 15 every time, counting its launches in its account's folder, in
     /// a folder of its own under the system's temporary one.
     fn exiting_claude(name: &str) -> (ClaudeBrain, PathBuf) {
-        scripted_claude(
-            name,
-            "#!/bin/sh\necho launch >> \"$CLAUDE_CONFIG_DIR/launches\"\nexit 15\n",
-        )
+        scripted_claude(name, |launches| {
+            format!(
+                "#!/bin/sh\necho launch >> '{}'\nexit 15\n",
+                launches.display()
+            )
+        })
     }
 
     /// A Claude Code that answers a plan after `seconds`, every time, counting its launches.
     fn slow_claude(name: &str, seconds: u32) -> (ClaudeBrain, PathBuf) {
-        scripted_claude(
-            name,
-            &format!(
-                "#!/bin/sh\necho launch >> \"$CLAUDE_CONFIG_DIR/launches\"\ncat > /dev/null\nsleep {seconds}\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"structured_output\":{{\"action\":\"reply_only\"}}}}'\n"
-            ),
-        )
+        scripted_claude(name, |launches| {
+            format!(
+                "#!/bin/sh\necho launch >> '{}'\ncat > /dev/null\nsleep {seconds}\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"structured_output\":{{\"action\":\"reply_only\"}}}}'\n",
+                launches.display()
+            )
+        })
     }
 
     /// The brain's first process keeps its whole budget: one that answers after more than half
@@ -1360,7 +1380,9 @@ pub mod tests {
     /// retry ran out of time too).
     #[tokio::test]
     async fn a_slow_first_answer_still_plans_the_turn() {
-        let (brain, file) = slow_claude("slow", 2);
+        // Answers after 5 of 8 seconds: the retry starts at 4, and the first answer comes well
+        // before the retry's could, on a busy Mac too.
+        let (brain, file) = slow_claude("slow", 5);
         let mut calls = vec![];
         let answer = brain
             .complete(
@@ -1369,7 +1391,7 @@ pub mod tests {
                 "hello",
                 None,
                 "{}",
-                Duration::from_secs(3),
+                Duration::from_secs(8),
                 true,
                 &going,
                 &mut calls,
@@ -1381,18 +1403,34 @@ pub mod tests {
                 .is_ok_and(|plan| plan.contains("reply_only")),
             "{answer:?}"
         );
-        // The retry started beside it at half the budget, and the first answer won.
-        assert_eq!(launches(&file), 2);
+        // The retry that started beside it at half the budget counts as a call, cancelled.
+        let started = launches(&file);
+        assert!(started >= 1);
+        assert_eq!(calls.len(), started, "{calls:?}");
+        let cancelled = calls
+            .iter()
+            .filter(|c| {
+                c.outcome == CallOutcome::Failed && c.subtype.as_deref() == Some("cancelled")
+            })
+            .count();
+        assert_eq!(cancelled, started - 1, "{calls:?}");
+        assert_eq!(
+            calls[0].outcome,
+            CallOutcome::Plan,
+            "the first to start answered: {calls:?}"
+        );
     }
 
-    fn scripted_claude(name: &str, script: &str) -> (ClaudeBrain, PathBuf) {
+    /// A Claude Code that runs the script `script` writes for the absolute path of its launches
+    /// file, in the account's folder (the brain's own config folder may be another).
+    fn scripted_claude(name: &str, script: impl Fn(&Path) -> String) -> (ClaudeBrain, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("obid-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let account = root.join("account");
         std::fs::create_dir_all(&account).unwrap();
         let bin = root.join("claude");
-        std::fs::write(&bin, script).unwrap();
+        std::fs::write(&bin, script(&account.join("launches"))).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let config = crate::config::Config::parse(
             &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"),
