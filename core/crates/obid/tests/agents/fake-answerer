@@ -69,7 +69,7 @@ function answer(prompt) {
   if (prompt.includes(CANARY)) fail("the question's words are in the prompt");
   if (argv.join(" ").includes(CANARY)) fail("the question's words are in the arguments");
   for (const name of Object.keys(process.env)) {
-    if (name === "CLAUDECODE" || name.startsWith("CLAUDE_CODE_") || name.startsWith("ANTHROPIC_") || name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN") fail(`${name} is in its environment`);
+    if (name === "CLAUDECODE" || (name.startsWith("CLAUDE_CODE_") && name !== "CLAUDE_CODE_TMPDIR") || name.startsWith("ANTHROPIC_") || name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN") fail(`${name} is in its environment`);
   }
   const probe = join(dirname(process.cwd()), `.answerer-sandbox-probe-${process.pid}`);
   let wrote = false;

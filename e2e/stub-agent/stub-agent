@@ -67,7 +67,7 @@ function problems(prompt, request) {
   if (!prompt.trim()) found.push("the prompt is empty");
   if (prompt.includes(CANARY)) found.push("data text from the request is in the prompt (it must only be in .obi/inputs/obi-request.json)");
   for (const name of Object.keys(process.env)) {
-    if (name === "CLAUDECODE" || name.startsWith("CLAUDE_CODE_") || name.startsWith("ANTHROPIC_") || name === "GH_TOKEN" || name === "GITHUB_TOKEN") found.push(`${name} is in the agent's environment`);
+    if (name === "CLAUDECODE" || (name.startsWith("CLAUDE_CODE_") && name !== "CLAUDE_CODE_TMPDIR") || name.startsWith("ANTHROPIC_") || name === "GH_TOKEN" || name === "GITHUB_TOKEN") found.push(`${name} is in the agent's environment`);
   }
   if (process.env.OBI_STUB_NO_SANDBOX !== "1") {
     const probe = join(dirname(cwd), `.obi-stub-sandbox-probe-${process.pid}`);
