@@ -1344,6 +1344,71 @@ fn the_default_login_is_a_copy_the_person_keeps_unchanged() {
     assert!(login.join(".claude.json").exists());
 }
 
+/// #655: a job never gets its account's own folder, only a folder of its own with a copy of the
+/// login (no refresh token: a refresh inside a box would rotate the account's login away, #651)
+/// and the account's trimmed `.claude.json`. Nothing it writes reaches the account's folder, which
+/// unboxed processes (the tool's own sign-in, the keeper's refresh) read; the copied credentials
+/// are gone once its run ends.
+#[test]
+fn a_job_never_writes_its_accounts_folder() {
+    let folder = Folder::new("account-folder");
+    let remote = fixture(&folder.0.join("fixture"));
+    let config = config(&folder.0, &remote);
+    let account = folder.0.join("home/accounts/stub");
+    std::fs::create_dir_all(&account).unwrap();
+    let files = [
+        (
+            ".credentials.json",
+            r#"{"claudeAiOauth":{"accessToken":"test-access","refreshToken":"test-refresh","expiresAt":4102444800000}}"#,
+        ),
+        (
+            ".claude.json",
+            r#"{"oauthAccount":{"emailAddress":"owner@example.com"},"mcpServers":{"x":{"command":"x"}}}"#,
+        ),
+    ];
+    for (name, text) in files {
+        std::fs::write(account.join(name), text).unwrap();
+    }
+    let obid = start(&folder.0, &config);
+    let task = format!("PLANT: {}", account.display());
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(
+        job["summary"],
+        "plant: dir=own refresh=none settings=ok state=ok real=no real-state=no"
+    );
+    // The account's folder is as it was: nothing planted, nothing added.
+    for (name, text) in files {
+        assert_eq!(
+            std::fs::read_to_string(account.join(name)).unwrap(),
+            text,
+            "{name}"
+        );
+    }
+    assert!(!account.join("settings.json").exists());
+    // The job's own folder got the hook and a trimmed .claude.json; its credentials are gone.
+    let login = obid.home.join("logins").join(&id);
+    assert!(
+        std::fs::read_to_string(login.join("settings.json"))
+            .unwrap()
+            .contains("planted")
+    );
+    let state = std::fs::read_to_string(login.join(".claude.json")).unwrap();
+    assert!(
+        state.contains("owner@example.com") && !state.contains("mcpServers"),
+        "{state}"
+    );
+    assert!(!login.join(".credentials.json").exists());
+}
+
 /// #626: routing skips an account whose login file isn't there (a login only in the macOS
 /// Keychain can't reach the job's sandbox): another account of the tool, else another tool.
 #[test]

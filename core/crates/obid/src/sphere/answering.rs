@@ -276,19 +276,20 @@ async fn run(
         frozen: Vec::new(),
     };
     let mut extra: Vec<(&str, OsString)> = Vec::new();
-    // An account's folder may hold the login obid copied from the Keychain for its jobs: a run that
-    // answers another person never gets it (#643's review), so it takes the plain copy instead.
-    let folder = account
-        .config_dir
-        .as_ref()
-        .filter(|_| !crate::jobs::keychain_on());
-    match folder {
+    match &account.config_dir {
+        // Never the account's own folder (#655), and never the Keychain's login: this run answers
+        // another person (#643's review). Its login file's copy only, without the refresh token.
         Some(account_dir) => {
-            crate::jobs::not_a_link(account_dir)?;
-            std::fs::create_dir_all(account_dir)
-                .map_err(|e| format!("obid can't make the account's folder: {e}"))?;
-            spec.accounts.push(account_dir.clone());
-            extra.push(("CLAUDE_CONFIG_DIR", account_dir.clone().into_os_string()));
+            let login = dir.join("login");
+            crate::jobs::not_a_link(&login)?;
+            crate::store::make_private_dir(&login)
+                .map_err(|e| format!("obid can't make the run's login folder: {e}"))?;
+            if let Some(bytes) = crate::jobs::folder_login(account_dir) {
+                crate::jobs::write_login(&login.join(".credentials.json"), &bytes)
+                    .map_err(|e| format!("obid can't copy Claude Code's login: {e}"))?;
+            }
+            extra.push(("CLAUDE_CONFIG_DIR", login.clone().into_os_string()));
+            spec.accounts.push(login);
         }
         None => {
             // The tool's own login, copied as a job's is, outside what the model reads; removed
