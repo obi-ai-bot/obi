@@ -461,6 +461,21 @@ impl Orchestration {
                 "I read the job, but this needs your decision. I left it in Needs you.",
             ));
         }
+        // Words for a job that ended start a follow-up, which only the owner's own words start
+        // (the owner's decision of 2026-10-18). The signature starts with the job's status.
+        let ended = |id: &String| {
+            signature(id).is_some_and(|s| !s.starts_with("queued|") && !s.starts_with("running|"))
+        };
+        if action == Action::MessageJob && named.first().is_some_and(ended) {
+            let words = plan.message.as_deref().unwrap_or_default();
+            return Err(escalate(
+                format!(
+                    "Oby read the job and recommends telling it: {}. It ended, so that starts a follow-up, which only your own words start.",
+                    super::briefing::line(words, 300)
+                ),
+                "I read the job, but this needs your decision. I left it in Needs you.",
+            ));
+        }
         let job = named.first().cloned().or_else(|| {
             self.events
                 .iter()

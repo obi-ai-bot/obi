@@ -180,6 +180,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Why it's queued and not running yet (#238): what it waits for, or nil when nothing holds it
     /// (it's getting ready, or about to start) and once it isn't queued.
     var waiting: Waiting?
+    /// The job this one follows up (obid): the owner told that one something after it ended, and
+    /// its thread shows this one's card (Sangam's design). Nil otherwise.
+    var followUpOf: String?
 
     /// What a queued job waits for, in the words every app shows after "Waiting": "a slot opens",
     /// "runner update". `job` is the job it waits behind, for `job` and `files`.

@@ -15,43 +15,38 @@ struct PairingView: View {
     @State private var busy = false
 
     var body: some View {
-        Section("Pair a device") {
+        SetGroup("Pair a device", problem: problem) {
             if let invitation {
-                if let image = Self.qr(invitation.qrText) {
-                    Image(nsImage: image).interpolation(.none).resizable().frame(width: 180, height: 180)
-                        .accessibilityLabel("Pairing QR code")
+                SetRow(about: "Valid for two minutes. The code is single-use. LAN pairing uses HTTP plus a device token.") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let image = Self.qr(invitation.qrText) {
+                            Image(nsImage: image).interpolation(.none).resizable().frame(width: 180, height: 180)
+                                .accessibilityLabel("Pairing QR code")
+                        }
+                        Text("Fallback code: \(invitation.code)").font(Tokens.font(Tokens.textLg).monospacedDigit()).textSelection(.enabled)
+                    }
                 }
-                Text("Fallback code: \(invitation.code)").font(.title3.monospacedDigit())
-                Text("Valid for two minutes. The code is single-use.").font(.caption).foregroundStyle(.secondary)
-                Text("LAN pairing uses HTTP plus a device token.").font(.caption).foregroundStyle(.secondary)
             }
-            Button(busy ? "Creating…" : invitation == nil ? "Pair a device" : "Create new invitation") {
-                Task { await create() }
-            }.disabled(busy)
-            if let problem { Text(problem).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+            SetRow("") {
+                Button(busy ? "Creating…" : invitation == nil ? "Pair a device" : "Create new invitation") {
+                    Task { await create() }
+                }
+                .buttonStyle(.set)
+                .disabled(busy)
+            }
         }
-        Section {
+        SetGroup("Paired devices", footer: "Revoke a lost phone here. It will need to pair again before it can reach this Mac.") {
             if devices.isEmpty {
-                Text("None yet").foregroundStyle(.secondary)
+                SetRow("None yet", quiet: true)
             }
             ForEach(devices) { device in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(device.name)
-                        Text("Expires \(device.expiresAt.formatted(date: .abbreviated, time: .shortened))")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
+                SetRow(device.name, about: "Expires \(device.expiresAt.formatted(date: .abbreviated, time: .shortened))") {
                     Button("Revoke", role: .destructive) {
                         Task { await revoke(device) }
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.set)
                 }
             }
-        } header: {
-            Text("Paired devices")
-        } footer: {
-            Text("Revoke a lost phone here. It will need to pair again before it can reach this Mac.")
         }
         .task { await loadDevices() }
     }

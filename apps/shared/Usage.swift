@@ -259,6 +259,60 @@ nonisolated enum Usage {
         return state + " · used in \(used) of \(jobs) recent job\(jobs == 1 ? "" : "s") (\(percent(Double(used) / Double(jobs))))"
     }
 
+    // MARK: Sangam's usage rows (Settings › Accounts on the Mac, docs/mac-design.md B2)
+
+    /// How much of its week an account has used, 0...1: none once the week has reset; nil while
+    /// unknown or signed out.
+    static func week(_ snapshot: Snapshot, now: Date = .now) -> Double? {
+        guard snapshot.signedIn, let used = snapshot.sevenDay else { return nil }
+        return (snapshot.sevenDayResets ?? .distantFuture) > now ? used : 0
+    }
+
+    /// "36% used", at the row's right, or nil while its week is unknown.
+    static func usedText(_ snapshot: Snapshot, now: Date = .now) -> String? {
+        week(snapshot, now: now).map { percent($0) + " used" }
+    }
+
+    /// The line under the account's name, in Sangam's words: "Paid by Deskree · Resets Thursday"; why
+    /// there's no meter in place of the reset ("Signed out", "No usage yet…"). With no payer (obid
+    /// has none yet), it starts at the reset.
+    static func about(_ snapshot: Snapshot, payer: String, now: Date = .now, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        var parts: [String] = []
+        if !payer.isEmpty { parts.append("Paid by \(payer)") }
+        if let notice = notice(snapshot) {
+            parts.append(notice)
+        } else if let resets = snapshot.sevenDayResets, resets > now, week(snapshot, now: now) != nil {
+            parts.append(resetsDay(resets, now: now, locale: locale, timeZone: timeZone))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// "Resets Thursday", or "Resets in 5 h" within the day.
+    static func resetsDay(_ date: Date, now: Date = .now, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        let seconds = date.timeIntervalSince(now)
+        if seconds < 24 * 3600 { return "Resets in \(max(1, Int((seconds / 3600).rounded(.up)))) h" }
+        return "Resets " + date.formatted(Date.FormatStyle(locale: locale, timeZone: timeZone).weekday(.wide))
+    }
+
+    /// The 5-hour window, only once it's past 80% (Sangam shows the week alone): "5-hour limit 85%
+    /// used · resets in 2 h".
+    static func fiveHourLine(_ snapshot: Snapshot, now: Date = .now, locale: Locale = .current, timeZone: TimeZone = .current) -> String? {
+        guard snapshot.signedIn, let used = snapshot.fiveHour, used > 0.8, (snapshot.fiveHourResets ?? .distantFuture) > now else { return nil }
+        let resets = snapshot.fiveHourResets.map { " · " + resetText($0, now: now, locale: locale, timeZone: timeZone) } ?? ""
+        return "5-hour limit \(percent(used)) used" + resets
+    }
+
+    /// The line over the accounts: the signed-in one with the most of its week left, "Most room:
+    /// Deskree on Codex, 88% left this week", until one reports usage.
+    static func mostRoom(_ snapshots: [Snapshot], now: Date = .now) -> String {
+        let weeks = snapshots.compactMap { snapshot in week(snapshot, now: now).map { (snapshot, $0) } }
+        guard let roomiest = weeks.min(by: { $0.1 < $1.1 }) else {
+            if snapshots.isEmpty { return "None yet" }
+            return snapshots.contains(where: \.signedIn) ? "No usage yet: it updates after the next job." : "No account is signed in."
+        }
+        return "Most room: \(roomiest.0.name) on \(roomiest.0.tool), \(percent(1 - roomiest.1)) left this week"
+    }
+
     /// The line above the cards: "All limits under 50%", or the account with the most room left,
     /// like "Most room: Codex, Deskree · Plus (12% used)", until some signed-in account reports usage.
     static func summary(_ snapshots: [Snapshot]) -> String {

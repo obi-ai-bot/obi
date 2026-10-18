@@ -1,12 +1,32 @@
 import Foundation
 
-/// One page open over Home (Sangam's Home.tsx `Step`): a kind of work's cards, a task's page, or
-/// the conversation with Oby. The Swift runner keeps one conversation, so the conversation list (#493)
-/// shows only when the runner on this Mac is obid; there's no Obysphere yet.
+/// One page open over Home (Sangam's Home.tsx `Step`): a kind of work's cards, a task's page, the
+/// conversation with Oby, or a Settings page. The Swift runner keeps one conversation, so the
+/// conversation list (#493) shows only when the runner on this Mac is obid; there's no Obysphere yet.
 nonisolated enum WindowStep: Hashable, Sendable {
     case group(WorkType)
     case job(id: String, local: Bool)
     case talk
+    case settings(SettingsPage)
+}
+
+/// Settings' pages, in the side panel's Settings section in this order (Sangam's SettingsView.tsx
+/// `SETTINGS_PAGES`).
+nonisolated enum SettingsPage: String, CaseIterable, Hashable, Sendable {
+    case general, runner, remote, accounts, models, connectors, vault, about
+
+    var label: String {
+        switch self {
+        case .general: "General"
+        case .runner: "Runner"
+        case .remote: "Remote access"
+        case .accounts: "Accounts"
+        case .models: "Models"
+        case .connectors: "Connectors"
+        case .vault: "Vault"
+        case .about: "About"
+        }
+    }
 }
 
 /// Where you are, as the steps that got you there: the title bar's trail. Each step opens over

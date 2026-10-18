@@ -290,6 +290,9 @@ struct TaskPage: View {
     var onPublishNow: () -> Void = {}
     /// Esc in the box: back a page.
     var onBack: (() -> Void)? = nil
+    /// Its follow-ups, oldest first (`ThreadTaskLine.followUps`), and opening one's page.
+    var followUps: [Job] = []
+    var onOpenJob: (String) -> Void = { _ in }
     @State private var moving = false
     @State private var busy = false
     @State private var problem: String?
@@ -329,6 +332,7 @@ struct TaskPage: View {
                                 }
                             }
                         }
+                        if !followUps.isEmpty { section("Follow-ups") { followUpList } }
                     }
                     .padding(.horizontal, 18)
                     .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
@@ -363,6 +367,22 @@ struct TaskPage: View {
         .onChange(of: publishNow, initial: true) { if publishNow { publishFromAlert() } }
         .sheet(isPresented: $showingReport) {
             if let report { ReportView(report: report, onFile: actions.fileProposal).frame(minWidth: 560, minHeight: 520) }
+        }
+    }
+
+    /// Each follow-up as Sangam's thread shows it: what you said, Oby's line, and its card.
+    private var followUpList: some View {
+        ForEach(Array(followUps.enumerated()), id: \.element.id) { index, next in
+            // Its own account, which a move may have changed: by name, as the iPhone shows it.
+            let account = actions.accounts.first { $0.account.id == next.account }?.account.name ?? next.account
+            VStack(alignment: .leading, spacing: 8) {
+                Text(next.request).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).lineSpacing(6)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                Text(ThreadTaskLine.followUp(next, account: account)).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                ThreadTask(job: next, account: account, onOpen: { onOpenJob(next.id) })
+            }
+            .padding(.top, index == 0 ? 0 : 16)
         }
     }
 

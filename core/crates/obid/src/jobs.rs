@@ -102,6 +102,25 @@ pub struct NewJob {
     /// What the brain found before it planned the job, and what done means (#540).
     #[serde(default)]
     pub brief: Option<crate::job::Brief>,
+    /// The job it follows up, what that one did, quoted in its first prompt, and the branch its
+    /// worktree starts from ([`follow_up`]).
+    #[serde(default)]
+    pub follow_up_of: Option<String>,
+    #[serde(default)]
+    pub earlier: Option<String>,
+    #[serde(default)]
+    pub start_from: Option<String>,
+}
+
+/// Who tells a job something, which decides what words for one that ended do (the owner's
+/// decision of 2026-10-18): the owner's own start a follow-up. Oby's event orchestrator's are the
+/// brain's own, and a turn that read something untrusted only proposes a follow-up for the owner's
+/// Start, so neither starts one here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Owner,
+    Untrusted,
+    Event,
 }
 
 /// A review another Obi asked for, once the owner or a remembered decision accepted it.
@@ -1288,6 +1307,11 @@ impl Jobs {
         job.brief = new
             .brief
             .filter(|b| !b.findings.is_empty() || b.done.is_some());
+        job.earlier = new.earlier.filter(|_| new.follow_up_of.is_some());
+        job.start_from = new
+            .start_from
+            .filter(|b| new.follow_up_of.is_some() && git::is_branch_name(b));
+        job.follow_up_of = new.follow_up_of;
         job.mode = Some(
             new.mode
                 .unwrap_or_else(|| self.default_mode().as_str().to_owned()),
@@ -1300,13 +1324,41 @@ impl Jobs {
         {
             Some(branch) if git::is_branch_name(&branch) => branch,
             Some(_) => return Err(Refused("That isn't a branch name obid can create.".into())),
-            None => match new.pr.or(new.issue) {
+            // A follow-up gets a branch of its own unless it carries the first job's on ([`follow_up`]).
+            None => match new.pr.or(new.issue).filter(|_| job.follow_up_of.is_none()) {
                 Some(number) => format!("oby/{}-{number}", new.kind),
                 None => format!("oby/{}-{id}", new.kind),
             },
         };
         job.phase = Some(Phase::Prepare);
         job.step = format!("Getting {} ready", job.repo_name());
+        // A follow-up starts only when nothing else moves its branch: checked and taken under one
+        // lock (insert takes the same job again).
+        if job.follow_up_of.is_some() {
+            let mut state = self.lock();
+            let active: Vec<&Job> = state
+                .jobs
+                .values()
+                .filter(|j| j.status.is_active())
+                .collect();
+            if let Some(other) = active.iter().find(|j| j.follow_up_of == job.follow_up_of) {
+                return Err(Refused(format!(
+                    "{} is following it up already: tell that one instead.",
+                    other.short_title()
+                )));
+            }
+            if let Some(other) = active
+                .iter()
+                .find(|j| j.repo == job.repo && j.branch == job.branch)
+            {
+                return Err(Refused(format!(
+                    "{} is working on {} now: tell that one instead.",
+                    other.short_title(),
+                    job.branch
+                )));
+            }
+            state.jobs.insert(job.id.clone(), job.clone());
+        }
         let job = self.insert(job);
         self.schedule();
         Ok(job)
@@ -1477,10 +1529,18 @@ impl Jobs {
     }
 
     /// The owner tells the job's agent something (`POST /v1/jobs/{id}/messages`). A job whose
-    /// agent is at work hears it as its next turn, before the check; a finished one picks its
-    /// session up again in the same worktree and branch, for one more round (and one more on a
-    /// loop's limit). `None` for a job obid doesn't have; `Err` says why it can't take the words.
-    pub fn message(self: &Arc<Self>, id: &str, text: &str) -> Option<Result<Job, Refused>> {
+    /// agent is at work hears it as its next turn, before the check; a finished one gets a
+    /// follow-up ([`follow_up`]), the job answered, as Sangam's design does (the owner's decision
+    /// of 2026-10-18). Only the exact Try-again words pick a finished job's session up again in the
+    /// same worktree and branch, for one more round (and one more on a loop's limit), unless a
+    /// follow-up carries its branch on. Only the owner's own words ([`Source`]) start a follow-up.
+    /// `None` for a job obid doesn't have; `Err` says why it can't take the words.
+    pub fn message(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+        source: Source,
+    ) -> Option<Result<Job, Refused>> {
         let job = self.get(id)?;
         let text = text.trim();
         if text.is_empty() || text.chars().count() > 2000 {
@@ -1492,6 +1552,14 @@ impl Jobs {
             return Some(Err(Refused(
                 "This is a review another Oby asked for: its answer goes back to that Oby, so it takes no words of yours.".into(),
             )));
+        }
+        if !job.status.is_active() && text != crate::brain::actions::TRY_AGAIN {
+            return Some(match source {
+                Source::Owner => self.create(follow_up(&job, text)),
+                Source::Untrusted | Source::Event => Err(Refused(
+                    "It ended, so these words would start a follow-up: only the owner's own words start one, where Oby read nothing untrusted.".into(),
+                )),
+            });
         }
         if self.lock().publishing.contains(id) {
             return Some(Err(Refused(
@@ -1550,6 +1618,18 @@ impl Jobs {
             self.events.send("job", job.to_json());
             self.changed.notify_waiters();
             return Some(Ok(job));
+        }
+        // Tried again, it would move a branch its follow-up carries on.
+        if let Some(next) = self
+            .lock()
+            .jobs
+            .values()
+            .find(|j| j.follow_up_of.as_deref() == Some(id) && j.branch == job.branch)
+        {
+            return Some(Err(Refused(format!(
+                "Its follow-up {} carries its branch on: tell that one instead.",
+                next.short_title()
+            ))));
         }
         if job.session.is_none() {
             return Some(Err(Refused(
@@ -3195,9 +3275,10 @@ impl Jobs {
             let clone = git::ensure_clone(&self.config.home, &repo.repo, &repo.remote, &refspecs)
                 .await
                 .map_err(|e| format!("Couldn't get {} ready: {e}", repo.repo))?;
-            let start = match job.pr {
-                Some(pr) => format!("refs/remotes/origin/pr/{pr}"),
-                None => format!("refs/remotes/origin/{base}"),
+            let start = match (&job.start_from, job.pr) {
+                (Some(branch), _) => format!("refs/heads/{branch}"),
+                (None, Some(pr)) => format!("refs/remotes/origin/pr/{pr}"),
+                (None, None) => format!("refs/remotes/origin/{base}"),
             };
             let start_commit = git::git(
                 &clone,
@@ -5163,12 +5244,81 @@ fn tail(text: &str, max: usize) -> &str {
 }
 
 /// The first prompt of the owner's job (Engine/Jobs.swift, `Prompts.agent`, for what obid does).
+/// A follow-up of `job`, which ended, with the owner's `words` (Sangam's design, the owner's
+/// decision of 2026-10-18): the same kind, agent, account, repository, pull request or issue,
+/// base, check, model, mode and conversation, the words its request and task, titled by their
+/// first line, and what `job` did for its first prompt. Bypass isn't carried: only the owner's own
+/// Confirm starts a job that never asks. When `job` has commits that aren't merged, the follow-up
+/// starts from its branch head, so its agent has that work: on that very branch while its pull
+/// request is open (publishing updates it), else on a branch of its own.
+pub fn follow_up(job: &Job, words: &str) -> NewJob {
+    let unmerged = job.commits.unwrap_or(0) > 0 && !job.merged();
+    let line = words.trim().lines().next().unwrap_or("").trim();
+    let mut title: String = if line.chars().count() > 60 {
+        format!("{}…", line.chars().take(59).collect::<String>().trim_end())
+    } else {
+        line.to_owned()
+    };
+    if let Some(first) = title.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    let commits = job.commits.unwrap_or(0);
+    let mut did = vec![
+        format!(
+            "{} ({}, {})",
+            job.short_title(),
+            job.kind,
+            job.status.as_str()
+        ),
+        format!("Asked: {}", job.request),
+    ];
+    if !job.summary.is_empty() {
+        did.push(format!("Its report: {}", job.summary));
+    }
+    did.push(format!(
+        "Branch {}, {commits} commit{}",
+        job.branch,
+        if commits == 1 { "" } else { "s" }
+    ));
+    if let Some(url) = &job.published {
+        did.push(format!("Pull request: {url}"));
+    }
+    NewJob {
+        repo: job.repo.clone(),
+        kind: job.kind.clone(),
+        task: words.to_owned(),
+        title: (!title.is_empty()).then_some(title),
+        request: Some(words.to_owned()),
+        pr: job.pr,
+        issue: job.issue,
+        account: Some(job.account.clone()),
+        agent: Some(job.agent.clone()),
+        base: job.base.clone(),
+        check: job.check.clone(),
+        model: job.model.clone(),
+        mode: job.mode.clone().filter(|m| m != "bypass"),
+        conversation: job.conversation.clone(),
+        branch: (unmerged && job.published.is_some() && job.pull_request_open())
+            .then(|| job.branch.clone()),
+        start_from: unmerged.then(|| job.branch.clone()),
+        follow_up_of: Some(job.id.clone()),
+        earlier: Some(crate::secrets::known().redact(&did.join("\n"))),
+        ..NewJob::default()
+    }
+}
+
 fn owner_prompt(job: &Job) -> String {
     let base = job
         .base
         .clone()
         .unwrap_or_else(|| "the default branch".into());
     let mut lines = vec![match job.pr {
+        _ if job.start_from.is_some() => format!(
+            "You're working in {}, in a git worktree of its own at the head of the branch {}, started from the head of {}, the branch of the earlier job this follows up: its commits are there. Its HEAD is detached: commit as it is and don't switch branches; obid moves the branch to your commits after each turn.",
+            job.repo,
+            job.branch,
+            job.start_from.as_deref().unwrap_or_default()
+        ),
         Some(pr) => format!(
             "{} pull request #{pr} in {}. Its code is checked out here at the head of the branch {} (HEAD detached: commit as it is, obid moves the branch to your commits); compare it with origin/{base} (git diff origin/{base}...HEAD).",
             if job.kind == "review" {
@@ -5198,6 +5348,14 @@ fn owner_prompt(job: &Job) -> String {
         }
     }
     lines.push(format!("What the user asked for: {}", job.task));
+    if let Some(earlier) = &job.earlier {
+        let nonce = crate::brain::briefing::nonce();
+        lines.push(format!(
+            "This follows up an earlier job of yours on this repository, which ended. What it did, quoted:\n\n{}\n{}",
+            crate::brain::briefing::fence_rule(&nonce, "the earlier job and its agent"),
+            crate::brain::briefing::fence(&nonce, earlier)
+        ));
+    }
     if let Some(brief) = &job.brief {
         lines.push(brief_section(brief));
     }
@@ -6243,6 +6401,98 @@ mod tests {
         // AUTO_MERGE ref with the job's own object folder): agents spent a turn checking a commit
         // that had landed.
         assert!(prompt.contains("packed-refs.lock"), "{prompt}");
+    }
+
+    /// A follow-up starts from the first job's unmerged work: on its branch while its pull request
+    /// is open, on one of its own otherwise; from its base when there's no such work. Bypass isn't
+    /// carried.
+    #[test]
+    fn a_follow_up_starts_where_the_first_jobs_work_is() {
+        let mut job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        job.branch = "oby/fix-j".into();
+        job.status = Status::Done;
+        job.mode = Some("bypass".into());
+        let next = follow_up(&job, "and the docs");
+        assert_eq!((next.branch, next.start_from), (None, None));
+        assert_eq!(next.mode, None);
+        assert_eq!(next.title.as_deref(), Some("And the docs"));
+        job.commits = Some(2);
+        let next = follow_up(&job, "and the docs");
+        assert_eq!(
+            (next.branch, next.start_from),
+            (None, Some("oby/fix-j".into()))
+        );
+        job.published = Some("https://github.com/o/r/pull/7".into());
+        let next = follow_up(&job, "and the docs");
+        assert_eq!(
+            (next.branch, next.start_from),
+            (Some("oby/fix-j".into()), Some("oby/fix-j".into()))
+        );
+        job.pull_request = Some(crate::github::PullRequest {
+            state: "CLOSED".into(),
+            review_decision: None,
+            base: "main".into(),
+            merged_at: None,
+            checked_at: 0,
+            head: None,
+        });
+        let next = follow_up(&job, "and the docs");
+        assert_eq!(
+            (next.branch, next.start_from),
+            (None, Some("oby/fix-j".into()))
+        );
+    }
+
+    /// Only the owner's own words start a follow-up: an event turn's, and an owner's turn that
+    /// read something untrusted, are refused here, even when the job ended after the turn looked
+    /// (message_job proposes the untrusted one instead), and nothing starts.
+    #[tokio::test]
+    async fn only_the_owners_words_start_a_follow_up() {
+        let root = std::env::temp_dir().join(format!("obid-follow-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "allowFileRemotes": true,
+                "repos": [{"repo": "o/r", "remote": "file:///nowhere", "defaultBranch": "main"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let mut job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        job.status = Status::Done;
+        job.session = Some("s".into());
+        jobs.lock().jobs.insert("j".into(), job);
+        for source in [Source::Event, Source::Untrusted] {
+            let refused = jobs.message("j", "rerun the flaky test", source).unwrap();
+            assert!(
+                refused
+                    .unwrap_err()
+                    .0
+                    .contains("only the owner's own words"),
+                "{source:?}"
+            );
+        }
+        assert_eq!(jobs.list(10).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #540: what Oby found reaches the agent quoted, as data, and nothing in it closes the quote.

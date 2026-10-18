@@ -70,8 +70,9 @@ pub mod action {
     pub const START: &str = "start";
     /// Answer any other item: `target` the item, `payload` `{"answer": "…"}`.
     pub const ANSWER_ITEM: &str = "answer_item";
-    /// Tell a job that ended the owner's words, for one more round in its own worktree (#542):
-    /// `target` the job, `payload` `{"words": "…"}`, already taken out of the vault's secrets.
+    /// Tell a job that ended the owner's words (#542): `target` the job, `payload` `{"words": "…"}`,
+    /// already taken out of the vault's secrets. Made before 2026-10-18 for one more round; it
+    /// starts a follow-up now, and obid makes none.
     pub const MESSAGE_JOB: &str = "message_job";
 }
 

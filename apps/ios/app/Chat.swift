@@ -380,7 +380,7 @@ private struct MessageRow: View {
 
 /// A task an answer started, as a small card under it (Sangam's ThreadTask): its agent's mark,
 /// its title, "Running · agent · account · repo", its mark and a chevron; a tap opens its page.
-private struct ThreadTask: View {
+struct ThreadTask: View {
     @Environment(\.push) private var push
     let job: Job
     let account: String

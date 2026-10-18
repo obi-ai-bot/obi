@@ -38,3 +38,67 @@ struct ObidAccountsTests {
         #expect(accounts.filter(\.signedIn).map(\.account.id) == ["personal"])
     }
 }
+
+/// Sangam's usage rows on Settings › Accounts (docs/mac-design.md B2), and which accounts show (C1).
+struct AccountRowsTests {
+    let now = Date(timeIntervalSince1970: 1_791_582_173)
+    let utc = TimeZone(identifier: "UTC")!
+    let english = Locale(identifier: "en_GB")
+
+    func snapshot(_ name: String, agent: String = "claude", week: Double?, resets: TimeInterval = 3 * 86_400, signedIn: Bool = true,
+                  fiveHour: Double? = nil, running: Int = 0) -> Usage.Snapshot {
+        Usage.Snapshot(agent: agent, name: name, label: nil, fiveHour: fiveHour, sevenDay: week, fiveHourResets: now + 7200,
+                       sevenDayResets: now + resets, running: running, runnerSignedIn: signedIn)
+    }
+
+    @Test func mostRoomIsTheSignedInAccountWithTheMostOfItsWeekLeft() {
+        let accounts = [snapshot("Personal", week: 0.82), snapshot("Deskree", agent: "codex", week: 0.12), snapshot("Old", week: 0.01, signedIn: false)]
+        #expect(Usage.mostRoom(accounts, now: now) == "Most room: Deskree on Codex, 88% left this week")
+        // A week past its reset is empty again.
+        #expect(Usage.mostRoom([snapshot("Personal", week: 0.9, resets: -60), snapshot("Deskree", week: 0.3)], now: now)
+                == "Most room: Personal on Claude Code, 100% left this week")
+        #expect(Usage.mostRoom([snapshot("Personal", week: nil)], now: now) == "No usage yet: it updates after the next job.")
+        #expect(Usage.mostRoom([snapshot("Personal", week: 0.2, signedIn: false)], now: now) == "No account is signed in.")
+        #expect(Usage.mostRoom([], now: now) == "None yet")
+    }
+
+    @Test func rowSaysWhoPaysWhenItResetsAndHowMuchIsUsed() {
+        let personal = snapshot("Personal", week: 0.36, running: 1)
+        #expect(Usage.about(personal, payer: "Deskree", now: now, locale: english, timeZone: utc) == "Paid by Deskree · Resets Monday")
+        // obid has no payer yet: the line starts at the reset.
+        #expect(Usage.about(personal, payer: "", now: now, locale: english, timeZone: utc) == "Resets Monday")
+        #expect(Usage.resetsDay(now + 4 * 3600 + 60, now: now) == "Resets in 5 h")
+        #expect(Usage.usedText(personal, now: now) == "36% used")
+        #expect(Usage.week(personal, now: now) == 0.36)
+    }
+
+    @Test func rowWithoutUsageSaysWhy() {
+        let unknown = snapshot("Personal", week: nil)
+        #expect(Usage.usedText(unknown, now: now) == nil)
+        #expect(Usage.about(unknown, payer: "", now: now) == "No usage yet: it updates after its next job")
+        let out = snapshot("Personal", week: 0.5, signedIn: false)
+        #expect(Usage.usedText(out, now: now) == nil)
+        #expect(Usage.about(out, payer: "Sam", now: now) == "Paid by Sam · Signed out")
+    }
+
+    @Test func fiveHourWindowShowsOnlyPastEightyPercent() {
+        #expect(Usage.fiveHourLine(snapshot("P", week: 0.2, fiveHour: 0.8), now: now) == nil)
+        #expect(Usage.fiveHourLine(snapshot("P", week: 0.2, fiveHour: 0.85), now: now) == "5-hour limit 85% used · resets in 2 h")
+    }
+
+    /// obid doesn't serve `/v1/settings/models` yet: its 404 means the Models page shows this Mac's
+    /// own models, as before, with no error; any other failure is shown.
+    @Test func modelsFallBackWhenTheRunnerHasNone() {
+        #expect(!ModelsSettingsView.servesModels(after: RunnerError(message: "Not found", status: 404)))
+        #expect(ModelsSettingsView.servesModels(after: RunnerError(message: "Bad gateway", status: 502)))
+        #expect(ModelsSettingsView.servesModels(after: URLError(.timedOut)))
+    }
+
+    /// With obid on this Mac, only its accounts; with a remote runner, this Mac's and the runner's;
+    /// with none, this Mac's.
+    @Test func whichAccountsShow() {
+        #expect(AccountPlaces.of(local: true, runner: true) == [.runner])
+        #expect(AccountPlaces.of(local: false, runner: true) == [.mac, .runner])
+        #expect(AccountPlaces.of(local: false, runner: false) == [.mac])
+    }
+}
