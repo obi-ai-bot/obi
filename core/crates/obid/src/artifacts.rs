@@ -45,6 +45,10 @@ const MAX_DEPTH: usize = 32;
 pub const MAX_VERSIONS: u32 = 50;
 /// The most entries of a job's `.obi/artifacts/` published at its end: the rest are refused.
 pub const MAX_JOB_ENTRIES: usize = 20;
+/// The most bytes one job's artifacts hold, every version of each counted.
+pub const MAX_JOB_BYTES: u64 = 500 * 1024 * 1024;
+/// How a refusal for a job's artifacts holding too much begins.
+pub const JOB_FULL: &str = "Not published: this job's artifacts hold";
 /// What a refusal says instead, when what it would say holds what looks like a secret (a name).
 pub const NAME_REFUSED: &str =
     "Not published: a name in it looks like a secret, so obid doesn't say it.";
@@ -136,6 +140,8 @@ pub struct Artifacts {
     dir: PathBuf,
     scratch: PathBuf,
     events: Events,
+    /// [`MAX_JOB_BYTES`], lower in tests.
+    job_bytes: u64,
     /// Each change to an `artifact.json`, one at a time. ponytail: one lock for all; per artifact
     /// if publishing ever queues.
     lock: Mutex<()>,
@@ -155,6 +161,7 @@ impl Artifacts {
             dir,
             scratch: home.join("tmp"),
             events,
+            job_bytes: MAX_JOB_BYTES,
             lock: Mutex::new(()),
         }))
     }
@@ -185,6 +192,10 @@ impl Artifacts {
                     return Err(format!(
                         "Not published: artifact {id} was made somewhere else, so only there can it get a new version."
                     ));
+                }
+                // Before anything is copied or scanned.
+                if artifact.versions.len() >= MAX_VERSIONS as usize {
+                    return Err(full(&artifact.id));
                 }
                 Some(artifact)
             }
@@ -262,10 +273,22 @@ impl Artifacts {
             },
         };
         if artifact.versions.len() >= MAX_VERSIONS as usize {
-            return Err(format!(
-                "Not published: artifact {} has {MAX_VERSIONS} versions, the most obid keeps; publish it as a new one.",
-                artifact.id
-            ));
+            return Err(full(&artifact.id));
+        }
+        if let Some(job) = what.job {
+            let held: u64 = self
+                .list(None, Some(job))
+                .iter()
+                .flat_map(|a| &a.versions)
+                .map(|v| v.bytes)
+                .sum();
+            if held + copied.bytes > self.job_bytes {
+                return Err(format!(
+                    "{JOB_FULL} {} MB, and {} MB is the most one job's may.",
+                    held / 1024 / 1024,
+                    self.job_bytes / 1024 / 1024
+                ));
+            }
         }
         let version = artifact.latest() + 1;
         let folder = self.dir.join(&artifact.id);
@@ -328,7 +351,20 @@ impl Artifacts {
     async fn scan_names(&self, names: &[String]) -> Result<(), String> {
         crate::vault::check()
             .map_err(|why| format!("Not published: the secret scan couldn't run ({why})."))?;
-        let lines: Vec<(String, String)> = names
+        // gitleaks wants a key to end where a word does: `<key>.md` and `<key>/index.html` hide
+        // it. So each part between `/`s, and each piece between `.`s, is a line too.
+        let mut parts: Vec<String> = Vec::new();
+        for name in names {
+            parts.push(name.clone());
+            for part in name.split('/') {
+                parts.push(part.to_owned());
+                parts.extend(part.split('.').map(str::to_owned));
+            }
+        }
+        parts.retain(|p| !p.is_empty());
+        parts.sort();
+        parts.dedup();
+        let lines: Vec<(String, String)> = parts
             .iter()
             .map(|n| ("name".to_owned(), n.clone()))
             .collect();
@@ -337,7 +373,7 @@ impl Artifacts {
         }
         make_private_dir(&self.scratch)
             .map_err(|e| format!("Not published: the secret scan couldn't run ({e})."))?;
-        match crate::scan::gitleaks_names(names, &self.scratch).await {
+        match crate::scan::gitleaks_names(&parts, &self.scratch).await {
             Ok(found) if found.is_empty() => Ok(()),
             Ok(_) => Err(NAME_REFUSED.into()),
             Err(why) => Err(format!(
@@ -432,6 +468,13 @@ impl Artifacts {
 /// A lower-case UUID, as obid makes them: never `..` or a path.
 fn is_id(id: &str) -> bool {
     id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+}
+
+/// Why an artifact at [`MAX_VERSIONS`] gets no more.
+fn full(id: &str) -> String {
+    format!(
+        "Not published: artifact {id} has {MAX_VERSIONS} versions, the most obid keeps; publish it as a new one."
+    )
 }
 
 /// An id as said back: only when it is one.
@@ -586,6 +629,7 @@ fn copy(root: &Path, path: &str, to: &Path) -> Result<Copied, String> {
     }
     shown.push_str(last);
     let entry = open_in(&at, last, &shown)?;
+    still_there(&at, last, &metadata(&entry)?, &shown)?;
     let mut copied = Copied {
         files: Vec::new(),
         bytes: 0,
@@ -624,6 +668,28 @@ fn plain(meta: &std::fs::Metadata, shown: &str, dev: u64) -> Result<(), String> 
         ));
     }
     if meta.is_file() && meta.nlink() > 1 {
+        return Err(format!(
+            "{shown} has another link to it (a hard link): obid publishes only files of their own."
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `name` in `dir` is still the entry opened as `meta`.
+fn still_there(
+    dir: &impl std::os::fd::AsFd,
+    name: &str,
+    meta: &std::fs::Metadata,
+    shown: &str,
+) -> Result<(), String> {
+    let now = nix::sys::stat::fstatat(dir, name, nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW)
+        .map_err(|e| format!("{shown} can't be read ({e})."))?;
+    if now.st_dev as u64 != meta.dev() || now.st_ino as u64 != meta.ino() {
+        return Err(format!(
+            "{shown} changed while obid copied it: try again once nothing writes there."
+        ));
+    }
+    if meta.is_file() && (meta.nlink() != 1 || now.st_nlink as u64 != 1) {
         return Err(format!(
             "{shown} has another link to it (a hard link): obid publishes only files of their own."
         ));
@@ -703,6 +769,7 @@ fn copy_folder(
             return Err(format!("{path}: a name can't hold `\\` or `:`."));
         }
         let entry = open_in(&dir, &name, &path)?;
+        still_there(&dir, &name, &metadata(&entry)?, &path)?;
         let inside = format!("{prefix}{name}");
         let meta = metadata(&entry)?;
         plain(&meta, &path, copied.dev)?;
@@ -857,26 +924,35 @@ pub async fn remove(
 
 /// What a job's `.obi/artifacts/` holds: one artifact per entry, hidden names left out, sorted.
 /// Nothing when `.obi` or `.obi/artifacts` isn't a real folder.
-pub fn job_entries(worktree: &Path) -> Vec<String> {
+/// `Err` when it holds more than [`MAX_FILES`] names, hidden ones too: then none is published,
+/// so "the first by name" is always of them all. The read stops there.
+pub fn job_entries(worktree: &Path) -> Result<Vec<String>, String> {
     let mut folder = worktree.to_path_buf();
     for part in [crate::obi_dir::OBI, "artifacts"] {
         folder.push(part);
         if !std::fs::symlink_metadata(&folder).is_ok_and(|m| m.is_dir()) {
-            return Vec::new();
+            return Ok(Vec::new());
         }
     }
     let Ok(entries) = std::fs::read_dir(&folder) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    // Hidden names count toward the most read, so a folder of millions is never all listed.
-    let mut names: Vec<String> = entries
-        .take(MAX_FILES)
-        .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| !n.starts_with('.'))
-        .collect();
+    let mut names = Vec::new();
+    for (read, entry) in entries.enumerate() {
+        if read >= MAX_FILES {
+            return Err(format!(
+                "Not published: .obi/artifacts holds more than {MAX_FILES} names, so none of it is."
+            ));
+        }
+        if let Ok(name) = entry.map(|e| e.file_name())
+            && let Ok(name) = name.into_string()
+            && !name.starts_with('.')
+        {
+            names.push(name);
+        }
+    }
     names.sort();
-    names
+    Ok(names)
 }
 
 /// The title an entry of `.obi/artifacts/` gets: its name without its extension.
@@ -1300,6 +1376,118 @@ mod tests {
         assert!(store.list(None, None).is_empty());
     }
 
+    /// A made-up Google API key, put together here: only gitleaks knows its shape.
+    fn google_key() -> String {
+        format!("{}{}", "AIza", "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q")
+    }
+
+    /// A PDF first doesn't blind gitleaks to what follows, in its own file or the next one; and
+    /// a key in a name before an extension or a slash is found (#648's re-review, N1, N2).
+    #[tokio::test]
+    async fn a_pdf_first_and_a_key_in_a_name_are_still_found() {
+        if crate::process::resolve_bin("gitleaks").is_none() {
+            return;
+        }
+        let t = Temp::new("gitleaks-only");
+        let key = google_key();
+        t.write("paper.pdf", format!("%PDF-1.4\nkey = {key}\n"));
+        t.write("site/a.pdf", "%PDF-1.4\n%\u{e2}\u{e3}\n");
+        t.write("site/b.md", format!("key = {key}\n"));
+        t.write("site/index.html", "<p>hi</p>");
+        t.write(&format!("{key}.md"), "# plain");
+        t.write("nested/index.html", "<p>hi</p>");
+        t.write(&format!("nested/{key}/index.html"), "<p>hi</p>");
+        let (store, _) = t.store();
+        let room = t.room();
+        for path in ["paper.pdf", "site"] {
+            let why = store.publish(what(&room, path)).await.unwrap_err();
+            assert!(why.contains("gitleaks"), "{path}: {why}");
+        }
+        let named = format!("{key}.md");
+        for path in [named.as_str(), "nested"] {
+            let why = store.publish(what(&room, path)).await.unwrap_err();
+            assert_eq!(why, NAME_REFUSED, "{path}");
+        }
+        assert_eq!(
+            store.speakable(format!("{key}.md: Not published: …")).await,
+            NAME_REFUSED
+        );
+        assert!(store.list(None, None).is_empty());
+    }
+
+    /// The entry checked after it's opened is the one its name still names, with no other link
+    /// (#648's re-review, N4).
+    #[test]
+    fn an_entry_swapped_after_it_was_opened_is_refused() {
+        let t = Temp::new("swap");
+        t.write("x.md", "first");
+        t.write("y.md", "second");
+        let dir = open(
+            &t.room(),
+            OFlag::O_DIRECTORY | OFlag::O_RDONLY | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let opened = open_in(&dir, "x.md", "x.md").unwrap();
+        let meta = metadata(&opened).unwrap();
+        assert!(still_there(&dir, "x.md", &meta, "x.md").is_ok());
+        std::fs::rename(t.room().join("y.md"), t.room().join("x.md")).unwrap();
+        let why = still_there(&dir, "x.md", &meta, "x.md").unwrap_err();
+        assert!(why.contains("changed while"), "{why}");
+    }
+
+    /// An artifact at its cap is refused before anything is copied; a job's artifacts hold at
+    /// most so many bytes in all (#648's re-review, N5).
+    #[tokio::test]
+    async fn caps_come_before_the_copy_and_a_job_has_a_size() {
+        let t = Temp::new("job-bytes");
+        t.write("notes.md", "0");
+        let (mut store, _) = t.store();
+        Arc::get_mut(&mut store).unwrap().job_bytes = 10;
+        let room = t.room();
+        let (id, _) = store
+            .publish(Publish {
+                job: Some("j1"),
+                conversation: None,
+                ..what(&room, "notes.md")
+            })
+            .await
+            .unwrap();
+        // Filled to the cap by hand, as 50 publishes would.
+        let mut artifact = store.get(&id).unwrap();
+        for n in 2..=MAX_VERSIONS {
+            let mut v = artifact.versions[0].clone();
+            v.version = n;
+            artifact.versions.push(v);
+        }
+        store.save(&artifact).unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", room.join("link.md")).unwrap();
+        let again = Publish {
+            job: Some("j1"),
+            conversation: None,
+            artifact: Some(&id),
+            ..what(&room, "link.md")
+        };
+        let why = store.publish(again).await.unwrap_err();
+        assert!(why.contains("50 versions"), "{why}");
+        // j1 holds 50 bytes already (its versions), past its 10.
+        t.write("more.md", "0123456789");
+        let more = Publish {
+            job: Some("j1"),
+            conversation: None,
+            ..what(&room, "more.md")
+        };
+        let why = store.publish(more).await.unwrap_err();
+        assert!(why.starts_with(JOB_FULL), "{why}");
+        // Another job has room.
+        let other = Publish {
+            job: Some("j2"),
+            conversation: None,
+            ..what(&room, "more.md")
+        };
+        assert!(store.publish(other).await.is_ok());
+    }
+
     #[test]
     fn titles_and_entries() {
         assert_eq!(title_of("landing-page"), "landing-page");
@@ -1311,15 +1499,38 @@ mod tests {
         assert!(clean_title(&"x".repeat(101)).is_none());
         let t = Temp::new("entries");
         let worktree = t.0.join("worktree");
-        assert!(job_entries(&worktree).is_empty());
+        assert_eq!(job_entries(&worktree), Ok(vec![]));
         std::fs::create_dir_all(worktree.join(".obi/artifacts/page")).unwrap();
         std::fs::write(worktree.join(".obi/artifacts/notes.md"), "x").unwrap();
         std::fs::write(worktree.join(".obi/artifacts/.hidden"), "x").unwrap();
-        assert_eq!(job_entries(&worktree), ["notes.md", "page"]);
+        assert_eq!(
+            job_entries(&worktree),
+            Ok(vec!["notes.md".to_owned(), "page".to_owned()])
+        );
         // `.obi/artifacts` a link out of the worktree: nothing.
         std::fs::remove_dir_all(worktree.join(".obi/artifacts")).unwrap();
         std::os::unix::fs::symlink(t.room(), worktree.join(".obi/artifacts")).unwrap();
         t.write("x.md", "x");
-        assert!(job_entries(&worktree).is_empty());
+        assert_eq!(job_entries(&worktree), Ok(vec![]));
+    }
+
+    /// "The first 20 by name" holds: past MAX_FILES names (hidden ones too) none is published,
+    /// rather than the first 20 of those read (#648's re-review, N6).
+    #[test]
+    fn too_many_entries_publish_none() {
+        let t = Temp::new("entries-cap");
+        let folder = t.0.join("worktree/.obi/artifacts");
+        std::fs::create_dir_all(&folder).unwrap();
+        for i in 0..MAX_FILES {
+            std::fs::write(folder.join(format!(".{i}")), "").unwrap();
+        }
+        std::fs::write(folder.join("a.md"), "x").unwrap();
+        let why = job_entries(&t.0.join("worktree")).unwrap_err();
+        assert!(why.contains("more than 2000"), "{why}");
+        std::fs::remove_file(folder.join(".0")).unwrap();
+        assert_eq!(
+            job_entries(&t.0.join("worktree")),
+            Ok(vec!["a.md".to_owned()])
+        );
     }
 }

@@ -133,26 +133,30 @@ fn a_jobs_artifacts_are_published_when_it_ends() {
     let titles: Vec<&str> = artifacts.iter().map(|(t, _)| t.as_str()).collect();
     assert_eq!(titles, ["chart", "notes", "page"], "{job}");
     let problems = job["artifactProblems"].as_array().unwrap();
-    assert_eq!(problems.len(), 3, "{job}");
-    // The entry whose name is a key: refused, and its name never said (#648's review, F2).
-    assert_eq!(
-        problems[0], "Not published: a name in it looks like a secret, so obid doesn't say it.",
-        "{job}"
-    );
+    assert_eq!(problems.len(), 4, "{job}");
+    // The entries whose names are keys (one only gitleaks knows): refused, and their names never
+    // said (#648's review, F2; its re-review, N3).
+    for problem in &problems[..2] {
+        assert_eq!(
+            problem, "Not published: a name in it looks like a secret, so obid doesn't say it.",
+            "{job}"
+        );
+    }
     assert!(!job.to_string().contains("QWERTYUIOP"), "{job}");
+    assert!(!job.to_string().contains("A1b2C3d4E5f6"), "{job}");
     assert!(
-        problems[1]
+        problems[2]
             .as_str()
             .unwrap()
             .starts_with("away.md: Not published: .obi/artifacts/away.md is a link"),
         "{job}"
     );
     assert!(
-        problems[2]
+        problems[3]
             .as_str()
             .unwrap()
             .starts_with("leak.md: Not published: the secret scan found")
-            && problems[2].as_str().unwrap().contains("AWS access key"),
+            && problems[3].as_str().unwrap().contains("AWS access key"),
         "{job}"
     );
     let published = events_named(&events, "artifact", 30, |got| got.len() >= 3);

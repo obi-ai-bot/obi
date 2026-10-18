@@ -902,14 +902,21 @@ fn random_bytes() -> [u8; 8] {
     bytes
 }
 
+/// What gitleaks reads first, before every text it's given.
+const FIRST_LINE: &str = "obid secret scan";
+
 async fn run_gitleaks(
     bin: &Path,
     lines: &[(String, usize, String)],
     folder: &Path,
 ) -> Result<Vec<Finding>, String> {
-    // Every line, in order, and where each came from.
+    // Every line, in order, and where each came from. A fixed first line goes before them: a
+    // file that starts like a PDF, a zip or a gzip (`%PDF`, `PK\x03\x04`) is one gitleaks skips
+    // whole ("scanned ~0 bytes"), so what comes first is never the texts' own (#648, N1).
     let places: Vec<(String, usize)> = lines.iter().map(|(n, i, _)| (n.clone(), *i)).collect();
-    let joined: Vec<&str> = lines.iter().map(|(_, _, text)| text.as_str()).collect();
+    let joined: Vec<&str> = std::iter::once(FIRST_LINE)
+        .chain(lines.iter().map(|(_, _, text)| text.as_str()))
+        .collect();
     let input = folder.join("texts.txt");
     let report = folder.join("report.json");
     std::fs::write(&input, joined.join("\n")).map_err(|e| format!("can't write the texts: {e}"))?;
@@ -963,10 +970,12 @@ async fn run_gitleaks(
             }
             Ok(leaks
                 .iter()
+                // Nothing on obid's own first line is the texts'.
+                .filter(|leak| leak["StartLine"].as_u64() != Some(1))
                 .map(|leak| {
                     let place = leak["StartLine"]
                         .as_u64()
-                        .and_then(|n| places.get((n as usize).checked_sub(1)?));
+                        .and_then(|n| places.get((n as usize).checked_sub(2)?));
                     Finding {
                         name: place.map_or("?".into(), |p| p.0.clone()),
                         line: place.map(|p| p.1),
@@ -1101,11 +1110,12 @@ mod tests {
     #[tokio::test]
     async fn what_gitleaks_reports_is_placed_by_text_and_line() {
         let folder = scratch("report");
-        // Its arguments: dir <file> … --report-path=<report>. It reports line 3 of what it read.
+        // Its arguments: dir <file> … --report-path=<report>. It reports line 4 of the file it
+        // read: obid's own first line, then the texts, so their third line.
         let bin = fake_gitleaks(
             &folder,
             r#"for a in "$@"; do case "$a" in --report-path=*) report="${a#--report-path=}";; esac; done
-echo '[{"StartLine": 3, "RuleID": "generic-api-key"}]' > "$report"
+echo '[{"StartLine": 4, "RuleID": "generic-api-key"}]' > "$report"
 exit 99"#,
         );
         let texts = vec![
@@ -1130,6 +1140,32 @@ exit 99"#,
             .filter(|e| e.file_name().to_string_lossy().starts_with("scan-"))
             .collect();
         assert!(left.is_empty());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A first line that reads like a PDF's or a zip's header made gitleaks skip everything it
+    /// was given ("scanned ~0 bytes"): a diff whose first added line is `%PDF-1.4`, or an
+    /// artifact whose first file is a PDF, hid a key only gitleaks knows (#648's re-review, N1).
+    #[tokio::test]
+    async fn a_first_line_like_a_pdf_or_a_zip_doesnt_blind_gitleaks() {
+        if crate::process::resolve_bin("gitleaks").is_none() {
+            return;
+        }
+        let folder = scratch("magic");
+        // A made-up Google API key, put together here: no built-in rule has its shape.
+        let key = format!("{}{}", "AIza", "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q");
+        assert!(line_rules(&key).is_empty());
+        for first in ["%PDF-1.4", "PK\u{3}\u{4}\u{14}\u{0}"] {
+            let lines = vec![
+                ("a.pdf".to_owned(), 1, first.to_owned()),
+                ("a.pdf".to_owned(), 2, format!("key = {key}")),
+            ];
+            let found = gitleaks_lines(&lines, &folder).await.unwrap();
+            assert!(
+                found.iter().any(|f| f.name == "a.pdf" && f.line == Some(2)),
+                "{first:?}: {found:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&folder);
     }
 

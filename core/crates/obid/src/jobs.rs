@@ -3449,11 +3449,15 @@ impl Jobs {
         let worktree = self.worktree_path(id);
         let mut listed = job.artifacts.clone();
         let mut problems = Vec::new();
-        let entries = crate::artifacts::job_entries(&worktree);
+        let entries = crate::artifacts::job_entries(&worktree).unwrap_or_else(|why| {
+            problems.push(why);
+            Vec::new()
+        });
         let more = entries
             .len()
             .saturating_sub(crate::artifacts::MAX_JOB_ENTRIES);
-        for entry in entries.into_iter().take(crate::artifacts::MAX_JOB_ENTRIES) {
+        let taken = entries.len().min(crate::artifacts::MAX_JOB_ENTRIES);
+        for (done, entry) in entries.into_iter().take(taken).enumerate() {
             let path = format!("{}/artifacts/{entry}", crate::obi_dir::OBI);
             let title = crate::artifacts::title_of(&entry);
             let before = listed.iter().position(|a| a.entry == entry);
@@ -3481,7 +3485,15 @@ impl Jobs {
                     version,
                     entry,
                 }),
-                // Said only when it holds no name that looks like a secret.
+                // A name refused is never said, the entry's least of all.
+                (Err(why), _) if why == crate::artifacts::NAME_REFUSED => problems.push(why),
+                // The job's artifacts are full: one line for this entry and the rest.
+                (Err(why), _) if why.starts_with(crate::artifacts::JOB_FULL) => {
+                    problems.push(format!("{} entries: {why}", taken - done));
+                    break;
+                }
+                // Any other refusal names the entry, only when no part of it looks like a
+                // secret (crate::artifacts, `speakable`, reads each part on its own).
                 (Err(why), _) => {
                     problems.push(artifacts.speakable(format!("{entry}: {why}")).await)
                 }
