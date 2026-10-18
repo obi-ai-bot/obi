@@ -38,6 +38,9 @@ impl Status {
 /// The kinds of work.
 pub const KINDS: [&str; 6] = ["review", "fix", "build", "test", "investigate", "research"];
 
+/// The kinds that only read: they run in Plan mode, whatever the default mode.
+pub const READ_ONLY: [&str; 2] = ["review", "investigate"];
+
 /// The permission modes (docs/runner-api.md, "Permission modes").
 pub const MODES: [&str; 5] = ["ask", "acceptEdits", "plan", "bypass", "sandbox"];
 
@@ -364,6 +367,12 @@ impl Job {
             })
     }
 
+    /// The owner's review or investigate job: always in Plan mode. A review another Obi asked for
+    /// runs its own way (runner-api.md, "obid only: Obi-to-Obi review jobs").
+    pub fn read_only(&self) -> bool {
+        READ_ONLY.contains(&self.kind.as_str()) && self.obi.is_none()
+    }
+
     pub fn max_rounds(&self) -> u32 {
         self.rounds.unwrap_or(1).max(1)
     }
@@ -500,8 +509,7 @@ impl Job {
             "created": obi_protocol::time::format(self.created),
             "started": date(self.started),
             "finished": date(self.finished),
-            // Oby's review makes no commits of its own.
-            "commits": if self.kind == "review" && self.status == Status::Done { Some(0) } else { self.commits },
+            "commits": self.commits,
             "published": self.published,
             "pushed": self.pushed,
             "publishError": self.publish_error,

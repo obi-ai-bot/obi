@@ -1368,10 +1368,12 @@ impl Jobs {
             .start_from
             .filter(|b| new.follow_up_of.is_some() && git::is_branch_name(b));
         job.follow_up_of = new.follow_up_of;
-        job.mode = Some(
+        job.mode = Some(if job.read_only() {
+            Mode::Plan.as_str().to_owned()
+        } else {
             new.mode
-                .unwrap_or_else(|| self.default_mode().as_str().to_owned()),
-        );
+                .unwrap_or_else(|| self.default_mode().as_str().to_owned())
+        });
         job.base = Some(new.base.unwrap_or_else(|| repo.default_branch.clone()));
         job.branch = match new
             .branch
@@ -1861,8 +1863,12 @@ impl Jobs {
     }
 
     /// The job's mode, as it names it. A job from before modes is in Bypass; a mode this obid
-    /// can't read (one a newer obid wrote) asks rather than allow.
+    /// can't read (one a newer obid wrote) asks rather than allow. A review or investigate job is
+    /// in Plan, whatever it says.
     fn mode_of(job: &Job) -> Mode {
+        if job.read_only() {
+            return Mode::Plan;
+        }
         match job.mode.as_deref() {
             None => Mode::Bypass,
             Some(mode) => Mode::parse(mode).unwrap_or(Mode::Ask),
@@ -2144,9 +2150,14 @@ impl Jobs {
     }
 
     /// Changes how much the job asks, from now on: the prompts waiting now that the new mode
-    /// allows are answered. A finished job keeps the mode for when it runs again.
+    /// allows are answered. A finished job keeps the mode for when it runs again. A review or
+    /// investigate job stays in Plan.
     pub fn set_mode(&self, id: &str, mode: Mode) -> Option<Job> {
-        self.update(id, |job| job.mode = Some(mode.as_str().to_owned()))?;
+        self.update(id, |job| {
+            if !job.read_only() {
+                job.mode = Some(mode.as_str().to_owned());
+            }
+        })?;
         self.reconsider(id);
         self.get(id)
     }
@@ -2929,7 +2940,7 @@ impl Jobs {
             // A job shows its steps; the words and each call's id are a conversation's.
             AgentEvent::Delta(_) | AgentEvent::Tool { .. } | AgentEvent::ToolDone { .. } => {}
         };
-        let plan = job.mode.as_deref() == Some("plan");
+        let plan = Self::mode_of(&job) == Mode::Plan;
         let ran = match tool {
             Tool::Claude => {
                 agent::run_turn(
@@ -3536,7 +3547,7 @@ impl Jobs {
             let mut message = owner_prompt(&job);
             let purpose = if job.kind == "review" {
                 obi_plugin_api::Purpose::Review
-            } else if job.mode.as_deref() == Some("plan") {
+            } else if Self::mode_of(&job) == Mode::Plan {
                 obi_plugin_api::Purpose::Plan
             } else {
                 obi_plugin_api::Purpose::Dispatch
@@ -3573,7 +3584,7 @@ impl Jobs {
                     "--permission-prompt-tool",
                     "stdio",
                     "--permission-mode",
-                    if job.mode.as_deref() == Some("plan") {
+                    if Self::mode_of(&job) == Mode::Plan {
                         "plan"
                     } else {
                         "default"
@@ -3773,6 +3784,11 @@ impl Jobs {
             // A round the owner asked for may end with nothing committed: their words decide.
             if COMMITTING.contains(&job.kind.as_str()) && commits == 0 && !job.asked {
                 return Err(format!("Nothing committed: {first_line}"));
+            }
+            // A review publishes nothing: one that committed fails, its commits counted.
+            if job.kind == "review" && commits > 0 {
+                self.update(id, |job| job.commits = Some(commits));
+                return Err(crate::publish::REVIEW_COMMITTED.into());
             }
             let pushed = self.still_pushed(&job, &head, commits).await;
             // The job as it would end, which is what gets published.
@@ -6994,6 +7010,41 @@ mod tests {
         assert_eq!(Jobs::mode_of(&job), Mode::Ask);
         job.mode = Some("sandbox".into());
         assert_eq!(Jobs::mode_of(&job), Mode::Sandbox);
+    }
+
+    /// The owner's review and investigate jobs only read: Plan, whatever their mode says (#630).
+    /// A review another Obi asked for runs its own way.
+    #[test]
+    fn review_and_investigate_jobs_are_in_plan() {
+        for kind in ["review", "investigate"] {
+            let mut job = Job::new(
+                "j".into(),
+                "o/r".into(),
+                kind.into(),
+                "Look".into(),
+                "codex".into(),
+                "a".into(),
+            );
+            assert_eq!(Jobs::mode_of(&job), Mode::Plan, "{kind}");
+            job.mode = Some("bypass".into());
+            assert_eq!(Jobs::mode_of(&job), Mode::Plan, "{kind}");
+        }
+        let mut obi = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "review".into(),
+            "Review".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        obi.mode = Some("bypass".into());
+        obi.obi = Some(ObiRef {
+            correlation_id: "c".into(),
+            from: "f".into(),
+            from_owner: "o".into(),
+            request_id: "r".into(),
+        });
+        assert_eq!(Jobs::mode_of(&obi), Mode::Bypass);
     }
 
     #[test]

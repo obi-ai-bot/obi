@@ -182,7 +182,7 @@ fn jobs_have_iso_dates_and_every_key() {
     let (obid, _) = obid(&folder);
     let sent = dispatch(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Look around",
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": "Look around",
                "title": "Job progress screen"}),
     );
     let id = sent["id"].as_str().unwrap().to_owned();
@@ -256,7 +256,7 @@ fn jobs_have_iso_dates_and_every_key() {
         assert!(body["pipeline"].is_object());
         assert_eq!(body["rounds"], 1);
         assert_eq!(body["round"], 1);
-        assert_eq!(body["kind"], "investigate");
+        assert_eq!(body["kind"], "research");
     }
     let done = ended(&obid, &id);
     assert_eq!(done["status"], "done");
@@ -1339,7 +1339,7 @@ fn publish_by_hand_is_off_a_dismissed_job() {
 fn asking(obid: &Obid, mode: &str, calls: Value) -> String {
     dispatch(
         obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "mode": mode,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research", "mode": mode,
                "task": format!("ASKS: {calls}")}),
     )["id"]
         .as_str()
@@ -1539,7 +1539,7 @@ fn the_api_answers_permissions_and_modes() {
     );
     let defaulted = dispatch(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Look around"}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": "Look around"}),
     );
     assert_eq!(defaulted["mode"], "ask");
     ended_ok(&obid, defaulted["id"].as_str().unwrap());

@@ -568,7 +568,7 @@ fn nothing_committed_fails_and_dismiss_lets_it_go() {
 
     let quiet = post_job(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Look around"}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": "Look around"}),
     )
     .body["id"]
         .as_str()
@@ -650,7 +650,7 @@ fn permission_prompts_are_answered_by_the_rules() {
             "answer: allow",
         ),
     ] {
-        let id = post_job(&obid, json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": format!("ASK: {ask}")})).body["id"]
+        let id = post_job(&obid, json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": format!("ASK: {ask}")})).body["id"]
             .as_str()
             .unwrap()
             .to_owned();
@@ -662,7 +662,7 @@ fn permission_prompts_are_answered_by_the_rules() {
 
 /// What a job's agent asks, one after another, as a job's task (the stand-in's `ASKS:`).
 fn asks(list: &[Value]) -> Value {
-    json!({"repo": "obi-e2e/fixture-app", "kind": "investigate",
+    json!({"repo": "obi-e2e/fixture-app", "kind": "research",
            "task": format!("ASKS: {}", Value::Array(list.to_vec()))})
 }
 
@@ -823,7 +823,7 @@ fn what_leaves_the_sandbox_still_asks() {
     ] {
         let id = post_job(
             &obid,
-            json!({"repo": "obi-e2e/fixture-app", "kind": "investigate",
+            json!({"repo": "obi-e2e/fixture-app", "kind": "research",
                    "task": format!("ASK: {ask}")}),
         )
         .body["id"]
@@ -874,7 +874,7 @@ fn only_the_owner_saves_a_rule_and_never_for_secrets() {
         );
         post_job(
             &obid,
-            json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task}),
+            json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": task}),
         )
         .body["id"]
             .as_str()
@@ -974,7 +974,7 @@ fn an_install_that_chose_bypass_keeps_it() {
         );
         let id = post_job(
             &obid,
-            json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task}),
+            json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": task}),
         )
         .body["id"]
             .as_str()
@@ -1005,7 +1005,7 @@ fn a_mode_change_never_settles_a_secret() {
     );
     let id = post_job(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": task}),
     )
     .body["id"]
         .as_str()
@@ -1063,7 +1063,7 @@ fn the_owner_can_go_back_to_asking_for_commands() {
     assert_eq!(put("nonsense").status, 422);
     let id = post_job(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate",
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research",
                "task": "ASK: {\"tool\": \"Bash\", \"input\": {\"command\": \"node --test\"}}"}),
     )
     .body["id"]
@@ -1086,7 +1086,7 @@ fn the_owner_can_go_back_to_asking_for_commands() {
     assert_eq!(put("sandbox").body, json!({"mode": "sandbox"}));
     let id = post_job(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate",
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research",
                "task": "ASK: {\"tool\": \"Bash\", \"input\": {\"command\": \"node --test\"}}"}),
     )
     .body["id"]
@@ -1113,7 +1113,7 @@ fn stop_and_stop_all_end_the_agents() {
     let new = |obid: &Obid| {
         post_job(
             obid,
-            json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "SLEEP"}),
+            json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": "SLEEP"}),
         )
         .body["id"]
             .as_str()
@@ -1174,7 +1174,7 @@ fn a_restart_carries_the_jobs_on() {
     let mut obid = start(&folder.0, &config);
     let id = post_job(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "SLEEP"}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": "SLEEP"}),
     )
     .body["id"]
         .as_str()
@@ -1246,7 +1246,7 @@ fn events_follow_every_change() {
     std::thread::sleep(Duration::from_millis(200));
     let id = post_job(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Look around"}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": "Look around"}),
     )
     .body["id"]
         .as_str()
@@ -1313,7 +1313,7 @@ fn the_default_login_is_a_copy_the_person_keeps_unchanged() {
     let task = format!("LOGIN: {}", person.display());
     let id = post_job(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": task}),
     )
     .body["id"]
         .as_str()
@@ -1375,7 +1375,7 @@ fn a_job_never_writes_its_accounts_folder() {
     let task = format!("PLANT: {}", account.display());
     let id = post_job(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": task}),
     )
     .body["id"]
         .as_str()
@@ -1435,7 +1435,7 @@ fn routing_skips_an_account_that_isnt_signed_in() {
     let job = |agent: Value| {
         let answer = post_job(
             &obid,
-            json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Say hello.",
+            json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": "Say hello.",
                    "agent": agent}),
         );
         assert_eq!(answer.status, 201, "{}", answer.text);

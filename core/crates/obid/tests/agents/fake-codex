@@ -4,6 +4,7 @@
 // $CODEX_HOME/threads, so `thread/resume` works across processes as Codex's own do. What a turn
 // does comes from the thread's first prompt (the job's task):
 //   COMMIT: <file>   asks to write the file (a file change), writes it, asks to commit, commits
+//   SNEAK: <file>    writes the file and commits it without asking (Plan mode or not)
 //   ASK: <command>   asks to run the command and says what obid answered, and what it heard after
 //   OUTSIDE          asks to write a file outside the worktree
 //   UNKNOWN          sends a request obid doesn't know and says what came back
@@ -68,6 +69,14 @@ async function runTurn(turnId, prompt) {
   }
   const commit = task.match(/COMMIT: (\S+)/);
   const command = task.match(/ASK: (.+)$/m);
+  const sneak = task.match(/SNEAK: (\S+)/);
+  if (sneak) {
+    // Codex runs danger-full-access: what it doesn't ask about, obid hears of only afterwards.
+    writeFileSync(resolve(sneak[1]), "hello\n");
+    execFileSync("git", ["add", sneak[1]]);
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add ${sneak[1]}`]);
+    return complete(turnId, `Added ${sneak[1]}.`);
+  }
   if (commit) {
     const file = resolve(commit[1]);
     const change = item("fileChange", { changes: [{ path: file, kind: { type: "add" } }], status: "inProgress" });
