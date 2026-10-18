@@ -32,9 +32,11 @@ nonisolated enum Usage {
         var running = 0
         /// Until when the user let it past its weekly reserve (#278), or nil.
         var reserveLiftedUntil: Date? = nil
+        /// What the runner says about the login (`AccountState.runnerSignedIn`); nil: the label says.
+        var runnerSignedIn: Bool? = nil
 
         var tool: String { Usage.tool(agent) }
-        var signedIn: Bool { label != nil }
+        var signedIn: Bool { runnerSignedIn ?? (label != nil) }
         /// "Team" from "Team · name@example.com", or nil.
         var plan: String? { Usage.plan(label) }
         /// "Deskree · Team", or just the name while the plan is unknown.
