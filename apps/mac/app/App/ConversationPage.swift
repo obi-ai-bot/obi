@@ -211,7 +211,8 @@ struct ConversationPage: View {
                        maximumHeight: height * 0.5, focusRequest: composerFocusRequest,
                        onSend: send, onScreenshot: screenshot,
                        onStop: { if thinking { desk.cancel(); return true }; return false },
-                       onEscape: onBack, usage: model.usageRows)
+                       onEscape: onBack, usage: model.usageRows,
+                       voice: model.voice, talkKeyListening: model.listening)
                 .disabled(sendingAnswer)
         }
     }

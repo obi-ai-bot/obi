@@ -63,8 +63,18 @@ struct MessageBox: View {
     var usage: [UsageRow]? = nil
     /// The + (a screenshot, the clipboard, a file): off where nothing can take them (a task's page).
     var attachments = true
+    /// The microphone the voice button listens with (AGENTS.md: a click listens until Stop or another
+    /// click, at most 60 seconds, the words left as a draft); nil: the button only says how to talk.
+    var voice: Voice? = nil
+    /// Whether the talk key is listening: the button waits for it.
+    var talkKeyListening = false
     @State private var width: CGFloat = 480
     @State private var hovering = false
+    @State private var listening = false
+    @State private var limit: Task<Void, Never>?
+
+    /// How long one click listens at most.
+    static let listenLimit: Duration = .seconds(60)
 
     private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     private var stacked: Bool { BoxMetrics.stacked(text, width: width, gauge: usage != nil) }
@@ -101,6 +111,35 @@ struct MessageBox: View {
         .onHover { hovering = $0 }
         .animation(Tokens.fade, value: hovering || focused)
         .overlay(alignment: .top) { if attachments { problem.offset(y: -28) } }
+        // Leaving the screen stops listening; what was heard stays as a draft.
+        .onDisappear { if listening { stopListening() } }
+    }
+
+    /// What was heard, after what's already typed: a draft, never sent by itself.
+    static func draft(_ text: String, adding said: String) -> String {
+        let said = said.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !said.isEmpty else { return text }
+        let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return typed.isEmpty ? said : typed + " " + said
+    }
+
+    private func toggleListening() {
+        guard let voice else { return }
+        if listening { return stopListening() }
+        guard voice.phase == .idle, !talkKeyListening else { return }
+        voice.start(key: .controlOption, context: [])
+        listening = true
+        limit = Task { @MainActor in
+            try? await Task.sleep(for: Self.listenLimit)
+            if !Task.isCancelled, listening { stopListening() }
+        }
+    }
+
+    private func stopListening() {
+        limit?.cancel()
+        limit = nil
+        listening = false
+        voice?.finish { said in text = Self.draft(text, adding: said) }
     }
 
     private var editor: some View {
@@ -109,7 +148,12 @@ struct MessageBox: View {
                        onEscape: onEscape)
             .frame(height: textHeight)
             .overlay(alignment: .topLeading) {
-                if text.isEmpty {
+                if listening {
+                    Text(voice.map { $0.words.isEmpty ? "Listening…" : $0.words } ?? "Listening…").font(Tokens.font(Tokens.textLg)).foregroundStyle(Tokens.muted)
+                        .lineLimit(1).truncationMode(.head)
+                        .frame(height: BoxMetrics.lineHeight)
+                        .allowsHitTesting(false)
+                } else if text.isEmpty {
                     Text(placeholder).font(Tokens.font(Tokens.textLg)).foregroundStyle(Tokens.muted)
                         .lineLimit(1).truncationMode(.tail)
                         .frame(height: BoxMetrics.lineHeight)
@@ -149,20 +193,32 @@ struct MessageBox: View {
             Button(action: onSend) { BoxIcon(symbol: "arrow.up", color: Tokens.ink) }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Send")
-                .opacity(empty ? 0 : 1).scaleEffect(empty ? 0.4 : 1)
-                .disabled(empty)
-                .accessibilityHidden(empty)
+                .opacity(empty || listening ? 0 : 1).scaleEffect(empty || listening ? 0.4 : 1)
+                .disabled(empty || listening)
+                .accessibilityHidden(empty || listening)
         }
         .frame(width: BoxMetrics.button)
         .animation(Tokens.spring, value: empty)
     }
 
-    private var voiceIcon: some View {
-        BoxIcon(symbol: "waveform")
-            .help("Hold fn (or Control-Option) to talk")
-            .accessibilityLabel("Hold fn to talk")
-            .opacity(empty ? 1 : 0).scaleEffect(empty ? 1 : 0.4)
-            .accessibilityHidden(!empty)
+    @ViewBuilder private var voiceIcon: some View {
+        if voice != nil {
+            Button(action: toggleListening) {
+                BoxIcon(symbol: listening ? "stop.fill" : "waveform", color: listening ? Tokens.ink : Tokens.muted)
+            }
+            .buttonStyle(.plain)
+            .disabled(talkKeyListening && !listening)
+            .help(listening ? "Stop listening" : "Click to talk, or hold fn (or Control-Option)")
+            .accessibilityLabel(listening ? "Stop listening" : "Talk")
+            .opacity(empty || listening ? 1 : 0).scaleEffect(empty || listening ? 1 : 0.4)
+            .accessibilityHidden(!(empty || listening))
+        } else {
+            BoxIcon(symbol: "waveform")
+                .help("Hold fn (or Control-Option) to talk")
+                .accessibilityLabel("Hold fn to talk")
+                .opacity(empty ? 1 : 0).scaleEffect(empty ? 1 : 0.4)
+                .accessibilityHidden(!empty)
+        }
     }
 
     /// What goes with the words, as tags over them.
