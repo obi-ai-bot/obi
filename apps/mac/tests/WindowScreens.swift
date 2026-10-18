@@ -140,6 +140,54 @@ struct WindowScreens {
         try await save("mac-pill-\(stage.word.lowercased())", window: pill)
     }
 
+    /// Sangam's Settings building blocks (apps/shared/SettingsComponents.swift), on made-up settings:
+    /// each control on and off, a meter at each fullness, the buttons.
+    @Test func settingsComponents() async throws {
+        let sheet = ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                SetGroup("Runner", footer: "The runner is Oby's login item on this Mac, and Oby follows it on 127.0.0.1.") {
+                    SetRow("Runner") { SetSegmented("Runner", selection: .constant(true), options: [(true, "This Mac"), (false, "Remote")]) }
+                    SetRow("Status") { SetValue("Connected", connected: true) }
+                    SetRow("URL") { SetField("Runner URL", text: .constant(""), prompt: "http://tetrix-lab:8790") }
+                }
+                SetGroup("Voice") {
+                    SetRow("Speak replies to spoken requests") { Toggle("Speak replies", isOn: .constant(true)).toggleStyle(.set) }
+                    SetRow("Keep my Mac available") { Toggle("Keep my Mac available", isOn: .constant(false)).toggleStyle(.set) }
+                    SetRow("Speech language") { SetSelect("Speech language", selection: .constant("system"), options: [("system", "Mac language"), ("en-US", "English")]) }
+                }
+                SetGroup("Claude Code") {
+                    ForEach([("Deskree", 36.0), ("Personal", 84.0), ("Team", 96.0)], id: \.0) { name, used in
+                        SetRow(controlOnTop: true) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(name)
+                                SetAbout("Paid by Deskree · Resets Thursday")
+                                SetMeter(used: used).padding(.top, 4)
+                            }
+                        } control: {
+                            SetValue("\(Int(used))% used")
+                            Button("Remove", role: .destructive) {}.buttonStyle(.set)
+                        }
+                    }
+                }
+                SetGroup("Add an account") {
+                    SetRow("Name") { SetField("Account name", text: .constant("Personal"), prompt: "Personal") }
+                    SetRow("Nothing yet", quiet: true)
+                    SetRow("") { Button("Add Account") {}.buttonStyle(.set) }
+                    SetRow("") { Button("Add Account") {}.buttonStyle(.set).disabled(true) }
+                }
+            }
+            .frame(maxWidth: Tokens.column).padding(.horizontal, Tokens.gutter).padding(.top, 40)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Tokens.bg)
+        let window = ChatWindow.make(sheet, size: NSSize(width: 700, height: 1080))
+        window.setFrameOrigin(NSPoint(x: 40, y: 40))
+        window.orderFrontRegardless()
+        defer { window.close() }
+        try await Task.sleep(for: .milliseconds(800))
+        try await save("mac-settings-components", window: window)
+    }
+
     @Test func taskNeedingYou() async throws {
         let state = ChatState()
         state.trail.start(.group(.review), .job(id: "r1", local: false))
