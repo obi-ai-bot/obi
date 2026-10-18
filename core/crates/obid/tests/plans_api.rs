@@ -3331,9 +3331,12 @@ fn a_plan_waits_for_the_owners_approval() {
     let first_id = first["id"].as_str().unwrap().to_owned();
     assert_eq!(first["options"], json!(["Approve", "Keep planning"]));
     assert_eq!(first["details"], json!(["1. Add src/average.js"]));
-    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    // The inbox has it a moment before the job shows it (Jobs::show).
+    let job = within(10, "the job shows its plan", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["step"] == "Waiting for your OK on the plan").then_some(job)
+    });
     assert_eq!(job["status"], "running", "{job}");
-    assert_eq!(job["step"], "Waiting for your OK on the plan");
     // The brain answers it neither way.
     for option in [1, 2] {
         queue(
