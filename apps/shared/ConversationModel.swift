@@ -43,6 +43,8 @@ final class ConversationModel {
     private(set) var streamed: [String: Streamed] = [:]
     /// The artifacts a turn made, by the turn's id (the app's Turn doesn't keep them).
     private(set) var refs: [String: [ArtifactRef]] = [:]
+    /// The turns a job added when it ended (#351), by id: not answers.
+    private var ended: Set<String> = []
     /// What's known of each artifact, by id: from `artifact` events and `lookUp`.
     private(set) var artifacts: [String: RunnerArtifact] = [:]
     /// Artifacts obid deleted or doesn't have.
@@ -75,7 +77,7 @@ final class ConversationModel {
             // Nor Oby's answer: words under way that the page answered are done.
             streamed = streamed.filter { id, _ in
                 guard let at = runnerTurns.firstIndex(where: { $0.id == id }) else { return true }
-                return !runnerTurns[(at + 1)...].contains { $0.who == .oby }
+                return !runnerTurns[(at + 1)...].contains { answers($0) }
             }
         } catch {
             guard mine == generation else { return }
@@ -103,20 +105,31 @@ final class ConversationModel {
 
     /// A `turn` event: the turn with that id is replaced (a job joined it), or the new one takes
     /// its place by time.
-    func apply(_ turn: Turn, artifacts: [ArtifactRef] = []) {
-        if !artifacts.isEmpty { refs[turn.id] = artifacts }
-        if turn.who == .oby, let since = streamed.values.map(\.since).min() {
-            // The words that came in were these: they carry on from when they started, not again.
+    func apply(_ turn: Turn, _ extras: TurnExtras = TurnExtras()) {
+        if !extras.artifacts.isEmpty { refs[turn.id] = extras.artifacts }
+        if extras.ended { ended.insert(turn.id) }
+        let new = !runnerTurns.contains(where: { $0.id == turn.id })
+        // Oby's answer, new to the thread, replaces the words that came in, which carry on from when
+        // they started, not again. A turn sent again (a job joined it) or a job's ended turn isn't
+        // an answer: words under way stay.
+        if new, answers(turn), let since = streamed.values.map(\.since).min() {
             streamed = [:]
             arrived[turn.id] = arrived[turn.id] ?? since
         }
-        if !runnerTurns.contains(where: { $0.id == turn.id }) { arrive(turn) }
+        if new { arrive(turn) }
         runnerTurns = Self.placed(turn, in: runnerTurns)
     }
 
-    /// A page of the runner's turns: the artifacts they made, for their cards.
+    /// Whether `turn` is Oby's answer to words: not the turn a job adds when it ends.
+    private func answers(_ turn: Turn) -> Bool { turn.who == .oby && !ended.contains(turn.id) }
+
+    /// A page of the runner's turns: the artifacts they made, for their cards, and which are a job's
+    /// ended turn.
     func note(_ turns: [RunnerTurn]) {
-        for turn in turns { if let list = turn.artifacts, !list.isEmpty { refs[turn.id] = list } }
+        for turn in turns {
+            if let list = turn.artifacts, !list.isEmpty { refs[turn.id] = list }
+            if turn.ended == true { ended.insert(turn.id) }
+        }
     }
 
     /// A `delta` event: the words join the answer under way for its turn.
@@ -200,6 +213,7 @@ final class ConversationModel {
         arrived = [:]
         streamed = [:]
         refs = [:]
+        ended = []
         artifacts = [:]
         gone = []
         runnerTurns = []

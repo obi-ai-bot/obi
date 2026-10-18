@@ -639,8 +639,9 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     #endif
     /// A turn of the conversation was added, from any app, or changed (a job dispatched from it):
     /// the Mac window's and the iPhone's thread replace it by id, or add it by time (#11).
-    /// With the artifacts the turn made (obid only), which the app's Turn doesn't keep.
-    case turn(Turn, artifacts: [ArtifactRef] = [])
+    /// With what the app's Turn doesn't keep (obid only): the artifacts it made, and whether it's
+    /// the turn a job adds when it ends.
+    case turn(Turn, TurnExtras = TurnExtras())
     /// One step of Oby's turn began, went on or ended (#304). Runners from before the step event never send it.
     case step(TurnStep)
     /// One of obid's conversations started, got a turn, was renamed, pinned or deleted (#493).
@@ -698,8 +699,12 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
     var conversation: String?
     /// obid only: what the turn made to be looked at.
     var artifacts: [ArtifactRef]?
+    /// obid only (#351): the turn a job adds to its conversation when it ends, not an answer.
+    var ended: Bool?
 
-    private enum CodingKeys: String, CodingKey { case id, who, text, at, jobs, details, conversation, artifacts }
+    var extras: TurnExtras { TurnExtras(artifacts: artifacts ?? [], ended: ended == true) }
+
+    private enum CodingKeys: String, CodingKey { case id, who, text, at, jobs, details, conversation, artifacts, ended }
 
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -712,16 +717,12 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
         conversation = try c.decodeIfPresent(String.self, forKey: .conversation)
         // Tolerant: a list this app can't read leaves the turn without cards, not unread.
         artifacts = try? c.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
+        ended = try? c.decodeIfPresent(Bool.self, forKey: .ended)
     }
 
     var turn: Turn {
-        #if os(macOS)
-        Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text,
-             jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details)
-        #else
         Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text,
              jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details, conversation: conversation)
-        #endif
     }
 }
 
@@ -1523,7 +1524,7 @@ nonisolated struct EventParser {
             #if os(macOS)
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
             #endif
-            case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn, artifacts: $0.artifacts ?? []) }
+            case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn, $0.extras) }
             case "step": return (try? Runner.decoder.decode(TurnStep.self, from: json)).map(RunnerEvent.step)
             case "conversation": return (try? Runner.decoder.decode(RunnerConversation.self, from: json)).map(RunnerEvent.conversation)
             case "delta": return (try? Runner.decoder.decode(TurnDelta.self, from: json)).map(RunnerEvent.delta)

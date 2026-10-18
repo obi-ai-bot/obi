@@ -11,6 +11,12 @@
 //                    and its ~/.claude.json, and tries the same in the person's real <home>
 //   ECHO             ends the turn with "heard: <the prompt> resume=<the session it resumed, or none>"
 //   PAUSE: <ms>      waits that long, then ends the turn with "Paused."
+//   ARTIFACTS        writes .obi/artifacts/ in the worktree: a page (a folder with index.html,
+//                    a stylesheet and a hidden file), notes.md, chart.png (bytes that aren't
+//                    UTF-8), leak.md holding a made-up AWS key, and away.md, a link out of the
+//                    worktree, and entries whose names are a made-up AWS key and a made-up
+//                    Google API key; then ends the turn with "Made artifacts."
+//   ARTIFACTS_MANY   writes 25 Markdown files in .obi/artifacts/ instead
 //   REPORT           writes .obi/report.json in the worktree: its arguments, environment, prompt,
 //                    the MCP config it was given (--mcp-config), the tools it was allowed
 //                    (--allowedTools), what each http MCP server answered to `tools/list`, and
@@ -21,7 +27,7 @@
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
 
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
@@ -100,6 +106,23 @@ rl.on("line", (line) => {
   } else if (prompt.includes("REPORT")) {
     // LINGER: the turn goes on after the report, until obid ends it.
     report(prompt).then(() => (prompt.includes("LINGER") ? setInterval(() => {}, 1000) : result("Reported.")), (e) => result(`report failed: ${e}`, true));
+  } else if (prompt.includes("ARTIFACTS_MANY")) {
+    mkdirSync(".obi/artifacts", { recursive: true });
+    for (let i = 0; i < 25; i++) writeFileSync(`.obi/artifacts/n${String(i).padStart(2, "0")}.md`, `# ${i}\n`);
+    result("Made artifacts.");
+  } else if (prompt.includes("ARTIFACTS")) {
+    mkdirSync(".obi/artifacts/page", { recursive: true });
+    writeFileSync(".obi/artifacts/page/index.html", '<link rel="stylesheet" href="style.css"><h1>Hello</h1>');
+    writeFileSync(".obi/artifacts/page/style.css", "h1 { color: teal }");
+    writeFileSync(".obi/artifacts/page/.hidden", "left out");
+    writeFileSync(".obi/artifacts/notes.md", "# Notes\n");
+    writeFileSync(".obi/artifacts/chart.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00, 0x80]));
+    // Put together here, so this file holds no key a scanner flags.
+    writeFileSync(".obi/artifacts/leak.md", `key: ${"AKIA" + "QWERTYUIOPASDFGH"}\n`);
+    symlinkSync("/etc/hosts", ".obi/artifacts/away.md");
+    writeFileSync(`.obi/artifacts/${"AKIA" + "QWERTYUIOPASDFGH"}.md`, "# A plain note\n");
+    writeFileSync(`.obi/artifacts/${"AIza" + "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q"}.md`, "# Another plain note\n");
+    result("Made artifacts.");
   } else if (prompt.match(/PAUSE: (\d+)/)) {
     setTimeout(() => result("Paused."), Number(prompt.match(/PAUSE: (\d+)/)[1]));
   } else if (prompt.includes("SLEEP")) {

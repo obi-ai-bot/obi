@@ -29,59 +29,6 @@ nonisolated enum PhoneWork {
     }
 }
 
-/// obid's conversations as the Conversations tab lists them (#493, Sangam's Sidebar.tsx).
-nonisolated enum ConversationList {
-    /// Pinned, then the rest (Recent), each newest first.
-    static func sections(_ list: [RunnerConversation]) -> (pinned: [RunnerConversation], recent: [RunnerConversation]) {
-        let sorted = ordered(list)
-        return (sorted.filter(\.pinned), sorted.filter { !$0.pinned })
-    }
-
-    /// A `conversation` event: in place of the one with its id, or out when it's deleted.
-    static func placed(_ conversation: RunnerConversation, in list: [RunnerConversation]) -> [RunnerConversation] {
-        var list = list.filter { $0.id != conversation.id }
-        if !conversation.deleted { list.append(conversation) }
-        return ordered(list)
-    }
-
-    private static func ordered(_ list: [RunnerConversation]) -> [RunnerConversation] {
-        list.sorted { ($0.pinned ? 1 : 0, $0.latest) > ($1.pinned ? 1 : 0, $1.latest) }
-    }
-
-    /// Whether `conversation` is the one `said` just started: obid titles a new conversation from
-    /// its first line (at most 48 characters, the first 45 and "…" when longer, its first letter
-    /// upper-case), and names it in a `conversation` event as the turn begins.
-    static func started(by said: String, _ conversation: RunnerConversation) -> Bool {
-        guard !conversation.deleted, !conversation.title.isEmpty else { return false }
-        let first = said.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").first.map(String.init) ?? ""
-        guard conversation.title.hasSuffix("…") else { return first.caseInsensitiveCompare(conversation.title) == .orderedSame }
-        let cut = conversation.title.dropLast().trimmingCharacters(in: .whitespaces)
-        return !cut.isEmpty && first.lowercased().hasPrefix(cut.lowercased())
-    }
-
-    /// Whether a step of Oby's turn belongs in the thread shown: a one-thread runner's always;
-    /// on obid, only its own conversation's, and none while a new one waits for its id (Thinking
-    /// says enough until then).
-    static func shows(_ step: TurnStep, in current: String?, startingNew: Bool) -> Bool {
-        shows(step.conversation, in: current, startingNew: startingNew)
-    }
-
-    /// The same for anything else of a turn under way (its words as they're written).
-    static func shows(_ conversation: String?, in current: String?, startingNew: Bool) -> Bool {
-        guard let id = conversation else { return true }
-        return !startingNew && id == current
-    }
-
-    /// "now", "5m", "2h", "3d", as the design's `ago` says it.
-    static func ago(_ date: Date, now: Date = .now) -> String {
-        let minutes = now.timeIntervalSince(date) / 60
-        if minutes < 1 { return "now" }
-        if minutes < 60 { return "\(Int(minutes.rounded()))m" }
-        if minutes < 24 * 60 { return "\(Int(minutes / 60))h" }
-        return "\(Int(minutes / 1440))d"
-    }
-}
-
 /// The phone's view of the runner: its jobs and accounts, kept live while the app is open, and
 /// the conversation that turns words into a plan.
 @Observable
@@ -132,6 +79,9 @@ final class Phone {
     /// A conversation is being started (Home's box) and obid hasn't named it yet: the thread
     /// holds only its words until it does.
     private(set) var startingNew = false
+    /// Oby's words for a conversation that comes before obid names it to this phone (`adopt`):
+    /// kept, and shown once it does.
+    private var heldDeltas: [TurnDelta] = []
     /// The conversation Oby's answer under way (`talk`) belongs to.
     private var talkIn: String?
     /// The last line said in each conversation, by id, for its row in the list.
@@ -229,7 +179,13 @@ final class Phone {
     /// old hand-entered link without that token must not send requests to a gateway that will 401.
     var route: RemoteRoute? { RemoteRoute.choose(lan: lan, link: link, paired: GatewayTokenStore.read() != nil) }
     /// Where the calls go: the linked Mac by its route, else the runner.
-    var base: URL { route?.url ?? runnerURL }
+    var base: URL {
+        #if DEBUG
+        // `-ObySampleOffline YES`: no runner, the linked Mac's gateway either (the link stays).
+        if Self.offline { return URL(string: "http://127.0.0.1:9")! }
+        #endif
+        return route?.url ?? runnerURL
+    }
     /// A stable identity for the logical runner, unaffected by switching between its home and
     /// tunnel routes. Unpaired runners use their configured URL.
     private var offlineQueueTarget: String {
@@ -293,7 +249,7 @@ final class Phone {
         #if DEBUG
         // `-ObySampleOffline YES`: the sample screens reach no runner at all, whatever the
         // simulator's settings say (the default runner is a real one).
-        if UserDefaults.standard.bool(forKey: "ObySampleOffline") { runnerURL = URL(string: "http://127.0.0.1:9")! }
+        if Self.offline { runnerURL = URL(string: "http://127.0.0.1:9")! }
         #endif
         if let data = UserDefaults.standard.data(forKey: "mac.link"), GatewayTokenStore.read() != nil {
             link = try? MacLink.paired(data)
@@ -368,10 +324,10 @@ final class Phone {
         // steps and Stop are that one's from now on, before Oby's answer comes.
         if startingNew, let pending, let request = requests[pending], request.new,
            !(conversations ?? []).contains(where: { $0.id == changed.id }),
-           ConversationList.started(by: request.said, changed) {
+           ConversationOrder.started(by: request.said, changed) {
             adopt(changed.id, echo: pending)
         }
-        if let list = conversations { conversations = ConversationList.placed(changed, in: list) }
+        if let list = conversations { conversations = ConversationOrder.placed(changed, in: list) }
         if changed.deleted, changed.id == current { show(nil) }
     }
 
@@ -423,7 +379,7 @@ final class Phone {
         #if DEBUG
         // `-ObySampleOffline YES`: the sample screens reach no runner at all (a simulator's
         // settings may name a real one).
-        if UserDefaults.standard.bool(forKey: "ObySampleOffline") { return }
+        if Self.offline { return }
         #endif
         loop = Task {
             var wait = 1.0
@@ -505,6 +461,11 @@ final class Phone {
     }
 
     #if DEBUG
+    /// Debug builds launched with `-ObySampleOffline YES`, or run with `OBY_OFFLINE=1` (a test
+    /// host: `TEST_RUNNER_OBY_OFFLINE=1 xcodebuild test`), reach no runner at all: a simulator's
+    /// default runner is a real one.
+    static let offline = UserDefaults.standard.bool(forKey: "ObySampleOffline") || ProcessInfo.processInfo.environment["OBY_OFFLINE"] == "1"
+
     /// The sample screens' made-up events (SampleTasks), through the same path as obid's.
     func sample(_ event: RunnerEvent) { apply(event) }
     #endif
@@ -523,15 +484,16 @@ final class Phone {
             // One that's done leaves the list.
             inbox.removeAll { $0.id == item.id }
             if item.isOpen { inbox.append(item) }
-        case .turn(let turn, let artifacts):
+        case .turn(let turn, let extras):
             if let id = turn.conversation { previews[id] = turn.text }
-            if turn.conversation == nil || (turn.conversation == current && !startingNew) { conversation.apply(turn, artifacts: artifacts) }
+            if turn.conversation == nil || (turn.conversation == current && !startingNew) { conversation.apply(turn, extras) }
             // The runner listed what this iPhone said: its echo has done its job.
             settleEchoes()
         case .step(let step):
-            if ConversationList.shows(step, in: current, startingNew: startingNew) { conversation.apply(step) }
+            if ConversationOrder.shows(step, in: current, startingNew: startingNew) { conversation.apply(step) }
         case .delta(let delta):
-            if ConversationList.shows(delta.conversation, in: current, startingNew: startingNew) { conversation.apply(delta) }
+            if ConversationOrder.shows(delta.conversation, in: current, startingNew: startingNew) { conversation.apply(delta) }
+            else if startingNew, delta.conversation != nil { heldDeltas.append(delta) }
         case .artifact(let artifact):
             conversation.apply(artifact)
         case .conversation(let changed):
@@ -567,6 +529,7 @@ final class Phone {
         if starts {
             current = nil
             startingNew = true
+            heldDeltas = []
             conversation.forget()
         }
         plan(said, answer: nil, voice: spoken, new: starts)
@@ -749,6 +712,8 @@ final class Phone {
         guard startingNew else { return }
         startingNew = false
         current = id
+        for delta in heldDeltas where delta.conversation == id { conversation.apply(delta) }
+        heldDeltas = []
         Task { await conversation.reload(arriving: true) }
     }
 

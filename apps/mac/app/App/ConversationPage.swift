@@ -4,7 +4,8 @@ import SwiftUI
 /// The conversation with Oby (Sangam's ChatView.tsx): your words in bubbles on the right, Oby's
 /// as plain text on the left under its face, in runs with the time under each; the tasks an answer
 /// started as cards under it; decisions as cards where they belong, answerable in place; Oby at
-/// work last; and the message box at the foot. The runner keeps one conversation, so this is it.
+/// work last; and the message box at the foot. It shows the conversation picked in the side panel (obid
+/// keeps many, #493), or the runner's one thread.
 struct ConversationPage: View {
     let model: IslandModel
     let composerFocusRequest: Int
@@ -57,7 +58,7 @@ struct ConversationPage: View {
     private var thread: some View {
         // Every half minute: a time that turns into yesterday's, and the inbox's waits move on.
         TimelineView(.periodic(from: .now, by: 30)) { context in
-            let turns = conversation.thread(with: desk.turns)
+            let turns = conversation.thread(with: model.localTurns)
             let entries = (desk.inbox.map { IslandInbox.Entry(item: $0, local: true) }
                 + (feed.inbox + feed.inboxHistory).map { IslandInbox.Entry(item: $0, local: false) })
                 .filter { $0.item.isDecision && ($0.item.later == nil || $0.item.later! <= context.date) }

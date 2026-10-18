@@ -35,8 +35,12 @@ struct HarnessTests {
         #expect(event("artifact", #"{"id":"a1","deleted":true}"#) == .artifact(ArtifactEvent(id: "a1", deleted: true)))
         // A turn's artifacts come with it.
         let turn = #"{"id":"o1","who":"oby","text":"Here it is.","at":"2026-10-17T09:12:09Z","jobs":[],"conversation":"c1","artifacts":[{"id":"a1","version":2}]}"#
-        guard case .turn(let read, let artifacts)? = event("turn", turn) else { Issue.record("no turn"); return }
-        #expect(read.id == "o1" && artifacts == [ArtifactRef(id: "a1", version: 2)])
+        guard case .turn(let read, let extras)? = event("turn", turn) else { Issue.record("no turn"); return }
+        #expect(read.id == "o1" && extras == TurnExtras(artifacts: [ArtifactRef(id: "a1", version: 2)]))
+        // A job's ended turn says so (#351).
+        let ended = #"{"id":"o2","who":"oby","text":"Done: PR #7.","at":"2026-10-17T09:30:00Z","jobs":["j1"],"ended":true}"#
+        guard case .turn(_, let endedExtras)? = event("turn", ended) else { Issue.record("no turn"); return }
+        #expect(endedExtras.ended)
         let meta = #"{"id":"a1","title":"Landing page","kind":"html","conversation":"c1","job":null,"created":"2026-10-17T09:12:00Z","versions":[{"version":1,"created":"2026-10-17T09:12:00Z","files":["index.html","style.css"],"bytes":1832}]}"#
         let artifact = try Runner.decoder.decode(RunnerArtifact.self, from: Data(meta.utf8))
         #expect(artifact.files(1) == ["index.html", "style.css"] && artifact.latest == 1 && artifact.kindName == "Page")
@@ -60,13 +64,39 @@ struct HarnessTests {
         guard case .step(let odd)? = event("step", newer) else { Issue.record("no step"); return }
         #expect(odd.tool == nil && odd.text == "Reading a.md")
         let plain = #"{"id":"o1","who":"oby","text":"Hi","at":"2026-10-17T09:12:09Z","artifacts":"soon","mood":"good"}"#
-        guard case .turn(let turn, let artifacts)? = event("turn", plain) else { Issue.record("no turn"); return }
-        #expect(turn.text == "Hi" && artifacts.isEmpty)
+        guard case .turn(let turn, let extras)? = event("turn", plain) else { Issue.record("no turn"); return }
+        #expect(turn.text == "Hi" && extras == TurnExtras())
         let thin = try Runner.decoder.decode(RunnerArtifact.self, from: Data(#"{"id":"a1","title":"Plan","kind":"hologram"}"#.utf8))
         #expect(thin.versions.isEmpty && thin.kindName == "Hologram")
     }
 
     // MARK: Streamed words
+
+    /// Only Oby's answer replaces the words coming in: not a job's ended turn (#351), and not a
+    /// turn sent again because a job joined it; a reload keeps them for the same reasons.
+    @Test func onlyAnAnswerReplacesWordsUnderWay() async {
+        let asked = Turn(id: "u1", date: now, who: .user, text: "Look into it")
+        let earlier = Turn(id: "o0", date: now.addingTimeInterval(-60), who: .oby, text: "Started it.", jobs: ["j0"])
+        var page = [earlier, asked]
+        let model = ConversationModel(page: { _, _ in page })
+        model.time = { self.now }
+        await model.reload()
+        model.apply(TurnDelta(conversation: nil, turn: "u1", text: "Reading "))
+        // A job ends meanwhile: its turn comes, after your words.
+        let jobEnded = Turn(id: "o-end", date: now.addingTimeInterval(1), who: .oby, text: "The job opened PR #7.", jobs: ["j0"])
+        model.apply(jobEnded, TurnExtras(ended: true))
+        #expect(model.streamed["u1"]?.text == "Reading ")
+        // An earlier answer sent again (a job joined it).
+        model.apply(Turn(id: "o0", date: earlier.date, who: .oby, text: "Started it.", jobs: ["j0", "j1"]))
+        #expect(model.streamed["u1"]?.text == "Reading ")
+        // A reload whose page has the ended turn after your words keeps them too.
+        page = [earlier, asked, jobEnded]
+        await model.reload()
+        #expect(model.streamed["u1"]?.text == "Reading ")
+        // The answer replaces them.
+        model.apply(Turn(id: "o1", date: now.addingTimeInterval(2), who: .oby, text: "Reading done."))
+        #expect(model.streamed.isEmpty)
+    }
 
     @Test func deltasAppendToTheAnswerUnderWayAndTheTurnReplacesThem() {
         let model = ConversationModel()
@@ -170,7 +200,7 @@ struct HarnessTests {
             return id == "a1" ? RunnerArtifact(id: "a1", title: "Landing page", kind: "html", versions: [.init(version: 1, files: ["index.html"])]) : nil
         }
         let said = Turn(id: "o1", date: now, who: .oby, text: "Here it is.")
-        model.apply(said, artifacts: [ArtifactRef(id: "a1", version: 1)])
+        model.apply(said, TurnExtras(artifacts: [ArtifactRef(id: "a1", version: 1)]))
         #expect(model.artifactRefs(of: said) == [ArtifactRef(id: "a1", version: 1)])
         await model.resolve("a1")
         await model.resolve("a1")
@@ -187,6 +217,14 @@ struct HarnessTests {
         #expect(model.gone.contains("a2"))
         model.apply(ArtifactEvent(id: "a1", deleted: true))
         #expect(model.artifacts["a1"] == nil && model.gone.contains("a1"))
+    }
+
+    /// A canvas can't ask for more web views, or bigger ones, than the phone should hold.
+    @Test func theCanvasIsCapped() {
+        let many = (0..<40).map { #"{"file": "f\#($0).html", "x": \#($0 * 10), "y": 0, "w": 100000, "h": 99999}"# }
+        let frames = Artboards.frames(Data(("[" + many.joined(separator: ",") + "]").utf8))
+        #expect(frames.count == 24 && frames.first?.file == "f0.html" && frames.last?.file == "f23.html")
+        #expect(frames.allSatisfy { $0.w == 4096 && $0.h == 4096 })
     }
 
     @Test func theCanvasIsReadTolerantly() throws {
@@ -221,8 +259,11 @@ struct HarnessTests {
 
     @Test func onlyTheArtifactsOwnFilesNavigate() {
         let ref = ArtifactRef(id: "3f0c", version: 2)
-        let own = ArtifactPage.url(ref, path: "assets/site.css")
+        let own = ArtifactPage.url(ref, path: "assets/site.css")!
         #expect(own.absoluteString == "oby-artifact://3f0c/2/assets/site.css")
+        // A query or fragment names the same file: it loads, not fails.
+        #expect(ArtifactPage.path(of: URL(string: "oby-artifact://3f0c/2/assets/site.css?v=2"), for: ref) == "assets/site.css")
+        #expect(ArtifactPage.path(of: URL(string: "oby-artifact://3f0c/2/index.html#top"), for: ref) == "index.html")
         #expect(ArtifactPage.path(of: own, for: ref) == "assets/site.css")
         #expect(ArtifactPage.path(of: ArtifactPage.url(ref, path: "a b.html"), for: ref) == "a b.html")
         for url in ["https://example.com/", "http://127.0.0.1:7357/v1/status", "oby-artifact://other/2/index.html",
@@ -262,10 +303,12 @@ struct HarnessTests {
             return ArtifactFixture.answer(path, files: files)
         }
         var links: [URL] = []
-        let navigation = ArtifactNavigation(ref: ref) { links.append($0) }
+        let gate = ArtifactLinkGate()
+        gate.ask = { links.append($0) }
+        let navigation = ArtifactNavigation(ref: ref, links: gate)
         let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: ArtifactWeb.configuration(handler))
         web.navigationDelegate = navigation
-        web.load(URLRequest(url: ArtifactPage.url(ref, path: "index.html")))
+        web.load(URLRequest(url: ArtifactPage.url(ref, path: "index.html")!))
         let seen = try await ArtifactFixture.read(web)
         #expect(seen["title"] as? String == "classic ran")
         #expect(seen["color"] as? String == ArtifactFixture.probeColor)
@@ -277,10 +320,37 @@ struct HarnessTests {
         #expect(fetched == "blocked")
         // Navigating itself away is denied, and not opened either: only a tapped link offers that.
         _ = try await web.callAsyncJavaScript("location.href = 'https://example.com/'; return 1", contentWorld: .page)
+        // A script clicking a link of its own, again and again, never brings up "Open in your browser?".
+        _ = try await web.callAsyncJavaScript("""
+            for (let i = 0; i < 5; i++) { const a = document.createElement('a'); a.href = 'https://example.org/' + i; document.body.appendChild(a); a.click(); }
+            return 1
+            """, contentWorld: .page)
         try await Task.sleep(for: .milliseconds(500))
         #expect(web.url == ArtifactPage.url(ref, path: "index.html") && links.isEmpty)
         #expect(navigation.denied.contains(URL(string: "https://example.com/")!))
+        #expect(navigation.denied.contains(URL(string: "https://example.org/0")!))
         #expect(served.sorted() == ["app.js", "index.html", "mod.js", "style.css"])
+    }
+
+    /// A link out is offered only within a second of a real tap, once per tap, and never again
+    /// from a viewer whose offer was turned down.
+    @Test func linksOutWaitForARealTap() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        var gate = LinkGate()
+        func offer(_ seconds: TimeInterval) -> Bool { gate.offer(at: start.addingTimeInterval(seconds)) }
+        let untouched = offer(0)
+        gate.touch(at: start)
+        let late = offer(1.5)
+        gate.touch(at: start.addingTimeInterval(2))
+        let tapped = offer(2.4)
+        // One tap, one offer: a script clicking again right after gets nothing.
+        let again = offer(2.5)
+        gate.touch(at: start.addingTimeInterval(3))
+        gate.refuse()
+        let refused = offer(3.1)
+        gate.touch(at: start.addingTimeInterval(4))
+        let afterCancel = offer(4.1)
+        #expect(!untouched && !late && tapped && !again && !refused && !afterCancel && gate.refused)
     }
 
     // MARK: A job's card

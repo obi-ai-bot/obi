@@ -54,17 +54,26 @@ final class ArtifactSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 }
 
-/// Lets the artifact's own files load and nothing else: every other navigation is denied, and a
-/// link the person tapped is handed to `onLink`, which may open it outside after they confirm.
+/// Whether a link out may be offered from one viewer's pages (`LinkGate`), shared by its web
+/// views and its Cancel.
+@MainActor final class ArtifactLinkGate {
+    var gate = LinkGate()
+    /// What the viewer does with a link it may offer: "Open … in your browser?".
+    var ask: (@MainActor (URL) -> Void)?
+}
+
+/// Lets the artifact's own files load and nothing else: every other navigation is denied. A link
+/// the person tapped (within a second of a real tap, `LinkGate`) is handed to `onLink`, which may
+/// open it outside after they confirm; a script clicking links gets nothing.
 final class ArtifactNavigation: NSObject, WKNavigationDelegate {
     let ref: ArtifactRef
-    let onLink: (URL) -> Void
+    let links: ArtifactLinkGate
     /// What was denied, newest last (the tests read it).
     private(set) var denied: [URL] = []
 
-    init(ref: ArtifactRef, onLink: @escaping (URL) -> Void) {
+    init(ref: ArtifactRef, links: ArtifactLinkGate) {
         self.ref = ref
-        self.onLink = onLink
+        self.links = links
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
@@ -72,22 +81,42 @@ final class ArtifactNavigation: NSObject, WKNavigationDelegate {
         if ArtifactPage.path(of: url, for: ref) != nil { return .allow }
         if let url {
             denied.append(url)
-            if action.navigationType == .linkActivated, ["http", "https"].contains(url.scheme) { onLink(url) }
+            if action.navigationType == .linkActivated, ["http", "https"].contains(url.scheme), links.gate.offer() { links.ask?(url) }
         }
         return .cancel
     }
 }
 
+/// The artifact's web view: it tells its gate when a person (never a script) taps or clicks it.
+final class ArtifactWKWebView: WKWebView {
+    var onTouch: (@MainActor () -> Void)?
+
+    #if os(iOS)
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if event?.type == .touches { onTouch?() }
+        return super.hitTest(point, with: event)
+    }
+    #else
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if let event = NSApp.currentEvent, [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) { onTouch?() }
+        return super.hitTest(point)
+    }
+    #endif
+}
+
 enum ArtifactWeb {
-    /// A web view's settings for an artifact: its files from `handler`, nothing kept between
-    /// pages, and no WebRTC (a CSP has no rule for it; ponytail: a script at document start in
-    /// every frame, the strongest public switch WebKit has; DNS prefetch has none at all).
-    static func configuration(_ handler: ArtifactSchemeHandler) -> WKWebViewConfiguration {
+    /// A web view's settings for an artifact: its files from `handler`, scripts on unless it's a
+    /// card's preview, nothing kept between pages, media only when tapped and never to AirPlay or
+    /// picture in picture, and no WebRTC (a CSP has no rule for it; ponytail: a script at document
+    /// start in every frame, the strongest public switch WebKit has; DNS prefetch has none at all).
+    static func configuration(_ handler: ArtifactSchemeHandler, scripts: Bool = true) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
         configuration.setURLSchemeHandler(handler, forURLScheme: ArtifactPage.scheme)
         configuration.websiteDataStore = .nonPersistent()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = scripts
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        configuration.mediaTypesRequiringUserActionForPlayback = .all
+        configuration.allowsAirPlayForMediaPlayback = false
         let noRTC = """
         for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCRtpSender', 'RTCRtpReceiver']) {
           try { Object.defineProperty(window, name, { value: undefined, writable: false, configurable: false }); } catch (e) {}
@@ -97,20 +126,23 @@ enum ArtifactWeb {
         configuration.userContentController.addUserScript(WKUserScript(source: noRTC, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         #if os(iOS)
         configuration.dataDetectorTypes = []
+        configuration.allowsPictureInPictureMediaPlayback = false
         #endif
         return configuration
     }
 }
 
-/// One page of an artifact (`path` in `ref`'s version) in a web view with its scripts on, loaded
-/// only through `ArtifactSchemeHandler`: never `loadHTMLString`, `blob:` or `srcdoc`, which drop
-/// obid's policy. `zoom` scales it, for a canvas's frames.
-struct ArtifactWebView {
+/// One page of an artifact (`path` in `ref`'s version) in a web view, loaded only through
+/// `ArtifactSchemeHandler`: never `loadHTMLString`, `blob:` or `srcdoc`, which drop obid's
+/// policy. `zoom` scales it, for a canvas's frames; `scripts` off for a card's preview.
+@MainActor struct ArtifactWebView {
     let ref: ArtifactRef
     let path: String
-    let fetch: ArtifactFetch
+    /// Where its files come from (`ArtifactSource`).
+    let runner: Runner?
     var zoom: CGFloat = 1
-    let onLink: (URL) -> Void
+    var scripts = true
+    var links = ArtifactLinkGate()
 
     final class Coordinator {
         var navigation: ArtifactNavigation?
@@ -119,10 +151,15 @@ struct ArtifactWebView {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     private func make(_ coordinator: Coordinator) -> WKWebView {
-        let navigation = ArtifactNavigation(ref: ref, onLink: onLink)
+        let navigation = ArtifactNavigation(ref: ref, links: links)
         coordinator.navigation = navigation
-        let web = WKWebView(frame: .zero, configuration: ArtifactWeb.configuration(ArtifactSchemeHandler(ref: ref, fetch: fetch)))
+        let fetch = ArtifactSource.fetch(ref, runner: runner) ?? { _ in throw URLError(.notConnectedToInternet) }
+        let web = ArtifactWKWebView(frame: .zero, configuration: ArtifactWeb.configuration(ArtifactSchemeHandler(ref: ref, fetch: fetch), scripts: scripts))
+        let links = links
+        web.onTouch = { links.gate.touch() }
         web.navigationDelegate = navigation
+        // A preview of a link opens it without asking the navigation delegate.
+        web.allowsLinkPreview = false
         web.pageZoom = zoom
         #if os(iOS)
         web.isOpaque = false
@@ -130,7 +167,7 @@ struct ArtifactWebView {
         #else
         web.underPageBackgroundColor = .clear
         #endif
-        web.load(URLRequest(url: ArtifactPage.url(ref, path: path)))
+        if let url = ArtifactPage.url(ref, path: path) { web.load(URLRequest(url: url)) }
         return web
     }
 }
@@ -147,13 +184,26 @@ extension ArtifactWebView: NSViewRepresentable {
 }
 #endif
 
-/// A PDF artifact, natively.
-struct PDFPage {
+/// A PDF artifact, natively. Its links go to the viewer's confirmation, http and https only.
+@MainActor struct PDFPage {
     let data: Data
+    let onLink: @MainActor (URL) -> Void
 
-    private func make() -> PDFView {
+    final class Coordinator: NSObject, PDFViewDelegate {
+        var onLink: @MainActor (URL) -> Void = { _ in }
+
+        func pdfViewWillClick(onLink sender: PDFView, with url: URL) {
+            if ["http", "https"].contains(url.scheme) { onLink(url) }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    private func make(_ coordinator: Coordinator) -> PDFView {
+        coordinator.onLink = onLink
         let view = PDFView()
         view.autoScales = true
+        view.delegate = coordinator
         view.document = PDFDocument(data: data)
         return view
     }
@@ -161,12 +211,12 @@ struct PDFPage {
 
 #if os(iOS)
 extension PDFPage: UIViewRepresentable {
-    func makeUIView(context: Context) -> PDFView { make() }
+    func makeUIView(context: Context) -> PDFView { make(context.coordinator) }
     func updateUIView(_ view: PDFView, context: Context) {}
 }
 #else
 extension PDFPage: NSViewRepresentable {
-    func makeNSView(context: Context) -> PDFView { make() }
+    func makeNSView(context: Context) -> PDFView { make(context.coordinator) }
     func updateNSView(_ view: PDFView, context: Context) {}
 }
 #endif
@@ -203,9 +253,9 @@ struct ArtifactCard: View {
     var body: some View {
         Button { open = true } label: {
             VStack(alignment: .leading, spacing: 0) {
-                if let fetch, !gone, artifact?.kind == "html" {
+                if fetch != nil, !gone, artifact?.kind == "html" {
                     // Its first screen, as it looks: not to touch, the card opens it.
-                    ArtifactWebView(ref: ref, path: "index.html", fetch: fetch, onLink: { _ in })
+                    ArtifactWebView(ref: ref, path: "index.html", runner: runner, scripts: false)
                         .allowsHitTesting(false)
                         .frame(height: 116)
                         .clipped()
@@ -275,6 +325,8 @@ struct ArtifactViewer: View {
     @State private var content: Content?
     @State private var problem: String?
     @State private var leaving: URL?
+    /// Links out of this viewer's pages: offered only after a real tap, and none after a Cancel.
+    @State private var links = ArtifactLinkGate()
 
     enum Content {
         case page(String)
@@ -308,11 +360,14 @@ struct ArtifactViewer: View {
         #else
         .frame(minWidth: 760, minHeight: 560)
         #endif
-        .task(id: open) { await load() }
+        .task(id: open) {
+            links.ask = { ask($0) }
+            await load()
+        }
         .confirmationDialog("Open \(leaving?.host() ?? "this link") in your browser?", isPresented: Binding { leaving != nil } set: { if !$0 { leaving = nil } },
                             titleVisibility: .visible) {
             Button("Open") { if let leaving { openURL(leaving) } }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) { links.gate.refuse() }
         } message: {
             Text(leaving?.absoluteString ?? "")
         }
@@ -349,11 +404,18 @@ struct ArtifactViewer: View {
     private var viewer: some View {
         Group {
             switch content {
-            case .page(let path): if let fetch { ArtifactWebView(ref: open, path: path, fetch: fetch, onLink: { leaving = $0 }) }
-            case .markdown(let text): ScrollView { MarkdownPage(text: text).padding(Tokens.gutter) }
+            case .page(let path): ArtifactWebView(ref: open, path: path, runner: runner, links: links)
+            case .markdown(let text):
+                ScrollView { MarkdownPage(text: text).padding(Tokens.gutter) }
+                    // Its links ask first too, and only go to the web.
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard ["http", "https"].contains(url.scheme) else { return .discarded }
+                        ask(url)
+                        return .handled
+                    })
             case .image(let data): ScrollView([.horizontal, .vertical]) { ArtifactImage(data: data).padding(Tokens.gutter) }
-            case .pdf(let data): PDFPage(data: data)
-            case .canvas(let frames): if let fetch { Artboard(ref: open, frames: frames, fetch: fetch, onLink: { leaving = $0 }) }
+            case .pdf(let data): PDFPage(data: data, onLink: ask)
+            case .canvas(let frames): Artboard(ref: open, frames: frames, runner: runner, links: links)
             case nil:
                 VStack(spacing: 8) {
                     if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger) } else { ProgressView() }
@@ -362,6 +424,12 @@ struct ArtifactViewer: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// "Open … in your browser?", unless a Cancel turned links from this viewer down.
+    private func ask(_ url: URL) {
+        guard !links.gate.refused else { return }
+        leaving = url
     }
 
     private func load() async {
@@ -448,8 +516,8 @@ private struct ArtifactImage: View {
 private struct Artboard: View {
     let ref: ArtifactRef
     let frames: [CanvasFrame]
-    let fetch: ArtifactFetch
-    let onLink: (URL) -> Void
+    let runner: Runner?
+    let links: ArtifactLinkGate
     @State private var scale: CGFloat?
     @GestureState private var pinch: CGFloat = 1
     private let title: CGFloat = 20
@@ -466,7 +534,7 @@ private struct Artboard: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(frame.title ?? frame.file).font(Tokens.font(11, .medium)).foregroundStyle(Tokens.text).lineLimit(1)
                                 .frame(height: title - 4)
-                            ArtifactWebView(ref: ref, path: frame.file, fetch: fetch, zoom: zoom, onLink: onLink)
+                            ArtifactWebView(ref: ref, path: frame.file, runner: runner, zoom: zoom, links: links)
                                 .frame(width: frame.w * zoom, height: frame.h * zoom)
                                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                 .overlay {
@@ -564,6 +632,19 @@ struct ToolSteps: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// The verb in `muted` (`danger` when it failed), then what it's on as a path token.
+    private static func styled(_ verb: String, _ detail: String?, failed: Bool) -> AttributedString {
+        var line = AttributedString(verb)
+        line.foregroundColor = failed ? Tokens.danger : Tokens.muted
+        if let detail {
+            var token = AttributedString(" " + detail)
+            token.font = Tokens.mono(12)
+            token.foregroundColor = Tokens.code
+            line += token
+        }
+        return line
+    }
+
     private func line(_ step: TurnStep) -> some View {
         let (verb, detail) = ToolLine.parts(step)
         return HStack(spacing: 8) {
@@ -578,8 +659,7 @@ struct ToolSteps: View {
             if step.state == .running {
                 Sheen(text: ToolLine.text(step), size: Tokens.textMd).lineLimit(1)
             } else {
-                (Text(verb).foregroundStyle(step.state == .failed ? Tokens.danger : Tokens.muted)
-                    + Text(detail.map { " " + $0 } ?? "").font(Tokens.mono(12)).foregroundStyle(Tokens.code))
+                Text(Self.styled(verb, detail, failed: step.state == .failed))
                     .font(Tokens.font(Tokens.textMd)).lineLimit(1).truncationMode(.middle)
             }
         }

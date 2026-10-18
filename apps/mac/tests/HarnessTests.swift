@@ -20,7 +20,7 @@ struct MacHarnessTests {
         guard case .delta(let delta)? = event("delta", #"{"conversation":"c1","turn":"u1","text":"Reading it now."}"#),
               case .step(let step)? = event("step", #"{"turn":"u1","index":1,"action":"tool","text":"Reading the web","tool":"web_search","detail":"obid csp","state":"running"}"#),
               case .artifact(let artifact)? = event("artifact", #"{"id":"a1","version":1,"title":"Plan","kind":"markdown","conversation":"c1","job":null}"#),
-              case .turn(let turn, let refs)? = event("turn", #"{"id":"o1","who":"oby","text":"Reading it now.","at":"2026-10-17T09:12:09Z","artifacts":[{"id":"a1","version":1}]}"#)
+              case .turn(let turn, let extras)? = event("turn", #"{"id":"o1","who":"oby","text":"Reading it now.","at":"2026-10-17T09:12:09Z","artifacts":[{"id":"a1","version":1}]}"#)
         else { Issue.record("an event wasn't read"); return }
         let asked = Turn(id: "u1", who: .user, text: "Look it up")
         model.apply(asked)
@@ -29,7 +29,7 @@ struct MacHarnessTests {
         #expect(model.streamed(under: asked, in: [asked])?.text == "Reading it now.")
         #expect(ToolLine.text(model.steps["u1"]![0]) == "Searching the web for “obid csp”" && ToolLine.folded(model.steps["u1"]!, words: true))
         model.apply(artifact)
-        model.apply(turn, artifacts: refs)
+        model.apply(turn, extras)
         model.settleLatestSteps()
         #expect(model.streamed.isEmpty && model.artifactRefs(of: turn) == [ArtifactRef(id: "a1", version: 1)])
         #expect(model.artifacts["a1"]?.kindName == "Document" && ToolLine.folded(model.steps["u1"]!))
@@ -54,10 +54,12 @@ struct MacHarnessTests {
         let ref = ArtifactRef(id: "a1", version: 1)
         let handler = ArtifactSchemeHandler(ref: ref) { ArtifactFixture.answer($0) }
         var links: [URL] = []
-        let navigation = ArtifactNavigation(ref: ref) { links.append($0) }
+        let gate = ArtifactLinkGate()
+        gate.ask = { links.append($0) }
+        let navigation = ArtifactNavigation(ref: ref, links: gate)
         let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: ArtifactWeb.configuration(handler))
         web.navigationDelegate = navigation
-        web.load(URLRequest(url: ArtifactPage.url(ref, path: "index.html")))
+        web.load(URLRequest(url: ArtifactPage.url(ref, path: "index.html")!))
         let seen = try await ArtifactFixture.read(web)
         #expect(seen["title"] as? String == "classic ran" && seen["color"] as? String == ArtifactFixture.probeColor)
         #expect(seen["inline"] as? String == "yes", "\(seen)")
@@ -66,6 +68,7 @@ struct MacHarnessTests {
         let fetched = try await web.callAsyncJavaScript("try { await fetch('style.css'); return 'fetched' } catch { return 'blocked' }", contentWorld: .page) as? String
         #expect(fetched == "blocked")
         _ = try await web.callAsyncJavaScript("location.href = 'https://example.com/'; return 1", contentWorld: .page)
+        _ = try await web.callAsyncJavaScript("const a = document.createElement('a'); a.href = 'https://example.org/'; document.body.appendChild(a); a.click(); a.click(); return 1", contentWorld: .page)
         try await Task.sleep(for: .milliseconds(500))
         #expect(web.url == ArtifactPage.url(ref, path: "index.html") && links.isEmpty)
         #expect(navigation.denied.contains(URL(string: "https://example.com/")!))
@@ -86,10 +89,10 @@ struct MacHarnessTests {
         #expect(answer.statusCode == 200 && answer.value(forHTTPHeaderField: "Content-Security-Policy") == ArtifactPage.policy)
         #expect(try await runner.artifactFile(ref, path: "../api-token").1.statusCode == 404)
         let handler = ArtifactSchemeHandler(ref: ref) { try await runner.artifactFile(ref, path: $0) }
-        let navigation = ArtifactNavigation(ref: ref) { _ in }
+        let navigation = ArtifactNavigation(ref: ref, links: ArtifactLinkGate())
         let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: ArtifactWeb.configuration(handler))
         web.navigationDelegate = navigation
-        web.load(URLRequest(url: ArtifactPage.url(ref, path: "index.html")))
+        web.load(URLRequest(url: ArtifactPage.url(ref, path: "index.html")!))
         let seen = try await ArtifactFixture.read(web)
         #expect(seen["title"] as? String == "classic ran" && seen["color"] as? String == ArtifactFixture.probeColor, "\(seen)")
         #expect(seen["inline"] as? String == "yes" && seen["module"] as? String == "yes" && seen["origin"] as? String == "null", "\(seen)")

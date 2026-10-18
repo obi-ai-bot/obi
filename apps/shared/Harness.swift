@@ -13,6 +13,14 @@ nonisolated struct TurnDelta: Codable, Equatable, Sendable {
     var text: String
 }
 
+/// What a runner's turn carries that the app's Turn doesn't keep (obid only).
+nonisolated struct TurnExtras: Equatable, Sendable {
+    /// The artifacts it made.
+    var artifacts: [ArtifactRef] = []
+    /// It's the turn a job adds to its conversation when it ends (#351), not an answer to words.
+    var ended = false
+}
+
 /// One version of an artifact, as a turn or a job names it.
 nonisolated struct ArtifactRef: Codable, Hashable, Sendable {
     var id: String
@@ -181,6 +189,28 @@ nonisolated enum ToolLine {
     }
 }
 
+/// When a link out of an artifact's page may be offered ("Open in your browser?"): only within a
+/// second of a real tap or click on the page, once per tap, and never again from a page whose
+/// offer was turned down. A script clicking its own links gets nothing.
+nonisolated struct LinkGate: Equatable, Sendable {
+    static let window: TimeInterval = 1
+    private var touched: Date?
+    private(set) var refused = false
+
+    /// A tap or a mouse-down on the page.
+    mutating func touch(at now: Date = .now) { touched = now }
+
+    /// Whether a link may be offered now; offering it takes the tap.
+    mutating func offer(at now: Date = .now) -> Bool {
+        guard !refused, let touched, now.timeIntervalSince(touched) >= 0, now.timeIntervalSince(touched) <= Self.window else { return false }
+        self.touched = nil
+        return true
+    }
+
+    /// The offer was turned down: none again from this page.
+    mutating func refuse() { refused = true }
+}
+
 /// How a job a turn started stands, for its card under the words.
 nonisolated struct JobOutcome: Equatable, Sendable {
     var text: String
@@ -243,18 +273,20 @@ nonisolated enum ArtifactPage {
     /// What obid sends on every artifact file (docs/runner-api.md), for an answer that comes without it.
     static let policy = "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' data: blob:; style-src 'self' 'unsafe-inline' data:; img-src 'self' data: blob:; connect-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts"
 
-    static func url(_ ref: ArtifactRef, path: String) -> URL {
+    /// Nil for an id or path no URL can hold.
+    static func url(_ ref: ArtifactRef, path: String) -> URL? {
         var parts = URLComponents()
         parts.scheme = scheme
         parts.host = ref.id
         parts.path = "/\(ref.version)/" + path
-        return parts.url!
+        return parts.url
     }
 
     /// The file of `ref`'s version that `url` names, or nil for anything else: another scheme,
-    /// another artifact or version, a way out (`..`), or no file.
+    /// another artifact or version, a way out (`..`), or no file. A query or fragment (a page's
+    /// `style.css?v=2`, `#top`) names the same file.
     static func path(of url: URL?, for ref: ArtifactRef) -> String? {
-        guard let url, url.scheme == scheme, url.host() == ref.id, url.query == nil else { return nil }
+        guard let url, url.scheme == scheme, url.host() == ref.id else { return nil }
         let parts = url.path(percentEncoded: false).split(separator: "/", omittingEmptySubsequences: false).dropFirst()
         guard parts.first == Substring(String(ref.version)) else { return nil }
         let file = parts.dropFirst()
@@ -295,8 +327,13 @@ nonisolated struct CanvasFrame: Decodable, Equatable, Identifiable, Sendable {
 }
 
 nonisolated enum Artboards {
-    /// The frames `canvas.json` lists (a list, or `{"frames": […]}`); one that can't be read,
-    /// has no size, or names a file outside the version, is left out.
+    /// At most this many frames, each at most this wide and tall: one web view each.
+    static let most = 24
+    static let largest: Double = 4096
+
+    /// The frames `canvas.json` lists (a list, or `{"frames": […]}`), the first `most`, each
+    /// clamped to `largest`; one that can't be read, has no size, or names a file outside the
+    /// version, is left out.
     static func frames(_ data: Data) -> [CanvasFrame] {
         struct Lossy: Decodable {
             var frame: CanvasFrame?
@@ -304,9 +341,16 @@ nonisolated enum Artboards {
         }
         struct Wrapped: Decodable { var frames: [Lossy] }
         let list = (try? JSONDecoder().decode([Lossy].self, from: data)) ?? (try? JSONDecoder().decode(Wrapped.self, from: data))?.frames ?? []
-        return list.compactMap(\.frame).filter { frame in
+        let kept = list.compactMap(\.frame).filter { frame in
             let parts = frame.file.split(separator: "/", omittingEmptySubsequences: false)
-            return frame.w > 0 && frame.h > 0 && !frame.file.hasPrefix("/") && !parts.contains { $0.isEmpty || $0 == ".." }
+            return frame.w > 0 && frame.h > 0 && frame.x.isFinite && frame.y.isFinite
+                && !frame.file.hasPrefix("/") && !parts.contains { $0.isEmpty || $0 == ".." }
+        }
+        return kept.prefix(most).map { frame in
+            var frame = frame
+            frame.w = min(frame.w, largest)
+            frame.h = min(frame.h, largest)
+            return frame
         }
     }
 

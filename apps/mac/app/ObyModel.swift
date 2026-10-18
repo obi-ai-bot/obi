@@ -32,7 +32,11 @@ final class IslandModel {
     }
 
     /// Both chat surfaces read and send through this model.
-    var thread: [Turn] { feed.conversation.thread(with: desk.turns) }
+    var thread: [Turn] { feed.conversation.thread(with: localTurns) }
+    /// This Mac's own turns in the thread: with one runner thread, the history from before the runner
+    /// planned; with obid's conversations (#493) none, since each conversation is only its own turns.
+    var localTurns: [Turn] { Self.localTurns(desk.turns, conversations: feed.conversationsOn) }
+    nonisolated static func localTurns(_ turns: [Turn], conversations: Bool) -> [Turn] { conversations ? [] : turns }
     /// The accounts a plan's card offers: the runner's when the runner on this Mac plans (#283),
     /// else this Mac's.
     var planAccounts: [AccountState] { (feed.local ? feed.accounts : desk.accounts.accounts).filter(\.signedIn) }

@@ -83,6 +83,8 @@ struct SidebarView: View {
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
+    /// The panel lists obid's conversations (#493) instead of Home's work.
+    private var listsConversations: Bool { feed.conversationsOn && state.section == .conversations }
     private var work: [WorkList.Item<SidebarSections.JobRow>] { model.work(since: state.since, seen: state.seen) }
     private var groups: [WorkList.Group<SidebarSections.JobRow>] {
         let query = search.trimmingCharacters(in: .whitespaces)
@@ -120,21 +122,23 @@ struct SidebarView: View {
     private var content: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4) {
-                Text("Home").font(Tokens.font(Tokens.textTitle, .semibold)).foregroundStyle(Tokens.ink)
+                Text(listsConversations ? "Conversations" : "Home").font(Tokens.font(Tokens.textTitle, .semibold)).foregroundStyle(Tokens.ink)
                     .lineLimit(1).frame(height: 32).padding(.horizontal, 10)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 0)
-                Menu {
-                    Picker("Group by", selection: $groupBy) {
-                        ForEach(GroupBy.allCases, id: \.self) { Text($0.label).tag($0) }
-                    }
-                    .pickerStyle(.inline)
-                    Divider()
-                    // Through the runner (it keeps the time), so the iPhone's Home clears too.
-                    Button("Clear done", action: clear).disabled(!clearable)
-                } label: { IconButton(symbol: "ellipsis", rotated: true) }
-                    .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
-                    .accessibilityLabel("Home options")
+                if !listsConversations {
+                    Menu {
+                        Picker("Group by", selection: $groupBy) {
+                            ForEach(GroupBy.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.inline)
+                        Divider()
+                        // Through the runner (it keeps the time), so the iPhone's Home clears too.
+                        Button("Clear done", action: clear).disabled(!clearable)
+                    } label: { IconButton(symbol: "ellipsis", rotated: true) }
+                        .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+                        .accessibilityLabel("Home options")
+                }
             }
             .padding(.bottom, clearProblem == nil ? 12 : 4)
             if let clearProblem {
@@ -143,12 +147,16 @@ struct SidebarView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if searching { searchField.transition(.opacity.combined(with: .move(edge: .top))) }
-                    PanelRow(symbol: "plus", title: "New task", action: onNewTask).padding(.bottom, 8)
-                    ForEach(groups) { group($0) }
-                    if groups.isEmpty {
-                        Text(search.isEmpty ? "Nothing here yet. Ask Oby for something and it shows up here." : "No tasks match “\(search)”")
-                            .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
-                            .padding(.horizontal, 10).padding(.vertical, 6)
+                    if listsConversations {
+                        ConversationsPanel(model: model, state: state, search: search)
+                    } else {
+                        PanelRow(symbol: "plus", title: "New task", action: onNewTask).padding(.bottom, 8)
+                        ForEach(groups) { group($0) }
+                        if groups.isEmpty {
+                            Text(search.isEmpty ? "Nothing here yet. Ask Oby for something and it shows up here." : "No tasks match “\(search)”")
+                                .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                        }
                     }
                 }
                 .padding(.bottom, 8)
@@ -303,8 +311,11 @@ private struct TaskRow: View {
 
     @ViewBuilder private var actions: some View {
         Button("View details") { open() }
-        if ConversationModel.started(job.id, in: model.thread) {
-            Button("Go to conversation") { state.trail.start(step, .talk) }
+        if model.hasConversation(of: job.id, local: local) {
+            Button("Go to conversation") {
+                model.showConversation(of: job.id, local: local)
+                state.trail.start(step, .talk)
+            }
         }
         if job.isActive { Button("Stop") { model.stopChatJob(job.id, local: local) } }
     }
@@ -324,10 +335,18 @@ private struct IconStrip: View {
     }
 
     var body: some View {
+        // With obid's conversations (#493) the icons pick the panel's section, as Sangam's do.
+        let sections = model.feed.conversationsOn
         VStack(spacing: 12) {
-            RailButton(symbol: "house", label: "Home", on: state.trail.isHome, dot: homeDot) { state.trail.closeAll() }
-            RailButton(symbol: "bubble.left.and.bubble.right", label: "Conversation with Oby", on: state.trail.top == .talk,
-                       dot: model.unreadReply ? Tokens.unread : nil) { state.open() }
+            RailButton(symbol: "house", label: "Home", on: sections ? state.section == .home : state.trail.isHome, dot: homeDot) {
+                state.section = .home
+                state.trail.closeAll()
+            }
+            RailButton(symbol: "bubble.left.and.bubble.right", label: sections ? "Conversations" : "Conversation with Oby",
+                       on: sections ? state.section == .conversations : state.trail.top == .talk,
+                       dot: model.unreadReply ? Tokens.unread : nil) {
+                if sections { state.section = .conversations } else { state.open() }
+            }
                 .accessibilityLabel(SidebarSections.obyLabel(last: model.thread.last?.text, unread: model.unreadReply))
             Spacer(minLength: 0)
             account
@@ -421,7 +440,7 @@ struct IconButton: View {
 }
 
 /// A row in the side panel that starts something (New task): an icon and a label.
-private struct PanelRow: View {
+struct PanelRow: View {
     let symbol: String
     let title: String
     let action: () -> Void

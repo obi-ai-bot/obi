@@ -227,6 +227,21 @@ pub struct Job {
     /// What Oby found before it started, for the first prompt (#540). Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brief: Option<Brief>,
+    /// What its `.obi/artifacts/` was published as, one per entry (crate::artifacts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<JobArtifact>,
+    /// Why an entry of its `.obi/artifacts/` wasn't published, as of its last end.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_problems: Vec<String>,
+}
+
+/// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
+/// end gives it a new version rather than a new artifact. The API shows `{id, version}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobArtifact {
+    pub id: String,
+    pub version: u32,
+    pub entry: String,
 }
 
 impl Job {
@@ -308,6 +323,8 @@ impl Job {
             offers: Vec::new(),
             asked: false,
             brief: None,
+            artifacts: Vec::new(),
+            artifact_problems: Vec::new(),
         }
     }
 
@@ -525,6 +542,8 @@ impl Job {
             "obi": self.obi,
             "worktree": self.worktree,
             "conversation": self.conversation,
+            "artifacts": self.artifacts.iter().map(|a| json!({"id": a.id, "version": a.version})).collect::<Vec<_>>(),
+            "artifactProblems": self.artifact_problems,
         });
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
@@ -850,8 +869,10 @@ mod tests {
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's five.
-        assert_eq!(object.len(), 70);
+        // The Swift runner's 65 keys, and obid's seven.
+        assert_eq!(object.len(), 72);
+        assert_eq!(value["artifacts"], json!([]));
+        assert_eq!(value["artifactProblems"], json!([]));
         assert_eq!(value["answered"], json!([]));
         assert_eq!(value["answeredCount"], 0);
         assert_eq!(value["report"], false);

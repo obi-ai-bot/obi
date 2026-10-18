@@ -92,7 +92,7 @@ enum SampleTasks {
             step(6, "oby_dispatch", "Starting a job", "deskree-inc/oby", .done)
             phone.sample(.artifact(ArtifactEvent(id: ArtifactFixture.sample.id, version: 1, title: ArtifactFixture.sample.title, kind: "html")))
             phone.sample(.turn(Turn(id: "sample-harness-answer", who: .oby, text: answer, jobs: ["sample-run"]),
-                               artifacts: [ArtifactRef(id: ArtifactFixture.sample.id, version: 1)]))
+                               TurnExtras(artifacts: [ArtifactRef(id: ArtifactFixture.sample.id, version: 1)])))
             for line in ["Reading LoginView.swift", "Editing LoginView.swift", "Running swift test"] {
                 job(line)
                 try? await Task.sleep(for: .seconds(1.5))
