@@ -47,7 +47,12 @@ What an agent makes to be looked at: a page, a doc, a chart, a canvas of design 
 - **Made** by `oby_artifact` from the conversation's room, or by a job (its `.obi/artifacts/` folder, published when the job ends). Kinds: `html` (a folder with an `index.html`), `markdown`, `image`, `pdf`, `canvas` (an artboard: a JSON list of frames, each an HTML page with a size and position).
 - **Kept** in `home/artifacts/<id>/<version>/`, every version, with `artifact.json` (`id`, `title`, `kind`, `conversation`, `job`, `created`, `versions`).
 - **API**: `GET /v1/artifacts?conversation=&job=`, `GET /v1/artifacts/{id}`, `GET /v1/artifacts/{id}/{version}/{path}` (the files), `PATCH /v1/artifacts/{id}` (`title`), `DELETE /v1/artifacts/{id}`; an `artifact` event when one is made or gets a version; the turn that made it carries `artifacts: [{id, version}]`. On the gateway's allowlist (the phone shows them).
-- **Shown** as a card under the words that made it, opening in a viewer in Sangam's style: HTML in a web view with scripts on and **no network** (`Content-Security-Policy: default-src 'self' data: blob:; …` on every file obid serves from an artifact, and the apps load it with network access denied), Markdown rendered, images and PDFs native, a canvas as a pannable artboard of its frames.
+- **Shown** as a card under the words that made it, opening in a viewer in Sangam's style: HTML in a web view with scripts on, Markdown rendered, images and PDFs native, a canvas as a pannable artboard of its frames. obid sends `Content-Security-Policy: default-src 'self' data: blob:; …; connect-src 'none'; …; sandbox allow-scripts` on every file it serves from an artifact (docs/runner-api.md, "obid only: artifacts"), which stops the page loading or fetching anything but its own files. It doesn't stop the page navigating itself away, a meta refresh, WebRTC or DNS prefetch: that is the client's part.
+- **The client contract** for showing an artifact page (every app, the web one too):
+  - Render it through a scheme handler (or a local proxy) that fetches each file from obid with the token and passes obid's `Content-Security-Policy` header on unchanged, or in a frame with `sandbox="allow-scripts"`. Never `allow-same-origin`, never with obid's API origin.
+  - Never load its HTML with `blob:` URLs, `srcdoc` or `loadHTMLString` outside such a sandbox: those drop obid's header.
+  - Deny every navigation in the web view's delegate (`WKNavigationDelegate` on Apple, `WebViewClient` on Android): only the artifact's own files load; a link the user taps may open outside the viewer, in the browser, after they confirm.
+  - Load it with network access denied where the platform can (WebRTC off, no DNS prefetch).
 - Sharing outside Oby (#387) comes after.
 
 ## 5. Events

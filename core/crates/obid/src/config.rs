@@ -313,6 +313,12 @@ impl Config {
                             account.id
                         ));
                     }
+                    Some(dir) if key == "claude" && in_persons_claude_folder(dir) => {
+                        return invalid(format!(
+                            "agents.claude.accounts: {}'s configDir {dir:?} is the person's own ~/.claude or inside it: an account's folder is one its jobs can write, and ~/.claude must stay one no job can.",
+                            account.id
+                        ));
+                    }
                     None if key == "cursor" => {
                         return invalid(format!(
                             "agents.cursor.accounts: {} has no configDir: each Cursor account needs a folder of its own, where its login lives.",
@@ -595,6 +601,22 @@ fn is_repo_name(name: &str) -> bool {
     matches!(name.split_once('/'), Some((owner, repo)) if ok(owner) && ok(repo))
 }
 
+/// Whether `dir` is the person's own `~/.claude` (the default login's folder) or inside it, in
+/// any of their homes, links resolved where they exist and letter case ignored (macOS ignores it).
+fn in_persons_claude_folder(dir: &std::path::Path) -> bool {
+    // As written and with links resolved, each in lower case.
+    let forms = |path: &std::path::Path| {
+        let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        [path.to_path_buf(), real]
+            .map(|p| std::path::PathBuf::from(p.to_string_lossy().to_lowercase()))
+    };
+    let dirs = forms(dir);
+    crate::jobs::person_homes().iter().any(|home| {
+        let claude = forms(&home.join(".claude"));
+        dirs.iter().any(|d| claude.iter().any(|c| d.starts_with(c)))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,6 +744,27 @@ mod tests {
         );
         let on = with(serde_json::json!({"claudeKeychain": true}));
         assert!(Config::parse(&on).unwrap().claude_keychain);
+    }
+
+    /// A Claude account's `configDir` is never the person's own `~/.claude` nor inside it (#651's
+    /// re-review): jobs can write an account's folder, and the default login's folder must stay
+    /// one no box can write, since obid refreshes it unboxed.
+    #[test]
+    fn a_claude_config_dir_is_never_the_persons_own_claude_folder() {
+        let home = crate::jobs::person_homes().into_iter().next().unwrap();
+        for dir in [
+            home.join(".claude"),
+            home.join(".claude/accounts/work"),
+            home.join(".Claude/work"),
+        ] {
+            let accounts = serde_json::json!({"claude": {"bin": "claude",
+                "accounts": [{"id": "work", "name": "Work", "configDir": dir}]}});
+            let text = with(serde_json::json!({"agents": accounts}));
+            assert!(problem(&text).contains("~/.claude"), "{}", dir.display());
+        }
+        let beside = serde_json::json!({"claude": {"bin": "claude",
+            "accounts": [{"id": "work", "name": "Work", "configDir": home.join(".claude-work")}]}});
+        assert!(Config::parse(&with(serde_json::json!({"agents": beside}))).is_ok());
     }
 
     #[test]

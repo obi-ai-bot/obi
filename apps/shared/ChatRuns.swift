@@ -163,3 +163,40 @@ nonisolated enum ChatSend: Equatable {
         replying ? .reply : questionWaits ? .answer : .oby
     }
 }
+
+/// Oby's words coming in a word at a time (Sangam's stream.ts): one every 35 ms, each fading in
+/// over 240 ms. For a whole answer, and for one still streaming in: `came` says when each word
+/// came, in seconds from the start (a word missing from it came at the start).
+nonisolated enum WordReveal {
+    static let word: TimeInterval = 0.035
+    static let fade: TimeInterval = 0.24
+
+    /// Each word with the space after it, as stream.ts cuts them.
+    static func words(_ text: String) -> [Substring] {
+        text.matches(of: /\S+\s*/).map { text[$0.range] }
+    }
+
+    /// When each of `count` words starts in: 35 ms after the one before, or when it came if later.
+    static func starts(_ count: Int, came: [TimeInterval] = []) -> [TimeInterval] {
+        var last: TimeInterval = 0
+        return (0..<count).map { index in
+            last = max(index < came.count ? came[index] : 0, last + word)
+            return last
+        }
+    }
+
+    /// How long until the last word is in.
+    static func duration(_ text: String, came: [TimeInterval] = []) -> TimeInterval {
+        (starts(words(text).count, came: came).last ?? 0) + fade
+    }
+
+    /// What's in `after` seconds: the words so far, and how far in (0 to 1) the last of them are
+    /// that are still fading, oldest first.
+    static func shown(_ text: String, came: [TimeInterval] = [], after elapsed: TimeInterval) -> (text: String, fading: [Double]) {
+        let words = words(text)
+        let starts = starts(words.count, came: came)
+        let count = starts.firstIndex { $0 > elapsed + 1e-9 } ?? words.count
+        let fading = starts[..<count].map { min(1, (elapsed - $0) / fade) }.filter { $0 < 1 }
+        return (words[..<count].joined(), fading)
+    }
+}

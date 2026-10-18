@@ -28,14 +28,21 @@ final class ConversationModel {
     private(set) var latestStepTurn: String?
     /// Counts reloads and forgets: a page from before the last one is dropped.
     private var generation = 0
+    /// When each of Oby's answers came while the thread was open, by turn id: its words come in a
+    /// word at a time from then (`WordReveal`). History read later isn't here.
+    private(set) var arrived: [String: Date] = [:]
+    /// Now, for `arrived`; tests put in their own.
+    @ObservationIgnored var time: () -> Date = { .now }
 
     init(page: @escaping @MainActor (_ before: String?, _ limit: Int) async throws -> [Turn] = { _, _ in [] }) {
         self.page = page
     }
 
     /// The latest page, in place of what was loaded: on every connection to the runner, so what
-    /// was said elsewhere while the connection was down is here.
-    func reload() async {
+    /// was said elsewhere while the connection was down is here. `arriving`: the page of a new
+    /// conversation just started here, whose first answer comes in word by word; any other reload
+    /// (opening a conversation, reconnecting) shows its turns whole.
+    func reload(arriving: Bool = false) async {
         generation += 1
         let mine = generation
         loading = true
@@ -43,6 +50,7 @@ final class ConversationModel {
         do {
             let latest = try await page(nil, Self.pageSize)
             guard mine == generation else { return }
+            if arriving { for turn in latest where !runnerTurns.contains(where: { $0.id == turn.id }) { arrive(turn) } }
             runnerTurns = Self.ordered(latest)
             hasOlder = latest.count >= Self.pageSize
             problem = nil
@@ -75,7 +83,15 @@ final class ConversationModel {
     /// A `turn` event: the turn with that id is replaced (a job joined it), or the new one takes
     /// its place by time.
     func apply(_ turn: Turn) {
+        if !runnerTurns.contains(where: { $0.id == turn.id }) { arrive(turn) }
         runnerTurns = Self.placed(turn, in: runnerTurns)
+    }
+
+    /// Oby's turn, new to the thread, said in the last few seconds: it comes in word by word.
+    private func arrive(_ turn: Turn) {
+        let now = time()
+        guard turn.who == .oby, arrived[turn.id] == nil, abs(now.timeIntervalSince(turn.date)) < 10 else { return }
+        arrived[turn.id] = now
     }
 
     /// A `step` event: the step with that turn and index changes, or is added in its place.
@@ -103,6 +119,7 @@ final class ConversationModel {
         generation += 1
         steps = [:]
         latestStepTurn = nil
+        arrived = [:]
         runnerTurns = []
         hasOlder = false
         loading = false

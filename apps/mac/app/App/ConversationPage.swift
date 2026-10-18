@@ -4,7 +4,8 @@ import SwiftUI
 /// The conversation with Oby (Sangam's ChatView.tsx): your words in bubbles on the right, Oby's
 /// as plain text on the left under its face, in runs with the time under each; the tasks an answer
 /// started as cards under it; decisions as cards where they belong, answerable in place; Oby at
-/// work last; and the message box at the foot. The runner keeps one conversation, so this is it.
+/// work last; and the message box at the foot. It shows the conversation picked in the side panel (obid
+/// keeps many, #493), or the runner's one thread.
 struct ConversationPage: View {
     let model: IslandModel
     let composerFocusRequest: Int
@@ -57,7 +58,7 @@ struct ConversationPage: View {
     private var thread: some View {
         // Every half minute: a time that turns into yesterday's, and the inbox's waits move on.
         TimelineView(.periodic(from: .now, by: 30)) { context in
-            let turns = conversation.thread(with: desk.turns)
+            let turns = conversation.thread(with: model.localTurns)
             let entries = (desk.inbox.map { IslandInbox.Entry(item: $0, local: true) }
                 + (feed.inbox + feed.inboxHistory).map { IslandInbox.Entry(item: $0, local: false) })
                 .filter { $0.item.isDecision && ($0.item.later == nil || $0.item.later! <= context.date) }
@@ -104,6 +105,7 @@ struct ConversationPage: View {
                                            account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
                                            isLocal: { id in desk.jobs.contains { $0.id == id } },
                                            steps: conversation.steps(under: row.turn, in: turns),
+                                           arrived: conversation.arrived[row.turn.id],
                                            onOpenJob: onOpenJob, onStopJob: { model.stopChatJob($0, local: $1) })
                                     .task(id: row.turn.jobs ?? []) {
                                         // A runner's job older than its list: fetched, so its card shows.
@@ -257,6 +259,8 @@ private struct MessageRow: View {
     let account: (_ job: Job, _ local: Bool) -> String
     let isLocal: (_ id: String) -> Bool
     let steps: [TurnStep]
+    /// When Oby's answer came while the thread was open: its words come in from then.
+    let arrived: Date?
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
     let onStopJob: (_ job: String, _ local: Bool) -> Void
 
@@ -273,7 +277,7 @@ private struct MessageRow: View {
                         .background(Tokens.bubble, in: RoundedRectangle(cornerRadius: Tokens.bubbleRadius, style: .continuous))
                 }
             } else {
-                if !turn.text.isEmpty { SaidText(text: turn.text, color: Tokens.item) }
+                if !turn.text.isEmpty { ArrivingSaid(text: turn.text, color: Tokens.item, since: arrived) }
                 if let markdown = ConversationModel.markdownDetails(for: turn) {
                     Text(markdown).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.item).lineSpacing(6).textSelection(.enabled)
                 }

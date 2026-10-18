@@ -595,8 +595,12 @@ async fn attempts(
             Tool::Codex => {
                 super::harness_codex::launch(shared, account, place, &url, token, &resume)?
             }
-            _ => (
-                shared.jobs.conversation_launch(
+            _ => {
+                // As before a job's run (#651): the Keychain's default login refreshed when it's
+                // due and kept fresh while the turn runs; an account with a folder of its own
+                // refused near its end.
+                shared.jobs.claude_login_ready(Some(account)).await?;
+                let launch = shared.jobs.conversation_launch(
                     Tool::Claude,
                     account,
                     &place.room,
@@ -605,9 +609,9 @@ async fn attempts(
                     vec![place.repos.clone()],
                     flags,
                     place.folder.join("agent.log"),
-                )?,
-                None,
-            ),
+                )?;
+                (launch, None)
+            }
         };
         let turn = one(
             shared,

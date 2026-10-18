@@ -300,21 +300,25 @@ struct SaidText: View {
     var color: Color = Tokens.item
     /// Yours: as typed, no paragraphs or lists.
     var plain = false
+    /// How far in the last words are, oldest first, while they come in (`ArrivingSaid`).
+    var fading: [Double] = []
 
     var body: some View {
+        let blocks = blocks
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+            ForEach(Array(blocks.enumerated()), id: \.offset) { b, block in
+                let last = b == blocks.count - 1
                 if block.allSatisfy({ $0.hasPrefix("- ") }) {
                     VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(block.enumerated()), id: \.offset) { _, line in
+                        ForEach(Array(block.enumerated()), id: \.offset) { l, line in
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Text("•").foregroundStyle(Tokens.muted)
-                                Text(Self.styled(String(line.dropFirst(2))))
+                                Text(faded(Self.styled(String(line.dropFirst(2))), last && l == block.count - 1))
                             }
                         }
                     }
                 } else {
-                    Text(Self.styled(block.joined(separator: "\n")))
+                    Text(faded(Self.styled(block.joined(separator: "\n")), last))
                 }
             }
         }
@@ -358,6 +362,71 @@ struct SaidText: View {
         string[range].foregroundColor = Tokens.code
         string[range].font = Tokens.mono(13)
         string[range].backgroundColor = Tokens.pill
+    }
+
+    /// The words at the end still coming in, as faint as they are in. Only the last line's: a word
+    /// fading across a paragraph's break shows whole (ponytail: rare, and gone in 240 ms).
+    private func faded(_ styled: AttributedString, _ last: Bool) -> AttributedString {
+        guard last, !fading.isEmpty else { return styled }
+        var string = styled
+        let characters = Array(string.characters)
+        var end = characters.count
+        for opacity in fading.reversed() {
+            while end > 0, characters[end - 1].isWhitespace { end -= 1 }
+            var start = end
+            while start > 0, !characters[start - 1].isWhitespace { start -= 1 }
+            guard start < end else { break }
+            let lower = string.characters.index(string.startIndex, offsetBy: start)
+            let upper = string.characters.index(string.startIndex, offsetBy: end)
+            let runs = string[lower..<upper].runs.map { ($0.range, $0.swiftUI.foregroundColor ?? color, $0.swiftUI.backgroundColor) }
+            for (range, tint, back) in runs {
+                string[range].foregroundColor = tint.opacity(opacity)
+                if let back { string[range].backgroundColor = back.opacity(opacity) }
+            }
+            end = start
+        }
+        return string
+    }
+}
+
+/// Oby's words coming in a word at a time from `since`, each fading in (Sangam's stream.ts): an
+/// answer that just came (`ConversationModel.arrived`), or text still streaming in (`text` grows,
+/// and a word that came late starts in when it came). With no `since`, Reduce Motion, or once
+/// in, it's plain `SaidText`.
+struct ArrivingSaid: View {
+    let text: String
+    var color: Color = Tokens.item
+    let since: Date?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// When each word came, from `since`, once the text has grown (else all came at the start).
+    @State private var came: [TimeInterval] = []
+    @State private var done = false
+
+    var body: some View {
+        Group {
+            if let since, !reduceMotion, !done, Date.now.timeIntervalSince(since) < WordReveal.duration(text, came: came) {
+                TimelineView(.animation) { context in
+                    let shown = WordReveal.shown(text, came: came, after: context.date.timeIntervalSince(since))
+                    SaidText(text: shown.text, color: color, fading: shown.fading)
+                }
+                // VoiceOver reads the whole answer, not the half-built sentence on screen.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(text)
+                .task(id: text) {
+                    try? await Task.sleep(for: .seconds(WordReveal.duration(text, came: came) - Date.now.timeIntervalSince(since)))
+                    if !Task.isCancelled { done = true }
+                }
+            } else {
+                SaidText(text: text, color: color)
+            }
+        }
+        .onChange(of: text) { old, new in
+            guard let since else { return }
+            if came.isEmpty { came = Array(repeating: 0, count: WordReveal.words(old).count) }
+            let now = Date.now.timeIntervalSince(since)
+            came += Array(repeating: now, count: max(0, WordReveal.words(new).count - came.count))
+            done = false
+        }
     }
 }
 

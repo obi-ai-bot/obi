@@ -339,7 +339,7 @@ fn no_file() -> Response {
 }
 
 /// `relative` under `root`, when it names a file there by plain names only.
-fn inside(root: &Path, relative: &str) -> Option<PathBuf> {
+pub(crate) fn inside(root: &Path, relative: &str) -> Option<PathBuf> {
     let plain = |part: &str| {
         !part.is_empty() && !part.starts_with('.') && !part.contains(['\\', '\0', ':'])
     };
@@ -352,9 +352,9 @@ fn inside(root: &Path, relative: &str) -> Option<PathBuf> {
 }
 
 /// The media type for a file, by its extension.
-fn type_of(path: &Path) -> &'static str {
+pub(crate) fn type_of(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
-        "html" => "text/html; charset=utf-8",
+        "html" | "htm" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "json" | "map" => "application/json",
@@ -367,6 +367,9 @@ fn type_of(path: &Path) -> &'static str {
         "woff" => "font/woff",
         "woff2" => "font/woff2",
         "txt" => "text/plain; charset=utf-8",
+        "md" | "markdown" => "text/markdown; charset=utf-8",
+        "csv" => "text/csv; charset=utf-8",
+        "pdf" => "application/pdf",
         _ => "application/octet-stream",
     }
 }
