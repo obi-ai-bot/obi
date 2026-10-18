@@ -39,6 +39,11 @@ The same for every agent. obid checks every call against the same rules the plan
 | `oby_answer` | `{item, answer}` | Answers an inbox item the plan loop may answer; the owner's own decisions (permissions, confirms, publishing) are refused with why. |
 | `oby_conversations` | `{query}` | Finds past conversations by what was said (#593). |
 | `oby_artifact` | `{title, path, kind?, artifact?}` | Publishes a file or folder from the room as an artifact, or a new version of `artifact` (section 4). |
+| `oby_read` | `{path, offset?, limit?}` | A text file of the room (`repos/` included), its lines numbered: at most 2,000 lines and 256 KB at a time. Quoted data. |
+| `oby_search` | `{pattern, path?, glob?}` | A regex search of the room's text files under `path`: at most 200 matches. Quoted data. |
+| `oby_list` | `{path?, glob?}` | A folder's entries, or with `glob` every file under it that matches: at most 500. |
+
+The read tools are how any agent reads (Codex has no shell, so no other way): only inside the room once links are followed, never `..` or its `config/` (Codex's login copy), `login/`, `home/` or `session.json`, the same refusals and taint as Claude Code's Read, Grep and LS, and every known secret taken out.
 
 ## 4. Artifacts
 

@@ -463,7 +463,7 @@ fn oby_dispatch_through_codex_starts_a_job() {
     let conversation = tools.body["conversation"].as_str().unwrap().to_owned();
     assert_eq!(
         tools.body["text"],
-        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_inbox,oby_answer,oby_conversations,oby_artifact",
+        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_inbox,oby_answer,oby_conversations,oby_artifact,oby_read,oby_search,oby_list",
         "{}",
         tools.text
     );
@@ -525,6 +525,66 @@ fn oby_dispatch_through_codex_starts_a_job() {
         "{}",
         misnamed.text
     );
+}
+
+/// Codex reads through Oby's tools (its shell is off): oby_read of a repository's checkout gives
+/// its lines, fenced as data, shows as a `read` step naming the file, and taints the turn, as
+/// Claude Code's Read does; a path out of the room (its CODEX_HOME's login copy) is refused and
+/// taints nothing.
+#[test]
+fn codex_reads_the_room_through_oby_read() {
+    let (_folder, obid) = obid("codex-conv-read", true);
+    let events = follow_events(&obid);
+    let answer = said(
+        &obid,
+        json!({"said": r#"OBY oby_read {"path": "repos/obi-e2e/fixture-app/README.md"}"#, "new": true}),
+    );
+    let conversation = answer.body["conversation"].as_str().unwrap().to_owned();
+    let text = answer.body["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("oby: Everything between a line <<<quoted-"),
+        "{}",
+        answer.text
+    );
+    assert!(text.contains("     1\t# Fixture app\n"), "{}", answer.text);
+    let seen = until_oby_turn(&events, 30);
+    let read: Vec<&Value> = seen
+        .iter()
+        .filter(|(n, d)| n == "step" && d["tool"] == "read")
+        .map(|(_, d)| d)
+        .collect();
+    assert_eq!(read.len(), 2, "{seen:?}");
+    assert_eq!(read[0]["detail"], "repos/obi-e2e/fixture-app/README.md");
+    assert_eq!(read[0]["text"], "Reading README.md");
+    assert_eq!(read[1]["state"], "done");
+    let kept = |conversation: &str| -> Value {
+        serde_json::from_slice(
+            &std::fs::read(
+                obid.home
+                    .join(format!("conversations/{conversation}/session.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        kept(&conversation)["web"],
+        true,
+        "reading repos/ taints the turn"
+    );
+
+    let prying = said(
+        &obid,
+        json!({"said": r#"OBY oby_read {"path": "../config/auth.json"}"#, "new": true}),
+    );
+    assert_eq!(
+        prying.body["text"],
+        "oby: refused: ../config/auth.json isn't a path in your room: name one relative to it, with no .. and no ~.",
+        "{}",
+        prying.text
+    );
+    let other = prying.body["conversation"].as_str().unwrap();
+    assert_eq!(kept(other)["web"], false);
 }
 
 /// Codex's approvals are answered by the conversation's own rule: no command at all, not even one
