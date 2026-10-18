@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// What the side panel shows (Sangam's Sidebar.tsx): its icon strip picks Home's tasks or the
 /// conversations; your picture at its foot opens Settings.
@@ -7,12 +8,16 @@ enum PanelSection: Hashable { case home, conversations }
 /// Oby on iPhone with no tab bar (the owner's call, 2026-10-18, as Sangam's design has none): Home
 /// and everything opened over it in one stack, and Sangam's side panel. It opens from the left and
 /// pushes the view over: the panel button at Home's top left, or a swipe from the screen's left
-/// edge on Home; a tap on what it pushed aside, or a swipe back, closes it.
+/// edge on Home; a tap on what it pushed aside, a swipe back on it, the panel's own button, or
+/// VoiceOver's escape closes it. With Reduce Motion it appears and goes without sliding.
 struct PhoneRoot: View {
     @Environment(Phone.self) private var phone
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let character: ObyCharacter
     /// How far a drag has moved the panel from where it rests.
     @GestureState private var drag: CGFloat = 0
+    /// How far a swipe from the screen's edge has pulled it out.
+    @State private var edge: CGFloat = 0
 
     var body: some View {
         if phone.needsPairing {
@@ -31,32 +36,37 @@ struct PhoneRoot: View {
         GeometryReader { geometry in
             let width = min(Tokens.sidebar + 40, geometry.size.width - 56)
             let open = phone.panel != nil
-            let shift = min(width, max(0, (open ? width : 0) + drag))
+            let shift = min(width, max(0, (open ? width : 0) + drag + edge))
             ZStack(alignment: .leading) {
-                SidePanel(width: width)
+                SidePanel(width: width, close: close)
                     .frame(width: width)
                     .offset(x: shift - width)
                     .accessibilityHidden(!open)
+                    .accessibilityAction(.escape) { close() }
                 HomeView(character: character)
                     .frame(width: geometry.size.width)
+                    // Home's left edge: a swipe right opens the panel. The system's own edge pan,
+                    // which cancels the touch under it, so a row the swipe ends on isn't tapped and
+                    // a tap near the edge still lands. Only on Home itself: over a page the edge
+                    // is the system's back swipe.
+                    .gesture(EdgeSwipe(enabled: !open && phone.homePath.isEmpty) { edge = $0 } ended: { moved in
+                        edge = 0
+                        if moved > width / 3, phone.homePath.isEmpty { phone.panel = .home }
+                    })
                     .overlay {
-                        // What the panel pushed aside: a tap brings it back.
+                        // What the panel pushed aside: a tap brings it back, and so does a drag
+                        // back on it. Only here, so the panel's rows keep their own swipes.
                         Tokens.bg.opacity(0.4 * shift / width).ignoresSafeArea()
                             .allowsHitTesting(open)
                             .onTapGesture { close() }
+                            .gesture(dragging(width))
                             .accessibilityHidden(true)
                     }
                     .clipShape(Rectangle())
                     .offset(x: shift)
                     .accessibilityHidden(open)
-                // Home's left edge: a swipe right opens the panel. On a page over Home the edge is
-                // the system's back swipe.
-                if !open, phone.homePath.isEmpty {
-                    Color.clear.frame(width: 20).contentShape(Rectangle()).gesture(dragging(width))
-                }
             }
-            .gesture(open ? dragging(width) : nil)
-            .animation(Tokens.warm, value: open)
+            .animation(reduceMotion ? nil : Tokens.warm, value: open)
         }
         .background(Tokens.bg)
     }
@@ -80,6 +90,7 @@ struct PhoneRoot: View {
 private struct SidePanel: View {
     @Environment(Phone.self) private var phone
     let width: CGFloat
+    let close: () -> Void
 
     var body: some View {
         let section = phone.panel ?? .home
@@ -97,10 +108,20 @@ private struct SidePanel: View {
             .frame(width: Tokens.rail)
             .overlay(alignment: .trailing) { Rectangle().fill(Tokens.edge).frame(width: 1) }
             VStack(alignment: .leading, spacing: 0) {
-                Text(section == .home ? "Home" : "Conversations")
-                    .font(Tokens.font(Tokens.textTitle, .semibold)).foregroundStyle(Tokens.ink)
-                    .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 12)
-                    .accessibilityAddTraits(.isHeader)
+                HStack {
+                    Text(section == .home ? "Home" : "Conversations")
+                        .font(Tokens.font(Tokens.textTitle, .semibold)).foregroundStyle(Tokens.ink)
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer()
+                    // Sangam's panel button, here to put it away again.
+                    Button(action: close) {
+                        Image(systemName: "sidebar.left").font(Tokens.font(17)).foregroundStyle(Tokens.muted)
+                            .frame(width: 44, height: 44).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Hide sidebar")
+                }
+                .padding(.leading, 12).padding(.trailing, 4).padding(.top, 4).padding(.bottom, 8)
                 switch section {
                 case .home: TasksColumn(open: open)
                 case .conversations: ConversationsColumn(open: open)
@@ -159,7 +180,16 @@ private struct TasksColumn: View {
                         Button { open(.task(item.id)) } label: { PanelTaskRow(item: item) }.buttonStyle(.plain)
                     }
                 }
-                Button("Every task") { open(.all) }.padding(.horizontal, 12).padding(.top, 16)
+                // What needs you with no task on Home, always reachable here too.
+                Button { open(.inbox) } label: {
+                    HStack {
+                        Text("Inbox")
+                        Spacer()
+                        if !phone.loose.isEmpty { Text("\(phone.loose.count)").monospacedDigit().foregroundStyle(Tokens.needsInk) }
+                    }
+                }
+                .padding(.horizontal, 12).padding(.top, 16)
+                Button("Every task") { open(.all) }.padding(.horizontal, 12).padding(.top, 8)
                 Button { open(.archived) } label: {
                     HStack {
                         Text("Archived")
@@ -209,6 +239,33 @@ struct OwnerPicture: View {
                 Image(systemName: "person.crop.circle").font(Tokens.font(22)).foregroundStyle(Tokens.railIcon)
                     .frame(width: 28, height: 28)
             }
+        }
+    }
+}
+
+/// A swipe in from the screen's left edge (UIScreenEdgePanGestureRecognizer): how far it has come,
+/// then where it ended, a fling counting a little further.
+private struct EdgeSwipe: UIGestureRecognizerRepresentable {
+    var enabled: Bool
+    var changed: (CGFloat) -> Void
+    var ended: (CGFloat) -> Void
+
+    func makeUIGestureRecognizer(context: Context) -> UIScreenEdgePanGestureRecognizer {
+        let recognizer = UIScreenEdgePanGestureRecognizer()
+        recognizer.edges = .left
+        return recognizer
+    }
+
+    func updateUIGestureRecognizer(_ recognizer: UIScreenEdgePanGestureRecognizer, context: Context) {
+        recognizer.isEnabled = enabled
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIScreenEdgePanGestureRecognizer, context: Context) {
+        let moved = max(0, recognizer.translation(in: recognizer.view).x)
+        switch recognizer.state {
+        case .began, .changed: changed(moved)
+        case .ended: ended(moved + recognizer.velocity(in: recognizer.view).x * 0.15)
+        default: ended(0)
         }
     }
 }

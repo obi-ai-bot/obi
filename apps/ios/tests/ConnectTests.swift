@@ -154,4 +154,20 @@ struct ConnectTests {
         #expect(ReachNotice.expired.title == "Pairing with your Mac ended")
         #expect(ReachNotice.expired.detail == "It lasts 30 days. Scan the code in Oby on your Mac to connect again.")
     }
+
+    /// Review of #683: a paired iPhone's 401 says its pairing ended, never the Tailscale line,
+    /// and it holds through a dropped connection until a request succeeds.
+    @Test func aRefusalSaysThePairingEndedAndHolds() throws {
+        let refused = HTTPURLResponse(url: gateway, statusCode: 401, httpVersion: nil, headerFields: nil)!
+        let said = "\(ReachNotice.expired.title). \(ReachNotice.expired.detail)"
+        do { try Runner.check(refused, nil, refused: said); Issue.record("a 401 went through") } catch let error as RunnerError {
+            #expect(error.message == said && error.status == 401)
+        }
+        do { try Runner.check(refused, nil) } catch let error as RunnerError {
+            #expect(error.status == 401 && !error.message.contains("Tailscale"))
+        }
+        #expect(Phone.refusal(after: URLError(.networkConnectionLost), was: 401) == 401)
+        #expect(Phone.refusal(after: RunnerError(message: "x", status: 500), was: 401) == 500)
+        #expect(Phone.refusal(after: URLError(.timedOut), was: nil) == nil)
+    }
 }
