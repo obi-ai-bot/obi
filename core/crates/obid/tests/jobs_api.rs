@@ -143,6 +143,12 @@ fn start_with(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid 
         .env("PATH", search)
         .env("HOME", folder.join("env-home"))
         .env("TMPDIR", folder.join("tmp"))
+        // Never the person's real Keychain (support::start): obid asks it at start when
+        // claudeKeychain is left out.
+        .env(
+            "OBID_SECURITY_BIN",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-security"),
+        )
         // What obid must keep from its agents, whatever its own environment holds.
         .env("CLAUDECODE", "1")
         .env("ANTHROPIC_API_KEY", "sk-ant-not-a-key")

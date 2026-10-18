@@ -855,7 +855,7 @@ pub async fn sign_in(
         ));
     }
     if tool == Tool::Claude && cfg!(target_os = "macos") && !crate::jobs::keychain_on() {
-        return conflict("On macOS Claude Code keeps its login in the Keychain, which obid uses only with claudeKeychain on in its configuration.".into());
+        return conflict("On macOS Claude Code keeps its login in the Keychain, which obid uses only with claudeKeychain on: obid turns it on by itself when it's left out and Claude Code's login is only in the Keychain, or set it to true in its configuration.".into());
     }
     let bin = agent_of(&agents, tool)
         .as_ref()

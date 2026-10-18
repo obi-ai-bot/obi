@@ -1133,6 +1133,11 @@ fn uninstalling_ends_whatever_of_obids_is_still_running() {
             .env_clear()
             .env("HOME", rig.user_home())
             .env("PATH", rig.tools())
+            // Never the person's real Keychain (support::start).
+            .env(
+                "OBID_SECURITY_BIN",
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-security"),
+            )
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

@@ -181,8 +181,16 @@ pub async fn serve(
     };
     // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
     secrets::known().learn("api-token", &token);
-    jobs::use_keychain(config.claude_keychain);
-    if config.claude_keychain {
+    // claudeKeychain as the owner set it; left out, on by itself on macOS when Claude Code's default
+    // login is only in the Keychain (the owner's decision of 2026-10-18).
+    let keychain = config.claude_keychain.unwrap_or_else(jobs::keychain_wanted);
+    jobs::use_keychain(keychain, config.claude_keychain.is_none());
+    if keychain {
+        if config.claude_keychain.is_none() {
+            tracing::info!(
+                "claudeKeychain on by itself: Claude Code's login is only in the Keychain"
+            );
+        }
         jobs::keep_keychain_logins();
     }
     vault::install(&config.home, &config.vault);
