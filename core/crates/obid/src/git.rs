@@ -196,6 +196,11 @@ pub async fn ensure_clone(
     // job sandbox doesn't let it write, and the agent spends a turn on the error.
     git(&clone, &["config", "maintenance.auto", "false"]).await?;
     git(&clone, &["config", "gc.auto", "0"]).await?;
+    // A job's worktree HEAD is its commits, whose objects stay in the job's own object folder
+    // until obid keeps them: a fetch here checks what it got against every worktree's HEAD too,
+    // and fails ("did not send all necessary objects") while another job holds commits (#628).
+    // Fetches leave the worktrees' HEADs out of that check, so it checks more, never less.
+    git(&clone, &["config", "fetch.hideRefs", "worktrees/"]).await?;
     exclude_obi_folders(&clone)?;
     if !refspecs.is_empty() {
         let mut args: Vec<&str> = vec![
@@ -386,6 +391,7 @@ mod tests {
         let clone = ensure_clone(&home, "o/r", &url, &[]).await.unwrap();
         assert_eq!(setting(clone.clone(), "maintenance.auto").await, "false");
         assert_eq!(setting(clone.clone(), "gc.auto").await, "0");
+        assert_eq!(setting(clone.clone(), "fetch.hideRefs").await, "worktrees/");
         git(&clone, &["config", "maintenance.auto", "true"])
             .await
             .unwrap();
