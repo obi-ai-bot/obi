@@ -1974,12 +1974,12 @@ fn a_dismissed_job_is_not_told_anything() {
     assert!(items_of(&obid, "confirm").is_empty());
 }
 
-/// #542, with the owner's decision of 2026-10-16: telling a job that ended done something starts
-/// nothing by itself. It's a confirm item with the user's words (a secret obid holds taken out);
-/// Cancel starts nothing, and the owner's Confirm runs one more round that starts with them, in
-/// the job's own worktree.
+/// #542, with the owner's decision of 2026-10-17 (it replaced 2026-10-16's Confirm, as Sangam's
+/// design does): telling a job that ended done something starts one more round of it at once, in
+/// its own worktree, starting with the user's words (a secret obid holds taken out). Nothing waits
+/// for a Confirm.
 #[test]
-fn telling_a_finished_job_something_waits_for_the_owners_confirm() {
+fn telling_a_finished_job_something_starts_one_more_round_at_once() {
     let folder = Folder::new("brain-message-done");
     let obid = started(&folder);
     let job = job_that(&obid, "Vault secrets", "Nothing", None, "done");
@@ -1989,49 +1989,13 @@ fn telling_a_finished_job_something_waits_for_the_owners_confirm() {
     let token = std::fs::read_to_string(obid.home.join("api-token")).unwrap();
     let token = token.trim();
     let words = format!("one more thing for the vault job: REPORT, and {token} isn't yours");
-    let ask = |obid: &Obid| {
-        queue(obid, &[message_plan(&id), reply("")]);
-        let answer = said(obid, &words);
-        assert_eq!(
-            answer["text"],
-            "Vault secrets ended, so one more round with your words waits for your OK: confirm it in your inbox."
-        );
-        let confirms = items_of(obid, "confirm");
-        assert_eq!(confirms.len(), 1, "{confirms:?}");
-        confirms[0].clone()
-    };
-
-    // Declined: nothing starts.
-    let declined = ask(&obid);
-    assert_eq!(declined["job"], json!(id));
-    assert_eq!(declined["options"], json!(["Confirm", "Cancel"]));
-    let text = declined["text"].as_str().unwrap();
-    assert!(
-        text.contains("> one more thing for the vault job: REPORT, and [redacted: ")
-            && !text.contains(token),
-        "{text}"
-    );
-    let job = get_job(&obid, &id);
+    queue(&obid, &[message_plan(&id), reply("")]);
+    let answer = said(&obid, &words);
     assert_eq!(
-        (job["status"].clone(), job["round"].clone()),
-        (json!("done"), json!(1))
+        answer["text"],
+        "Vault secrets ended, so it picks up again with what you said: one more round."
     );
-    assert!(job["notes"].is_null(), "{job}");
-    assert_eq!(
-        owner_answers(&obid, declined["id"].as_str().unwrap(), "Cancel").status,
-        200
-    );
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    let job = get_job(&obid, &id);
-    assert_eq!(
-        (job["status"].clone(), job["round"].clone()),
-        (json!("done"), json!(1))
-    );
-
-    // Confirmed: one more round, in its own worktree, starting with the words.
-    let confirm = ask(&obid);
-    let confirmed = owner_answers(&obid, confirm["id"].as_str().unwrap(), "Confirm");
-    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    assert!(items_of(&obid, "confirm").is_empty());
     let done = within(30, "its round ended", || {
         let job = get_job(&obid, &id);
         (job["status"] == "done" && job["round"] == 2).then_some(job)
