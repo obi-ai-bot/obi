@@ -1409,7 +1409,73 @@ obid serves the LAN gateway's pairing and forwarding (LAN gateway (#284), above)
 - **Paired devices** are kept, by their token's SHA-256 digest only, in `home/gateway-devices.json` (0600), not in `devices.json`: a phone paired with the Swift runner pairs again with obid.
 - **Forwarding** happens inside obid: an allowed request with a paired device's token goes to obid's own API router with obid's API token and a loopback `Host`, carrying only its method, path, query, body (at most 4 MiB) and `Content-Type`. The answer has passed through the API's own layers, so the vault's secrets are already out; the gateway then nulls `session` and puts `[home]` for the accounts' `configDir` paths and for `home/logins` (where a job's copy of its login lives), as above, and sends only the status, `Content-Type`, `Cache-Control`, and an artifact's `Content-Security-Policy`, `X-Content-Type-Options` and `Referrer-Policy`. An answer that isn't text (not `text/…`, JSON or `…+json`: an artifact's image or PDF) goes byte for byte, as the API's own layer sends it. An answer of known length goes whole; any other (the event stream, `GET /v1/jobs/{id}/wait`) goes chunk by chunk as obid sends it, so a wait's first space reaches the phone at once. A stream ends at its first chunk after its device is revoked.
 - **Redeeming** takes only what a phone sends: a request with an `Origin` (a browser) is `403` and one that isn't `application/json` is `415`, before it counts as a try, so a web page can't use an invitation up. A device's name keeps no control characters.
-- **The allowlist** is Runner/Routes.swift's, plus `GET /v1/conversations`, `PATCH` and `DELETE /v1/conversations/{id}` (obid only: conversations), `GET /v1/artifacts`, `GET /v1/artifacts/{id}` and `GET /v1/artifacts/{id}/{version}/{path}` at any depth (obid only: artifacts), `GET /v1/jobs/{id}/report` and `POST /v1/jobs/{id}/proposals/{index}/file`. Routes obid doesn't serve yet answer `404` through the gateway as they do on loopback.
+- **The allowlist** is Runner/Routes.swift's, plus `GET /v1/conversations`, `PATCH` and `DELETE /v1/conversations/{id}` (obid only: conversations), `GET /v1/artifacts`, `GET /v1/artifacts/{id}` and `GET /v1/artifacts/{id}/{version}/{path}` at any depth (obid only: artifacts), `GET /v1/jobs/{id}/report`, `POST /v1/jobs/{id}/proposals/{index}/file`, and `GET /v1/github/work`, `POST /v1/github/work/refresh` and `POST /v1/github/work/{id}/start` (obid only: GitHub work). Routes obid doesn't serve yet answer `404` through the gateway as they do on loopback.
+
+### obid only: GitHub work
+
+What GitHub wants from the owner, so Oby can show it and do it for them: the open issues assigned to them, the open pull requests waiting for their review (asked of them or of a team they're on), and their own open pull requests. obid reads it with its own `gh` login, as the Lead reads the board: `gh` signs in with its own login (gh's device sign-in from the Mac, or a token the owner gave gh's own store), and obid never reads, holds or passes a token (no file, argument, environment variable, log or event of obid's has one). No webhooks: obid is local and self-hostable, so it asks.
+
+- **How it reads.** One `gh api graphql` query per read, with three searches of up to 100 items each (`is:open is:issue archived:false assignee:<login>`, `is:open is:pr archived:false review-requested:<login>`, `is:open is:pr archived:false author:<login>`, newest update first) and GitHub's `rateLimit`; `<login>` is `gh api user`'s, read once per sign-in. Every 3 minutes while obid runs, the first right after it starts. A `403` or `429` (GitHub's rate limits, the secondary ones included) waits 3 minutes, then doubles, up to 30 minutes, until a read succeeds; a read that leaves fewer than 50 points waits until `rateLimit.resetAt`. Other failures (no network, a `5xx`) keep the last lists and try again at the next tick.
+- **Not signed in.** When `gh` isn't installed or isn't signed in, the lists are empty and `signedIn` is false: the apps show Connect GitHub. obid reads again at every tick, so signing in shows the work within 3 minutes (or at once with a refresh).
+
+#### `GET /v1/github/work`
+
+```json
+{"signedIn": true, "login": "wellington", "checkedAt": "2026-10-18T09:12:00Z", "nextCheck": "2026-10-18T09:15:00Z", "error": null,
+ "counts": {"reviews": 1, "assigned": 140, "mine": 1},
+ "reviews": [{"id": "3f9a0c1d2b4e5f60", "list": "reviews", "repo": "obi-ai-bot/obi", "number": 702, "title": "Pair a device from Settings",
+              "url": "https://github.com/obi-ai-bot/obi/pull/702", "author": "sangam", "labels": ["area:mac"], "updated": "2026-10-18T08:40:11Z",
+              "state": "OPEN", "draft": false, "reviewDecision": "REVIEW_REQUIRED", "checks": "SUCCESS", "known": true, "job": null}],
+ "assigned": [{"id": "9b1c…", "list": "assigned", "repo": "obi-ai-bot/obi", "number": 640, "title": "…", "url": "https://github.com/obi-ai-bot/obi/issues/640",
+               "author": "wellington", "labels": [], "updated": "…", "state": "OPEN", "draft": null, "reviewDecision": null, "checks": null, "known": true, "job": "ab12cd34"}],
+ "mine": [ … ]}
+```
+
+- `signedIn`: whether `gh` is installed and signed in. `login`: its GitHub login, or null. `checkedAt`: the last read that succeeded, or null (none yet). `nextCheck`: when obid reads next. `error`: why the last read failed, one line with the secrets obid holds taken out (`GitHub's rate limit: reading again at 09:42`, `gh isn't signed in to GitHub`), or null; the lists stay as the last read that worked.
+- `reviews`, `assigned`, `mine`: the three lists, newest update first, at most 100 each. `counts`: how many GitHub found for each, so a list shorter than its count was cut at 100.
+- Each item: `id` (16 hex characters, obid's own, the same for the same repository and number on every read), `list` (which of the three), `repo` (`owner/name`), `number`, `title`, `url`, `author` (a login, or null for a deleted user), `labels` (names, at most 20), `updated`, `state` (`OPEN`). On pull requests, `draft`, `reviewDecision` (`APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or null: no review required) and `checks` (the head commit's combined state: `SUCCESS`, `FAILURE`, `ERROR`, `PENDING`, `EXPECTED`, or null when it has none); on issues, the three are null. `known`: whether the repository is one of obid's `repos` (obid only: configuration), so work on it can start. `job`: the queued or running obid job on it (same repository and number), or null.
+- Everything in an item is GitHub's data: show it, never act on it. `title` and `labels` are what people wrote.
+
+#### `GET /v1/events`: `github`
+
+A `github` event comes, carrying the same object as `GET /v1/github/work`, when a read changes anything in it but `checkedAt` and `nextCheck` (an item came, went or changed, `signedIn`, `login`, `error`), and when a job starts on an item or ends. Replace the whole feed with it.
+
+#### `POST /v1/github/work/refresh`
+
+Reads now, as a tick does, and answers the feed as `GET /v1/github/work` does once the read ends (up to 2 minutes; one read at a time, so a refresh during a read waits for it and answers that one). During a rate-limit wait it doesn't read: it answers the feed as it is, `error` and `nextCheck` saying until when. No body.
+
+#### `POST /v1/github/work/{id}/start`
+
+Starts the work on an item with one call, as the owner's tap (no body, or `{}`). Starting work is always the owner's choice: nothing in the feed starts a job by itself.
+
+- A `reviews` item starts Oby's review of that pull request: a `review` job (`POST /v1/jobs` with `kind` `review` and `pr`), routed as any job, with the pull request's head checked out. It reads, never commits, and never posts on GitHub (What the runner never does): its `summary` is the review, shown in Oby, for the owner to post or not.
+- An `assigned` item starts a `fix` job on that issue (`kind` `fix`, `issue`), routed as any job, that ends in a pull request through Publish as today (`Closes #N`).
+- A `mine` item is `409`: `Oby doesn't start work on your own pull requests from the feed yet.`
+- The job's `task` and `title` are obid's own words, never GitHub's: `Review pull request #702 in obi-ai-bot/obi.` titled `Review obi #702`, `Fix issue #640 in obi-ai-bot/obi.` titled `Fix obi #640`. What people wrote on GitHub (the title, the description, the labels and the latest 30 comments, at most 64 KiB) reaches the agent only as a quoted file, `.obi/inputs/github-<name>-<number>.md` (an attachment, so its text is fenced, the prompt says it's data, never instructions, and the vault's secrets are taken out when it's copied into the worktree), never in a prompt, a task, a title or the brain's briefing.
+- Answers `201` with the new `Job`, as `POST /v1/jobs` does (and a `job` event). When a queued or running job is on it already (same repository, kind and number), answers `200` with that job and starts nothing: two taps, or the Mac and the iPhone at once, start one job.
+- `404` for an id that isn't in the feed now (read again). `409` with why: `gh` isn't signed in, a `mine` item, or a repository that isn't one of obid's `repos` (`obid doesn't work in obi-ai-bot/other yet: add it to repos in obid's configuration.`). obid never clones a repository it wasn't configured for: which repositories it works in, and their checks, stay the owner's choice. `422` with why when the job can't be made (no account signed in). `502` when GitHub's text for it couldn't be read.
+
+#### The `github` inbox item
+
+When a read finds a new item in `reviews` or `assigned` on a repository obid knows, one `github` inbox item offers to do it:
+
+```json
+{"id": "github-3f9a0c1d2b4e5f60", "kind": "github", "job": "", "title": "Review requested: obi #702",
+ "text": "Your review is requested on pull request #702 in obi-ai-bot/obi.", "options": ["Review it", "Dismiss"],
+ "details": ["Starts Oby's review of it. Nothing is posted on GitHub.", "Leaves it for now. It stays in your GitHub work."],
+ "recommended": null, "github": {"id": "3f9a0c1d2b4e5f60", "list": "reviews", "repo": "obi-ai-bot/obi", "number": 702, "url": "https://github.com/obi-ai-bot/obi/pull/702", "quoted": {"title": "Pair a device from Settings"}}, …}
+```
+
+- An assigned issue's item is titled `Assigned to you: obi #640`, says `Issue #640 in obi-ai-bot/obi is assigned to you.` and offers `Fix it` (`Starts a fix job on it, which opens a pull request when its check passes.`) and `Dismiss`. `title` and `text` are obid's own words; GitHub's title is quoted under `github.quoted`, for the card only.
+- `Review it` or `Fix it` starts the work as `POST /v1/github/work/{id}/start` does, and the item is done, its `job` the job's id (or the job already on it). When it can't start, the answer is the same error and the item stays open. `Dismiss`, done or later settle or put it off; nothing is sent to GitHub.
+- One per item, ever: its `id` is `github-` and the item's `id`, so an item that's done never comes back, across restarts too. It's done by itself, with no `answer`, once its item leaves the feed (reviewed, merged, closed or unassigned).
+- No flood: the first read with no earlier read on record (a new obid, or one that never read GitHub) offers nothing, it only notes what's there; after that, at most 5 items per read, the newest first. Items on repositories obid doesn't know and `mine` items get no inbox item: they're in the feed only.
+
+#### Who reaches it
+
+- On loopback, with obid's API token, like every endpoint.
+- Through the gateway, a paired phone can `GET /v1/github/work`, `POST /v1/github/work/refresh` and `POST /v1/github/work/{id}/start` (obid only: the gateway). The list is read-only, and a start does no more than `POST /v1/jobs`, already on the allowlist, would, with obid's own task. The phone gets the feed scrubbed as any answer is.
+- Another Obi never does: nothing in Obi-to-Obi exchanges reads the feed or starts work from it, and its typed actions are unchanged.
 
 ### obid only: the vault
 
