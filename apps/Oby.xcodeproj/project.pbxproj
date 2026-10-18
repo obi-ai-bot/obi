@@ -191,6 +191,16 @@
 			);
 			target = 0B1E0C0A0000000000AE0007 /* ObyWatchWidget */;
 		};
+		0B1E0C0A0000000000AF0010 /* Exceptions for "Shared" folder in "ObyPhone" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				DecisionCard.swift,
+				OBYStyle.swift,
+				ObyFace.swift,
+				StatusPill.swift,
+			);
+			target = 0B1E0C0A000000000000C5 /* ObyPhone */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -217,6 +227,7 @@
 			exceptions = (
 				0B1E0C0A0000000000AD0006 /* Exceptions for "Shared" folder in "ObyWatch" target */,
 				0B1E0C0A0000000000AE0006 /* Exceptions for "Shared" folder in "ObyWatchWidget" target */,
+				0B1E0C0A0000000000AF0010 /* Exceptions for "Shared" folder in "ObyPhone" target */,
 			);
 			path = shared;
 			sourceTree = "<group>";

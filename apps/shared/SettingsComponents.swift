@@ -410,7 +410,7 @@ struct SetMeter: View {
     static func fraction(used: Double) -> Double { min(max(used, 0), 100) / 100 }
 
     var body: some View {
-        Capsule().fill(Color.white.opacity(0.08))
+        Capsule().fill(Tokens.meter)
             .overlay(alignment: .leading) {
                 GeometryReader { box in
                     Capsule().fill(Self.fill(used: used)).frame(width: box.size.width * Self.fraction(used: used))
