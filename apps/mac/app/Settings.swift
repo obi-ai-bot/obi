@@ -791,7 +791,7 @@ extension AccountState {
     var usage: Usage.Snapshot {
         Usage.Snapshot(agent: account.agent, name: account.name, label: label, fiveHour: fiveHour, sevenDay: sevenDay,
                        fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running,
-                       reserveLiftedUntil: reserveLifted)
+                       reserveLiftedUntil: reserveLifted, runnerSignedIn: runnerSignedIn)
     }
 }
 
