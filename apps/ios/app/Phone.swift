@@ -79,6 +79,9 @@ final class Phone {
     /// A conversation is being started (Home's box) and obid hasn't named it yet: the thread
     /// holds only its words until it does.
     private(set) var startingNew = false
+    /// Oby's words for a conversation that comes before obid names it to this phone (`adopt`):
+    /// kept, and shown once it does.
+    private var heldDeltas: [TurnDelta] = []
     /// The conversation Oby's answer under way (`talk`) belongs to.
     private var talkIn: String?
     /// The last line said in each conversation, by id, for its row in the list.
@@ -176,7 +179,13 @@ final class Phone {
     /// old hand-entered link without that token must not send requests to a gateway that will 401.
     var route: RemoteRoute? { RemoteRoute.choose(lan: lan, link: link, paired: GatewayTokenStore.read() != nil) }
     /// Where the calls go: the linked Mac by its route, else the runner.
-    var base: URL { route?.url ?? runnerURL }
+    var base: URL {
+        #if DEBUG
+        // `-ObySampleOffline YES`: no runner, the linked Mac's gateway either (the link stays).
+        if Self.offline { return URL(string: "http://127.0.0.1:9")! }
+        #endif
+        return route?.url ?? runnerURL
+    }
     /// A stable identity for the logical runner, unaffected by switching between its home and
     /// tunnel routes. Unpaired runners use their configured URL.
     private var offlineQueueTarget: String {
@@ -237,6 +246,11 @@ final class Phone {
         self.connection = connection
         self.inbox = inbox
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
+        #if DEBUG
+        // `-ObySampleOffline YES`: the sample screens reach no runner at all, whatever the
+        // simulator's settings say (the default runner is a real one).
+        if Self.offline { runnerURL = URL(string: "http://127.0.0.1:9")! }
+        #endif
         if let data = UserDefaults.standard.data(forKey: "mac.link"), GatewayTokenStore.read() != nil {
             link = try? MacLink.paired(data)
         } else {
@@ -247,8 +261,11 @@ final class Phone {
         JobsActivity.watchTokens { [weak self] in self?.runner }
         conversation.page = { [weak self] before, limit in
             guard let self, !startingNew else { return [] }
-            return try await runner.conversation(id: current, before: before, limit: limit)
+            let turns = try await runner.conversationTurns(id: current, before: before, limit: limit)
+            conversation.note(turns)
+            return turns.map(\.turn)
         }
+        conversation.lookUp = { [weak self] id in try await self?.runner.artifact(id) }
         offlineQueue.bindUnscopedEntries(to: offlineQueueTarget)
         restoreQueuedMessages(for: offlineQueueTarget)
         #if DEBUG
@@ -359,6 +376,11 @@ final class Phone {
     /// tries again, waiting a little longer each time.
     private func follow() {
         guard loop == nil else { return }
+        #if DEBUG
+        // `-ObySampleOffline YES`: the sample screens reach no runner at all (a simulator's
+        // settings may name a real one).
+        if Self.offline { return }
+        #endif
         loop = Task {
             var wait = 1.0
             while !Task.isCancelled {
@@ -438,6 +460,16 @@ final class Phone {
         JobsActivity.markStale()
     }
 
+    #if DEBUG
+    /// Debug builds launched with `-ObySampleOffline YES`, or run with `OBY_OFFLINE=1` (a test
+    /// host: `TEST_RUNNER_OBY_OFFLINE=1 xcodebuild test`), reach no runner at all: a simulator's
+    /// default runner is a real one.
+    static let offline = UserDefaults.standard.bool(forKey: "ObySampleOffline") || ProcessInfo.processInfo.environment["OBY_OFFLINE"] == "1"
+
+    /// The sample screens' made-up events (SampleTasks), through the same path as obid's.
+    func sample(_ event: RunnerEvent) { apply(event) }
+    #endif
+
     private func apply(_ event: RunnerEvent) {
         switch event {
         case .job(let job):
@@ -452,13 +484,18 @@ final class Phone {
             // One that's done leaves the list.
             inbox.removeAll { $0.id == item.id }
             if item.isOpen { inbox.append(item) }
-        case .turn(let turn):
+        case .turn(let turn, let extras):
             if let id = turn.conversation { previews[id] = turn.text }
-            if turn.conversation == nil || (turn.conversation == current && !startingNew) { conversation.apply(turn) }
+            if turn.conversation == nil || (turn.conversation == current && !startingNew) { conversation.apply(turn, extras) }
             // The runner listed what this iPhone said: its echo has done its job.
             settleEchoes()
         case .step(let step):
             if ConversationOrder.shows(step, in: current, startingNew: startingNew) { conversation.apply(step) }
+        case .delta(let delta):
+            if ConversationOrder.shows(delta.conversation, in: current, startingNew: startingNew) { conversation.apply(delta) }
+            else if startingNew, delta.conversation != nil { heldDeltas.append(delta) }
+        case .artifact(let artifact):
+            conversation.apply(artifact)
         case .conversation(let changed):
             take(changed)
         }
@@ -492,6 +529,7 @@ final class Phone {
         if starts {
             current = nil
             startingNew = true
+            heldDeltas = []
             conversation.forget()
         }
         plan(said, answer: nil, voice: spoken, new: starts)
@@ -674,6 +712,8 @@ final class Phone {
         guard startingNew else { return }
         startingNew = false
         current = id
+        for delta in heldDeltas where delta.conversation == id { conversation.apply(delta) }
+        heldDeltas = []
         Task { await conversation.reload(arriving: true) }
     }
 

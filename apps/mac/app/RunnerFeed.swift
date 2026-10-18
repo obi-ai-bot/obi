@@ -178,11 +178,13 @@ final class RunnerFeed {
         conversations.runner = { [weak self] in self?.runner }
         conversation.page = { [weak self] before, limit in
             guard let self, let runner = self.runner else { return [] }
-            guard conversations.served else { return try await runner.conversation(before: before, limit: limit) }
             // A new conversation has nothing to read until its first words start it.
-            guard let id = conversations.shown else { return [] }
-            return try await runner.conversation(id: id, before: before, limit: limit)
+            if conversations.served, conversations.shown == nil { return [] }
+            let turns = try await runner.conversationTurns(id: conversations.served ? conversations.shown : nil, before: before, limit: limit)
+            conversation.note(turns)
+            return turns.map(\.turn)
         }
+        conversation.lookUp = { [weak self] id in try await self?.runner?.artifact(id) }
     }
 
     func start() {
@@ -311,9 +313,11 @@ final class RunnerFeed {
                         apply(item, words: words)
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
-                    // obid names each turn's and step's conversation: the window shows one (#493).
-                    case .turn(let turn): if conversations.shows(turn.conversation) { conversation.apply(turn) }
+                    // obid names each turn's, step's and word's conversation: the window shows one (#493).
+                    case .turn(let turn, let extras): if conversations.shows(turn.conversation) { conversation.apply(turn, extras) }
                     case .step(let step): if conversations.shows(step.conversation) { conversation.apply(step) }
+                    case .delta(let delta): if conversations.shows(delta.conversation) { conversation.apply(delta) }
+                    case .artifact(let artifact): conversation.apply(artifact)
                     case .conversation(let change): conversations.apply(change)
                     }
                 }

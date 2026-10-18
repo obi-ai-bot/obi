@@ -13,6 +13,8 @@ struct Composer: View {
     var typing: FocusState<Bool>.Binding
     /// Sends the field; true when it has dictated words, so Oby may speak its reply.
     let onSend: (_ spoken: Bool) -> Void
+    /// While Oby works on a turn: Stop takes the end slot until there's something to send.
+    var onStop: (() -> Void)? = nil
     @State private var selection: TextSelection?
     /// The field has dictated words in it: cleared, it's typed again.
     @State private var dictated = false
@@ -68,7 +70,17 @@ struct Composer: View {
     /// The mic while the box is empty (Stop while it listens), Send once there's text.
     @ViewBuilder private var end: some View {
         ZStack {
-            if dictating || !sendable {
+            if let onStop, !dictating, !sendable {
+                // A filled square on a `hover` circle (docs/ios-design.md): ends the turn under way.
+                Button(action: onStop) {
+                    Image(systemName: "stop.fill").font(Tokens.font(11, .semibold)).foregroundStyle(Tokens.ink)
+                        .frame(width: 32, height: 32).background(Tokens.hover, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Stop")
+                .accessibilityHint("Ends what Oby is doing")
+                .transition(.scale(scale: 0.4).combined(with: .opacity))
+            } else if dictating || !sendable {
                 DictationMic(active: phone.voice.active, listening: phone.voice.listening,
                              finishing: phone.voice.finishing, level: phone.voice.level, toggle: toggleDictation)
                     .transition(.scale(scale: 0.4).combined(with: .opacity))
@@ -86,6 +98,7 @@ struct Composer: View {
         }
         .frame(width: 32, height: 32)
         .animation(Tokens.spring, value: sendable)
+        .animation(Tokens.spring, value: onStop == nil)
     }
 
     private func send() {

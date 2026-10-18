@@ -39,6 +39,8 @@ pub const CHECK_TOO_LONG: &str = "obid stopped it after 20 minutes, the most a t
 const CHECK_OUTPUT_MAX: usize = 64 * 1024;
 /// Claude Code's own turn limit for a round.
 const MAX_TURNS: &str = "200";
+/// How often obid lets git tidy a clone.
+const TIDY_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The agent's MCP configuration (`--mcp-config`), in the job's own folder (its `HOME`), written
 /// before each turn: the `agent-mcp` plug-ins' servers.
 pub const MCP_CONFIG_FILE: &str = "obi-mcp.json";
@@ -373,11 +375,68 @@ impl Jobs {
         }
     }
 
-    /// Starts the queued jobs there are slots for, and follows the published pull requests.
+    /// Starts the queued jobs there are slots for, follows the published pull requests, and tidies
+    /// the clones once a day.
     pub fn resume(self: &Arc<Self>) {
         self.schedule();
         let jobs = self.clone();
         tokio::spawn(async move { jobs.follow_pull_requests().await });
+        let jobs = self.clone();
+        tokio::spawn(async move { jobs.tidy_clones().await });
+    }
+
+    /// Lets git tidy each clone once a day ([`Jobs::tidy_clone`]).
+    async fn tidy_clones(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(TIDY_EVERY).await;
+            let repos: Vec<String> = self.config.repos.iter().map(|r| r.repo.clone()).collect();
+            for repo in repos {
+                match self.tidy_clone(&repo).await {
+                    Ok(true) => tracing::info!("{repo}: obid's clone tidied (git gc --auto)"),
+                    Ok(false) => {}
+                    Err(e) => tracing::info!("{repo}: obid's clone wasn't tidied: {e}"),
+                }
+            }
+        }
+    }
+
+    /// `git gc --auto` in obid's clone of `repo`, which runs no maintenance by itself
+    /// (git::ensure_clone): only while no job uses the repository, under the lock that gets one
+    /// ready. False when it didn't run.
+    async fn tidy_clone(&self, repo: &str) -> Result<bool, String> {
+        let clone = git::clone_path(&self.config.home, repo);
+        if !clone.join(".git").is_dir() {
+            return Ok(false);
+        }
+        let preparing = self.preparing(repo);
+        let Ok(_held) = preparing.try_lock() else {
+            return Ok(false);
+        };
+        let busy = self
+            .lock()
+            .jobs
+            .values()
+            .any(|job| job.repo == repo && job.status.is_active());
+        if busy {
+            return Ok(false);
+        }
+        // git's own threshold, for this run only (the clone's gc.auto is 0), and in the foreground,
+        // so it ends while the lock is held.
+        git::git(
+            &clone,
+            &[
+                "-c",
+                "gc.auto=6700",
+                "-c",
+                "gc.autoDetach=false",
+                "gc",
+                "--auto",
+                "--quiet",
+            ],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(true)
     }
 
     /// One job.
@@ -3123,6 +3182,8 @@ impl Jobs {
             .clone()
             .unwrap_or_else(|| repo.default_branch.clone());
         let worktree = self.worktree_path(id);
+        let stages = Stages::new(self.log_path(id, "stages.log"));
+        stages.begin("prepare");
 
         let preparing = self.preparing(&repo.repo);
         let prepared = preparing.lock().await;
@@ -3391,6 +3452,7 @@ impl Jobs {
                         job.step = format!("Starting {}", tool.name());
                     }
                 });
+                stages.begin(&format!("agent round {round}"));
                 let turn = self
                     .turn(
                         id,
@@ -3444,6 +3506,7 @@ impl Jobs {
                         job.phase = Some(Phase::Check);
                         job.step = format!("Running {command}");
                     });
+                    stages.begin("check");
                     let run = self.check(id, command, &spec, signal).await?;
                     if *signal.borrow() != Signal::Run {
                         return Ok(());
@@ -3502,7 +3565,9 @@ impl Jobs {
             }
 
             // What it made to be looked at, listed on the job before it ends.
+            stages.begin("artifacts");
             self.publish_artifacts(id).await;
+            stages.begin("keep commits");
             let head = self.keep_commits(id).await?;
             let commits = if start_commit.is_empty() || head == start_commit {
                 0
@@ -3548,6 +3613,8 @@ impl Jobs {
                 job.publish_step = Some(crate::publish::Step::Scan);
                 job.step = "Publishing".into();
             });
+            // Publish times its own steps (PublishHooks).
+            stages.end();
             let published = self.publish_job(id, Some(signal.clone()), |_| Ok(())).await;
             if *signal.borrow() != Signal::Run {
                 return Ok(());
@@ -3781,6 +3848,7 @@ impl Jobs {
                     jobs: self.clone(),
                     id: id.to_owned(),
                     signal,
+                    stages: Stages::new(self.log_path(id, "stages.log")),
                 };
                 let outcome = crate::publish::publish(&job, &base, &target, &hooks).await;
                 let _ = std::fs::remove_dir_all(&target.scratch);
@@ -3992,10 +4060,13 @@ struct PublishHooks {
     id: String,
     /// The job's worker's signal, when it publishes by itself: a stop means nothing more goes out.
     signal: Option<watch::Receiver<Signal>>,
+    /// Each step's time, in the job's stages.log.
+    stages: Stages,
 }
 
 impl crate::publish::Hooks for PublishHooks {
     fn progress(&self, step: crate::publish::Step) {
+        self.stages.begin(step.as_str());
         self.jobs
             .update(&self.id, |job| job.publish_step = Some(step));
     }
@@ -4018,6 +4089,68 @@ impl crate::publish::Hooks for PublishHooks {
         );
         self.jobs
             .update(&self.id, |job| job.outgoing.push(outgoing));
+    }
+}
+
+/// How long each stage of a job's run took, one line each in the job's `stages.log`
+/// (`prepare 0.81s`), so a run's time can be read without guessing: a stage ends when the next
+/// begins, or when this goes.
+struct Stages {
+    file: PathBuf,
+    open: Mutex<Option<(String, std::time::Instant)>>,
+}
+
+impl Stages {
+    fn new(file: PathBuf) -> Stages {
+        Stages {
+            file,
+            open: Mutex::new(None),
+        }
+    }
+
+    /// The stage under way ends, and `name` begins.
+    fn begin(&self, name: &str) {
+        let ended = self
+            .open
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace((name.to_owned(), std::time::Instant::now()));
+        self.write(ended);
+    }
+
+    /// The stage under way ends.
+    fn end(&self) {
+        let ended = self.open.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.write(ended);
+    }
+
+    fn write(&self, ended: Option<(String, std::time::Instant)>) {
+        use std::io::Write;
+        let Some((name, began)) = ended else { return };
+        let line = format!("{name} {:.2}s\n", began.elapsed().as_secs_f64());
+        let job = self
+            .file
+            .parent()
+            .and_then(Path::file_name)
+            .map(|id| id.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        tracing::info!("job {job}: {}", line.trim_end());
+        if let Some(folder) = self.file.parent() {
+            let _ = std::fs::create_dir_all(folder);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.file)
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+}
+
+impl Drop for Stages {
+    fn drop(&mut self) {
+        self.end();
     }
 }
 
@@ -5069,6 +5202,7 @@ fn owner_prompt(job: &Job) -> String {
         lines.push(brief_section(brief));
     }
     lines.push("Commit your changes here when they're ready. Don't push, open pull requests or post anything to GitHub: obid publishes the work itself.".into());
+    lines.push("A packed-refs.lock warning after a commit is harmless: the commit landed if `git log -1` shows it.".into());
     if COMMITTING.contains(&job.kind.as_str()) {
         lines.push(format!("If you can't commit, say why in your summary's first line: a {} job that ends with no commits counts as nothing committed.", job.kind));
     }
@@ -5925,6 +6059,134 @@ mod tests {
     }
     use super::*;
 
+    /// git tidies obid's clone (its own automatic maintenance is off) only while no job uses the
+    /// repository: loose objects are packed, and a job that's queued or running holds it off.
+    #[tokio::test]
+    async fn a_clone_is_tidied_only_while_no_job_uses_it() {
+        let root = std::env::temp_dir().join(format!("obid-tidy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let remote = root.join("remote");
+        std::fs::create_dir_all(&remote).unwrap();
+        crate::git::git(&remote, &["init", "-q", "-b", "main"])
+            .await
+            .unwrap();
+        for i in 0..3 {
+            std::fs::write(remote.join("f"), i.to_string()).unwrap();
+            crate::git::git(&remote, &["add", "f"]).await.unwrap();
+            crate::git::git(
+                &remote,
+                &[
+                    "-c",
+                    "user.name=a",
+                    "-c",
+                    "user.email=a@b",
+                    "commit",
+                    "-qm",
+                    "c",
+                ],
+            )
+            .await
+            .unwrap();
+        }
+        let url = format!("file://{}", remote.display());
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "allowFileRemotes": true,
+                "repos": [{"repo": "o/r", "remote": url, "defaultBranch": "main"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let clone = crate::git::ensure_clone(&config.home, "o/r", &url, &[])
+            .await
+            .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        jobs.lock().jobs.insert("j".into(), job);
+        assert_eq!(
+            jobs.tidy_clone("o/r").await,
+            Ok(false),
+            "a queued job uses it"
+        );
+        jobs.lock().jobs.get_mut("j").unwrap().status = Status::Done;
+        // Past git's threshold, as a clone that fetched for months would be.
+        crate::git::git(&clone, &["config", "gc.autoPackLimit", "1"])
+            .await
+            .unwrap();
+        std::fs::write(remote.join("f"), "more").unwrap();
+        crate::git::git(
+            &remote,
+            &[
+                "-c",
+                "user.name=a",
+                "-c",
+                "user.email=a@b",
+                "commit",
+                "-qam",
+                "d",
+            ],
+        )
+        .await
+        .unwrap();
+        crate::git::git(&clone, &["fetch", "-q", "origin"])
+            .await
+            .unwrap();
+        // The fetched objects in a pack of their own, beside the clone's.
+        crate::git::git(&clone, &["repack", "-q"]).await.unwrap();
+        let packs = || {
+            std::fs::read_dir(clone.join(".git/objects/pack"))
+                .unwrap()
+                .filter(|e| {
+                    e.as_ref()
+                        .unwrap()
+                        .path()
+                        .extension()
+                        .is_some_and(|x| x == "pack")
+                })
+                .count()
+        };
+        assert!(packs() > 1, "{}", packs());
+        assert_eq!(jobs.tidy_clone("o/r").await, Ok(true));
+        assert_eq!(packs(), 1);
+        assert_eq!(jobs.tidy_clone("x/none").await, Ok(false), "no clone");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Each stage of a run is a line in the job's stages.log, with how long it took; the last ends
+    /// when the run does.
+    #[test]
+    fn a_runs_stages_are_timed_in_its_log() {
+        let root = std::env::temp_dir().join(format!("obid-stages-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let file = root.join("logs/j/stages.log");
+        {
+            let stages = Stages::new(file.clone());
+            stages.begin("prepare");
+            std::thread::sleep(Duration::from_millis(20));
+            stages.begin("agent round 1");
+        }
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(
+            lines[0].starts_with("prepare 0.0") && lines[0].ends_with('s'),
+            "{text}"
+        );
+        assert!(lines[1].starts_with("agent round 1 "), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A job from before modes is in Bypass; a mode this obid can't read asks (security review
     /// of #586, S4).
     #[test]
@@ -5977,6 +6239,10 @@ mod tests {
         assert!(prompt.contains("What the user asked for: Fix it"));
         assert!(prompt.contains("`node --test` succeeds"));
         assert!(prompt.contains("counts as nothing committed"));
+        // After each commit git prints a packed-refs.lock error the sandbox causes (deleting its
+        // AUTO_MERGE ref with the job's own object folder): agents spent a turn checking a commit
+        // that had landed.
+        assert!(prompt.contains("packed-refs.lock"), "{prompt}");
     }
 
     /// #540: what Oby found reaches the agent quoted, as data, and nothing in it closes the quote.

@@ -404,7 +404,7 @@ fn oby_dispatch_through_codex_starts_a_job() {
     let conversation = tools.body["conversation"].as_str().unwrap().to_owned();
     assert_eq!(
         tools.body["text"],
-        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_inbox,oby_answer,oby_conversations",
+        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_inbox,oby_answer,oby_conversations,oby_artifact",
         "{}",
         tools.text
     );
@@ -430,6 +430,31 @@ fn oby_dispatch_through_codex_starts_a_job() {
     assert_eq!(dispatch.len(), 2, "{seen:?}");
     assert_eq!(dispatch[0]["detail"], "obi-e2e/fixture-app");
     assert_eq!(dispatch[1]["state"], "done");
+
+    // #660's oby_artifact is Codex's too: a folder of the room becomes this conversation's artifact.
+    let page = said(
+        &obid,
+        json!({"said": r#"MAKEPAGE OBY oby_artifact {"title": "Functions", "path": "page"}"#,
+               "conversation": conversation}),
+    );
+    let text = page.body["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("oby: Published artifact ") && text.ends_with(", version 1."),
+        "{}",
+        page.text
+    );
+    let listed = call(
+        &obid,
+        "GET",
+        &format!("/v1/artifacts?conversation={conversation}"),
+        None,
+    );
+    assert_eq!(
+        listed.body.as_array().map_or(0, Vec::len),
+        1,
+        "{}",
+        listed.text
+    );
 
     let elsewhere = said(
         &obid,

@@ -1,5 +1,5 @@
 //! The existing Mac app against obid: tests/mac-app/main.swift is built with the app's own client
-//! code (apps/shared/Runner.swift and what it needs: apps/shared/Decisions.swift, apps/shared/JobList.swift,
+//! code (apps/shared/Runner.swift and what it needs: apps/shared/Harness.swift, apps/shared/Decisions.swift, apps/shared/JobList.swift,
 //! apps/shared/Elapsed.swift, apps/shared/DeviceKey.swift and Engine/, compiled as the Oby target compiles
 //! them) and follows a running obid as apps/mac/app/RunnerFeed.swift follows the runner on this Mac
 //! (Settings › Runner › This Mac, #283): the token through `LocalRunner.token(home:fallback:)`, `GET
@@ -27,8 +27,9 @@ use serde_json::json;
 use support::*;
 
 /// The app's files the client is built from, under the repository root.
-const APP_SOURCES: [&str; 5] = [
+const APP_SOURCES: [&str; 6] = [
     "apps/shared/Runner.swift",
+    "apps/shared/Harness.swift",
     "apps/shared/Decisions.swift",
     "apps/shared/JobList.swift",
     "apps/shared/Elapsed.swift",

@@ -19,6 +19,7 @@
 //   PERMS              asks to run a command in its room, to write inside, outside and in repos/,
 //                      and to read ~/.ssh
 //   RUN <words>        runs a command without asking (as Codex runs a "safe" one), then does <words>
+//   MAKEPAGE <words>   writes page/index.html in its room (with apply_patch, no shell), then does <words>
 //   COPY               says which tokens its CODEX_HOME's auth.json holds: "copy: access=… refresh=…"
 //   LEAK               says the tokens of its CODEX_HOME's auth.json and of OBY_MCP_TOKEN
 //   FAIL               the turn fails
@@ -135,6 +136,11 @@ async function act(turnId, words) {
     event("item/started", turnId, { item: run });
     event("item/completed", turnId, { item: { ...run, status: "completed", exitCode: 0, aggregatedOutput: "hi\n" } });
     return act(turnId, words.slice(4));
+  }
+  if (words.startsWith("MAKEPAGE ")) {
+    mkdirSync(join(room, "page"), { recursive: true });
+    writeFileSync(join(room, "page/index.html"), "<h1>Functions</h1>\n");
+    return act(turnId, words.slice(9));
   }
   if (words.startsWith("COPY")) {
     const t = JSON.parse(readFileSync(join(home, "auth.json"), "utf8")).tokens ?? {};

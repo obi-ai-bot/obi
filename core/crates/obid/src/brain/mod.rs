@@ -149,12 +149,14 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
         );
         shared.turns.end(&control);
         let recap = recap.or_else(|| shared.presence.take());
+        let made = shared.harness.take_made(&control.turn);
         respond(
             &shared,
             &conversation,
             answered.talk,
             answered.details,
             recap,
+            made,
         )
     });
     turn.await.map_err(|_| {
@@ -214,6 +216,7 @@ fn respond(
     talk: Talk,
     details: Option<String>,
     recap: Option<String>,
+    artifacts: Vec<Value>,
 ) -> Result<Response, ApiError> {
     // The recap is Oby's first line, never a turn the user wrote; an answer with no words keeps
     // it for the next one.
@@ -259,7 +262,10 @@ fn respond(
                 .collect(),
             _ => vec![],
         };
-        match shared.conversations.append(conversation, "oby", text, jobs) {
+        match shared
+            .conversations
+            .append_made(conversation, text, jobs, artifacts.clone())
+        {
             Ok(_) => {}
             // Deleted while the brain thought: the answer still goes to the app that asked.
             Err(crate::conversation::Error::NoConversation) => {
@@ -270,6 +276,9 @@ fn respond(
     }
     if let Some(recap) = recap {
         body["recap"] = json!(recap);
+    }
+    if !artifacts.is_empty() {
+        body["artifacts"] = json!(artifacts);
     }
     body["conversation"] = json!(conversation);
     Ok((StatusCode::OK, axum::Json(body)).into_response())
@@ -585,6 +594,7 @@ fn validate_turns(input: Option<Vec<InputTurn>>) -> Result<Option<Vec<Turn>>, Ap
             jobs: vec![],
             conversation: String::new(),
             ended: false,
+            artifacts: vec![],
         });
     }
     Ok(Some(out))
