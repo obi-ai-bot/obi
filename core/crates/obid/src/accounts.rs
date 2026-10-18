@@ -1187,7 +1187,7 @@ impl Drop for Pending {
 }
 
 /// Reads `out` a line at a time, each cut to [`LONGEST_LINE`] bytes, into `lines`, until it ends.
-async fn read_lines(
+pub(crate) async fn read_lines(
     mut out: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
     lines: tokio::sync::mpsc::UnboundedSender<String>,
 ) {
@@ -1308,7 +1308,7 @@ fn interpreter(script: &Path) -> Option<String> {
 }
 
 /// `line` without terminal colours and around spaces.
-fn plain(line: &str) -> String {
+pub(crate) fn plain(line: &str) -> String {
     static ESCAPES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     ESCAPES
         .get_or_init(|| regex::Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").expect("a valid pattern"))

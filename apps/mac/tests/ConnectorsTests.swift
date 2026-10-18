@@ -101,6 +101,21 @@ struct ConnectorsTests {
         #expect(ids(Connectors.groups(list, query: ""), "Connected").isEmpty)
     }
 
+    /// With obid saying whether its gh is signed in (`GET /v1/github`), GitHub is connected as its
+    /// user, or offers gh's own sign-in; with no gh at all it can't work.
+    @Test func gitHubFollowsObidsGhLogin() throws {
+        func row(_ login: GitHubLogin) throws -> Connector {
+            let runner = Connectors.RunnerState(name: "This Mac", local: true, accounts: [], github: "owner", checks: "no app", gitHubLogin: login)
+            return try #require(Connectors.list(mac: [], runner: runner).first { $0.id == "github" })
+        }
+        let signed = try row(GitHubLogin(gh: true, signedIn: true, user: "octo-cat", signIn: nil))
+        #expect(signed.state == .connected && signed.how.contains("as octo-cat"))
+        let out = try row(GitHubLogin(gh: true, signedIn: false, user: nil, signIn: nil))
+        #expect(out.state == .available && out.way == .button("Sign In…", .signInGitHub))
+        let none = try row(GitHubLogin(gh: false, signedIn: false, user: nil, signIn: nil))
+        #expect(none.state == .broken && none.way == nil)
+    }
+
     /// What can't work isn't connected: a connection whose vault secret is missing (every call
     /// fails, Runner/Broker.swift) and a plug-in obid gave up on need attention, with the reason; a
     /// plug-in still starting isn't confirmed yet.

@@ -57,6 +57,8 @@ pub struct Shared {
     pub plugins: Arc<crate::plugins::Plugins>,
     /// The accounts' sign-ins under way (crate::accounts).
     pub sign_ins: crate::accounts::SignIns,
+    /// The GitHub login and its sign-in (crate::github_login).
+    pub github: crate::github_login::GitHubLogin,
     /// The browsers signed in to the web app's own files (crate::web): nothing under `/v1`.
     pub pages: crate::web::Sessions,
     /// True once obid is stopping: streams end.
@@ -105,6 +107,11 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route(
             "/v1/accounts/{id}",
             axum::routing::patch(crate::accounts::change).delete(crate::accounts::remove),
+        )
+        .route("/v1/github", get(crate::github_login::get))
+        .route(
+            "/v1/github/sign-in",
+            post(crate::github_login::sign_in).delete(crate::github_login::end_sign_in),
         )
         .route(
             "/v1/accounts/{id}/sign-in",

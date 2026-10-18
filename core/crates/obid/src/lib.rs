@@ -24,6 +24,7 @@ pub mod failures;
 pub mod gateway;
 pub mod git;
 pub mod github;
+pub mod github_login;
 pub mod job;
 pub mod jobs;
 pub mod logs;
@@ -258,6 +259,7 @@ pub async fn serve(
         link: link.clone(),
         plugins: plugins.clone(),
         sign_ins: accounts::SignIns::default(),
+        github: github_login::GitHubLogin::default(),
         pages: web::Sessions::default(),
         stopping: stopping_rx.clone(),
     });
@@ -326,6 +328,7 @@ pub async fn serve(
             }
             let _ = stopped_at.set(tokio::time::Instant::now());
             shared.sign_ins.kill_all();
+            shared.github.kill();
             tokio::join!(jobs.shutdown(JOBS_GRACE), plugins.shutdown());
         })
     };

@@ -32,6 +32,8 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
         case disablePlugin(String)
         /// `DELETE /v1/connections/{name}`, approved with Touch ID.
         case disconnect(String)
+        /// gh's own sign-in on the runner (`POST /v1/github/sign-in`): GitHub's page and its code.
+        case signInGitHub
     }
 
     /// How to disconnect a connected one, or connect an available one.
@@ -81,6 +83,8 @@ nonisolated enum Connectors {
         var accounts: [AccountState]
         var github: String?
         var checks: String?
+        /// Whether its gh is signed in (`GET /v1/github`), from obid; nil from a runner that doesn't say.
+        var gitHubLogin: GitHubLogin? = nil
         var plugins: [RunnerPlugin]?
         var connections: [ConnectedApp]?
     }
@@ -95,6 +99,8 @@ nonisolated enum Connectors {
     struct Lists: Equatable, Sendable {
         var plugins: [RunnerPlugin]?
         var connections: [ConnectedApp]?
+        /// obid's GitHub login (`GET /v1/github`); nil from a runner that doesn't say.
+        var gitHub: GitHubLogin?
         /// Why a list couldn't be read: a timeout, a 500, a 401. Only a 404 means the runner has
         /// none to list; anything else is said, never shown as an empty list.
         var problems: [String] = []
@@ -113,6 +119,8 @@ nonisolated enum Connectors {
         } catch {
             lists.problems.append("Couldn't read the connections on \(name): \(error.localizedDescription)")
         }
+        // Said on GitHub's own row: without it, the row says what the status says.
+        lists.gitHub = try? await runner.gitHubLogin()
         return lists
     }
 
@@ -128,7 +136,8 @@ nonisolated enum Connectors {
         if let runner { list += (runner.plugins ?? []).map { plugin($0, place: runner.name) } }
         list += mac.compactMap { tetrix($0, place: thisMac, runner: nil) }
         if let runner { list += runnerAccounts.compactMap { tetrix($0, place: runner.name, runner: runner.name) } }
-        if let runner, let github = runner.github { list.append(gitHub(github, checks: runner.checks, place: runner.name)) }
+        if let runner, let login = runner.gitHubLogin { list.append(gitHub(login, place: runner.name)) }
+        else if let runner, let github = runner.github { list.append(gitHub(github, checks: runner.checks, place: runner.name)) }
         if let runner { list += (runner.connections ?? []).map { connection($0, place: runner.name) } }
         return list
     }
@@ -222,6 +231,27 @@ nonisolated enum Connectors {
         return Connector(id: "github", name: "GitHub", about: "Repositories, pull requests and checks", place: place,
                          how: how + (runs.map { " \($0)" } ?? ""), state: app ? .connected : .unconfirmed, way: .steps(steps),
                          symbol: "arrow.triangle.branch")
+    }
+
+    /// GitHub as obid's gh is signed in to it (`GET /v1/github`): connected as its user, or a button
+    /// that runs gh's own sign-in. The token stays gh's: Oby only learns who it's signed in as.
+    static func gitHub(_ login: GitHubLogin, place: String) -> Connector {
+        let there = place == thisMac ? "this Mac" : place
+        if login.signedIn {
+            let who = login.user.map { " as \($0)" } ?? ""
+            return Connector(id: "github", name: "GitHub", about: "Repositories, pull requests and checks", place: place,
+                             how: "Signed in with GitHub's own login\(who). Oby clones, pushes and opens pull requests with it.",
+                             state: .connected, way: .steps("To disconnect it, run gh auth logout on \(there)."),
+                             symbol: "arrow.triangle.branch")
+        }
+        guard login.gh else {
+            return Connector(id: "github", name: "GitHub", about: "Repositories, pull requests and checks", place: place,
+                             how: "\(place == thisMac ? "This Mac" : place) has no GitHub CLI for Oby to sign in with.",
+                             state: .broken, way: nil, symbol: "arrow.triangle.branch")
+        }
+        return Connector(id: "github", name: "GitHub", about: "Repositories, pull requests and checks", place: place,
+                         how: "Not signed in: Oby can't clone private repositories, push or open pull requests. Signing in uses GitHub's own page.",
+                         state: .available, way: .button("Sign In…", .signInGitHub), symbol: "arrow.triangle.branch")
     }
 
     /// An app or API the runner's agents use through its broker, with the secret it sends, by name.

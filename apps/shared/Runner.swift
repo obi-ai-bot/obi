@@ -1246,6 +1246,26 @@ nonisolated struct Runner: Sendable {
         struct Body: Encodable { var enabled: Bool; var config: [String: String]? }
         return try await call("PUT", "v1/obid/plugins/\(id)", body: Body(enabled: enabled, config: config))
     }
+
+    /// Whether obid's gh is signed in to GitHub, as whom, and the sign-in under way (docs/runner-api.md,
+    /// "obid only: GitHub's sign-in"), or nil from a runner without it.
+    func gitHubLogin() async throws -> GitHubLogin? {
+        do {
+            return try await call("GET", "v1/github")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// gh's own sign-in on the runner, or the one under way: GitHub's device page and the code to type there.
+    func startGitHubSignIn() async throws -> GitHubSignIn {
+        try await call("POST", "v1/github/sign-in")
+    }
+
+    /// Ends the GitHub sign-in under way, if any.
+    func endGitHubSignIn() async throws {
+        _ = try await send("DELETE", "v1/github/sign-in")
+    }
     #endif
 
     /// Server-Sent Events until the connection drops; the caller reconnects.
@@ -1460,6 +1480,22 @@ nonisolated struct ConnectedApp: Decodable, Identifiable, Equatable, Sendable {
     var secretSaved: Bool
     var lastUsed: Date?
     var id: String { name }
+}
+
+/// obid's GitHub login, as `GET /v1/github` says: whether it has a gh, whether gh is signed in and
+/// as whom, and the sign-in under way. obid never passes on the token.
+nonisolated struct GitHubLogin: Decodable, Equatable, Sendable {
+    var gh: Bool
+    var signedIn: Bool
+    var user: String?
+    var signIn: GitHubSignIn?
+}
+
+/// gh's own sign-in under way: GitHub's device page, the code to type there, when it runs out.
+nonisolated struct GitHubSignIn: Decodable, Equatable, Sendable {
+    var url: URL
+    var userCode: String
+    var expiresAt: String
 }
 
 /// A plug-in obid found, as `GET /v1/obid/plugins` lists it.
