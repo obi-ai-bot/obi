@@ -379,7 +379,8 @@ private struct ObyAtWork: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if face { ObyMark() }
+            // Melting into dots that bounce until its words land (Sangam's ObyFaceLive), as on the iPhone.
+            if face { ObyFaceLive(live: true) }
             HStack(spacing: 10) {
                 Sheen(text: working ? "Working" : "Thinking")
                 StopButton(action: onStop)

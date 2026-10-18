@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Oby on iPhone: a client of the runner (docs/runner-api.md), so work goes on with the Mac closed.
-/// Sangam's design, light or dark as the system is (Settings › Appearance), in three tabs: Home, the stage; Conversations with Oby; Settings.
+/// Sangam's design, light or dark as the system is (Settings › Appearance): Home, with his side
+/// panel for the tasks and the conversations, and no tab bar (PhoneRoot).
 @main
 struct ObyPhoneApp: App {
     /// Holds the phone, so a notification tapped before Home appears still opens its job.
@@ -14,19 +15,7 @@ struct ObyPhoneApp: App {
 
     var body: some Scene {
         WindowGroup {
-            TabView(selection: Binding { phone.tab } set: { phone.tab = $0 }) {
-                Tab("Home", systemImage: "house", value: PhoneTab.home) {
-                    HomeView(character: character)
-                }
-                Tab("Conversations", systemImage: "bubble.left.and.bubble.right", value: PhoneTab.chat) {
-                    ConversationsScreen()
-                }
-                Tab("Settings", systemImage: "gearshape", value: PhoneTab.settings) {
-                    SettingsScreen()
-                }
-            }
-            // iOS 26's bar: it steps aside while a thread scrolls.
-            .tabBarMinimizeBehavior(.onScrollDown)
+            PhoneRoot(character: character)
             .tint(Tokens.ink)
             .foregroundStyle(Tokens.text)
             .background(Tokens.bg)
@@ -37,11 +26,11 @@ struct ObyPhoneApp: App {
                 phase == .active ? phone.start() : phone.stop()
             }
             // Oby draws only while Home's stage shows.
-            .onChange(of: scenePhase == .active && phone.tab == .home && phone.homePath.isEmpty, initial: true) { _, shown in
+            .onChange(of: scenePhase == .active && phone.homePath.isEmpty, initial: true) { _, shown in
                 character.pause(!shown)
             }
-            // Leaving a tab mid-hold: the mic stops, as leaving Home always did.
-            .onChange(of: phone.tab) { phone.cancelVoice() }
+            // Opening the side panel mid-hold: the mic stops, as leaving Home always did.
+            .onChange(of: phone.panel) { phone.cancelVoice() }
         }
         // A job ended while Oby was suspended (JobWaiter): say so on the Live Activity.
         .backgroundTask(.urlSession(JobWaiter.identifier)) { [phone] in await phone.catchUp() }

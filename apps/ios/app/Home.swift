@@ -12,6 +12,7 @@ enum Route: Hashable {
     case all
     case archived
     case inbox
+    case settings
 }
 
 extension EnvironmentValues {
@@ -36,6 +37,7 @@ extension View {
             case .all: AllTasksPage()
             case .archived: ArchivedPage()
             case .inbox: InboxPage()
+            case .settings: SettingsScreen()
             }
         }
     }
@@ -63,6 +65,9 @@ struct HomeView: View {
 
     var body: some View {
         @Bindable var phone = phone
+        // Why the Mac can't be reached: one line over every screen, the bars under it.
+        VStack(spacing: 0) {
+        if let notice = phone.notice { ReachLine(notice: notice) }
         NavigationStack(path: $phone.homePath) {
             ScrollView {
                 VStack(spacing: 0) {
@@ -78,9 +83,21 @@ struct HomeView: View {
                 Composer(text: $text, prompt: HomeLine.placeholder(fullName: HomeLine.owner(ofMac: phone.link?.name) ?? ""),
                          typing: $typing, onSend: send)
             }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { typing = false; phone.panel = .home } label: { Image(systemName: "sidebar.left") }
+                        .accessibilityLabel("Show sidebar")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { phone.homePath.append(.settings) } label: { OwnerPicture(name: HomeLine.owner(ofMac: phone.link?.name)) }
+                        .accessibilityLabel("Settings")
+                }
+            }
             .routes()
         }
         .pushes(onto: $phone.homePath)
+        }
+        .animation(Tokens.warm, value: phone.notice)
         .onDisappear { phone.cancelVoice() }
         .onChange(of: scenePhase) { if scenePhase != .active { phone.leftForeground(background: scenePhase == .background) } }
         .onChange(of: phone.homePath) { if !phone.homePath.isEmpty { phone.cancelVoice(); typing = false } }
@@ -108,7 +125,7 @@ struct HomeView: View {
                 .accessibilityElement()
                 .accessibilityLabel("Oby")
             Button {
-                if let first = PhoneWork.firstNeeding(work, inbox: InboxItem.waiting(phone.inbox)) { phone.homePath.append(first) }
+                if let first = PhoneWork.firstNeeding(work, inbox: phone.answering) { phone.homePath.append(first) }
             } label: {
                 Text(HomeLine.attention(running: running, needs: needs))
                     .font(Tokens.font(Tokens.textBase))
@@ -119,12 +136,6 @@ struct HomeView: View {
             .disabled(needs == 0)
             .accessibilityHint(needs > 0 ? "Opens what needs you" : "")
             .padding(.top, 14)
-            if case .offline = phone.connection {
-                Label(phone.offlineLine, systemImage: "wifi.exclamationmark")
-                    .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needsInk)
-                    .multilineTextAlignment(.center)
-                    .padding(.top, 8)
-            }
             CenteredFlow(spacing: 8) {
                 ForEach(WorkList.kinds(work)) { group in
                     HomeChip(label: group.label, fresh: group.fresh, needs: group.needs > 0) {
@@ -155,7 +166,7 @@ struct HomeView: View {
                 }
             }
             if !recent.isEmpty {
-                ListLabel(title: "Recent", more: "All conversations") { phone.tab = .chat }
+                ListLabel(title: "Recent", more: "All conversations") { phone.panel = .conversations }
                     .padding(.top, rows.isEmpty ? 0 : 14)
                 ForEach(recent) { conversation in
                     Button { phone.homePath.append(.conversation(conversation.id)) } label: {

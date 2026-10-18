@@ -257,7 +257,7 @@ struct ConnectorsTests {
         }
         let lists = await Connectors.lists(from: failing.runner, name: "tetrix-lab")
         #expect(lists.plugins == nil && lists.connections == nil)
-        #expect(lists.problems == ["Couldn't read the plug-ins on tetrix-lab: The runner only answers its owner's Tailscale login.",
+        #expect(lists.problems == ["Couldn't read the plug-ins on tetrix-lab: The runner didn't let this device in.",
                                    "Couldn't read the connections on tetrix-lab: The runner couldn't read connections.json."])
     }
 

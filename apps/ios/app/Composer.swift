@@ -4,7 +4,8 @@ import SwiftUI
 /// five lines, and at its end the mic, which turns into Send ↑ once there's text. The same box on
 /// Home, in a conversation and on a task's page. Tap the mic and what you say goes into the field
 /// as it's heard; tap Stop and the words stay there to edit and send (apps/ios/app/README.md,
-/// "Voice input"). There's no + : the iPhone sends no attachments yet.
+/// "Voice input"). Before them, the usage gauge whenever there's an account. There's no + : the
+/// iPhone sends no attachments yet.
 struct Composer: View {
     @Environment(Phone.self) private var phone
     @Binding var text: String
@@ -44,6 +45,7 @@ struct Composer: View {
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .frame(minHeight: 32)
                     .accessibilityAddTraits(phone.voice.listening ? .updatesFrequently : [])
+                if !phone.accounts.isEmpty { UsageGauge() }
                 end
             }
             .padding(6)
@@ -85,11 +87,12 @@ struct Composer: View {
                              finishing: phone.voice.finishing, level: phone.voice.level, toggle: toggleDictation)
                     .transition(.scale(scale: 0.4).combined(with: .opacity))
             } else {
+                // A plain arrow, like the mic it takes the place of (Sangam's `.composer-send`).
                 Button(action: send) {
-                    Image(systemName: "arrow.up").font(Tokens.font(16, .semibold))
-                        .foregroundStyle(Tokens.onInk)
+                    Image(systemName: "arrow.up").font(Tokens.font(18, .medium))
+                        .foregroundStyle(Tokens.ink)
                         .frame(width: 32, height: 32)
-                        .background(Tokens.ink, in: Circle())
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Send")
@@ -158,5 +161,72 @@ private struct DictationMic: View {
         .disabled(finishing)
         .accessibilityLabel(active ? "Stop dictating" : "Dictate")
         .accessibilityHint(active ? "Keeps your words in the field to edit and send." : "Your words go into the field as you speak.")
+    }
+}
+
+/// How much the accounts have used this week (Sangam's UsageGauge): a gauge with a dot while any is
+/// past 80% (yellow) or 90% (red); a tap shows each account's week, and the way to Settings.
+private struct UsageGauge: View {
+    @Environment(Phone.self) private var phone
+    @State private var open = false
+
+    var body: some View {
+        let weeks = phone.accounts.map { Usage.week($0.usage) }
+        let dot = UsageDot.of(weeks: weeks)
+        Button { open.toggle() } label: {
+            Image(systemName: "gauge.with.dots.needle.33percent").font(Tokens.font(17))
+                .foregroundStyle(open ? Tokens.ink : Tokens.muted)
+                .frame(width: 32, height: 32)
+                .background(open ? Tokens.active : .clear, in: Circle())
+                .overlay(alignment: .topTrailing) {
+                    if dot != .none {
+                        Circle().fill(dot == .over ? Tokens.over : Tokens.full).frame(width: 6, height: 6).offset(x: -4, y: 5)
+                    }
+                }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Usage this week" + (dot == .none ? "" : ", an account is nearly full"))
+        .popover(isPresented: $open, arrowEdge: .bottom) {
+            panel.presentationCompactAdaptation(.popover)
+        }
+    }
+
+    private var panel: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Usage this week").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.label)
+                Spacer()
+                Button { open = false; phone.panel = nil; phone.homePath.append(.settings) } label: {
+                    Image(systemName: "gearshape").font(Tokens.font(15)).foregroundStyle(Tokens.muted).frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Manage accounts")
+            }
+            .padding(.leading, 8)
+            ForEach(phone.accounts) { account in
+                let week = Usage.week(account.usage)
+                let level = UsageDot.of(weeks: [week])
+                HStack(alignment: .top, spacing: 10) {
+                    AgentMark(agent: account.agent).font(Tokens.font(13)).frame(width: 16).foregroundStyle(Tokens.muted)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text("\(Usage.tool(account.agent)) · \(account.name)").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.ink).fadeOut()
+                            if let resets = account.sevenDayResets {
+                                Text(Usage.resetText(resets)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fixedSize()
+                            }
+                            Text(week.map(Usage.percent) ?? "–").font(Tokens.font(Tokens.textBase)).monospacedDigit()
+                                .foregroundStyle(level == .over ? Tokens.over : level == .high ? Tokens.full : Tokens.text)
+                                .frame(minWidth: 32, alignment: .trailing)
+                        }
+                        SetMeter(used: (week ?? 0) * 100)
+                    }
+                }
+                .padding(8)
+            }
+        }
+        .padding(.horizontal, 8).padding(.top, 8).padding(.bottom, 20)
+        .frame(width: 340)
+        .background(Tokens.surface)
     }
 }
