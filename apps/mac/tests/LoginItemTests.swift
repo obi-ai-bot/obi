@@ -3,8 +3,9 @@ import ServiceManagement
 import Testing
 @testable import Oby
 
-/// The runner ships inside Oby.app as a login item (#283): the build bundles its launchd plist at
-/// Contents/Library/LaunchAgents and the executable at Contents/Helpers ("Bundle the runner").
+/// obid ships inside Oby.app as a login item (the owner's decision of 2026-10-18): the build bundles
+/// its launchd plist at Contents/Library/LaunchAgents, the executable at Contents/Helpers and its
+/// plug-ins at Contents/Resources/obid ("Bundle obid").
 struct LoginItemTests {
     /// The tests run hosted by Oby.app itself, so `Bundle.main` is the app bundle the build made.
     @Test func theAppBundlesThePlistAndTheRunner() throws {
@@ -15,6 +16,35 @@ struct LoginItemTests {
         #expect(plist?["BundleProgram"] as? String == RunnerLoginItem.helperPath)
         #expect(plist?["AssociatedBundleIdentifiers"] as? [String] == ["com.deskree.oby"])
         #expect(RunnerLoginItem.plistPath.hasSuffix("/" + RunnerLoginItem.plist))
+        #expect(plist?["ProgramArguments"] as? [String] == ["obid", "serve"])
+        #expect(RunnerLoginItem.label == "com.deskree.oby.obid" && RunnerLoginItem.helperPath == "Contents/Helpers/obid")
+        // Never install.sh's label: macOS would tie the app's agent to that file and never start it.
+        #expect(RunnerLoginItem.label != RunnerLoginItem.scriptLabel)
+        // The Swift runner's plist stays, only so an older registration can be undone.
+        let swift = Bundle.main.bundleURL.appending(path: "Contents/Library/LaunchAgents/\(RunnerLoginItem.swiftRunnerPlist)")
+        #expect(FileManager.default.fileExists(atPath: swift.path))
+        let plugins = Bundle.main.bundleURL.appending(path: "Contents/Resources/obid/plugins")
+        #expect(FileManager.default.fileExists(atPath: plugins.path))
+    }
+
+    /// install.sh's obid moves only when it uses the file the app's obid reads.
+    @Test func installShsObidMovesOnlyWithTheSameConfiguration() {
+        let home = URL(filePath: "/Users/someone")
+        let file = "/Users/someone/Library/Application Support/Oby/obid/config.json"
+        #expect(RunnerLoginItem.cantMove(arguments: ["/x/bin/obid", "serve", "--config", file], home: home) == nil)
+        #expect(RunnerLoginItem.cantMove(arguments: ["/x/bin/obid", "serve", "--config=\(file)"], home: home) == nil)
+        #expect(RunnerLoginItem.cantMove(arguments: ["/x/bin/obid", "serve"], home: home) == nil)
+        let elsewhere = RunnerLoginItem.cantMove(arguments: ["/x/bin/obid", "serve", "--config", "/srv/obid.json"], home: home)
+        #expect(elsewhere?.contains("/srv/obid.json") == true)
+    }
+
+    /// With no install.sh agent where it looks, nothing runs instead of the app's obid.
+    @Test func noScriptAgentMeansTheAppsObid() {
+        let item = RunnerLoginItem(service: .agent(plistName: "com.deskree.oby.nothing.plist"),
+                                   swiftRunner: .agent(plistName: "com.deskree.oby.nothing-else.plist"),
+                                   scriptAgent: URL(filePath: "/nonexistent/com.deskree.obid.plist"))
+        #expect(!item.byScript)
+        #expect(item.line != "Installed with install.sh")
     }
 
     /// Its status is read from launchd, never guessed: a fresh item of another name isn't registered.

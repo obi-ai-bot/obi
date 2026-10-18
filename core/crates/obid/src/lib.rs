@@ -9,6 +9,7 @@ pub mod accounts;
 pub mod acp;
 pub mod agent;
 pub mod api;
+pub mod app;
 pub mod approval;
 pub mod artifacts;
 pub mod brain;
