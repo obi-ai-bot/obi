@@ -748,3 +748,150 @@ fn a_turn_replaced_while_it_waits_never_starts() {
         "the replaced turn started: {seen:?}"
     );
 }
+
+/// The owner's attachments reach the session: copied into its room as
+/// `attachments/<turn>/<name>`, names cleaned, text with every secret obid knows taken out, a
+/// binary file that holds one left out, and named in the prompt as quoted data.
+#[test]
+fn attachments_reach_the_session_in_its_room() {
+    let (_folder, obid) = obid("harness-attachments", true);
+    let dir = obid.home.join("attachments");
+    std::fs::create_dir_all(&dir).unwrap();
+    let png: Vec<u8> = [
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d,
+    ]
+    .into_iter()
+    .chain(0..=255u8)
+    .collect();
+    std::fs::write(dir.join("pic one.png"), &png).unwrap();
+    std::fs::write(dir.join("notes.txt"), format!("token {TOKEN} here\n")).unwrap();
+    let mut leak = vec![0xff, 0xfe, 0x00];
+    leak.extend(TOKEN.as_bytes());
+    std::fs::write(dir.join("leak.bin"), &leak).unwrap();
+    let attached: Vec<String> = ["pic one.png", "notes.txt", "leak.bin"]
+        .iter()
+        .map(|n| dir.join(n).to_string_lossy().into_owned())
+        .collect();
+    let answer = said(
+        &obid,
+        json!({"said": "FILES", "new": true, "attachments": attached}),
+    );
+    let text = answer.body["text"].as_str().unwrap();
+    let conversation = answer.body["conversation"].as_str().unwrap();
+    let turn = call(
+        &obid,
+        "GET",
+        &format!("/v1/conversation?id={conversation}"),
+        None,
+    )
+    .body[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        text,
+        format!("files: attachments/{turn}/notes.txt,attachments/{turn}/pic_one.png named=true"),
+        "{}",
+        answer.text
+    );
+    let copied = obid.home.join(format!(
+        "conversations/{conversation}/room/attachments/{turn}"
+    ));
+    assert_eq!(std::fs::read(copied.join("pic_one.png")).unwrap(), png);
+    let notes = std::fs::read_to_string(copied.join("notes.txt")).unwrap();
+    assert!(
+        notes.contains("[redacted") && !notes.contains(TOKEN),
+        "{notes}"
+    );
+    assert!(!copied.join("leak.bin").exists());
+}
+
+/// An attachment is untrusted input: a turn that gets one proposes the work it dispatches for the
+/// owner's Start, never starts it at once (P2).
+#[test]
+fn an_attachment_makes_the_turns_work_wait() {
+    let (_folder, obid) = obid("harness-attach-taint", true);
+    let dir = obid.home.join("attachments");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("pic.png"), b"not really a png").unwrap();
+    let attached = vec![dir.join("pic.png").to_string_lossy().into_owned()];
+    let dispatch = r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#;
+    let answer = said(
+        &obid,
+        json!({"said": dispatch, "new": true, "attachments": attached}),
+    );
+    assert_eq!(answer.body["jobs"], json!([]), "{}", answer.text);
+    assert!(
+        inbox(&obid).iter().any(|i| i["kind"] == "start"),
+        "a start item: {:?}",
+        inbox(&obid)
+    );
+    assert_eq!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .map_or(0, Vec::len),
+        0
+    );
+}
+
+/// An attachment larger than the cap is left out, not copied, and the prompt says so (P3).
+#[test]
+fn an_oversize_attachment_is_left_out() {
+    let (_folder, obid) = obid("harness-attach-big", true);
+    let dir = obid.home.join("attachments");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("small.txt"), b"ok").unwrap();
+    // A sparse file over the cap: its length is large, but it writes no real bytes.
+    let big = std::fs::File::create(dir.join("huge.bin")).unwrap();
+    big.set_len(26_000_000).unwrap();
+    drop(big);
+    let attached: Vec<String> = ["small.txt", "huge.bin"]
+        .iter()
+        .map(|n| dir.join(n).to_string_lossy().into_owned())
+        .collect();
+    let answer = said(
+        &obid,
+        json!({"said": "FILES", "new": true, "attachments": attached}),
+    );
+    let conversation = answer.body["conversation"].as_str().unwrap().to_owned();
+    let room = obid
+        .home
+        .join(format!("conversations/{conversation}/room/attachments"));
+    let turn = std::fs::read_dir(&room)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(turn.join("small.txt").is_file(), "the small file is copied");
+    assert!(!turn.join("huge.bin").exists(), "the big file isn't copied");
+    // The prompt the agent got names the small file and says the big one was left out.
+    let prompt = turns(&obid)[0]["prompt"].as_str().unwrap().to_owned();
+    assert!(prompt.contains("small.txt"), "{prompt}");
+    assert!(
+        prompt.contains("huge.bin") && prompt.contains("larger than"),
+        "{prompt}"
+    );
+}
+
+/// The owner's attachments are theirs, whatever their name: one called CLAUDE.md is copied before
+/// the room is scrubbed of planted instructions, and the scrub leaves attachments/ alone (R4).
+#[test]
+fn an_attachment_named_claude_md_survives_the_scrub() {
+    let (_folder, obid) = obid("harness-attach-claude-md", true);
+    let dir = obid.home.join("attachments");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("CLAUDE.md"), b"the owner's own notes").unwrap();
+    let attached = vec![dir.join("CLAUDE.md").to_string_lossy().into_owned()];
+    let answer = said(
+        &obid,
+        json!({"said": "FILES", "new": true, "attachments": attached}),
+    );
+    let text = answer.body["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("files: attachments/") && text.contains("/CLAUDE.md named=true"),
+        "{}",
+        answer.text
+    );
+}

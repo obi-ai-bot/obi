@@ -48,6 +48,8 @@ pub const NO_ACCOUNT: &str = "no Claude Code account is signed in for conversati
 pub const FAILED_TWICE: &str = "its agent session failed twice";
 /// The most earlier turns a new session is handed, quoted.
 const EARLIER: usize = 20;
+/// The largest attachment copied into the room, in bytes (P3): a larger one is left out.
+const ATTACHMENT_CAP: u64 = 25_000_000;
 
 /// A conversation turn under way in its session: what Oby's tools act for.
 pub struct Session {
@@ -298,9 +300,13 @@ impl Place {
 
 /// Removes every `CLAUDE.md` and `CLAUDE.local.md` anywhere under `root` (a nested one Claude Code
 /// would load), never descending through a symbolic link, and never into `repos/` (read-only, and
-/// a repository may keep its own). At most a few thousand entries.
+/// a repository may keep its own) nor `attachments/` (the owner's own files). At most a few
+/// thousand entries.
 fn remove_nested_claude_md(root: &Path) {
     let repos = root.join("repos");
+    // The owner's attachments are theirs, whatever their names (R4): copied before the scrub, never
+    // removed by it. `--restricted` keeps Claude Code from auto-loading a CLAUDE.md anywhere anyway.
+    let attachments = root.join("attachments");
     let mut stack = vec![root.to_path_buf()];
     let mut seen = 0;
     while let Some(dir) = stack.pop() {
@@ -318,7 +324,7 @@ fn remove_nested_claude_md(root: &Path) {
                 continue;
             };
             if kind.is_dir() {
-                if path != repos {
+                if path != repos && path != attachments {
                     stack.push(path);
                 }
             } else if matches!(
@@ -514,8 +520,25 @@ async fn attempts(
         .map_err(|e| format!("the session's MCP configuration couldn't be written: {e}"))?;
     // What reaches the agent has the vault's secrets taken out; a vault that can't be read sends
     // nothing.
-    let words = crate::vault::for_agent(said.trim())?;
-    let first = crate::vault::for_agent(&first_prompt(said.trim(), given))?;
+    // The files the owner attached, in the room, named before their words (quoted).
+    let attached = attach(
+        shared,
+        place,
+        &control.turn,
+        &session.attachments,
+        &session.nonce,
+    )?;
+    // The owner's attachments are untrusted input: a turn with any taints, so work it dispatches
+    // waits for the owner (P2, #374).
+    if !session.attachments.is_empty() {
+        session.taint();
+    }
+    let with = |prompt: String| match &attached {
+        Some(names) => format!("{names}\n\n{prompt}"),
+        None => prompt,
+    };
+    let words = crate::vault::for_agent(&with(said.trim().to_owned()))?;
+    let first = crate::vault::for_agent(&with(first_prompt(said.trim(), given)))?;
     let mut failures = vec![];
     for attempt in 1..=2 {
         let limit = deadline.saturating_duration_since(Instant::now());
@@ -615,6 +638,114 @@ async fn attempts(
         crate::secrets::known().redact(&failures.join("; "))
     );
     Err(FAILED_TWICE.into())
+}
+
+/// Copies the turn's attachments (already checked to be in obid's attachments folder) into the
+/// room as `attachments/<turn>/<name>`, as a job's are copied into its inputs: names cleaned, text
+/// with every secret obid knows taken out, a binary file that holds one left out. Written without
+/// following a link. What the prompt says of them, the names quoted, or none with no attachment.
+fn attach(
+    shared: &Shared,
+    place: &Place,
+    turn: &str,
+    paths: &[String],
+    nonce: &str,
+) -> Result<Option<String>, String> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    // The folders are made fresh under the room (never through a link one run left in place), and
+    // each file is written no-follow into its parent ([`crate::jobs::write_login`], O_NOFOLLOW +
+    // O_EXCL); one turn per conversation runs at a time (N9), so nothing swaps a folder under it
+    // (P1).
+    let folder = place.room.join("attachments");
+    let dir = folder.join(turn);
+    for dir in [&folder, &dir] {
+        crate::jobs::not_a_link(dir)?;
+        crate::store::make_private_dir(dir)
+            .map_err(|e| format!("the room's attachments folder couldn't be made: {e}"))?;
+    }
+    let allowed = shared.config.home.join("attachments");
+    let root = allowed.canonicalize().unwrap_or(allowed);
+    let secrets = crate::secrets::known();
+    let mut named = vec![];
+    let mut left_out = vec![];
+    let mut too_big = vec![];
+    for path in paths {
+        let Ok(source) = std::path::Path::new(path).canonicalize() else {
+            continue;
+        };
+        if !source.starts_with(&root) || !source.is_file() {
+            continue;
+        }
+        let mut name = clean(&source.file_name().unwrap_or_default().to_string_lossy());
+        while named.contains(&format!("attachments/{turn}/{name}")) {
+            name = format!("1-{name}");
+        }
+        // A cap per file, so one attachment can't fill the room or a turn (P3).
+        if std::fs::metadata(&source).map(|m| m.len()).unwrap_or(0) > ATTACHMENT_CAP {
+            too_big.push(name);
+            continue;
+        }
+        let data =
+            std::fs::read(&source).map_err(|e| format!("an attachment couldn't be read: {e}"))?;
+        let data = match String::from_utf8(data) {
+            Ok(text) => secrets.redact(&text).into_bytes(),
+            Err(binary) => {
+                let data = binary.into_bytes();
+                let lossy = String::from_utf8_lossy(&data);
+                if secrets.redact(&lossy) != lossy {
+                    left_out.push(name);
+                    continue;
+                }
+                data
+            }
+        };
+        crate::jobs::write_login(&dir.join(&name), &data)
+            .map_err(|e| format!("an attachment couldn't be copied into the room: {e}"))?;
+        named.push(format!("attachments/{turn}/{name}"));
+    }
+    let mut list = named.clone();
+    list.extend(
+        left_out
+            .iter()
+            .map(|n| format!("(left out: {n}, it holds a secret)")),
+    );
+    list.extend(too_big.iter().map(|n| {
+        format!(
+            "(left out: {n}, it is larger than {} MB)",
+            ATTACHMENT_CAP / 1_000_000
+        )
+    }));
+    if list.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "The owner attached files to these words; they're in your room, named below. Read them (Read shows images and PDFs).\n{}\n{}",
+        super::briefing::fence_rule(nonce, "the names of the files the owner attached"),
+        super::briefing::fence(nonce, &secrets.redact(&list.join("\n")))
+    )))
+}
+
+/// A file name the room can hold: letters, digits, `.`, `_` and `-`, anything else `_`, no
+/// leading dot, at most 100 characters.
+fn clean(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let cleaned: String = cleaned.trim_start_matches('.').chars().take(100).collect();
+    if cleaned.is_empty() {
+        "attachment".into()
+    } else {
+        cleaned
+    }
 }
 
 /// The first prompt of a session: the conversation so far, quoted, before the owner's words.
@@ -1189,6 +1320,16 @@ mod tests {
         assert_eq!(plain.push("Hello th", &secrets), "Hello ");
         assert_eq!(plain.push("ere.", &secrets), "");
         assert_eq!(plain.finish(&secrets), "there.");
+    }
+
+    #[test]
+    fn attachment_names_are_cleaned() {
+        assert_eq!(clean("pic one.png"), "pic_one.png");
+        assert_eq!(clean("../../etc/passwd"), "_.._etc_passwd");
+        assert_eq!(clean(".hidden"), "hidden");
+        assert_eq!(clean("résumé.pdf"), "r_sum_.pdf");
+        assert_eq!(clean("..."), "attachment");
+        assert_eq!(clean(&"a".repeat(300)).len(), 100);
     }
 
     #[test]
