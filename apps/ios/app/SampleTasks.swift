@@ -23,5 +23,24 @@ enum SampleTasks {
         ]
         return list.compactMap { try? Runner.decoder.decode(Job.self, from: Data($0.utf8)) }
     }
+
+    /// With `-ObySampleTalk <seconds>` too: the Oby thread opens with a question of yours, and that
+    /// many seconds after launch Oby's answer comes, a word at a time, for a screenshot of it coming in.
+    @MainActor static func talk(_ phone: Phone) {
+        let delay = UserDefaults.standard.double(forKey: "ObySampleTalk")
+        guard delay > 0 else { return }
+        let model = phone.conversation
+        phone.tab = .chat
+        phone.chatPath = [.conversation(nil)]
+        model.apply(Turn(id: "sample-ask", who: .user, text: "Where's the login screen task at?"))
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(delay))
+            model.apply(Turn(id: "sample-answer", who: .oby, text: """
+                Claude is on it in deskree-inc/oby: the empty state now says what to do next, and it's running \
+                `swift test` before the review. Two of five stages are done, and nothing needs you yet. I'll tell \
+                you when it opens the pull request, or sooner if it gets stuck on a check.
+                """, jobs: ["sample-run"]))
+        }
+    }
 }
 #endif

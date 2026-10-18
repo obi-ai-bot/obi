@@ -62,7 +62,7 @@ struct ConversationsScreen: View {
         if let conversations = found ?? phone.conversations {
             TimelineView(.periodic(from: .now, by: 60)) { context in
                 List {
-                    let sections = ConversationList.sections(conversations)
+                    let sections = ConversationOrder.sections(conversations)
                     if conversations.isEmpty {
                         Text(found == nil ? "No conversations yet" : "Nothing matches “\(query)”")
                             .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).listRowBackground(Color.clear)
@@ -118,7 +118,7 @@ struct ConversationsScreen: View {
                 Text(title).font(Tokens.font(Tokens.textBase, .medium)).foregroundStyle(Tokens.ink).lineLimit(1)
                 Spacer(minLength: 8)
                 if let at, at > .distantPast {
-                    Text(ConversationList.ago(at, now: now)).font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(Tokens.muted)
+                    Text(ConversationOrder.ago(at, now: now)).font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(Tokens.muted)
                 }
             }
             if let last, !last.isEmpty {
@@ -351,7 +351,7 @@ private struct MessageRow: View {
                     .font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.ink)
                 }
             } else {
-                if !turn.text.isEmpty { SaidText(text: turn.text, color: Tokens.item) }
+                if !turn.text.isEmpty { ArrivingSaid(text: turn.text, color: Tokens.item, since: phone.conversation.arrived[turn.id]) }
                 if let markdown = ConversationModel.markdownDetails(for: turn) {
                     Text(markdown).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).lineSpacing(6).textSelection(.enabled)
                 }

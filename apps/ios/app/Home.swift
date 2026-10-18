@@ -328,7 +328,7 @@ struct ArchivedPage: View {
                             Text(TaskMeta.line(job, account: phone.accountName(job.account))).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).lineLimit(1)
                         }
                         Spacer(minLength: 8)
-                        Text(ConversationList.ago(job.finished ?? job.created)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                        Text(ConversationOrder.ago(job.finished ?? job.created)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
                     }
                     .frame(minHeight: 44)
                 }

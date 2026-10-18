@@ -1,8 +1,8 @@
 import Foundation
 
 /// One page open over Home (Sangam's Home.tsx `Step`): a kind of work's cards, a task's page, or
-/// the conversation with Oby. The Mac talks to one runner, which keeps one conversation, so there's
-/// no conversation list and no Obysphere until the Mac runs on obid.
+/// the conversation with Oby. The Swift runner keeps one conversation, so the conversation list (#493)
+/// shows only when the runner on this Mac is obid; there's no Obysphere yet.
 nonisolated enum WindowStep: Hashable, Sendable {
     case group(WorkType)
     case job(id: String, local: Bool)
