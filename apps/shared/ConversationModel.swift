@@ -354,6 +354,16 @@ final class ConversationModel {
             ?? ordered.last(where: { $0.date <= created })?.id
     }
 
+    /// Whether the decision of `job` belongs in the conversation shown (Sangam: a decision lives
+    /// with its task, mac-design C3): with obid's conversations (`served`), only one whose job a
+    /// turn here started or obid says `startedIn` this one, and one with no job, which nothing
+    /// else shows yet (C9). A runner with one thread shows every decision in it.
+    nonisolated static func shows(decisionOf job: String, startedIn: String?, served: Bool, shown: String?, turns: [Turn]) -> Bool {
+        guard served, !job.isEmpty else { return true }
+        if turns.contains(where: { ($0.jobs ?? []).contains(job) }) { return true }
+        return shown != nil && startedIn == shown
+    }
+
     /// Time groups are independent of sender/bubble groups: a reply doesn't start a new time line.
     nonisolated static func showsTime(_ turn: Turn, after previous: Turn?, calendar: Calendar = .current) -> Bool {
         guard let previous else { return true }
