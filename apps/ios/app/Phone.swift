@@ -300,7 +300,7 @@ final class Phone {
         offlineQueue.bindUnscopedEntries(to: offlineQueueTarget)
         restoreQueuedMessages(for: offlineQueueTarget)
         #if DEBUG
-        if SampleTasks.on { jobs = SampleTasks.jobs; loaded = true }
+        if SampleTasks.on { jobs = SampleTasks.jobs; loaded = true; SampleTasks.talk(self) }
         #endif
     }
 

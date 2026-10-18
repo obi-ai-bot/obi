@@ -351,7 +351,7 @@ private struct MessageRow: View {
                     .font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.ink)
                 }
             } else {
-                if !turn.text.isEmpty { SaidText(text: turn.text, color: Tokens.item) }
+                if !turn.text.isEmpty { ArrivingSaid(text: turn.text, color: Tokens.item, since: phone.conversation.arrived[turn.id]) }
                 if let markdown = ConversationModel.markdownDetails(for: turn) {
                     Text(markdown).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).lineSpacing(6).textSelection(.enabled)
                 }

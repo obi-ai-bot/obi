@@ -165,4 +165,57 @@ struct ChatTests {
         model.apply(turn(80, who: .oby))
         #expect(model.runnerTurns.last?.id == "t80")
     }
+    /// Oby's words come in a word at a time (Sangam's stream.ts): one every 35 ms, each fading in
+    /// over 240 ms, as it is now; the whole answer once the last word is in.
+    @Test func obysWordsComeInAWordAtATime() {
+        let text = "Done. Three files changed."
+        #expect(WordReveal.shown(text, after: 0).text.isEmpty)
+        let first = WordReveal.shown(text, after: 0.06)
+        #expect(first.text == "Done. " && first.fading.count == 1 && abs(first.fading[0] - 0.025 / 0.24) < 0.001)
+        let three = WordReveal.shown(text, after: 0.105)
+        #expect(three.text == "Done. Three files " && three.fading.count == 3)
+        // Each word fades in on its own: the newest is the faintest.
+        #expect(three.fading == three.fading.sorted(by: >))
+        let all = WordReveal.shown(text, after: WordReveal.duration(text))
+        #expect(all.text == text && all.fading.isEmpty)
+        #expect(abs(WordReveal.duration(text) - (4 * 0.035 + 0.24)) < 0.0001)
+        // Streaming in: a word that came late starts in when it came, the next 35 ms after it.
+        let came: [TimeInterval] = [0, 0, 1, 1]
+        #expect(WordReveal.shown(text, came: came, after: 0.5).text == "Done. Three ")
+        let late = WordReveal.shown(text, came: came, after: 1.12)
+        #expect(late.text == text && late.fading.count == 2 && abs(late.fading[0] - 0.5) < 0.01)
+        #expect(abs(WordReveal.duration(text, came: came) - (1.035 + 0.24)) < 0.0001)
+    }
+
+    /// Only an answer that comes while the thread is open comes in word by word: a turn event, or
+    /// the page read right after it (a new conversation's first answer); never history read later.
+    @Test func onlyAnswersThatJustCameAreRevealed() async throws {
+        let clock = now.addingTimeInterval(2000)
+        let old = (0..<3).map { turn($0, who: .oby) }
+        let runner = FakeRunner(old)
+        let model = ConversationModel(page: runner.page)
+        model.time = { clock }
+        await model.reload()
+        #expect(model.arrived.isEmpty)
+        // Its answer as a turn event: from now.
+        let answer = Turn(id: "a1", date: clock.addingTimeInterval(-1), who: .oby, text: "On it.")
+        model.apply(answer)
+        #expect(model.arrived["a1"] == clock)
+        // The same turn again (a job joined it) keeps when it came; yours never come word by word.
+        model.time = { clock.addingTimeInterval(5) }
+        model.apply(Turn(id: "a1", date: answer.date, who: .oby, text: "On it.", jobs: ["j1"]))
+        model.apply(Turn(id: "u1", date: clock, who: .user, text: "Thanks"))
+        #expect(model.arrived == ["a1": clock])
+        // A new conversation's first answer, read with its page just after it was said.
+        runner.turns = old + [Turn(id: "a2", date: clock, who: .oby, text: "Started it.")]
+        await model.reload()
+        #expect(model.arrived["a2"] == clock.addingTimeInterval(5))
+        // History: older pages, and a reload of answers long said, don't.
+        let history = FakeRunner((0..<120).map { turn($0, who: .oby) })
+        let later = ConversationModel(page: history.page)
+        later.time = { clock }
+        await later.reload()
+        await later.loadOlder()
+        #expect(later.arrived.isEmpty)
+    }
 }
