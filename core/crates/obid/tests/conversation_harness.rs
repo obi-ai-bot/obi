@@ -436,9 +436,14 @@ fn the_plan_loop_answers_when_the_session_cant_run() {
 fn work_planned_after_the_web_waits_for_the_owners_start() {
     let (_folder, obid) = obid("harness-web", true);
     let dispatch = r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#;
-    for (n, words) in [format!("WEB {dispatch}"), format!("READREPO {dispatch}")]
-        .iter()
-        .enumerate()
+    // The web, a read of repos/, and a search with no path (the whole room, repos/ in it: R1).
+    for (n, words) in [
+        format!("WEB {dispatch}"),
+        format!("READREPO {dispatch}"),
+        format!("GREP {dispatch}"),
+    ]
+    .iter()
+    .enumerate()
     {
         let answer = said(&obid, json!({"said": words, "new": true}));
         assert_eq!(answer.body["jobs"], json!([]), "{}", answer.text);
@@ -675,4 +680,71 @@ fn the_toolsearch_step_is_hidden() {
             );
         }
     }
+}
+
+/// A turn that was replaced while it waited for the one before it (one turn per conversation at a
+/// time) exits as soon as it gets its turn, without starting: no `thinking` for it, and the latest
+/// answers. Event-driven: the third words go in as soon as the second's turn is seen, which is when
+/// the first is cancelled; the first then holds the lock for at least obid's 400 ms stop grace, so
+/// the second is still waiting when the third replaces it.
+#[test]
+fn a_turn_replaced_while_it_waits_never_starts() {
+    let (_folder, obid) = obid("harness-cancel-waiting", true);
+    let first = said(&obid, json!({"said": "SAY hi", "new": true}));
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    let events = follow_events(&obid);
+    let mut seen: Vec<(String, Value)> = vec![];
+    let mut until = |what: &str, done: &dyn Fn(&str, &Value) -> bool| loop {
+        let (name, data) = events
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap_or_else(|_| panic!("no {what}: {seen:?}"));
+        let hit = done(&name, &data);
+        seen.push((name, data));
+        if hit {
+            return;
+        }
+    };
+    std::thread::scope(|scope| {
+        let slow = scope.spawn(|| {
+            said(
+                &obid,
+                json!({"said": "LINGER 5000", "conversation": conversation}),
+            )
+        });
+        // The first is running its agent.
+        until("the first's agent", &|n, d| {
+            n == "thinking" && d["state"] == "running"
+        });
+        let waiting = scope.spawn(|| {
+            said(
+                &obid,
+                json!({"said": "SAY second", "conversation": conversation}),
+            )
+        });
+        // The second began: the first is cancelled now, and still holds the lock.
+        until("the second's turn", &|n, d| {
+            n == "turn" && d["who"] == "user" && d["text"] == "SAY second"
+        });
+        let latest = said(
+            &obid,
+            json!({"said": "SAY third", "conversation": conversation}),
+        );
+        assert_eq!(latest.body["text"], "third", "{}", latest.text);
+        let _ = slow.join();
+        let _ = waiting.join();
+    });
+    until("the third's answer", &|n, d| {
+        n == "turn" && d["who"] == "oby" && d["text"] == "third"
+    });
+    let second = seen
+        .iter()
+        .find(|(n, d)| n == "turn" && d["who"] == "user" && d["text"] == "SAY second")
+        .map(|(_, d)| d["id"].clone())
+        .unwrap();
+    assert!(
+        !seen
+            .iter()
+            .any(|(n, d)| (n == "thinking" || n == "reply") && d["turn"] == second),
+        "the replaced turn started: {seen:?}"
+    );
 }

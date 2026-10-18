@@ -108,7 +108,7 @@ async fn call(
         "oby_job" => {
             let One { id } = parse(args)?;
             let job = shared.jobs.get(&id).ok_or("There's no job with that id.")?;
-            session.web.store(true, Ordering::SeqCst);
+            session.taint();
             Ok(quoted(
                 session,
                 "the job's agent",
@@ -128,7 +128,7 @@ async fn call(
             act(shared, session, plan, &session.said).await
         }
         "oby_inbox" => {
-            session.web.store(true, Ordering::SeqCst);
+            session.taint();
             Ok(inbox(shared, session))
         }
         "oby_answer" => {
@@ -157,7 +157,7 @@ async fn call(
                 None,
                 super::find::CONVERSATIONS,
             );
-            session.web.store(true, Ordering::SeqCst);
+            session.taint();
             if found.is_empty() {
                 return Ok(format!(
                     "No other conversation says “{}”.",

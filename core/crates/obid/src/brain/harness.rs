@@ -67,6 +67,36 @@ pub struct Session {
     /// How many times this turn's tools started a job, and told one something.
     pub dispatched: AtomicUsize,
     pub told: AtomicUsize,
+    /// Where the session's [`Kept`] is (`session.json`), and the account it's on.
+    pub kept: PathBuf,
+    pub account: String,
+}
+
+impl Session {
+    /// Marks the turn as having read something untrusted, and writes the mark to `session.json`
+    /// at once, so a crash mid-turn doesn't lose it.
+    pub fn taint(&self) {
+        if !self.web.swap(true, Ordering::SeqCst) {
+            self.keep(None);
+        }
+    }
+
+    /// Writes the session's [`Kept`]: `id` when the run just named its session, else the one kept
+    /// (nothing when there's none yet: a new session's id comes with its `init` line).
+    fn keep(&self, id: Option<&str>) {
+        let id = id.map(str::to_owned).or_else(|| {
+            let kept: Kept = serde_json::from_slice(&std::fs::read(&self.kept).ok()?).ok()?;
+            (kept.account == self.account).then_some(kept.session)
+        });
+        let Some(session) = id else { return };
+        let kept = Kept {
+            session,
+            account: self.account.clone(),
+            web: self.web.load(Ordering::SeqCst),
+        };
+        let _ =
+            crate::store::write_private(&self.kept, &serde_json::to_vec(&kept).unwrap_or_default());
+    }
 }
 
 /// The sessions with a turn under way, by their token.
@@ -374,7 +404,11 @@ async fn session(
     // scrubs and relaunches in the same room (N9).
     let busy = shared.harness.busy(&control.conversation);
     let _held = busy.lock().await;
-    checkouts(shared, &place).await;
+    // Replaced or stopped while it waited for the one before: nothing more for it.
+    if !control.live() {
+        return Err("the turn was cancelled before it started".into());
+    }
+    checkouts(shared, &place, control).await;
     super::thinking(shared, control, 1, "Thinking", State::Running);
     let resumed = kept(&place, &account.id);
     let session = Arc::new(Session {
@@ -387,6 +421,8 @@ async fn session(
         web: AtomicBool::new(resumed.as_ref().is_some_and(|k| k.web)),
         dispatched: AtomicUsize::new(0),
         told: AtomicUsize::new(0),
+        kept: place.session.clone(),
+        account: account.id.clone(),
     });
     let token = shared.harness.open(session.clone());
     // Even on a panic, the token stops being valid and the login copy is taken out.
@@ -683,7 +719,7 @@ async fn one(
                 // Untrusted content read this turn (the web, repo code) taints it: work it
                 // dispatches then waits for the owner (N1).
                 if taints(&name, &input, &bounds, &place.repos) {
-                    session.web.store(true, Ordering::SeqCst);
+                    session.taint();
                 }
                 let index = steps.len() + 1;
                 let line = (
@@ -701,11 +737,15 @@ async fn one(
                     step(shared, control, line, state);
                 }
             }
-            Event::Session(_) | Event::Step(_) | Event::Denied(_) => {}
+            // The session's id, kept as soon as it's named (crash safety, with the mark).
+            Event::Session(id) => session.keep(Some(&id)),
+            Event::Step(_) | Event::Denied(_) => {}
         }
     };
     let decide = |tool: &str, input: &Value| {
-        Ruling::Now(rule(tool, input, &bounds, &place.repos, &session.web))
+        Ruling::Now(rule(tool, input, &bounds, &place.repos, &|| {
+            session.taint()
+        }))
     };
     let ran = agent::run_turn(launch, prompt, limit, stop, decide, on_event).await;
     watching.abort();
@@ -788,21 +828,48 @@ fn placed(text: &str, homes: &[(String, &'static str)]) -> String {
 
 /// Whether the tool call makes the turn consume something untrusted: a web search or fetch, or a
 /// read of the repositories' checkouts (their code is data, not the owner's words, #374, N1).
-fn taints(tool: &str, input: &Value, _bounds: &Bounds, repos: &Path) -> bool {
-    if matches!(tool, "WebFetch" | "WebSearch") {
+fn taints(tool: &str, input: &Value, bounds: &Bounds, repos: &Path) -> bool {
+    // The web, and a helper (a sub-agent reads and searches as it likes, R2).
+    if matches!(tool, "WebFetch" | "WebSearch" | "Task" | "Agent") {
         return true;
     }
-    if matches!(tool, "Read" | "Grep" | "Glob" | "LS" | "NotebookRead") {
-        let real = crate::policy::real_path(repos).unwrap_or_else(|| repos.to_path_buf());
-        let call = Call::new(tool, input);
-        return call
-            .paths
-            .iter()
-            .chain(&call.reads)
-            .filter_map(|p| crate::policy::real_path(Path::new(p)))
-            .any(|p| p.starts_with(&real));
+    if !matches!(tool, "Read" | "Grep" | "Glob" | "LS" | "NotebookRead") {
+        return false;
     }
-    false
+    let text = |key: &str| {
+        input
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|p| !p.is_empty())
+    };
+    let mut places: Vec<&str> = ["file_path", "notebook_path", "path"]
+        .into_iter()
+        .filter_map(text)
+        .collect();
+    // An absolute glob names its own place; a relative one is under the path, or the room.
+    if tool == "Glob"
+        && let Some(pattern) = text("pattern").filter(|p| p.starts_with('/'))
+    {
+        places.push(pattern);
+    }
+    // No path is the working folder: the whole room, repos/ in it (R1).
+    let places: Vec<PathBuf> = if places.is_empty() {
+        vec![bounds.worktree.clone()]
+    } else {
+        places
+            .into_iter()
+            .map(|p| match Path::new(p) {
+                p if p.is_absolute() => p.to_path_buf(),
+                p => bounds.worktree.join(p),
+            })
+            .collect()
+    };
+    let repos = crate::policy::real_path(repos).unwrap_or_else(|| repos.to_path_buf());
+    places.iter().any(|place| {
+        let place = crate::policy::real_path(place).unwrap_or_else(|| place.clone());
+        // Inside repos/, or a folder that holds it (a search of the room reads repos/ too).
+        place.starts_with(&repos) || repos.starts_with(&place)
+    })
 }
 
 /// A `step` event for one tool call of the session.
@@ -825,7 +892,7 @@ fn step(
 /// obid's answer to one of the session's permission prompts, by Sandbox mode's rules: inside the
 /// room, yes; the web, yes; Oby's own tools, yes. Secrets, anything outside the room, a write in
 /// the repositories' checkouts, another MCP server's tool: no, saying why. Never the owner's call.
-fn rule(tool: &str, input: &Value, bounds: &Bounds, repos: &Path, web: &AtomicBool) -> Answer {
+fn rule(tool: &str, input: &Value, bounds: &Bounds, repos: &Path, taint: &dyn Fn()) -> Answer {
     // Oby's own MCP server: each of its tools checks what it's asked by obid's rules.
     if tool.starts_with("mcp__oby__") {
         return Answer::Allow;
@@ -848,7 +915,14 @@ fn rule(tool: &str, input: &Value, bounds: &Bounds, repos: &Path, web: &AtomicBo
     // building anything is a job (oby_dispatch).
     if matches!(
         tool,
-        "Bash" | "BashOutput" | "KillShell" | "KillBash" | "PowerShell" | "ExecCommand"
+        "Bash"
+            | "BashOutput"
+            | "KillShell"
+            | "KillBash"
+            | "PowerShell"
+            | "ExecCommand"
+            | "REPL"
+            | "JavaScript"
     ) {
         return Answer::Deny(
             "A conversation can't run commands (there is no terminal). Running, building or testing anything is work for a job: start one with oby_dispatch.".into(),
@@ -860,7 +934,7 @@ fn rule(tool: &str, input: &Value, bounds: &Bounds, repos: &Path, web: &AtomicBo
         permissions::Verdict::Ask => match permissions::reach(&call, bounds) {
             // Web search and fetch are part of talking, and taint the turn.
             Some(Reach::Network) => {
-                web.store(true, Ordering::SeqCst);
+                taint();
                 Answer::Allow
             }
             reach => Answer::Deny(format!(
@@ -946,13 +1020,17 @@ fn step_text(name: &str, input: &Value) -> String {
 /// The room's read-only checkouts, each configured repository at its default branch as obid's
 /// clone has it (`refs/remotes/origin/<branch>`; fetched once when there's no clone yet), made
 /// again when the branch moved. A repository that can't be checked out is left out, and logged.
-async fn checkouts(shared: &Shared, place: &Place) {
+async fn checkouts(shared: &Shared, place: &Place, control: &Control) {
     let marks = place.folder.join("repos.json");
     let mut kept: BTreeMap<String, String> = std::fs::read(&marks)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
     for repo in &shared.config.repos {
+        // A cancelled turn doesn't keep extracting (a big tree takes time).
+        if !control.live() {
+            break;
+        }
         if let Err(why) = checkout(shared, place, repo, &mut kept).await {
             tracing::warn!("conversation room: {} isn't checked out: {why}", repo.repo);
         }
@@ -1131,6 +1209,37 @@ mod tests {
         );
     }
 
+    /// The mark goes to `session.json` as soon as it's set, before the run ends (crash safety).
+    #[test]
+    fn a_taint_is_kept_at_once() {
+        let home = std::env::temp_dir().join(format!("obid-taint-kept-{}", std::process::id()));
+        let place = Place::of(&home, "c1");
+        std::fs::create_dir_all(&place.folder).unwrap();
+        let control = super::super::turn::Turns::default().begin("t1", "c1");
+        let session = Session {
+            conversation: "c1".into(),
+            said: String::new(),
+            attachments: vec![],
+            control,
+            jobs: Mutex::new(vec![]),
+            nonce: "n".into(),
+            web: AtomicBool::new(false),
+            dispatched: AtomicUsize::new(0),
+            told: AtomicUsize::new(0),
+            kept: place.session.clone(),
+            account: "a".into(),
+        };
+        // The run names its session: kept at once, unmarked.
+        session.keep(Some("c0000000-0000-4000-8000-000000000001"));
+        assert!(!kept(&place, "a").unwrap().web);
+        // Something untrusted is read: the mark is on disk now, mid-run.
+        session.taint();
+        let got = kept(&place, "a").unwrap();
+        assert!(got.web);
+        assert_eq!(got.session, "c0000000-0000-4000-8000-000000000001");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// Only a session id Claude Code made is resumed: a UUID, never an argument of another kind.
     #[test]
     fn only_a_uuid_is_resumed() {
@@ -1175,7 +1284,8 @@ mod tests {
             logins: vec![],
         };
         let web = AtomicBool::new(false);
-        let decide = |tool: &str, input: Value| rule(tool, &input, &bounds, &place.repos, &web);
+        let taint = || web.store(true, Ordering::SeqCst);
+        let decide = |tool: &str, input: Value| rule(tool, &input, &bounds, &place.repos, &taint);
         // Every code-runner is refused, even one that only reads inside the room.
         for command in ["curl -s https://example.com", "node x.js", "cat README.md"] {
             assert!(
@@ -1186,7 +1296,13 @@ mod tests {
                 "{command}"
             );
         }
-        assert!(matches!(decide("PowerShell", json!({})), Answer::Deny(_)));
+        // The backstop refuses them by name, saying running is a job's (not only as an unknown tool).
+        for runner in ["Bash", "PowerShell", "REPL", "JavaScript"] {
+            match decide(runner, json!({})) {
+                Answer::Deny(why) => assert!(why.contains("can't run commands"), "{runner}: {why}"),
+                other => panic!("{runner}: {other:?}"),
+            }
+        }
         assert!(!web.load(Ordering::SeqCst));
         // The web is part of talking, and marks the turn.
         assert_eq!(
@@ -1216,6 +1332,61 @@ mod tests {
         };
         assert!(read(place.repos.join("o/n/f.rs")));
         assert!(!read(place.room.join("notes.md")));
+        // A relative path is the room's (R1).
+        assert!(taints(
+            "Read",
+            &json!({"file_path": "repos/o/n/f.rs"}),
+            &bounds,
+            &place.repos
+        ));
+        assert!(!taints(
+            "Read",
+            &json!({"file_path": "notes.md"}),
+            &bounds,
+            &place.repos
+        ));
+        // A search with no path searches the whole room, repos/ in it (R1).
+        assert!(taints(
+            "Grep",
+            &json!({"pattern": "fn"}),
+            &bounds,
+            &place.repos
+        ));
+        assert!(taints(
+            "Glob",
+            &json!({"pattern": "**/*.rs"}),
+            &bounds,
+            &place.repos
+        ));
+        assert!(taints("LS", &json!({}), &bounds, &place.repos));
+        assert!(taints(
+            "Glob",
+            &json!({"pattern": "*.rs", "path": "repos/o"}),
+            &bounds,
+            &place.repos
+        ));
+        assert!(taints(
+            "Grep",
+            &json!({"pattern": "fn", "path": "."}),
+            &bounds,
+            &place.repos
+        ));
+        // A search of a room folder that doesn't hold repos/ doesn't.
+        std::fs::create_dir_all(place.room.join("notes")).unwrap();
+        assert!(!taints(
+            "Grep",
+            &json!({"pattern": "fn", "path": "notes"}),
+            &bounds,
+            &place.repos
+        ));
+        // A helper reads as it likes (R2).
+        assert!(taints(
+            "Task",
+            &json!({"description": "look"}),
+            &bounds,
+            &place.repos
+        ));
+        assert!(taints("Agent", &json!({}), &bounds, &place.repos));
         assert!(taints(
             "WebSearch",
             &json!({"query": "x"}),
@@ -1249,6 +1420,8 @@ mod tests {
             web: AtomicBool::new(false),
             dispatched: AtomicUsize::new(0),
             told: AtomicUsize::new(0),
+            kept: PathBuf::from("/nowhere/session.json"),
+            account: "a".into(),
         }));
         assert!(sessions.session("conversation-c1", &token).is_some());
         assert!(sessions.session("conversation-c2", &token).is_none());
