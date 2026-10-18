@@ -83,6 +83,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var conversation: String?
     /// What it made to be looked at (obid only, its `.obi/artifacts/`), or nil.
     var artifacts: [ArtifactRef]?
+    /// The job this one follows up (obid only): the owner told that one something after it ended,
+    /// and its page lists this one (Sangam's design). Nil otherwise.
+    var followUpOf: String?
 
     /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
     /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
@@ -112,7 +115,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
-             conversation, artifacts
+             conversation, artifacts, followUpOf
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
