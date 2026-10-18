@@ -792,6 +792,39 @@ fn a_base_that_cant_be_fetched_sends_nothing() {
     assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
 }
 
+/// Jobs on one repository that end together all publish (#628): one keeping its commits in the
+/// clone never breaks another's fetch of the base, and every branch reaches the remote.
+#[test]
+fn jobs_ending_together_on_one_clone_all_publish() {
+    let folder = Folder::new("publish-together");
+    let bin = fake_gh(&folder.0);
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    let ids: Vec<String> = (0..4)
+        .map(|n| {
+            dispatch(
+                &obid,
+                json!({"repo": "obi-e2e/fixture-app", "kind": "build",
+                       "task": format!("SLOW: together-{n}.txt")}),
+            )
+        })
+        .collect();
+    for id in &ids {
+        let job = ended(&obid, id);
+        assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+        assert_eq!(job["publishError"], Value::Null, "{job}\n{}", obid.log());
+        assert_eq!(job["published"], PULL, "{job}");
+        let clone = obid.home.join("clones/obi-e2e/fixture-app");
+        let head = git(
+            &clone,
+            &["rev-parse", &format!("refs/heads/oby/build-{id}")],
+        );
+        assert_eq!(
+            remote_branch(&remote, &format!("oby/build-{id}")).as_deref(),
+            Some(head.as_str())
+        );
+    }
+}
+
 /// The made-up GitHub token the stand-in agent uses (`AUTHOR:`, `HEADER:`, `FOLDER`), put together
 /// here so this file holds none.
 fn made_up_token() -> String {
