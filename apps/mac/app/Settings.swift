@@ -308,7 +308,7 @@ struct RemoteAccessSettingsView: View {
 private struct ReserveLine: View {
     let snapshot: Usage.Snapshot
     let on: Bool
-    var lift: @MainActor (Bool) async throws -> Void
+    var lift: @MainActor @Sendable (Bool) async throws -> Void
     @State private var problem: String?
 
     var body: some View {
@@ -349,6 +349,7 @@ struct AccountsSettingsView: View {
     @State private var agent = "claude"
     @State private var name = ""
     @State private var payer = ""
+    @State private var removing: Account?
     @State private var problem: String?
 
     private var places: [AccountPlaces] { AccountPlaces.of(local: feed.local, runner: feed.runner != nil) }
@@ -364,7 +365,7 @@ struct AccountsSettingsView: View {
                     } else if state.tetrix == false {
                         Button("Sign In to Tetrix") { attempt { try store.signIn(state.account, tetrix: true) } }.buttonStyle(.set)
                     }
-                    Button("Remove", role: .destructive) { attempt { try store.remove(state.account) } }.buttonStyle(.set)
+                    Button("Remove", role: .destructive) { removing = state.account }.buttonStyle(.set)
                 }
             }
             addAccount
@@ -405,6 +406,15 @@ struct AccountsSettingsView: View {
             }
         }
         .task { await store.refresh() }
+        // Kept beyond Sangam's mock: removing deletes the account's settings folder and its login, so
+        // macOS's confirmation first.
+        .confirmationDialog("Remove \(removing?.name ?? "this account")?",
+                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            presenting: removing) { account in
+            Button("Remove", role: .destructive) { attempt { try store.remove(account) } }
+        } message: { account in
+            Text(account.home == nil ? "Its login stays in the tool's own settings." : "Oby deletes this account's settings folder, with its login. This can’t be undone.")
+        }
         // Back from signing in, in Terminal.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await store.refresh() }
@@ -428,7 +438,7 @@ struct AccountUsageRow<Buttons: View>: View {
     let state: AccountState
     /// Who pays for it: this Mac's accounts know; obid's don't say yet.
     var payer = ""
-    var lift: @MainActor (Bool) async throws -> Void
+    var lift: @MainActor @Sendable (Bool) async throws -> Void
     @ViewBuilder var buttons: Buttons
 
     var body: some View {
@@ -453,7 +463,7 @@ struct AccountUsageRow<Buttons: View>: View {
                             SetAbout(Usage.liftedText(until))
                         }
                         if usage.signedIn, usage.inReserve(at: now) {
-                            ReserveLine(snapshot: usage, on: usage.liftedUntil(at: now) != nil, lift: lift)
+                            ReserveLine(snapshot: usage, on: usage.liftedUntil(at: now) != nil) { try await lift($0) }
                         }
                         // A job of its hit the limit: no job goes to it until then.
                         if state.isFull(at: now), let until = state.fullUntil {
@@ -791,11 +801,14 @@ struct ModelsSettingsView: View {
     @State private var cursorModels: [CursorModel] = []
     /// What the runner offers, once it has answered.
     @State private var runnerOptions: ModelOptions?
+    /// Whether the runner serves its models: obid doesn't yet (no `/v1/settings/models` routes), and
+    /// then the page is this Mac's own models, as before.
+    @State private var runnerServesModels = true
     @State private var problem: String?
 
     var body: some View {
         // With obid on this Mac it runs every job: its models are the only ones (docs/mac-design.md C2).
-        if feed.local {
+        if feed.local && runnerServesModels {
             // In a stack that's always there: the sections are empty until the options arrive, and a
             // task on an empty view never runs.
             VStack(alignment: .leading, spacing: 0) {
@@ -854,8 +867,14 @@ struct ModelsSettingsView: View {
             runnerOptions = try await runner.modelOptions()
             problem = nil
         } catch {
-            problem = error.localizedDescription
+            runnerServesModels = Self.servesModels(after: error)
+            problem = runnerServesModels ? error.localizedDescription : nil
         }
+    }
+
+    /// A 404 says the runner has no models to set (obid today): nothing wrong to show.
+    nonisolated static func servesModels(after error: any Error) -> Bool {
+        (error as? RunnerError)?.status != 404
     }
 
     /// The account's models, plus the chosen one while the list loads (or if the plan dropped it).
