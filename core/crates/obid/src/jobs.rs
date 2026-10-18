@@ -5733,6 +5733,7 @@ fn owner_prompt(job: &Job) -> String {
     }
     lines.push("To show the user something to look at (a page, a document, a chart, an image, a PDF), put it in .obi/artifacts/: one file, or one folder with an index.html, per thing. obid shows each one when the job ends; keep secrets out, or it shows none of it.".into());
     lines.push("Run checks in the foreground, and never end a turn waiting on a background command: obid takes the end of your turn as the end of your work.".into());
+    lines.push("Change files with Edit or Write, never a script (sed -i, python -c, a heredoc into a file), and run commands from this worktree's root without cd, naming paths instead (`cargo test --manifest-path core/Cargo.toml`): obid can't see what a script writes or where a cd leads, so each one stops the job until the user says yes.".into());
     lines.push(
         "Finish with a short summary. Its first line is one sentence the user will see.".into(),
     );
@@ -6992,6 +6993,13 @@ mod tests {
         // AUTO_MERGE ref with the job's own object folder): agents spent a turn checking a commit
         // that had landed.
         assert!(prompt.contains("packed-refs.lock"), "{prompt}");
+        // Seen live (2026-10-18): python3 -c and sed -i edits, and `cd ../..` before cargo, each
+        // stopped a job for the owner's OK, since obid can't see what they reach.
+        assert!(
+            prompt.contains("with Edit or Write, never a script"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("without cd"), "{prompt}");
     }
 
     /// A follow-up starts from the first job's unmerged work: on its branch while its pull request
