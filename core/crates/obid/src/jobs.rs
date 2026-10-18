@@ -68,6 +68,10 @@ struct Boxed<'a> {
     frozen: Vec<PathBuf>,
     flags: Vec<OsString>,
     stderr: PathBuf,
+    /// It reads nothing of the machine's but the system's, its tools' and its own folders
+    /// (`Sandbox::wrap_reading_only_its_own`), and its account's folder is its own copy of the
+    /// login, never the account's shared one: a conversation's session.
+    confined: bool,
 }
 
 /// A job the owner describes whole (`POST /v1/jobs`), checked. A `start` or `confirm` inbox
@@ -2415,14 +2419,17 @@ impl Jobs {
             frozen: Vec::new(),
             flags,
             stderr: dir.join("stderr.log"),
+            confined: false,
         })
     }
 
     /// A conversation's agent session (crate::brain::harness), boxed like a job's agent: it
     /// writes only `room` (its working folder), but not `frozen` in it (the repositories'
-    /// checkouts), `temp` (its `HOME` and `TMPDIR`) and its account's login (`login` when the
-    /// account has no folder of its own); it reads those and its tools, and nothing else of obid's
-    /// home or the person's. Throws why it can't run.
+    /// checkouts), `temp` (its `HOME` and `TMPDIR`) and `login`, its own copy of the account's
+    /// login (its `CLAUDE_CONFIG_DIR` for an account with a folder of its own, which it never
+    /// sees); it reads those, its tools and what the system needs, and nothing else of the
+    /// machine's: not obid's home, the person's, `/tmp` or other people's folders. Throws why it
+    /// can't run.
     #[allow(clippy::too_many_arguments)]
     pub fn conversation_launch(
         &self,
@@ -2443,6 +2450,7 @@ impl Jobs {
             frozen,
             flags,
             stderr,
+            confined: true,
         })
     }
 
@@ -2458,6 +2466,7 @@ impl Jobs {
             frozen,
             flags,
             stderr,
+            confined,
         } = boxed;
         let sandbox = self
             .sandbox
@@ -2480,6 +2489,9 @@ impl Jobs {
             std::slice::from_ref(&self.config.home),
         ));
         read_only.push(bin.clone());
+        if confined {
+            read_only.extend(sandbox::path_software(&process::tools_path(), &hidden));
+        }
         let mut spec = Spec {
             worktree: dir.to_path_buf(),
             git_admin: None,
@@ -2494,6 +2506,14 @@ impl Jobs {
         };
         let mut extra: Vec<(&str, OsString)> = Vec::new();
         match &account.config_dir {
+            // A conversation never sees the account's own folder (every job's and conversation's
+            // transcripts are in it): `login` is its own, with a copy of the login and nothing else.
+            Some(shared) if confined => {
+                copy_account_login(shared, login)
+                    .map_err(|e| format!("obid can't copy Claude Code's login: {e}"))?;
+                spec.accounts.push(login.to_path_buf());
+                extra.push(("CLAUDE_CONFIG_DIR", login.as_os_str().to_owned()));
+            }
             Some(folder) => {
                 not_a_link(folder)?;
                 std::fs::create_dir_all(folder)
@@ -2527,8 +2547,13 @@ impl Jobs {
             Tool::Codex => codex::argv(bin, None),
             _ => std::iter::once(bin.into_os_string()).chain(flags).collect(),
         };
+        let argv = if confined {
+            sandbox.wrap_reading_only_its_own(&spec, &argv)
+        } else {
+            sandbox.wrap(&spec, &argv)
+        };
         Ok(Launch {
-            argv: sandbox.wrap(&spec, &argv),
+            argv,
             env: {
                 if tool == Tool::Claude {
                     extra.push((process::CLAUDE_TMPDIR, spec.temp.clone().into_os_string()));
@@ -4085,6 +4110,24 @@ pub(crate) fn not_a_link(folder: &Path) -> Result<(), String> {
     }
 }
 
+/// A conversation's own copy of an account's Claude Code login (crate::brain::harness): the macOS
+/// Keychain's item for the account's folder when obid copies from there, else that folder's
+/// `.credentials.json` (a regular file only), written into `to` without following a link. Nothing
+/// else of the account's folder.
+pub(crate) fn copy_account_login(account: &Path, to: &Path) -> std::io::Result<()> {
+    not_a_link(to).map_err(std::io::Error::other)?;
+    store::make_private_dir(to)?;
+    let file = account.join(".credentials.json");
+    let bytes = match keychain_login(Some(account)) {
+        Some(bytes) => bytes,
+        None if std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) => {
+            std::fs::read(&file)?
+        }
+        None => return Ok(()),
+    };
+    write_login(&to.join(".credentials.json"), &bytes)
+}
+
 /// Before a boxed Claude Code run on an account with a folder of its own: its `.credentials.json`
 /// from the Keychain, fresh, when the Keychain has one (else the folder is left as it is).
 pub(crate) fn refresh_keychain_login(folder: &Path) -> std::io::Result<()> {
@@ -4165,7 +4208,7 @@ pub(crate) fn copy_login(
 
 /// Removes the copied credentials from a job's login folder once its run ended: they are copied
 /// again before its next start.
-fn forget_login_secrets(login: &Path) {
+pub(crate) fn forget_login_secrets(login: &Path) {
     for (folder, name) in [(".claude", ".credentials.json"), (".codex", "auth.json")] {
         let folder = login.join(folder);
         // Only in a real folder: never through a link the job left in its place.

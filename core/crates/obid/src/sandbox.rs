@@ -1043,6 +1043,27 @@ pub fn tool_roots(path: &std::ffi::OsStr, hidden: &[PathBuf], never: &[PathBuf])
     roots
 }
 
+/// What a confined run ([`Sandbox::wrap_reading_only_its_own`]) reads of the software on `path`
+/// outside the hidden folders (`/opt/homebrew/bin`, `/usr/local/bin`): each folder, and the
+/// install prefix around a `bin` or `sbin` (its libraries, a symbolic link's target in it), never
+/// `/` itself nor a folder that holds a hidden one.
+pub fn path_software(path: &std::ffi::OsStr, hidden: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::env::split_paths(path) {
+        if !entry.is_absolute() || hidden.iter().any(|h| entry.starts_with(h)) {
+            continue;
+        }
+        let prefix = entry
+            .file_name()
+            .filter(|n| *n == "bin" || *n == "sbin")
+            .and_then(|_| entry.parent())
+            .filter(|p| p.components().count() > 1 && !hidden.iter().any(|h| h.starts_with(p)));
+        out.extend(prefix.map(Path::to_path_buf));
+        out.push(entry);
+    }
+    out
+}
+
 /// The folder an agent's binary is installed in, when the sandbox hides it and the binary needs
 /// what is beside it: where `bin` leads (through its symbolic links), that file's folder. Cursor's
 /// `~/.local/bin/cursor-agent` leads to `~/.local/share/cursor-agent/versions/<v>/cursor-agent`,

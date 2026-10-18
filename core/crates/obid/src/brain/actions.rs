@@ -939,7 +939,7 @@ fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
 
 /// Puts what the brain planned, which only the user may do, in the inbox as a `confirm` item:
 /// carried out only on their own Confirm (`POST /v1/inbox/{id}/answer`).
-fn confirm(
+pub(super) fn confirm(
     shared: &Shared,
     job: &str,
     title: String,
