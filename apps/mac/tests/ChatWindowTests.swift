@@ -163,6 +163,15 @@ struct ChatWindowTests {
         #expect(MessageBox.listenLimit == .seconds(60))
     }
 
+    /// While Oby works, the box's end slot is Stop (mac-design A14); listening keeps the microphone.
+    @Test func theBoxStopsATurnFromItsEndSlot() {
+        #expect(MessageBox.endSlot(empty: true, listening: false, working: false) == .voice)
+        #expect(MessageBox.endSlot(empty: false, listening: false, working: false) == .send)
+        #expect(MessageBox.endSlot(empty: true, listening: false, working: true) == .stop)
+        #expect(MessageBox.endSlot(empty: false, listening: false, working: true) == .stop)
+        #expect(MessageBox.endSlot(empty: true, listening: true, working: true) == .voice)
+    }
+
     @Test func decisionsAttachToTheirJobEvenAfterOtherTurns() {
         let turns = [Turn(id: "start", date: now, who: .oby, text: "Starting", jobs: ["job"]),
                      Turn(id: "later", date: now + 60, who: .user, text: "Another question")]
