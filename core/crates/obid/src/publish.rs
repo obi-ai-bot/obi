@@ -501,20 +501,18 @@ fn credentials(remote: &str, gh: Option<&Path>, unset: &[String]) -> Vec<String>
     args
 }
 
-/// The `-c` setting that adds the owner's `gh` login after git's own credential helpers, for a
-/// clone or fetch of an `https` remote ([`crate::git::ensure_clone`]): as a push signs in
-/// ([`credentials`]), so a private repository clones with nothing set up but gh's own sign-in
-/// (no `gh auth setup-git`), and a helper the person already has still answers first. None for
-/// another remote, or without a gh.
+/// The `-c` settings for a clone or fetch of an `https` remote ([`crate::git::ensure_clone`]):
+/// git's own credential helpers reset, then the owner's `gh` login, exactly as a push signs in
+/// ([`credentials`]). So a private repository clones with nothing set up but gh's own sign-in (no
+/// `gh auth setup-git`), and gh's token never reaches another helper: after a successful clone git
+/// sends `store` to every helper, and Apple's git turns `osxkeychain` on system-wide, which would
+/// copy the token into the login Keychain, where it outlived `gh auth logout`. None for another
+/// remote, or without a gh: then git's own settings, as before.
 pub(crate) fn fetch_credentials(remote: &str, gh: Option<&Path>) -> Vec<String> {
-    let mut args = credentials(remote, gh, &forbidden_names());
-    // Keep git's own helpers: only the gh one, not credentials()'s reset.
-    if args.len() == 4 {
-        args.drain(..2);
-    } else {
-        args.clear();
+    if gh.is_none() || !remote.starts_with("https://") {
+        return Vec::new();
     }
-    args
+    credentials(remote, gh, &forbidden_names())
 }
 
 /// The variables in obid's environment that never reach gh (`crate::process::is_forbidden`),
@@ -1262,16 +1260,19 @@ async fn push(head: &str, job: &Job, target: &Target, lease: Option<&str>) -> Re
 mod tests {
     use super::*;
 
-    /// A clone or fetch adds gh's login after git's own helpers, only for https and with a gh.
+    /// A clone or fetch of an https remote resets git's own helpers before gh's, as a push does, so
+    /// no other helper (Apple git's system-wide osxkeychain) is asked to `store` gh's token; nothing
+    /// for another remote or without a gh.
     #[test]
-    fn fetches_add_gh_after_gits_own_helpers() {
+    fn fetches_reset_gits_own_helpers_before_ghs() {
         let gh = Path::new("/opt/gh");
         let https = fetch_credentials("https://github.com/o/r.git", Some(gh));
-        assert_eq!(https.len(), 2, "{https:?}");
-        assert_eq!(https[0], "-c");
-        assert!(https[1].starts_with("credential.helper=!env "), "{https:?}");
+        assert_eq!(https.len(), 4, "{https:?}");
+        assert_eq!(&https[..2], ["-c", "credential.helper="], "{https:?}");
+        assert_eq!(https[2], "-c");
+        assert!(https[3].starts_with("credential.helper=!env "), "{https:?}");
         assert!(
-            https[1].ends_with("'/opt/gh' auth git-credential"),
+            https[3].ends_with("'/opt/gh' auth git-credential"),
             "{https:?}"
         );
         assert!(fetch_credentials("https://github.com/o/r.git", None).is_empty());

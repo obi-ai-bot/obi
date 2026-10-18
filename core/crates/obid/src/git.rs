@@ -172,16 +172,7 @@ pub async fn ensure_clone(
         ));
         let _ = std::fs::remove_dir_all(&partial);
         let signed = crate::publish::fetch_credentials(remote, crate::github::gh().as_deref());
-        let mut args: Vec<&OsStr> = signed.iter().map(OsStr::new).collect();
-        args.extend::<[&OsStr; 6]>([
-            "clone".as_ref(),
-            "--no-checkout".as_ref(),
-            "--quiet".as_ref(),
-            "--".as_ref(),
-            remote.as_ref(),
-            partial.as_os_str(),
-        ]);
-        run(parent, &args, &[]).await?;
+        run(parent, &clone_args(&signed, remote, &partial), &[]).await?;
         git(&partial, &["config", "remote.origin.pushurl", NO_PUSH_URL]).await?;
         std::fs::rename(&partial, &clone)
             .map_err(|e| GitError(format!("can't move the clone into place: {e}")))?;
@@ -197,18 +188,38 @@ pub async fn ensure_clone(
     exclude_obi_folders(&clone)?;
     if !refspecs.is_empty() {
         let signed = crate::publish::fetch_credentials(remote, crate::github::gh().as_deref());
-        let mut args: Vec<&str> = signed.iter().map(String::as_str).collect();
-        args.extend([
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "origin",
-        ]);
-        args.extend(refspecs.iter().map(String::as_str));
-        git(&clone, &args).await?;
+        git(&clone, &fetch_args(&signed, refspecs)).await?;
     }
     Ok(clone)
+}
+
+/// `git clone` of `remote` into `partial`, after the credential settings `signed`
+/// ([`crate::publish::fetch_credentials`]).
+fn clone_args<'a>(signed: &'a [String], remote: &'a str, partial: &'a Path) -> Vec<&'a OsStr> {
+    let mut args: Vec<&OsStr> = signed.iter().map(OsStr::new).collect();
+    args.extend::<[&OsStr; 6]>([
+        "clone".as_ref(),
+        "--no-checkout".as_ref(),
+        "--quiet".as_ref(),
+        "--".as_ref(),
+        remote.as_ref(),
+        partial.as_os_str(),
+    ]);
+    args
+}
+
+/// `git fetch` of `refspecs` from origin, after the credential settings `signed`.
+fn fetch_args<'a>(signed: &'a [String], refspecs: &'a [String]) -> Vec<&'a str> {
+    let mut args: Vec<&str> = signed.iter().map(String::as_str).collect();
+    args.extend([
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "origin",
+    ]);
+    args.extend(refspecs.iter().map(String::as_str));
+    args
 }
 
 /// `.obi/` (what obid hands an agent: quoted inputs and context) and `.oby/` (the Swift runner's)
@@ -327,6 +338,46 @@ pub fn is_sha(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clone and a fetch of an https remote with a gh reset git's own credential helpers before
+    /// gh's, so no other helper (Apple git's system-wide osxkeychain) stores gh's token.
+    #[test]
+    fn https_clones_and_fetches_reset_gits_own_helpers_first() {
+        let signed = crate::publish::fetch_credentials(
+            "https://github.com/o/r.git",
+            Some(Path::new("/opt/gh")),
+        );
+        let clone = clone_args(
+            &signed,
+            "https://github.com/o/r.git",
+            Path::new("/c/.r.cloning"),
+        );
+        assert_eq!(
+            clone[..2],
+            [OsStr::new("-c"), OsStr::new("credential.helper=")]
+        );
+        assert_eq!(clone[2], OsStr::new("-c"));
+        assert!(
+            clone[3]
+                .to_string_lossy()
+                .ends_with("'/opt/gh' auth git-credential")
+        );
+        assert_eq!(clone[4], OsStr::new("clone"));
+        let refspecs = ["main".to_owned()];
+        let fetch = fetch_args(&signed, &refspecs);
+        assert_eq!(fetch[..2], ["-c", "credential.helper="]);
+        assert_eq!(
+            fetch[4..],
+            [
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "origin",
+                "main"
+            ]
+        );
+    }
 
     #[test]
     fn branch_names() {
