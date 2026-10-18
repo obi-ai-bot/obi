@@ -359,7 +359,7 @@ async fn act(
     words: &str,
 ) -> Result<String, String> {
     problems(shared, session, &plan)?;
-    answered(
+    outcome_answer(
         session,
         actions::act(shared, &plan, words, source(session)).await,
     )
@@ -377,7 +377,7 @@ fn source(session: &Session) -> crate::jobs::Source {
 
 /// A tool's answer for an action's outcome: a job it started (a follow-up) goes on the turn, and
 /// its card on the answer, as `oby_dispatch`'s do.
-fn answered(session: &Session, outcome: Outcome) -> Result<String, String> {
+fn outcome_answer(session: &Session, outcome: Outcome) -> Result<String, String> {
     match outcome {
         Outcome::Done(text) => Ok(text),
         Outcome::Started(text, job) => {
@@ -450,7 +450,7 @@ async fn tell(
         .get(&id)
         .ok_or("That job isn't here any more.")?;
     if job.status.is_active() {
-        return answered(
+        return outcome_answer(
             session,
             actions::act(shared, &plan, &words, source(session)).await,
         );
@@ -478,7 +478,7 @@ async fn tell(
     if source(session) == crate::jobs::Source::Untrusted {
         return Ok(actions::propose_follow_up(shared, &job, &new));
     }
-    answered(session, actions::follow_up(shared, &job, new))
+    outcome_answer(session, actions::follow_up(shared, &job, new))
 }
 
 /// oby_dispatch: the plan loop's dispatch of one job, linked to the conversation.
