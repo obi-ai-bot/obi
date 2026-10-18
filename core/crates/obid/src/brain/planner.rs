@@ -280,6 +280,8 @@ impl ClaudeBrain {
         let deadline = Instant::now() + timeout;
         let mut failures: Vec<String> = vec![];
         let attempts = if foreground { 2 } else { 1 };
+        // The first process, still thinking when the retry started beside it.
+        let mut thinking = None;
         for attempt in 1..=attempts {
             if halted() {
                 return Err(Failure::Halted);
@@ -288,79 +290,106 @@ impl ClaudeBrain {
             if remaining.is_zero() {
                 break;
             }
-            // Half of the budget is kept for the one retry when the first process times out.
-            let limit = if attempt < attempts {
-                remaining / 2
-            } else {
-                remaining
-            };
             let began = Instant::now();
-            let result = run(&launch, own_group, input.as_bytes(), limit)
-                .await
-                .map_err(|e| Failure::Failed(format!("Claude Code couldn't start: {e}")))?;
-            let answer = serde_json::from_slice::<Value>(&result.out).ok();
-            // It can report success without structured_output: the field is what counts.
-            let plan = answer
-                .as_ref()
-                .and_then(|a| a.get("structured_output"))
-                .filter(|p| p.is_object());
-            let mut call = Call::read("claude", Some(model), answer.as_ref(), began);
-            if plan.is_none() {
-                call.outcome = CallOutcome::Failed;
-            }
-            calls.push(call);
-            if halted() {
-                return Err(Failure::Halted);
-            }
-            if let Some(plan) = plan {
-                return Ok(plan.to_string());
-            }
-            let text = String::from_utf8_lossy(&result.out).trim().to_owned();
-            let subtype = answer
-                .as_ref()
-                .and_then(|a| a["subtype"].as_str())
-                .filter(|s| *s != "success");
-            let reason = if result.timed_out {
-                "timeout".to_owned()
-            } else if let Some(subtype) = subtype {
-                // error_max_turns and the like say more than an exit code.
-                subtype.to_owned()
-            } else if result.status == Some(15) {
-                "exit code 15".to_owned()
-            } else if text.is_empty() {
-                "empty".to_owned()
-            } else {
-                format!("exit code {}", result.status.unwrap_or(-1))
-            };
-            // What Claude said, like "Not logged in · Please run /login" (#626): only its own
-            // error, never text the model wrote nor anything that looks like a credential, on one
-            // line, the vault's secrets taken out before it's cut (#640's security review).
-            let reason = match answer
-                .as_ref()
-                .filter(|a| a["is_error"] == true)
-                .and_then(|a| a["result"].as_str())
-            {
-                Some(said) if !said.trim().is_empty() && crate::scan::matches(said).is_empty() => {
-                    let said = secrets
-                        .redact(said)
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    format!("{reason}: {}", said.chars().take(300).collect::<String>())
+            let mut this = Box::pin(run(&launch, own_group, input.as_bytes(), remaining));
+            let mut ended = vec![];
+            if attempt < attempts {
+                // The first process keeps the whole budget: when it hasn't answered by half of it,
+                // the one retry starts beside it and the first plan wins. Killing it at half its
+                // budget cost a busy Mac 10 seconds a turn, or the turn.
+                match tokio::time::timeout(remaining / 2, &mut this).await {
+                    Ok(result) => ended.push((result, began, attempt)),
+                    Err(_) => {
+                        thinking = Some((this, began));
+                        continue;
+                    }
                 }
-                _ => reason,
-            };
-            let err = if result.err.is_empty() {
-                "<empty>".to_owned()
+            } else if let Some((mut first, first_began)) = thinking.take() {
+                tokio::select! {
+                    result = &mut first => {
+                        let planned = result.as_ref().is_ok_and(|r| plan_of(&r.out).is_some());
+                        ended.push((result, first_began, attempt - 1));
+                        if !planned {
+                            ended.push((this.await, began, attempt));
+                        }
+                    }
+                    result = &mut this => {
+                        let planned = result.as_ref().is_ok_and(|r| plan_of(&r.out).is_some());
+                        ended.push((result, began, attempt));
+                        if !planned {
+                            ended.push((first.await, first_began, attempt - 1));
+                        }
+                    }
+                }
             } else {
-                let chars: Vec<char> = secrets.redact(&result.err).chars().collect();
-                chars[chars.len().saturating_sub(1000)..].iter().collect()
-            };
-            failures.push(format!("attempt {attempt}: {reason}, stderr: {err}"));
-            // One retry covers empty answers, Claude's exit 15, and a process that timed out.
-            if !(attempt < attempts
-                && (text.is_empty() || result.status == Some(15) || result.timed_out))
-            {
+                ended.push((this.await, began, attempt));
+            }
+            let mut retry = false;
+            for (result, began, attempt) in ended {
+                let result = result
+                    .map_err(|e| Failure::Failed(format!("Claude Code couldn't start: {e}")))?;
+                let answer = serde_json::from_slice::<Value>(&result.out).ok();
+                let plan = plan_of(&result.out);
+                let mut call = Call::read("claude", Some(model), answer.as_ref(), began);
+                if plan.is_none() {
+                    call.outcome = CallOutcome::Failed;
+                }
+                calls.push(call);
+                if halted() {
+                    return Err(Failure::Halted);
+                }
+                if let Some(plan) = plan {
+                    return Ok(plan.to_string());
+                }
+                let text = String::from_utf8_lossy(&result.out).trim().to_owned();
+                let subtype = answer
+                    .as_ref()
+                    .and_then(|a| a["subtype"].as_str())
+                    .filter(|s| *s != "success");
+                let reason = if result.timed_out {
+                    "timeout".to_owned()
+                } else if let Some(subtype) = subtype {
+                    // error_max_turns and the like say more than an exit code.
+                    subtype.to_owned()
+                } else if result.status == Some(15) {
+                    "exit code 15".to_owned()
+                } else if text.is_empty() {
+                    "empty".to_owned()
+                } else {
+                    format!("exit code {}", result.status.unwrap_or(-1))
+                };
+                // What Claude said, like "Not logged in · Please run /login" (#626): only its own
+                // error, never text the model wrote nor anything that looks like a credential, on one
+                // line, the vault's secrets taken out before it's cut (#640's security review).
+                let reason = match answer
+                    .as_ref()
+                    .filter(|a| a["is_error"] == true)
+                    .and_then(|a| a["result"].as_str())
+                {
+                    Some(said)
+                        if !said.trim().is_empty() && crate::scan::matches(said).is_empty() =>
+                    {
+                        let said = secrets
+                            .redact(said)
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        format!("{reason}: {}", said.chars().take(300).collect::<String>())
+                    }
+                    _ => reason,
+                };
+                let err = if result.err.is_empty() {
+                    "<empty>".to_owned()
+                } else {
+                    let chars: Vec<char> = secrets.redact(&result.err).chars().collect();
+                    chars[chars.len().saturating_sub(1000)..].iter().collect()
+                };
+                failures.push(format!("attempt {attempt}: {reason}, stderr: {err}"));
+                // One retry covers empty answers, Claude's exit 15, and a process that timed out.
+                retry = attempt < attempts
+                    && (text.is_empty() || result.status == Some(15) || result.timed_out);
+            }
+            if !retry {
                 break;
             }
         }
@@ -394,6 +423,27 @@ fn unboxed_env(
     env
 }
 
+/// The plan in Claude Code's JSON answer: it can report success without `structured_output`, and
+/// the field is what counts.
+fn plan_of(out: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<Value>(out)
+        .ok()?
+        .get("structured_output")
+        .filter(|p| p.is_object())
+        .cloned()
+}
+
+/// Ends the process group of a run whose wait was dropped (the other process answered first).
+struct EndsGroup(u32);
+
+impl Drop for EndsGroup {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            crate::process::signal_group(self.0, nix::sys::signal::Signal::SIGKILL);
+        }
+    }
+}
+
 /// Runs `launch` with `input` on its stdin, for at most `limit`: what it printed and how it ended.
 async fn run(
     launch: &Launch,
@@ -421,11 +471,15 @@ async fn run(
     }
     let mut child = command.spawn()?;
     let pid = child.id().unwrap_or(0);
+    let mut group = EndsGroup(pid);
     if let Some(mut stdin) = child.stdin.take() {
         // An answer that comes before it read everything is still an answer.
         let _ = stdin.write_all(input).await;
     }
-    match tokio::time::timeout(limit, child.wait_with_output()).await {
+    let waited = tokio::time::timeout(limit, child.wait_with_output()).await;
+    // It ended (or timed out, below): nothing is left to end when this returns.
+    group.0 = 0;
+    match waited {
         Ok(output) => {
             let output = output?;
             Ok(Output {
@@ -1285,17 +1339,60 @@ pub mod tests {
     /// A Claude Code that exits 15 every time, counting its launches in its account's folder, in
     /// a folder of its own under the system's temporary one.
     fn exiting_claude(name: &str) -> (ClaudeBrain, PathBuf) {
+        scripted_claude(
+            name,
+            "#!/bin/sh\necho launch >> \"$CLAUDE_CONFIG_DIR/launches\"\nexit 15\n",
+        )
+    }
+
+    /// A Claude Code that answers a plan after `seconds`, every time, counting its launches.
+    fn slow_claude(name: &str, seconds: u32) -> (ClaudeBrain, PathBuf) {
+        scripted_claude(
+            name,
+            &format!(
+                "#!/bin/sh\necho launch >> \"$CLAUDE_CONFIG_DIR/launches\"\ncat > /dev/null\nsleep {seconds}\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"structured_output\":{{\"action\":\"reply_only\"}}}}'\n"
+            ),
+        )
+    }
+
+    /// The brain's first process keeps its whole budget: one that answers after more than half
+    /// of it still plans the turn, where a busy Mac used to lose it (killed at half, then the
+    /// retry ran out of time too).
+    #[tokio::test]
+    async fn a_slow_first_answer_still_plans_the_turn() {
+        let (brain, file) = slow_claude("slow", 2);
+        let mut calls = vec![];
+        let answer = brain
+            .complete(
+                QUICK_MODEL,
+                "Plan it.",
+                "hello",
+                None,
+                "{}",
+                Duration::from_secs(3),
+                true,
+                &going,
+                &mut calls,
+            )
+            .await;
+        assert!(
+            answer
+                .as_deref()
+                .is_ok_and(|plan| plan.contains("reply_only")),
+            "{answer:?}"
+        );
+        // The retry started beside it at half the budget, and the first answer won.
+        assert_eq!(launches(&file), 2);
+    }
+
+    fn scripted_claude(name: &str, script: &str) -> (ClaudeBrain, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("obid-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let account = root.join("account");
         std::fs::create_dir_all(&account).unwrap();
         let bin = root.join("claude");
-        std::fs::write(
-            &bin,
-            "#!/bin/sh\necho launch >> \"$CLAUDE_CONFIG_DIR/launches\"\nexit 15\n",
-        )
-        .unwrap();
+        std::fs::write(&bin, script).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let config = crate::config::Config::parse(
             &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"),
