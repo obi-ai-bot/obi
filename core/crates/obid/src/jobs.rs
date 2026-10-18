@@ -54,6 +54,22 @@ enum Gate<'a> {
     Owner { mcp: &'a [String] },
 }
 
+/// One boxed run that isn't a job's ([`Jobs::brain_launch`], [`Jobs::conversation_launch`]).
+struct Boxed<'a> {
+    tool: Tool,
+    account: &'a crate::config::Account,
+    /// Its working folder, written.
+    dir: &'a Path,
+    /// Its `HOME` and `TMPDIR`, written.
+    temp: &'a Path,
+    /// Where the tool's own login is copied when the account has no folder of its own.
+    login: &'a Path,
+    /// Folders in `dir` that stay read-only.
+    frozen: Vec<PathBuf>,
+    flags: Vec<OsString>,
+    stderr: PathBuf,
+}
+
 /// A job the owner describes whole (`POST /v1/jobs`), checked. A `start` or `confirm` inbox
 /// item keeps one until the owner says so.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -2232,6 +2248,7 @@ impl Jobs {
             hidden,
             // An agent keeps the network any agent has (its model's API); the check gets none.
             network: true,
+            frozen: Vec::new(),
         }
     }
 
@@ -2382,13 +2399,6 @@ impl Jobs {
         dir: &Path,
         flags: Vec<OsString>,
     ) -> Result<Launch, String> {
-        let sandbox = self
-            .sandbox
-            .as_ref()
-            .map_err(|why| format!("obid can't box the brain: {why}"))?;
-        let bin = self
-            .agent_bin(tool)
-            .ok_or_else(|| format!("obid can't find {}'s binary.", tool.name()))?;
         let account = self
             .signed_in_account(tool)
             .or_else(|| self.accounts(tool).into_iter().next())
@@ -2396,6 +2406,67 @@ impl Jobs {
         let temp = dir.join("home");
         store::make_private_dir(&temp)
             .map_err(|e| format!("obid can't make the brain's folder: {e}"))?;
+        self.boxed_launch(Boxed {
+            tool,
+            account: &account,
+            dir,
+            temp: &temp,
+            login: &dir.join("login"),
+            frozen: Vec::new(),
+            flags,
+            stderr: dir.join("stderr.log"),
+        })
+    }
+
+    /// A conversation's agent session (crate::brain::harness), boxed like a job's agent: it
+    /// writes only `room` (its working folder), but not `frozen` in it (the repositories'
+    /// checkouts), `temp` (its `HOME` and `TMPDIR`) and its account's login (`login` when the
+    /// account has no folder of its own); it reads those and its tools, and nothing else of obid's
+    /// home or the person's. Throws why it can't run.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conversation_launch(
+        &self,
+        account: &crate::config::Account,
+        room: &Path,
+        temp: &Path,
+        login: &Path,
+        frozen: Vec<PathBuf>,
+        flags: Vec<OsString>,
+        stderr: PathBuf,
+    ) -> Result<Launch, String> {
+        self.boxed_launch(Boxed {
+            tool: Tool::Claude,
+            account,
+            dir: room,
+            temp,
+            login,
+            frozen,
+            flags,
+            stderr,
+        })
+    }
+
+    /// What [`Jobs::brain_launch`] and [`Jobs::conversation_launch`] run: `tool` in the job
+    /// sandbox, working in `dir`, with its account's login.
+    fn boxed_launch(&self, boxed: Boxed<'_>) -> Result<Launch, String> {
+        let Boxed {
+            tool,
+            account,
+            dir,
+            temp,
+            login,
+            frozen,
+            flags,
+            stderr,
+        } = boxed;
+        let sandbox = self
+            .sandbox
+            .as_ref()
+            .map_err(|why| format!("obid can't box {}: {why}", tool.name()))?;
+        let bin = self
+            .agent_bin(tool)
+            .ok_or_else(|| format!("obid can't find {}'s binary.", tool.name()))?;
+        let temp = temp.to_path_buf();
         let mut hidden = vec![self.config.home.clone()];
         hidden.extend(person_homes());
         let mut read_only = sandbox::tool_roots(
@@ -2419,6 +2490,7 @@ impl Jobs {
             read_only,
             hidden,
             network: true,
+            frozen,
         };
         let mut extra: Vec<(&str, OsString)> = Vec::new();
         match &account.config_dir {
@@ -2437,16 +2509,17 @@ impl Jobs {
                 });
             }
             None => {
-                // The tool's own login, copied into the brain's folder as a job's is.
-                let login = dir.join("login");
-                let names = copy_login(login_home().as_deref(), &login, tool, true)
+                // The tool's own login, copied into a folder of its own as a job's is.
+                let names = copy_login(login_home().as_deref(), login, tool, true)
                     .map_err(|e| format!("obid can't copy {}'s login: {e}", tool.name()))?;
                 for name in names {
+                    let link = temp.join(name);
+                    let _ = std::fs::remove_file(&link);
                     #[cfg(unix)]
-                    std::os::unix::fs::symlink(login.join(name), temp.join(name))
-                        .map_err(|e| format!("obid can't show the brain its login: {e}"))?;
+                    std::os::unix::fs::symlink(login.join(name), &link)
+                        .map_err(|e| format!("obid can't show {} its login: {e}", tool.name()))?;
                 }
-                spec.accounts.push(login);
+                spec.accounts.push(login.to_path_buf());
             }
         }
         let argv: Vec<OsString> = match tool {
@@ -2463,7 +2536,7 @@ impl Jobs {
                 process::sandbox_env(&process::tools_path(), &spec.temp, &extra)
             },
             cwd: dir.to_path_buf(),
-            stderr: dir.join("stderr.log"),
+            stderr,
         })
     }
 
@@ -2507,6 +2580,8 @@ impl Jobs {
             AgentEvent::Step(step) | AgentEvent::Denied(step) => {
                 jobs.update(id, |job| job.step = step);
             }
+            // A job shows its steps; the words and each call's id are a conversation's.
+            AgentEvent::Delta(_) | AgentEvent::Tool { .. } | AgentEvent::ToolDone { .. } => {}
         };
         let plan = job.mode.as_deref() == Some("plan");
         let ran = match tool {
@@ -3956,7 +4031,7 @@ pub(crate) fn keychain_login(config_dir: Option<&Path>) -> Option<Vec<u8>> {
 /// through a link: not one in place of the file, nor one a job left in place of its folder (the
 /// folder is opened without following a link, and the file made in that very folder; #643's
 /// security review).
-fn write_login(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_login(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use nix::fcntl::{OFlag, open, openat};
     use nix::sys::stat::Mode;
     let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {

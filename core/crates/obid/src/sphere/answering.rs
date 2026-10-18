@@ -287,6 +287,7 @@ async fn run(
         hidden,
         // Its model's API.
         network: true,
+        frozen: Vec::new(),
     };
     let mut extra: Vec<(&str, OsString)> = Vec::new();
     // An account's folder may hold the login obid copied from the Keychain for its jobs: a run that

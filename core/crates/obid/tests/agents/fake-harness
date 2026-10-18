@@ -1,0 +1,148 @@
+#!/usr/bin/env node
+// A stand-in for Claude Code as a conversation's agent session (docs/runner-api.md, "obid only:
+// the conversation harness"): stream-json in and out, partial messages, a tool call, and calls to
+// obid's `oby` MCP server from its --mcp-config. Run with --json-schema it is the plan loop's brain
+// (fake-planner), for the fallback. Each turn is recorded as one line of turns.jsonl in its
+// account's folder ($CLAUDE_CONFIG_DIR): argv, cwd, HOME, the prompt, the session it resumed.
+// What it does comes from the owner's words:
+//   HELLO          streams "Hello there." in three deltas, reads notes.md in its room, says it
+//   REMEMBER       says "resume=<the session it resumed, or none>"
+//   OBY <tool> <json>  calls the oby tool with the json and says "oby: <what it answered>"
+//   TOOLS          says "tools: <the oby tools, by name>"
+//   ESCAPE         tries to write outside its room and into repos/, reads repos/, says what held
+//   PERMS          asks obid's permission for writes inside, outside and in repos/, and the web
+//   FAIL           ends the turn with an error result
+//   anything else  says "Nothing to do."
+import { spawnSync } from "node:child_process";
+import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
+
+const argv = process.argv.slice(2);
+if (argv.includes("--json-schema")) {
+  const planner = join(dirname(fileURLToPath(import.meta.url)), "fake-planner");
+  const ran = spawnSync(planner, argv, { stdio: "inherit" });
+  process.exit(ran.status ?? 1);
+}
+
+const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
+const flag = (name) => (argv.indexOf(name) >= 0 ? argv[argv.indexOf(name) + 1] : null);
+const resumed = flag("--resume");
+const session = resumed ?? "c0000000-0000-4000-8000-00000000000" + (Date.now() % 10);
+const partial = argv.includes("--include-partial-messages");
+const result = (text, error = false) =>
+  emit({ type: "result", subtype: error ? "error_during_execution" : "success", is_error: error, num_turns: 1, result: text, session_id: session });
+const say = (text) => {
+  if (partial) {
+    const third = Math.ceil(text.length / 3);
+    for (let at = 0; at < text.length; at += third) {
+      emit({ type: "stream_event", session_id: session, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: text.slice(at, at + third) } } });
+    }
+  }
+  emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "text", text }] } });
+  result(text);
+};
+const use = (id, name, input) =>
+  emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } });
+const used = (id, content, error = false) =>
+  emit({ type: "user", session_id: session, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content, is_error: error }] } });
+
+async function oby(tool, args) {
+  const config = JSON.parse(readFileSync(flag("--mcp-config"), "utf8"));
+  const server = config.mcpServers.oby;
+  const answer = await fetch(server.url, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...server.headers },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: tool === "tools/list" ? "tools/list" : "tools/call", params: tool === "tools/list" ? {} : { name: tool, arguments: args } }),
+  });
+  return answer.json();
+}
+
+const tries = (f) => {
+  try {
+    f();
+    return "ok";
+  } catch {
+    return "no";
+  }
+};
+
+let waiting = null;
+const answers = [];
+const asks = [];
+const askNext = () => {
+  const { tool, input } = asks.shift();
+  waiting = tool;
+  emit({ type: "control_request", request_id: `r${answers.length + 1}`, request: { subtype: "can_use_tool", tool_name: tool, input } });
+};
+
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", async (line) => {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (message.type === "control_response" && waiting) {
+    const answer = message.response?.response ?? {};
+    answers.push(`${waiting}=${answer.behavior}`);
+    waiting = null;
+    return asks.length ? askNext() : result(`perms: ${answers.join(" ")}`);
+  }
+  if (message.type !== "user") return;
+  const prompt = typeof message.message.content === "string" ? message.message.content : "";
+  appendFileSync(join(process.env.CLAUDE_CONFIG_DIR, "turns.jsonl"), JSON.stringify({ argv, cwd: process.cwd(), home: process.env.HOME, prompt, resumed }) + "\n");
+  emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Read", "Bash"], mcp_servers: [{ name: "oby", status: "connected" }], model: flag("--model") ?? "fake" });
+  const room = process.cwd();
+  const words = prompt.split("\n").pop();
+  try {
+    if (words.startsWith("HELLO")) {
+      writeFileSync("notes.md", "notes\n");
+      use("t1", "Read", { file_path: join(room, "notes.md") });
+      used("t1", "notes");
+      say("Hello there.");
+    } else if (words.startsWith("REMEMBER")) {
+      say(`resume=${resumed ?? "none"}`);
+    } else if (words.startsWith("TOOLS")) {
+      const listed = await oby("tools/list");
+      say(`tools: ${listed.result.tools.map((t) => t.name).join(",")}`);
+    } else if (words.startsWith("OBY ")) {
+      const [, tool, ...rest] = words.split(" ");
+      use("t1", `mcp__oby__${tool}`, JSON.parse(rest.join(" ")));
+      const answer = await oby(tool, JSON.parse(rest.join(" ")));
+      used("t1", answer.result?.content?.[0]?.text ?? "", answer.result?.isError);
+      say(`oby: ${answer.result?.isError ? "refused: " : ""}${answer.result?.content?.[0]?.text ?? JSON.stringify(answer)}`);
+    } else if (words.startsWith("ESCAPE")) {
+      const conversation = dirname(room);
+      const home = dirname(dirname(conversation));
+      const repo = join(room, "repos/obi-e2e/fixture-app");
+      const held = {
+        parent: tries(() => writeFileSync(join(conversation, "escaped.txt"), "x")),
+        home: tries(() => writeFileSync(join(home, "escaped.txt"), "x")),
+        repos: tries(() => writeFileSync(join(repo, "planted.txt"), "x")),
+        config: tries(() => readFileSync(join(home, "api-token"))),
+        inside: tries(() => writeFileSync(join(room, "mine.txt"), "x")),
+        readRepo: existsSync(repo) && readdirSync(repo).length > 0 ? "ok" : "no",
+      };
+      say(`escape: ${Object.entries(held).map(([k, v]) => `${k}=${v}`).join(" ")}`);
+    } else if (words.startsWith("PERMS")) {
+      asks.push(
+        { tool: "Write", input: { file_path: join(room, "inside.md"), content: "x" } },
+        { tool: "Write", input: { file_path: join(dirname(room), "outside.md"), content: "x" } },
+        { tool: "Edit", input: { file_path: join(room, "repos/obi-e2e/fixture-app/README.md"), old_string: "a", new_string: "b" } },
+        { tool: "WebFetch", input: { url: "https://example.com", prompt: "read" } },
+        { tool: "Bash", input: { command: "cat ~/.ssh/id_rsa" } },
+        { tool: "mcp__elsewhere__run", input: {} },
+      );
+      askNext();
+    } else if (words.startsWith("FAIL")) {
+      result("it broke", true);
+    } else {
+      say("Nothing to do.");
+    }
+  } catch (e) {
+    result(`the stand-in failed: ${e}`, true);
+  }
+});

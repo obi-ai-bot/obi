@@ -7,6 +7,7 @@
 pub mod actions;
 pub mod briefing;
 pub mod find;
+pub mod harness;
 pub mod lead;
 pub mod orchestrator;
 pub mod plan;
@@ -15,6 +16,7 @@ pub mod read;
 pub mod recap;
 pub mod research;
 pub mod rules;
+pub mod tools;
 pub mod turn;
 
 use std::collections::BTreeMap;
@@ -141,7 +143,7 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
         // The recap is written while the brain thinks; a background call is bounded and
         // tried once, and when it fails the answer is the same as without it.
         let (answered, recap) = tokio::join!(
-            turn::run(&shared, &said, &given, &asked, &control),
+            harness::run(&shared, &said, &given, &asked, &control),
             recap::back(&shared, back, now)
         );
         shared.turns.end(&control);

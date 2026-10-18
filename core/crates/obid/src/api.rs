@@ -44,6 +44,9 @@ pub struct Shared {
     pub conversations: crate::conversation::Conversations,
     /// The conversation turns under way, for Stop and cancel (#546).
     pub turns: crate::brain::turn::Turns,
+    /// The conversation turns under way in an agent session, by their MCP token
+    /// (crate::brain::harness).
+    pub harness: crate::brain::harness::Sessions,
     /// When the owner last sent a message or tapped, and the recap kept for the next answer (#594).
     pub presence: crate::brain::recap::Presence,
     /// Its Sphere: membership, exchanges, the inbox and decisions.
@@ -274,7 +277,10 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
         };
         if given.is_some_and(|token| {
             (agent_check && shared.jobs.is_apple_check_token(token))
-                || agent_mcp.is_some_and(|id| shared.connections.allows(id, token))
+                || agent_mcp.is_some_and(|id| {
+                    shared.connections.allows(id, token)
+                        || shared.harness.session(id, token).is_some()
+                })
         }) {
             Ok(())
         } else {

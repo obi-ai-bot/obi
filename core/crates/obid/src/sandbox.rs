@@ -148,6 +148,9 @@ pub struct Spec {
     pub hidden: Vec<PathBuf>,
     /// Whether it may reach the network at all.
     pub network: bool,
+    /// Folders inside the worktree that stay read-only: a conversation's checkouts of the
+    /// repositories in its room (`room/repos`). Each must exist before the process starts.
+    pub frozen: Vec<PathBuf>,
 }
 
 impl Sandbox {
@@ -341,6 +344,7 @@ impl Spec {
             read_only,
             hidden,
             network: self.network,
+            frozen: self.frozen.iter().map(real).collect(),
         }
     }
 
@@ -509,6 +513,11 @@ fn bubblewrap_args_reading(
     }
     let worktree = spec.worktree.as_os_str();
     push(&["--bind".as_ref(), worktree, worktree]);
+    // What stays read-only inside the worktree is bound over it again, read-only: a mount point,
+    // so it can't be renamed or removed either.
+    for frozen in &spec.frozen {
+        push(&["--ro-bind".as_ref(), frozen.as_os_str(), frozen.as_os_str()]);
+    }
     // The pointer that says where the worktree's git data is stays as obid wrote it.
     let pointer = spec.worktree.join(".git");
     if pointer.is_file() {
@@ -581,6 +590,10 @@ fn seatbelt_profile_reading(spec: &Spec, confined: bool) -> String {
         for file in ["commondir", "gitdir"] {
             profile.push_str(&format!(" (literal {})", sbpl_string(&admin.join(file))));
         }
+    }
+    // What stays read-only inside the worktree, itself included (it can't be removed or renamed).
+    for frozen in &spec.frozen {
+        profile.push_str(&format!(" (subpath {})", sbpl_string(frozen)));
     }
     profile.push_str(")\n");
     if confined {
@@ -1201,6 +1214,56 @@ mod tests {
         let real = root.canonicalize().unwrap();
         assert_eq!(spec.accounts, vec![real.join("accounts/real")]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A folder frozen inside the worktree (a conversation's `room/repos`) stays read-only: denied
+    /// after the worktree's writes on macOS, bound read-only over it on Linux.
+    #[test]
+    fn a_frozen_folder_inside_the_worktree_stays_read_only() {
+        let spec = Spec {
+            worktree: "/h/conversations/c/room".into(),
+            temp: "/h/conversations/c/home".into(),
+            frozen: vec!["/h/conversations/c/room/repos".into()],
+            hidden: vec!["/h".into()],
+            ..Spec::default()
+        };
+        let profile = seatbelt_profile(&spec);
+        let allow = profile
+            .find("(allow file-write* (subpath \"/h/conversations/c/room\")")
+            .unwrap();
+        let deny = profile
+            .find("(subpath \"/h/conversations/c/room/repos\"))\n")
+            .unwrap();
+        assert!(allow < deny, "{profile}");
+        assert!(
+            profile[..deny].rfind("(deny file-write*").unwrap() > allow,
+            "{profile}"
+        );
+        let args: Vec<String> = bubblewrap_args(&spec)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let bind = args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    "--bind",
+                    "/h/conversations/c/room",
+                    "/h/conversations/c/room",
+                ]
+            })
+            .unwrap();
+        let frozen = args
+            .windows(3)
+            .position(|w| {
+                w == [
+                    "--ro-bind",
+                    "/h/conversations/c/room/repos",
+                    "/h/conversations/c/room/repos",
+                ]
+            })
+            .unwrap();
+        assert!(bind < frozen, "{args:?}");
     }
 
     #[test]

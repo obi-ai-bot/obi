@@ -563,6 +563,8 @@ impl Conversations {
             Err(e) => return Err(Error::Io(e)),
         }
         threads.remove(index);
+        // Its agent session's room, checkouts and login go with it (crate::brain::harness).
+        let _ = std::fs::remove_dir_all(self.dir.join(&id));
         self.events
             .send("conversation", json!({"id": id, "deleted": true}));
         Ok(())
