@@ -128,7 +128,7 @@ struct HomeView: View {
                     .multilineTextAlignment(.center)
             }
             .buttonStyle(.plain)
-            .allowsHitTesting(needs > 0)
+            .disabled(needs == 0)
             .accessibilityHint(needs > 0 ? "Opens what needs you" : "")
             .padding(.top, 14)
             if case .offline = phone.connection {
