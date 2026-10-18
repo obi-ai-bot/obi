@@ -221,14 +221,18 @@ fn checked(seed: &Agents, saved: Saved, home: &Path) -> Saved {
         ..Saved::default()
     };
     for (id, change) in saved.changed {
-        match (
-            one_line("name", &change.name),
-            payer_text(change.payer.as_deref()),
-        ) {
-            (Ok(name), Ok(payer)) => {
-                kept.changed.insert(id, Change { name, payer });
+        // A configured account's, with a name no other account of its tool has.
+        let agents = merged(seed, &kept);
+        let fine = find(&agents, &id).and_then(|(tool, _)| {
+            let name = name(&agents, tool, &change.name, Some(&id)).ok()?;
+            let payer = payer_text(change.payer.as_deref()).ok()?;
+            Some(Change { name, payer })
+        });
+        match fine {
+            Some(change) => {
+                kept.changed.insert(id, change);
             }
-            _ => drop("change", &id),
+            None => drop("change", &id),
         }
     }
     for added in saved.added {
@@ -422,9 +426,10 @@ fn new_id(agents: &Agents, saved: &Saved) -> String {
 }
 
 /// The folder obid makes for an account it adds: `home/accounts/<id>`, `id` being one obid made
-/// (eight hex digits), never one anybody wrote.
+/// (eight lowercase hex digits: macOS ignores letter case, so `A1B2C3D4` would be `a1b2c3d4`'s
+/// folder), never one anybody wrote.
 fn own_folder(home: &Path, id: &str) -> Option<PathBuf> {
-    (id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+    (id.len() == 8 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
         .then(|| home.join("accounts").join(id))
 }
 
@@ -603,7 +608,15 @@ pub async fn remove(
     let lock = shared.sign_ins.lock_for(&id);
     let _held = lock.lock().await;
     let (_, account) = find(&shared.config.agents.get(), &id).ok_or_else(|| no_account(&id))?;
-    shared.sign_ins.end(&id).await;
+    if !shared.sign_ins.end(&id).await {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "{}'s sign-in didn't end within 5 seconds: try again in a moment.",
+                account.name
+            ),
+        ));
+    }
     let _changing = shared
         .jobs
         .begin_change(&id)
@@ -631,8 +644,33 @@ pub async fn remove(
     {
         tracing::warn!("account {id}: its folder {} stayed: {e}", dir.display());
     }
+    // Nothing of obid's is kept for it any more. The tool's own login stays where the tool kept
+    // it (on macOS, Claude Code's Keychain item) and with its provider.
+    if let Some(dir) = &account.config_dir {
+        crate::jobs::forget_kept(dir);
+    }
+    shared.sign_ins.forget(&id);
     tracing::info!("account {id}: removed");
     send_accounts(&shared).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// `DELETE /v1/accounts/{id}/sign-in`: ends the account's sign-in under way, if any, so an
+/// abandoned one doesn't keep jobs off the account until it runs out. `204`.
+pub async fn end_sign_in(
+    State(shared): State<Arc<Shared>>,
+    UrlPath(id): UrlPath<String>,
+) -> Result<Response, ApiError> {
+    let (_, account) = find(&shared.config.agents.get(), &id).ok_or_else(|| no_account(&id))?;
+    if !shared.sign_ins.end(&id).await {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "{}'s sign-in didn't end within 5 seconds: try again in a moment.",
+                account.name
+            ),
+        ));
+    }
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -693,14 +731,25 @@ impl SignIns {
             .clone()
     }
 
-    /// Ends the account's sign-in, if one is under way, and waits until it has.
-    async fn end(&self, id: &str) {
-        if let Some(sign_in) = self.get(id) {
-            sign_in.cancel.notify_one();
-            let mut ended = sign_in.ended.clone();
-            let _ =
-                tokio::time::timeout(Duration::from_secs(5), ended.wait_for(Option::is_some)).await;
-        }
+    /// Ends the account's sign-in, if one is under way, and waits until it has: false when it
+    /// hadn't within 5 seconds.
+    async fn end(&self, id: &str) -> bool {
+        let Some(sign_in) = self.get(id) else {
+            return true;
+        };
+        sign_in.cancel.notify_one();
+        let mut ended = sign_in.ended.clone();
+        tokio::time::timeout(Duration::from_secs(5), ended.wait_for(Option::is_some))
+            .await
+            .is_ok()
+    }
+
+    /// Forgets the account's lock (the account is gone).
+    fn forget(&self, id: &str) {
+        self.locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
     }
 
     /// Kills every sign-in's whole process group (obid is stopping).
@@ -762,6 +811,16 @@ pub async fn sign_in(
             tool.name()
         ));
     };
+    let home = &shared.config.home;
+    if [home.join("worktrees"), home.join("clones")]
+        .iter()
+        .any(|root| inside(&dir, root))
+    {
+        return conflict(format!(
+            "{}'s folder is inside obid's worktrees or clones, which jobs write: obid never signs it in there.",
+            account.name
+        ));
+    }
     if tool == Tool::Claude && cfg!(target_os = "macos") && !crate::jobs::keychain_on() {
         return conflict("On macOS Claude Code keeps its login in the Keychain, which obid uses only with claudeKeychain on in its configuration.".into());
     }
@@ -786,6 +845,33 @@ pub async fn sign_in(
         .await
         .map_err(|why| ApiError::new(StatusCode::BAD_GATEWAY, why))?;
     Ok(answer(StatusCode::OK, sign_in.to_json()))
+}
+
+/// Whether `path` is `root` or inside it, as written or with links resolved (the part that
+/// exists), letter case aside as macOS compares names.
+fn inside(path: &Path, root: &Path) -> bool {
+    let forms = |path: &Path| {
+        let mut existing = path.to_path_buf();
+        let mut rest = Vec::new();
+        let real = loop {
+            if let Ok(real) = std::fs::canonicalize(&existing) {
+                break rest.iter().rev().fold(real, |p: PathBuf, n| p.join(n));
+            }
+            match (
+                existing.file_name().map(|n| n.to_owned()),
+                existing.parent(),
+            ) {
+                (Some(name), Some(parent)) => {
+                    rest.push(name);
+                    existing = parent.to_path_buf();
+                }
+                _ => break path.to_path_buf(),
+            }
+        };
+        [path.to_path_buf(), real].map(|p| PathBuf::from(p.to_string_lossy().to_lowercase()))
+    };
+    let (paths, roots) = (forms(path), forms(root));
+    paths.iter().any(|p| roots.iter().any(|r| p.starts_with(r)))
 }
 
 /// `POST /v1/accounts/{id}/sign-in` with `{"code": "…"}`: the code the page showed, to the login
@@ -906,6 +992,13 @@ async fn start(
         }
     };
     let group = child.id();
+    // Until the sign-in is registered, a request that ends (the app gone, obid stopping) takes
+    // the login and its folder with it.
+    let mut pending = Pending {
+        group,
+        scratch: scratch.clone(),
+        armed: true,
+    };
     let kill = move || {
         if let Some(group) = group {
             crate::process::signal_group(group, nix::sys::signal::Signal::SIGKILL);
@@ -975,6 +1068,8 @@ async fn start(
         .sign_ins
         .running()
         .insert(account.id.clone(), sign_in.clone());
+    // From here the sign-in's own task ends it.
+    pending.armed = false;
     tracing::info!("account {}: {} sign-in started", account.id, tool.id());
     let (shared, watched, account) = (shared.clone(), sign_in.clone(), account.clone());
     tokio::spawn(async move {
@@ -1019,6 +1114,25 @@ async fn start(
         send_accounts(&shared).await;
     });
     Ok(sign_in)
+}
+
+/// A login started and not yet registered as a sign-in: dropped armed (its request ended), its
+/// whole process group is killed and its folder removed.
+struct Pending {
+    group: Option<u32>,
+    scratch: PathBuf,
+    armed: bool,
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Some(group) = self.group {
+                crate::process::signal_group(group, nix::sys::signal::Signal::SIGKILL);
+            }
+            let _ = std::fs::remove_dir_all(&self.scratch);
+        }
+    }
 }
 
 /// Reads `out` a line at a time, each cut to [`LONGEST_LINE`] bytes, into `lines`, until it ends.
@@ -1105,15 +1219,41 @@ fn command(
 }
 
 /// [`SYSTEM_PATH`], then the folder the tool's binary is in (links followed: Cursor's runs the
-/// `node` beside it).
+/// `node` beside it), then, for a script that starts `#!/usr/bin/env <program>` (a CLI installed
+/// with npm: `#!/usr/bin/env node`), the folder of that program as obid finds it.
 fn login_path(bin: &Path) -> String {
-    let own = std::fs::canonicalize(bin)
-        .ok()
-        .and_then(|real| real.parent().map(Path::to_path_buf));
-    match own {
-        Some(own) => format!("{SYSTEM_PATH}:{}", own.display()),
-        None => SYSTEM_PATH.into(),
+    let real = std::fs::canonicalize(bin).ok();
+    let mut path = SYSTEM_PATH.to_owned();
+    let mut add = |dir: Option<&Path>| {
+        if let Some(dir) = dir.and_then(|d| d.to_str())
+            && !path.split(':').any(|p| p == dir)
+        {
+            path.push(':');
+            path.push_str(dir);
+        }
+    };
+    add(real.as_deref().and_then(Path::parent));
+    let program = real.as_deref().and_then(interpreter);
+    let found = program.as_deref().and_then(crate::process::resolve_bin);
+    add(found
+        .as_deref()
+        .filter(|p| p.is_absolute())
+        .and_then(Path::parent));
+    path
+}
+
+/// The program a script names on its first line as `#!/usr/bin/env [-S] <program> …`.
+fn interpreter(script: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut head = [0u8; 256];
+    let n = std::fs::File::open(script).ok()?.read(&mut head).ok()?;
+    let line = std::str::from_utf8(&head[..n]).ok()?.lines().next()?;
+    let mut words = line.strip_prefix("#!")?.split_whitespace();
+    if words.next()? != "/usr/bin/env" {
+        return None;
     }
+    let program = words.find(|w| !w.starts_with('-'))?;
+    (!program.contains('/') && !program.contains('=')).then(|| program.to_owned())
 }
 
 /// `line` without terminal colours and around spaces.
@@ -1333,15 +1473,23 @@ mod tests {
                 entry("d1b2c3d4", "claude", "two\nlines", own("d1b2c3d4")),
                 entry("e1b2c3d4", "claude", "good", own("e1b2c3d4")),
                 entry("work", "claude", "Seeded", own("work")),
+                entry("A1B2C3D4", "claude", "Upper", own("A1B2C3D4")),
             ],
-            "changed": {"work": {"name": ""}, "more": {"name": "Renamed", "payer": "x\u{7}"}},
+            "changed": {"work": {"name": ""}, "more": {"name": "Renamed", "payer": "x\u{7}"},
+                        "other": {"name": "WORK"}},
             "removed": []
         });
         std::fs::write(home.join(FILE), file.to_string()).unwrap();
-        let live = Live::new(agents(Some(vec![account("work", "Work", Some("/srv/w"))])));
+        let live = Live::new(agents(Some(vec![
+            account("work", "Work", Some("/srv/w")),
+            account("other", "Other", Some("/srv/o")),
+        ])));
         live.open(&home);
-        assert_eq!(ids(&live.get()), ["work", "a1b2c3d4"]);
-        assert_eq!(live.get().claude.unwrap().accounts[0].name, "Work");
+        assert_eq!(ids(&live.get()), ["work", "other", "a1b2c3d4"]);
+        let accounts = live.get().claude.unwrap().accounts;
+        assert_eq!(accounts[0].name, "Work");
+        // A change to a name another account has ("Work", letter case aside) is left out.
+        assert_eq!(accounts[1].name, "Other");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1420,6 +1568,75 @@ mod tests {
         assert_eq!(login_path(Path::new("/nowhere/claude")), SYSTEM_PATH);
     }
 
+    /// A login whose request ended before its link (the app gone, obid stopping) is killed with
+    /// everything it started, and its folder removed.
+    #[test]
+    fn a_login_its_request_dropped_ends_with_everything_it_started() {
+        use std::os::unix::process::CommandExt;
+        let root = std::env::temp_dir().join(format!("obid-pending-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let pids = root.join("pids");
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "sleep 300 & echo $$ $! > '{}'; wait",
+                pids.display()
+            ))
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let said = loop {
+            if let Ok(text) = std::fs::read_to_string(&pids)
+                && text.ends_with('\n')
+            {
+                break text;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        drop(Pending {
+            group: Some(child.id()),
+            scratch: root.clone(),
+            armed: true,
+        });
+        let _ = child.wait();
+        assert!(!root.exists());
+        for pid in said.split_whitespace() {
+            let pid = nix::unistd::Pid::from_raw(pid.parse().unwrap());
+            let gone = (0..100).any(|_| {
+                std::thread::sleep(Duration::from_millis(20));
+                nix::sys::signal::kill(pid, None).is_err()
+            });
+            assert!(gone, "{pid} outlived its login");
+        }
+    }
+
+    /// A CLI installed with npm is a `#!/usr/bin/env node` script: node's folder joins its PATH.
+    #[test]
+    fn an_npm_scripts_interpreter_is_on_its_path() {
+        let root = std::env::temp_dir().join(format!("obid-npm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("codex.js");
+        std::fs::write(&script, "#!/usr/bin/env node\nconsole.log(1)\n").unwrap();
+        assert_eq!(interpreter(&script).as_deref(), Some("node"));
+        std::fs::write(&script, "#!/usr/bin/env -S node --no-warnings\n").unwrap();
+        assert_eq!(interpreter(&script).as_deref(), Some("node"));
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        assert_eq!(interpreter(&script), None);
+        std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
+        if let Some(node) = crate::process::resolve_bin("node") {
+            let path = login_path(&script);
+            assert!(path.starts_with(SYSTEM_PATH), "{path}");
+            assert!(
+                path.split(':')
+                    .any(|p| Path::new(p) == node.parent().unwrap()),
+                "{path}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn names_and_payers_are_checked() {
         let agents = agents(Some(vec![account("work", "Work", Some("/srv/acct/work"))]));
@@ -1440,5 +1657,6 @@ mod tests {
         let home = Path::new("/srv/obid");
         assert!(own_folder(home, "a1b2c3d4").is_some());
         assert!(own_folder(home, "../../x").is_none());
+        assert!(own_folder(home, "A1B2C3D4").is_none());
     }
 }

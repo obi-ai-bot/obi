@@ -20,31 +20,13 @@ fn agent(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/agents/{name}"))
 }
 
-/// The stand-in agents copied into the test's `bin`, with `node` beside them: a login runs with
-/// the system's folders and its own binary's folder on its `PATH`, as the real tools need.
-fn agents_bin(folder: &Path) -> PathBuf {
-    let bin = folder.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    for name in ["fake-claude", "fake-codex", "fake-cursor", "fake-login.mjs"] {
-        std::fs::copy(agent(name), bin.join(name)).unwrap();
-    }
-    let node = std::process::Command::new("sh")
-        .args(["-c", "command -v node"])
-        .output()
-        .unwrap();
-    let node = String::from_utf8(node.stdout).unwrap();
-    std::os::unix::fs::symlink(node.trim(), bin.join("node")).unwrap();
-    bin
-}
-
 /// The tests' configuration with the three stand-in agents; on macOS `claudeKeychain` is on, as
 /// signing a Claude Code account in there needs it (its login goes to the Keychain).
 fn accounts_config(folder: &Path) -> Value {
     let remote = folder.join("remote.git");
-    let bin = agents_bin(folder);
-    let mut config = config(folder, &remote, &bin.join("fake-claude"));
-    config["agents"]["codex"] = json!({"bin": bin.join("fake-codex"), "accounts": []});
-    config["agents"]["cursor"] = json!({"bin": bin.join("fake-cursor"), "accounts": []});
+    let mut config = config(folder, &remote, &agent("fake-claude"));
+    config["agents"]["codex"] = json!({"bin": agent("fake-codex"), "accounts": []});
+    config["agents"]["cursor"] = json!({"bin": agent("fake-cursor"), "accounts": []});
     if cfg!(target_os = "macos") {
         config["claudeKeychain"] = json!(true);
     }
@@ -361,8 +343,9 @@ fn claude_code_signs_in_with_its_own_login() {
         })
     });
 
-    // Claude Code ran in the account's folder, by its absolute path, with the system's folders
-    // and its own on its PATH, and wrote its login there itself.
+    // Claude Code ran in the account's folder, by its absolute path, with the system's folders,
+    // its own and (a `#!/usr/bin/env node` script) node's on its PATH, and wrote its login there
+    // itself.
     let saw: Value =
         serde_json::from_slice(&std::fs::read(dir.join(".credentials.json")).unwrap()).unwrap();
     let saw = &saw["saw"];
@@ -374,11 +357,18 @@ fn claude_code_signs_in_with_its_own_login() {
     );
     assert_eq!(saw["env"]["HOME"], json!(folder.0.join("env-home")));
     assert_eq!(saw["env"]["BROWSER"], "true");
+    let agents = agent("fake-claude").canonicalize().unwrap();
+    let node = std::process::Command::new("sh")
+        .args(["-c", "command -v node"])
+        .output()
+        .unwrap();
+    let node = PathBuf::from(String::from_utf8(node.stdout).unwrap().trim());
     assert_eq!(
         saw["env"]["PATH"],
         json!(format!(
-            "/usr/bin:/bin:/usr/sbin:/sbin:{}",
-            folder.0.join("bin").display()
+            "/usr/bin:/bin:/usr/sbin:/sbin:{}:{}",
+            agents.parent().unwrap().display(),
+            node.parent().unwrap().display()
         ))
     );
     // What it started ended with it.
@@ -403,6 +393,66 @@ fn claude_code_signs_in_with_its_own_login() {
     let removed = call(&obid, "DELETE", &format!("/v1/accounts/{id}"), None);
     assert_eq!(removed.status, 204, "{}", removed.text);
     assert_eq!(call(&obid, "GET", &target, None).status, 404);
+}
+
+/// A sign-in the person walked away from can be ended (`DELETE …/sign-in`): the account takes jobs
+/// again at once, not after 15 minutes.
+#[test]
+fn an_abandoned_sign_in_can_be_ended() {
+    let folder = Folder::new("accounts-abandon");
+    let config = accounts_config(&folder.0);
+    let obid = start(&folder.0, &config, None);
+    let added = add(&obid, json!({"agent": "claude", "name": "Personal"}));
+    let id = added.body["id"].as_str().unwrap().to_owned();
+    let target = format!("/v1/accounts/{id}/sign-in");
+    assert_eq!(call(&obid, "GET", &target, None).status, 200);
+    let pids = obid.home.join("accounts").join(&id).join("login-pids");
+    let pids = within(5, "the login said its pids", || {
+        std::fs::read_to_string(&pids).ok()
+    });
+    let ended = call(&obid, "DELETE", &target, None);
+    assert_eq!(ended.status, 204, "{}", ended.text);
+    for pid in pids.split_whitespace() {
+        let pid: i32 = pid.parse().unwrap();
+        within(5, "the login ended", || (!alive(pid)).then_some(()));
+    }
+    // Nothing under way: ending it again is fine, and the code has nowhere to go.
+    assert_eq!(call(&obid, "DELETE", &target, None).status, 204);
+    assert_eq!(
+        call(
+            &obid,
+            "POST",
+            &target,
+            Some(&json!({"code": "good-code#fake"}))
+        )
+        .status,
+        409
+    );
+    assert_eq!(
+        call(&obid, "DELETE", "/v1/accounts/nobody/sign-in", None).status,
+        404
+    );
+    // A new one starts.
+    assert_eq!(call(&obid, "GET", &target, None).status, 200);
+}
+
+/// A configured account whose folder is inside obid's worktrees or clones, which jobs write, is
+/// never signed in there.
+#[test]
+fn a_folder_jobs_can_write_is_never_signed_in() {
+    let folder = Folder::new("accounts-worktree");
+    let mut config = accounts_config(&folder.0);
+    let home = PathBuf::from(config["home"].as_str().unwrap());
+    config["agents"]["codex"]["accounts"] = json!([
+        {"id": "in-worktree", "name": "W", "configDir": home.join("worktrees/abc/acct")},
+        {"id": "in-clone", "name": "C", "configDir": home.join("clones/o/r/acct")}
+    ]);
+    let obid = start(&folder.0, &config, None);
+    for id in ["in-worktree", "in-clone"] {
+        let refused = call(&obid, "GET", &format!("/v1/accounts/{id}/sign-in"), None);
+        assert_eq!(refused.status, 409, "{id}: {}", refused.text);
+        assert!(refused.text.contains("jobs"), "{}", refused.text);
+    }
 }
 
 /// obid stopping ends a sign-in's login with everything it started.

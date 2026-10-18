@@ -108,7 +108,9 @@ pub fn router(shared: Arc<Shared>) -> Router {
         )
         .route(
             "/v1/accounts/{id}/sign-in",
-            get(crate::accounts::sign_in).post(crate::accounts::sign_in_code),
+            get(crate::accounts::sign_in)
+                .post(crate::accounts::sign_in_code)
+                .delete(crate::accounts::end_sign_in),
         )
         .route(
             "/v1/jobs",

@@ -1321,7 +1321,7 @@ valid for other clients; This Mac mode uses the fixed home and address above.
 The owner adds, renames and removes the agents' accounts, and signs them in, from the apps (Settings › Accounts). The configuration's `agents.<tool>.accounts` are the seed. What these endpoints change is kept in `home/accounts.json` (0600) and laid over the seed at every start; the configuration file is never rewritten.
 
 - **When a change applies.** Every change reaches routing, the brain and the gateway's scrubbing at once, and every app following `GET /v1/events` gets `accounts` (the whole list, as `GET /v1/status` has it).
-- **Checks at start.** Each entry of `home/accounts.json` is checked as the API checks it, and one that isn't right is left out and logged: an id obid didn't make, a folder other than `home/accounts/<id>`, a name or payer the API would refuse, a name another account of the tool has, or past 32 accounts.
+- **Checks at start.** Each entry of `home/accounts.json` is checked as the API checks it, and one that isn't right is left out and logged: an id obid didn't make (eight lowercase hex digits: macOS ignores letter case, so two ids differing only in case would share a folder), a folder other than `home/accounts/<id>`, a name or payer the API would refuse, a name (added or changed) another account of the tool has, a change for an account obid doesn't have, or past 32 accounts.
 - **A file that doesn't read.** obid logs why, runs with the configuration's accounts, and answers `503` to every change until the owner fixes or removes the file.
 - **No tool comes back on its own.** A tool whose accounts were all removed is gone, rather than back on its own default login (the person's), which an empty `accounts` otherwise means. Its default login is listed, as `default` (Claude Code) or `codex` (Codex), once anything about the tool's accounts changed, and can be removed like any account.
 - **Not on the gateway.** None of these endpoints is on the gateway's allowlist: a paired phone's token must never add an account or sign obid into someone else's login, which would send the owner's code to that account. The Mac app calls them over loopback.
@@ -1342,10 +1342,10 @@ The owner adds, renames and removes the agents' accounts, and signs them in, fro
 
 **`DELETE /v1/accounts/{id}`** answers `204`.
 
-- A sign-in under way ends first.
+- A sign-in under way ends first; `409` (`Personal's sign-in didn't end within 5 seconds: try again in a moment.`) when it doesn't within 5 seconds.
 - `409` while a job of the account is queued or running: `Personal has a job queued or running: stop it, or move it to another account, first.`
 - Its folder is removed only when obid made it (a real folder, never through a link). A configuration account that is removed stays removed across restarts.
-- On macOS, Claude Code's Keychain item for the folder stays; Keychain Access removes it.
+- obid keeps nothing of it afterwards: the keeper stops refreshing its login. What the tool itself keeps stays: on macOS, Claude Code's Keychain item for the folder (Keychain Access removes it), and the login on the provider's side (signed in with Anthropic, OpenAI or Cursor until the person signs it out there).
 
 **`GET /v1/accounts/{id}/sign-in`** runs the tool's own login for the account, never obid's (AGENTS.md: obid never reads, stores or forwards the login), and answers what the person needs to finish it:
 
@@ -1356,23 +1356,23 @@ The owner adds, renames and removes the agents' accounts, and signs them in, fro
 
 - **What the app does.** It opens `url` in the browser. `userCode` (Codex) is the one-time code the person types on that page. `pasteCode` (Claude Code) means the page ends by showing a code, which the app sends back with `POST`.
 - **One at a time.** Asked again while it's under way, the answer is the same sign-in; there is one per account. It ends after 15 minutes (Codex's code lasts that long), or once it has signed in.
-- **Jobs wait.** While a sign-in is under way, and while an account is being removed, no job is dispatched to the account (a job naming it is refused: `Personal is being signed in or removed: try again in a moment.`; routing passes it by) and none starts on it. That holds from the moment no job of it was queued or running, and both are looked at under the same lock.
+- **Jobs wait.** While a sign-in is under way, and while an account is being removed, no job is dispatched to the account (a job naming it is refused: `Personal is being signed in or removed: try again in a moment.`; routing passes it by) and none starts on it: a job queued on it in the meantime stays queued and starts once the change ends. That holds from the moment no job of it was queued or running, and both are looked at under the same lock. An abandoned sign-in is ended with `DELETE` (below), rather than keeping the account's jobs waiting until it runs out.
 - **Where it runs.** The login runs in the account's own folder: no box ever gets that folder (#655, "The job sandbox"), so nothing a job wrote can steer the login. The tool writes the login there itself, and obid never reads or copies what it writes there except for the boxed runs' copies.
   - **Claude Code:** `claude auth login` with `CLAUDE_CONFIG_DIR` set to the account's folder. On macOS the login goes to that folder's Keychain item, the one obid copies for a boxed run with `claudeKeychain`, so on macOS it's `409` unless `claudeKeychain` is on. Without a terminal, Claude Code prints a link whose page shows the code, and reads the code on its stdin.
   - **Codex:** `codex login --device-auth -c cli_auth_credentials_store="file"` with `CODEX_HOME` and `HOME` set to the account's folder. It prints a link and a one-time code, and listens on no port (its browser login needs `localhost:1455`). It ends by itself once the person has signed in.
   - **Cursor:** `cursor-agent login` with `NO_OPEN_BROWSER=1`, the account's own `HOME`, `XDG_CONFIG_HOME` and `CURSOR_CONFIG_DIR`, and `AGENT_CLI_CREDENTIAL_STORE=file`, so its login is a file under the folder rather than the macOS Keychain (jobs run with the same setting and get a copy of that file). Its caches (`NODE_COMPILE_CACHE`, `XDG_CACHE_HOME`) go in obid's folder for the sign-in, and its `cli-config.json` is rewritten first, as before a job. It ends by itself once the person has signed in.
 - **How it runs.** Every login runs unboxed, since it must reach the Keychain and the network:
   - by its absolute path (`503` when obid can't find one);
-  - with its environment made from scratch: the kept variables, `PATH=/usr/bin:/bin:/usr/sbin:/sbin` plus the folder of the tool's own binary (links followed: Cursor runs the `node` beside it), no token, and no Claude Code or Anthropic variable;
+  - with its environment made from scratch: the kept variables, `PATH=/usr/bin:/bin:/usr/sbin:/sbin` plus the folder of the tool's own binary (links followed: Cursor runs the `node` beside it) and, for a script that starts `#!/usr/bin/env <program>` (a CLI installed with npm: `#!/usr/bin/env node`), the folder of that program as obid finds it on the login shell's `PATH`, no token, and no Claude Code or Anthropic variable;
   - with `BROWSER=true`, so nothing opens on the runner;
   - with `TMPDIR` and its working folder set to a new folder of obid's (`home/tmp/sign-in-…`, removed when it ends, and swept at obid's next start);
-  - in a process group of its own, which obid kills when the login ends, when the sign-in runs out or the account is removed, and when obid stops.
+  - in a process group of its own, which obid kills when the login ends, when the sign-in runs out, is ended or the account is removed, when obid stops, and when the request that started it ends before the login gave its link (its folder removed with it).
 - **What obid takes from its output.** What a login prints is read, at most 4,096 bytes of each line, only for the link and the code:
   - the link is the first `https://` link on the tool's own sites (`claude.com`, `claude.ai`, `anthropic.com`; `openai.com`, `chatgpt.com`; `cursor.com`, `cursor.sh`, or below them), with no login, port or space in it;
   - the code is Codex's, a line like `3U0G-DCVSU`.
   Nothing else it prints is kept, answered or logged. obid's log says only that a sign-in started and whether it signed the account in.
 - **Errors.** `404` for an unknown account. `409` in four cases:
-  - the tool's own default login (an account without a folder: it is the person's, signed in with the tool itself);
+  - the tool's own default login (an account without a folder: it is the person's, signed in with the tool itself), and a configured account whose folder is inside obid's worktrees or clones, which jobs write;
   - a job of the account is queued or running;
   - the account is being removed;
   - Claude Code on macOS without `claudeKeychain`.
@@ -1384,6 +1384,8 @@ The owner adds, renames and removes the agents' accounts, and signs them in, fro
 - `422` when the code isn't one line of at most 4,096 characters, or when Claude Code didn't sign in with it (`Claude Code didn't sign in with that code. Start again for a new link.`: the sign-in has ended).
 - `409` when no sign-in is under way, a code went to it already, or the tool takes no code (Codex, Cursor).
 - `504` when it didn't end within 60 seconds.
+
+**`DELETE /v1/accounts/{id}/sign-in`** ends the account's sign-in under way, with everything its login started: `204`, also when none was under way. `404` for an unknown account; `409` when it didn't end within 5 seconds.
 
 When a sign-in ends, every app gets `accounts`, with `signedIn` as obid finds it (the login file, or the Keychain item with `claudeKeychain`).
 

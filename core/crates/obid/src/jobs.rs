@@ -199,6 +199,8 @@ pub struct Changing {
 impl Drop for Changing {
     fn drop(&mut self) {
         self.jobs.lock().changing.remove(&self.account);
+        // A job queued on it meanwhile starts now.
+        self.jobs.schedule();
     }
 }
 
@@ -1445,6 +1447,15 @@ impl Jobs {
                 .collect();
             queued.sort();
             for (_, id) in queued {
+                // A job queued while its account is signed in or removed waits for that to end
+                // ([`Jobs::begin_change`]).
+                if state
+                    .jobs
+                    .get(&id)
+                    .is_some_and(|j| state.changing.contains(&j.account))
+                {
+                    continue;
+                }
                 if state.workers.len() < self.max_running() {
                     let (sender, receiver) = watch::channel(Signal::Run);
                     state.workers.insert(id.clone(), sender);
@@ -4681,6 +4692,13 @@ pub(crate) fn folder_login(config_dir: &Path) -> Option<Vec<u8>> {
         .and_then(|bytes| without_refresh(&bytes))
 }
 
+/// The keeper forgets the login of an account that was removed: its folder's Keychain item isn't
+/// refreshed any more (the item itself stays; obid never writes the Keychain).
+pub(crate) fn forget_kept(config_dir: &Path) {
+    let service = keychain_service(Some(config_dir));
+    kept().retain(|k| k.service != service);
+}
+
 /// A job's private copy (`path`) of the Keychain login `service`, kept fresh while its run goes.
 fn keep_keychain_copy(service: &str, path: PathBuf) {
     if let Some(account) = kept().iter_mut().find(|k| k.service == service)
@@ -5830,6 +5848,47 @@ mod tests {
 
     /// After a refresh, every live copy is written again from the Keychain: one whose run ended
     /// (its file removed) is forgotten, never made again.
+    /// A job queued while its account is signed in or removed waits (its account's change is
+    /// under way), and starts once the change ends, instead of failing.
+    #[tokio::test]
+    async fn a_job_queued_during_an_accounts_change_waits_for_it() {
+        let root = std::env::temp_dir().join(format!("obid-changing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let changing = jobs.begin_change("a").unwrap();
+        let job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        jobs.insert(job);
+        jobs.schedule();
+        assert!(!jobs.lock().workers.contains_key("j"));
+        assert_eq!(jobs.get("j").unwrap().status, Status::Queued);
+        drop(changing);
+        let started = (0..100).any(|_| {
+            jobs.lock().workers.contains_key("j")
+                || jobs.get("j").is_some_and(|j| j.status != Status::Queued)
+        });
+        assert!(started, "the job never started once the change ended");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_refresh_rewrites_the_live_copies_only() {
         let root = std::env::temp_dir().join(format!("obid-copies-{}", std::process::id()));
