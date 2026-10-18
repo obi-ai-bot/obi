@@ -192,6 +192,10 @@ pub async fn ensure_clone(
         git(&clone, &["config", "remote.origin.url", remote]).await?;
         git(&clone, &["config", "remote.origin.pushurl", NO_PUSH_URL]).await?;
     }
+    // No automatic maintenance: after an agent's commit it packs refs into packed-refs, which the
+    // job sandbox doesn't let it write, and the agent spends a turn on the error.
+    git(&clone, &["config", "maintenance.auto", "false"]).await?;
+    git(&clone, &["config", "gc.auto", "0"]).await?;
     exclude_obi_folders(&clone)?;
     if !refspecs.is_empty() {
         let mut args: Vec<&str> = vec![
@@ -345,5 +349,48 @@ mod tests {
         ] {
             assert!(!is_branch_name(bad), "{bad}");
         }
+    }
+
+    /// git's automatic maintenance never runs in obid's clones: after an agent's commit it packs
+    /// refs into the clone's packed-refs, which the job sandbox doesn't let it write, and the
+    /// agent spent a turn checking a commit that had landed. A clone made before is held to it too.
+    #[tokio::test]
+    async fn clones_run_no_automatic_maintenance() {
+        let root = std::env::temp_dir().join(format!("obid-maintenance-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let remote = root.join("remote");
+        std::fs::create_dir_all(&remote).unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &[
+                "-c",
+                "user.name=a",
+                "-c",
+                "user.email=a@b",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "first",
+            ],
+        ] {
+            git(&remote, args).await.unwrap();
+        }
+        let home = root.join("home");
+        let url = format!("file://{}", remote.display());
+        let setting = |clone: PathBuf, key: &'static str| async move {
+            git(&clone, &["config", "--get", key])
+                .await
+                .unwrap_or_default()
+        };
+        let clone = ensure_clone(&home, "o/r", &url, &[]).await.unwrap();
+        assert_eq!(setting(clone.clone(), "maintenance.auto").await, "false");
+        assert_eq!(setting(clone.clone(), "gc.auto").await, "0");
+        git(&clone, &["config", "maintenance.auto", "true"])
+            .await
+            .unwrap();
+        let clone = ensure_clone(&home, "o/r", &url, &[]).await.unwrap();
+        assert_eq!(setting(clone, "maintenance.auto").await, "false");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

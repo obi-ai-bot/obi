@@ -159,8 +159,13 @@ pub fn user_message(text: &str) -> Value {
     json!({"type": "user", "message": {"role": "user", "content": text}})
 }
 
+/// How long the agent may take to close its output and exit by itself once its turn's `result`
+/// came: Claude Code took 0.8 to 3.1 seconds, finishing the session file the next turn's
+/// `--resume` reads. Then it's ended, as a stop ends it.
+const AFTER_RESULT: Duration = Duration::from_secs(3);
+
 /// Runs one turn: starts the agent, sends `prompt`, answers prompts with `decide`, reports with
-/// `on_event`, closes stdin after the `result` line and waits for the agent to exit. Ends the
+/// `on_event`, closes stdin after the `result` line and lets the agent exit (`AFTER_RESULT`). Ends the
 /// agent and everything it started when `stop` turns true or `limit` passes.
 pub async fn run_turn(
     launch: Launch,
@@ -258,15 +263,24 @@ pub async fn run_turn(
                     turn.session.get_or_insert_with(|| session.to_owned());
                 }
                 turn.result = Some(message);
-                // The turn is over: no more input, so the agent exits once it's idle.
+                // The turn is over: no more input, and nothing more to read.
                 conn.close_input();
+                break;
             }
             _ => {}
         }
     }
     turn.timed_out = conn.timed_out;
     turn.stopped = conn.stopped;
-    turn.exit = conn.finish().await;
+    // After its result the agent closes its output and exits by itself, within AFTER_RESULT.
+    turn.exit = if turn.result.is_some() {
+        let until = std::time::Instant::now() + AFTER_RESULT;
+        conn.drain_within(AFTER_RESULT).await;
+        conn.finish_within(until.saturating_duration_since(std::time::Instant::now()))
+            .await
+    } else {
+        conn.finish().await
+    };
     Ok(turn)
 }
 
@@ -315,6 +329,64 @@ pub fn step(tool: &str, input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs one turn of a fake Claude Code that reads the prompt, prints its result, then runs
+    /// `after`: the turn, how long it took, and the fake's folder.
+    async fn fake_turn(name: &str, after: &str) -> (Turn, Duration, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("obid-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let bin = root.join("claude");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nread line\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Done.\",\"session_id\":\"s1\"}}'\n{after}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launch = Launch {
+            argv: vec![bin.into_os_string()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            cwd: root.clone(),
+            stderr: root.join("agent.log"),
+        };
+        let (_stop, stop) = watch::channel(process::Signal::Run);
+        let began = std::time::Instant::now();
+        let turn = run_turn(
+            launch,
+            "Do it.",
+            Duration::from_secs(60),
+            stop,
+            |_, _| Ruling::Now(Answer::Allow),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        (turn, began.elapsed(), root)
+    }
+
+    /// After its result Claude Code finishes its session file, which the next turn's `--resume`
+    /// reads: obid lets it exit by itself (it took 0.8 to 3.1 seconds), never cutting it at once.
+    #[tokio::test]
+    async fn the_agent_finishes_its_session_before_the_turn_ends() {
+        let (turn, took, root) = fake_turn("session-end", "sleep 1\necho end > session-end").await;
+        assert!(turn.succeeded());
+        assert_eq!(turn.text(), "Done.");
+        assert!(root.join("session-end").exists(), "cut after {took:?}");
+        assert!(took < AFTER_RESULT, "{took:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One that never exits after its result ends a few seconds later, not at the round's limit.
+    #[tokio::test]
+    async fn an_agent_that_never_exits_ends_soon_after_its_result() {
+        let (turn, took, root) = fake_turn("never-exits", "exec sleep 30").await;
+        assert!(turn.succeeded());
+        assert!(took < AFTER_RESULT + Duration::from_secs(2), "{took:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn steps() {
