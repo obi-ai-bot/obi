@@ -75,6 +75,8 @@ nonisolated enum Tokens {
     static let codeBg = Color(dark: Color.black.opacity(0.3), light: Color.black.opacity(0.05))
     /// A task or artifact card under Oby's words.
     static let cardFill = Color(dark: Color.white.opacity(0.06), light: Color(hex: 0xFFFFFF))
+    /// A switch that's off.
+    static let track = Color(dark: Color.white.opacity(0.14), light: Color.black.opacity(0.12))
     /// A usage bar's track.
     static let meter = Color(dark: Color.white.opacity(0.08), light: Color.black.opacity(0.07))
     /// The stage bar's done and current segments, and an upcoming stage's ring.
