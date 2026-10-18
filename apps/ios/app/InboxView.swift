@@ -3,7 +3,7 @@ import SwiftUI
 /// One thing only you can answer (`GET /v1/inbox`), as Sangam's decision block (AskBlock, the
 /// shared AskCard): its kind, Oby's headline, what happened, the command or plan, the choices with
 /// the recommended one filled, Later, and your own words. Answered here, it goes from the Mac's
-/// window too. Shown on a task's card and page, in its conversation, and in Home's Needs you.
+/// window too. Shown on a task's card and page, in its conversation, and, with no task on Home, in the Inbox.
 struct InboxDecision: View {
     @Environment(\.openURL) private var openURL
     @Environment(Phone.self) private var phone

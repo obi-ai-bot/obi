@@ -11,12 +11,16 @@ nonisolated enum PhoneTab: String, Hashable, Sendable { case home, chat, setting
 /// stands, and whether it's new; and what's been archived.
 nonisolated enum PhoneWork {
     /// Latest first (by when it finished, else when it was made). New: made after `since` (this
-    /// launch) and not opened since (`seen`). No teammates yet: the runner doesn't say who asked.
-    static func items(_ jobs: [Job], since: Date, seen: Set<String>) -> [WorkList.Item<Job>] {
-        jobs.enumerated()
+    /// launch) and not opened since (`seen`). Needs you: a decision is open on it, its own or one
+    /// of `inbox` (what waits now, `InboxItem.waiting`), whatever its agent is doing (Sangam's
+    /// tasks.ts). No teammates yet: the runner doesn't say who asked.
+    static func items(_ jobs: [Job], inbox: [InboxItem] = [], since: Date, seen: Set<String>) -> [WorkList.Item<Job>] {
+        let asked = Set(inbox.map(\.job))
+        return jobs.enumerated()
             .sorted { ($0.element.finished ?? $0.element.created, -$0.offset) > ($1.element.finished ?? $1.element.created, -$1.offset) }
             .map { _, job in
-                let status: WorkStatus = job.needsYou || job.waitsForAnswer || job.waitsForPermission ? .needs : job.isActive ? .running : .done
+                let decides = job.needsYou || job.waitsForAnswer || job.waitsForPermission || asked.contains(job.id)
+                let status: WorkStatus = decides ? .needs : job.isActive ? .running : .done
                 return WorkList.Item(id: job.id, job: job, type: .of(review: job.kind == "review", issue: job.issue, requester: nil),
                                      status: status, queued: job.status == .queued, fresh: job.created > since && !seen.contains(job.id))
             }
@@ -26,6 +30,23 @@ nonisolated enum PhoneWork {
     /// ones you let go (Dismiss). The runner keeps them all; this lists the ones it sent.
     static func archived(_ jobs: [Job], clearedAt: Date?) -> [Job] {
         jobs.filter { !$0.isActive && ($0.dismissed != nil || !$0.listed(after: clearedAt, among: jobs)) }
+    }
+
+    /// The Inbox (docs/oby-ux.md row 10): of what waits now, the decisions with no task on Home,
+    /// so each one is somewhere. The rest live with their task.
+    static func loose(_ inbox: [InboxItem], among items: [WorkList.Item<Job>]) -> [InboxItem] {
+        let listed = Set(items.map(\.id))
+        return inbox.filter { !listed.contains($0.job) }
+    }
+
+    /// Where Home's "needs you" leads: the decision that has waited longest (`inbox` is what waits
+    /// now, longest first), on its task's page, or the Inbox when it has no task on Home; with no
+    /// inbox item (an older runner), the first task that needs you.
+    static func firstNeeding(_ items: [WorkList.Item<Job>], inbox: [InboxItem]) -> Route? {
+        if let first = inbox.first {
+            return items.contains { $0.id == first.job } ? .task(first.job) : .inbox
+        }
+        return WorkList.ranked(items).first { $0.status == .needs }.map { .task($0.id) }
     }
 }
 
@@ -92,7 +113,9 @@ final class Phone {
     func markSeen(_ id: String) { seen.insert(id) }
 
     /// Home's work: every job Home lists, with its kind and where it stands.
-    var work: [WorkList.Item<Job>] { PhoneWork.items(visibleJobs, since: since, seen: seen) }
+    var work: [WorkList.Item<Job>] { PhoneWork.items(visibleJobs, inbox: InboxItem.waiting(inbox), since: since, seen: seen) }
+    /// The Inbox: what waits now with no task on Home.
+    var loose: [InboxItem] { PhoneWork.loose(InboxItem.waiting(inbox), among: work) }
     /// Archived: done jobs that left Home (Clear done, Dismiss).
     var archived: [Job] { PhoneWork.archived(jobs, clearedAt: clearedAt) }
     /// What Oby's answering or asking in the thread shown, else nothing.

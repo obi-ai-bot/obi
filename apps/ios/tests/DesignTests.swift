@@ -49,6 +49,37 @@ struct DesignTests {
         #expect(WorkList.items(items, in: .done).map(\.id) == ["t"])
     }
 
+    /// One "needs you" (docs/oby-ux.md rows 5 and 10): the tasks with an open decision, its own or
+    /// an inbox item, plus the decisions with no task on Home; the line leads to the longest-waiting.
+    @Test func needsYouIsCountedOnceAndLeadsToTheTask() throws {
+        let queued = try job("q", "queued")
+        let running = try job("r", "running")
+        let failed = try job("f", "failed", finished: "2026-10-09T22:00:00Z")
+        let since = ISO8601DateFormatter().date(from: "2026-10-09T21:00:00Z")!
+        func item(_ id: String, _ kind: String, job: String, created: TimeInterval, later: Date? = nil) -> InboxItem {
+            InboxItem(kind: kind, id: id, job: job, title: kind, text: "", options: [], created: Date(timeIntervalSince1970: created), later: later)
+        }
+        let start = item("i1", "start", job: "q", created: 200)
+        let audit = item("i2", "audit", job: "", created: 100)
+        let putOff = item("i3", "question", job: "r", created: 50, later: .now.addingTimeInterval(3600))
+        let elsewhere = item("i4", "question", job: "older-than-the-list", created: 300)
+        let inbox = InboxItem.waiting([start, audit, putOff, elsewhere])
+        let items = PhoneWork.items([queued, running, failed], inbox: inbox, since: since, seen: [])
+        // A Start it? on a queued task makes it need you; a decision put off doesn't, until it's back.
+        #expect(items.first { $0.id == "q" }?.status == .needs)
+        #expect(items.first { $0.id == "r" }?.status == .running)
+        // The Inbox holds only what has no task on Home.
+        let loose = PhoneWork.loose(inbox, among: items)
+        #expect(loose.map(\.id) == ["i2", "i4"])
+        #expect(WorkList.needsYou(items, loose: loose.count) == 4)
+        // The longest-waiting decision first: here the one with no task, so the Inbox.
+        #expect(PhoneWork.firstNeeding(items, inbox: inbox) == .inbox)
+        #expect(PhoneWork.firstNeeding(items, inbox: [start, elsewhere]) == .task("q"))
+        // No inbox item (an older runner): the first task that needs you.
+        #expect(PhoneWork.firstNeeding(items, inbox: []) == .task("f"))
+        #expect(PhoneWork.firstNeeding(items.filter { $0.status != .needs }, inbox: []) == nil)
+    }
+
     @Test func archivedHoldsWhatLeftHome() throws {
         let cleared = try job("c", "done", finished: "2026-10-09T22:00:00Z")
         let dismissed = try job("d", "failed", finished: "2026-10-09T22:00:00Z", extra: #", "dismissed": "2026-10-09T23:00:00Z""#)

@@ -3,7 +3,7 @@ import WebKit
 
 /// Where a tab's stack can go: a kind of work's page, a task's page, a conversation (obid's by
 /// id, nil for the latest or the one thread), the one Home's box just started, every task,
-/// Archived, and what needs you.
+/// Archived, and the Inbox (what needs you with no task on Home).
 enum Route: Hashable {
     case kind(WorkType)
     case task(String)
@@ -11,7 +11,7 @@ enum Route: Hashable {
     case newConversation
     case all
     case archived
-    case needs
+    case inbox
 }
 
 extension EnvironmentValues {
@@ -35,7 +35,7 @@ extension View {
             case .newConversation: ConversationPage(id: nil, isNew: true)
             case .all: AllTasksPage()
             case .archived: ArchivedPage()
-            case .needs: NeedsYouPage()
+            case .inbox: InboxPage()
             }
         }
     }
@@ -50,8 +50,8 @@ extension View {
 
 /// Home (Sangam's Home.tsx): Oby on its stage, what's running and what needs you under it, a chip
 /// for each kind of work, and the message box. What you send there starts a conversation and
-/// opens it. A chip opens its kind's page; the list button, every task; Needs you, what only you
-/// can answer.
+/// opens it. A chip opens its kind's page; the list button, every task; "needs you", the decision
+/// that has waited longest, with its task (docs/oby-ux.md rows 9-10).
 struct HomeView: View {
     @Environment(Phone.self) private var phone
     @Environment(\.scenePhase) private var scenePhase
@@ -102,8 +102,8 @@ struct HomeView: View {
     private var stage: some View {
         let work = phone.work
         let groups = WorkList.groups(work, by: .type)
-        let running = work.count { $0.status == .running }, needs = work.count { $0.status == .needs }
-        let waiting = InboxItem.waiting(phone.inbox).count
+        let running = work.count { $0.status == .running }
+        let needs = WorkList.needsYou(work, loose: phone.loose.count)
         return VStack(spacing: 16) {
             Spacer(minLength: 0)
             WebView(character.page)
@@ -113,20 +113,23 @@ struct HomeView: View {
                 .frame(width: 240, height: 200)
                 .accessibilityElement()
                 .accessibilityLabel("Oby")
-            Text(HomeLine.attention(running: running, needs: needs))
-                .font(Tokens.font(Tokens.textBase))
-                .foregroundStyle(running + needs == 0 ? Tokens.text : Tokens.muted)
-                .multilineTextAlignment(.center)
+            Button {
+                if let first = PhoneWork.firstNeeding(work, inbox: InboxItem.waiting(phone.inbox)) { phone.homePath.append(first) }
+            } label: {
+                Text(HomeLine.attention(running: running, needs: needs))
+                    .font(Tokens.font(Tokens.textBase))
+                    .foregroundStyle(running + needs == 0 ? Tokens.text : Tokens.muted)
+                    .multilineTextAlignment(.center)
+            }
+            .buttonStyle(.plain)
+            .allowsHitTesting(needs > 0)
+            .accessibilityHint(needs > 0 ? "Opens what needs you" : "")
             if case .offline = phone.connection {
                 Label(phone.offlineLine, systemImage: "wifi.exclamationmark")
                     .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needs)
                     .multilineTextAlignment(.center)
             }
             CenteredFlow(spacing: 8) {
-                // What only you can answer, first, so nothing waits unseen.
-                if waiting > 0 {
-                    HomeChip(label: "Needs you · \(waiting)", fresh: false, needs: true) { phone.homePath.append(.needs) }
-                }
                 ForEach(groups) { group in
                     HomeChip(label: group.label, fresh: group.fresh, needs: group.needs > 0) {
                         if let kind = group.type { phone.homePath.append(.kind(kind)) }
@@ -346,17 +349,19 @@ struct ArchivedPage: View {
     }
 }
 
-/// Needs you: everything only you can answer, the longest-waiting first, each as its decision.
-struct NeedsYouPage: View {
+/// The Inbox (docs/oby-ux.md row 10): what only you can answer and has no task on Home (an audit,
+/// an Oby failure, a task older than the list), the longest-waiting first. The rest live with
+/// their task: on its card, its page and in its conversation.
+struct InboxPage: View {
     @Environment(Phone.self) private var phone
 
     var body: some View {
         // Every half minute: what was put off comes back.
         TimelineView(.periodic(from: .now, by: 30)) { context in
-            let items = InboxItem.waiting(phone.inbox, now: context.date)
+            let items = PhoneWork.loose(InboxItem.waiting(phone.inbox, now: context.date), among: phone.work)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Needs you").font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink).padding(.bottom, 8)
+                    Text("Inbox").font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink).padding(.bottom, 8)
                         .accessibilityAddTraits(.isHeader)
                     ForEach(items) { item in
                         VStack(alignment: .leading, spacing: 6) {

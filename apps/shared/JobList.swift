@@ -271,6 +271,10 @@ nonisolated enum WorkList {
         return (group.items.filter { $0.status != .done } + done.prefix(keep), hidden)
     }
 
+    /// "Needs you", counted one way wherever it shows (docs/oby-ux.md row 5): the tasks with an open
+    /// decision, plus the decisions that have no task (`loose`).
+    static func needsYou<J>(_ items: [Item<J>], loose: Int) -> Int { items.count { $0.status == .needs } + loose }
+
     /// A kind's tasks under one tab of its page.
     static func items<J>(_ items: [Item<J>], in tab: Tab) -> [Item<J>] {
         items.filter { ($0.status == .done) == (tab == .done) }
