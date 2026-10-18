@@ -138,6 +138,36 @@ fn an_event_it_cant_match_escalates_and_changes_nothing() {
     assert_eq!(job["round"], 1);
 }
 
+/// Telling a job that ended something starts a follow-up (the owner's decision of 2026-10-18),
+/// which only the owner's own words start: an event turn's message to one escalates, and nothing
+/// starts.
+#[test]
+fn an_event_turn_never_starts_a_follow_up() {
+    let folder = Folder::new("orchestrator-follow-up");
+    let obid = started(&folder);
+    let id = failing(&obid);
+    let mut tell = on("message_job", &id);
+    tell = tell.replace(
+        r#""jobs":"#,
+        r#""message": "Rerun the flaky test.", "jobs":"#,
+    );
+    queue(&obid, &[on("read_job", &id), tell]);
+    let item = within(60, "it escalates", || escalations(&obid).pop());
+    assert!(
+        item["text"]
+            .as_str()
+            .unwrap()
+            .contains("only your own words start"),
+        "{item}"
+    );
+    assert_eq!(planned(&obid), ["read_job", "message_job"]);
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["status"], "failed");
+    assert_eq!(job["round"], 1);
+}
+
 /// The user's words preempt an event turn: it stops after what it was doing, and acts on nothing.
 #[test]
 fn a_user_message_preempts_an_event_turn() {

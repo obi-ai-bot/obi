@@ -10,7 +10,7 @@ use super::plan::{Action, Plan, Question};
 use super::planner::Planned;
 use crate::api::Shared;
 use crate::job::Job;
-use crate::jobs::NewJob;
+use crate::jobs::{NewJob, Source};
 use crate::sphere::inbox::{Confirmed, Item, action};
 
 /// How an action that changes something ended: what Oby says about it, and whether it happened.
@@ -18,6 +18,8 @@ use crate::sphere::inbox::{Confirmed, Item, action};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Done(String),
+    /// It happened and started a job, whose card goes on the answer: a follow-up.
+    Started(String, Value),
     Failed(String),
     /// Nothing happened because the plan didn't say which job or item: the user is asked to.
     NeedsWhich(String),
@@ -26,12 +28,15 @@ pub enum Outcome {
 impl Outcome {
     pub fn text(&self) -> &str {
         match self {
-            Outcome::Done(text) | Outcome::Failed(text) | Outcome::NeedsWhich(text) => text,
+            Outcome::Done(text)
+            | Outcome::Started(text, _)
+            | Outcome::Failed(text)
+            | Outcome::NeedsWhich(text) => text,
         }
     }
 
     pub fn failed(&self) -> bool {
-        !matches!(self, Outcome::Done(_))
+        !matches!(self, Outcome::Done(_) | Outcome::Started(..))
     }
 }
 
@@ -350,8 +355,9 @@ pub const TRY_AGAIN: &str =
     "Try again, picking up where you left off. Finish with a short summary as asked.";
 
 /// Carries out an action that changes something, and says what happened. `said` is the user's
-/// own words this turn, which message_job passes on.
-pub async fn act(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
+/// own words this turn, which message_job passes on; `source` is whose they are and whether the
+/// turn read something untrusted, which decides what they do to a job that ended.
+pub async fn act(shared: &Arc<Shared>, plan: &Plan, said: &str, source: Source) -> Outcome {
     match plan.action {
         Action::StopAgent => stop(shared, plan),
         Action::SetMode => set_mode(shared, plan),
@@ -359,7 +365,7 @@ pub async fn act(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
         Action::RetryJob | Action::DismissJob | Action::StartNow => on_jobs(shared, plan),
         Action::AnswerInbox => answer_inbox(shared, plan).await,
         Action::SetSetting => set_setting(shared, plan),
-        Action::MessageJob => message_job(shared, plan, said),
+        Action::MessageJob => message_job(shared, plan, said, source),
         Action::MoveJob => {
             let names: Vec<String> = plan
                 .named()
@@ -448,7 +454,8 @@ fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
             false,
         );
     }
-    match shared.jobs.message(&job.id, TRY_AGAIN) {
+    // Try again's own words pick its session up again: they never start a follow-up.
+    match shared.jobs.message(&job.id, TRY_AGAIN, Source::Event) {
         Some(Ok(job)) => (
             format!("Started {name} again on {}.", place(shared, &job)),
             true,
@@ -458,25 +465,12 @@ fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
     }
 }
 
-/// Whether obid's configuration still has the account `account` for the tool `agent`.
-fn account_exists(shared: &Arc<Shared>, agent: &str, account: &str) -> bool {
-    let agents = &shared.config.agents;
-    let tool = match agent {
-        "claude" => &agents.claude,
-        "codex" => &agents.codex,
-        "cursor" => &agents.cursor,
-        _ => return false,
-    };
-    tool.as_ref()
-        .is_some_and(|tool| tool.accounts.iter().any(|a| a.id == account))
-}
-
 /// message_job (#542): the user's own words reach the job's agent, with the secrets obid knows
-/// taken out, never the brain's restatement of them (obid has no event orchestrator to speak
-/// for itself yet, #351). A running job hears them at its next turn; one that ended picks its
-/// session up again in its own worktree for one more round that starts with them, at once. A job
-/// whose pull request was merged takes none: that's new work.
-fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
+/// taken out, never the brain's restatement of them. A running job hears them at its next turn;
+/// one that ended gets a follow-up that starts with them (Sangam's design, the owner's decision of
+/// 2026-10-18), and stays as it ended. After research the follow-up waits for the owner's Start;
+/// an event turn's words never start one.
+fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str, source: Source) -> Outcome {
     let Some(id) = plan.named().first() else {
         return Outcome::Failed("Say which job to tell.".into());
     };
@@ -484,55 +478,68 @@ fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
         return Outcome::Failed("That job isn't here any more.".into());
     };
     let name = job.short_title();
-    if job.merged() {
-        return Outcome::Failed(format!(
-            "Couldn't tell {name}: its pull request was merged, so start a new job instead."
-        ));
-    }
-    let active = job.status.is_active();
-    // A job the owner let go, or whose account isn't set up any more, isn't picked up again: that
-    // would wait on a Confirm for work that can't or shouldn't run. The brain starts a new job.
-    if !active && job.dismissed.is_some() {
-        return Outcome::Failed(format!(
-            "Couldn't tell {name}: you let it go, so start a new job instead."
-        ));
-    }
-    if !active && !account_exists(shared, &job.agent, &job.account) {
-        return Outcome::Failed(format!(
-            "Couldn't tell {name}: its account {} isn't set up any more, so start a new job instead.",
-            job.account
-        ));
-    }
-    if !active
-        && job
-            .worktree
-            .as_deref()
-            .is_none_or(|w| !std::path::Path::new(w).is_dir())
-    {
-        return Outcome::Failed(format!(
-            "Couldn't tell {name}: its worktree is gone, so start a new job instead."
-        ));
-    }
-    if !active && job.session.is_none() {
-        return Outcome::Failed(format!(
-            "Couldn't tell {name}: it never started, so there's no session to pick up."
-        ));
-    }
     let words = match crate::vault::for_agent(said.trim()) {
         Ok(words) => crate::secrets::known().redact(&words),
         Err(why) => return Outcome::Failed(format!("Couldn't tell {name}: {why}")),
     };
-    // A job that ended picks up again with the words at once: one more round in its own worktree
-    // (the owner's decision of 2026-10-17, as Sangam's design does; it replaced a Confirm). What
-    // it may then do is what any round may: publishing, merging and secrets keep their own gates.
-    match shared.jobs.message(&job.id, &words) {
-        Some(Ok(_)) if !active => Outcome::Done(format!(
-            "{name} ended, so it picks up again with what you said: one more round."
-        )),
+    if !job.status.is_active() {
+        let new = crate::jobs::follow_up(&job, &words);
+        return match source {
+            Source::Owner => follow_up(shared, &job, new),
+            Source::Untrusted => Outcome::Done(propose_follow_up(shared, &job, &new)),
+            Source::Event => Outcome::Failed(format!(
+                "Couldn't tell {name}: it ended, so that starts a follow-up, which only your own words start."
+            )),
+        };
+    }
+    match shared.jobs.message(&job.id, &words, source) {
         Some(Ok(_)) => Outcome::Done(format!("Told {name} what you said.")),
         Some(Err(refused)) => Outcome::Failed(format!("Couldn't tell {name}: {}", refused.0)),
         None => Outcome::Failed("That job isn't here any more.".into()),
     }
+}
+
+/// Starts `new`, the follow-up of `job`, and says so as Sangam's design does, its card on the
+/// answer.
+pub(super) fn follow_up(shared: &Arc<Shared>, job: &Job, new: NewJob) -> Outcome {
+    let name = job.short_title();
+    match shared.jobs.create(new) {
+        Ok(next) => Outcome::Started(
+            format!(
+                "{name} is finished, so I started a follow-up: {}. {} has it in {} on {}.",
+                next.short_title(),
+                tool_name(&next.agent),
+                next.repo_name(),
+                account_name(shared, &next.account)
+            ),
+            next.to_json(),
+        ),
+        Err(refused) => Outcome::Failed(format!(
+            "Couldn't start a follow-up of {name}: {}",
+            refused.0
+        )),
+    }
+}
+
+/// Proposes `new`, the follow-up of `job`, after the turn read something untrusted: a `start` item
+/// in obid's own words, the task it would hear quoted, for the owner's Start (#374).
+pub(super) fn propose_follow_up(shared: &Arc<Shared>, job: &Job, new: &NewJob) -> String {
+    let name = job.short_title();
+    let nonce = super::briefing::nonce();
+    let text = format!(
+        "Oby looked into it first. Start {}, a follow-up of {name}?\n\n{}\n{}",
+        describe(new),
+        super::briefing::fence_rule(&nonce, "what the follow-up would hear"),
+        super::briefing::fence(&nonce, &new.task),
+    );
+    let title = new
+        .title
+        .clone()
+        .unwrap_or_else(|| format!("Follow-up of {name}"));
+    shared.link.propose(new, title, text);
+    format!(
+        "{name} is finished, and this turn looked something up, so its follow-up waits for your Start in your inbox."
+    )
 }
 
 /// answer_inbox: an item of the inbox, with one of its options or the user's own words

@@ -1952,11 +1952,11 @@ fn the_user_tells_a_running_job_something() {
     assert!(items_of(&obid, "confirm").is_empty());
 }
 
-/// A job the owner let go (Dismiss) isn't picked up again by "tell it…": the brain hears that it
-/// should start a new job, and nothing waits for a Confirm (a field test, 2026-10-17, kept being
-/// offered one more round of a dismissed job that had failed for good).
+/// A job the owner let go (Dismiss) is finished too: "tell it…" starts a follow-up, and the job
+/// stays let go (a field test, 2026-10-17, kept being offered one more round of a dismissed job
+/// that had failed for good).
 #[test]
-fn a_dismissed_job_is_not_told_anything() {
+fn a_dismissed_job_gets_a_follow_up_too() {
     let folder = Folder::new("brain-message-dismissed");
     let obid = started(&folder);
     let job = job_that(&obid, "Docs line", "FAIL", None, "failed");
@@ -1964,51 +1964,168 @@ fn a_dismissed_job_is_not_told_anything() {
     let dismissed = call(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None);
     assert_eq!(dismissed.status, 200, "{}", dismissed.text);
     queue(&obid, &[message_plan(&id), reply("")]);
-    let text = said(&obid, "Tell the docs job to add one more line")["text"].clone();
-    assert!(
-        text.as_str()
-            .unwrap_or("")
-            .contains("start a new job instead"),
-        "{text}"
-    );
+    let answer = said(&obid, "Tell the docs job to add one more line");
+    let cards = answer["jobs"].as_array().unwrap();
+    assert_eq!(cards.len(), 1, "{answer}");
+    let next = get_job(&obid, cards[0]["id"].as_str().unwrap());
+    assert_eq!(next["followUpOf"], json!(id));
+    assert_eq!(next["request"], "Tell the docs job to add one more line");
+    let first = get_job(&obid, &id);
+    assert_eq!(first["status"], "failed");
+    assert!(first["dismissed"].is_string(), "{first}");
     assert!(items_of(&obid, "confirm").is_empty());
 }
 
-/// #542, with the owner's decision of 2026-10-17 (it replaced 2026-10-16's Confirm, as Sangam's
-/// design does): telling a job that ended done something starts one more round of it at once, in
-/// its own worktree, starting with the user's words (a secret obid holds taken out). Nothing waits
-/// for a Confirm.
+/// The owner's decision of 2026-10-18 (Sangam's design leads; it replaced #644's one more round
+/// in the job's own worktree): telling a job that ended something starts a follow-up job at once,
+/// with the same kind, agent, account, repository and conversation, the owner's words as its
+/// request (a secret obid holds taken out), and what the first job did quoted in its first prompt.
+/// The first job stays as it ended. Oby's answer names the follow-up and carries its card, and
+/// nothing waits for a Confirm.
 #[test]
-fn telling_a_finished_job_something_starts_one_more_round_at_once() {
+fn telling_a_finished_job_something_starts_a_follow_up() {
     let folder = Folder::new("brain-message-done");
     let obid = started(&folder);
     let job = job_that(&obid, "Vault secrets", "Nothing", None, "done");
     let id = job["id"].as_str().unwrap().to_owned();
-    let worktree = job["worktree"].clone();
-    assert!(worktree.is_string(), "{job}");
     let token = std::fs::read_to_string(obid.home.join("api-token")).unwrap();
     let token = token.trim();
     let words = format!("one more thing for the vault job: REPORT, and {token} isn't yours");
     queue(&obid, &[message_plan(&id), reply("")]);
     let answer = said(&obid, &words);
+    let cards = answer["jobs"].as_array().unwrap();
+    assert_eq!(cards.len(), 1, "{answer}");
+    let next = cards[0]["id"].as_str().unwrap().to_owned();
+    assert_ne!(next, id);
+    let title = cards[0]["title"].as_str().unwrap();
+    assert!(
+        title.starts_with("One more thing for the vault job: REPORT, and [redacted: ")
+            && !title.contains(token),
+        "{title}"
+    );
     assert_eq!(
         answer["text"],
-        "Vault secrets ended, so it picks up again with what you said: one more round."
+        format!(
+            "Vault secrets is finished, so I started a follow-up: {title}. Claude Code has it in fixture-app on Stub."
+        )
     );
     assert!(items_of(&obid, "confirm").is_empty());
-    let done = within(30, "its round ended", || {
-        let job = get_job(&obid, &id);
-        (job["status"] == "done" && job["round"] == 2).then_some(job)
+    assert!(items_of(&obid, "start").is_empty());
+    let follow = within(30, "the follow-up ended", || {
+        let job = get_job(&obid, &next);
+        (job["status"] == "done").then_some(job)
     });
-    assert_eq!(done["worktree"], worktree);
-    let prompt = reported(&obid, &id)["prompt"].as_str().unwrap().to_owned();
+    assert_eq!(follow["followUpOf"], json!(id));
+    for key in [
+        "kind",
+        "agent",
+        "account",
+        "repo",
+        "base",
+        "mode",
+        "conversation",
+    ] {
+        assert_eq!(follow[key], job[key], "{key}");
+    }
+    assert_ne!(follow["branch"], job["branch"]);
+    assert_ne!(follow["worktree"], job["worktree"]);
+    let request = follow["request"].as_str().unwrap();
     assert!(
-        prompt.starts_with("one more thing for the vault job: REPORT, and [redacted: ")
-            && prompt.ends_with("] isn't yours"),
+        request.starts_with("one more thing for the vault job: REPORT, and [redacted: ")
+            && !request.contains(token),
+        "{request}"
+    );
+    // The first job stays as it ended.
+    let first = get_job(&obid, &id);
+    assert_eq!(
+        (first["status"].clone(), first["round"].clone()),
+        (json!("done"), json!(1))
+    );
+    assert!(first["notes"].is_null(), "{first}");
+    assert!(first["followUpOf"].is_null(), "{first}");
+    // Its first prompt: the owner's words, then what the first job did, quoted.
+    let prompt = reported(&obid, &next)["prompt"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!prompt.contains(token));
+    assert!(
+        prompt.contains(&format!("What the user asked for: {request}")),
         "{prompt}"
     );
-    assert!(!prompt.contains(token));
-    assert!(!done["notes"].to_string().contains(token), "{done}");
+    let (_, earlier) = prompt
+        .split_once("This follows up an earlier job")
+        .expect("what the first job did is in the prompt");
+    let open = earlier
+        .lines()
+        .find(|l| l.starts_with("<<<quoted-"))
+        .expect("quoted");
+    let quoted = earlier.split_once(&format!("{open}\n")).unwrap().1;
+    assert!(
+        quoted.contains("Vault secrets") && quoted.contains("Nothing to do."),
+        "{quoted}"
+    );
+}
+
+/// A turn that looked something up (a lookup reads the web, GitHub or a repository: data, never
+/// the owner's words) only proposes the follow-up of a job that ended: a `start` item for the
+/// owner's Start, as research's dispatches are (#374). Nothing starts until they say Start.
+#[test]
+fn a_follow_up_after_research_waits_for_the_owners_start() {
+    let folder = Folder::new("brain-follow-up-research");
+    let obid = started(&folder);
+    let job = job_that(&obid, "Vault secrets", "Nothing", None, "done");
+    let id = job["id"].as_str().unwrap().to_owned();
+    queue(
+        &obid,
+        &[
+            research(vec![lookup(
+                "list_files",
+                json!({"repo": "obi-e2e/fixture-app"}),
+            )]),
+            message_plan(&id),
+            reply(""),
+        ],
+    );
+    let answer = said(
+        &obid,
+        "look at the files, then tell the vault job to add a test",
+    );
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("waits for your Start"),
+        "{answer}"
+    );
+    assert!(
+        answer["jobs"].as_array().is_none_or(Vec::is_empty),
+        "{answer}"
+    );
+    assert_eq!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let starts = items_of(&obid, "start");
+    assert_eq!(starts.len(), 1, "{starts:?}");
+    let item = starts[0]["id"].as_str().unwrap();
+    let started = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{item}/answer"),
+        Some(&json!({"answer": "Start"})),
+    );
+    assert_eq!(started.status, 200, "{}", started.text);
+    let next = get_job(&obid, started.body["job"].as_str().unwrap());
+    assert_eq!(next["followUpOf"], json!(id));
+    assert_eq!(
+        next["request"],
+        "look at the files, then tell the vault job to add a test"
+    );
 }
 
 /// JobActionTests.aJobThatIsStillRunningCantBeTriedAgain, aJobThatNeedsNothingSaysWhyItStays and

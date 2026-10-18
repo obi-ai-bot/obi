@@ -239,12 +239,13 @@ fn a_done_job_publishes_by_itself_and_follows_its_pull_request() {
         "It's already published, with every commit."
     );
 
-    // Told more, its new commit goes to the same branch and pull request.
+    // Tried again, its new commit goes to the same branch and pull request.
+    again_commits(&obid, &id, "second.txt");
     let told = call(
         &obid,
         "POST",
         &format!("/v1/jobs/{id}/messages"),
-        Some(&json!({"text": "COMMIT: second.txt"})),
+        Some(&json!({"text": TRY_AGAIN})),
     );
     assert_eq!(told.status, 200, "{}", told.text);
     let again = ended(&obid, &id);
@@ -270,6 +271,98 @@ fn a_done_job_publishes_by_itself_and_follows_its_pull_request() {
         remote_branch(&remote, "main").as_deref(),
         Some(main.as_str())
     );
+}
+
+/// A follow-up of a job whose pull request is still open goes on its branch: it starts at the
+/// branch head and publishes onto it, updating that pull request rather than opening a second.
+/// Its own commits are all it counts. Meanwhile the first job takes no Try again: its follow-up
+/// carries its branch on.
+#[test]
+fn a_follow_up_of_published_work_updates_its_pull_request() {
+    let folder = Folder::new("publish-follow-up");
+    let bin = fake_gh(&folder.0);
+    std::fs::write(
+        folder.0.join("gh/view.json"),
+        r#"{"state":"OPEN","reviewDecision":"REVIEW_REQUIRED","mergedAt":null,"baseRefName":"main","headRefOid":""}"#,
+    )
+    .unwrap();
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: hello.txt",
+               "check": "test -f hello.txt", "title": "Hello file"}),
+    );
+    let first = ended(&obid, &id);
+    assert_eq!(first["published"], PULL, "{first}");
+    let branch = format!("oby/build-{id}");
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let head = git(&clone, &["rev-parse", &format!("refs/heads/{branch}")]);
+
+    let told = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "COMMIT: second.txt"})),
+    );
+    assert_eq!(told.status, 201, "{}", told.text);
+    let next = told.body["id"].as_str().unwrap().to_owned();
+    assert_eq!(told.body["branch"], branch.as_str());
+    // The first job takes no Try again while its follow-up has its branch.
+    let again = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": TRY_AGAIN})),
+    );
+    assert_eq!(again.status, 422, "{}", again.text);
+    let follow = ended(&obid, &next);
+    assert_eq!(follow["status"], "done", "{follow}\n{}", obid.log());
+    assert_eq!(follow["startCommit"], head.as_str());
+    assert_eq!(follow["commits"], 1);
+    assert_eq!(follow["published"], PULL);
+    let actions: Vec<&str> = follow["outgoing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["action"].as_str().unwrap())
+        .collect();
+    assert_eq!(actions, ["push", "pullRequestEdit"]);
+    assert_eq!(kept(&folder.0, "calls").matches("pr create").count(), 1);
+    let pushed = git(&clone, &["rev-parse", &format!("refs/heads/{branch}")]);
+    assert_eq!(
+        remote_branch(&remote, &branch).as_deref(),
+        Some(pushed.as_str())
+    );
+    assert_eq!(
+        git(&clone, &["rev-parse", &format!("{pushed}~1")]),
+        head,
+        "on top of the first job's commit"
+    );
+    let again = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": TRY_AGAIN})),
+    );
+    assert_eq!(again.status, 422, "{}", again.text);
+    assert!(
+        again.body["error"].as_str().unwrap().contains("follow-up"),
+        "{}",
+        again.text
+    );
+}
+
+/// What a job hears when the owner tries it again (`Inbox.tryAgainMessage`): its session again,
+/// where words for a job that ended would start a follow-up.
+const TRY_AGAIN: &str =
+    "Try again, picking up where you left off. Finish with a short summary as asked.";
+
+/// The stand-in agent commits `file` in job `id`'s next Try again.
+fn again_commits(obid: &Obid, id: &str, file: &str) {
+    let job = call(obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    let worktree = Path::new(job["worktree"].as_str().unwrap()).join(".obi");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(worktree.join("again"), format!("COMMIT: {file}")).unwrap();
 }
 
 fn calls_now(folder: &Path) -> String {
@@ -547,11 +640,12 @@ fn someone_elses_push_is_never_overwritten() {
         ],
     );
     let their_commit = remote_branch(&remote, &branch).unwrap();
+    again_commits(&obid, &id, "second.txt");
     let told = call(
         &obid,
         "POST",
         &format!("/v1/jobs/{id}/messages"),
-        Some(&json!({"text": "COMMIT: second.txt"})),
+        Some(&json!({"text": TRY_AGAIN})),
     );
     assert_eq!(told.status, 200, "{}", told.text);
     let job = ended(&obid, &id);
@@ -815,11 +909,12 @@ fn a_hand_publish_is_for_the_run_that_was_approved() {
     // obid describes the first job's run; then it runs again, and its own publish fails again:
     // the same sentence, other commits. Another device asks again, and this one signs.
     let sentence = sentence_of(&obid, &ran);
+    again_commits(&obid, &ran, "second.txt");
     let told = call(
         &obid,
         "POST",
         &format!("/v1/jobs/{ran}/messages"),
-        Some(&json!({"text": "COMMIT: second.txt"})),
+        Some(&json!({"text": TRY_AGAIN})),
     );
     assert_eq!(told.status, 200, "{}", told.text);
     assert_eq!(ended(&obid, &ran)["commits"], 2);

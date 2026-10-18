@@ -72,6 +72,18 @@ struct RunnerTests {
         #expect(try Runner.decoder.decode(Job.self, from: Data(told.utf8)).notes == ["Add a test.", "And docs."])
     }
 
+    /// A follow-up names the job it follows up (obid, the owner's decision of 2026-10-18); older
+    /// runners leave it out, and the page lists a task's follow-ups oldest first.
+    @Test func followUps() throws {
+        let first = try Runner.decoder.decode(Job.self, from: Data(job.utf8))
+        #expect(first.followUpOf == nil)
+        let next = job.replacingOccurrences(of: #""published": null}"#, with: #""published": null, "followUpOf": "\#(first.id)"}"#)
+        var follow = try Runner.decoder.decode(Job.self, from: Data(next.utf8))
+        #expect(follow.followUpOf == first.id)
+        follow.id = "f1"
+        #expect(ThreadTaskLine.followUps(of: first.id, in: [first, follow]).map(\.id) == ["f1"])
+    }
+
     @Test func eventsAndPings() throws {
         var parser = EventParser()
         let account = #"[{"id": "default", "agent": "claude", "name": "Deskree", "label": "Team · w@deskree.com", "signedIn": true, "fiveHour": 0.1, "sevenDay": null, "running": 1}]"#

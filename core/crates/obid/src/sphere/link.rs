@@ -2482,19 +2482,11 @@ impl Link {
                     .map(|_| ())
                     .map_err(|e| api(StatusCode::UNPROCESSABLE_ENTITY, e.0))
             }
+            // Made before 2026-10-18 for one more round: the words now start a follow-up, as any
+            // words for a job that ended do.
             inbox::action::MESSAGE_JOB => {
-                let job = self
-                    .jobs
-                    .get(target)
-                    .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone."))?;
-                if job.merged() {
-                    return Err(api(
-                        StatusCode::CONFLICT,
-                        "Its pull request was merged: start a new job instead.",
-                    ));
-                }
                 let words = confirmed.payload["words"].as_str().unwrap_or("");
-                match self.jobs.message(target, words) {
+                match self.jobs.message(target, words, crate::jobs::Source::Owner) {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
                     None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
