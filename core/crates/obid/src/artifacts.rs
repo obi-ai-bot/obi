@@ -482,7 +482,7 @@ fn is_id(id: &str) -> bool {
 }
 
 /// Whether `name` holds a run of 32 or more of `[A-Za-z0-9_+-]` with letters and digits in it,
-/// other than one of obid's own ids: the shape of a token, whatever joins it to the rest of the
+/// other than one of obid's own ids or a run of lower-case hex alone: the shape of a token, whatever joins it to the rest of the
 /// name (`-`, `_`, `+`, `,`, `(`, `~`, `@`), which gitleaks lets by (#648, R2).
 fn long_run(name: &str) -> bool {
     static RUN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -492,6 +492,8 @@ fn long_run(name: &str) -> bool {
         text.bytes().any(|b| b.is_ascii_alphabetic())
             && text.bytes().any(|b| b.is_ascii_digit())
             && !(text.len() == 36 && uuid::Uuid::try_parse(text).is_ok())
+            // A bundler's content hash (`main.<32 hex>.js`) is lower-case hex alone.
+            && !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     })
 }
 
@@ -1513,6 +1515,27 @@ mod tests {
             "landing-page-v2.md: fine"
         );
         assert!(store.list(None, None).is_empty());
+    }
+
+    /// A bundler's hashed asset name (`main.<32 hex>.js`) isn't a token: a run of lower-case hex
+    /// only is let by, as an id is (#648's fourth review, S3). Mixed case still isn't.
+    #[tokio::test]
+    async fn hashed_asset_names_are_published() {
+        let t = Temp::new("hashed");
+        t.write("app/index.html", "<script src=\"main.js\"></script>");
+        t.write(
+            "app/main.0123456789abcdef0123456789abcdef.js",
+            "console.log(1)",
+        );
+        t.write(
+            "app/style.5f3c9a0b1d2e4f6a7b8c9d0e1f2a3b4c5d6e7f80.css",
+            "p {}",
+        );
+        let (store, _) = t.store();
+        let room = t.room();
+        store.publish(what(&room, "app")).await.unwrap();
+        assert!(long_run("main.0123456789ABCDEF0123456789abcdef.js"));
+        assert!(!long_run("main.0123456789abcdef0123456789abcdef.js"));
     }
 
     /// The entry checked after it's opened is the one its name still names, with no other link

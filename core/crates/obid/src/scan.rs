@@ -930,11 +930,14 @@ async fn run_gitleaks(
     // sniffs further in too (`ustar` at byte 257, `CD001` at 32769), so a canary goes last: a
     // report without it is a scan that couldn't run (#648, R1).
     let places: Vec<(String, usize)> = lines.iter().map(|(n, i, _)| (n.clone(), *i)).collect();
+    // The same neutral line goes between the texts and the canary, so a last line that only
+    // names a secret (`API_KEY=`, `token:`) isn't read on into the canary as its value (S2).
     let canary = canary();
-    let canary_line = lines.len() as u64 + 2;
+    let spacer_line = lines.len() as u64 + 2;
+    let canary_line = spacer_line + 1;
     let joined: Vec<&str> = std::iter::once(FIRST_LINE)
         .chain(lines.iter().map(|(_, _, text)| text.as_str()))
-        .chain(std::iter::once(canary.as_str()))
+        .chain([FIRST_LINE, canary.as_str()])
         .collect();
     let input = folder.join("texts.txt");
     let report = folder.join("report.json");
@@ -953,6 +956,8 @@ async fn run_gitleaks(
         .args([
             "--no-banner",
             "--redact",
+            // A `gitleaks:allow` in what's scanned would drop the findings around it (S1).
+            "--ignore-gitleaks-allow",
             "--exit-code=99",
             "--report-format=json",
         ])
@@ -989,7 +994,7 @@ async fn run_gitleaks(
             }
             Ok(leaks
                 .iter()
-                .filter(|leak| start(leak) != Some(canary_line))
+                .filter(|leak| start(leak) != Some(canary_line) && start(leak) != Some(spacer_line))
                 // A finding wholly on obid's own first line isn't the texts'; one that runs into
                 // them is.
                 .filter(|leak| leak["EndLine"].as_u64().or(start(leak)).unwrap_or(2) >= 2)
@@ -1225,6 +1230,60 @@ exit 99"#,
         // What it does read, it reads to the end, and the canary isn't a finding.
         let lines = vec![("a.md".to_owned(), 1, "plain".to_owned())];
         assert_eq!(gitleaks_lines(&lines, &folder).await, Ok(Vec::new()));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// `gitleaks:allow` in the texts is no way past: gitleaks drops every finding of the part of
+    /// its input that holds it, and past ~300 KB the canary is in another part, so the scan would
+    /// read clean (#648's fourth review, S1). The input is made here, not kept in the repository.
+    #[tokio::test]
+    async fn a_gitleaks_allow_comment_hides_nothing() {
+        if crate::process::resolve_bin("gitleaks").is_none() {
+            return;
+        }
+        let folder = scratch("allow");
+        let key = format!("{}{}", "AIza", "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q");
+        let mut lines = vec![(
+            "config.js".to_owned(),
+            1,
+            format!("const key = \"{key}\"; // gitleaks:allow"),
+        )];
+        lines.extend((0..8_000).map(|i| {
+            (
+                "filler.txt".to_owned(),
+                i + 1,
+                format!("plain words on line {i}, nothing to see here at all"),
+            )
+        }));
+        let found = gitleaks_lines(&lines, &folder).await.unwrap();
+        assert!(
+            found
+                .iter()
+                .any(|f| f.name == "config.js" && f.line == Some(1)),
+            "{found:?}"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A last line that only names a secret (`API_KEY=`, `token:`) isn't read into the canary:
+    /// it's clean, as it was before the canary (S2).
+    #[tokio::test]
+    async fn a_last_line_that_names_a_secret_stays_clean() {
+        if crate::process::resolve_bin("gitleaks").is_none() {
+            return;
+        }
+        let folder = scratch("last-line");
+        for last in ["API_KEY=", "token:", "export GITHUB_TOKEN="] {
+            let lines = vec![
+                (".env.example".to_owned(), 1, "# Fill these in".to_owned()),
+                (".env.example".to_owned(), 2, last.to_owned()),
+            ];
+            assert_eq!(
+                gitleaks_lines(&lines, &folder).await,
+                Ok(Vec::new()),
+                "{last}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&folder);
     }
 
