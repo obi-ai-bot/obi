@@ -160,10 +160,28 @@ final class ChatState {
     var chrome = WindowChrome()
     /// The window is on screen (not closed or in the Dock): Oby on Home draws only then.
     var visible = true
-    /// When this state began, and the job rows opened since: a job created after it and not
-    /// opened yet is new (#496), its row and its kind's chip with a blue dot.
-    let since = Date.now
-    var seen: Set<String> = []
+    /// Since when, and the job rows opened since: a job created after it and not opened yet is new
+    /// (#496), its row and its kind's chip with a blue dot. Both are kept across launches (C8), so a
+    /// task made while Oby was closed is new, and one opened before isn't.
+    let since: Date
+    var seen: Set<String> {
+        // ponytail: every row ever opened, a few dozen bytes each; drop the oldest past a few thousand if it grows.
+        didSet { defaults.set(Array(seen), forKey: Self.seenKey) }
+    }
+    @ObservationIgnored private let defaults: UserDefaults
+    private static let sinceKey = "newWorkSince"
+    private static let seenKey = "newWorkSeen"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if let kept = defaults.object(forKey: Self.sinceKey) as? Date {
+            since = kept
+        } else {
+            since = .now
+            defaults.set(since, forKey: Self.sinceKey)
+        }
+        seen = Set(defaults.stringArray(forKey: Self.seenKey) ?? [])
+    }
     /// The side panel's folded groups and those showing all their done tasks.
     var folded: Set<String> = []
     var more: Set<String> = []

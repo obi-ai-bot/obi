@@ -125,7 +125,7 @@ struct ChatWindowTests {
     @Test func openingChatFocusesTheComposerAndNewDecisionsLeaveTypingAlone() async throws {
         let feed = RunnerFeed()
         let model = IslandModel(desk: Desk(), feed: feed, availability: MacAvailability())
-        let state = ChatState()
+        let state = ChatState(defaults: .scratch)
         state.open()
         let window = offscreenWindow(size: NSSize(width: 900, height: 600),
                                      root: ChatView(model: model, state: state))
@@ -161,6 +161,17 @@ struct ChatWindowTests {
         #expect(MessageBox.draft("Please", adding: "add a test") == "Please add a test")
         #expect(MessageBox.draft("Please ", adding: "") == "Please ")
         #expect(MessageBox.listenLimit == .seconds(60))
+    }
+
+    /// A task stays new across launches until it's opened (mac-design C8): what was opened, and
+    /// since when, are kept.
+    @Test func newTasksStayNewAcrossLaunches() throws {
+        let defaults = try #require(UserDefaults(suiteName: "oby-new-work-\(UUID().uuidString)"))
+        let first = ChatState(defaults: defaults)
+        first.seen.insert("runner/j1")
+        let again = ChatState(defaults: defaults)
+        #expect(again.seen == ["runner/j1"])
+        #expect(again.since == first.since)
     }
 
     @Test func decisionsAttachToTheirJobEvenAfterOtherTurns() {
@@ -334,4 +345,10 @@ struct ChatWindowTests {
         job.question = Plan.Question(text: "Which?", options: ["A", "B"])
         #expect(job.badge.text == "Needs input")
     }
+}
+
+extension UserDefaults {
+    /// A store of its own, so a test's window state never lands in Oby's own preferences: the
+    /// test host has Oby's bundle id.
+    static var scratch: UserDefaults { UserDefaults(suiteName: "oby-tests-\(UUID().uuidString)")! }
 }
