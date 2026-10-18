@@ -229,10 +229,12 @@ impl Conn {
     /// Reads what the agent still says until it closes its output, for 10 seconds at most: after
     /// its turn, with stdin closed, it is exiting.
     pub async fn drain(&mut self) {
-        let _ = tokio::time::timeout(Duration::from_secs(10), async {
-            while self.next().await.is_ok() {}
-        })
-        .await;
+        self.drain_within(Duration::from_secs(10)).await;
+    }
+
+    /// [`Conn::drain`], for `limit` at most.
+    pub async fn drain_within(&mut self, limit: Duration) {
+        let _ = tokio::time::timeout(limit, async { while self.next().await.is_ok() {} }).await;
     }
 
     /// No more input: an agent that waits for it exits once it's idle.
