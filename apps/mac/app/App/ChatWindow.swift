@@ -35,9 +35,14 @@ final class ChatWindow: NSObject, NSWindowDelegate {
 
     init(island: IslandController) { self.island = island }
 
-    /// Shows the window, on the conversation or on a job's page when one is named.
-    func show(job: (id: String, local: Bool)? = nil) {
+    /// Shows the window, on the conversation or on a job's page when one is named; on Home, with
+    /// Oby and its message box, when Oby was just opened.
+    func show(job: (id: String, local: Bool)? = nil, home: Bool = false) {
         state.open(job: job)
+        if home {
+            state.section = .home
+            state.newTask()
+        }
         island.model.chatWindowVisible = true
         if job == nil { island.model.markChatRead() }
         NSApp.activate()
