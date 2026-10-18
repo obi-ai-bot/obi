@@ -213,7 +213,7 @@ What exists today, what must be built, and where. Local work (obid, the Mac and 
 
 ## 7. Order of work
 
-Small pull requests into `dev`, each usable on its own: first the ones that remove a terminal step from Just this Mac, then memory, then Cloud.
+Small pull requests into `dev`, each usable on its own: first the ones that remove a terminal step from Just this Mac, then memory. Items 19–22 (Oby Cloud) are for the future (section 8).
 
 1. **fix(ios): Connect is the first screen.** No default runner address; Settings' Runner section and Tailscale footer go; a gateway 401 says the iPhone was removed; keep `expiresAt`. (S)
 2. **fix(mac): FirstLaunch's copy.** "Menu bar", "Screen Recording isn't asked". (S)
@@ -247,4 +247,4 @@ The owner's decisions of 2026-10-18, besides the paths, remote access per path, 
 3. **The Swift runner:** once obid is bundled, Oby.app registers obid and no longer registers `oby-runner`; an existing install.sh setup is moved over.
 4. **Merge rules:** AGENTS.md keeps only the safety rules; how this repository merges is its remembered workflow, and every other repository starts on the safe default.
 
-Still open: **Oby Cloud's billing**, through the App Store or a web checkout.
+5. **Oby Cloud is for the future.** Build Just this Mac first: everything in section 6's local table. Oby Cloud's relay, accounts and billing, teams and the Obysphere wait, and so does how it bills (the App Store or a web checkout). The setup's first screen offers only Just this Mac until then.
