@@ -181,6 +181,8 @@ pub async fn serve(
     // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
     secrets::known().learn("api-token", &token);
     jobs::use_keychain(config.claude_keychain);
+    // What an older obid's boxes could have left in the accounts' folders (#655), said once.
+    jobs::check_account_folders(&config.agents);
     if config.claude_keychain {
         jobs::keep_keychain_logins();
     }

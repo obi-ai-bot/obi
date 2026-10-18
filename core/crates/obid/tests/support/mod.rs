@@ -196,12 +196,16 @@ pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
     std::fs::write(&path, config.to_string()).unwrap();
     std::fs::create_dir_all(folder.join("env-home")).unwrap();
     // The fake planner's state is its account's folder; unboxed, obid gives the brain a config
-    // folder of its own (#651), so it finds the account's from obid's HOME.
+    // folder of its own (#651), so it finds the account's from obid's HOME. Boxed, it can write
+    // nothing that outlives its call (#655), so it asks the state server below, whose address it
+    // finds in the test's folder.
     if let Some(dir) = config["agents"]["claude"]["accounts"][0]["configDir"].as_str() {
         std::fs::create_dir_all(dir).unwrap();
         let link = folder.join("env-home/.fake-planner");
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(dir, link).unwrap();
+        let url = planner_state(PathBuf::from(dir));
+        std::fs::write(folder.join("fake-planner-url"), url).unwrap();
     }
     std::fs::create_dir_all(folder.join("tmp")).unwrap();
     let stderr = folder.join("obid.stderr");
@@ -258,6 +262,80 @@ pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
         folder: folder.to_path_buf(),
         stderr,
     }
+}
+
+/// The fake planner's state for its boxed calls (tests/agents/fake-planner): an HTTP server on
+/// 127.0.0.1 that records a call in `state/calls/<n>` (its `args`, `input`, `pwd` and `work.md`)
+/// and answers the first line of `state/plans`, taking it out, under the same lock the unboxed
+/// planner takes. Its address, `http://127.0.0.1:<port>/`.
+pub fn planner_state(state: PathBuf) -> String {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/",
+        listener.local_addr().unwrap().port()
+    );
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let _ = planner_call(&state, stream);
+        }
+    });
+    url
+}
+
+fn planner_call(state: &Path, stream: TcpStream) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let line = line.trim();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    let call: Value = serde_json::from_slice(&body).unwrap_or_default();
+    let lock = state.join("lock");
+    std::fs::create_dir_all(state.join("calls"))?;
+    while std::fs::create_dir(&lock).is_err() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let n = std::fs::read_dir(state.join("calls"))?.count() + 1;
+    let dir = state.join("calls").join(n.to_string());
+    std::fs::create_dir_all(&dir)?;
+    let args: Vec<&str> = call["args"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    std::fs::write(
+        dir.join("args"),
+        args.iter().map(|a| format!("{a}\n")).collect::<String>(),
+    )?;
+    std::fs::write(dir.join("input"), call["input"].as_str().unwrap_or(""))?;
+    std::fs::write(
+        dir.join("pwd"),
+        format!("{}\n", call["pwd"].as_str().unwrap_or("")),
+    )?;
+    if let Some(work) = call["work"].as_str() {
+        std::fs::write(dir.join("work.md"), work)?;
+    }
+    let plans = std::fs::read_to_string(state.join("plans")).unwrap_or_default();
+    let (first, rest) = plans.split_once('\n').unwrap_or((plans.as_str(), ""));
+    let first = first.to_owned();
+    std::fs::write(state.join("plans"), rest)?;
+    std::fs::remove_dir(&lock)?;
+    let mut stream = stream;
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{first}",
+        first.len()
+    )
 }
 
 pub struct Answer {

@@ -71,9 +71,18 @@ fn turns(obid: &Obid) -> Vec<Value> {
     all
 }
 
-/// What the stand-in recorded as the jobs' agent, in the account's own folder.
+/// What the stand-in recorded as the jobs' agent, in each job's own config folder.
 fn job_turns(obid: &Obid) -> Vec<Value> {
-    recorded(&obid.home.join("accounts/stub/turns.jsonl"))
+    // In each job's own config folder (#655: never the account's), in the order they came.
+    let mut turns: Vec<Value> = std::fs::read_dir(obid.home.join("logins"))
+        .map(|dir| {
+            dir.flatten()
+                .flat_map(|e| recorded(&e.path().join("turns.jsonl")))
+                .collect()
+        })
+        .unwrap_or_default();
+    turns.sort_by_key(|t| t["at"].as_u64());
+    turns
 }
 
 fn recorded(file: &Path) -> Vec<Value> {

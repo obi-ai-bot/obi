@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // A stand-in for `cursor-agent --sandbox disabled acp` in obid's tests: the Agent Client Protocol,
 // newline-delimited JSON-RPC 2.0 over stdio, as docs/cursor.md describes what the probe saw.
-// It is signed in when $XDG_CONFIG_HOME/cursor/auth.json exists, as Cursor's login is; sessions are
+// It is signed in when its login file exists where Cursor's file store keeps it ($HOME/.cursor/auth.json
+// on macOS, $XDG_CONFIG_HOME/cursor/auth.json elsewhere); sessions are
 // kept in $CURSOR_CONFIG_DIR/sessions, so `session/load` works across processes. Like the real one,
 // it edits files without asking and asks before every command. What a prompt does comes from the
 // session's first prompt (the job's task):
@@ -35,7 +36,9 @@ if (process.argv.slice(2).join(" ") !== "--sandbox disabled acp") {
 const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
 const config = process.env.CURSOR_CONFIG_DIR || join(process.env.HOME || "/nonexistent", ".cursor");
 const sessions = join(config, "sessions");
-const signedIn = existsSync(join(process.env.XDG_CONFIG_HOME || "/nonexistent", "cursor", "auth.json"));
+const signedIn = existsSync(process.platform === "darwin"
+  ? join(process.env.HOME || "/nonexistent", ".cursor", "auth.json")
+  : join(process.env.XDG_CONFIG_HOME || "/nonexistent", "cursor", "auth.json"));
 const leaked = Object.keys(process.env).filter((name) =>
   name === "CLAUDECODE" || name.startsWith("CLAUDE_CODE_") || name.startsWith("ANTHROPIC_") ||
   name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN" ||
