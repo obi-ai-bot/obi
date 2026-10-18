@@ -92,14 +92,17 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     var mode: String?
     var permission: RunnerPermission?
     var question: Question?
+    /// obid only (#493): the conversation whose words started the job, kept when that one is deleted.
+    var conversation: String?
 
-    private enum Keys: String, CodingKey { case id, mode, permission, question }
+    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation }
 
-    init(id: String, mode: String? = nil, permission: RunnerPermission? = nil, question: Question? = nil) {
+    init(id: String, mode: String? = nil, permission: RunnerPermission? = nil, question: Question? = nil, conversation: String? = nil) {
         self.id = id
         self.mode = mode
         self.permission = permission
         self.question = question
+        self.conversation = conversation
     }
 
     init(from decoder: any Decoder) throws {
@@ -108,6 +111,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
         mode = try? keys.decodeIfPresent(String.self, forKey: .mode)
         permission = try? keys.decodeIfPresent(RunnerPermission.self, forKey: .permission)
         question = try? keys.decodeIfPresent(Question.self, forKey: .question)
+        conversation = try? keys.decodeIfPresent(String.self, forKey: .conversation)
     }
 
     /// Each job's, by id; a list that can't be read gives none.

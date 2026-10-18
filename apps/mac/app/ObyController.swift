@@ -30,6 +30,9 @@ final class IslandController {
     /// The window (or first launch) is up, in front, and showing what you say and Oby's answer: the
     /// pill stays away then. The app sets it.
     var windowShowsTalk: () -> Bool = { false }
+    /// The window is in front on the conversation page: what you say carries on there. Anywhere
+    /// else it goes to the latest conversation (#493). The app sets it.
+    var windowShowsConversation: () -> Bool = { false }
 
     init() {
         desk.issueSync.enabled = true
@@ -243,13 +246,23 @@ final class IslandController {
         }
     }
 
+    /// Whether the talk key's words go to the latest conversation (#493): said away from the
+    /// conversation page. A bare "stop" or "never mind" sends nothing (Desk.ask), so it redirects
+    /// nothing either: the next words, typed or said, go where they would have.
+    nonisolated static func toLatest(_ said: String, showsConversation: Bool) -> Bool {
+        !showsConversation && !Conversation.cancels(said)
+    }
+
     private func heard(_ said: String, key: TalkKey.Key) {
         // A bare "stop" or "never mind" ends the turn and the hands-free listening, and no job
         // with it: Desk.ask sends nothing to the brain for it, so nothing is spoken and nothing
         // listens again.
         let cancels = Conversation.cancels(said)
         if cancels { handsFreeAsk = false }
-        if !said.isEmpty { desk.ask(said, spoken: true) }
+        if !said.isEmpty {
+            feed.conversations.nextToLatest = Self.toLatest(said, showsConversation: windowShowsConversation())
+            desk.ask(said, spoken: true)
+        }
         // Talking again already: that's what shows.
         guard model.voice.phase == .idle, model.listening else { return }
         model.listening = false

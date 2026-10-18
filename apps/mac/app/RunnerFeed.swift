@@ -127,6 +127,9 @@ final class RunnerFeed {
     /// The runner's conversation, read in pages and followed over `turn` events, for the window's
     /// thread (apps/shared/ConversationModel.swift): one thread for every device (#11).
     let conversation = ConversationModel()
+    /// obid's many conversations (#493), when the runner on this Mac serves them: the side panel
+    /// lists them and `conversation` shows the one picked. Empty for a runner with one thread.
+    let conversations: ConversationList
     /// A job's notice just changed to something that needs the user, once its alert is posted.
     @ObservationIgnored var onNotice: (Job, Notice) -> Void = { _, _ in }
 
@@ -171,9 +174,14 @@ final class RunnerFeed {
     }
 
     init() {
+        conversations = ConversationList(thread: conversation)
+        conversations.runner = { [weak self] in self?.runner }
         conversation.page = { [weak self] before, limit in
-            guard let runner = self?.runner else { return [] }
-            return try await runner.conversation(before: before, limit: limit)
+            guard let self, let runner = self.runner else { return [] }
+            guard conversations.served else { return try await runner.conversation(before: before, limit: limit) }
+            // A new conversation has nothing to read until its first words start it.
+            guard let id = conversations.shown else { return [] }
+            return try await runner.conversation(id: id, before: before, limit: limit)
         }
     }
 
@@ -237,6 +245,7 @@ final class RunnerFeed {
         clearedAt = nil
         notified = nil
         conversation.forget()
+        conversations.reset()
         device.reset()
     }
 
@@ -283,6 +292,8 @@ final class RunnerFeed {
                             inboxHistory = past.filter { !$0.isOpen }
                             inboxWords = pastWords.merging(words, uniquingKeysWith: { _, fresh in fresh })
                         } else { inboxWords.merge(words, uniquingKeysWith: { _, fresh in fresh }) }
+                        // obid's conversations before the thread, which reads the one shown.
+                        try await conversations.load(from: runner, planning: local)
                         // The thread's latest page every time too: what was said from the iPhone
                         // while the connection was down is in it.
                         await conversation.reload()
@@ -300,10 +311,10 @@ final class RunnerFeed {
                         apply(item, words: words)
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
-                    case .turn(let turn): conversation.apply(turn)
-                    case .step(let step): conversation.apply(step)
-                    // The Mac shows one thread until it runs on obid.
-                    case .conversation: break
+                    // obid names each turn's and step's conversation: the window shows one (#493).
+                    case .turn(let turn): if conversations.shows(turn.conversation) { conversation.apply(turn) }
+                    case .step(let step): if conversations.shows(step.conversation) { conversation.apply(step) }
+                    case .conversation(let change): conversations.apply(change)
                     }
                 }
             } catch {
@@ -345,7 +356,16 @@ final class RunnerFeed {
     /// show it (`Desk.planElsewhere`): the drafts are its, and Dispatch sends them back to it.
     func plan(_ said: String, answer: (question: String, option: String)?, attachments: [String] = []) async throws -> Desk.Talk {
         guard let runner else { throw RunnerError(message: "The runner on this Mac isn't running yet.") }
-        switch try await runner.plan(said, answer: answer, attachments: attachments) {
+        // In the conversation shown, or a new one (obid keeps many, #493); neither for one thread.
+        let planned: PlannedTurn
+        do {
+            planned = try await runner.planned(said, answer: answer, attachments: attachments, in: conversations.target(said))
+        } catch {
+            conversations.failed()
+            throw error
+        }
+        await conversations.joined(planned.conversation)
+        switch planned.result {
         case .question(let said, let question):
             return .question(said: said, Plan.Question(text: question.text, options: question.options, details: question.details,
                                                        recommended: question.recommended, plan: question.plan))
@@ -356,9 +376,10 @@ final class RunnerFeed {
         }
     }
 
-    /// Cancels a plan still running on the local runner.
-    func cancelPlan() async {
-        await runner?.cancelPlan()
+    /// Cancels a plan still running on the local runner (tests give their own `runner`).
+    func cancelPlan(on given: Runner? = nil) async {
+        // The conversation shown's (#493): obid otherwise cancels the latest plan in any of them.
+        await (given ?? runner)?.cancelPlan(conversations.shown)
     }
 
     /// The runner's exact sentence for publishing a job: Publish shows it, and Touch ID approves it.
@@ -481,13 +502,14 @@ final class RunnerFeed {
 
     /// Stop: the runner ends the turn Oby is working on (`POST /v1/conversation/stop`, #304), and
     /// the steps that ran show as ended.
-    func stopTurn() async {
-        guard let runner else {
+    func stopTurn(on given: Runner? = nil) async {
+        guard let runner = given ?? runner else {
             stopProblem = "Set the runner's URL in Settings first."
             return
         }
         do {
-            try await runner.stopConversation()
+            // The conversation shown's turn (#493), as the iPhone's Stop does.
+            try await runner.stopConversation(conversations.shown)
             stopProblem = nil
             conversation.settleSteps()
         } catch let error as RunnerError where error.status == 404 {
