@@ -83,6 +83,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var conversation: String?
     /// What it made to be looked at (obid only, its `.obi/artifacts/`), or nil.
     var artifacts: [ArtifactRef]?
+    /// The job this one follows up (obid only): the owner told that one something after it ended,
+    /// and its page lists this one (Sangam's design). Nil otherwise.
+    var followUpOf: String?
 
     /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
     /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
@@ -112,7 +115,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
-             conversation, artifacts
+             conversation, artifacts, followUpOf
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -298,7 +301,7 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     var usage: Usage.Snapshot {
         Usage.Snapshot(agent: agent, name: name, label: label, fiveHour: fiveHour, sevenDay: sevenDay,
                        fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running,
-                       reserveLiftedUntil: reserveLiftedUntil)
+                       reserveLiftedUntil: reserveLiftedUntil, runnerSignedIn: signedIn)
     }
 }
 #endif
@@ -548,7 +551,7 @@ typealias RunnerAccount = AccountState
 
 extension AccountState: Decodable {
     private enum Keys: String, CodingKey {
-        case id, agent, name, label, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed, reserveLiftedUntil
+        case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed, reserveLiftedUntil
     }
 
     init(from decoder: any Decoder) throws {
@@ -565,7 +568,8 @@ extension AccountState: Decodable {
                   tetrix: try keys.decodeIfPresent(Bool.self, forKey: .tetrix),
                   tetrixJobs: try keys.decodeIfPresent(Int.self, forKey: .tetrixJobs) ?? 0,
                   tetrixUsed: try keys.decodeIfPresent(Int.self, forKey: .tetrixUsed) ?? 0,
-                  reserveLifted: try keys.decodeIfPresent(Date.self, forKey: .reserveLiftedUntil))
+                  reserveLifted: try keys.decodeIfPresent(Date.self, forKey: .reserveLiftedUntil),
+                  runnerSignedIn: try keys.decodeIfPresent(Bool.self, forKey: .signedIn))
     }
 }
 #endif
@@ -1006,7 +1010,8 @@ nonisolated struct Runner: Sendable {
     /// Starts a job that waits for its `startWhen` now (#216): the runner answers with the job.
     func startNow(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/start") }
 
-    /// Tells the job's agent something. A finished job picks its session up again.
+    /// Tells the job's agent something: the runner answers with the job, or with the follow-up a
+    /// finished one gets (`followUpOf` set), except Try again's words, which pick its session up again.
     func tell(_ id: String, _ text: String) async throws -> Job {
         struct Body: Encodable { var text: String }
         return try await call("POST", "v1/jobs/\(id)/messages", body: Body(text: text))

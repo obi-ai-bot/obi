@@ -271,6 +271,9 @@ fn new_job(job: &Map<String, Value>) -> Result<NewJob, String> {
         mode: text("mode")?,
         conversation: None,
         brief: None,
+        follow_up_of: None,
+        earlier: None,
+        start_from: None,
     })
 }
 
@@ -514,7 +517,8 @@ pub async fn set_job_settings(
     }
 }
 
-/// `POST /v1/jobs/{id}/messages`: `{"text": "…"}`, the owner's words to the job's agent.
+/// `POST /v1/jobs/{id}/messages`: `{"text": "…"}`, the owner's words to the job's agent: `200`
+/// with the job that heard them, or `201` with the follow-up a job that ended got.
 pub async fn message(
     State(shared): State<Arc<Shared>>,
     Path(id): Path<String>,
@@ -527,9 +531,10 @@ pub async fn message(
         .ok()
         .and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_owned))
         .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "The body is {\"text\": \"…\"}."))?;
-    match shared.jobs.message(&id, &text) {
+    match shared.jobs.message(&id, &text, crate::jobs::Source::Owner) {
         None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
         Some(Err(refused)) => Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
+        Some(Ok(job)) if job.id != id => Ok(json(StatusCode::CREATED, job.to_json())),
         Some(Ok(job)) => Ok(json(StatusCode::OK, job.to_json())),
     }
 }

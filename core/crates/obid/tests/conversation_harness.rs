@@ -243,7 +243,7 @@ fn oby_dispatch_starts_a_job_whose_card_is_on_the_turn() {
     let conversation = tools.body["conversation"].as_str().unwrap().to_owned();
     assert_eq!(
         tools.body["text"],
-        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_inbox,oby_answer,oby_conversations,oby_artifact",
+        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_inbox,oby_answer,oby_conversations,oby_artifact,oby_read,oby_search,oby_list",
         "{}",
         tools.text
     );
@@ -491,8 +491,10 @@ fn work_planned_after_the_web_waits_for_the_owners_start() {
     );
 }
 
-/// What a job hears is the owner's own words this turn; the agent's go along quoted, as data. A
-/// turn that used the web picks up a job that ended only with the owner's Confirm.
+/// What a job hears is the owner's own words this turn; the agent's go along quoted, as data. Told
+/// something after it ended, a job gets a follow-up (Sangam's design, the owner's decision of
+/// 2026-10-18) whose request is the owner's words alone and whose card goes on the turn; a turn
+/// that used the web only proposes it, a `start` item for the owner's Start.
 #[test]
 fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
     let (_folder, obid) = obid("harness-tell", true);
@@ -503,7 +505,7 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
     );
     let conversation = started.body["conversation"].as_str().unwrap().to_owned();
     let id = started.body["jobs"][0]["id"].as_str().unwrap().to_owned();
-    ended(&obid, &id);
+    let first = ended(&obid, &id);
     let before = job_turns(&obid).len();
     let tell = format!(r#"OBY oby_tell_job {{"id": "{id}", "words": "AGENT-WORDS-1"}}"#);
     let told = said(&obid, json!({"said": tell, "conversation": conversation}));
@@ -511,42 +513,67 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
         told.body["text"]
             .as_str()
             .unwrap()
-            .contains("picks up again"),
+            .contains("started a follow-up"),
         "{}",
         told.text
     );
-    let heard = within(30, "the job hears it", || {
+    let cards = told.body["jobs"].as_array().unwrap();
+    assert_eq!(cards.len(), 1, "{}", told.text);
+    let next = cards[0]["id"].as_str().unwrap().to_owned();
+    assert_ne!(next, id);
+    let follow = ended(&obid, &next);
+    assert_eq!(follow["followUpOf"], id.as_str());
+    assert_eq!(follow["conversation"], conversation.as_str());
+    assert_eq!(follow["request"], tell.as_str());
+    assert_eq!(follow["kind"], first["kind"]);
+    let heard = within(30, "the follow-up's agent hears it", || {
         job_turns(&obid).get(before).cloned()
     });
     let prompt = heard["prompt"].as_str().unwrap();
-    assert!(prompt.starts_with(&tell), "{prompt}");
-    let quoted = prompt
-        .find("<<<quoted-")
-        .expect("the agent's words are fenced");
+    let asked = prompt
+        .find(&format!("What the user asked for: {tell}\n"))
+        .unwrap_or_else(|| panic!("{prompt}"));
+    let quoted = asked
+        + prompt[asked..]
+            .find("<<<quoted-")
+            .expect("the agent's words are fenced");
     assert!(prompt[quoted..].contains("AGENT-WORDS-1"), "{prompt}");
     assert!(!prompt[..quoted].contains("AGENT-WORDS-1\n"), "{prompt}");
-    ended(&obid, &id);
+    assert_eq!(ended(&obid, &id)["status"], first["status"]);
 
-    let after = job_turns(&obid).len();
+    let jobs = call(&obid, "GET", "/v1/jobs", None)
+        .body
+        .as_array()
+        .unwrap()
+        .len();
     let web = format!(r#"WEB OBY oby_tell_job {{"id": "{id}", "words": "AGENT-WORDS-2"}}"#);
     let waits = said(&obid, json!({"said": web, "conversation": conversation}));
     assert!(
         waits.body["text"]
             .as_str()
             .unwrap()
-            .contains("waits for your OK"),
+            .contains("waits for your Start"),
         "{}",
         waits.text
     );
+    let start = inbox(&obid)
+        .into_iter()
+        .find(|i| i["kind"] == "start")
+        .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
     assert!(
-        inbox(&obid)
-            .iter()
-            .any(|i| i["kind"] == "confirm" && i["job"] == id.as_str()),
-        "{:?}",
-        inbox(&obid)
+        start["text"].as_str().unwrap().contains("AGENT-WORDS-2"),
+        "{start}"
     );
     std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(job_turns(&obid).len(), after, "it didn't pick up");
+    assert_eq!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        jobs,
+        "nothing started"
+    );
 }
 
 /// One turn starts at most ten jobs and tells jobs at most ten times: past that a tool says why.
@@ -564,6 +591,51 @@ fn a_turn_starts_and_tells_at_most_ten() {
             answer.text
         );
     }
+}
+
+/// A follow-up is a job a turn starts: it counts against the turn's ten, and a turn starts at most
+/// one follow-up of a job.
+#[test]
+fn a_turn_starts_one_follow_up_of_a_job_within_its_ten() {
+    let (_folder, obid) = obid("harness-follow-up-caps", true);
+    let started = said(
+        &obid,
+        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#,
+               "new": true}),
+    );
+    let id = started.body["jobs"][0]["id"].as_str().unwrap().to_owned();
+    ended(&obid, &id);
+    let jobs = || {
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    let tell = format!(r#"OBY oby_tell_job {{"id": "{id}", "words": "x"}}"#);
+    let full = said(
+        &obid,
+        json!({"said": format!(r#"REPEAT 10 OBY oby_dispatch {{"repo": "obi-e2e/nowhere", "task": "x"}} THEN {tell}"#), "new": true}),
+    );
+    assert!(
+        full.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("starts jobs at most 10"),
+        "{}",
+        full.text
+    );
+    assert_eq!(jobs(), 1);
+    let twice = said(
+        &obid,
+        json!({"said": format!(r#"REPEAT 2 {tell}"#), "new": true}),
+    );
+    assert!(
+        twice.body["text"].as_str().unwrap().contains("refused"),
+        "{}",
+        twice.text
+    );
+    assert_eq!(jobs(), 2);
 }
 
 /// What the agent could plant for the next turn's Claude Code (instructions, settings, commands,

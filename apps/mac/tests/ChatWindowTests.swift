@@ -128,7 +128,7 @@ struct ChatWindowTests {
         let state = ChatState()
         state.open()
         let window = offscreenWindow(size: NSSize(width: 900, height: 600),
-                                     root: ChatView(model: model, state: state, onOpenSettings: { _ in }))
+                                     root: ChatView(model: model, state: state))
         window.makeKey()
         defer { window.close() }
         for _ in 0..<40 {

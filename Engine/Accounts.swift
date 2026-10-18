@@ -43,8 +43,12 @@ nonisolated struct AccountState: Equatable, Sendable {
     /// The user let it past its weekly reserve until this time, its week's reset (#278): until
     /// then it isn't `isReserved`. Saved with its usage, so a restart keeps it.
     var reserveLifted: Date?
+    /// Whether the runner says the login is there (obid's `signedIn`): it knows logins the label
+    /// doesn't show, like Claude Code's in the Keychain, and sends `label: null` until a tool reports
+    /// one (#626). Nil for Oby's own accounts and from older runners: then the label says.
+    var runnerSignedIn: Bool?
 
-    var signedIn: Bool { label != nil }
+    var signedIn: Bool { runnerSignedIn ?? (label != nil) }
     func isFull(at now: Date = .now) -> Bool { (fullUntil ?? .distantPast) > now }
 
     /// The share of its weekly limit an account keeps for jobs the user sends to it by name.

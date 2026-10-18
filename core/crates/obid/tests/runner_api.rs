@@ -205,12 +205,13 @@ fn jobs_have_iso_dates_and_every_key() {
                 "artifactProblems",
                 "artifacts",
                 "conversation",
+                "followUpOf",
                 "obi",
                 "worktree"
             ],
             "{body}"
         );
-        assert_eq!(keys.len(), 72);
+        assert_eq!(keys.len(), 73);
         // What obid never sets is there, as null.
         for key in [
             "published",
@@ -1056,11 +1057,14 @@ fn raising_the_cap_starts_a_waiting_job_at_once() {
     assert_eq!(call(&obid, "POST", "/v1/stop-all", None).body["stopped"], 2);
 }
 
-/// RunnerTests.messagesReachOnlyJobsThatCanTakeThem: `POST /v1/jobs/{id}/messages` answers 404 for
-/// an unknown job, 400 for a body without `text`, 422 for words that aren't 1 to 2,000 characters
-/// and for a job that never started (no session); a finished job picks its session up again in
-/// the same worktree and branch, hears the words, keeps them in `notes`, and gets a new round (and
-/// one more on a loop's limit).
+/// RunnerTests.messagesReachOnlyJobsThatCanTakeThem, with the owner's decision of 2026-10-18
+/// (Sangam's design leads): `POST /v1/jobs/{id}/messages` answers 404 for an unknown job, 400 for
+/// a body without `text` and 422 for words that aren't 1 to 2,000 characters. Words for a job that
+/// ended start a follow-up (`201`, the new job): the same kind, agent, account, repository, base
+/// and conversation, on a branch and worktree of its own, `followUpOf` the first job, the words
+/// its request; the first job stays as it ended, even one that never started. Only the exact
+/// Try-again words pick a job's session up again in its own worktree for one more round (and one
+/// more on a loop's limit), as Try again does, and a job that never started has none to pick up.
 #[test]
 fn messages_reach_only_jobs_that_can_take_them() {
     let folder = Folder::new("talk");
@@ -1090,7 +1094,7 @@ fn messages_reach_only_jobs_that_can_take_them() {
         .unwrap()
         .to_owned();
     assert_eq!(ended(&obid, &never)["status"], "failed");
-    let refused = post(&never, json!({"text": "hi"}));
+    let refused = post(&never, json!({"text": TRY_AGAIN}));
     assert_eq!(refused.status, 422, "{}", refused.text);
     assert!(
         refused.body["error"]
@@ -1100,6 +1104,10 @@ fn messages_reach_only_jobs_that_can_take_them() {
         "{}",
         refused.text
     );
+    let after_never = post(&never, json!({"text": "hi"}));
+    assert_eq!(after_never.status, 201, "{}", after_never.text);
+    assert_eq!(after_never.body["followUpOf"], never.as_str());
+    assert_eq!(job(&obid, &never)["status"], "failed");
 
     // A loop of up to two rounds that ends done after its first (its check passes), then the
     // owner's words.
@@ -1116,34 +1124,133 @@ fn messages_reach_only_jobs_that_can_take_them() {
         (done["round"].clone(), done["rounds"].clone()),
         (json!(1), json!(2))
     );
-    let session = done["session"].as_str().unwrap().to_owned();
     assert_eq!(post(&finished, json!({"words": "hi"})).status, 400);
     assert_eq!(post(&finished, json!({"text": " \n "})).status, 422);
     assert_eq!(
         post(&finished, json!({"text": "x".repeat(2001)})).status,
         422
     );
-    let words = "ECHO rename notes.txt to hello.txt";
-    let resumed = post(&finished, json!({"text": words}));
+    let words = "rename notes.txt to hello.txt";
+    let followed = post(&finished, json!({"text": words}));
+    assert_eq!(followed.status, 201, "{}", followed.text);
+    let next = &followed.body;
+    assert_ne!(next["id"], finished.as_str());
+    assert_eq!(next["followUpOf"], finished.as_str());
+    assert_eq!(next["request"], words);
+    for key in ["kind", "agent", "account", "repo", "base", "conversation"] {
+        assert_eq!(next[key], done[key], "{key}");
+    }
+    assert_ne!(next["branch"], "oby/review-33");
+    let next_id = next["id"].as_str().unwrap().to_owned();
+    let next_done = ended(&obid, &next_id);
+    assert_eq!(next_done["status"], "done", "{next_done}");
+    assert_ne!(next_done["worktree"], done["worktree"]);
+    let first = job(&obid, &finished);
+    assert_eq!(first["status"], "done");
+    assert_eq!(first["round"], 1);
+    assert!(first["notes"].is_null(), "{first}");
+
+    // Try again picks the session up again, in the same worktree and branch.
+    let session = done["session"].as_str().unwrap().to_owned();
+    let resumed = post(&finished, json!({"text": TRY_AGAIN}));
     assert_eq!(resumed.status, 200, "{}", resumed.text);
     let again = &resumed.body;
     assert_eq!(again["id"], finished.as_str());
     assert_eq!(again["branch"], "oby/review-33");
-    assert_eq!(again["notes"], json!([words]));
+    assert_eq!(again["notes"], json!([TRY_AGAIN]));
     assert_eq!(again["round"], 2);
     assert_eq!(again["rounds"], 3);
-    assert_eq!(again["step"], format!("You: {words}"));
+    assert_eq!(again["step"], format!("You: {TRY_AGAIN}"));
     assert!(again["finished"].is_null());
     let after = ended(&obid, &finished);
     assert_eq!(after["status"], "done", "{after}");
-    assert_eq!(after["summary"], format!("heard: {words} resume={session}"));
+    assert_eq!(after["session"], session.as_str());
     assert_eq!(after["worktree"], done["worktree"]);
-    assert_eq!(after["notes"], json!([words]));
+    assert_eq!(after["notes"], json!([TRY_AGAIN]));
 }
 
+/// A follow-up of a job whose commits aren't merged (here not published: this obid has no `gh`)
+/// starts from that job's branch head, on a branch of its own: its agent sees that work, and only
+/// its own commits count as its. A job takes one follow-up at a time: while one works, more words
+/// for the first job are refused, pointing at it.
+#[test]
+fn a_follow_up_starts_from_the_first_jobs_unmerged_work() {
+    let folder = Folder::new("follow-up-work");
+    let (obid, _) = obid(&folder);
+    let post = |id: &str, text: &str| {
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/messages"),
+            Some(&json!({"text": text})),
+        )
+    };
+    let first = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: one.txt"}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let done = ended(&obid, &first);
+    assert_eq!(done["commits"], 1, "{done}");
+    assert!(done["published"].is_null(), "{done}");
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let head = git_out(
+        &clone,
+        &["rev-parse", &format!("refs/heads/oby/build-{first}")],
+    );
+
+    let followed = post(&first, "COMMIT: two.txt");
+    assert_eq!(followed.status, 201, "{}", followed.text);
+    let next = followed.body["id"].as_str().unwrap().to_owned();
+    assert_eq!(followed.body["branch"], format!("oby/build-{next}"));
+    let after = ended(&obid, &next);
+    assert_eq!(after["startCommit"], head.as_str(), "{after}");
+    assert_eq!(after["commits"], 1, "{after}");
+    let worktree = std::path::Path::new(after["worktree"].as_str().unwrap());
+    assert!(worktree.join("one.txt").is_file() && worktree.join("two.txt").is_file());
+
+    // One follow-up at a time.
+    let looked = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Look around"}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    ended(&obid, &looked);
+    let pausing = post(&looked, "PAUSE: 3000");
+    assert_eq!(pausing.status, 201, "{}", pausing.text);
+    let busy = post(&looked, "and one more");
+    assert_eq!(busy.status, 422, "{}", busy.text);
+    assert!(
+        busy.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("is following it up already"),
+        "{}",
+        busy.text
+    );
+}
+
+fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// What a job hears when the owner tries it again (`Inbox.tryAgainMessage`).
+const TRY_AGAIN: &str =
+    "Try again, picking up where you left off. Finish with a short summary as asked.";
+
 /// The owner's words reach a job whose agent is at work as its next turn, before the check, in
-/// the same round; a job that must commit and whose round the owner asked for may end done with
-/// nothing committed: their words decide (runner-api.md, "POST /v1/jobs/{id}/messages").
+/// the same round; a job that must commit and whose round the owner asked for (Try again) may end
+/// done with nothing committed: their words decide (runner-api.md, "POST /v1/jobs/{id}/messages").
 #[test]
 fn a_running_job_hears_the_words_next_and_the_owners_round_may_commit_nothing() {
     let folder = Folder::new("hear");
@@ -1193,7 +1300,7 @@ fn a_running_job_hears_the_words_next_and_the_owners_round_may_commit_nothing() 
     let failed = ended(&obid, &fix);
     assert_eq!(failed["status"], "failed");
     assert_eq!(failed["summary"], "Nothing committed: Nothing to do.");
-    assert_eq!(post(&fix, "ECHO leave it as it is").status, 200);
+    assert_eq!(post(&fix, TRY_AGAIN).status, 200);
     let left = ended(&obid, &fix);
     assert_eq!(left["status"], "done", "{left}");
     assert_eq!(left["commits"], 0);
