@@ -186,8 +186,10 @@ pub async fn serve(
         jobs::keep_keychain_logins();
     }
     vault::install(&config.home, &config.vault);
-    // What the accounts API changed, over the configuration's accounts, before anything uses them.
+    // What the accounts API changed, over the configuration's accounts, before anything uses them;
+    // and what sign-ins cut short by the last stop left behind.
     config.agents.open(&config.home);
+    accounts::sweep(&config.home);
     let events = events::Events::new();
     let sandbox = std::env::current_exe()
         .map_err(|e| format!("obid can't find its own executable: {e}"))
@@ -293,7 +295,7 @@ pub async fn serve(
     // A job a conversation started tells it how it ended (#351).
     conversation::report_job_ends(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
-    brain::orchestrator::spawn(shared);
+    brain::orchestrator::spawn(shared.clone());
     // Every event a plug-in emits becomes a `pluginEvent` inbox item. The receiver ends once
     // the host has shut down.
     if let Some(mut events) = plugins.take_events() {
@@ -305,10 +307,11 @@ pub async fn serve(
         });
     }
     // Once told to stop: every agent and check ends now, and its job stays as it is for the next
-    // start; every plug-in stops, with everything it started; the event streams and waits end,
-    // so the server's connections close.
+    // start; every plug-in stops, with everything it started; every sign-in's login ends, with
+    // everything it started; the event streams and waits end, so the server's connections close.
     let stopped_at = Arc::new(std::sync::OnceLock::new());
     let ending = {
+        let shared = shared.clone();
         let jobs = jobs.clone();
         let plugins = plugins.clone();
         let stopped_at = stopped_at.clone();
@@ -320,6 +323,7 @@ pub async fn serve(
                 }
             }
             let _ = stopped_at.set(tokio::time::Instant::now());
+            shared.sign_ins.kill_all();
             tokio::join!(jobs.shutdown(JOBS_GRACE), plugins.shutdown());
         })
     };

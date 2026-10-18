@@ -2,7 +2,8 @@
 // "GET /v1/accounts/{id}/sign-in"):
 //   fake-claude auth login                                          prints the link to open, reads
 //       the code pasted back on stdin; `good-code#fake` writes $CLAUDE_CONFIG_DIR/.credentials.json
-//       and exits 0, anything else exits 1 as Claude Code does ("Login failed")
+//       and exits 0, anything else exits 1 as Claude Code does ("Login failed"). Meanwhile a child
+//       of its own sleeps, and both pids are in $CLAUDE_CONFIG_DIR/login-pids
 //   fake-codex login --device-auth -c cli_auth_credentials_store="file"   prints the link and a
 //       one-time code in colour, then after 2 seconds writes $CODEX_HOME/auth.json and exits 0
 //   fake-cursor login                                               prints the link, then after
@@ -11,6 +12,7 @@
 // environment), so the tests can check how obid ran it. Each also prints a made-up secret obid
 // must never repeat, and refuses to run with a Claude Code, Anthropic or GitHub variable.
 
+import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -26,7 +28,8 @@ const saw = () => ({
   cwd: process.cwd(),
   env: Object.fromEntries(
     ["HOME", "TMPDIR", "PATH", "BROWSER", "NO_OPEN_BROWSER", "CLAUDE_CONFIG_DIR",
-     "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CODEX_HOME", "CURSOR_CONFIG_DIR", "XDG_CONFIG_HOME"]
+     "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CODEX_HOME", "CURSOR_CONFIG_DIR", "XDG_CONFIG_HOME",
+     "XDG_CACHE_HOME", "NODE_COMPILE_CACHE", "AGENT_CLI_CREDENTIAL_STORE"]
       .filter((name) => name in process.env)
       .map((name) => [name, process.env[name]])),
   names: Object.keys(process.env).sort(),
@@ -46,6 +49,8 @@ export async function login(tool) {
   }
   process.stderr.write(`debug: refresh ${SECRET}\n`);
   if (tool === "claude") {
+    const child = spawn("sleep", ["300"], { stdio: "ignore" });
+    writeFileSync(join(process.env.CLAUDE_CONFIG_DIR, "login-pids"), `${process.pid} ${child.pid}`);
     process.stdout.write("Opening browser to sign in…\n");
     process.stdout.write("If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&state=fake\n");
     process.stdout.write("Paste code here if prompted > ");

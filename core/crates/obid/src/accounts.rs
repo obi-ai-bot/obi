@@ -4,12 +4,14 @@
 //! The configuration's `agents.<tool>.accounts` are the seed. What the API changes is kept in
 //! `home/accounts.json` (0600) and laid over the seed at every start ([`Live::open`]), so a restart
 //! keeps it and the configuration file is never rewritten. Every copy of the configuration shares
-//! one [`Live`], so a change reaches routing, the brain and the gateway's scrubbing at once.
+//! one [`Live`], so a change reaches routing, the brain and the gateway's scrubbing at once. An
+//! account the API adds always has a folder obid makes, `home/accounts/<id>`.
 //!
-//! Signing in runs the tool's own login, never obid's (AGENTS.md): obid passes on only the link to
-//! open and the code to type, both read from what the login prints and checked, and the code the
-//! person pastes back goes to the login's stdin. Nothing else the login prints is kept, shown or
-//! logged.
+//! Signing in runs the tool's own login, never obid's (AGENTS.md), in the account's own folder: no
+//! box ever gets that folder (#655), so nothing a job wrote can steer the login, and obid never
+//! reads or copies what it writes. obid passes on only the link to open and the code to type,
+//! both read from what the login prints and checked, and the code the person pastes back goes to
+//! the login's stdin. Nothing else the login prints is kept, shown or logged.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -24,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::agent::Tool;
-use crate::api::{ApiError, Shared};
+use crate::api::{AccountJson, ApiError, Shared};
 use crate::config::{Account, Agent, Agents};
 
 /// Where obid keeps what the API changed, under its home.
@@ -32,6 +34,9 @@ const FILE: &str = "accounts.json";
 
 /// The longest name or payer, in characters.
 const LONGEST: usize = 60;
+
+/// The most accounts obid keeps, the configuration's and the API's together.
+const MOST_ACCOUNTS: usize = 32;
 
 /// How long a sign-in may wait for the person: Codex's one-time code lasts 15 minutes.
 const SIGN_IN_LASTS: Duration = Duration::from_secs(15 * 60);
@@ -41,6 +46,16 @@ const LINK_WITHIN: Duration = Duration::from_secs(30);
 
 /// How long a pasted code may take to sign the login in.
 const CODE_WITHIN: Duration = Duration::from_secs(60);
+
+/// The longest line of a login's output obid reads; the rest of a longer line is dropped.
+const LONGEST_LINE: usize = 4096;
+
+/// The `PATH` a login runs with: the system's folders, then the folder of the tool's own binary.
+const SYSTEM_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// The folders a sign-in uses for its temporary files, under obid's home: `sign-in-<…>`, swept at
+/// every start ([`sweep`]).
+const SCRATCH_PREFIX: &str = "sign-in-";
 
 // ---------------------------------------------------------------------------------------------
 // The accounts, live
@@ -73,6 +88,7 @@ struct Saved {
     removed: Vec<String>,
 }
 
+/// An account the API added: its folder is obid's own, `home/accounts/<id>`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Added {
@@ -82,9 +98,6 @@ struct Added {
     #[serde(default)]
     payer: Option<String>,
     config_dir: PathBuf,
-    /// obid made the folder (`home/accounts/<id>`), so removing the account removes it.
-    #[serde(default)]
-    made: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,8 +144,9 @@ impl Live {
     }
 
     /// Lays `home/accounts.json` over the configuration's accounts (crate::serve, before anything
-    /// uses them). A file that doesn't read is left as it is, logged, and changes are refused
-    /// until the owner fixes or removes it.
+    /// uses them), each entry checked as the API checks it ([`checked`]): one that isn't right is
+    /// left out and logged. A file that doesn't read is left as it is, logged, and changes are
+    /// refused until the owner fixes or removes it.
     pub fn open(&self, home: &Path) {
         let file = home.join(FILE);
         let mut inner = self.write();
@@ -140,16 +154,7 @@ impl Live {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => inner.broken = Some(format!("obid can't read {}: {e}", file.display())),
             Ok(bytes) => match serde_json::from_slice::<Saved>(&bytes) {
-                Ok(mut saved) => {
-                    saved.added.retain(|a| {
-                        let fine = Tool::from_id(&a.agent).is_some() && a.config_dir.is_absolute();
-                        if !fine {
-                            tracing::warn!("{}: account {:?} left out", file.display(), a.id);
-                        }
-                        fine
-                    });
-                    inner.saved = saved;
-                }
+                Ok(saved) => inner.saved = checked(&inner.seed, saved, home),
                 Err(e) => inner.broken = Some(format!("{} doesn't read: {e}", file.display())),
             },
         }
@@ -203,6 +208,45 @@ impl PartialEq for Live {
 
 impl Eq for Live {}
 
+/// `saved` as read from `home/accounts.json`, with what the API would refuse left out (and
+/// logged): an added account must have an id obid makes, a tool, its folder `home/accounts/<id>`,
+/// a name and payer the API takes and no other account's name, and keep the total within
+/// [`MOST_ACCOUNTS`]; a change's name and payer the same.
+fn checked(seed: &Agents, saved: Saved, home: &Path) -> Saved {
+    let drop = |what: &str, id: &str| {
+        tracing::warn!("{}: {what} {id:?} left out", home.join(FILE).display());
+    };
+    let mut kept = Saved {
+        removed: saved.removed,
+        ..Saved::default()
+    };
+    for (id, change) in saved.changed {
+        match (
+            one_line("name", &change.name),
+            payer_text(change.payer.as_deref()),
+        ) {
+            (Ok(name), Ok(payer)) => {
+                kept.changed.insert(id, Change { name, payer });
+            }
+            _ => drop("change", &id),
+        }
+    }
+    for added in saved.added {
+        let agents = merged(seed, &kept);
+        let fine = Tool::from_id(&added.agent).filter(|_| {
+            own_folder(home, &added.id).is_some_and(|own| own == added.config_dir)
+                && find(&agents, &added.id).is_none()
+                && all(&agents).len() < MOST_ACCOUNTS
+                && payer_text(added.payer.as_deref()).is_ok()
+        });
+        match fine.map(|tool| name(&agents, tool, &added.name, None)) {
+            Some(Ok(name)) if name == added.name => kept.added.push(added),
+            _ => drop("account", &added.id),
+        }
+    }
+    kept
+}
+
 /// The tool's own default login, which an empty `accounts` stands for (Cursor has none: each of
 /// its accounts needs a folder).
 fn implicit(tool: Tool) -> Vec<Account> {
@@ -245,7 +289,10 @@ fn agent_of_mut(agents: &mut Agents, tool: Tool) -> &mut Option<Agent> {
 }
 
 /// The configuration's accounts with `saved` laid over them: renamed, removed, then the added
-/// ones after. A tool the configuration doesn't name is there while it has an added account.
+/// ones after. A tool the configuration doesn't name is there while it has an added account. A
+/// tool whose accounts were all removed is gone, rather than back on its own default login (an
+/// empty list's meaning): its default login is listed (and can be removed) once anything about
+/// the tool's accounts changed.
 fn merged(seed: &Agents, saved: &Saved) -> Agents {
     let seeded: Vec<String> = Tool::ALL
         .iter()
@@ -263,8 +310,8 @@ fn merged(seed: &Agents, saved: &Saved) -> Agents {
         let slot = agent_of_mut(&mut agents, tool);
         let agent = match slot {
             Some(agent) => {
-                // An empty list was the tool's own login: it stays beside what's added.
-                if agent.accounts.is_empty() && !added.is_empty() {
+                let own_removed = implicit(tool).iter().any(|a| saved.removed.contains(&a.id));
+                if agent.accounts.is_empty() && (!added.is_empty() || own_removed) {
                     agent.accounts = implicit(tool);
                 }
                 agent
@@ -275,6 +322,7 @@ fn merged(seed: &Agents, saved: &Saved) -> Agents {
                 accounts: Vec::new(),
             }),
         };
+        let had = agent.accounts.len() + added.len();
         agent.accounts.retain(|a| !saved.removed.contains(&a.id));
         for account in &mut agent.accounts {
             if let Some(change) = saved.changed.get(&account.id) {
@@ -283,6 +331,9 @@ fn merged(seed: &Agents, saved: &Saved) -> Agents {
             }
         }
         agent.accounts.extend(added);
+        if had > 0 && agent.accounts.is_empty() {
+            *slot = None;
+        }
     }
     agents
 }
@@ -345,87 +396,17 @@ fn name(agents: &Agents, tool: Tool, text: &str, except: Option<&str>) -> Result
 fn payer(value: Option<&Value>) -> Result<Option<String>, ApiError> {
     match value {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) if text.trim().is_empty() => Ok(None),
-        Some(Value::String(text)) => one_line("payer", text).map(Some),
+        Some(Value::String(text)) => payer_text(Some(text)),
         Some(_) => Err(unprocessable("payer is text or null.")),
     }
 }
 
-/// A path as written and with links resolved (the part that exists), each in lower case, as
-/// macOS compares names: what a folder is checked against.
-fn forms(path: &Path) -> [PathBuf; 2] {
-    let mut existing = path.to_path_buf();
-    let mut rest = Vec::new();
-    let real = loop {
-        if let Ok(real) = std::fs::canonicalize(&existing) {
-            break rest.iter().rev().fold(real, |p, name| p.join(name));
-        }
-        match (
-            existing.file_name().map(|n| n.to_owned()),
-            existing.parent(),
-        ) {
-            (Some(name), Some(parent)) => {
-                rest.push(name);
-                existing = parent.to_path_buf();
-            }
-            _ => break path.to_path_buf(),
-        }
-    };
-    [path.to_path_buf(), real].map(|p| PathBuf::from(p.to_string_lossy().to_lowercase()))
-}
-
-/// Whether `a` is `b` or inside it, in any of their forms.
-fn within(a: &[PathBuf; 2], b: &[PathBuf; 2]) -> bool {
-    a.iter().any(|a| b.iter().any(|b| a.starts_with(b)))
-}
-
-/// A folder the owner names for an account: absolute, without `.` or `..`, and none of: inside
-/// obid's home or holding it; the person's home or a folder holding it; the person's own
-/// `~/.claude`, `~/.codex` or `~/.cursor` or inside one (an account's folder is one its jobs can
-/// write, #651); another account's folder, inside one or holding one.
-fn folder(agents: &Agents, home: &Path, dir: &Path) -> Result<PathBuf, ApiError> {
-    let refuse = |why: String| Err(unprocessable(format!("configDir {dir:?} {why}")));
-    if !dir.is_absolute() {
-        return refuse("must be an absolute path.".into());
+fn payer_text(text: Option<&str>) -> Result<Option<String>, ApiError> {
+    match text {
+        None => Ok(None),
+        Some(text) if text.trim().is_empty() => Ok(None),
+        Some(text) => one_line("payer", text).map(Some),
     }
-    let dotted = dir
-        .as_os_str()
-        .as_encoded_bytes()
-        .split(|b| *b == b'/')
-        .any(|part| part == b"." || part == b"..");
-    if dotted {
-        return refuse("must name its folder without . or ..".into());
-    }
-    let dir: PathBuf = dir.components().collect();
-    let these = forms(&dir);
-    let obid = forms(home);
-    if within(&these, &obid) || within(&obid, &these) {
-        return refuse("is obid's home, inside it or holds it: obid makes the folder there itself when configDir is left out.".into());
-    }
-    for person in crate::jobs::person_homes() {
-        if within(&forms(&person), &these) {
-            return refuse("is the person's home or holds it.".into());
-        }
-        for own in [".claude", ".codex", ".cursor"] {
-            if within(&these, &forms(&person.join(own))) {
-                return refuse(format!(
-                    "is the person's own ~/{own} or inside it: an account's folder is one its jobs can write, and ~/{own} must stay one no job can."
-                ));
-            }
-        }
-    }
-    for (_, account) in all(agents) {
-        if let Some(other) = &account.config_dir {
-            let other = forms(other);
-            if within(&these, &other) || within(&other, &these) {
-                return refuse(format!(
-                    "is {}'s folder, inside it or holds it: each account has a folder of its own.",
-                    account.name
-                ));
-            }
-        }
-    }
-    Ok(dir)
 }
 
 /// An id no account has, nor had (a removed one), as job ids are made.
@@ -440,8 +421,8 @@ fn new_id(agents: &Agents, saved: &Saved) -> String {
     }
 }
 
-/// The folder obid makes for an account it adds without one: `home/accounts/<id>`, `id` being
-/// one obid made (eight hex digits), never one the owner wrote.
+/// The folder obid makes for an account it adds: `home/accounts/<id>`, `id` being one obid made
+/// (eight hex digits), never one anybody wrote.
 fn own_folder(home: &Path, id: &str) -> Option<PathBuf> {
     (id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit()))
         .then(|| home.join("accounts").join(id))
@@ -457,7 +438,7 @@ fn object(body: &Bytes, keys: &[&str], shape: &str) -> Result<Map<String, Value>
     };
     if let Some(key) = map.keys().find(|k| !keys.contains(&k.as_str())) {
         return Err(unprocessable(format!(
-            "{key} isn't something an account has: the body is {shape}."
+            "{key} isn't something an account has here: the body is {shape}."
         )));
     }
     Ok(map)
@@ -479,15 +460,41 @@ fn answer(status: StatusCode, value: impl Serialize) -> Response {
     (status, axum::Json(value)).into_response()
 }
 
+/// Every account as the apps see it, worked out off obid's async runtime: whether an account is
+/// signed in can ask the macOS Keychain (`security`), which blocks.
+pub async fn list_now(shared: &Arc<Shared>) -> Vec<AccountJson> {
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || crate::api::account_list(&shared))
+        .await
+        .unwrap_or_default()
+}
+
+/// One account as the apps see it, off obid's async runtime ([`list_now`]).
+async fn json_now(shared: &Arc<Shared>, tool: Tool, account: Account) -> Option<AccountJson> {
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || crate::api::account_json(&shared, tool, &account))
+        .await
+        .ok()
+}
+
+/// Tells every app the accounts as they are now (`accounts`, docs/runner-api.md, "GET /v1/events").
+pub async fn send_accounts(shared: &Arc<Shared>) {
+    let list = list_now(shared).await;
+    shared
+        .events
+        .send("accounts", serde_json::to_value(list).unwrap_or_default());
+}
+
 // ---------------------------------------------------------------------------------------------
 // POST /v1/accounts, PATCH and DELETE /v1/accounts/{id}
 
-const NEW_SHAPE: &str = "{\"agent\": \"claude\" | \"codex\" | \"cursor\", \"name\": \"…\", \"payer\": \"…\", \"configDir\": \"/abs/path\"}";
+const NEW_SHAPE: &str =
+    "{\"agent\": \"claude\" | \"codex\" | \"cursor\", \"name\": \"…\", \"payer\": \"…\"}";
 
-/// `POST /v1/accounts`: a new account for Claude Code, Codex or Cursor, in a folder obid makes
-/// (`home/accounts/<id>`, 0700) unless `configDir` names one. `201` with the Account.
+/// `POST /v1/accounts`: a new account for Claude Code, Codex or Cursor, in a folder obid makes,
+/// `home/accounts/<id>` (0700). `201` with the Account.
 pub async fn add(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
-    let map = object(&body, &["agent", "name", "payer", "configDir"], NEW_SHAPE)?;
+    let map = object(&body, &["agent", "name", "payer"], NEW_SHAPE)?;
     let agent = text_field(&map, "agent")?
         .ok_or_else(|| unprocessable(format!("agent is missing: the body is {NEW_SHAPE}.")))?;
     let tool = Tool::from_id(agent).ok_or_else(|| {
@@ -496,54 +503,41 @@ pub async fn add(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Respo
     let text = text_field(&map, "name")?
         .ok_or_else(|| unprocessable(format!("name is missing: the body is {NEW_SHAPE}.")))?;
     let payer = payer(map.get("payer"))?;
-    let named = match map.get("configDir") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(dir)) => Some(PathBuf::from(dir)),
-        Some(_) => return Err(unprocessable("configDir is an absolute path or null.")),
-    };
     let home = shared.config.home.clone();
-    let account = shared.config.agents.change(|agents, saved| {
+    let added = shared.config.agents.change(|agents, saved| {
+        if all(agents).len() >= MOST_ACCOUNTS {
+            return Err(unprocessable(format!(
+                "obid keeps at most {MOST_ACCOUNTS} accounts: remove one first."
+            )));
+        }
         let name = name(agents, tool, text, None)?;
-        let config_dir = named
-            .as_deref()
-            .map(|dir| folder(agents, &home, dir))
-            .transpose()?;
         let id = new_id(agents, saved);
-        let made = config_dir.is_none();
-        let config_dir = match config_dir {
-            Some(dir) => dir,
-            None => {
-                let dir = own_folder(&home, &id).expect("obid's own id");
-                make_folder(&dir).map_err(|e| {
-                    ApiError::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("obid couldn't make the account's folder: {e}"),
-                    )
-                })?;
-                dir
-            }
-        };
+        let config_dir = own_folder(&home, &id).expect("obid's own id");
+        make_folder(&config_dir).map_err(|e| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("obid couldn't make the account's folder: {e}"),
+            )
+        })?;
         let added = Added {
             id,
             agent: tool.id().into(),
             name,
             payer,
             config_dir,
-            made,
         };
         saved.added.push(added.clone());
         Ok(added)
-    });
-    let added = account?;
+    })?;
     tracing::info!("account {}: added ({})", added.id, tool.id());
-    send_accounts(&shared);
+    send_accounts(&shared).await;
     Ok(answer(
         StatusCode::CREATED,
-        crate::api::account_json(&shared, tool, &added.account()),
+        json_now(&shared, tool, added.account()).await,
     ))
 }
 
-/// A new folder of obid's own (0700), in a private `home/accounts`.
+/// A new folder of obid's own (0700), in a private `home/accounts` (or `home/tmp`).
 fn make_folder(dir: &Path) -> std::io::Result<()> {
     if let Some(parent) = dir.parent() {
         crate::store::make_private_dir(parent)?;
@@ -589,31 +583,37 @@ pub async fn change(
         }
         Ok((tool, account))
     })?;
-    send_accounts(&shared);
+    send_accounts(&shared).await;
     Ok(answer(
         StatusCode::OK,
-        crate::api::account_json(&shared, tool, &account),
+        json_now(&shared, tool, account).await,
     ))
 }
 
-/// `DELETE /v1/accounts/{id}`: `204`. `409` while a job of it is queued or running. Its folder goes
-/// too only when obid made it; a sign-in under way ends.
+/// `DELETE /v1/accounts/{id}`: `204`. A sign-in under way ends first; then `409` while a job of
+/// the account is queued or running. Its folder goes too when obid made it.
 pub async fn remove(
     State(shared): State<Arc<Shared>>,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Response, ApiError> {
     let home = shared.config.home.clone();
-    // Asked before the accounts are locked: the jobs read the accounts under their own lock.
+    find(&shared.config.agents.get(), &id).ok_or_else(|| no_account(&id))?;
+    // One change of the account at a time: a sign-in can't start while it's removed. Looked up
+    // again once held: it may have gone meanwhile.
+    let lock = shared.sign_ins.lock_for(&id);
+    let _held = lock.lock().await;
     let (_, account) = find(&shared.config.agents.get(), &id).ok_or_else(|| no_account(&id))?;
-    if shared.jobs.busy_on(&id) {
-        return Err(busy(&account));
-    }
+    shared.sign_ins.end(&id).await;
+    let _changing = shared
+        .jobs
+        .begin_change(&id)
+        .ok_or_else(|| busy(&account))?;
     let made = shared.config.agents.change(|agents, saved| {
         find(agents, &id).ok_or_else(|| no_account(&id))?;
         let made = match saved.added.iter().position(|a| a.id == id) {
             Some(at) => {
                 let added = saved.added.remove(at);
-                own_folder(&home, &id).filter(|own| added.made && added.config_dir == *own)
+                own_folder(&home, &id).filter(|own| added.config_dir == *own)
             }
             None => {
                 saved.changed.remove(&id);
@@ -623,9 +623,8 @@ pub async fn remove(
         };
         Ok(made)
     })?;
-    shared.sign_ins.cancel(&id);
-    // Never through a link a job left in the folder's place: only a real folder is removed, and
-    // what's in it without following links.
+    // Never through a link in the folder's place: only a real folder is removed, and what's in it
+    // without following links.
     if let Some(dir) = made
         && std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir())
         && let Err(e) = std::fs::remove_dir_all(&dir)
@@ -633,7 +632,7 @@ pub async fn remove(
         tracing::warn!("account {id}: its folder {} stayed: {e}", dir.display());
     }
     tracing::info!("account {id}: removed");
-    send_accounts(&shared);
+    send_accounts(&shared).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -647,14 +646,6 @@ fn busy(account: &Account) -> ApiError {
     )
 }
 
-/// Tells every app the accounts as they are now (`accounts`, docs/runner-api.md, "GET /v1/events").
-pub fn send_accounts(shared: &Shared) {
-    let list = crate::api::account_list(shared);
-    shared
-        .events
-        .send("accounts", serde_json::to_value(list).unwrap_or_default());
-}
-
 // ---------------------------------------------------------------------------------------------
 // Signing in
 
@@ -662,8 +653,8 @@ pub fn send_accounts(shared: &Shared) {
 #[derive(Default)]
 pub struct SignIns {
     running: Mutex<HashMap<String, Arc<SignIn>>>,
-    /// Held while one starts, so two asks for one account start one login.
-    starting: tokio::sync::Mutex<()>,
+    /// One change of an account at a time (a sign-in starting, the account removed).
+    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// One sign-in under way: the tool's own login, waiting for the person.
@@ -675,6 +666,8 @@ pub struct SignIn {
     /// Claude Code: the page shows a code the person pastes back (`POST`).
     paste: bool,
     expires: i64,
+    /// The login's process group.
+    group: Option<u32>,
     stdin: tokio::sync::Mutex<Option<tokio::process::ChildStdin>>,
     /// Whether it signed the account in, once it ended.
     ended: tokio::sync::watch::Receiver<Option<bool>>,
@@ -683,17 +676,39 @@ pub struct SignIn {
 
 impl SignIns {
     fn get(&self, id: &str) -> Option<Arc<SignIn>> {
-        self.lock().get(id).cloned()
+        self.running().get(id).cloned()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<SignIn>>> {
+    fn running(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<SignIn>>> {
         self.running.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Ends the account's sign-in, if one is under way.
-    pub fn cancel(&self, id: &str) {
+    /// The lock for changing the account `id` (one that exists: at most one per account obid had).
+    fn lock_for(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(id.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    /// Ends the account's sign-in, if one is under way, and waits until it has.
+    async fn end(&self, id: &str) {
         if let Some(sign_in) = self.get(id) {
             sign_in.cancel.notify_one();
+            let mut ended = sign_in.ended.clone();
+            let _ =
+                tokio::time::timeout(Duration::from_secs(5), ended.wait_for(Option::is_some)).await;
+        }
+    }
+
+    /// Kills every sign-in's whole process group (obid is stopping).
+    pub fn kill_all(&self) {
+        for sign_in in self.running().values() {
+            if let Some(group) = sign_in.group {
+                crate::process::signal_group(group, nix::sys::signal::Signal::SIGKILL);
+            }
         }
     }
 }
@@ -705,20 +720,38 @@ impl SignIn {
     }
 }
 
+/// Removes the folders sign-ins left in `home/tmp` when obid stopped before they ended.
+pub fn sweep(home: &Path) {
+    let Ok(entries) = std::fs::read_dir(home.join("tmp")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(SCRATCH_PREFIX)
+            && entry.file_type().is_ok_and(|t| t.is_dir())
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// `GET /v1/accounts/{id}/sign-in`: the account's sign-in under way, or a new one: the tool's own
-/// login for the account's folder, and what the person needs from it (`url`, `userCode`,
+/// login in the account's folder, and what the person needs from it (`url`, `userCode`,
 /// `pasteCode`).
 pub async fn sign_in(
     State(shared): State<Arc<Shared>>,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Response, ApiError> {
-    let (tool, account) = find(&shared.config.agents.get(), &id).ok_or_else(|| no_account(&id))?;
-    let _starting = shared.sign_ins.starting.lock().await;
+    find(&shared.config.agents.get(), &id).ok_or_else(|| no_account(&id))?;
+    // One change of the account at a time; looked up again once held (it may have been removed).
+    let lock = shared.sign_ins.lock_for(&id);
+    let _held = lock.lock().await;
+    let agents = shared.config.agents.get();
+    let (tool, account) = find(&agents, &id).ok_or_else(|| no_account(&id))?;
     if let Some(sign_in) = shared.sign_ins.get(&id) {
         return Ok(answer(StatusCode::OK, sign_in.to_json()));
-    }
-    if shared.jobs.busy_on(&id) {
-        return Err(busy(&account));
     }
     let conflict = |message: String| Err(ApiError::new(StatusCode::CONFLICT, message));
     let Some(dir) = account.config_dir.clone() else {
@@ -732,16 +765,24 @@ pub async fn sign_in(
     if tool == Tool::Claude && cfg!(target_os = "macos") && !crate::jobs::keychain_on() {
         return conflict("On macOS Claude Code keeps its login in the Keychain, which obid uses only with claudeKeychain on in its configuration.".into());
     }
-    let bin = agent_of(&shared.config.agents.get(), tool)
+    let bin = agent_of(&agents, tool)
         .as_ref()
         .and_then(|agent| crate::process::resolve_bin(&agent.bin))
+        .filter(|bin| bin.is_absolute())
         .ok_or_else(|| {
             ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("obid can't find {}'s binary.", tool.name()),
+                format!(
+                    "obid can't find {}'s binary by an absolute path, which is how it runs a sign-in.",
+                    tool.name()
+                ),
             )
         })?;
-    let sign_in = start(&shared, tool, &account, &bin, &dir)
+    let changing = shared
+        .jobs
+        .begin_change(&id)
+        .ok_or_else(|| busy(&account))?;
+    let sign_in = start(&shared, tool, &account, &bin, &dir, changing)
         .await
         .map_err(|why| ApiError::new(StatusCode::BAD_GATEWAY, why))?;
     Ok(answer(StatusCode::OK, sign_in.to_json()))
@@ -801,7 +842,7 @@ pub async fn sign_in_code(
                 .unwrap_or(account);
             Ok(answer(
                 StatusCode::OK,
-                crate::api::account_json(&shared, tool, &account),
+                json_now(&shared, tool, account).await,
             ))
         }
         Some(false) => Err(unprocessable(format!(
@@ -819,27 +860,27 @@ pub async fn sign_in_code(
     }
 }
 
-/// Starts the tool's own login for the account's folder `dir` and waits for its link.
+/// Starts the tool's own login in the account's folder `dir` and waits for its link. No box ever
+/// gets that folder (#655), so nothing a job wrote there steers the login, and the login writes
+/// its sign-in where the tool keeps it, read by nobody but the tool itself and the copies obid
+/// makes for its boxed runs:
 ///
-/// - Claude Code: `claude auth login`, in a new empty config folder of obid's (`CLAUDE_CONFIG_DIR`)
-///   so it never reads the account's folder, which jobs can write (#655); on macOS
-///   `CLAUDE_SECURESTORAGE_CONFIG_DIR` names the account's folder, so the login lands in that
-///   folder's Keychain item, the one obid copies for its runs. With no terminal it prints a link
-///   whose page shows a code to paste back on its stdin.
-/// - Codex: `codex login --device-auth`, with its login kept in a file, in a folder of obid's
-///   (`CODEX_HOME`): a link and a one-time code to type there; it ends by itself.
-/// - Cursor: `cursor-agent login` with the account's own folders, as its jobs run it, its
+/// - Claude Code: `claude auth login` with `CLAUDE_CONFIG_DIR` the account's folder (on macOS its
+///   login then goes to that folder's Keychain item). With no terminal it prints a link whose page
+///   shows a code to paste back on its stdin.
+/// - Codex: `codex login --device-auth`, its login kept in a file, with `CODEX_HOME` and `HOME` the
+///   account's folder: a link and a one-time code to type there; it ends by itself.
+/// - Cursor: `cursor-agent login` with the account's folders and its login kept in a file, its
 ///   `cli-config.json` rewritten first ([`crate::acp::cursor::rewrite_config`]); it ends by itself.
 ///
-/// A login file the tool wrote in obid's folder (Codex's `auth.json`, Claude Code's
-/// `.credentials.json` where there's no Keychain) is then written into the account's folder as
-/// obid copies a login, never through a link, and obid's folder removed.
+/// `changing` keeps jobs off the account until the login ends.
 async fn start(
     shared: &Arc<Shared>,
     tool: Tool,
     account: &Account,
     bin: &Path,
     dir: &Path,
+    changing: crate::jobs::Changing,
 ) -> Result<Arc<SignIn>, String> {
     crate::jobs::not_a_link(dir)?;
     crate::store::make_private_dir(dir)
@@ -850,7 +891,7 @@ async fn start(
         .config
         .home
         .join("tmp")
-        .join(format!("sign-in-{}-{n}", std::process::id()));
+        .join(format!("{SCRATCH_PREFIX}{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     make_folder(&scratch).map_err(|e| format!("obid can't make a folder for the sign-in: {e}"))?;
     let child = command(tool, bin, dir, &scratch).and_then(|mut c| {
@@ -864,13 +905,14 @@ async fn start(
             return Err(why);
         }
     };
-    let pid = child.id();
+    let group = child.id();
     let kill = move || {
-        if let Some(pid) = pid {
-            crate::process::signal_group(pid, nix::sys::signal::Signal::SIGKILL);
+        if let Some(group) = group {
+            crate::process::signal_group(group, nix::sys::signal::Signal::SIGKILL);
         }
     };
-    // What it prints, a line at a time, read until it ends: only the link and the code are taken.
+    // What it prints, a line at a time (at most [`LONGEST_LINE`] of each), read until it ends:
+    // only the link and the code are taken.
     let (lines, mut said) = tokio::sync::mpsc::unbounded_channel::<String>();
     for out in [
         child
@@ -885,20 +927,7 @@ async fn start(
     .into_iter()
     .flatten()
     {
-        let lines = lines.clone();
-        tokio::spawn(async move {
-            use tokio::io::AsyncBufReadExt;
-            let mut reader = tokio::io::BufReader::new(out);
-            let mut line = Vec::new();
-            while reader
-                .read_until(b'\n', &mut line)
-                .await
-                .is_ok_and(|n| n > 0)
-            {
-                let _ = lines.send(String::from_utf8_lossy(&line).into_owned());
-                line.clear();
-            }
-        });
+        tokio::spawn(read_lines(out, lines.clone()));
     }
     drop(lines);
     let wanted = async {
@@ -937,35 +966,42 @@ async fn start(
         user_code,
         paste: tool == Tool::Claude,
         expires: obi_protocol::time::now() + SIGN_IN_LASTS.as_secs() as i64,
+        group,
         stdin: tokio::sync::Mutex::new(child.stdin.take()),
         ended,
         cancel: tokio::sync::Notify::new(),
     });
     shared
         .sign_ins
-        .lock()
+        .running()
         .insert(account.id.clone(), sign_in.clone());
     tracing::info!("account {}: {} sign-in started", account.id, tool.id());
-    let (shared, watched, account, dir) = (
-        shared.clone(),
-        sign_in.clone(),
-        account.clone(),
-        dir.to_path_buf(),
-    );
+    let (shared, watched, account) = (shared.clone(), sign_in.clone(), account.clone());
     tokio::spawn(async move {
         let exited = tokio::select! {
             status = child.wait() => status.ok(),
             () = tokio::time::sleep(SIGN_IN_LASTS) => None,
             () = watched.cancel.notified() => None,
         };
+        // Whatever it started goes with it.
+        kill();
         if exited.is_none() {
-            kill();
             let _ = child.wait().await;
         }
-        let signed = exited.is_some_and(|s| s.success()) && finish(tool, &account, &scratch, &dir);
         let _ = std::fs::remove_dir_all(&scratch);
+        let signed = match exited {
+            Some(status) if status.success() => {
+                let account = account.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::jobs::signed_in(tool, &account, crate::jobs::login_home().as_deref())
+                })
+                .await
+                .unwrap_or(false)
+            }
+            _ => false,
+        };
         {
-            let mut running = shared.sign_ins.lock();
+            let mut running = shared.sign_ins.running();
             if running
                 .get(&account.id)
                 .is_some_and(|s| Arc::ptr_eq(s, &watched))
@@ -973,20 +1009,48 @@ async fn start(
                 running.remove(&account.id);
             }
         }
+        drop(changing);
         let _ = ended_tx.send(Some(signed));
         if signed {
             tracing::info!("account {}: signed in", account.id);
         } else {
             tracing::info!("account {}: sign-in ended without signing in", account.id);
         }
-        send_accounts(&shared);
+        send_accounts(&shared).await;
     });
     Ok(sign_in)
 }
 
-/// The tool's login command for the account's folder `dir`, run from `scratch`: its environment
-/// made from scratch (no token, no Claude Code or Anthropic variable), no browser opened on this
-/// machine, nothing printed to a terminal.
+/// Reads `out` a line at a time, each cut to [`LONGEST_LINE`] bytes, into `lines`, until it ends.
+async fn read_lines(
+    mut out: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    lines: tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    use tokio::io::AsyncReadExt;
+    let mut buffer = [0u8; 4096];
+    let mut line = Vec::new();
+    while let Ok(n) = out.read(&mut buffer).await {
+        if n == 0 {
+            break;
+        }
+        for byte in &buffer[..n] {
+            if *byte == b'\n' {
+                let _ = lines.send(String::from_utf8_lossy(&line).into_owned());
+                line.clear();
+            } else if line.len() < LONGEST_LINE {
+                line.push(*byte);
+            }
+        }
+    }
+    if !line.is_empty() {
+        let _ = lines.send(String::from_utf8_lossy(&line).into_owned());
+    }
+}
+
+/// The tool's login command for the account's folder `dir`: its environment made from scratch (no
+/// token, no Claude Code or Anthropic variable), a `PATH` of the system's folders and the tool's
+/// own, run by its absolute path from `scratch` (its temporary folder, and Cursor's caches), no
+/// browser opened on this machine, nothing printed to a terminal, in a process group of its own.
 fn command(
     tool: Tool,
     bin: &Path,
@@ -997,7 +1061,7 @@ fn command(
     command
         .env_clear()
         .envs(crate::process::kept(|name| std::env::var_os(name)))
-        .env("PATH", crate::process::tools_path())
+        .env("PATH", login_path(bin))
         .env("TMPDIR", scratch)
         .env("BROWSER", "true")
         .current_dir(scratch)
@@ -1013,10 +1077,7 @@ fn command(
             command
                 .args(["auth", "login"])
                 .env("HOME", home)
-                .env("CLAUDE_CONFIG_DIR", scratch);
-            if cfg!(target_os = "macos") {
-                command.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", dir);
-            }
+                .env("CLAUDE_CONFIG_DIR", dir);
         }
         Tool::Codex => {
             command
@@ -1026,8 +1087,8 @@ fn command(
                     "-c",
                     r#"cli_auth_credentials_store="file""#,
                 ])
-                .env("HOME", scratch)
-                .env("CODEX_HOME", scratch);
+                .env("HOME", dir)
+                .env("CODEX_HOME", dir);
         }
         Tool::Cursor => {
             crate::acp::cursor::rewrite_config(dir)
@@ -1035,30 +1096,24 @@ fn command(
             command
                 .arg("login")
                 .envs(crate::acp::cursor::environment(dir))
-                .env("NO_OPEN_BROWSER", "1");
+                .env("NO_OPEN_BROWSER", "1")
+                .env("NODE_COMPILE_CACHE", scratch)
+                .env("XDG_CACHE_HOME", scratch);
         }
     }
     Ok(command)
 }
 
-/// After a login that ended well: the login file it wrote in obid's folder, if any, written into
-/// the account's folder (0600, never through a link), then whether the account is signed in.
-fn finish(tool: Tool, account: &Account, scratch: &Path, dir: &Path) -> bool {
-    let name = match tool {
-        Tool::Claude => ".credentials.json",
-        Tool::Codex => "auth.json",
-        Tool::Cursor => return true,
-    };
-    let from = scratch.join(name);
-    if std::fs::symlink_metadata(&from).is_ok_and(|m| m.is_file()) {
-        let copied = std::fs::read(&from)
-            .and_then(|bytes| crate::jobs::write_login(&dir.join(name), &bytes));
-        if let Err(e) = copied {
-            tracing::warn!("account {}: its login wasn't kept: {e}", account.id);
-            return false;
-        }
+/// [`SYSTEM_PATH`], then the folder the tool's binary is in (links followed: Cursor's runs the
+/// `node` beside it).
+fn login_path(bin: &Path) -> String {
+    let own = std::fs::canonicalize(bin)
+        .ok()
+        .and_then(|real| real.parent().map(Path::to_path_buf));
+    match own {
+        Some(own) => format!("{SYSTEM_PATH}:{}", own.display()),
+        None => SYSTEM_PATH.into(),
     }
-    crate::jobs::signed_in(tool, account, crate::jobs::login_home().as_deref())
 }
 
 /// `line` without terminal colours and around spaces.
@@ -1147,9 +1202,16 @@ mod tests {
             agent: agent.into(),
             name: format!("Name {id}"),
             payer: Some("Deskree".into()),
-            config_dir: PathBuf::from(format!("/srv/{id}")),
-            made: true,
+            config_dir: PathBuf::from(format!("/srv/obid/accounts/{id}")),
         }
+    }
+
+    fn ids(agents: &Agents) -> Vec<String> {
+        agents
+            .claude
+            .iter()
+            .flat_map(|a| a.accounts.iter().map(|a| a.id.clone()))
+            .collect()
     }
 
     #[test]
@@ -1189,16 +1251,33 @@ mod tests {
             added: vec![added("a1b2c3d4", "claude")],
             ..Saved::default()
         };
-        let ids: Vec<String> = merged(&seed, &saved)
-            .claude
-            .unwrap()
-            .accounts
-            .into_iter()
-            .map(|a| a.id)
-            .collect();
-        assert_eq!(ids, ["default", "a1b2c3d4"]);
+        assert_eq!(ids(&merged(&seed, &saved)), ["default", "a1b2c3d4"]);
         // Nothing added: nothing changes.
         assert_eq!(merged(&seed, &Saved::default()), seed);
+    }
+
+    /// Removing a tool's last account takes the tool away: it never comes back on its own default
+    /// login, the person's, which an empty list would otherwise mean.
+    #[test]
+    fn the_last_account_removed_never_brings_the_default_login_back() {
+        let empty = agents(Some(Vec::new()));
+        let saved = Saved {
+            removed: vec!["default".into()],
+            ..Saved::default()
+        };
+        assert!(merged(&empty, &saved).claude.is_none());
+        let saved = Saved {
+            added: vec![added("a1b2c3d4", "claude")],
+            removed: vec!["default".into()],
+            ..Saved::default()
+        };
+        assert_eq!(ids(&merged(&empty, &saved)), ["a1b2c3d4"]);
+        let listed = agents(Some(vec![account("work", "Work", Some("/srv/w"))]));
+        let saved = Saved {
+            removed: vec!["work".into()],
+            ..Saved::default()
+        };
+        assert!(merged(&listed, &saved).claude.is_none());
     }
 
     #[test]
@@ -1206,7 +1285,13 @@ mod tests {
         let home = std::env::temp_dir().join(format!("obid-accounts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
-        let live = Live::new(agents(Some(vec![account("work", "Work", Some("/srv/w"))])));
+        let seed = || {
+            agents(Some(vec![
+                account("work", "Work", Some("/srv/w")),
+                account("more", "More", Some("/srv/m")),
+            ]))
+        };
+        let live = Live::new(seed());
         live.open(&home);
         let copy = live.clone();
         live.change(|_, saved| {
@@ -1215,18 +1300,48 @@ mod tests {
         })
         .unwrap_or_else(|e| panic!("{}", e.message));
         // Every copy sees it, and so does the next start.
-        assert!(copy.get().claude.unwrap().accounts.is_empty());
-        let next = Live::new(agents(Some(vec![account("work", "Work", Some("/srv/w"))])));
+        assert_eq!(ids(&copy.get()), ["more"]);
+        let next = Live::new(seed());
         next.open(&home);
-        assert!(next.get().claude.unwrap().accounts.is_empty());
+        assert_eq!(ids(&next.get()), ["more"]);
         // A file that doesn't read changes nothing, and nothing is changed over it.
         std::fs::write(home.join(FILE), "{").unwrap();
-        let broken = Live::new(agents(Some(vec![account("work", "Work", Some("/srv/w"))])));
+        let broken = Live::new(seed());
         broken.open(&home);
-        assert_eq!(broken.get().claude.unwrap().accounts.len(), 1);
+        assert_eq!(ids(&broken.get()), ["work", "more"]);
         let refused = broken.change(|_, _| Ok(())).err().unwrap();
         assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(std::fs::read(home.join(FILE)).unwrap(), b"{");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// What `home/accounts.json` holds is checked as the API checks it: an entry the API would
+    /// refuse is left out, the rest kept.
+    #[test]
+    fn a_wrong_entry_in_the_file_is_left_out() {
+        let home = std::env::temp_dir().join(format!("obid-accounts-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let own = |id: &str| home.join("accounts").join(id);
+        let entry = |id: &str, agent: &str, name: &str, dir: PathBuf| json!({"id": id, "agent": agent, "name": name, "configDir": dir});
+        let file = json!({
+            "added": [
+                entry("a1b2c3d4", "claude", "Good", own("a1b2c3d4")),
+                entry("b1b2c3d4", "claude", "Elsewhere", PathBuf::from("/Users/someone/.claude")),
+                entry("../../x", "claude", "Traversal", own("../../x")),
+                entry("c1b2c3d4", "gemini", "Tool", own("c1b2c3d4")),
+                entry("d1b2c3d4", "claude", "two\nlines", own("d1b2c3d4")),
+                entry("e1b2c3d4", "claude", "good", own("e1b2c3d4")),
+                entry("work", "claude", "Seeded", own("work")),
+            ],
+            "changed": {"work": {"name": ""}, "more": {"name": "Renamed", "payer": "x\u{7}"}},
+            "removed": []
+        });
+        std::fs::write(home.join(FILE), file.to_string()).unwrap();
+        let live = Live::new(agents(Some(vec![account("work", "Work", Some("/srv/w"))])));
+        live.open(&home);
+        assert_eq!(ids(&live.get()), ["work", "a1b2c3d4"]);
+        assert_eq!(live.get().claude.unwrap().accounts[0].name, "Work");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1272,37 +1387,42 @@ mod tests {
         assert_eq!(user_code("ABCD"), None);
     }
 
+    /// A login runs in the account's own folder, which no box gets (#655), with a `PATH` of the
+    /// system's folders and its own, no secret of obid's, and Cursor's caches in obid's folder.
     #[test]
-    fn a_login_never_reads_the_accounts_folder_or_gets_a_secret() {
+    fn a_login_runs_in_the_accounts_folder_with_a_pinned_path() {
         let (dir, scratch) = (Path::new("/srv/acct"), Path::new("/srv/obid/tmp/s"));
         let claude = command(Tool::Claude, Path::new("/bin/claude"), dir, scratch).unwrap();
         let env = env_of(&claude);
-        assert_eq!(env["CLAUDE_CONFIG_DIR"], Some(scratch.into()));
-        assert_eq!(
-            env.get("CLAUDE_SECURESTORAGE_CONFIG_DIR")
-                .cloned()
-                .flatten(),
-            cfg!(target_os = "macos").then(|| OsString::from(dir))
-        );
+        assert_eq!(env["CLAUDE_CONFIG_DIR"], Some(dir.into()));
+        assert!(!env.contains_key("CLAUDE_SECURESTORAGE_CONFIG_DIR"));
         let codex = command(Tool::Codex, Path::new("/bin/codex"), dir, scratch).unwrap();
         let env = env_of(&codex);
-        assert_eq!(env["CODEX_HOME"], Some(scratch.into()));
-        assert_eq!(env["HOME"], Some(scratch.into()));
+        assert_eq!(env["CODEX_HOME"], Some(dir.into()));
+        assert_eq!(env["HOME"], Some(dir.into()));
         for command in [&claude, &codex] {
+            let env = env_of(command);
+            assert!(
+                env["PATH"]
+                    .as_ref()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(SYSTEM_PATH)
+            );
             assert!(
                 command
                     .as_std()
                     .get_envs()
-                    .all(|(k, _)| { !crate::process::is_forbidden(&k.to_string_lossy()) })
+                    .all(|(k, _)| !crate::process::is_forbidden(&k.to_string_lossy()))
             );
             assert_eq!(command.as_std().get_current_dir(), Some(scratch));
         }
+        assert_eq!(login_path(Path::new("/nowhere/claude")), SYSTEM_PATH);
     }
 
     #[test]
-    fn names_payers_and_folders_are_checked() {
+    fn names_and_payers_are_checked() {
         let agents = agents(Some(vec![account("work", "Work", Some("/srv/acct/work"))]));
-        let home = Path::new("/srv/obid");
         assert_eq!(
             name(&agents, Tool::Claude, " Personal ", None)
                 .ok()
@@ -1317,20 +1437,7 @@ mod tests {
         assert!(name(&agents, Tool::Codex, "Work", None).is_ok());
         assert_eq!(payer(Some(&json!(" "))).ok(), Some(None));
         assert!(payer(Some(&json!(3))).is_err());
-        assert!(folder(&agents, home, Path::new("/srv/acct/other")).is_ok());
-        for bad in [
-            "rel",
-            "/srv/obid",
-            "/srv/obid/accounts/x",
-            "/srv",
-            "/srv/acct/work",
-            "/srv/acct/work/inner",
-            "/srv/acct",
-            "/srv/x/../obid",
-            "/srv/./x",
-        ] {
-            assert!(folder(&agents, home, Path::new(bad)).is_err(), "{bad}");
-        }
+        let home = Path::new("/srv/obid");
         assert!(own_folder(home, "a1b2c3d4").is_some());
         assert!(own_folder(home, "../../x").is_none());
     }

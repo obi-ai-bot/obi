@@ -185,6 +185,21 @@ struct State {
     /// When obid last tried to read each published pull request, and which one: an unavailable
     /// GitHub isn't asked again on every pass.
     followed: HashMap<String, (String, i64)>,
+    /// The accounts being signed in or removed (crate::accounts): no job is dispatched to them or
+    /// starts on them meanwhile ([`Jobs::begin_change`]).
+    changing: std::collections::HashSet<String>,
+}
+
+/// An account being signed in or removed ([`Jobs::begin_change`]), until this is dropped.
+pub struct Changing {
+    jobs: Arc<Jobs>,
+    account: String,
+}
+
+impl Drop for Changing {
+    fn drop(&mut self) {
+        self.jobs.lock().changing.remove(&self.account);
+    }
 }
 
 /// Every job obid has, and the workers running them.
@@ -261,6 +276,7 @@ impl Jobs {
                 apple_logs: HashMap::new(),
                 publishing: std::collections::HashSet::new(),
                 followed: HashMap::new(),
+                changing: std::collections::HashSet::new(),
             }),
             changed: Notify::new(),
             max_running: std::sync::atomic::AtomicUsize::new(max_running),
@@ -477,12 +493,27 @@ impl Jobs {
         self.lock().workers.len()
     }
 
-    /// Whether a job that hasn't ended (queued or running) is on `account`.
-    pub fn busy_on(&self, account: &str) -> bool {
-        self.lock()
+    /// Marks `account` as being signed in or removed, unless a job that hasn't ended (queued or
+    /// running) is on it or it's being changed already: both looked at and set under the jobs'
+    /// lock, so no job slips in between. Until the [`Changing`] is dropped, no job is dispatched to
+    /// the account and none starts on it.
+    pub fn begin_change(self: &Arc<Self>, account: &str) -> Option<Changing> {
+        let mut state = self.lock();
+        let busy = state
             .jobs
             .values()
-            .any(|j| j.account == account && j.status.is_active())
+            .any(|j| j.account == account && j.status.is_active());
+        if busy || !state.changing.insert(account.to_owned()) {
+            return None;
+        }
+        Some(Changing {
+            jobs: self.clone(),
+            account: account.to_owned(),
+        })
+    }
+
+    fn being_changed(&self, account: &str) -> bool {
+        self.lock().changing.contains(account)
     }
 
     /// How many of them run on the account `id`.
@@ -1165,7 +1196,19 @@ impl Jobs {
         let home = login_home();
         let mut first = None;
         for tool in &tools {
-            let accounts = self.accounts(*tool);
+            let mut accounts = self.accounts(*tool);
+            if let Some(changing) = named.and_then(|named| {
+                accounts
+                    .iter()
+                    .find(|a| (a.id == named || a.name == named) && self.being_changed(&a.id))
+            }) {
+                return Err(Refused(format!(
+                    "{} is being signed in or removed: try again in a moment.",
+                    changing.name
+                )));
+            }
+            // Routing skips an account being signed in or removed.
+            accounts.retain(|a| !self.being_changed(&a.id));
             match named {
                 // Routing skips an account that isn't signed in (#626).
                 None => {
@@ -2356,6 +2399,13 @@ impl Jobs {
         account: &crate::config::Account,
         broker: Option<&(String, String)>,
     ) -> Result<Launch, String> {
+        if self.being_changed(&account.id) {
+            return Err(format!(
+                "{} is being signed in or removed, so {} didn't start.",
+                account.name,
+                tool.name()
+            ));
+        }
         let sandbox = self
             .sandbox
             .as_ref()

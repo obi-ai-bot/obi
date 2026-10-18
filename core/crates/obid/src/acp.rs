@@ -793,6 +793,9 @@ pub mod cursor {
             ("CURSOR_CONFIG_DIR", home.as_os_str().to_owned()),
             ("HOME", home.as_os_str().to_owned()),
             ("XDG_CONFIG_HOME", home.join(".config").into_os_string()),
+            // Its login in a file under XDG_CONFIG_HOME, never the macOS Keychain: the account's
+            // sign-in writes it there, and a job's box (which denies the Keychain) gets a copy.
+            ("AGENT_CLI_CREDENTIAL_STORE", "file".into()),
         ]
     }
 

@@ -615,7 +615,7 @@ pub fn account_json(
 }
 
 async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>, ApiError> {
-    let accounts = account_list(&shared);
+    let accounts = crate::accounts::list_now(&shared).await;
     Ok(axum::Json(Status {
         runner: RunnerJson {
             version: API_VERSION,
