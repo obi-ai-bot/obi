@@ -258,9 +258,6 @@ struct ConversationPage: View {
                             Text("The runner's thread couldn't be read: \(problem)").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needsInk)
                                 .padding(.bottom, 12)
                         }
-                        if case .offline = phone.connection {
-                            Text(phone.offlineLine).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needsInk).padding(.bottom, 12)
-                        }
                         if turns.isEmpty, !thinking {
                             Text(phone.loaded ? "Ask Oby anything." : "Reaching the runner…").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
                                 .frame(maxWidth: .infinity).padding(.top, 40)
@@ -271,6 +268,7 @@ struct ConversationPage: View {
                                        steps: phone.conversation.steps(under: row.turn, in: turns),
                                        streamed: phone.conversation.streamed(under: row.turn, in: turns),
                                        failure: phone.failures[row.turn.id],
+                                       waiting: phone.waitsToSend(echo: row.turn.id),
                                        onRetry: { phone.retry(echo: row.turn.id) },
                                        onEdit: { text = row.turn.text; phone.discard(echo: row.turn.id); typing = true })
                                 .id(row.turn.id)
@@ -345,6 +343,8 @@ private struct MessageRow: View {
     var streamed: ConversationModel.Streamed?
     /// Why the words didn't reach the runner, on an echo whose request failed.
     var failure: String?
+    /// The words wait on this iPhone for the Mac (docs/oby-ux.md row 18).
+    var waiting = false
     var onRetry: () -> Void
     var onEdit: () -> Void
 
@@ -359,6 +359,9 @@ private struct MessageRow: View {
                     SaidText(text: turn.text, color: Tokens.ink, plain: true)
                         .padding(.horizontal, 14).padding(.vertical, 9)
                         .background(Tokens.bubble, in: RoundedRectangle(cornerRadius: Tokens.bubbleRadius, style: .continuous))
+                }
+                if waiting {
+                    Text(ReachNotice.waiting).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
                 }
                 if let failure {
                     Text("Didn't reach Oby: \(failure)").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger)
@@ -441,7 +444,8 @@ private struct ObyAtWork: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ObyMark()
+            // Melting into dots that bounce until its words land (Sangam's ObyFaceLive).
+            ObyFaceLive(live: true)
             HStack(spacing: 12) {
                 Sheen(text: line)
                 if waiting {

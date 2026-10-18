@@ -72,13 +72,16 @@ struct OfflineMessage: Codable, Equatable, Sendable {
     }
 }
 
+@Observable
 final class OfflineQueue: @unchecked Sendable {
     enum FlushError: Error { case alreadySettled }
     static let maxEntries = 50
     static let maxAge: TimeInterval = 7 * 24 * 60 * 60
 
+    /// The runner no longer has it waiting: 404 (gone), or obid's 409 "That item is done already."
+    /// (settled meanwhile). Either way the answer leaves the queue, and the next ones still go.
     static func isAlreadySettled(_ error: Error) -> Bool {
-        (error as? RunnerError)?.status == 404
+        [404, 409].contains((error as? RunnerError)?.status)
     }
 
     var messages: [OfflineMessage] = []

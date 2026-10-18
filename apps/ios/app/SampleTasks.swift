@@ -24,6 +24,14 @@ enum SampleTasks {
         return list.compactMap { try? Runner.decoder.decode(Job.self, from: Data($0.utf8)) }
     }
 
+    /// Two made-up accounts, one past 80% of its week, for the message box's usage gauge.
+    static var accounts: [Account] {
+        let resets = ISO8601DateFormatter().string(from: .now.addingTimeInterval(3 * 86_400))
+        return [#"{"id": "personal", "agent": "claude", "name": "Personal", "signedIn": true, "sevenDay": 0.84, "sevenDayResets": "\#(resets)", "running": 1}"#,
+                #"{"id": "deskree", "agent": "codex", "name": "Deskree", "signedIn": true, "sevenDay": 0.12, "sevenDayResets": "\#(resets)", "running": 0}"#]
+            .compactMap { try? Runner.decoder.decode(Account.self, from: Data($0.utf8)) }
+    }
+
     /// Two made-up conversations, for Home's Recent.
     static var conversations: [RunnerConversation] {
         [RunnerConversation(id: "sample-c1", title: "Why does the login screen look empty?", lastActivity: .now.addingTimeInterval(-120),
