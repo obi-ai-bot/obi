@@ -333,7 +333,7 @@ fn quoted(session: &Session, from: &str, text: &str) -> String {
 /// What the plan loop's checks say of `plan`, with the briefing's ids as they are now; for an
 /// inbox answer every waiting item counts, so `actions` itself says why a confirm is the owner's.
 fn problems(shared: &Shared, session: &Session, plan: &Plan) -> Result<(), String> {
-    let mut context = super::context(shared, &[], &session.nonce);
+    let mut context = super::context(shared, &session.conversation, &[], &session.nonce);
     context.said = session.said.clone();
     if plan.action == Action::AnswerInbox {
         context.inbox = shared
@@ -361,7 +361,7 @@ async fn act(
     problems(shared, session, &plan)?;
     outcome_answer(
         session,
-        actions::act(shared, &plan, words, source(session)).await,
+        actions::act(shared, &plan, words, source(session), &session.conversation).await,
     )
 }
 
@@ -452,7 +452,14 @@ async fn tell(
     if job.status.is_active() {
         return outcome_answer(
             session,
-            actions::act(shared, &plan, &words, source(session)).await,
+            actions::act(
+                shared,
+                &plan,
+                &words,
+                source(session),
+                &session.conversation,
+            )
+            .await,
         );
     }
     // A follow-up is a job the turn starts: it counts against the turn's ten, and a job gets one
@@ -574,7 +581,8 @@ fn jobs(shared: &Shared, session: &Session, args: Value) -> Result<String, Strin
             json!({"id": j.id, "title": super::briefing::line(&j.short_title(), 80),
                    "status": j.status.as_str(), "step": super::briefing::line(&j.step, 200),
                    "repo": j.repo, "agent": j.agent, "account": j.account, "pr": j.pr,
-                   "published": j.published})
+                   "published": j.published,
+                   "thisConversation": j.conversation.as_deref() == Some(session.conversation.as_str())})
         })
         .collect();
     if listed.is_empty() {
