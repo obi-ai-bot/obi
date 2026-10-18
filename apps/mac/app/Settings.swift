@@ -72,7 +72,7 @@ struct GeneralSettingsView: View {
                 openAtLogin = SMAppService.mainApp.status == .enabled
             }
         }
-        SetGroup("Permissions on this Mac", footer: "How much the jobs this Mac runs itself ask. Each job's Mode menu changes it while it runs. Always allow saves a rule, so it doesn't ask again; remove the rule to be asked again. The runner's jobs follow Settings › Runner.") {
+        SetGroup("Permissions on this Mac", footer: "How much the jobs this Mac runs itself ask. Each job’s Mode menu changes it while it runs. Always allow saves a rule, so it doesn’t ask again; remove the rule to be asked again. The runner’s jobs follow Runner › Permissions.") {
             SetRow("Default mode", about: RunnerMode(mode.rawValue)?.help) {
                 SetSelect("Default mode", selection: $mode,
                           options: RunnerMode.local.map { (PermissionMode(rawValue: $0.rawValue) ?? .bypass, $0.label) })
@@ -82,7 +82,7 @@ struct GeneralSettingsView: View {
             }
             ForEach(rules) { rule in
                 SetRow(about: "\(rule.decision == .deny ? "Denied" : "Allowed") · \(rule.repo)") {
-                    Text(rule.rule).font(Tokens.mono(Tokens.textMd)).foregroundStyle(Tokens.code)
+                    SetCode(rule.rule)
                 } control: {
                     Button("Remove", role: .destructive) { forget(rule) }
                         .buttonStyle(.set)
@@ -123,13 +123,13 @@ struct RunnerSettingsView: View {
     /// Apple checks agents ask for (Engine/AppleChecks.swift).
     @AppStorage(MacChecks.appleSetting) private var runAppleChecks = true
     @State private var watches: [PairedWatch] = []
-    @State private var removing: PairedWatch?
     @State private var watchProblem: String?
 
     var body: some View {
+        // Sangam's words, but "the window" where his say "the island", which is gone.
         SetGroup("Runner", footer: onThisMac
-                 ? "Oby's runner runs on this Mac as a login item: it starts when you log in and keeps working while Oby's window is closed. Oby plans and runs every job there, on 127.0.0.1, and lists them in the window. Your iPhone and Apple Watch reach it through the gateway."
-                 : "The runner does the work while your Mac is closed. The window lists the jobs running there too, and Oby tells you when one needs you. It answers only your Tailscale login, so this Mac needs Tailscale on. Leave it empty to turn this off.",
+                 ? "The runner is Oby’s login item on this Mac, and Oby follows it on 127.0.0.1."
+                 : "Oby follows the runner at this address: the window lists its jobs.",
                  problem: onThisMac ? loginItem.problem : nil) {
             SetRow("Runner") {
                 SetSegmented("Runner", selection: $onThisMac, options: [(true, "This Mac"), (false, "Remote")])
@@ -142,10 +142,11 @@ struct RunnerSettingsView: View {
                     }
                 }
             } else {
-                SetRow("URL") { SetField("Runner URL", text: $runnerURL, prompt: Runner.defaultURL.absoluteString) }
+                SetRow("URL") { SetField("Runner URL", text: $runnerURL, prompt: "http://tetrix-lab:8790") }
             }
             SetRow("Status") {
-                SetValue(feed.runner == nil && !feed.local ? "Off" : feed.connection.status(host: feed.name), connected: feed.connection == .live)
+                SetValue(feed.runner == nil && !feed.local ? "Off" : feed.connection == .live ? "Connected" : feed.connection.status(host: feed.name),
+                         connected: feed.connection == .live)
             }
             if let cleanup = feed.cleanup {
                 SetRow("Job worktrees") { SetValue(ByteCountFormatter.string(fromByteCount: cleanup.bytes, countStyle: .file)) }
@@ -160,21 +161,18 @@ struct RunnerSettingsView: View {
                 Toggle("Keep my Mac available", isOn: Binding(get: { availability.keepAvailable }, set: availability.setKeepAvailable)).toggleStyle(.set)
             }
             SetRow("Availability") { SetValue(availability.label) }
-            SetRow("") {
-                Link("Recommend Wake for network access", destination: URL(string: "x-apple.systempreferences:com.apple.energysaver")!).buttonStyle(.set)
-            }
         }
         // As on the iPhone (apps/shared/PermissionsSection.swift). This Mac's own jobs' default is in General.
         PermissionsSection(runner: feed.runner, defaultMode: feed.defaultMode, setDefault: feed.setDefaultMode)
         SetGroup("Checks on this Mac") {
-            SetRow("Run merge checks on this Mac", about: "When Oby's review approves a pull request, this Mac runs its tests and builds the Mac and iPhone apps, one at a time, before Oby merges it into dev.") {
+            SetRow("Run merge checks on this Mac", about: "When Oby’s review approves a pull request, this Mac runs its tests and builds the Mac and iPhone apps, one at a time, before Oby merges it into dev.") {
                 Toggle("Run merge checks on this Mac", isOn: $runMergeChecks).toggleStyle(.set)
             }
-            SetRow("Build and test agents' work on this Mac", about: "When an agent on the runner asks (oby-check apple), this Mac builds and tests the Mac and iPhone apps at its latest commit, before Oby's review has read it, and the agent gets the compiler's errors and failing tests.") {
-                Toggle("Build and test agents' work on this Mac", isOn: $runAppleChecks).toggleStyle(.set)
+            SetRow("Build and test agents’ work on this Mac", about: "When an agent on the runner asks, this Mac builds and tests the Mac and iPhone apps at its latest commit, before Oby’s review has read it, and the agent gets the compiler’s errors and failing tests.") {
+                Toggle("Build and test agents’ work on this Mac", isOn: $runAppleChecks).toggleStyle(.set)
             }
         }
-        SetGroup("Apple Watch without iPhone", footer: "Away from your iPhone, a paired watch reaches the runner through your Cloudflare Tunnel. Pair one in Oby's Settings on your iPhone, with Oby open on the watch: pairing asks for Face ID.",
+        SetGroup("Apple Watch without iPhone", footer: "Away from your iPhone, a paired watch reaches the runner through your Cloudflare Tunnel. Pair one in Oby’s Settings on your iPhone, with Oby open on the watch: pairing asks for Face ID.",
                  problem: watchProblem) {
             if watches.isEmpty {
                 SetRow("None yet", quiet: true)
@@ -182,11 +180,11 @@ struct RunnerSettingsView: View {
             ForEach(watches) { watch in
                 SetRow(watch.name) {
                     SetValue("Paired")
-                    Button("Remove", role: .destructive) { removing = watch }.buttonStyle(.set)
+                    Button("Remove", role: .destructive) { remove(watch) }.buttonStyle(.set)
                 }
             }
         }
-        SetGroup("Publishing", footer: "Oby opens a pull request by itself once a job's check passes and the secret scan is clean. When that failed, publish by hand here or on your iPhone: this Mac's key, like the iPhone's, signs only after Touch ID, and the runner learns it once, while pairing is open on it. Oby merges only into dev, once its review approves and your Mac's checks pass.") {
+        SetGroup("Publishing", footer: "Oby opens a pull request by itself once a job’s check passes and the secret scan is clean. When that failed, publish by hand here or on your iPhone: this Mac’s key, like the iPhone’s, signs only after Touch ID. Oby merges only into dev, once its review approves and your Mac’s checks pass.") {
             SetRow("Publishing key") { SetValue(feed.runner == nil ? "Off" : feed.device.status) }
             // The runner's own line (pairing is closed: how to open it), then Try again.
             if feed.runner != nil, let problem = feed.device.problem {
@@ -206,13 +204,6 @@ struct RunnerSettingsView: View {
                 guard feed.connection == .live, let runner = feed.runner else { return }
                 // A runner older than the Watch API has no list: then there's nothing to show.
                 watches = (try? await runner.watches()) ?? []
-            }
-            .confirmationDialog("Remove \(removing?.name ?? "this watch")?",
-                                isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-                                presenting: removing) { watch in
-                Button("Remove", role: .destructive) { remove(watch) }
-            } message: { _ in
-                Text("The runner forgets it: away from your iPhone, it reaches the runner again once you pair it on your iPhone.")
             }
     }
 
@@ -237,12 +228,11 @@ struct RemoteAccessSettingsView: View {
     let remote: RemoteAccess
     @State private var email = ""
     @State private var code = ""
-    @State private var forgetting = false
 
     private var signedIn: Bool { remote.step == .signedIn || remote.step == .on }
 
     var body: some View {
-        SetGroup("Oby account", footer: "Remote access goes through Oby's control plane (oby-control.tetrix.pro), which signs you in with a code by email and gives this Mac a hostname of its own.",
+        SetGroup("Oby account", footer: "Remote access goes through Oby’s control plane, which signs you in with a code by email and gives this Mac a hostname of its own.",
                  problem: signedIn ? nil : remote.problem) {
             switch remote.step {
             case .signedOut:
@@ -269,7 +259,7 @@ struct RemoteAccessSettingsView: View {
             }
         }
         if signedIn {
-            SetGroup("Remote access", footer: "On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Pair the iPhone to hand it the hostname. Off keeps the hostname for next time. Forget removes this Mac from your account, and the hostname stops answering.",
+            SetGroup("Remote access", footer: "On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Off keeps the hostname for next time. Forget removes this Mac from your account, and the hostname stops answering.",
                      problem: remote.problem) {
                 SetRow("Reach this Mac from anywhere") {
                     Toggle("Reach this Mac from anywhere", isOn: Binding(get: { remote.step == .on }, set: { on in
@@ -286,15 +276,10 @@ struct RemoteAccessSettingsView: View {
                     SetValue(status, connected: status == "Connected")
                 }
                 SetRow("") {
-                    Button("Forget This Mac", role: .destructive) { forgetting = true }
+                    Button("Forget This Mac", role: .destructive) { Task { await remote.forget() } }
                         .buttonStyle(.set)
                         .disabled(remote.busy)
                 }
-            }
-            .confirmationDialog("Forget this Mac?", isPresented: $forgetting) {
-                Button("Forget", role: .destructive) { Task { await remote.forget() } }
-            } message: {
-                Text("Its tunnel and hostname are removed from your Oby account, and this Mac signs out. Turning remote access on again makes a new hostname.")
             }
         }
     }
@@ -655,32 +640,24 @@ struct VaultSettingsView: View {
     @State private var names: [String] = []
     @State private var name = ""
     @State private var value = ""
-    @State private var removing: String?
     @State private var problem: String?
 
     var body: some View {
         SetGroup("Secrets") {
             if names.isEmpty {
-                SetRow("No secrets yet.", quiet: true)
+                SetRow("No secrets yet", quiet: true)
             }
             ForEach(names, id: \.self) { name in
                 SetRow {
-                    Text(name).font(Tokens.mono(Tokens.textMd)).foregroundStyle(Tokens.code)
+                    SetCode(name)
                 } control: {
-                    Button("Remove", role: .destructive) { removing = name }
+                    Button("Remove", role: .destructive) { attempt { try vault.remove(name) } }
                         .buttonStyle(.set)
                         .accessibilityLabel("Remove \(name)")
                 }
             }
         }
         .onAppear { attempt {} }
-        .confirmationDialog("Remove \(removing ?? "this secret")?",
-                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-                            presenting: removing) { name in
-            Button("Remove", role: .destructive) { attempt { try vault.remove(name) } }
-        } message: { _ in
-            Text("Oby deletes it from the keychain.")
-        }
         SetGroup("Add a secret", footer: "Oby uses a secret only in its own calls, for a connection you made. No agent sees it, and the secret scan stops anything outgoing that holds it, plain or encoded.",
                  problem: problem) {
             SetRow("Name") { SetField("Secret name", text: $name, prompt: "staging-api-key") }
@@ -745,7 +722,7 @@ struct ModelsSettingsView: View {
                 SetSelect("Codex complex job effort", selection: $codexComplexEffort, options: codexEfforts.map { ($0, AgentModels.effortName($0)) })
             }
         }
-        SetGroup("Cursor on this Mac", footer: "New jobs on this Mac use these. Oby's brain stays on Haiku: it plans and answers in the conversation, so it should be quick.",
+        SetGroup("Cursor on this Mac", footer: "New jobs on this Mac use these. Oby’s brain stays on Haiku: it plans and answers in the conversation, so it should be quick.",
                  problem: problem) {
             SetRow("Model") { SetSelect("Cursor model", selection: $cursorModel, options: cursorChoices.map { ($0.id, $0.name) }) }
         }

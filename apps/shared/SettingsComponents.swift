@@ -154,6 +154,20 @@ struct SetValue: View {
     }
 }
 
+/// A name in code (`.tok-code`): a rule, a secret's name. Coral SF Mono 13 on white 8%, 4 round.
+struct SetCode: View {
+    var text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text).font(Tokens.mono(Tokens.textMd)).foregroundStyle(Tokens.code)
+            .padding(.horizontal, 3).padding(.vertical, 1)
+            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .textSelection(.enabled)
+    }
+}
+
 /// The on/off switch (`.set-switch`): 32 × 18, white 14% off and ink on, a 14-point knob in `text`
 /// (`bg` when on), 200 ms warm; never the system's green toggle. The row carries the name, so the
 /// toggle's own label is only what VoiceOver reads.

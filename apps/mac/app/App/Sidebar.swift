@@ -382,9 +382,11 @@ private struct IconStrip: View {
     private var account: some View {
         let name = NSFullUserName()
         return Menu {
-            Section("\(name) · \(SidebarSections.accountLine(email: model.remote?.email, mac: Host.current().localizedName))") {
-                Button("Settings") { withAnimation(Tokens.warm) { state.openSettings() } }
-            }
+            // Sangam's head: your name, the address under it.
+            Text(name)
+            Text(SidebarSections.accountLine(email: model.remote?.email, mac: Host.current().localizedName))
+            Divider()
+            Button("Settings") { withAnimation(Tokens.warm) { state.openSettings() } }
         } label: {
             Text(SidebarSections.initials(name)).font(Tokens.font(10, .semibold)).foregroundStyle(.white.opacity(0.92))
                 .frame(width: 24, height: 24).background(Tokens.avatar(name), in: Circle())

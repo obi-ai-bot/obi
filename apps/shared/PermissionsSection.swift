@@ -16,7 +16,7 @@ struct PermissionsSection: View {
     @State private var problem: String?
     @Environment(\.settingsCards) private var cards
 
-    private static let footer = "Ask: the agent asks before it edits or runs anything. Always allow saves a rule, so it doesn't ask again; remove the rule to be asked again."
+    private static let footer = "Ask: the agent asks before it edits or runs anything. Always allow saves a rule, so it doesn’t ask again; remove the rule to be asked again."
 
     private var mode: Binding<RunnerMode?> {
         Binding { defaultMode } set: { mode in
@@ -50,7 +50,7 @@ struct PermissionsSection: View {
                 }
                 ForEach(rules ?? []) { rule in
                     SetRow(about: [rule.decision == "deny" ? "Denied" : "Allowed", rule.repo].compactMap(\.self).joined(separator: " · ")) {
-                        Text(rule.rule).font(Tokens.mono(Tokens.textMd)).foregroundStyle(Tokens.code)
+                        SetCode(rule.rule)
                     } control: {
                         Button("Remove", role: .destructive) { remove([rule.id]) }
                             .buttonStyle(.set)
