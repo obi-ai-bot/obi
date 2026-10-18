@@ -289,8 +289,15 @@ async fn run(
         network: true,
     };
     let mut extra: Vec<(&str, OsString)> = Vec::new();
-    match &account.config_dir {
+    // An account's folder may hold the login obid copied from the Keychain for its jobs: a run that
+    // answers another person never gets it (#643's review), so it takes the plain copy instead.
+    let folder = account
+        .config_dir
+        .as_ref()
+        .filter(|_| !crate::jobs::keychain_on());
+    match folder {
         Some(account_dir) => {
+            crate::jobs::not_a_link(account_dir)?;
             std::fs::create_dir_all(account_dir)
                 .map_err(|e| format!("obid can't make the account's folder: {e}"))?;
             spec.accounts.push(account_dir.clone());
@@ -301,7 +308,8 @@ async fn run(
             // with `dir` once the run ends.
             let login = dir.join("login");
             let names =
-                crate::jobs::copy_login(crate::jobs::login_home().as_deref(), &login, Tool::Claude)
+                // Never the Keychain's login: this run answers another person (#643's review).
+                crate::jobs::copy_login(crate::jobs::login_home().as_deref(), &login, Tool::Claude, false)
                     .map_err(|e| format!("obid can't copy Claude Code's login: {e}"))?;
             for name in names {
                 #[cfg(unix)]

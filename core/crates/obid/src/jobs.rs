@@ -2282,6 +2282,7 @@ impl Jobs {
         }
         match (&account.config_dir, tool) {
             (Some(dir), _) => {
+                not_a_link(dir)?;
                 std::fs::create_dir_all(dir).map_err(|e| {
                     format!(
                         "obid can't make the account's folder {}: {e}",
@@ -2323,9 +2324,10 @@ impl Jobs {
                 // the person's own ~/.claude, ~/.claude.json and ~/.codex are never writable, so
                 // nothing a job runs can plant something the tool runs later outside the sandbox.
                 let login = self.login_path(&job.id);
-                let names = copy_login(login_home().as_deref(), &login, tool).map_err(|e| {
-                    format!("obid can't copy {}'s login for this job: {e}", tool.name())
-                })?;
+                let names =
+                    copy_login(login_home().as_deref(), &login, tool, true).map_err(|e| {
+                        format!("obid can't copy {}'s login for this job: {e}", tool.name())
+                    })?;
                 for name in names {
                     let link = spec.temp.join(name);
                     let _ = std::fs::remove_file(&link);
@@ -2421,6 +2423,7 @@ impl Jobs {
         let mut extra: Vec<(&str, OsString)> = Vec::new();
         match &account.config_dir {
             Some(folder) => {
+                not_a_link(folder)?;
                 std::fs::create_dir_all(folder)
                     .map_err(|e| format!("obid can't make the account's folder: {e}"))?;
                 if tool == Tool::Claude {
@@ -2436,7 +2439,7 @@ impl Jobs {
             None => {
                 // The tool's own login, copied into the brain's folder as a job's is.
                 let login = dir.join("login");
-                let names = copy_login(login_home().as_deref(), &login, tool)
+                let names = copy_login(login_home().as_deref(), &login, tool, true)
                     .map_err(|e| format!("obid can't copy {}'s login: {e}", tool.name()))?;
                 for name in names {
                     #[cfg(unix)]
@@ -3891,6 +3894,11 @@ pub(crate) fn keychain_service(config_dir: Option<&Path>) -> String {
 /// when obid starts): off unless the owner turns it on.
 static KEYCHAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Whether the Keychain copy is on.
+pub fn keychain_on() -> bool {
+    KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Turns the Keychain copy on or off (crate::serve, from the configuration).
 pub fn use_keychain(on: bool) {
     KEYCHAIN.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -3940,18 +3948,63 @@ pub(crate) fn keychain_login(config_dir: Option<&Path>) -> Option<Vec<u8>> {
     while bytes.last().is_some_and(|b| b.is_ascii_whitespace()) {
         bytes.pop();
     }
+    learn_claude_tokens(&bytes);
     (!bytes.is_empty()).then_some(bytes)
 }
 
-/// Writes `bytes` to `path` as only the person may read it (0600), replacing what's there; never
-/// through a link left in its place.
+/// Writes `bytes` to `path` as only the person may read it (0600), replacing what's there. Never
+/// through a link: not one in place of the file, nor one a job left in place of its folder (the
+/// folder is opened without following a link, and the file made in that very folder; #643's
+/// security review).
 fn write_login(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let _ = std::fs::remove_file(path);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    std::io::Write::write_all(&mut options.open(path)?, bytes)
+    use nix::fcntl::{OFlag, open, openat};
+    use nix::sys::stat::Mode;
+    let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(std::io::Error::other("no folder for the login"));
+    };
+    let dir = open(
+        folder,
+        OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_RDONLY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let _ = nix::unistd::unlinkat(&dir, name, nix::unistd::UnlinkatFlags::NoRemoveDir);
+    let file = openat(
+        &dir,
+        name,
+        OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_WRONLY | OFlag::O_CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(std::io::Error::from)?;
+    std::io::Write::write_all(&mut std::fs::File::from(file), bytes)
+}
+
+/// The tokens in Claude Code's login (`claudeAiOauth`'s access and refresh tokens), learned as
+/// secrets obid knows, so whatever repeats them (an agent, the brain, a log) is redacted.
+fn learn_claude_tokens(bytes: &[u8]) {
+    let Ok(login) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return;
+    };
+    for key in ["accessToken", "refreshToken"] {
+        if let Some(token) = login["claudeAiOauth"][key]
+            .as_str()
+            .filter(|t| !t.is_empty())
+        {
+            crate::secrets::known().learn(&format!("claude-login {key}"), token);
+        }
+    }
+}
+
+/// Whether `folder` is a real folder, or not there yet: never a link a job left in its place,
+/// which obid would otherwise follow (#643's security review).
+pub(crate) fn not_a_link(folder: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(folder) {
+        Ok(meta) if !meta.is_dir() => Err(format!(
+            "{} isn't a folder any more (a link or a file is in its place), so nothing started there.",
+            folder.display()
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Before a boxed Claude Code run on an account with a folder of its own: its `.credentials.json`
@@ -3975,6 +4028,7 @@ pub(crate) fn copy_login(
     home: Option<&Path>,
     login: &Path,
     tool: Tool,
+    keychain: bool,
 ) -> std::io::Result<Vec<&'static str>> {
     let (shown, secret, once): (&[&'static str], &[&str], &[&str]) = match tool {
         Tool::Codex => (&[".codex"], &[".codex/auth.json"], &[".codex/config.toml"]),
@@ -3984,6 +4038,7 @@ pub(crate) fn copy_login(
             &[".claude.json"],
         ),
     };
+    not_a_link(login).map_err(std::io::Error::other)?;
     store::make_private_dir(login)?;
     // The job may have changed its login folder: obid writes only into a real folder there,
     // never through a link the job left in its place.
@@ -4015,7 +4070,8 @@ pub(crate) fn copy_login(
         copy(name)?;
     }
     // On macOS Claude Code's login may be only in the Keychain (keychain_login).
-    if tool == Tool::Claude
+    if keychain
+        && tool == Tool::Claude
         && std::fs::symlink_metadata(home.join(secret[0])).is_err()
         && let Some(bytes) = keychain_login(None)
     {
@@ -4483,6 +4539,49 @@ fn tail_chars(text: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// #643's security review: a job that put a link in place of its account folder can't make obid
+    /// write the login wherever the link points; a real folder still gets it, as only the person
+    /// may read it.
+    #[test]
+    fn a_login_is_never_written_through_a_link() {
+        let root = std::env::temp_dir().join(format!("obid-login-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (real, elsewhere, planted) = (
+            root.join("real"),
+            root.join("elsewhere"),
+            root.join("planted"),
+        );
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &planted).unwrap();
+        assert!(write_login(&planted.join(".credentials.json"), b"{}").is_err());
+        assert!(!elsewhere.join(".credentials.json").exists());
+        write_login(&real.join(".credentials.json"), b"{}").unwrap();
+        let mode = std::fs::metadata(real.join(".credentials.json"))
+            .unwrap()
+            .permissions();
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The tokens in a copied Keychain login are secrets obid knows: what repeats them is redacted.
+    #[test]
+    fn a_keychain_logins_tokens_are_redacted() {
+        let access = ["sk-ant-oat01-", &"x".repeat(40)].concat();
+        let refresh = ["sk-ant-ort01-", &"y".repeat(40)].concat();
+        let login =
+            serde_json::json!({"claudeAiOauth": {"accessToken": access, "refreshToken": refresh}});
+        learn_claude_tokens(login.to_string().as_bytes());
+        let said = crate::secrets::known().redact(&format!("{access} and {refresh}"));
+        assert!(
+            !said.contains(&access) && !said.contains(&refresh),
+            "{said}"
+        );
+    }
 
     /// Claude Code's Keychain names, as it makes them: the default folder's, and any other's with
     /// the first 8 hex digits of its SHA-256 (seen on 2026-10-17 for an account's folder).
