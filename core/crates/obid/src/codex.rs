@@ -104,12 +104,15 @@ pub async fn run_turn(
     // after its result (`AFTER_RESULT`, #658) to read out and exit by itself, then is ended.
     run.conn.close_input();
     let until = std::time::Instant::now() + agent::AFTER_RESULT;
-    if run.ended.is_some() {
+    if run.ended.is_some() && turn.fatal.is_none() {
         run.conn.drain_within(agent::AFTER_RESULT).await;
     }
     turn.timed_out = run.conn.timed_out;
     turn.stopped = run.conn.stopped;
-    turn.exit = if run.ended.is_some() {
+    turn.exit = if turn.fatal.is_some() {
+        // Ended for good: everything it started ends now, not after a grace.
+        run.conn.finish_within(Duration::ZERO).await
+    } else if run.ended.is_some() {
         run.conn
             .finish_within(until.saturating_duration_since(std::time::Instant::now()))
             .await
@@ -227,6 +230,13 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             self.files.insert(item, paths);
         }
         let params = &message["params"];
+        // Fail closed, in any thread (a helper's too): a conversation's Codex runs no command, no
+        // hook and no tool of another MCP server, whatever its settings did.
+        if self.no_commands
+            && let Some(what) = ran_outside(&message)
+        {
+            return self.end_for_good(what).await;
+        }
         // Helpers Codex starts run in threads of their own: only this job's thread reports.
         if let (Some(other), Some(thread)) = (params["threadId"].as_str(), &self.thread)
             && other != thread
@@ -235,30 +245,6 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         }
         let item = &params["item"];
         match message["method"].as_str() {
-            // Fail closed: a conversation's Codex runs no command, whatever its settings did.
-            Some("item/started") if self.no_commands && item["type"] == "commandExecution" => {
-                let command = unwrap_shell(&command_of(&item["command"]).unwrap_or_default());
-                let command: String = command
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(80)
-                    .collect();
-                let why = format!(
-                    "Codex ran a command ({command}), which a conversation never does, so obid stopped it"
-                );
-                if let (Some(thread), Some(turn)) = (self.thread.clone(), self.turn.clone()) {
-                    self.conn
-                        .request(
-                            "turn/interrupt",
-                            json!({"threadId": thread, "turnId": turn}),
-                        )
-                        .await;
-                }
-                self.fatal = Some(why.clone());
-                self.ended = Some((why, true));
-            }
             Some("item/started") => {
                 if let Some(step) = step(item) {
                     (self.on_event)(Event::Step(step));
@@ -302,6 +288,22 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             }
             _ => {}
         }
+    }
+
+    /// Ends the turn for good because Codex `what` (ran a command, …): interrupts it, and the run
+    /// ends at once.
+    async fn end_for_good(&mut self, what: String) {
+        let why = format!("{what}, which a conversation never does, so obid stopped it");
+        if let (Some(thread), Some(turn)) = (self.thread.clone(), self.turn.clone()) {
+            self.conn
+                .request(
+                    "turn/interrupt",
+                    json!({"threadId": thread, "turnId": turn}),
+                )
+                .await;
+        }
+        self.fatal = Some(why.clone());
+        self.ended = Some((why, true));
     }
 
     /// obid's answer to an approval: the fixed denials, then the job's own rule. Anything else
@@ -490,6 +492,50 @@ fn changes(message: &Value) -> Option<(String, Vec<String>)> {
     }
 }
 
+/// What a conversation's Codex did that it never may, from one notification in any thread: a
+/// command (an item of that kind in any `item/*`, or a command's own `item/commandExecution/*`), a
+/// hook (`hook/*`), or a tool of an MCP server that isn't Oby's. Codex's own resource tools
+/// (`list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`, server `codex`) only
+/// reach the servers it has, Oby's alone.
+fn ran_outside(message: &Value) -> Option<String> {
+    let method = message["method"].as_str()?;
+    let item = &message["params"]["item"];
+    if method.starts_with("hook/") {
+        return Some("Codex ran a hook".into());
+    }
+    if method.starts_with("item/commandExecution/")
+        || (method.starts_with("item/") && item["type"] == "commandExecution")
+    {
+        let command = unwrap_shell(&command_of(&item["command"]).unwrap_or_default());
+        let command: String = command
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect();
+        return Some(match command.trim() {
+            "" => "Codex ran a command".into(),
+            command => format!("Codex ran a command ({command})"),
+        });
+    }
+    if method.starts_with("item/") && item["type"] == "mcpToolCall" {
+        let (server, tool) = (
+            item["server"].as_str().unwrap_or(""),
+            item["tool"].as_str().unwrap_or(""),
+        );
+        let own = server == "codex"
+            && matches!(
+                tool,
+                "list_mcp_resources" | "list_mcp_resource_templates" | "read_mcp_resource"
+            );
+        if server != "oby" && !own {
+            return Some(format!("Codex called {server}'s {tool}"));
+        }
+    }
+    None
+}
+
 /// What Codex is doing, in the same words as Claude Code's steps.
 pub fn step(item: &Value) -> Option<String> {
     match item["type"].as_str()? {
@@ -546,6 +592,11 @@ pub fn tool_call(item: &Value) -> Option<(String, Value)> {
             ),
             item["arguments"].clone(),
         )),
+        // A picture it looked at is a file it read (the turn's taint, as Read's).
+        "imageView" => call(
+            "Read",
+            json!({"file_path": item["path"].as_str().unwrap_or("")}),
+        ),
         "webSearch" => call(
             "WebSearch",
             json!({"query": item["query"].as_str().unwrap_or("")}),
@@ -676,6 +727,62 @@ exec sleep 30
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A conversation's Codex that runs a command is ended at once, with everything it started:
+    /// no grace to read out (finding 6).
+    #[tokio::test]
+    async fn a_command_ends_the_codex_process_at_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("obid-codex-fatal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let bin = root.join("codex");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+read l; echo '{"id":1,"result":{}}'
+read l
+read l; echo '{"id":2,"result":{"thread":{"id":"t1"}}}'
+read l; echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
+echo '{"method":"item/started","params":{"threadId":"t1","turnId":"u1","item":{"type":"commandExecution","id":"c1","command":"/bin/zsh -lc '"'"'cat x'"'"'"}}}'
+exec sleep 30
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launch = Launch {
+            argv: vec![bin.into_os_string()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            cwd: root.clone(),
+            stderr: root.join("agent.log"),
+        };
+        let (_stop, stop) = watch::channel(process::Signal::Run);
+        let options = Options {
+            no_commands: true,
+            ..Options::default()
+        };
+        let began = std::time::Instant::now();
+        let turn = run_turn(
+            launch,
+            "Do it.",
+            &options,
+            Duration::from_secs(60),
+            stop,
+            |_, _| Ruling::Now(Answer::Allow),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let took = began.elapsed();
+        assert_eq!(
+            turn.fatal.as_deref(),
+            Some(
+                "Codex ran a command (cat x), which a conversation never does, so obid stopped it"
+            )
+        );
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_shell_codex_wraps_commands_in_comes_off() {
         assert_eq!(unwrap_shell("/bin/zsh -lc 'git status'"), "git status");
@@ -736,6 +843,10 @@ exec sleep 30
         assert_eq!(
             call(json!({"type": "webSearch", "query": "rust"})),
             ("WebSearch".into(), json!({"query": "rust"}))
+        );
+        assert_eq!(
+            call(json!({"type": "imageView", "path": "/r/a.png"})),
+            ("Read".into(), json!({"file_path": "/r/a.png"}))
         );
         assert_eq!(tool_call(&json!({"type": "agentMessage"})), None);
     }

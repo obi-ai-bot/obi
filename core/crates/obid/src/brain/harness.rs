@@ -338,6 +338,31 @@ impl Place {
         }
         remove_in(&self.config, CODEX);
         remove_in(&self.temp, &[".agents", ".codex"]);
+        // A shell's start-up files in its HOME, which a shell (Codex's snapshot of one, too)
+        // sources outside obid's view: zsh's, bash's (every `.bash*`), sh's and fish's.
+        remove_in(
+            &self.temp,
+            &[
+                ".zshenv",
+                ".zprofile",
+                ".zshrc",
+                ".zlogin",
+                ".zlogout",
+                ".profile",
+            ],
+        );
+        let bash: Vec<String> = std::fs::read_dir(&self.temp)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with(".bash"))
+            .collect();
+        remove_in(
+            &self.temp,
+            &bash.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        remove_in(&self.temp.join(".config"), &["fish"]);
     }
 }
 
@@ -428,6 +453,15 @@ struct Kept {
     web: bool,
 }
 
+/// Whether the conversation's session on `account` read something untrusted, even one that's
+/// never picked up again (ended for good: its id is gone, its taint isn't).
+fn kept_taint(place: &Place, account: &str) -> bool {
+    std::fs::read(&place.session)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Kept>(&bytes).ok())
+        .is_some_and(|kept| kept.account == account && kept.web)
+}
+
 fn kept(place: &Place, account: &str) -> Option<Kept> {
     let bytes = std::fs::read(&place.session).ok()?;
     let kept: Kept = serde_json::from_slice(&bytes).ok()?;
@@ -468,7 +502,9 @@ async fn session(
         control: control.clone(),
         jobs: Mutex::new(vec![]),
         nonce: super::briefing::nonce(),
-        web: AtomicBool::new(resumed.as_ref().is_some_and(|k| k.web)),
+        web: AtomicBool::new(
+            resumed.as_ref().is_some_and(|k| k.web) || kept_taint(&place, &account.id),
+        ),
         dispatched: AtomicUsize::new(0),
         told: AtomicUsize::new(0),
         kept: place.session.clone(),
@@ -684,9 +720,19 @@ async fn attempts(
                 continue;
             }
         };
-        // Ended for good (Codex ran a command): not tried again, and its session never picked up.
+        // Ended for good (Codex ran a command): not tried again, and its session never picked up,
+        // but what ran taints the conversation, and the mark is kept (finding 5).
         if let Some(why) = turn.0.fatal.clone() {
-            let _ = std::fs::remove_file(&place.session);
+            session.web.store(true, Ordering::SeqCst);
+            let kept = Kept {
+                session: String::new(),
+                account: account.id.clone(),
+                web: true,
+            };
+            let _ = crate::store::write_private(
+                &place.session,
+                &serde_json::to_vec(&kept).unwrap_or_default(),
+            );
             return Err(why);
         }
         if let Some(id) = &turn.0.session {

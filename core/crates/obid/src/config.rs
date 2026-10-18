@@ -313,9 +313,15 @@ impl Config {
                             account.id
                         ));
                     }
-                    Some(dir) if key == "claude" && in_persons_claude_folder(dir) => {
+                    Some(dir) if key == "claude" && in_persons_folder(dir, ".claude") => {
                         return invalid(format!(
                             "agents.claude.accounts: {}'s configDir {dir:?} is the person's own ~/.claude or inside it: an account's folder is one its jobs can write, and ~/.claude must stay one no job can.",
+                            account.id
+                        ));
+                    }
+                    Some(dir) if key == "codex" && in_persons_folder(dir, ".codex") => {
+                        return invalid(format!(
+                            "agents.codex.accounts: {}'s configDir {dir:?} is the person's own ~/.codex or inside it: an account's folder is one its jobs can write, and ~/.codex must stay one no job can.",
                             account.id
                         ));
                     }
@@ -601,9 +607,10 @@ fn is_repo_name(name: &str) -> bool {
     matches!(name.split_once('/'), Some((owner, repo)) if ok(owner) && ok(repo))
 }
 
-/// Whether `dir` is the person's own `~/.claude` (the default login's folder) or inside it, in
-/// any of their homes, links resolved where they exist and letter case ignored (macOS ignores it).
-fn in_persons_claude_folder(dir: &std::path::Path) -> bool {
+/// Whether `dir` is the person's own `~/<folder>` (`.claude`, `.codex`: the default login's
+/// folder) or inside it, in any of their homes, links resolved where they exist and letter case
+/// ignored (macOS ignores it).
+fn in_persons_folder(dir: &std::path::Path, folder: &str) -> bool {
     // As written and with links resolved, each in lower case.
     let forms = |path: &std::path::Path| {
         let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -612,8 +619,8 @@ fn in_persons_claude_folder(dir: &std::path::Path) -> bool {
     };
     let dirs = forms(dir);
     crate::jobs::person_homes().iter().any(|home| {
-        let claude = forms(&home.join(".claude"));
-        dirs.iter().any(|d| claude.iter().any(|c| d.starts_with(c)))
+        let own = forms(&home.join(folder));
+        dirs.iter().any(|d| own.iter().any(|c| d.starts_with(c)))
     })
 }
 
@@ -749,6 +756,26 @@ mod tests {
     /// A Claude account's `configDir` is never the person's own `~/.claude` nor inside it (#651's
     /// re-review): jobs can write an account's folder, and the default login's folder must stay
     /// one no box can write, since obid refreshes it unboxed.
+    /// Nor is a Codex account's `configDir` the person's own `~/.codex` or inside it (finding 9):
+    /// a job's Codex runs in its account's folder, which it can write.
+    #[test]
+    fn a_codex_config_dir_is_never_the_persons_own_codex_folder() {
+        let home = crate::jobs::person_homes().into_iter().next().unwrap();
+        for dir in [
+            home.join(".codex"),
+            home.join(".codex/work"),
+            home.join(".Codex/work"),
+        ] {
+            let accounts = serde_json::json!({"codex": {"bin": "codex",
+                "accounts": [{"id": "work", "name": "Work", "configDir": dir}]}});
+            let text = with(serde_json::json!({"agents": accounts}));
+            assert!(problem(&text).contains("~/.codex"), "{}", dir.display());
+        }
+        let beside = serde_json::json!({"codex": {"bin": "codex",
+            "accounts": [{"id": "work", "name": "Work", "configDir": home.join(".codex-work")}]}});
+        assert!(Config::parse(&with(serde_json::json!({"agents": beside}))).is_ok());
+    }
+
     #[test]
     fn a_claude_config_dir_is_never_the_persons_own_claude_folder() {
         let home = crate::jobs::person_homes().into_iter().next().unwrap();

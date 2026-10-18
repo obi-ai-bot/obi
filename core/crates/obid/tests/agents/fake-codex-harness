@@ -14,8 +14,13 @@
 //   ELSEWHERE          calls a tool of another MCP server and says "elsewhere: <the answer>"
 //   MISNAMED           calls oby_jobs, but asks to run oby_answer, and says "misnamed: <the answer>"
 //   WEB <words>        searches the web (Codex never asks), then does <words>
-//   PLANT              leaves config.toml and AGENTS.md in its CODEX_HOME and AGENTS.md in its room
+//   PLANT              leaves config.toml and AGENTS.md in its CODEX_HOME, AGENTS.md in its room, and
+//                      shell start-up files (.zshrc, .zshenv, .bash_profile, .profile, fish's config)
+//                      in its HOME, which Codex's shell snapshot would source
 //   LOOK               says "look: <which of those are still there>"
+//   HELPERRUN          a helper's thread (another threadId) runs a command
+//   OUTPUT             a command's output arrives with no item/started before it
+//   HOOK               a hook runs (hook/started)
 //   PERMS              asks to run a command in its room, to write inside, outside and in repos/,
 //                      and to read ~/.ssh
 //   RUN <words>        runs a command without asking (as Codex runs a "safe" one), then does <words>
@@ -32,16 +37,24 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 
 const argv = process.argv.slice(2);
-// `features list`, as Codex prints it: shell_tool off when the -c settings turn it off, unless
-// FAKE_CODEX_SHELL_STAYS_ON is set (a Codex that ignores the setting).
+// `features list`, as Codex prints it: a feature off when the -c settings turn it off, unless
+// FAKE_CODEX_STAYS_ON names it (a Codex that ignores the setting). Run in the conversation's box,
+// it sees the login copy in its CODEX_HOME.
 if (argv.slice(-2).join(" ") === "features list") {
   // As Codex 0.162.1: a CODEX_HOME that isn't there is an error.
   if (process.env.CODEX_HOME && !existsSync(process.env.CODEX_HOME)) {
     process.stderr.write(`Error: CODEX_HOME points to "${process.env.CODEX_HOME}", but that path does not exist\n`);
     process.exit(1);
   }
-  const off = (name) => argv.includes(`features.${name}=false`) && !(name === "shell_tool" && process.env.FAKE_CODEX_SHELL_STAYS_ON);
-  for (const name of ["apps", "plugins", "shell_tool", "unified_exec"])
+  if (process.env.CODEX_HOME && !existsSync(join(process.env.CODEX_HOME, "auth.json"))) {
+    process.stderr.write("fake-codex-harness: features list ran without the run's login copy\n");
+    process.exit(1);
+  }
+  const off = (name) => argv.includes(`features.${name}=false`) && name !== process.env.FAKE_CODEX_STAYS_ON;
+  for (const name of ["apps", "browser_use", "browser_use_full_cdp_access", "code_mode_host", "computer_use",
+                      "daemon_auto_start", "hooks", "in_app_browser", "in_app_local_automation", "multi_agent", "plugins",
+                      "shell_snapshot", "shell_tool", "skill_mcp_dependency_install", "unified_exec", "view_image",
+                      "workspace_dependencies", "worktrees"])
     process.stdout.write(`${name.padEnd(41)}stable             ${off(name) ? "false" : "true"}\n`);
   process.exit(0);
 }
@@ -152,13 +165,36 @@ async function act(turnId, words) {
     return say(turnId, `leak: ${t.access_token} ${t.refresh_token} ${t.id_token} ${auth.OPENAI_API_KEY} ${process.env.OBY_MCP_TOKEN}`);
   }
   if (words.startsWith("PLANT")) {
-    for (const file of [join(home, "config.toml"), join(home, "AGENTS.md"), join(room, "AGENTS.md")]) writeFileSync(file, "planted\n");
+    const user = process.env.HOME;
+    mkdirSync(join(user, ".config/fish"), { recursive: true });
+    for (const file of [join(home, "config.toml"), join(home, "AGENTS.md"), join(room, "AGENTS.md"), join(user, ".zshrc"),
+                        join(user, ".zshenv"), join(user, ".bash_profile"), join(user, ".profile"), join(user, ".config/fish/config.fish")])
+      writeFileSync(file, "planted\n");
     return say(turnId, "planted");
   }
   if (words.startsWith("LOOK")) {
-    const there = [["home/config.toml", join(home, "config.toml")], ["home/AGENTS.md", join(home, "AGENTS.md")], ["room/AGENTS.md", join(room, "AGENTS.md")]]
+    const user = process.env.HOME;
+    const there = [["home/config.toml", join(home, "config.toml")], ["home/AGENTS.md", join(home, "AGENTS.md")], ["room/AGENTS.md", join(room, "AGENTS.md")],
+                   ["~/.zshrc", join(user, ".zshrc")], ["~/.zshenv", join(user, ".zshenv")], ["~/.bash_profile", join(user, ".bash_profile")],
+                   ["~/.profile", join(user, ".profile")], ["~/.config/fish", join(user, ".config/fish")]]
       .filter(([, file]) => existsSync(file)).map(([name]) => name);
     return say(turnId, `look: ${there.join(",") || "nothing"}`);
+  }
+  if (words.startsWith("HELPERRUN")) {
+    const run = { type: "commandExecution", id: randomUUID(), command: "/bin/zsh -lc 'echo helper'", cwd: room, commandActions: [], status: "inProgress" };
+    send({ method: "item/started", params: { threadId: "helper-thread", turnId: "helper-turn", item: run } });
+    await new Promise((r) => setTimeout(r, 300));
+    return say(turnId, "helper ran");
+  }
+  if (words.startsWith("OUTPUT")) {
+    event("item/commandExecution/outputDelta", turnId, { itemId: "c9", delta: "hi\n" });
+    await new Promise((r) => setTimeout(r, 300));
+    return say(turnId, "output came");
+  }
+  if (words.startsWith("HOOK")) {
+    event("hook/started", turnId, { hook: { id: "h1", command: "echo hook" } });
+    await new Promise((r) => setTimeout(r, 300));
+    return say(turnId, "hook ran");
   }
   if (words.startsWith("HELLO")) {
     const search = { type: "webSearch", id: randomUUID(), query: "greetings" };

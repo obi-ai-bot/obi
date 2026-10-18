@@ -175,8 +175,21 @@ fn a_codex_turn_streams_its_words_and_ends_in_a_turn() {
     // (a code-host login), and the turn's token kept out of any command's environment (F6).
     for setting in [
         "features.shell_tool=false",
+        "features.shell_snapshot=false",
         "features.apps=false",
         "features.plugins=false",
+        "features.multi_agent=false",
+        "features.hooks=false",
+        "features.browser_use=false",
+        "features.browser_use_full_cdp_access=false",
+        "features.computer_use=false",
+        "features.in_app_browser=false",
+        "features.in_app_local_automation=false",
+        "features.view_image=false",
+        "features.skill_mcp_dependency_install=false",
+        "features.workspace_dependencies=false",
+        "features.daemon_auto_start=false",
+        "features.worktrees=false",
         r#"shell_environment_policy.exclude=["OBY_MCP_TOKEN"]"#,
     ] {
         assert!(argv.contains(&setting), "{setting}: {argv:?}");
@@ -276,30 +289,76 @@ fn a_command_ends_a_codex_turn() {
         answer.text
     );
     assert_eq!(turns(&obid).len(), 1, "not tried again");
-    assert!(
-        !obid
-            .home
-            .join(format!("conversations/{conversation}/session.json"))
-            .exists()
-    );
     let jobs = call(&obid, "GET", "/v1/jobs", None);
     assert_eq!(jobs.body.as_array().map_or(0, Vec::len), 0, "{}", jobs.text);
+    // Its thread is never picked up again, but the taint stays (finding 5): work the next turn
+    // plans waits for the owner's Start.
+    let kept: Value = serde_json::from_slice(
+        &std::fs::read(
+            obid.home
+                .join(format!("conversations/{conversation}/session.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(kept["session"], "", "{kept}");
+    assert_eq!(kept["web"], true, "{kept}");
+    let next = said(
+        &obid,
+        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#,
+               "conversation": conversation}),
+    );
+    assert_eq!(next.body["jobs"], json!([]), "{}", next.text);
+    assert_eq!(
+        inbox(&obid).iter().filter(|i| i["kind"] == "start").count(),
+        1,
+        "{}",
+        next.text
+    );
+    assert!(turns(&obid)[1]["resumed"].is_null());
 }
 
-/// A Codex whose shell stays on whatever obid sets (`features list` says so) never runs a
-/// conversation (G1).
+/// However a command, a hook or another server's tool shows up (a helper's thread, output with no
+/// item before it, a hook, an MCP call to a server that isn't Oby's), the turn ends (findings 2-4).
 #[test]
-fn codex_whose_shell_stays_on_is_refused() {
-    let (_folder, obid) = obid_with("codex-conv-shell-on", true, "fake-codex-shell-on", None);
-    let answer = said(&obid, json!({"said": "HELLO", "new": true}));
-    assert!(
-        words(&answer).ends_with(
-            "\n(Oby's plan loop answered: Codex's shell couldn't be turned off (its features list says shell_tool is on), so a conversation doesn't run on it.)"
-        ),
-        "{}",
-        answer.text
-    );
-    assert!(turns(&obid).is_empty());
+fn whatever_runs_outside_obys_tools_ends_a_codex_turn() {
+    let (_folder, obid) = obid("codex-conv-fatal", true);
+    for (words_said, why) in [
+        ("HELPERRUN", "Codex ran a command (echo helper)"),
+        ("OUTPUT", "Codex ran a command"),
+        ("HOOK", "Codex ran a hook"),
+        ("ELSEWHERE", "Codex called elsewhere's run"),
+    ] {
+        let answer = said(&obid, json!({"said": words_said, "new": true}));
+        assert!(
+            words(&answer).ends_with(&format!(
+                "\n(Oby's plan loop answered: {why}, which a conversation never does, so obid stopped it.)"
+            )),
+            "{words_said}: {}",
+            answer.text
+        );
+    }
+}
+
+/// A Codex that keeps a feature on whatever obid sets (`features list`, run in the conversation's
+/// own box, says so) never runs a conversation: its shell (G1), its hooks (finding 4).
+#[test]
+fn codex_that_keeps_a_feature_on_is_refused() {
+    for (bin, feature) in [
+        ("fake-codex-shell-on", "shell_tool"),
+        ("fake-codex-hooks-on", "hooks"),
+    ] {
+        let (_folder, obid) = obid_with(&format!("codex-conv-{feature}"), true, bin, None);
+        let answer = said(&obid, json!({"said": "HELLO", "new": true}));
+        assert!(
+            words(&answer).ends_with(&format!(
+                "\n(Oby's plan loop answered: Codex's features list says {feature} is on whatever obid sets, so a conversation doesn't run on it.)"
+            )),
+            "{}",
+            answer.text
+        );
+        assert!(turns(&obid).is_empty());
+    }
 }
 
 /// The login copy never carries the refresh token, which the provider rotates (G2); a login whose
@@ -395,7 +454,7 @@ fn a_codex_conversation_resumes_its_thread() {
 }
 
 /// Codex gets the same Oby tools: oby_dispatch, approved by obid's rule, starts a job whose card
-/// is on the turn. Another MCP server's tool is declined.
+/// is on the turn.
 #[test]
 fn oby_dispatch_through_codex_starts_a_job() {
     let (_folder, obid) = obid("codex-conv-dispatch", true);
@@ -456,15 +515,6 @@ fn oby_dispatch_through_codex_starts_a_job() {
         listed.text
     );
 
-    let elsewhere = said(
-        &obid,
-        json!({"said": "ELSEWHERE", "conversation": conversation}),
-    );
-    assert_eq!(
-        elsewhere.body["text"], "elsewhere: declined (decline)",
-        "{}",
-        elsewhere.text
-    );
     // An approval for a tool that wasn't called is declined.
     let misnamed = said(
         &obid,
