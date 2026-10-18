@@ -4821,7 +4821,13 @@ pub fn check_account_folders(agents: &crate::config::Agents) {
                     tool.name()
                 );
             }
-            if tool == Tool::Claude && keychain_on() && remove_older_copy(dir) {
+            // Only where the Keychain holds that login: the file is then a copy, never the login
+            // itself.
+            if tool == Tool::Claude
+                && cfg!(target_os = "macos")
+                && keychain_on()
+                && remove_older_copy(dir, keychain_has(Some(dir)))
+            {
                 tracing::info!(
                     "account {}: took out an older obid's copy of its login from its folder",
                     account.id
@@ -4832,9 +4838,10 @@ pub fn check_account_folders(agents: &crate::config::Agents) {
 }
 
 /// What in an account's folder would run something, or change where a tool sends its requests,
-/// the next time the tool runs unboxed on it: Claude Code's `hooks` and `env` (in
-/// `settings.json`, `settings.local.json` or `.claude.json`), Codex's `notify`, `mcp_servers` and
-/// `model_providers` (in `config.toml`).
+/// the next time the tool runs unboxed on it: Claude Code's `hooks`, `env`, `apiKeyHelper`,
+/// `statusLine` and `mcpServers` (in `settings.json`, `settings.local.json` or `.claude.json`);
+/// Codex's `notify`, `mcp_servers`, `model_providers` and `profiles` (in `config.toml`); Cursor's
+/// `mcp.json`, and a `permissions.allow` that lets something through in `cli-config.json`.
 fn planted(tool: Tool, dir: &Path) -> Vec<String> {
     let read = |name: &str| {
         let file = dir.join(name);
@@ -4851,7 +4858,7 @@ fn planted(tool: Tool, dir: &Path) -> Vec<String> {
                 else {
                     continue;
                 };
-                for key in ["hooks", "env"] {
+                for key in ["hooks", "env", "apiKeyHelper", "statusLine", "mcpServers"] {
                     if json.get(key).is_some_and(|v| !v.is_null()) {
                         found.push(format!("`{key}` in {name}"));
                     }
@@ -4860,7 +4867,7 @@ fn planted(tool: Tool, dir: &Path) -> Vec<String> {
         }
         Tool::Codex => {
             if let Some(text) = read("config.toml") {
-                for key in ["notify", "mcp_servers", "model_providers"] {
+                for key in ["notify", "mcp_servers", "model_providers", "profiles"] {
                     let set = text.lines().map(str::trim).any(|line| {
                         line.starts_with(&format!("[{key}"))
                             || line
@@ -4873,17 +4880,29 @@ fn planted(tool: Tool, dir: &Path) -> Vec<String> {
                 }
             }
         }
-        Tool::Cursor => {}
+        Tool::Cursor => {
+            if std::fs::symlink_metadata(dir.join("mcp.json")).is_ok() {
+                found.push("an `mcp.json`".into());
+            }
+            let allows = read("cli-config.json")
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                .and_then(|c| c["permissions"]["allow"].as_array().map(|a| !a.is_empty()));
+            if allows == Some(true) {
+                found.push("`permissions.allow` in cli-config.json".into());
+            }
+        }
     }
     found
 }
 
-/// Takes out a `.credentials.json` in an account's folder that has no refresh token: a copy an
-/// older obid wrote there from the Keychain before every run (Claude Code's own has one). Never
+/// Takes out a `.credentials.json` in an account's folder that has no refresh token, when the
+/// Keychain holds the account's login (`held`): then it is a copy an older obid wrote there from
+/// the Keychain before every run (Claude Code's own has one), never the login itself. Never
 /// through a link. Whether one was taken out.
-fn remove_older_copy(dir: &Path) -> bool {
+fn remove_older_copy(dir: &Path, held: bool) -> bool {
     let file = dir.join(".credentials.json");
-    let older = std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file())
+    let older = held
+        && std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file())
         && std::fs::read(&file)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -5102,13 +5121,13 @@ pub(crate) fn cursor_login_file() -> &'static str {
     }
 }
 
-/// Cursor's `auth.json` as obid copies it for a job: all of it but the refresh token, which is
-/// kept as an empty string (Cursor takes an empty one as none), so a refresh inside a box can't
-/// rotate the account's own login away (#651). Its tokens are learned as secrets obid knows. `None`
-/// when it isn't a JSON object.
+/// Cursor's `auth.json` as obid copies it for a job: only what calls Cursor's API, its
+/// `accessToken` and `apiKey`, and nothing else the file holds (never the refresh token, which a
+/// refresh inside a box would rotate away from the account, #651, nor Bedrock's keys). Its tokens
+/// are learned as secrets obid knows. `None` when it isn't a JSON object.
 fn cursor_without_refresh(bytes: &[u8], account: &Path) -> Option<Vec<u8>> {
-    let mut login: Value = serde_json::from_slice(bytes).ok()?;
-    let fields = login.as_object_mut()?;
+    let login: Value = serde_json::from_slice(bytes).ok()?;
+    let fields = login.as_object()?;
     for key in ["accessToken", "refreshToken", "apiKey"] {
         if let Some(token) = fields
             .get(key)
@@ -5118,10 +5137,11 @@ fn cursor_without_refresh(bytes: &[u8], account: &Path) -> Option<Vec<u8>> {
             crate::secrets::known().learn(&format!("Cursor {} {key}", account.display()), token);
         }
     }
-    if fields.contains_key("refreshToken") {
-        fields.insert("refreshToken".into(), json!(""));
-    }
-    serde_json::to_vec(&login).ok()
+    let kept: serde_json::Map<String, Value> = ["accessToken", "apiKey"]
+        .into_iter()
+        .filter_map(|key| Some((key.to_owned(), fields.get(key)?.clone())))
+        .collect();
+    serde_json::to_vec(&kept).ok()
 }
 
 /// Whether a copied Codex login (`copy`, its `auth.json`) can run: none was copied, an API-key
@@ -5232,12 +5252,12 @@ pub(crate) fn copy_account_login(tool: Tool, account: &Path, to: &Path) -> std::
 /// - Claude Code (`CLAUDE_CONFIG_DIR`): the login as [`copy_account_login`] copies it, without its
 ///   refresh token, again before every start; once, the account's `.claude.json` trimmed to what
 ///   keeps it signed in ([`trimmed_claude_json`]).
-/// - Codex (`CODEX_HOME`): `auth.json` without its refresh token, again before every start; once,
-///   its `config.toml`.
+/// - Codex (`CODEX_HOME`): `auth.json` without its refresh token, again before every start; never
+///   its `config.toml` (MCP servers and their tokens).
 /// - Cursor (`HOME`, `XDG_CONFIG_HOME`, `CURSOR_CONFIG_DIR`): its login file ([`cursor_login_file`])
-///   without its refresh token ([`cursor_without_refresh`]), again before every start; once, its
-///   `cli-config.json` and `mcp.json`; then obid's settings over it
-///   ([`acp::cursor::rewrite_config`]).
+///   as only its access token and API key ([`cursor_without_refresh`]), again before every start;
+///   once, its `cli-config.json`, then obid's settings over it ([`acp::cursor::rewrite_config`]);
+///   never its `mcp.json`.
 ///
 /// The rest is the job's own: what it writes there reaches no other run and no unboxed process.
 pub(crate) fn copy_account_folder(tool: Tool, account: &Path, login: &Path) -> std::io::Result<()> {
@@ -5266,10 +5286,9 @@ pub(crate) fn copy_account_folder(tool: Tool, account: &Path, login: &Path) -> s
                 read(".claude.json").map_or_else(|| b"{}".to_vec(), |b| trimmed_claude_json(&b));
             once(".claude.json", Some(state))
         }
-        Tool::Codex => {
-            copy_account_login(tool, account, login)?;
-            once("config.toml", read("config.toml"))
-        }
+        // Only its login: never the account's `config.toml`, whose MCP servers would start inside
+        // the box with whatever tokens they carry (agents have no code-host login).
+        Tool::Codex => copy_account_login(tool, account, login),
         Tool::Cursor => {
             let file = cursor_login_file();
             if let Some(copy) = read(file).and_then(|bytes| cursor_without_refresh(&bytes, account))
@@ -5286,8 +5305,8 @@ pub(crate) fn copy_account_folder(tool: Tool, account: &Path, login: &Path) -> s
                 }
                 write_login(&login.join(file), &copy)?;
             }
+            // Never its `mcp.json` (MCP servers starting inside the box, with their tokens).
             once("cli-config.json", read("cli-config.json"))?;
-            once("mcp.json", read("mcp.json"))?;
             acp::cursor::rewrite_config(login)
         }
     }
@@ -6369,9 +6388,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A Cursor job's copy of its account's login has no refresh token (the key stays, empty): a
-    /// box that refreshed would rotate the account's own login away, as #651 found for Claude
-    /// Code. Its access token and API key stay, learned as secrets obid knows.
+    /// A Codex job's copy of its account's folder is its login only, never its `config.toml`, whose
+    /// MCP servers would start inside the box with whatever tokens they carry.
+    #[test]
+    fn a_codex_job_gets_its_login_and_not_its_config() {
+        let root = std::env::temp_dir().join(format!("obid-codex-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (account, login) = (root.join("account"), root.join("login"));
+        std::fs::create_dir_all(&account).unwrap();
+        std::fs::write(
+            account.join("auth.json"),
+            json!({"tokens": {"access_token": "a", "refresh_token": "r"}}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            account.join("config.toml"),
+            "[mcp_servers.github]\ncommand = \"x\"\nenv = { GITHUB_PAT = \"made-up\" }\n",
+        )
+        .unwrap();
+        copy_account_folder(Tool::Codex, &account, &login).unwrap();
+        assert!(login.join("auth.json").is_file());
+        assert!(
+            !login.join("config.toml").exists(),
+            "the account's config reached the box"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A Cursor job's copy of its account's login is only its access token and API key: a box that
+    /// refreshed would rotate the account's own login away, as #651 found for Claude Code. They're
+    /// learned as secrets obid knows, and the account's `mcp.json` isn't copied.
     #[test]
     fn a_cursor_login_copy_has_no_refresh_token() {
         let root = std::env::temp_dir().join(format!("obid-cursor-copy-{}", std::process::id()));
@@ -6387,14 +6433,19 @@ mod tests {
         let refresh = ["cursor-refresh-", &"r".repeat(30)].concat();
         std::fs::write(
             account.join(file),
-            json!({"accessToken": access, "refreshToken": refresh, "apiKey": null}).to_string(),
+            json!({"accessToken": access, "refreshToken": refresh, "apiKey": null,
+                   "bedrockCredentials": {"secretKey": "s"}})
+            .to_string(),
         )
         .unwrap();
+        std::fs::write(account.join("mcp.json"), r#"{"mcpServers": {}}"#).unwrap();
         copy_account_folder(Tool::Cursor, &account, &login).unwrap();
         let copied: Value =
             serde_json::from_slice(&std::fs::read(login.join(file)).unwrap()).unwrap();
-        assert_eq!(copied["accessToken"], access.as_str());
-        assert_eq!(copied["refreshToken"], "", "{copied}");
+        // Only what calls Cursor's API: no refresh token, no Bedrock keys.
+        assert_eq!(copied, json!({"accessToken": access, "apiKey": null}));
+        // Never the account's MCP servers.
+        assert!(!login.join("mcp.json").exists());
         assert!(
             !crate::secrets::known().redact(&access).contains(&access),
             "not learned"
@@ -6433,11 +6484,40 @@ mod tests {
             planted(Tool::Codex, &root),
             ["`notify` in config.toml", "`mcp_servers` in config.toml"]
         );
+        std::fs::write(
+            root.join("settings.local.json"),
+            r#"{"apiKeyHelper": "x", "statusLine": {"command": "y"}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join(".claude.json"), r#"{"mcpServers": {"x": {}}}"#).unwrap();
+        assert_eq!(
+            planted(Tool::Claude, &root),
+            [
+                "`hooks` in settings.json",
+                "`apiKeyHelper` in settings.local.json",
+                "`statusLine` in settings.local.json",
+                "`mcpServers` in .claude.json"
+            ]
+        );
+        std::fs::write(root.join("config.toml"), "[profiles.fast]\nmodel = \"x\"\n").unwrap();
+        assert_eq!(planted(Tool::Codex, &root), ["`profiles` in config.toml"]);
+        assert!(planted(Tool::Cursor, &root).is_empty());
+        std::fs::write(root.join("mcp.json"), "{}").unwrap();
+        std::fs::write(
+            root.join("cli-config.json"),
+            r#"{"permissions": {"allow": ["Shell(*)"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            planted(Tool::Cursor, &root),
+            ["an `mcp.json`", "`permissions.allow` in cli-config.json"]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A `.credentials.json` an older obid copied into an account's folder (no refresh token) is
-    /// taken out; Claude Code's own (with one) and a link stay.
+    /// taken out when the Keychain holds the login; Claude Code's own (with one), one the Keychain
+    /// doesn't hold, and a link stay.
     #[test]
     fn an_older_copy_of_a_login_is_taken_out() {
         let root = std::env::temp_dir().join(format!("obid-older-copy-{}", std::process::id()));
@@ -6449,19 +6529,22 @@ mod tests {
             r#"{"claudeAiOauth": {"accessToken": "a", "expiresAt": 1}}"#,
         )
         .unwrap();
-        assert!(remove_older_copy(&root));
+        // Not while the Keychain doesn't hold the login: it may be the only one.
+        assert!(!remove_older_copy(&root, false));
+        assert!(file.exists());
+        assert!(remove_older_copy(&root, true));
         assert!(!file.exists());
         std::fs::write(
             &file,
             r#"{"claudeAiOauth": {"accessToken": "a", "refreshToken": "r"}}"#,
         )
         .unwrap();
-        assert!(!remove_older_copy(&root));
+        assert!(!remove_older_copy(&root, true));
         assert!(file.exists());
         std::fs::remove_file(&file).unwrap();
         std::fs::write(root.join("elsewhere"), r#"{"claudeAiOauth": {}}"#).unwrap();
         std::os::unix::fs::symlink(root.join("elsewhere"), &file).unwrap();
-        assert!(!remove_older_copy(&root));
+        assert!(!remove_older_copy(&root, true));
         assert!(root.join("elsewhere").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
