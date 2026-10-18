@@ -195,6 +195,14 @@ pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
     put_token(config, TOKEN);
     std::fs::write(&path, config.to_string()).unwrap();
     std::fs::create_dir_all(folder.join("env-home")).unwrap();
+    // The fake planner's state is its account's folder; unboxed, obid gives the brain a config
+    // folder of its own (#651), so it finds the account's from obid's HOME.
+    if let Some(dir) = config["agents"]["claude"]["accounts"][0]["configDir"].as_str() {
+        std::fs::create_dir_all(dir).unwrap();
+        let link = folder.join("env-home/.fake-planner");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(dir, link).unwrap();
+    }
     std::fs::create_dir_all(folder.join("tmp")).unwrap();
     let stderr = folder.join("obid.stderr");
     let mut search = std::env::var_os("PATH").unwrap_or_default();

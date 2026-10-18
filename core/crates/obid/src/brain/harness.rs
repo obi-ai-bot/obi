@@ -582,6 +582,9 @@ async fn attempts(
         }
         flags.extend(["--mcp-config".into(), mcp.clone().into_os_string()]);
         place.scrub();
+        // As before a job's run (#651): the Keychain's default login refreshed when it's due and
+        // kept fresh while the turn runs; an account with a folder of its own refused near its end.
+        shared.jobs.claude_login_ready(Some(account)).await?;
         let launch = shared.jobs.conversation_launch(
             account,
             &place.room,

@@ -2,8 +2,9 @@
 # A stand-in for Claude Code as obid's brain (`claude -p … --json-schema …`) in obid's tests.
 # Run as a job's agent (no --json-schema), it is fake-claude.
 #
-# Its state is in its account's folder ($CLAUDE_CONFIG_DIR, else $HOME): the one place it can
-# write both as it is and boxed (when the brain may read its quoted file).
+# Its state is in its account's folder ($CLAUDE_CONFIG_DIR boxed, $HOME/.fake-planner unboxed,
+# else $HOME): the one place it can write both as it is and boxed (when the brain may read its
+# quoted file).
 #   plans        a queue, one line per call, the first taken each time:
 #                  EXIT <code> <stderr…>   prints the words on stderr, nothing on stdout, exits
 #                  PRINT <text>            prints the text as it is, and exits 0
@@ -24,7 +25,9 @@ case " $* " in
 esac
 input=$(cat)
 printf '%s\n' "$input" > "$HOME/plan-input"
-state=${CLAUDE_CONFIG_DIR:-$HOME}
+# Unboxed, obid gives an account's brain a config folder of its own (#651), so the tests point at
+# the account's folder from obid's HOME (support::start, \`.fake-planner\`).
+if [ -d "$HOME/.fake-planner" ]; then state=$HOME/.fake-planner; else state=${CLAUDE_CONFIG_DIR:-$HOME}; fi
 mkdir -p "$state/calls"
 until mkdir "$state/lock" 2>/dev/null; do sleep 0.05; done
 n=$(($(ls "$state/calls" | wc -l) + 1))

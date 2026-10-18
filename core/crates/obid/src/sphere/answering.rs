@@ -297,7 +297,8 @@ async fn run(
             let names =
                 // Never the Keychain's login: this run answers another person (#643's review).
                 crate::jobs::copy_login(crate::jobs::login_home().as_deref(), &login, Tool::Claude, false)
-                    .map_err(|e| format!("obid can't copy Claude Code's login: {e}"))?;
+                    .map_err(|e| format!("obid can't copy Claude Code's login: {e}"))?
+                    .names;
             for name in names {
                 #[cfg(unix)]
                 std::os::unix::fs::symlink(login.join(name), temp.join(name))

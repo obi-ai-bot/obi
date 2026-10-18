@@ -42,6 +42,8 @@ pub struct Shared {
     pub events: Events,
     /// The conversations, shared by every device and plan request (#493).
     pub conversations: crate::conversation::Conversations,
+    /// What agents made to be looked at (crate::artifacts).
+    pub artifacts: Arc<crate::artifacts::Artifacts>,
     /// The conversation turns under way, for Stop and cancel (#546).
     pub turns: crate::brain::turn::Turns,
     /// The conversation turns under way in an agent session, by their MCP token
@@ -145,6 +147,17 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route(
             "/v1/conversations/{id}",
             axum::routing::patch(crate::conversation::update).delete(crate::conversation::remove),
+        )
+        .route("/v1/artifacts", get(crate::artifacts::list))
+        .route(
+            "/v1/artifacts/{id}",
+            get(crate::artifacts::get)
+                .patch(crate::artifacts::update)
+                .delete(crate::artifacts::remove),
+        )
+        .route(
+            "/v1/artifacts/{id}/{version}/{*path}",
+            get(crate::artifacts::file),
         )
         .route("/v1/plans", post(crate::brain::plan))
         .route("/v1/plans/cancel", post(crate::brain::cancel))

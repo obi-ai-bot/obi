@@ -47,6 +47,7 @@ const HOME: &str = "[home]";
 /// router: adding an endpoint never makes it reachable from a phone by itself. Kept off on purpose:
 /// `/v1/checks/…` and `/v1/agent/…` (the Mac's and agents' own calls), `/v1/connections…`,
 /// `/v1/speech`, `PUT /v1/settings/jobs`, `/v1/pairing/…`, `/v1/obid/…` and everything else.
+/// `*` is one path segment; `**`, last only, is one or more.
 const ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/status"),
     ("GET", "/v1/events"),
@@ -54,6 +55,9 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/conversations"),
     ("PATCH", "/v1/conversations/*"),
     ("DELETE", "/v1/conversations/*"),
+    ("GET", "/v1/artifacts"),
+    ("GET", "/v1/artifacts/*"),
+    ("GET", "/v1/artifacts/*/*/**"),
     ("POST", "/v1/conversation/stop"),
     ("POST", "/v1/plans"),
     ("POST", "/v1/plans/cancel"),
@@ -101,9 +105,17 @@ const ROUTES: &[(&str, &str)] = &[
 pub fn allows(method: &Method, path: &str) -> bool {
     let actual: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     ROUTES.iter().any(|(m, pattern)| {
-        let expected: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+        let mut expected: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+        let rest = expected.last() == Some(&"**");
+        if rest {
+            expected.pop();
+        }
         *m == method.as_str()
-            && expected.len() == actual.len()
+            && (if rest {
+                actual.len() > expected.len()
+            } else {
+                actual.len() == expected.len()
+            })
             && expected
                 .iter()
                 .zip(&actual)
@@ -522,11 +534,28 @@ async fn scrubbed(
 ) -> Response {
     let (parts, body) = response.into_parts();
     let kind = parts.headers.get(header::CONTENT_TYPE).cloned();
-    let events = kind
+    let kind_text = kind
         .as_ref()
         .and_then(|k| k.to_str().ok())
-        .is_some_and(|k| k.to_ascii_lowercase().starts_with("text/event-stream"));
-    let mut out = if events || body.size_hint().exact().is_none() {
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let events = kind_text.starts_with("text/event-stream");
+    // What isn't text (an artifact's image or PDF) goes as it is: read as text, it would break.
+    // The API's own layer (crate::vault::answers) passes it as it is too.
+    let text = kind_text.is_empty()
+        || kind_text.starts_with("application/json")
+        || kind_text.starts_with("text/")
+        || kind_text.contains("+json");
+    let mut out = if !text {
+        if body.size_hint().exact().is_none() {
+            Response::new(Body::from_stream(
+                body.into_data_stream()
+                    .take_while(move |_| std::future::ready(still_paired())),
+            ))
+        } else {
+            Response::new(body)
+        }
+    } else if events || body.size_hint().exact().is_none() {
         let chunks = body
             .into_data_stream()
             .take_while(move |_| std::future::ready(still_paired()))
@@ -558,8 +587,16 @@ async fn scrubbed(
         header::CONTENT_TYPE,
         kind.unwrap_or(HeaderValue::from_static("application/json")),
     );
-    if let Some(cache) = parts.headers.get(header::CACHE_CONTROL) {
-        headers.insert(header::CACHE_CONTROL, cache.clone());
+    // An artifact's file keeps what holds it in (crate::artifacts, POLICY).
+    for name in [
+        header::CACHE_CONTROL,
+        header::CONTENT_SECURITY_POLICY,
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::REFERRER_POLICY,
+    ] {
+        if let Some(value) = parts.headers.get(&name) {
+            headers.insert(name, value.clone());
+        }
     }
     out
 }
@@ -668,6 +705,31 @@ mod tests {
         ] {
             assert!(!allows(&method, path), "{method} {path}");
         }
+    }
+
+    /// The phone shows artifacts: it lists and reads them, any file at any depth, and changes
+    /// nothing.
+    #[test]
+    fn the_gateway_reads_artifacts_and_only_reads_them() {
+        for path in [
+            "/v1/artifacts",
+            "/v1/artifacts/abc",
+            "/v1/artifacts/abc/1/index.html",
+            "/v1/artifacts/abc/1/assets/css/site.css",
+        ] {
+            assert!(allows(&Method::GET, path), "{path}");
+        }
+        for (method, path) in [
+            (Method::PATCH, "/v1/artifacts/abc"),
+            (Method::DELETE, "/v1/artifacts/abc"),
+            (Method::POST, "/v1/artifacts"),
+            (Method::GET, "/v1/artifacts/abc/1"),
+            (Method::PUT, "/v1/artifacts/abc/1/index.html"),
+        ] {
+            assert!(!allows(&method, path), "{method} {path}");
+        }
+        // `**` is the rest of the path, at the end of a pattern only.
+        assert!(!allows(&Method::GET, "/v1/jobs/abc/def/wait"));
     }
 
     /// Ports GatewayTests.pairingSecretAndCodeWorkOnceAndExpire.

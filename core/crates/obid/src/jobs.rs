@@ -22,7 +22,7 @@ use tokio::sync::{Notify, watch};
 use crate::agent::{self, Answer, Event as AgentEvent, Launch, Ruling, Tool};
 use crate::config::{Config, Repo};
 use crate::events::Events;
-use crate::job::{Job, ObiRef, Phase, Status, Waiting};
+use crate::job::{Job, JobArtifact, ObiRef, Phase, Status, Waiting};
 use crate::permissions::{self, Call, Decision, Mode, Permission, Rule};
 use crate::process::{self, Signal};
 use crate::sandbox::{self, Sandbox, Spec};
@@ -210,6 +210,8 @@ pub struct Jobs {
     plugins: std::sync::OnceLock<Arc<crate::plugins::Plugins>>,
     /// The connected-app broker: job-scoped MCP config and use records.
     connections: std::sync::OnceLock<Arc<crate::connections::Connections>>,
+    /// Where a job's `.obi/artifacts/` is published when it ends.
+    artifacts: std::sync::OnceLock<Arc<crate::artifacts::Artifacts>>,
     /// Loopback endpoint given to agents for `oby-check apple`.
     api_url: Mutex<String>,
     /// The approvals devices gave to publish by hand, each let through once.
@@ -268,6 +270,7 @@ impl Jobs {
             permissions: Mutex::new(kept),
             plugins: std::sync::OnceLock::new(),
             connections: std::sync::OnceLock::new(),
+            artifacts: std::sync::OnceLock::new(),
             api_url: Mutex::new(api_url),
             approvals,
             follow: Notify::new(),
@@ -286,6 +289,11 @@ impl Jobs {
 
     pub fn use_connections(&self, connections: Arc<crate::connections::Connections>) {
         let _ = self.connections.set(connections);
+    }
+
+    /// Where jobs' artifacts go (once; without it, a job publishes none).
+    pub fn use_artifacts(&self, artifacts: Arc<crate::artifacts::Artifacts>) {
+        let _ = self.artifacts.set(artifacts);
     }
 
     /// Opens this job's frozen connected-app snapshot. The returned token is safe to expose only
@@ -2171,6 +2179,11 @@ impl Jobs {
             Ok(()) if job.obi.is_some() => self.run_obi_review(id, &signal).await,
             Ok(()) => {
                 let outcome = self.run_owner_job(id, &signal).await;
+                // A job that ends any other way than done (failed, stopped) shows what it made
+                // too; done published them before it ended. A shutdown isn't an end.
+                if *signal.borrow() != Signal::Shutdown {
+                    self.publish_artifacts(id).await;
+                }
                 // Whatever ended it (a limit, a stop, a failure), what it committed is on its
                 // branch.
                 if let Err(e) = self.keep_commits(id).await {
@@ -2345,11 +2358,14 @@ impl Jobs {
                 // the person's own ~/.claude, ~/.claude.json and ~/.codex are never writable, so
                 // nothing a job runs can plant something the tool runs later outside the sandbox.
                 let login = self.login_path(&job.id);
-                let names =
+                let copied =
                     copy_login(login_home().as_deref(), &login, tool, true).map_err(|e| {
                         format!("obid can't copy {}'s login for this job: {e}", tool.name())
                     })?;
-                for name in names {
+                if copied.from_keychain {
+                    keep_keychain_copy(login.join(".claude/.credentials.json"));
+                }
+                for name in copied.names {
                     let link = spec.temp.join(name);
                     let _ = std::fs::remove_file(&link);
                     #[cfg(unix)]
@@ -2393,6 +2409,34 @@ impl Jobs {
         })
     }
 
+    /// The account the brain thinks with: the tool's first [`signed_in`] one, else its first.
+    fn brain_account(&self, tool: Tool) -> Option<crate::config::Account> {
+        self.signed_in_account(tool)
+            .or_else(|| self.accounts(tool).into_iter().next())
+    }
+
+    /// Before a boxed Claude Code run on `account` (none: the brain's), its Keychain login is
+    /// fresh ([`keychain_ready`]). Without a binary or an account it's the launch that says so.
+    pub async fn claude_login_ready(
+        &self,
+        account: Option<&crate::config::Account>,
+    ) -> Result<(), String> {
+        if !keychain_on() {
+            return Ok(());
+        }
+        let account = match account {
+            Some(account) => account.clone(),
+            None => match self.brain_account(Tool::Claude) {
+                Some(account) => account,
+                None => return Ok(()),
+            },
+        };
+        match self.agent_bin(Tool::Claude) {
+            Some(bin) => keychain_ready(bin, &account).await,
+            None => Ok(()),
+        }
+    }
+
     /// The brain's command line when it may read its quoted file (#65): boxed like a job's agent,
     /// so all it sees is `dir` (its working directory, `work.md` in it) and its account's login.
     /// `flags` follow Claude Code's binary; Codex runs `app-server`. The brain thinks with the
@@ -2404,8 +2448,7 @@ impl Jobs {
         flags: Vec<OsString>,
     ) -> Result<Launch, String> {
         let account = self
-            .signed_in_account(tool)
-            .or_else(|| self.accounts(tool).into_iter().next())
+            .brain_account(tool)
             .ok_or_else(|| format!("{} has no account.", tool.name()))?;
         let temp = dir.join("home");
         store::make_private_dir(&temp)
@@ -2530,8 +2573,14 @@ impl Jobs {
             }
             None => {
                 // The tool's own login, copied into a folder of its own as a job's is.
-                let names = copy_login(login_home().as_deref(), login, tool, true)
+                let copied = copy_login(login_home().as_deref(), login, tool, true)
                     .map_err(|e| format!("obid can't copy {}'s login: {e}", tool.name()))?;
+                // A conversation's copy of the Keychain's default login is kept fresh by the
+                // keeper while its turn runs, as a job's is (#651); the brain's lives one call.
+                if confined && copied.from_keychain {
+                    keep_keychain_copy(login.join(".claude/.credentials.json"));
+                }
+                let names = copied.names;
                 for name in names {
                     let link = temp.join(name);
                     let _ = std::fs::remove_file(&link);
@@ -2925,6 +2974,9 @@ impl Jobs {
             OsString::from("--tools"),
             OsString::from(crate::policy::REVIEW_TOOLS.join(",")),
         ]);
+        if tool == Tool::Claude {
+            self.claude_login_ready(Some(&account)).await?;
+        }
         let launch = self.launch(&job, &spec, tool, flags, &account, None)?;
         if *signal.borrow() != Signal::Run {
             return Ok(());
@@ -3293,6 +3345,9 @@ impl Jobs {
                         flags.extend(mcp_rules.iter().map(OsString::from));
                     }
                 }
+                if tool == Tool::Claude {
+                    self.claude_login_ready(Some(&account)).await?;
+                }
                 let launch = self.launch(&job, &spec, tool, flags, &account, broker.as_ref())?;
                 if *signal.borrow() != Signal::Run {
                     return Ok(());
@@ -3417,6 +3472,8 @@ impl Jobs {
                 self.update(id, |job| job.round = Some(round + 1));
             }
 
+            // What it made to be looked at, listed on the job before it ends.
+            self.publish_artifacts(id).await;
             let head = self.keep_commits(id).await?;
             let commits = if start_commit.is_empty() || head == start_commit {
                 0
@@ -3521,6 +3578,80 @@ impl Jobs {
                 }
             }
             return Ok(());
+        }
+    }
+
+    /// Publishes each entry of the job's `.obi/artifacts/` (crate::artifacts): a new artifact of
+    /// the job, or a new version of the one that entry made before; the same files again change
+    /// nothing. What was refused is said in `artifact_problems`, entry by entry.
+    async fn publish_artifacts(&self, id: &str) {
+        let (Some(artifacts), Some(job)) = (self.artifacts.get(), self.get(id)) else {
+            return;
+        };
+        let worktree = self.worktree_path(id);
+        let mut listed = job.artifacts.clone();
+        let mut problems = Vec::new();
+        let entries = crate::artifacts::job_entries(&worktree).unwrap_or_else(|why| {
+            problems.push(why);
+            Vec::new()
+        });
+        let more = entries
+            .len()
+            .saturating_sub(crate::artifacts::MAX_JOB_ENTRIES);
+        let taken = entries.len().min(crate::artifacts::MAX_JOB_ENTRIES);
+        for (done, entry) in entries.into_iter().take(taken).enumerate() {
+            let path = format!("{}/artifacts/{entry}", crate::obi_dir::OBI);
+            let title = crate::artifacts::title_of(&entry);
+            let before = listed.iter().position(|a| a.entry == entry);
+            let published = artifacts
+                .publish(crate::artifacts::Publish {
+                    root: &worktree,
+                    path: &path,
+                    title: &title,
+                    kind: None,
+                    conversation: job.conversation.as_deref(),
+                    job: Some(id),
+                    artifact: before.map(|i| listed[i].id.as_str()),
+                })
+                .await;
+            match (published, before) {
+                (Ok((made, version)), Some(i)) => {
+                    listed[i] = JobArtifact {
+                        id: made,
+                        version,
+                        entry,
+                    }
+                }
+                (Ok((made, version)), None) => listed.push(JobArtifact {
+                    id: made,
+                    version,
+                    entry,
+                }),
+                // A name refused is never said, the entry's least of all.
+                (Err(why), _) if why == crate::artifacts::NAME_REFUSED => problems.push(why),
+                // The job's artifacts are full: one line for this entry and the rest.
+                (Err(why), _) if why.starts_with(crate::artifacts::JOB_FULL) => {
+                    problems.push(format!("{} entries: {why}", taken - done));
+                    break;
+                }
+                // Any other refusal names the entry, only when no part of it looks like a
+                // secret (crate::artifacts, `speakable`, reads each part on its own).
+                (Err(why), _) => {
+                    problems.push(artifacts.speakable(format!("{entry}: {why}")).await)
+                }
+            }
+        }
+        if more > 0 {
+            problems.push(format!(
+                "{more} more entries: Not published: a job publishes at most {} artifacts.",
+                crate::artifacts::MAX_JOB_ENTRIES
+            ));
+        }
+        if listed != job.artifacts || problems != job.artifact_problems {
+            self.update(id, |job| {
+                job.artifacts = listed;
+                job.artifact_problems = problems;
+            });
         }
     }
 
@@ -4042,14 +4173,415 @@ fn keychain_has(config_dir: Option<&Path>) -> bool {
 /// 2026-10-17: the sandbox denies the Keychain, and Claude Code no longer writes a login file when
 /// it can't use the Keychain, so obid copies the Keychain's item into the place a boxed run reads
 /// its `.credentials.json` from, as it copies a login file. Never logged, shown or kept anywhere
-/// else; none on other systems.
+/// else; none on other systems. The copy never carries the refresh token ([`without_refresh`]);
+/// the Mac's own Claude Code keeps the login fresh ([`keychain_ready`], [`keep_keychain_logins`]).
 pub(crate) fn keychain_login(config_dir: Option<&Path>) -> Option<Vec<u8>> {
-    let mut bytes = keychain(config_dir, true)?;
-    while bytes.last().is_some_and(|b| b.is_ascii_whitespace()) {
-        bytes.pop();
-    }
+    let bytes = keychain(config_dir, true)?;
     learn_claude_tokens(&bytes, &keychain_service(config_dir));
-    (!bytes.is_empty()).then_some(bytes)
+    without_refresh(&bytes)
+}
+
+/// Claude Code's login as obid copies it from the Keychain: exactly what calls the API (the access
+/// token, when it ends, its scopes, the plan and its rate tier) and nothing else the item holds.
+/// Never a refresh token: Anthropic rotates them, so a boxed run that refreshed with a copied one
+/// revoked the Keychain's own and signed the Mac's own `claude` out (2026-10-17). Nor the owner's
+/// MCP logins, plug-in secrets or device tokens (#651's review). None when it has no access token.
+fn without_refresh(bytes: &[u8]) -> Option<Vec<u8>> {
+    let login: Value = serde_json::from_slice(bytes).ok()?;
+    let oauth = login.get("claudeAiOauth")?;
+    oauth.get("accessToken")?.as_str()?;
+    let mut kept = serde_json::Map::new();
+    for key in [
+        "accessToken",
+        "expiresAt",
+        "scopes",
+        "subscriptionType",
+        "rateLimitTier",
+    ] {
+        if let Some(value) = oauth.get(key) {
+            kept.insert(key.into(), value.clone());
+        }
+    }
+    serde_json::to_vec(&json!({ "claudeAiOauth": kept })).ok()
+}
+
+/// When the access token in Claude Code's `login` ends (milliseconds since 1970), if it says.
+fn expires_at(login: &[u8]) -> Option<u64> {
+    serde_json::from_slice::<Value>(login).ok()?["claudeAiOauth"]["expiresAt"].as_u64()
+}
+
+/// When the Mac's own Claude Code last refreshed an account's login, and whether that worked.
+type Refreshed = Option<(std::time::Instant, bool)>;
+
+/// What [`keep_fresh`] found of a Keychain login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fresh {
+    /// Good to copy as it is (or there's none: nothing is copied).
+    Good,
+    /// The Mac's own Claude Code just refreshed it: every copy is written again.
+    Renewed,
+    /// It can't be refreshed: the Mac's Claude login needs signing in again.
+    SignIn,
+}
+
+/// Whether a token ending at `ends` is far enough from its end at `now` that Claude Code wouldn't
+/// refresh it: it refreshes only in a token's last 5 minutes (2.1.296).
+fn far_from_end(ends: Option<u64>, now: u64) -> bool {
+    ends.is_some_and(|t| t > now + 5 * 60_000)
+}
+
+/// The Keychain login `read` answers, kept fresh: when its token ends within 5 minutes of `now`
+/// or doesn't say when, the Mac's own Claude Code refreshes it (`refresh`), renewed if that worked
+/// and the token hasn't ended. At most once per 4 minutes (`last`: when it ran and whether it
+/// worked), so a failed refresh isn't hammered; meanwhile a token that hasn't ended is still good.
+fn keep_fresh(
+    last: &mut Refreshed,
+    now: u64,
+    read: impl Fn() -> Option<Vec<u8>>,
+    refresh: impl FnOnce() -> bool,
+) -> Fresh {
+    let good = |yes: bool| if yes { Fresh::Good } else { Fresh::SignIn };
+    let Some(login) = read() else {
+        return Fresh::Good;
+    };
+    let ends = expires_at(&login);
+    if far_from_end(ends, now) {
+        return Fresh::Good;
+    }
+    if let Some((_, worked)) = last.filter(|(at, _)| at.elapsed() < Duration::from_secs(4 * 60)) {
+        return good(ends.map_or(worked, |t| t > now));
+    }
+    let worked = refresh() && read().is_some_and(|l| expires_at(&l).is_none_or(|t| t > now));
+    *last = Some((std::time::Instant::now(), worked));
+    if worked {
+        Fresh::Renewed
+    } else {
+        Fresh::SignIn
+    }
+}
+
+/// Each Keychain item's lock and last refresh ([`Refreshed`]), by its name: one refresh at a time
+/// for an item, so many runs starting at once refresh it once; other items go on.
+static ITEMS: Mutex<Vec<(String, Arc<Mutex<Refreshed>>)>> = Mutex::new(Vec::new());
+
+/// [`keep_fresh`] for the Keychain item `service`: a login far from its end takes no lock; else
+/// one refresh at a time for that item, and the one that comes after it finds the login fresh (or
+/// within the 4 minutes after a failed one). After a refresh, the access token running jobs still
+/// hold stays a secret obid knows, next to the new one. Blocks: never on obid's async runtime.
+fn refresh_if_due(
+    service: &str,
+    now: u64,
+    read: impl Fn() -> Option<Vec<u8>>,
+    refresh: impl FnOnce() -> bool,
+) -> Fresh {
+    let Some(before) = read() else {
+        return Fresh::Good;
+    };
+    if far_from_end(expires_at(&before), now) {
+        return Fresh::Good;
+    }
+    let item = {
+        let mut items = ITEMS.lock().unwrap_or_else(|e| e.into_inner());
+        match items.iter().find(|(s, _)| s == service) {
+            Some((_, item)) => item.clone(),
+            None => {
+                let item = Arc::new(Mutex::new(None));
+                items.push((service.to_owned(), item.clone()));
+                item
+            }
+        }
+    };
+    let mut last = item.lock().unwrap_or_else(|e| e.into_inner());
+    let fresh = keep_fresh(&mut last, now, &read, refresh);
+    if fresh == Fresh::Renewed
+        && let Ok(login) = serde_json::from_slice::<Value>(&before)
+        && let Some(token) = login["claudeAiOauth"]["accessToken"].as_str()
+    {
+        crate::secrets::known().learn(&format!("{service} accessToken before its refresh"), token);
+    }
+    fresh
+}
+
+/// The account whose boxed runs get the Keychain's default login (no `configDir`), as the keeper
+/// knows it.
+struct Kept {
+    /// Its Keychain item ([`keychain_service`]).
+    service: String,
+    /// The Mac's own Claude Code, which refreshes it.
+    bin: PathBuf,
+    /// When a boxed run last started on it.
+    used: std::time::Instant,
+    /// The jobs' private login copies of it (`.credentials.json`) while their runs go.
+    copies: Vec<PathBuf>,
+}
+
+/// The logins [`keep_keychain_logins`] keeps fresh.
+static KEPT: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
+
+fn kept() -> std::sync::MutexGuard<'static, Vec<Kept>> {
+    KEPT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Milliseconds since 1970, as `expiresAt` counts.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Writes `bytes` again to each of `copies` that is still there ([`write_login`], never through a
+/// link); one that's gone (its run ended) is forgotten, never made again.
+fn rewrite(copies: &mut Vec<PathBuf>, bytes: &[u8]) {
+    copies.retain(|path| std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()));
+    for path in copies.iter() {
+        let _ = write_login(path, bytes);
+    }
+}
+
+/// The Keychain login for `config_dir` refreshed when it's due ([`refresh_if_due`]); once renewed,
+/// written again into every running job's private copy. Blocks.
+fn keep_one(service: &str, config_dir: Option<&Path>, bin: &Path) -> Fresh {
+    let fresh = refresh_if_due(
+        service,
+        now_ms(),
+        || keychain(config_dir, true),
+        || refresh_claude_login(bin, config_dir),
+    );
+    if fresh == Fresh::Renewed
+        && let Some(bytes) = keychain_login(config_dir)
+        // Under the keeper's lock, so a job that ends ([`forget_keychain_copy`]) never has its
+        // copy made again.
+        && let Some(account) = kept().iter_mut().find(|k| k.service == service)
+    {
+        rewrite(&mut account.copies, &bytes);
+    }
+    fresh
+}
+
+/// Before a boxed Claude Code run on `account` that gets the Keychain's login
+/// ([`keychain_login`]): if its token ends within 5 minutes, the Mac's own Claude Code refreshes
+/// it first (or the run waits for the refresh that's going), off obid's async runtime, and the
+/// default login is kept fresh from now on ([`keep_keychain_logins`]). An account with a folder of
+/// its own is never refreshed ([`refresh_claude_login`]): its login is good while its token is far
+/// from its end, and refused after ([`shared_login_ok`]). Throws one line when the login can't be
+/// used. obid never writes the Keychain: a folder's older copy is only overwritten from it.
+pub(crate) async fn keychain_ready(
+    bin: PathBuf,
+    account: &crate::config::Account,
+) -> Result<(), String> {
+    if !keychain_on() {
+        return Ok(());
+    }
+    let dir = account.config_dir.clone();
+    // With no folder of its own, the Keychain's login is copied only when there's no login file.
+    if dir.is_none()
+        && login_home()
+            .is_some_and(|h| std::fs::symlink_metadata(h.join(".claude/.credentials.json")).is_ok())
+    {
+        return Ok(());
+    }
+    let service = keychain_service(dir.as_deref());
+    if dir.is_none() {
+        let mut all = kept();
+        match all.iter_mut().find(|k| k.service == service) {
+            Some(k) => {
+                k.used = std::time::Instant::now();
+                k.bin = bin.clone();
+            }
+            None => all.push(Kept {
+                service: service.clone(),
+                bin: bin.clone(),
+                used: std::time::Instant::now(),
+                copies: Vec::new(),
+            }),
+        }
+    }
+    if let Some(folder) = dir {
+        // Never refreshed while jobs can write its folder (#655): good far from its end, else
+        // refused, whatever was tried before (#651's re-review).
+        let read = tokio::task::spawn_blocking(move || keychain(Some(&folder), true))
+            .await
+            .unwrap_or(None);
+        return if shared_login_ok(read.as_deref(), now_ms()) {
+            Ok(())
+        } else {
+            Err(format!(
+                "The Mac's Claude login for {} ends soon or has ended, and obid doesn't refresh it while jobs can write its folder: run claude on that account to refresh it, or see {SHARED_FOLDER_ISSUE}.",
+                account.name
+            ))
+        };
+    }
+    let fresh = tokio::task::spawn_blocking(move || keep_one(&service, None, &bin))
+        .await
+        .unwrap_or(Fresh::SignIn);
+    match fresh {
+        Fresh::SignIn => Err(format!(
+            "The Mac's Claude login for {} needs signing in again (run claude, then /login).",
+            account.name
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Whether the Keychain `login` of an account whose folder jobs can write is good to copy: there
+/// is none (nothing is copied from it), or its token is far from its end ([`far_from_end`]).
+fn shared_login_ok(login: Option<&[u8]>, now: u64) -> bool {
+    login.is_none_or(|login| far_from_end(expires_at(login), now))
+}
+
+/// An account's login as obid copies it for a run that must not read the account's folder (the
+/// unboxed brain, `crate::brain::planner`): the Keychain's ([`keychain_login`]), else its
+/// `.credentials.json` when that's a regular file, only what calls the API ([`without_refresh`]).
+pub(crate) fn account_login(config_dir: &Path) -> Option<Vec<u8>> {
+    keychain_login(Some(config_dir)).or_else(|| {
+        let file = config_dir.join(".credentials.json");
+        std::fs::symlink_metadata(&file)
+            .is_ok_and(|m| m.is_file())
+            .then(|| std::fs::read(&file).ok())
+            .flatten()
+            .and_then(|bytes| without_refresh(&bytes))
+    })
+}
+
+/// The issue for jobs getting a config folder of their own instead of the account's shared one,
+/// after which an account with a `configDir` can be refreshed too.
+const SHARED_FOLDER_ISSUE: &str = "#655";
+
+/// A job's private copy of the Keychain's default login (`path`), kept fresh while its run goes.
+fn keep_keychain_copy(path: PathBuf) {
+    let service = keychain_service(None);
+    if let Some(account) = kept().iter_mut().find(|k| k.service == service)
+        && !account.copies.contains(&path)
+    {
+        account.copies.push(path);
+    }
+}
+
+/// The copy at `path` isn't kept fresh any more: its run ended.
+fn forget_keychain_copy(path: &Path) {
+    for account in kept().iter_mut() {
+        account.copies.retain(|p| p != path);
+    }
+}
+
+/// With `claudeKeychain` on, obid's keeper: every 60 seconds, on a thread of its own, the default
+/// login is refreshed when it's due and the running jobs' copies written again ([`keep_one`]),
+/// while a boxed run used it in the last hour or a job of it still runs. A running Claude Code
+/// reads its `.credentials.json` again when the file changes, before it calls the model (2.1.296),
+/// so a long job goes on with the renewed token. Started once, by obid's start.
+pub fn keep_keychain_logins() {
+    let _ = std::thread::Builder::new()
+        .name("keychain-keeper".into())
+        .spawn(|| {
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+                let due: Vec<(String, PathBuf)> = {
+                    let mut all = kept();
+                    for account in all.iter_mut() {
+                        account
+                            .copies
+                            .retain(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file()));
+                    }
+                    all.retain(|k| {
+                        !k.copies.is_empty() || k.used.elapsed() < Duration::from_secs(60 * 60)
+                    });
+                    all.iter()
+                        .map(|k| (k.service.clone(), k.bin.clone()))
+                        .collect()
+                };
+                for (service, bin) in due {
+                    keep_one(&service, None, &bin);
+                }
+            }
+        });
+}
+
+/// The command that has the Mac's own Claude Code (`bin`, by its absolute path) refresh the login
+/// whose Keychain item `storage` names (none: the default one), as it does before it calls the
+/// model: `claude -p ok` with haiku, no tools and none of the person's settings. It never reads a
+/// folder a job can write: its config folder is `scratch`, a new empty one of obid's (Claude Code
+/// applies a `.claude.json`'s `env` from its config folder whatever `--setting-sources` says), and
+/// `storage` reaches it only as `CLAUDE_SECURESTORAGE_CONFIG_DIR`, which names the Keychain item.
+/// `PATH` is the system's folders only (it runs `security`), and obid's Claude Code and Anthropic
+/// variables are left out.
+fn refresh_command(bin: &Path, storage: Option<&Path>, scratch: &Path, home: &Path) -> Command {
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(bin);
+    command
+        .args([
+            "-p",
+            "ok",
+            "--model",
+            "haiku",
+            "--max-turns",
+            "1",
+            "--tools",
+            "",
+        ])
+        .args(["--strict-mcp-config", "--setting-sources", ""])
+        .arg("--no-session-persistence")
+        .current_dir(scratch)
+        .env_clear()
+        .envs(process::kept(|name| std::env::var_os(name)))
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", home)
+        .env("TMPDIR", scratch)
+        .env("CLAUDE_CONFIG_DIR", scratch)
+        .env(
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+            storage.map_or(std::ffi::OsStr::new(""), Path::as_os_str),
+        )
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0);
+    command
+}
+
+/// Has the Mac's own Claude Code (`bin`, not boxed, so it reaches the Keychain) refresh its
+/// default login ([`refresh_command`]) within 60 seconds. Claude Code 2.1.296 has no command that
+/// only refreshes (`claude auth status` reads the login without refreshing it). What it says is
+/// never kept. Never for an account with a folder of its own (`config_dir`): Claude Code keeps that
+/// item's refresh lock, write lock and plaintext fallback in that folder, which its jobs can write,
+/// so a job could have a refresh rotate the login and then fail to save it, or catch the new one in
+/// the fallback file (#651's review, [`SHARED_FOLDER_ISSUE`]).
+fn refresh_claude_login(bin: &Path, config_dir: Option<&Path>) -> bool {
+    if config_dir.is_some() || !bin.is_absolute() {
+        return false;
+    }
+    let Some(home) = login_home() else {
+        return false;
+    };
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let scratch = std::env::temp_dir().join(format!("obid-refresh-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    // A new folder: made here, by obid, or nothing runs.
+    let mut builder = std::fs::DirBuilder::new();
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    if builder.create(&scratch).is_err() {
+        return false;
+    }
+    let worked = refresh_command(bin, None, &scratch, &home)
+        .spawn()
+        .is_ok_and(|mut child| {
+            let give_up_at = std::time::Instant::now() + Duration::from_secs(60);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status.success(),
+                    Ok(None) if std::time::Instant::now() < give_up_at => {
+                        std::thread::sleep(Duration::from_millis(50))
+                    }
+                    _ => {
+                        process::signal_group(child.id(), nix::sys::signal::Signal::SIGKILL);
+                        let _ = child.wait();
+                        break false;
+                    }
+                }
+            }
+        });
+    let _ = std::fs::remove_dir_all(&scratch);
+    worked
 }
 
 /// Writes `bytes` to `path` as only the person may read it (0600), replacing what's there. Never
@@ -4112,21 +4644,18 @@ pub(crate) fn not_a_link(folder: &Path) -> Result<(), String> {
 
 /// A conversation's own copy of an account's Claude Code login (crate::brain::harness): the macOS
 /// Keychain's item for the account's folder when obid copies from there, else that folder's
-/// `.credentials.json` (a regular file only), written into `to` without following a link. Nothing
-/// else of the account's folder.
+/// `.credentials.json` (a regular file only), only what calls the API ([`account_login`]), written
+/// into `to` without following a link. Nothing else of the account's folder.
 pub(crate) fn copy_account_login(account: &Path, to: &Path) -> std::io::Result<()> {
     not_a_link(to).map_err(std::io::Error::other)?;
     store::make_private_dir(to)?;
-    let file = account.join(".credentials.json");
-    let bytes = match keychain_login(Some(account)) {
-        Some(bytes) => bytes,
-        None if std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) => {
-            let bytes = std::fs::read(&file)?;
-            learn_claude_tokens(&bytes, &keychain_service(Some(account)));
-            bytes
-        }
-        None => return Ok(()),
+    // Only what calls the API, never a refresh token, from the Keychain or the folder's file
+    // ([`account_login`], #651). An account with a folder of its own isn't refreshed by obid
+    // ([`keychain_ready`]), so this copy isn't kept fresh by the keeper either.
+    let Some(bytes) = account_login(account) else {
+        return Ok(());
     };
+    learn_claude_tokens(&bytes, &keychain_service(Some(account)));
     write_login(&to.join(".credentials.json"), &bytes)
 }
 
@@ -4152,7 +4681,7 @@ pub(crate) fn copy_login(
     login: &Path,
     tool: Tool,
     keychain: bool,
-) -> std::io::Result<Vec<&'static str>> {
+) -> std::io::Result<Copied> {
     let (shown, secret, once): (&[&'static str], &[&str], &[&str]) = match tool {
         Tool::Codex => (&[".codex"], &[".codex/auth.json"], &[".codex/config.toml"]),
         _ => (
@@ -4171,7 +4700,10 @@ pub(crate) fn copy_login(
     }
     store::make_private_dir(&folder)?;
     let Some(home) = home else {
-        return Ok(shown.to_vec());
+        return Ok(Copied {
+            names: shown.to_vec(),
+            from_keychain: false,
+        });
     };
     let copy = |name: &str| -> std::io::Result<()> {
         let from = home.join(name);
@@ -4198,12 +4730,14 @@ pub(crate) fn copy_login(
         learn_claude_tokens(&bytes, &keychain_service(None));
     }
     // On macOS Claude Code's login may be only in the Keychain (keychain_login).
+    let mut from_keychain = false;
     if keychain
         && tool == Tool::Claude
         && std::fs::symlink_metadata(home.join(secret[0])).is_err()
         && let Some(bytes) = keychain_login(None)
     {
         write_login(&login.join(secret[0]), &bytes)?;
+        from_keychain = true;
     }
     for name in once {
         if std::fs::symlink_metadata(login.join(name)).is_err() {
@@ -4217,7 +4751,17 @@ pub(crate) fn copy_login(
             }
         }
     }
-    Ok(shown.to_vec())
+    Ok(Copied {
+        names: shown.to_vec(),
+        from_keychain,
+    })
+}
+
+/// What [`copy_login`] copied: the names to show in the run's `HOME`, and whether the login came
+/// from the Keychain (only such a copy is kept fresh, [`keep_keychain_logins`]).
+pub(crate) struct Copied {
+    pub names: Vec<&'static str>,
+    pub from_keychain: bool,
 }
 
 /// `~/.claude.json` with only the keys a boxed Claude Code needs to stay signed in: the account,
@@ -4242,6 +4786,7 @@ fn trimmed_claude_json(bytes: &[u8]) -> Vec<u8> {
 /// Removes the copied credentials from a job's login folder once its run ended: they are copied
 /// again before its next start.
 pub(crate) fn forget_login_secrets(login: &Path) {
+    forget_keychain_copy(&login.join(".claude/.credentials.json"));
     for (folder, name) in [(".claude", ".credentials.json"), (".codex", "auth.json")] {
         let folder = login.join(folder);
         // Only in a real folder: never through a link the job left in its place.
@@ -4424,6 +4969,7 @@ fn owner_prompt(job: &Job) -> String {
     } else if job.max_rounds() > 1 {
         lines.push("End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.".into());
     }
+    lines.push("To show the user something to look at (a page, a document, a chart, an image, a PDF), put it in .obi/artifacts/: one file, or one folder with an index.html, per thing. obid shows each one when the job ends; keep secrets out, or it shows none of it.".into());
     lines.push("Run checks in the foreground, and never end a turn waiting on a background command: obid takes the end of your turn as the end of your work.".into());
     lines.push(
         "Finish with a short summary. Its first line is one sentence the user will see.".into(),
@@ -4766,6 +5312,410 @@ mod tests {
             !said.contains(&access) && !said.contains(&refresh) && !said.contains(&other),
             "{said}"
         );
+    }
+
+    /// A copy of the Keychain's login carries only what calls the API: never a refresh token
+    /// (a boxed run that refreshed with it would rotate the Mac's own login away, 2026-10-17), nor
+    /// anything else the item holds (MCP logins, plug-in secrets, device tokens; #651's review).
+    #[test]
+    fn a_keychain_copy_carries_no_refresh_token() {
+        let login = json!({
+            "claudeAiOauth": {
+                "accessToken": "access",
+                "refreshToken": "refresh",
+                "refreshTokenExpiresAt": 1,
+                "expiresAt": 1_760_000_000_000u64,
+                "scopes": ["user:inference"],
+                "subscriptionType": "max",
+                "rateLimitTier": "default_claude_max_20x",
+                "clientId": "client",
+            },
+            "mcpOAuth": {"server|1": {"accessToken": "m", "refreshToken": "mr"}},
+            "mcpOAuthClientConfig": {"server|1": {"clientSecret": "s"}},
+            "mcpXaaIdp": {"refreshToken": "x"},
+            "mcpXaaIdpConfig": {"clientSecret": "x"},
+            "pluginSecrets": {"plugin": "p"},
+            "trustedDeviceToken": "t",
+        });
+        let copy: Value =
+            serde_json::from_slice(&without_refresh(login.to_string().as_bytes()).unwrap())
+                .unwrap();
+        assert_eq!(
+            copy,
+            json!({"claudeAiOauth": {
+                "accessToken": "access",
+                "expiresAt": 1_760_000_000_000u64,
+                "scopes": ["user:inference"],
+                "subscriptionType": "max",
+                "rateLimitTier": "default_claude_max_20x",
+            }})
+        );
+        // Not a login, or one with no access token: nothing to copy.
+        assert!(without_refresh(b"").is_none());
+        assert!(without_refresh(br#"{"mcpOAuth": {}}"#).is_none());
+    }
+
+    /// A Claude Code login as the Keychain has it, its token ending at `ends` (none: not said).
+    fn a_login(ends: Option<u64>) -> Option<Vec<u8>> {
+        let mut oauth = json!({"accessToken": "a", "scopes": ["user:inference"]});
+        if let Some(ends) = ends {
+            oauth["expiresAt"] = ends.into();
+        }
+        Some(json!({"claudeAiOauth": oauth}).to_string().into_bytes())
+    }
+
+    /// The Mac's own Claude Code refreshes a login obid copies when its token ends within 5
+    /// minutes (when Claude Code refreshes at all) or doesn't say when, and not before; a refresh
+    /// isn't tried again for 4 minutes, so a failed one isn't hammered.
+    #[test]
+    fn the_macs_claude_code_refreshes_a_login_near_its_end() {
+        let now = 1_760_000_000_000u64;
+        let minute = 60_000;
+        let ran = std::cell::Cell::new(0);
+        let refresh = |works: bool| {
+            ran.set(ran.get() + 1);
+            works
+        };
+        // Six minutes off: nothing runs (Claude Code wouldn't refresh yet).
+        let mut last = None;
+        let far = || a_login(Some(now + 6 * minute));
+        assert_eq!(
+            keep_fresh(&mut last, now, far, || refresh(true)),
+            Fresh::Good
+        );
+        assert_eq!(ran.get(), 0);
+        // No Keychain login: nothing to copy, nothing runs.
+        assert_eq!(
+            keep_fresh(&mut last, now, || None, || refresh(true)),
+            Fresh::Good
+        );
+        assert_eq!(ran.get(), 0);
+        // Within 5 minutes: it runs.
+        let near = || a_login(Some(now + 4 * minute));
+        assert_eq!(
+            keep_fresh(&mut None, now, near, || refresh(true)),
+            Fresh::Renewed
+        );
+        assert_eq!(ran.get(), 1);
+        // No end said: it runs; one that fails means signing in again...
+        let mut last = None;
+        let unsaid = || a_login(None);
+        assert_eq!(
+            keep_fresh(&mut last, now, unsaid, || refresh(false)),
+            Fresh::SignIn
+        );
+        assert_eq!(ran.get(), 2);
+        // ...and isn't tried again within 4 minutes.
+        assert_eq!(
+            keep_fresh(&mut last, now, unsaid, || refresh(true)),
+            Fresh::SignIn
+        );
+        assert_eq!(ran.get(), 2);
+        // In those 4 minutes a token that hasn't ended still works.
+        assert_eq!(
+            keep_fresh(&mut last, now, near, || refresh(true)),
+            Fresh::Good
+        );
+        assert_eq!(ran.get(), 2);
+        // A refresh that worked but left a token already ended fails too.
+        let ended = || a_login(Some(now - 1));
+        assert_eq!(
+            keep_fresh(&mut None, now, ended, || refresh(true)),
+            Fresh::SignIn
+        );
+        assert_eq!(ran.get(), 3);
+    }
+
+    /// Many runs starting at once for the same account refresh it once: the rest wait for that
+    /// one and find the login fresh, or within the 4 minutes after a failed one.
+    #[test]
+    fn runs_starting_at_once_refresh_once() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let now = 1_760_000_000_000u64;
+        for works in [true, false] {
+            let service = format!("obid-test-{}-{works}", std::process::id());
+            let ran = AtomicUsize::new(0);
+            let refreshed = AtomicBool::new(false);
+            let read = || {
+                let fresh = refreshed.load(Ordering::SeqCst);
+                a_login(Some(if fresh { now + 3_600_000 } else { now + 60_000 }))
+            };
+            let refresh = || {
+                ran.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(50));
+                refreshed.store(works, Ordering::SeqCst);
+                works
+            };
+            std::thread::scope(|scope| {
+                for _ in 0..8 {
+                    scope.spawn(|| refresh_if_due(&service, now, read, refresh));
+                }
+            });
+            assert_eq!(ran.load(Ordering::SeqCst), 1, "works: {works}");
+        }
+    }
+
+    /// After a refresh, every live copy is written again from the Keychain: one whose run ended
+    /// (its file removed) is forgotten, never made again.
+    #[test]
+    fn a_refresh_rewrites_the_live_copies_only() {
+        let root = std::env::temp_dir().join(format!("obid-copies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (live, ended) = (root.join("live"), root.join("ended"));
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&ended).unwrap();
+        let (live, ended) = (
+            live.join(".credentials.json"),
+            ended.join(".credentials.json"),
+        );
+        std::fs::write(&live, b"old").unwrap();
+        let mut copies = vec![live.clone(), ended.clone()];
+        rewrite(&mut copies, b"new");
+        assert_eq!(std::fs::read(&live).unwrap(), b"new");
+        assert!(!ended.exists());
+        assert_eq!(copies, vec![live]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The refresh never lets a box-writable folder steer the unboxed Claude Code (#651's
+    /// review): a job could plant `.claude.json` with an `env` (Claude Code applies it whatever
+    /// `--setting-sources` says) and a `security` of its own on that `PATH`. The command runs
+    /// `claude` by its absolute path, in a fresh empty config folder of obid's, with a `PATH` of
+    /// the system's folders only; the account's folder only names its Keychain item.
+    #[test]
+    fn a_refresh_is_never_steered_by_the_accounts_folder() {
+        let root = std::env::temp_dir().join(format!("obid-steer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let account = root.join("account");
+        std::fs::create_dir_all(account.join("bin")).unwrap();
+        std::fs::write(account.join("bin/security"), "#!/bin/sh\n").unwrap();
+        let planted = json!({"env": {"PATH": account.join("bin"), "HTTPS_PROXY": "http://x"}});
+        std::fs::write(account.join(".claude.json"), planted.to_string()).unwrap();
+        let scratch = root.join("scratch");
+        let bin = Path::new("/opt/claude/bin/claude");
+        let command = refresh_command(
+            bin,
+            Some(account.as_path()),
+            &scratch,
+            Path::new("/Users/me"),
+        );
+        assert_eq!(command.get_program(), bin.as_os_str());
+        let env: HashMap<String, Option<String>> = command
+            .get_envs()
+            .map(|(k, v)| {
+                let v = v.map(|v| v.to_string_lossy().into_owned());
+                (k.to_string_lossy().into_owned(), v)
+            })
+            .collect();
+        let get = |name: &str| env.get(name).cloned().flatten();
+        assert_eq!(
+            get("CLAUDE_CONFIG_DIR"),
+            Some(scratch.display().to_string())
+        );
+        assert_eq!(
+            get("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
+            Some(account.display().to_string())
+        );
+        assert_eq!(
+            get("PATH").as_deref(),
+            Some("/usr/bin:/bin:/usr/sbin:/sbin")
+        );
+        assert_eq!(get("HTTPS_PROXY"), std::env::var("HTTPS_PROXY").ok());
+        // Nothing else names the account's folder, and the config folder is obid's own, empty.
+        for (name, value) in &env {
+            let value = value.clone().unwrap_or_default();
+            assert!(
+                name == "CLAUDE_SECURESTORAGE_CONFIG_DIR" || !value.contains("account"),
+                "{name}={value}"
+            );
+        }
+        assert_eq!(command.get_current_dir(), Some(scratch.as_path()));
+        // The default login's item: an empty storage folder name.
+        let command = refresh_command(bin, None, &scratch, Path::new("/Users/me"));
+        let storage = command
+            .get_envs()
+            .find(|(k, _)| *k == "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+            .and_then(|(_, v)| v);
+        assert_eq!(storage, Some(std::ffi::OsStr::new("")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An account with a folder of its own isn't refreshed at all while jobs can write that
+    /// folder: Claude Code keeps its refresh lock, its write lock and its plaintext fallback there
+    /// (`CLAUDE_SECURESTORAGE_CONFIG_DIR`), so a job could make a refresh rotate the login and then
+    /// fail to save it, or catch it in the fallback file. Nothing runs.
+    #[test]
+    fn an_account_folder_jobs_can_write_is_never_refreshed() {
+        let root = std::env::temp_dir().join(format!("obid-no-refresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let ran = root.join("ran");
+        let bin = root.join("claude");
+        std::fs::write(&bin, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        assert!(!refresh_claude_login(&bin, Some(&root)));
+        assert!(!ran.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A conversation's copy of an account's login is #651's allowlisted one: what calls the API,
+    /// never the refresh token (a copy that refreshed would revoke the account's own login).
+    #[test]
+    fn a_conversations_login_copy_has_no_refresh_token() {
+        let root = std::env::temp_dir().join(format!("obid-conv-login-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let account = root.join("account");
+        std::fs::create_dir_all(&account).unwrap();
+        let access = ["sk-ant-oat01-", &"a".repeat(40)].concat();
+        let refresh = ["sk-ant-ort01-", &"r".repeat(40)].concat();
+        std::fs::write(
+            account.join(".credentials.json"),
+            json!({"claudeAiOauth": {"accessToken": access, "refreshToken": refresh,
+                   "expiresAt": 1, "scopes": ["user:inference"]},
+                   "mcpOAuth": {"x": "y"}})
+            .to_string(),
+        )
+        .unwrap();
+        copy_account_login(&account, &root.join("config")).unwrap();
+        let copied: Value =
+            serde_json::from_slice(&std::fs::read(root.join("config/.credentials.json")).unwrap())
+                .unwrap();
+        assert_eq!(copied["claudeAiOauth"]["accessToken"], access.as_str());
+        assert_eq!(copied["claudeAiOauth"]["expiresAt"], 1);
+        assert!(
+            copied["claudeAiOauth"].get("refreshToken").is_none(),
+            "{copied}"
+        );
+        assert!(copied.get("mcpOAuth").is_none(), "{copied}");
+        // No usable login (no access token): nothing is copied.
+        std::fs::write(account.join(".credentials.json"), b"{}").unwrap();
+        let _ = std::fs::remove_file(root.join("config/.credentials.json"));
+        copy_account_login(&account, &root.join("config")).unwrap();
+        assert!(!root.join("config/.credentials.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A login copied from a file isn't one the keeper writes again: only a copy made from the
+    /// Keychain is (#651's review).
+    #[test]
+    fn copy_login_says_whether_it_copied_the_keychains_login() {
+        let root = std::env::temp_dir().join(format!("obid-copy-from-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude/.credentials.json"), b"{}").unwrap();
+        let copied = copy_login(Some(&home), &root.join("login"), Tool::Claude, true).unwrap();
+        assert!(!copied.from_keychain);
+        assert!(root.join("login/.claude/.credentials.json").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// After a refresh the access token running jobs still hold stays redacted, next to the new.
+    #[test]
+    fn the_token_before_a_refresh_stays_redacted() {
+        let now = 1_760_000_000_000u64;
+        let old = ["sk-ant-oat01-", &"o".repeat(40)].concat();
+        let service = format!("obid-test-previous-{}", std::process::id());
+        let refreshed = std::sync::atomic::AtomicBool::new(false);
+        let read = || {
+            let fresh = refreshed.load(std::sync::atomic::Ordering::SeqCst);
+            let (token, ends) = if fresh {
+                ("sk-ant-oat01-new", now + 3_600_000)
+            } else {
+                (old.as_str(), now + 60_000)
+            };
+            Some(
+                json!({"claudeAiOauth": {"accessToken": token, "expiresAt": ends, "scopes": ["user:inference"]}})
+                    .to_string()
+                    .into_bytes(),
+            )
+        };
+        let refresh = || {
+            refreshed.store(true, std::sync::atomic::Ordering::SeqCst);
+            true
+        };
+        assert_eq!(refresh_if_due(&service, now, read, refresh), Fresh::Renewed);
+        let said = crate::secrets::known().redact(&format!("a job said {old}"));
+        assert!(!said.contains(&old), "{said}");
+    }
+
+    /// A login far from its end takes no lock, and one account's refresh doesn't hold up
+    /// another's (#651's review).
+    #[test]
+    fn one_accounts_refresh_holds_up_no_other() {
+        use std::sync::mpsc;
+        let now = 1_760_000_000_000u64;
+        let pid = std::process::id();
+        let (a, b) = (format!("obid-test-a-{pid}"), format!("obid-test-b-{pid}"));
+        let near = || a_login(Some(now + 60_000));
+        let (started, on_start) = mpsc::channel();
+        let (release, on_release) = mpsc::channel::<()>();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let (a, done) = (&a, &done);
+            scope.spawn(move || {
+                refresh_if_due(a, now, near, || {
+                    started.send(()).unwrap();
+                    let _ = on_release.recv_timeout(Duration::from_secs(30));
+                    true
+                });
+                done.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            on_start.recv().unwrap();
+            // While A's refresh goes: B refreshes, and A far from its end needs no lock.
+            assert_eq!(refresh_if_due(&b, now, near, || true), Fresh::Renewed);
+            let far = || a_login(Some(now + 3_600_000));
+            assert_eq!(refresh_if_due(a, now, far, || true), Fresh::Good);
+            assert!(!done.load(std::sync::atomic::Ordering::SeqCst));
+            release.send(()).unwrap();
+        });
+    }
+
+    /// An account whose folder jobs can write is never refreshed (#655): its Keychain login is
+    /// good while its token is far from its end, and refused otherwise, however long ago anything
+    /// was tried (#651's re-review). No Keychain login: nothing is copied from it.
+    #[test]
+    fn a_shared_folders_login_is_good_only_far_from_its_end() {
+        let now = 1_760_000_000_000u64;
+        assert!(shared_login_ok(
+            a_login(Some(now + 3_600_000)).as_deref(),
+            now
+        ));
+        assert!(!shared_login_ok(
+            a_login(Some(now + 60_000)).as_deref(),
+            now
+        ));
+        assert!(!shared_login_ok(a_login(Some(now - 1)).as_deref(), now));
+        assert!(!shared_login_ok(a_login(None).as_deref(), now));
+        assert!(shared_login_ok(None, now));
+    }
+
+    /// The brain's copy of an account's login, for its own empty config folder: from the
+    /// account's login file when the Keychain isn't used, only what calls the API, never through
+    /// a link.
+    #[test]
+    fn an_accounts_login_copy_carries_only_what_calls_the_api() {
+        let root = std::env::temp_dir().join(format!("obid-login-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("account")).unwrap();
+        let login = json!({"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "scopes": ["user:inference"]}});
+        std::fs::write(root.join("account/.credentials.json"), login.to_string()).unwrap();
+        let copy: Value =
+            serde_json::from_slice(&account_login(&root.join("account")).unwrap()).unwrap();
+        assert_eq!(
+            copy,
+            json!({"claudeAiOauth": {"accessToken": "a", "scopes": ["user:inference"]}})
+        );
+        // A link in the file's place is not a login.
+        std::fs::create_dir_all(root.join("linked")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("account/.credentials.json"),
+            root.join("linked/.credentials.json"),
+        )
+        .unwrap();
+        assert!(account_login(&root.join("linked")).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A folder named with a trailing `/` or `/.` is still looked at as itself, not where a link
