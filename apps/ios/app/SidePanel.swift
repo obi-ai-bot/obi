@@ -15,6 +15,19 @@ struct PhoneRoot: View {
     @GestureState private var drag: CGFloat = 0
 
     var body: some View {
+        if phone.needsPairing {
+            // A fresh iPhone, or one the Mac stopped taking: Connect first, the line saying why.
+            VStack(spacing: 0) {
+                if let notice = phone.notice { ReachLine(notice: notice) }
+                NavigationStack { ConnectScreen() }
+            }
+            .background(Tokens.bg)
+        } else {
+            panelled
+        }
+    }
+
+    private var panelled: some View {
         GeometryReader { geometry in
             let width = min(Tokens.sidebar + 40, geometry.size.width - 56)
             let open = phone.panel != nil

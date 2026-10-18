@@ -929,7 +929,9 @@ nonisolated struct Runner: Sendable {
         self.token = token
     }
 
-    static let defaultURL = URL(string: "https://tetrix-lab.tail8de49b.ts.net:8443")!
+    /// Nowhere: what a request goes to with no Mac paired and no runner set (port 9, discard),
+    /// so a fresh iPhone talks to nobody (docs/oby-ux.md row 33).
+    static let nowhere = URL(string: "http://127.0.0.1:9")!
 
     /// `request` with the token, when there is one.
     private func signed(_ request: URLRequest) -> URLRequest {

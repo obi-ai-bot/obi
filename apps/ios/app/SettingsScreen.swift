@@ -56,7 +56,7 @@ struct SettingsScreen: View {
         .obyPage()
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            address = phone.runnerURL.absoluteString
+            address = phone.runnerURL?.absoluteString ?? ""
             do { options = try await phone.runner.modelOptions() } catch { problem = error.localizedDescription }
             // A runner older than the Watch API has no list: then there's nothing to show.
             try? await watchPairing.load(phone)
@@ -148,6 +148,8 @@ struct SettingsScreen: View {
     }
 
     private func saveAddress() {
+        // Cleared: no runner but a paired Mac.
+        if address.trimmingCharacters(in: .whitespaces).isEmpty { problem = nil; phone.runnerURL = nil; return }
         guard let url = URL(string: address.trimmingCharacters(in: .whitespaces)), url.scheme == "https" else {
             problem = "The runner's address starts with https://"
             return
