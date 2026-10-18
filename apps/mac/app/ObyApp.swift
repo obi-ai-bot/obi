@@ -131,7 +131,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         #if !DEBUG
         island.updater.start()
         #endif
-        if !FirstLaunch.done { firstLaunch.show() }
+        // Opened by hand (Finder, Spotlight, the Dock, `open`), Oby comes up in front with its window, as
+        // any Mac app does; started at login, it waits in the menu bar.
+        if !FirstLaunch.done { firstLaunch.show() } else if !launchedAtLogin { chat.show(home: true) }
+    }
+
+    /// Whether macOS started Oby as a login item (Settings › General › Open at login). Read before
+    /// launching finishes, while the launch's Apple event is still the current one.
+    private var launchedAtLogin = false
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        launchedAtLogin = event?.eventID == kAEOpenApplication
+            && event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
     }
 
     /// A click on an alert opens the window on its job (the runner's, or one of this Mac's); the runner's

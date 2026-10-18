@@ -245,7 +245,9 @@ function deformed(material, { offset = 0, key, ear }) {
 --------------------------------------------------------------------------- */
 const stage = document.getElementById('stage');
 const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, premultipliedAlpha: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+// Always 2x: on a 1x display the browser scales it down, which smooths the edges that
+// antialias: false leaves jagged (the outline pass needs it off); on Retina it's the screen's own.
+renderer.setPixelRatio(2);
 renderer.setClearColor(0x000000, 0);
 stage.appendChild(renderer.domElement);
 
