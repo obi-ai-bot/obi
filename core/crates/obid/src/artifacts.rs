@@ -49,6 +49,8 @@ pub const MAX_JOB_ENTRIES: usize = 20;
 pub const MAX_JOB_BYTES: u64 = 500 * 1024 * 1024;
 /// How a refusal for a job's artifacts holding too much begins.
 pub const JOB_FULL: &str = "Not published: this job's artifacts hold";
+/// How the same refusal begins for a conversation's own artifacts (no job), which have the same cap.
+pub const CONVERSATION_FULL: &str = "Not published: this conversation's artifacts hold";
 /// What a refusal says instead, when what it would say holds what looks like a secret (a name).
 pub const NAME_REFUSED: &str =
     "Not published: a name in it looks like a secret, so obid doesn't say it.";
@@ -275,16 +277,25 @@ impl Artifacts {
         if artifact.versions.len() >= MAX_VERSIONS as usize {
             return Err(full(&artifact.id));
         }
-        if let Some(job) = what.job {
-            let held: u64 = self
-                .list(None, Some(job))
+        // A job's artifacts, or a conversation's own (no job), hold at most so much in all.
+        let owner = match (what.job, what.conversation) {
+            (Some(job), _) => Some((self.list(None, Some(job)), JOB_FULL, "job")),
+            (None, Some(conversation)) => {
+                let mut own = self.list(Some(conversation), None);
+                own.retain(|a| a.job.is_none());
+                Some((own, CONVERSATION_FULL, "conversation"))
+            }
+            (None, None) => None,
+        };
+        if let Some((theirs, full, whose)) = owner {
+            let held: u64 = theirs
                 .iter()
                 .flat_map(|a| &a.versions)
                 .map(|v| v.bytes)
                 .sum();
             if held + copied.bytes > self.job_bytes {
                 return Err(format!(
-                    "{JOB_FULL} {} MB, and {} MB is the most one job's may.",
+                    "{full} {} MB, and {} MB is the most one {whose}'s may.",
                     held / 1024 / 1024,
                     self.job_bytes / 1024 / 1024
                 ));
@@ -368,7 +379,7 @@ impl Artifacts {
             .iter()
             .map(|n| ("name".to_owned(), n.clone()))
             .collect();
-        if !crate::scan::built_in(&lines).is_empty() {
+        if !crate::scan::built_in(&lines).is_empty() || names.iter().any(|n| long_run(n)) {
             return Err(NAME_REFUSED.into());
         }
         make_private_dir(&self.scratch)
@@ -468,6 +479,20 @@ impl Artifacts {
 /// A lower-case UUID, as obid makes them: never `..` or a path.
 fn is_id(id: &str) -> bool {
     id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+}
+
+/// Whether `name` holds a run of 32 or more of `[A-Za-z0-9_+-]` with letters and digits in it,
+/// other than one of obid's own ids: the shape of a token, whatever joins it to the rest of the
+/// name (`-`, `_`, `+`, `,`, `(`, `~`, `@`), which gitleaks lets by (#648, R2).
+fn long_run(name: &str) -> bool {
+    static RUN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let run = RUN.get_or_init(|| regex::Regex::new(r"[A-Za-z0-9_+\-]{32,}").expect("it compiles"));
+    run.find_iter(name).any(|found| {
+        let text = found.as_str();
+        text.bytes().any(|b| b.is_ascii_alphabetic())
+            && text.bytes().any(|b| b.is_ascii_digit())
+            && !(text.len() == 36 && uuid::Uuid::try_parse(text).is_ok())
+    })
 }
 
 /// Why an artifact at [`MAX_VERSIONS`] gets no more.
@@ -1411,6 +1436,81 @@ mod tests {
         assert_eq!(
             store.speakable(format!("{key}.md: Not published: …")).await,
             NAME_REFUSED
+        );
+        assert!(store.list(None, None).is_empty());
+    }
+
+    /// A conversation's own artifacts (no job) have the same cap a job's have.
+    #[tokio::test]
+    async fn a_conversation_has_a_size_too() {
+        let t = Temp::new("conversation-bytes");
+        t.write("small.md", "0123");
+        t.write("more.md", "0123456789");
+        let (mut store, _) = t.store();
+        Arc::get_mut(&mut store).unwrap().job_bytes = 10;
+        let room = t.room();
+        store.publish(what(&room, "small.md")).await.unwrap();
+        let why = store.publish(what(&room, "more.md")).await.unwrap_err();
+        assert!(why.starts_with(CONVERSATION_FULL), "{why}");
+        let elsewhere = Publish {
+            conversation: Some("c2"),
+            ..what(&room, "more.md")
+        };
+        assert!(store.publish(elsewhere).await.is_ok());
+    }
+
+    /// A file that makes gitleaks read nothing (`ustar` where a tar has it) is a scan that
+    /// couldn't run, not a clean one: the key in the next file is never published (R1).
+    #[tokio::test]
+    async fn a_file_gitleaks_reads_as_a_tar_publishes_nothing() {
+        if crate::process::resolve_bin("gitleaks").is_none() {
+            return;
+        }
+        let t = Temp::new("tar-sniff");
+        // gitleaks reads `obid\n` first, then a.html: `ustar` lands at byte 257.
+        t.write("site/a.html", format!("{}ustar", "x".repeat(257 - 5)));
+        t.write("site/index.html", format!("key = {}\n", google_key()));
+        let (store, _) = t.store();
+        let room = t.room();
+        let why = store.publish(what(&room, "site")).await.unwrap_err();
+        assert!(why.contains("couldn't run"), "{why}");
+        assert!(store.list(None, None).is_empty());
+    }
+
+    /// A key joined to a name by `-`, `_`, `+`, `,`, `(`, `~` or `@` is still refused: a long run
+    /// of letters and digits in a name is (R2). An id obid says isn't.
+    #[tokio::test]
+    async fn a_key_joined_to_a_name_is_refused() {
+        let t = Temp::new("joined");
+        let key = google_key();
+        let (store, _) = t.store();
+        let room = t.room();
+        for joint in ["-", "_", "+", ",", "(", "~", "@"] {
+            let name = format!("notes{joint}{key}.md");
+            t.write(&name, "# plain");
+            let why = store.publish(what(&room, &name)).await.unwrap_err();
+            assert_eq!(why, NAME_REFUSED, "{joint}");
+            let titled = Publish {
+                title: &format!("Notes{joint}{key}"),
+                ..what(&room, "plain.md")
+            };
+            t.write("plain.md", "# plain");
+            assert_eq!(
+                store.publish(titled).await.unwrap_err(),
+                NAME_REFUSED,
+                "{joint}"
+            );
+            assert_eq!(
+                store.speakable(format!("{name}: Not published: …")).await,
+                NAME_REFUSED
+            );
+        }
+        let id_line =
+            "Not published: artifact 3f0c2b7e-9a1d-4c5e-8f60-0123456789ab has 50 versions.";
+        assert_eq!(store.speakable(id_line.to_owned()).await, id_line);
+        assert_eq!(
+            store.speakable("landing-page-v2.md: fine".into()).await,
+            "landing-page-v2.md: fine"
         );
         assert!(store.list(None, None).is_empty());
     }
