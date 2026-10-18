@@ -7,7 +7,6 @@ import SwiftUI
 /// cards here, as on the Mac.
 struct SettingsScreen: View {
     @Environment(Phone.self) private var phone
-    @State private var address = ""
     @State private var options: ModelOptions?
     @State private var problem: String?
     @State private var watchPairing = WatchPairing()
@@ -40,7 +39,6 @@ struct SettingsScreen: View {
                     SetRow("Version") { SetValue(Self.version) }
                     SetRow("Mac") { SetValue(phone.host.isEmpty ? "Not reached yet" : phone.host) }
                 }
-                runner
                 watch
                 SetGroup("Publishing key", footer: "Oby opens a pull request by itself once a job's check passes and the secret scan is clean. Publishing by hand, when that failed, needs Face ID on this iPhone.",
                          problem: problem) {
@@ -56,7 +54,6 @@ struct SettingsScreen: View {
         .obyPage()
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            address = phone.runnerURL.absoluteString
             do { options = try await phone.runner.modelOptions() } catch { problem = error.localizedDescription }
             // A runner older than the Watch API has no list: then there's nothing to show.
             try? await watchPairing.load(phone)
@@ -99,19 +96,6 @@ struct SettingsScreen: View {
         }
     }
 
-    /// The runner's address, for a runner that isn't a paired Mac.
-    private var runner: some View {
-        SetGroup("Runner", footer: "Only for a runner that isn't your Mac: it answers your Tailscale login, so this iPhone needs Tailscale on.") {
-            SetRow("Address") {
-                SetField("Address", text: $address, prompt: "https://…", width: 200)
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .onSubmit(saveAddress)
-            }
-            SetRow("Status") { SetValue(phone.notice?.title ?? phone.connection.status(host: phone.host), connected: phone.connection == .live) }
-        }
-    }
-
     /// Apple Watches that reach the runner without this iPhone.
     private var watch: some View {
         SetGroup("Apple Watch without iPhone",
@@ -147,14 +131,6 @@ struct SettingsScreen: View {
         return info?["CFBundleVersion"].map { "\(short) (\($0))" } ?? short
     }
 
-    private func saveAddress() {
-        guard let url = URL(string: address.trimmingCharacters(in: .whitespaces)), url.scheme == "https" else {
-            problem = "The runner's address starts with https://"
-            return
-        }
-        problem = nil
-        if url != phone.runnerURL { phone.runnerURL = url }
-    }
 
 }
 
