@@ -122,10 +122,38 @@ func inside(_ text: String) -> [String] {
     }
 
     @Test func runnerURL() {
-        #expect(RunnerAPI.url(environment: [:], settings: nil) == "https://tetrix-lab.tail8de49b.ts.net:8443")
+        #expect(RunnerAPI.url(environment: [:], settings: nil, localObid: false) == "https://tetrix-lab.tail8de49b.ts.net:8443")
         #expect(RunnerAPI.url(environment: [:], settings: "https://mac.test:8443/") == "https://mac.test:8443")
         #expect(RunnerAPI.url(environment: ["OBY_RUNNER_URL": "http://127.0.0.1:7777"], settings: "https://mac.test") == "http://127.0.0.1:7777")
-        #expect(RunnerAPI.url(environment: ["OBY_RUNNER_URL": " "], settings: "") == RunnerAPI.defaultURL)
+        #expect(RunnerAPI.url(environment: ["OBY_RUNNER_URL": " "], settings: "", localObid: false) == RunnerAPI.defaultURL)
+        // With nothing set, obid on this Mac when its token is there.
+        #expect(RunnerAPI.url(environment: [:], settings: nil, localObid: true) == "http://127.0.0.1:7777")
+        #expect(RunnerAPI.url(environment: [:], settings: "https://mac.test", localObid: true) == "https://mac.test")
+    }
+
+    /// obid answers only its token (401 without it): oby-mcp reads it from obid's home as the Mac
+    /// app does, and sends it only to a runner on this machine, never to one elsewhere.
+    @Test func obidsTokenGoesOnlyToThisMachine() throws {
+        let home = FileManager.default.temporaryDirectory.appending(path: "oby-mcp-token-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let file = home.appending(path: "api-token")
+        let token = String(repeating: "ab", count: 32)
+        try Data((token + "\n").utf8).write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+
+        #expect(RunnerAPI.token(for: "http://127.0.0.1:7777", homes: [home]) == token)
+        #expect(RunnerAPI.token(for: "http://localhost:7777", homes: [home]) == token)
+        #expect(RunnerAPI.token(for: "https://tetrix-lab.tail8de49b.ts.net:8443", homes: [home]) == nil)
+        #expect(RunnerAPI.token(for: "http://127.0.0.1.evil.test:7777", homes: [home]) == nil)
+        // A file others can read isn't taken, as the Mac app doesn't take it.
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
+        #expect(RunnerAPI.token(for: "http://127.0.0.1:7777", homes: [home]) == nil)
+
+        let request = RunnerAPI.request(URL(string: "http://127.0.0.1:7777/v1/jobs")!, method: "GET", body: nil, token: token)
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(token)")
+        #expect(RunnerAPI.request(URL(string: "https://runner.test/v1/jobs")!, method: "GET", body: nil, token: nil)
+            .value(forHTTPHeaderField: "Authorization") == nil)
     }
 }
 
