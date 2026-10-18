@@ -19,8 +19,8 @@ use crate::api::Shared;
 /// under `untrusted` Codex runs the commands it deems safe reads (`cat`, `ls`, `grep`) without
 /// asking, and one could read its login in `CODEX_HOME`; `unified_exec` stays on whatever it's set
 /// to, and is only how the shell runs. No `shell_snapshot` (it sources the shell's start-up files
-/// in its `HOME` at every thread start), hooks, helpers (`multi_agent`), browser or computer use,
-/// image viewing, skill or workspace installs, a daemon or worktrees. No ChatGPT apps (`apps`:
+/// in its `HOME` at every thread start), hooks, helpers (`multi_agent`), browser (an outside one
+/// too) or computer use, image viewing or generation, skill or workspace installs, a daemon or worktrees. No ChatGPT apps (`apps`:
 /// their GitHub tools are a code-host login) and no plug-ins. Its code mode stays
 /// (`code_mode_host` off, Codex offers no MCP tool at all): `exec`'s JavaScript has no file,
 /// process or network access. Codex takes keys it doesn't know without a word, so obid checks, and
@@ -33,11 +33,13 @@ const OFF: &[&str] = &[
     "multi_agent",
     "hooks",
     "browser_use",
+    "browser_use_external",
     "browser_use_full_cdp_access",
     "computer_use",
     "in_app_browser",
     "in_app_local_automation",
     "view_image",
+    "image_generation",
     "skill_mcp_dependency_install",
     "workspace_dependencies",
     "daemon_auto_start",

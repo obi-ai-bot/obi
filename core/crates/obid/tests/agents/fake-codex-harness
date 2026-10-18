@@ -16,11 +16,14 @@
 //   WEB <words>        searches the web (Codex never asks), then does <words>
 //   PLANT              leaves config.toml and AGENTS.md in its CODEX_HOME, AGENTS.md in its room, and
 //                      shell start-up files (.zshrc, .zshenv, .bash_profile, .profile, fish's config)
-//                      in its HOME, which Codex's shell snapshot would source
+//                      in its HOME, which Codex's shell snapshot would source; csh's, tcsh's and ksh's too
+//   PLANTLINK          makes its HOME's .config a link to a folder holding fish's config
 //   LOOK               says "look: <which of those are still there>"
 //   HELPERRUN          a helper's thread (another threadId) runs a command
 //   OUTPUT             a command's output arrives with no item/started before it
 //   HOOK               a hook runs (hook/started)
+//   ITEM <type>        an item of that type starts and completes, then says "item ran"
+//   NOTICE <method>    sends that notification, then says "notice sent"
 //   PERMS              asks to run a command in its room, to write inside, outside and in repos/,
 //                      and to read ~/.ssh
 //   RUN <words>        runs a command without asking (as Codex runs a "safe" one), then does <words>
@@ -31,7 +34,7 @@
 //   anything else      "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable, or
 // obid's API token, and when a thread isn't danger-full-access with untrusted approvals.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
@@ -51,8 +54,8 @@ if (argv.slice(-2).join(" ") === "features list") {
     process.exit(1);
   }
   const off = (name) => argv.includes(`features.${name}=false`) && name !== process.env.FAKE_CODEX_STAYS_ON;
-  for (const name of ["apps", "browser_use", "browser_use_full_cdp_access", "code_mode_host", "computer_use",
-                      "daemon_auto_start", "hooks", "in_app_browser", "in_app_local_automation", "multi_agent", "plugins",
+  for (const name of ["apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access", "code_mode_host", "computer_use",
+                      "daemon_auto_start", "hooks", "image_generation", "in_app_browser", "in_app_local_automation", "multi_agent", "plugins",
                       "shell_snapshot", "shell_tool", "skill_mcp_dependency_install", "unified_exec", "view_image",
                       "workspace_dependencies", "worktrees"])
     process.stdout.write(`${name.padEnd(41)}stable             ${off(name) ? "false" : "true"}\n`);
@@ -164,19 +167,29 @@ async function act(turnId, words) {
     const t = auth.tokens ?? {};
     return say(turnId, `leak: ${t.access_token} ${t.refresh_token} ${t.id_token} ${auth.OPENAI_API_KEY} ${process.env.OBY_MCP_TOKEN}`);
   }
-  if (words.startsWith("PLANT")) {
+  if (words.startsWith("PLANT") && !words.startsWith("PLANTLINK")) {
     const user = process.env.HOME;
     mkdirSync(join(user, ".config/fish"), { recursive: true });
     for (const file of [join(home, "config.toml"), join(home, "AGENTS.md"), join(room, "AGENTS.md"), join(user, ".zshrc"),
-                        join(user, ".zshenv"), join(user, ".bash_profile"), join(user, ".profile"), join(user, ".config/fish/config.fish")])
+                        join(user, ".zshenv"), join(user, ".bash_profile"), join(user, ".profile"), join(user, ".config/fish/config.fish"),
+                        join(user, ".cshrc"), join(user, ".tcshrc"), join(user, ".login"), join(user, ".kshrc")])
       writeFileSync(file, "planted\n");
+    return say(turnId, "planted");
+  }
+  if (words.startsWith("PLANTLINK")) {
+    const user = process.env.HOME;
+    mkdirSync(join(user, "elsewhere/fish"), { recursive: true });
+    writeFileSync(join(user, "elsewhere/fish/config.fish"), "planted\n");
+    rmSync(join(user, ".config"), { recursive: true, force: true });
+    symlinkSync(join(user, "elsewhere"), join(user, ".config"));
     return say(turnId, "planted");
   }
   if (words.startsWith("LOOK")) {
     const user = process.env.HOME;
     const there = [["home/config.toml", join(home, "config.toml")], ["home/AGENTS.md", join(home, "AGENTS.md")], ["room/AGENTS.md", join(room, "AGENTS.md")],
                    ["~/.zshrc", join(user, ".zshrc")], ["~/.zshenv", join(user, ".zshenv")], ["~/.bash_profile", join(user, ".bash_profile")],
-                   ["~/.profile", join(user, ".profile")], ["~/.config/fish", join(user, ".config/fish")]]
+                   ["~/.profile", join(user, ".profile")], ["~/.config/fish", join(user, ".config/fish")], ["~/.cshrc", join(user, ".cshrc")],
+                   ["~/.tcshrc", join(user, ".tcshrc")], ["~/.login", join(user, ".login")], ["~/.kshrc", join(user, ".kshrc")]]
       .filter(([, file]) => existsSync(file)).map(([name]) => name);
     return say(turnId, `look: ${there.join(",") || "nothing"}`);
   }
@@ -195,6 +208,18 @@ async function act(turnId, words) {
     event("hook/started", turnId, { hook: { id: "h1", command: "echo hook" } });
     await new Promise((r) => setTimeout(r, 300));
     return say(turnId, "hook ran");
+  }
+  if (words.startsWith("ITEM ")) {
+    const item = { type: words.slice(5).trim(), id: randomUUID() };
+    event("item/started", turnId, { item });
+    event("item/completed", turnId, { item });
+    await new Promise((r) => setTimeout(r, 300));
+    return say(turnId, "item ran");
+  }
+  if (words.startsWith("NOTICE ")) {
+    event(words.slice(7).trim(), turnId, {});
+    await new Promise((r) => setTimeout(r, 300));
+    return say(turnId, "notice sent");
   }
   if (words.startsWith("HELLO")) {
     const search = { type: "webSearch", id: randomUUID(), query: "greetings" };

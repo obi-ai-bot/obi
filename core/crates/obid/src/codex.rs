@@ -492,11 +492,56 @@ fn changes(message: &Value) -> Option<(String, Vec<String>)> {
     }
 }
 
+/// The items a conversation's Codex may make (codex-cli 0.162.1's `ThreadItem`): words, thinking,
+/// a plan, a web search, a file change (each one obid's to approve), a tool of Oby's own MCP server
+/// ([`ran_outside`] checks the server), a compaction, the owner's words and a pause. Anything else,
+/// a kind Codex adds later too, ends the turn: an allowlist fails closed.
+const ITEMS: &[&str] = &[
+    "agentMessage",
+    "reasoning",
+    "plan",
+    "webSearch",
+    "fileChange",
+    "mcpToolCall",
+    "contextCompaction",
+    "userMessage",
+    "sleep",
+];
+
+/// The notifications that aren't an item's that a conversation's Codex may send (0.162.1's
+/// `ServerNotification`): the thread's and the turn's own news, usage, warnings, its MCP servers
+/// starting. An item's (`item/…`) pass when its kind is one of [`ITEMS`].
+const NOTICES: &[&str] = &[
+    "error",
+    "warning",
+    "configWarning",
+    "deprecationNotice",
+    "thread/started",
+    "thread/status/changed",
+    "thread/name/updated",
+    "thread/settings/updated",
+    "thread/tokenUsage/updated",
+    "thread/compacted",
+    "turn/started",
+    "turn/completed",
+    "turn/diff/updated",
+    "turn/plan/updated",
+    "turn/moderationMetadata",
+    "serverRequest/resolved",
+    "mcpServer/startupStatus/updated",
+    "account/updated",
+    "account/rateLimits/updated",
+    "model/rerouted",
+    "model/verification",
+    "model/safetyBuffering/updated",
+];
+
 /// What a conversation's Codex did that it never may, from one notification in any thread: a
 /// command (an item of that kind in any `item/*`, or a command's own `item/commandExecution/*`), a
-/// hook (`hook/*`), or a tool of an MCP server that isn't Oby's. Codex's own resource tools
-/// (`list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`, server `codex`) only
-/// reach the servers it has, Oby's alone.
+/// hook (`hook/*`), a tool of an MCP server that isn't Oby's, or any item or notification that
+/// isn't on the lists ([`ITEMS`], [`NOTICES`]). Codex's own resource tools (`list_mcp_resources`,
+/// `list_mcp_resource_templates`, `read_mcp_resource`, server `codex`) only reach the servers it
+/// has, Oby's alone.
 fn ran_outside(message: &Value) -> Option<String> {
     let method = message["method"].as_str()?;
     let item = &message["params"]["item"];
@@ -519,7 +564,19 @@ fn ran_outside(message: &Value) -> Option<String> {
             command => format!("Codex ran a command ({command})"),
         });
     }
-    if method.starts_with("item/") && item["type"] == "mcpToolCall" {
+    match method.split('/').collect::<Vec<_>>()[..] {
+        // An item: its kind must be on the list.
+        ["item", "started" | "completed"] => match item["type"].as_str() {
+            Some(kind) if ITEMS.contains(&kind) => {}
+            Some(kind) => return Some(format!("Codex used {kind}")),
+            None => return Some("Codex used an item of no kind".into()),
+        },
+        // An item's own news (`item/agentMessage/delta`): its kind, from the method.
+        ["item", kind, _] if ITEMS.contains(&kind) => {}
+        _ if NOTICES.contains(&method) => {}
+        _ => return Some(format!("Codex sent {method}")),
+    }
+    if item["type"] == "mcpToolCall" {
         let (server, tool) = (
             item["server"].as_str().unwrap_or(""),
             item["tool"].as_str().unwrap_or(""),
@@ -781,6 +838,84 @@ exec sleep 30
         );
         assert!(took < Duration::from_millis(1500), "{took:?}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A conversation's Codex may only do what's on the list: any other item or notification, a
+    /// kind Codex adds later too, ends the turn.
+    #[test]
+    fn only_what_a_conversation_may_do_passes() {
+        let item =
+            |kind: &str| json!({"method": "item/started", "params": {"item": {"type": kind}}});
+        let notice = |method: &str| json!({"method": method, "params": {}});
+        for kind in [
+            "agentMessage",
+            "reasoning",
+            "plan",
+            "webSearch",
+            "fileChange",
+            "contextCompaction",
+            "userMessage",
+            "sleep",
+        ] {
+            assert_eq!(ran_outside(&item(kind)), None, "{kind}");
+        }
+        for method in [
+            "turn/started",
+            "turn/completed",
+            "thread/tokenUsage/updated",
+            "item/agentMessage/delta",
+            "item/reasoning/textDelta",
+            "item/plan/delta",
+            "item/fileChange/patchUpdated",
+            "item/mcpToolCall/progress",
+            "account/rateLimits/updated",
+            "serverRequest/resolved",
+        ] {
+            assert_eq!(ran_outside(&notice(method)), None, "{method}");
+        }
+        let oby = json!({"method": "item/started",
+            "params": {"item": {"type": "mcpToolCall", "server": "oby", "tool": "oby_jobs"}}});
+        assert_eq!(ran_outside(&oby), None);
+        for kind in [
+            "imageGeneration",
+            "imageView",
+            "collabAgentToolCall",
+            "subAgentActivity",
+            "dynamicToolCall",
+            "hookPrompt",
+            "enteredReviewMode",
+            "somethingNew",
+        ] {
+            assert_eq!(
+                ran_outside(&item(kind)),
+                Some(format!("Codex used {kind}")),
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            ran_outside(&json!({"method": "item/completed", "params": {"item": {}}})),
+            Some("Codex used an item of no kind".into())
+        );
+        for method in [
+            "process/outputDelta",
+            "process/exited",
+            "command/exec/outputDelta",
+            "item/dynamicToolCall/progress",
+            "thread/realtime/started",
+            "somethingNew",
+        ] {
+            assert_eq!(
+                ran_outside(&notice(method)),
+                Some(format!("Codex sent {method}")),
+                "{method}"
+            );
+        }
+        assert_eq!(
+            ran_outside(&notice("hook/started")),
+            Some("Codex ran a hook".into())
+        );
+        // An answer to obid's own request is no notification.
+        assert_eq!(ran_outside(&json!({"id": 3, "result": {}})), None);
     }
 
     #[test]

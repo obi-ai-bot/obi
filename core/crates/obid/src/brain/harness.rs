@@ -339,7 +339,8 @@ impl Place {
         remove_in(&self.config, CODEX);
         remove_in(&self.temp, &[".agents", ".codex"]);
         // A shell's start-up files in its HOME, which a shell (Codex's snapshot of one, too)
-        // sources outside obid's view: zsh's, bash's (every `.bash*`), sh's and fish's.
+        // sources outside obid's view: zsh's, bash's (every `.bash*`), sh's, csh's and tcsh's,
+        // ksh's and fish's.
         remove_in(
             &self.temp,
             &[
@@ -349,6 +350,10 @@ impl Place {
                 ".zlogin",
                 ".zlogout",
                 ".profile",
+                ".cshrc",
+                ".tcshrc",
+                ".login",
+                ".kshrc",
             ],
         );
         let bash: Vec<String> = std::fs::read_dir(&self.temp)
@@ -362,6 +367,10 @@ impl Place {
             &self.temp,
             &bash.iter().map(String::as_str).collect::<Vec<_>>(),
         );
+        // A `.config` that is a link (to fish's config elsewhere) goes; a real one loses fish's.
+        if !std::fs::symlink_metadata(self.temp.join(".config")).is_ok_and(|m| m.is_dir()) {
+            remove_in(&self.temp, &[".config"]);
+        }
         remove_in(&self.temp.join(".config"), &["fish"]);
     }
 }
