@@ -8,6 +8,7 @@ pub mod actions;
 pub mod briefing;
 pub mod find;
 pub mod harness;
+pub mod harness_codex;
 pub mod lead;
 pub mod orchestrator;
 pub mod plan;
