@@ -43,7 +43,7 @@ The same for every agent. obid checks every call against the same rules the plan
 | `oby_search` | `{pattern, path?, glob?}` | A regex search of the room's text files under `path`: at most 200 matches. Quoted data. |
 | `oby_list` | `{path?, glob?}` | A folder's entries, or with `glob` every file under it that matches: at most 500. |
 
-The read tools are how any agent reads (Codex has no shell, so no other way): only inside the room once links are followed, never `..` or its `config/` (Codex's login copy), `login/`, `home/` or `session.json`, the same refusals and taint as Claude Code's Read, Grep and LS, and every known secret taken out.
+The read tools are how any agent reads (Codex has no shell, so no other way): only inside the room once links are followed, never `..` or its `config/` (Codex's login copy), `login/`, `home/` or `session.json`, the same refusals and taint as Claude Code's Read, Grep and LS (`repos/` and `attachments/` taint), files opened with `O_NOFOLLOW` and checked again once open, a search held to 32 MB and 10 seconds and ended with its turn, answers and refusals fenced, and every known secret taken out.
 
 ## 4. Artifacts
 

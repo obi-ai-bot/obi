@@ -1141,11 +1141,16 @@ fn taints(tool: &str, input: &Value, bounds: &Bounds, repos: &Path) -> bool {
             })
             .collect()
     };
-    let repos = crate::policy::real_path(repos).unwrap_or_else(|| repos.to_path_buf());
+    // The owner's attachments, from this turn or an earlier one, are untrusted too (R4).
+    let untrusted = [repos.to_path_buf(), bounds.worktree.join("attachments")]
+        .map(|p| crate::policy::real_path(&p).unwrap_or(p));
     places.iter().any(|place| {
         let place = crate::policy::real_path(place).unwrap_or_else(|| place.clone());
-        // Inside repos/, or a folder that holds it (a search of the room reads repos/ too).
-        place.starts_with(&repos) || repos.starts_with(&place)
+        // Inside repos/ or attachments/, or a folder that holds them (a search of the room reads
+        // them too).
+        untrusted
+            .iter()
+            .any(|u| place.starts_with(u) || u.starts_with(&place))
     })
 }
 
@@ -1677,6 +1682,16 @@ mod tests {
         };
         assert!(read(place.repos.join("o/n/f.rs")));
         assert!(!read(place.room.join("notes.md")));
+        // The owner's attachments, from any turn, are untrusted as repos/ is.
+        std::fs::create_dir_all(place.room.join("attachments")).unwrap();
+        std::fs::write(place.room.join("attachments/a.txt"), "theirs").unwrap();
+        assert!(read(place.room.join("attachments/a.txt")));
+        assert!(taints(
+            "Grep",
+            &json!({"path": "attachments"}),
+            &bounds,
+            &place.repos
+        ));
         // A relative path is the room's (R1).
         assert!(taints(
             "Read",

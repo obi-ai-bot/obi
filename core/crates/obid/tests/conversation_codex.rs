@@ -577,9 +577,13 @@ fn codex_reads_the_room_through_oby_read() {
         &obid,
         json!({"said": r#"OBY oby_read {"path": "../config/auth.json"}"#, "new": true}),
     );
-    assert_eq!(
-        prying.body["text"],
-        "oby: refused: ../config/auth.json isn't a path in your room: name one relative to it, with no .. and no ~.",
+    // The refusal names the agent's own path, so it comes quoted too.
+    let refused = prying.body["text"].as_str().unwrap();
+    assert!(
+        refused.starts_with("oby: refused: Everything between a line <<<quoted-")
+            && refused.contains(
+                "\n../config/auth.json isn't a path in your room: name one relative to it, with no .. and no ~.\nquoted-"
+            ),
         "{}",
         prying.text
     );

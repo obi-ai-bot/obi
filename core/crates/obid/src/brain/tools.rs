@@ -75,7 +75,7 @@ fn list() -> Value {
              "path": {"type": "string", "description": "A folder or file, relative to your room; left out, the whole room."},
              "glob": {"type": "string", "description": "Only files matching it, as *.rs, src/**/*.ts or *.{md,txt}."}},
              "required": ["pattern"]}},
-        {"name": "oby_list", "description": "Lists the files and folders in a folder of your room (a folder ends in /), or with glob every file under it that matches, at most 500.",
+        {"name": "oby_list", "description": "Lists the files and folders in a folder of your room (a folder ends in /, a link in @), or with glob every file under it that matches, at most 500.",
          "inputSchema": {"type": "object", "properties": {
              "path": {"type": "string", "description": "A folder, relative to your room; left out, the room."},
              "glob": {"type": "string", "description": "Every file under the folder matching it, as **/*.md."}}}}
@@ -200,16 +200,21 @@ async fn call(
         }
         "oby_artifact" => artifact(shared, session, args).await,
         "oby_read" | "oby_search" | "oby_list" => {
-            let (home, conversation, tool) = (
+            let (home, conversation, tool, control) = (
                 shared.config.home.clone(),
                 session.conversation.clone(),
                 name.to_owned(),
+                session.control.clone(),
             );
             let (text, taints) = tokio::task::spawn_blocking(move || {
-                files(&Place::of(&home, &conversation), &tool, args)
+                let live = || control.live();
+                let budget = Budget::new(&live);
+                files(&Place::of(&home, &conversation), &tool, args, &budget)
             })
             .await
-            .map_err(|_| "obid couldn't read that.".to_owned())??;
+            .map_err(|_| "obid couldn't read that.".to_owned())?
+            // A refusal names the agent's own path: quoted too.
+            .map_err(|why| quoted(session, "Oby's refusal", &why))?;
             // Read from the repositories (or a folder holding them): other people's words.
             if taints {
                 session.taint();
@@ -611,10 +616,35 @@ const ENTRIES: usize = 500;
 const WALKED: usize = 20_000;
 /// A larger file isn't searched.
 const SEARCHED_BYTES: u64 = 1_000_000;
+/// The longest line oby_read holds in memory: the rest of a longer one is skipped.
+const LINE_BYTES: u64 = 4 * LINE_CHARS as u64;
+
+/// How much one oby_search may read, for how long, and while its turn goes on.
+struct Budget<'a> {
+    bytes: u64,
+    until: std::time::Instant,
+    live: &'a dyn Fn() -> bool,
+}
+
+impl<'a> Budget<'a> {
+    /// 32 MB of files and 10 seconds.
+    fn new(live: &'a dyn Fn() -> bool) -> Budget<'a> {
+        Budget {
+            bytes: 32_000_000,
+            until: std::time::Instant::now() + std::time::Duration::from_secs(10),
+            live,
+        }
+    }
+}
 
 /// oby_read, oby_search or oby_list in the conversation at `place`: the answer, and whether it
 /// read something untrusted (the repositories), or why not.
-fn files(place: &Place, tool: &str, args: Value) -> Result<(String, bool), String> {
+fn files(
+    place: &Place,
+    tool: &str,
+    args: Value,
+    budget: &Budget,
+) -> Result<(String, bool), String> {
     let bounds = place.bounds();
     let room = place
         .room
@@ -629,7 +659,7 @@ fn files(place: &Place, tool: &str, args: Value) -> Result<(String, bool), Strin
             } = parse(args)?;
             let real = in_room(&room, &path)?;
             let taints = super::harness::reading(place, &bounds, "Read", &real)?;
-            Ok((read_file(&real, &path, offset, limit)?, taints))
+            Ok((read_file(&room, &real, &path, offset, limit)?, taints))
         }
         "oby_search" => {
             let SearchArgs {
@@ -649,14 +679,24 @@ fn files(place: &Place, tool: &str, args: Value) -> Result<(String, bool), Strin
             let taints = super::harness::reading(place, &bounds, "Grep", &root)?;
             let mut found = vec![];
             let mut full = false;
+            let (mut spent, mut ended, mut spent_all) = (0, false, false);
             let walked = walk(&root, globbed.as_ref(), &mut |file| {
+                if !(budget.live)() {
+                    ended = true;
+                    return false;
+                }
+                if spent >= budget.bytes || std::time::Instant::now() >= budget.until {
+                    spent_all = true;
+                    return false;
+                }
                 // Only what oby_read would read: never a file obid refuses (a secret's, say).
                 if super::harness::reading(place, &bounds, "Read", file).is_err() {
                     return true;
                 }
-                let Some(text) = text_of(file, SEARCHED_BYTES) else {
+                let Some(text) = text_of(&room, file, SEARCHED_BYTES) else {
                     return true;
                 };
+                spent += text.len() as u64;
                 let shown = shown(&room, file);
                 for (n, line) in text.lines().enumerate() {
                     if regex.is_match(line) {
@@ -669,6 +709,14 @@ fn files(place: &Place, tool: &str, args: Value) -> Result<(String, bool), Strin
                 }
                 true
             });
+            if ended {
+                return Err("The turn was stopped: nothing more happens for it.".into());
+            }
+            let walked = if spent_all {
+                "\n(Oby stopped at its search budget, 32 MB or 10 seconds: narrow the path or glob for the rest.)".to_owned()
+            } else {
+                walked
+            };
             if found.is_empty() {
                 return Ok((format!("Nothing matches {pattern}.{}", walked), taints));
             }
@@ -703,8 +751,14 @@ fn files(place: &Place, tool: &str, args: Value) -> Result<(String, bool), Strin
                             full = true;
                             break;
                         }
-                        let slash = if entry.is_dir() { "/" } else { "" };
-                        listed.push(format!("{}{slash}", shown(&room, &entry)));
+                        // Never through a link: one shows as one (`@`), as `ls -F` shows it.
+                        let kind = std::fs::symlink_metadata(&entry).map(|m| m.file_type());
+                        let mark = match kind {
+                            Ok(t) if t.is_symlink() => "@",
+                            Ok(t) if t.is_dir() => "/",
+                            _ => "",
+                        };
+                        listed.push(format!("{}{mark}", shown(&room, &entry)));
                     }
                     String::new()
                 }
@@ -770,14 +824,41 @@ fn binary(start: &[u8]) -> bool {
     start.iter().take(8192).any(|b| *b == 0)
 }
 
-/// A text file of at most `most` bytes, read whole; none for a larger or binary one.
-fn text_of(file: &Path, most: u64) -> Option<String> {
-    let mut bytes = vec![];
-    std::fs::File::open(file)
-        .ok()?
-        .take(most + 1)
-        .read_to_end(&mut bytes)
+/// The regular file `real` opened, when it's still in `room` as it's opened: never through a
+/// link put in its place since it was resolved (`O_NOFOLLOW`), and the opened file's own path
+/// checked again (`F_GETPATH` on macOS, `/proc/self/fd` on Linux).
+fn open_in_room(room: &Path, real: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        // Non-blocking, so a named pipe left in the room can't hold the open.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(real)
         .ok()?;
+    (file.metadata().ok()?.is_file() && opened_path(&file)?.starts_with(room)).then_some(file)
+}
+
+#[cfg(target_os = "macos")]
+fn opened_path(file: &std::fs::File) -> Option<PathBuf> {
+    let mut path = PathBuf::new();
+    nix::fcntl::fcntl(file, nix::fcntl::FcntlArg::F_GETPATH(&mut path)).ok()?;
+    Some(path)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn opened_path(file: &std::fs::File) -> Option<PathBuf> {
+    use std::os::fd::AsRawFd;
+    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()
+}
+
+/// A text file of the room of at most `most` bytes, read whole; none for a larger or binary one.
+fn text_of(room: &Path, file: &Path, most: u64) -> Option<String> {
+    let opened = open_in_room(room, file)?;
+    if opened.metadata().ok()?.len() > most {
+        return None;
+    }
+    let mut bytes = vec![];
+    opened.take(most + 1).read_to_end(&mut bytes).ok()?;
     (bytes.len() as u64 <= most && !binary(&bytes))
         .then(|| String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -785,6 +866,7 @@ fn text_of(file: &Path, most: u64) -> Option<String> {
 /// oby_read of `real` (named `path`): its lines from `offset`, numbered, at most `limit`, 2,000
 /// lines and 256 KB.
 fn read_file(
+    room: &Path,
     real: &Path,
     path: &str,
     offset: Option<usize>,
@@ -794,7 +876,7 @@ fn read_file(
         return Err(format!("{path} is a folder: list it with oby_list."));
     }
     let mut reader = std::io::BufReader::new(
-        std::fs::File::open(real).map_err(|_| format!("{path} couldn't be read."))?,
+        open_in_room(room, real).ok_or_else(|| format!("{path} couldn't be read."))?,
     );
     if binary(
         reader
@@ -808,12 +890,33 @@ fn read_file(
     let (mut out, mut shown, mut n, mut line) = (String::new(), 0, 0, vec![]);
     loop {
         line.clear();
-        if reader
+        let failed = |_| format!("{path} couldn't be read.");
+        if (&mut reader)
+            .take(LINE_BYTES)
             .read_until(b'\n', &mut line)
-            .map_err(|_| format!("{path} couldn't be read."))?
+            .map_err(failed)?
             == 0
         {
             break;
+        }
+        // A longer line: the rest of it is skipped, never held.
+        if !line.ends_with(b"\n") && line.len() as u64 == LINE_BYTES {
+            loop {
+                let buf = reader.fill_buf().map_err(failed)?;
+                if buf.is_empty() {
+                    break;
+                }
+                match buf.iter().position(|b| *b == b'\n') {
+                    Some(at) => {
+                        reader.consume(at + 1);
+                        break;
+                    }
+                    None => {
+                        let all = buf.len();
+                        reader.consume(all);
+                    }
+                }
+            }
         }
         n += 1;
         if n < first {
@@ -955,7 +1058,78 @@ mod tests {
     }
 
     fn run(place: &Place, tool: &str, args: Value) -> Result<(String, bool), String> {
-        files(place, tool, args)
+        files(place, tool, args, &Budget::new(&|| true))
+    }
+
+    /// A search stops at its budget (bytes read, its deadline), saying so, and at once when its
+    /// turn ends.
+    #[test]
+    fn a_search_stops_at_its_budget_and_with_its_turn() {
+        let (home, place) = conversation("budget");
+        let mut budget = Budget::new(&|| true);
+        budget.bytes = 10;
+        let (found, _) = files(&place, "oby_search", json!({"pattern": "e"}), &budget).unwrap();
+        assert!(
+            found.ends_with("(Oby stopped at its search budget, 32 MB or 10 seconds: narrow the path or glob for the rest.)"),
+            "{found}"
+        );
+        assert_eq!(
+            found.lines().filter(|l| l.contains(":1:")).count(),
+            1,
+            "{found}"
+        );
+        let mut late = Budget::new(&|| true);
+        late.until = std::time::Instant::now();
+        let (found, _) = files(&place, "oby_search", json!({"pattern": "e"}), &late).unwrap();
+        assert!(
+            found.starts_with("Nothing matches e.\n(Oby stopped"),
+            "{found}"
+        );
+        let ended = Budget::new(&|| false);
+        let refused = files(&place, "oby_search", json!({"pattern": "e"}), &ended).unwrap_err();
+        assert!(refused.contains("The turn was stopped"), "{refused}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A line longer than oby_read holds is cut and the rest skipped; the next line reads as usual.
+    #[test]
+    fn a_long_line_is_cut_and_skipped() {
+        let (home, place) = conversation("long-line");
+        let long = "z".repeat(100_000);
+        std::fs::write(place.room.join("long.txt"), format!("{long}\nsecond\n")).unwrap();
+        let (text, _) = run(&place, "oby_read", json!({"path": "long.txt"})).unwrap();
+        assert_eq!(
+            text,
+            format!("     1\t{}…\n     2\tsecond\n", "z".repeat(LINE_CHARS))
+        );
+        // Exactly the most it holds, then its new line: nothing of the next line is lost.
+        let edge = "w".repeat(LINE_BYTES as usize);
+        std::fs::write(place.room.join("edge.txt"), format!("{edge}\nnext\n")).unwrap();
+        let (text, _) = run(&place, "oby_read", json!({"path": "edge.txt"})).unwrap();
+        assert!(text.ends_with("     2\tnext\n"), "{text}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A file is opened never through a link (one put in its place after it was resolved), and
+    /// only when it's a regular file still in the room; a named pipe never holds the open.
+    #[test]
+    fn files_open_only_in_the_room_and_never_through_a_link() {
+        let (home, place) = conversation("open");
+        let room = place.room.canonicalize().unwrap();
+        assert!(open_in_room(&room, &room.join("notes.md")).is_some());
+        std::os::unix::fs::symlink(room.join("notes.md"), room.join("link.md")).unwrap();
+        assert!(open_in_room(&room, &room.join("link.md")).is_none());
+        let outside = home.canonicalize().unwrap().join("outside.txt");
+        assert!(open_in_room(&room, &outside).is_none());
+        nix::unistd::mkfifo(&room.join("pipe"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+        assert!(open_in_room(&room, &room.join("pipe")).is_none());
+        // oby_list shows a link as a link, never as what it leads to.
+        std::os::unix::fs::symlink(place.folder.join("config"), room.join("cfg")).unwrap();
+        let (listed, _) = run(&place, "oby_list", json!({})).unwrap();
+        assert!(listed.lines().any(|l| l == "cfg@"), "{listed}");
+        assert!(listed.lines().any(|l| l == "link.md@"), "{listed}");
+        assert!(listed.lines().any(|l| l == "repos/"), "{listed}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// Only the room: no .., no ~, no absolute path or link that leads out of it, so never the
