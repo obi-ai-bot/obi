@@ -152,6 +152,31 @@ struct OfflineTests {
         #expect(!OfflineQueue.isAlreadySettled(RunnerError(message: "bad", status: 400)))
     }
 
+    /// obid answers 409 "That item is done already." for a decision settled meanwhile (sphere/link.rs):
+    /// the stale answer leaves the queue, and the ones after it still go.
+    @Test func anAnswerObidCallsDoneAlreadyLeavesTheQueue() async {
+        #expect(OfflineQueue.isAlreadySettled(RunnerError(message: "That item is done already.", status: 409)))
+        let suiteName = "com.deskree.oby.offline-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let queue = OfflineQueue(defaults: defaults)
+        queue.answers = [OfflineInboxAnswer(id: "stale", answer: "Allow", done: nil, later: nil),
+                         OfflineInboxAnswer(id: "next", answer: "Allow", done: nil, later: nil)]
+        var sent: [String] = []
+        await queue.flushAnswers { item in
+            do {
+                if item.id == "stale" { throw RunnerError(message: "That item is done already.", status: 409) }
+                sent.append(item.id)
+            } catch {
+                // As Phone.flushQueuedInbox maps it.
+                if OfflineQueue.isAlreadySettled(error) { throw OfflineQueue.FlushError.alreadySettled }
+                throw error
+            }
+        }
+        #expect(sent == ["next"])
+        #expect(queue.answers.isEmpty)
+    }
+
     @Test func messageAndInboxActionsRoundTripThroughCodableStorage() throws {
         let message = OfflineMessage(id: "m1", said: "build it", question: nil, option: nil, voice: false)
         let answer = OfflineInboxAnswer(id: "i1", answer: "Allow", done: nil, later: nil)
