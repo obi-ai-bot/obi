@@ -110,7 +110,7 @@
 				Oby.entitlements,
 				Tools/bundle-cloudflared.sh,
 				Tools/bundle-obid.sh,
-				Tools/com.deskree.obid.plist,
+				Tools/com.deskree.oby.obid.plist,
 			);
 			target = FB61F80A30795FDE00A9523D /* Oby */;
 		};

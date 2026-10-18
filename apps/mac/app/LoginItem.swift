@@ -7,16 +7,21 @@ import ServiceManagement
 /// open the app and the engine runs, no terminal, no install.sh). `obid` from the app bundle
 /// (Contents/Helpers/obid), which launchd starts at login and keeps running while the window is
 /// closed, registered with `SMAppService` from the bundle's own plist
-/// (Contents/Library/LaunchAgents/com.deskree.obid.plist, apps/mac/app/Tools/com.deskree.obid.plist
+/// (Contents/Library/LaunchAgents/com.deskree.oby.obid.plist, apps/mac/app/Tools/com.deskree.oby.obid.plist
 /// in the repository). Settings › Runner turns it on with "This Mac" and off with a remote runner.
 ///
 /// Two older setups give way to it: the Swift runner (`oby-runner`), which older builds registered
 /// and which wanted the same ports, is unregistered; and an obid installed with install.sh, under
-/// the same label, keeps running until the person moves it into Oby (`moveFromScript`).
+/// its own label, keeps running until the person moves it into Oby (`moveFromScript`).
 @Observable
 final class RunnerLoginItem {
-    static let plist = "com.deskree.obid.plist"
-    static let label = "com.deskree.obid"
+    static let plist = "com.deskree.oby.obid.plist"
+    /// Not install.sh's `com.deskree.obid`: macOS's background-task records keep a label tied to the
+    /// file that first used it, and an app agent under install.sh's label then never starts (seen
+    /// 2026-10-18: "Missing container for matching BTMItem", exit 78).
+    static let label = "com.deskree.oby.obid"
+    /// install.sh's label for obid's launch agent.
+    static let scriptLabel = "com.deskree.obid"
     /// Where the bundle keeps the plist and the executable, from its root.
     static let plistPath = "Contents/Library/LaunchAgents/" + plist
     static let helperPath = "Contents/Helpers/obid"
@@ -45,7 +50,7 @@ final class RunnerLoginItem {
 
     /// `~/Library/LaunchAgents/com.deskree.obid.plist`, where install.sh puts obid's launch agent.
     static var scriptAgentURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/LaunchAgents/\(label).plist")
+        FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/LaunchAgents/\(scriptLabel).plist")
     }
 
     /// Turns the engine on: it starts now and at every login. macOS may want the user's approval
@@ -123,7 +128,7 @@ final class RunnerLoginItem {
             }
             let stop = Process()
             stop.executableURL = URL(filePath: "/bin/launchctl")
-            stop.arguments = ["bootout", "gui/\(getuid())/\(Self.label)"]
+            stop.arguments = ["bootout", "gui/\(getuid())/\(Self.scriptLabel)"]
             try stop.run()
             stop.waitUntilExit()
             // Status 3 (no such process) or 36 (not loaded): already stopped.

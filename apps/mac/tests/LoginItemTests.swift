@@ -17,7 +17,9 @@ struct LoginItemTests {
         #expect(plist?["AssociatedBundleIdentifiers"] as? [String] == ["com.deskree.oby"])
         #expect(RunnerLoginItem.plistPath.hasSuffix("/" + RunnerLoginItem.plist))
         #expect(plist?["ProgramArguments"] as? [String] == ["obid", "serve"])
-        #expect(RunnerLoginItem.label == "com.deskree.obid" && RunnerLoginItem.helperPath == "Contents/Helpers/obid")
+        #expect(RunnerLoginItem.label == "com.deskree.oby.obid" && RunnerLoginItem.helperPath == "Contents/Helpers/obid")
+        // Never install.sh's label: macOS would tie the app's agent to that file and never start it.
+        #expect(RunnerLoginItem.label != RunnerLoginItem.scriptLabel)
         // The Swift runner's plist stays, only so an older registration can be undone.
         let swift = Bundle.main.bundleURL.appending(path: "Contents/Library/LaunchAgents/\(RunnerLoginItem.swiftRunnerPlist)")
         #expect(FileManager.default.fileExists(atPath: swift.path))

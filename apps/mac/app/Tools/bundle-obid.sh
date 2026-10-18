@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Bundles obid, Oby's engine, with Oby (the owner's decision of 2026-10-18): Contents/Helpers/obid,
 # signed with the app's identity and the hardened runtime, its launch agent at
-# Contents/Library/LaunchAgents/com.deskree.obid.plist (apps/mac/app/LoginItem.swift registers it),
+# Contents/Library/LaunchAgents/com.deskree.oby.obid.plist (apps/mac/app/LoginItem.swift registers it),
 # and its plug-ins and web app at Contents/Resources/obid, where obid finds them from inside the
 # app (core/crates/obid/src/app.rs). Also keeps the Swift runner's old plist there, only so the app
 # can unregister it on Macs where an older Oby registered it. Run by the "Bundle obid" build phase
@@ -41,7 +41,7 @@ rm -f "$helpers/obid"
 lipo -create -output "$helpers/obid" "${slices[@]}"
 chmod 755 "$helpers/obid"
 
-cp "$SRCROOT/mac/app/Tools/com.deskree.obid.plist" "$agents/com.deskree.obid.plist"
+cp "$SRCROOT/mac/app/Tools/com.deskree.oby.obid.plist" "$agents/com.deskree.oby.obid.plist"
 cp "$root/Runner/com.deskree.oby.runner.plist" "$agents/com.deskree.oby.runner.plist"
 
 rm -rf "$resources/plugins" "$resources/web"
