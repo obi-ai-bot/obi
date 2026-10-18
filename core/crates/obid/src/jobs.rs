@@ -2269,7 +2269,7 @@ impl Jobs {
         }
     }
 
-    fn agent_bin(&self, tool: Tool) -> Option<PathBuf> {
+    pub(crate) fn agent_bin(&self, tool: Tool) -> Option<PathBuf> {
         self.agent_config(tool)
             .and_then(|agent| process::resolve_bin(&agent.bin))
     }
@@ -2696,6 +2696,7 @@ impl Jobs {
                     model: job.model.clone(),
                     plan,
                     instructions: None,
+                    no_commands: false,
                 };
                 codex::run_turn(
                     launch,
@@ -4697,7 +4698,15 @@ pub(crate) fn copy_account_login(tool: Tool, account: &Path, to: &Path) -> std::
         }
         let bytes = std::fs::read(&file)?;
         learn_codex_tokens(&bytes, &account.display().to_string());
-        return write_login(&to.join("auth.json"), &bytes);
+        // Never the refresh token, which the provider rotates: a refresh inside the copy would sign
+        // the owner's own Codex out (as #651 for Claude). Nothing when it isn't JSON.
+        let Ok(mut login) = serde_json::from_slice::<Value>(&bytes) else {
+            return Ok(());
+        };
+        if let Some(tokens) = login.get_mut("tokens").and_then(Value::as_object_mut) {
+            tokens.remove("refresh_token");
+        }
+        return write_login(&to.join("auth.json"), login.to_string().as_bytes());
     }
     // Only what calls the API, never a refresh token, from the Keychain or the folder's file
     // ([`account_login`], #651). An account with a folder of its own isn't refreshed by obid

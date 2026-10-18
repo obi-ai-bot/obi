@@ -7,7 +7,7 @@
 // $CODEX_HOME/turns.jsonl: argv, cwd, HOME, CODEX_HOME, the prompt, the thread it resumed, its
 // settings, and what its CODEX_HOME holds.
 // What a turn does comes from the last line of the owner's words:
-//   HELLO              reads notes.md in its room (a command item) and streams "Hello there."
+//   HELLO              searches the web for "greetings" and streams "Hello there."
 //   REMEMBER           says "resume=<the thread it resumed, or none>"
 //   TOOLS              says "tools: <the oby tools, by name>"
 //   OBY <tool> <json>  calls the oby tool with the json and says "oby: <what it answered>"
@@ -19,6 +19,7 @@
 //   PERMS              asks to run a command in its room, to write inside, outside and in repos/,
 //                      and to read ~/.ssh
 //   RUN <words>        runs a command without asking (as Codex runs a "safe" one), then does <words>
+//   COPY               says which tokens its CODEX_HOME's auth.json holds: "copy: access=… refresh=…"
 //   LEAK               says the tokens of its CODEX_HOME's auth.json and of OBY_MCP_TOKEN
 //   FAIL               the turn fails
 //   anything else      "Nothing to do."
@@ -30,6 +31,14 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 
 const argv = process.argv.slice(2);
+// `features list`, as Codex prints it: shell_tool off when the -c settings turn it off, unless
+// FAKE_CODEX_SHELL_STAYS_ON is set (a Codex that ignores the setting).
+if (argv.slice(-2).join(" ") === "features list") {
+  const off = (name) => argv.includes(`features.${name}=false`) && !(name === "shell_tool" && process.env.FAKE_CODEX_SHELL_STAYS_ON);
+  for (const name of ["apps", "plugins", "shell_tool", "unified_exec"])
+    process.stdout.write(`${name.padEnd(41)}stable             ${off(name) ? "false" : "true"}\n`);
+  process.exit(0);
+}
 if (argv[argv.length - 1] !== "app-server") {
   process.stderr.write("fake-codex-harness: run as `fake-codex-harness [-c k=v]… app-server`\n");
   process.exit(2);
@@ -118,6 +127,10 @@ async function act(turnId, words) {
     event("item/completed", turnId, { item: { ...run, status: "completed", exitCode: 0, aggregatedOutput: "hi\n" } });
     return act(turnId, words.slice(4));
   }
+  if (words.startsWith("COPY")) {
+    const t = JSON.parse(readFileSync(join(home, "auth.json"), "utf8")).tokens ?? {};
+    return say(turnId, `copy: access=${t.access_token ? "yes" : "no"} refresh=${t.refresh_token ? "yes" : "no"}`);
+  }
   if (words.startsWith("LEAK")) {
     const auth = JSON.parse(readFileSync(join(home, "auth.json"), "utf8"));
     const t = auth.tokens ?? {};
@@ -133,11 +146,9 @@ async function act(turnId, words) {
     return say(turnId, `look: ${there.join(",") || "nothing"}`);
   }
   if (words.startsWith("HELLO")) {
-    writeFileSync("notes.md", "notes\n");
-    const read = { type: "commandExecution", id: randomUUID(), command: "/bin/zsh -lc 'cat notes.md'", cwd: room,
-      commandActions: [{ type: "read", command: "cat notes.md", name: "notes.md", path: join(room, "notes.md") }], status: "inProgress" };
-    event("item/started", turnId, { item: read });
-    event("item/completed", turnId, { item: { ...read, status: "completed", exitCode: 0, aggregatedOutput: "notes\n" } });
+    const search = { type: "webSearch", id: randomUUID(), query: "greetings" };
+    event("item/started", turnId, { item: search });
+    event("item/completed", turnId, { item: search });
     return say(turnId, "Hello there.");
   }
   if (words.startsWith("REMEMBER")) return say(turnId, `resume=${resumed ?? "none"}`);

@@ -32,6 +32,8 @@ pub struct Options {
     /// What the thread is told after Codex's own instructions (`developerInstructions`): a
     /// conversation's orientation.
     pub instructions: Option<String>,
+    /// A conversation's thread, whose shell is off: a command that runs anyway ends the turn.
+    pub no_commands: bool,
 }
 
 /// The `command` line `codex app-server` runs as: the binary, then `app-server`.
@@ -70,6 +72,8 @@ pub async fn run_turn(
         plan: options.plan,
         files: HashMap::new(),
         calls: HashMap::new(),
+        no_commands: options.no_commands,
+        fatal: None,
         thread: None,
         turn: None,
         said: None,
@@ -92,6 +96,7 @@ pub async fn run_turn(
         }
     }
     turn.session = run.thread.clone();
+    turn.fatal = run.fatal.take();
     if let Some((text, failed)) = &run.ended {
         turn.result = Some(agent::result(text, *failed, run.thread.as_deref()));
     }
@@ -130,6 +135,9 @@ struct Run<D, E> {
     /// The MCP tools each server was called for this turn, as their items started: the approval
     /// Codex asks names the tool only in its words.
     calls: HashMap<String, Vec<(String, Value)>>,
+    no_commands: bool,
+    /// Why obid ended the turn for good.
+    fatal: Option<String>,
     thread: Option<String>,
     /// The turn under way.
     turn: Option<String>,
@@ -219,6 +227,30 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         }
         let item = &params["item"];
         match message["method"].as_str() {
+            // Fail closed: a conversation's Codex runs no command, whatever its settings did.
+            Some("item/started") if self.no_commands && item["type"] == "commandExecution" => {
+                let command = unwrap_shell(&command_of(&item["command"]).unwrap_or_default());
+                let command: String = command
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(80)
+                    .collect();
+                let why = format!(
+                    "Codex ran a command ({command}), which a conversation never does, so obid stopped it"
+                );
+                if let (Some(thread), Some(turn)) = (self.thread.clone(), self.turn.clone()) {
+                    self.conn
+                        .request(
+                            "turn/interrupt",
+                            json!({"threadId": thread, "turnId": turn}),
+                        )
+                        .await;
+                }
+                self.fatal = Some(why.clone());
+                self.ended = Some((why, true));
+            }
             Some("item/started") => {
                 if let Some(step) = step(item) {
                     (self.on_event)(Event::Step(step));

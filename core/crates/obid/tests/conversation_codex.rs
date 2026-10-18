@@ -20,16 +20,22 @@ fn agent(name: &str) -> PathBuf {
 /// obid with conversations on Codex (the stand-in), and Claude Code's stand-in for the plan loop's
 /// brain; `signed_in` puts a login in the Codex account's folder.
 fn obid(name: &str, signed_in: bool) -> (Folder, Obid) {
+    obid_with(name, signed_in, "fake-codex-harness", None)
+}
+
+/// [`obid`] with `bin` as Codex, and `login` as the account's auth.json when there is one.
+fn obid_with(name: &str, signed_in: bool, bin: &str, login: Option<Value>) -> (Folder, Obid) {
     let folder = Folder::new(name);
     let remote = fixture(&folder.0.join("fixture"));
     let mut config = config(&folder.0, &remote, &agent("fake-harness"));
     config["conversation"] = json!({"agent": "codex"});
     let account = folder.0.join("home/accounts/codex");
-    config["agents"]["codex"] = json!({"bin": agent("fake-codex-harness"),
+    config["agents"]["codex"] = json!({"bin": agent(bin),
         "accounts": [{"id": "cstub", "name": "Codex stub", "configDir": account}]});
     std::fs::create_dir_all(&account).unwrap();
     if signed_in {
-        std::fs::write(account.join("auth.json"), "{}").unwrap();
+        let login = login.unwrap_or_else(|| json!({}));
+        std::fs::write(account.join("auth.json"), login.to_string()).unwrap();
     }
     let obid = start(&folder.0, &config, None);
     (folder, obid)
@@ -76,6 +82,31 @@ fn turns(obid: &Obid) -> Vec<Value> {
     all
 }
 
+/// What the plan loop answered: a reply's or a question's words.
+fn words(answer: &Answer) -> String {
+    answer.body["text"]
+        .as_str()
+        .or(answer.body["question"]["text"].as_str())
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// A ChatGPT access token (a JWT) that ends `seconds` from now.
+fn access_token(seconds: i64) -> String {
+    use base64::Engine;
+    let encode = |v: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    format!(
+        "{}.{}.{}",
+        encode(json!({"alg": "RS256"})),
+        encode(json!({"exp": now + seconds})),
+        "s".repeat(40)
+    )
+}
+
 fn inbox(obid: &Obid) -> Vec<Value> {
     let inbox = call(obid, "GET", "/v1/inbox", None);
     inbox.body.as_array().cloned().unwrap_or_default()
@@ -114,8 +145,8 @@ fn a_codex_turn_streams_its_words_and_ends_in_a_turn() {
         .map(|(_, d)| d)
         .collect();
     assert_eq!(steps.len(), 2, "{seen:?}");
-    assert_eq!(steps[0]["tool"], "read");
-    assert_eq!(steps[0]["detail"], "notes.md");
+    assert_eq!(steps[0]["tool"], "web_search");
+    assert_eq!(steps[0]["detail"], "greetings");
     assert_eq!(steps[0]["state"], "running");
     assert_eq!(steps[1]["state"], "done");
     let (_, last) = seen.last().unwrap();
@@ -144,7 +175,6 @@ fn a_codex_turn_streams_its_words_and_ends_in_a_turn() {
     // (a code-host login), and the turn's token kept out of any command's environment (F6).
     for setting in [
         "features.shell_tool=false",
-        "features.unified_exec=false",
         "features.apps=false",
         "features.plugins=false",
         r#"shell_environment_policy.exclude=["OBY_MCP_TOKEN"]"#,
@@ -220,27 +250,94 @@ fn codex_tokens_never_reach_what_obid_sends() {
     for token in [&access, &refresh, &id, &key] {
         assert!(!sent.contains(token.as_str()), "{token} in {sent}");
     }
-    // The four login tokens and the turn's MCP token, each taken out.
+    // The three login tokens in the copy and the turn's MCP token, each taken out (the copy has
+    // no refresh token).
     let said_back = answer.body["text"].as_str().unwrap();
-    assert_eq!(said_back.matches("[redacted: ").count(), 5, "{said_back}");
+    assert_eq!(said_back.matches("[redacted: ").count(), 4, "{said_back}");
 }
 
-/// A command Codex ran without asking taints the turn, as the web does (F4).
+/// A command item is never part of a conversation: Codex's shell is off, and if one runs anyway
+/// (a setting Codex stopped knowing) the turn ends at once, isn't tried again, its thread is never
+/// picked up again, and the plan loop says why (G1).
 #[test]
-fn work_codex_plans_after_a_command_waits_for_the_owners_start() {
-    let (_folder, obid) = obid("codex-conv-run", true);
+fn a_command_ends_a_codex_turn() {
+    let (_folder, obid) = obid("codex-conv-command", true);
     let answer = said(
         &obid,
         json!({"said": r#"RUN OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#,
                "new": true}),
     );
-    assert_eq!(answer.body["jobs"], json!([]), "{}", answer.text);
-    assert_eq!(
-        inbox(&obid).iter().filter(|i| i["kind"] == "start").count(),
-        1,
+    let conversation = answer.body["conversation"].as_str().unwrap().to_owned();
+    assert!(
+        words(&answer).ends_with(
+            "\n(Oby's plan loop answered: Codex ran a command (echo hi), which a conversation never does, so obid stopped it.)"
+        ),
         "{}",
         answer.text
     );
+    assert_eq!(turns(&obid).len(), 1, "not tried again");
+    assert!(
+        !obid
+            .home
+            .join(format!("conversations/{conversation}/session.json"))
+            .exists()
+    );
+    let jobs = call(&obid, "GET", "/v1/jobs", None);
+    assert_eq!(jobs.body.as_array().map_or(0, Vec::len), 0, "{}", jobs.text);
+}
+
+/// A Codex whose shell stays on whatever obid sets (`features list` says so) never runs a
+/// conversation (G1).
+#[test]
+fn codex_whose_shell_stays_on_is_refused() {
+    let (_folder, obid) = obid_with("codex-conv-shell-on", true, "fake-codex-shell-on", None);
+    let answer = said(&obid, json!({"said": "HELLO", "new": true}));
+    assert!(
+        words(&answer).ends_with(
+            "\n(Oby's plan loop answered: Codex's shell couldn't be turned off (its features list says shell_tool is on), so a conversation doesn't run on it.)"
+        ),
+        "{}",
+        answer.text
+    );
+    assert!(turns(&obid).is_empty());
+}
+
+/// The login copy never carries the refresh token, which the provider rotates (G2); a login whose
+/// access token ends before the turn could is refused with why.
+#[test]
+fn codex_login_copies_have_no_refresh_token() {
+    let login = |seconds| {
+        json!({"auth_mode": "chatgpt", "last_refresh": "2026-10-12T23:13:02Z",
+               "tokens": {"access_token": access_token(seconds), "refresh_token": format!("rt_{}", "r".repeat(40)),
+                          "id_token": access_token(seconds), "account_id": "acct"}})
+    };
+    let (_folder, obid) = obid_with(
+        "codex-conv-copy",
+        true,
+        "fake-codex-harness",
+        Some(login(10 * 24 * 3600)),
+    );
+    let copy = said(&obid, json!({"said": "COPY", "new": true}));
+    assert_eq!(
+        copy.body["text"], "copy: access=yes refresh=no",
+        "{}",
+        copy.text
+    );
+
+    std::fs::write(
+        obid.home.join("accounts/codex/auth.json"),
+        login(60).to_string(),
+    )
+    .unwrap();
+    let ending = said(&obid, json!({"said": "COPY", "new": true}));
+    assert!(
+        words(&ending).ends_with(
+            "\n(Oby's plan loop answered: Codex's login for Codex stub ends within this turn, and obid doesn't refresh a conversation's copy: run codex on that account to refresh it.)"
+        ),
+        "{}",
+        ending.text
+    );
+    assert_eq!(turns(&obid).len(), 1);
 }
 
 /// Work planned after Codex searched the web waits for the owner's Start, as on Claude Code.
@@ -382,13 +479,6 @@ fn the_plan_loop_answers_when_codex_cant_run() {
     let (_folder, obid) = obid("codex-conv-fallback", false);
     // What the plan loop says depends on whether its brain can run (with no usable login it's
     // keyword rules, #651); its answer, a reply or a question, ends with the line saying why.
-    let words = |answer: &Answer| {
-        answer.body["text"]
-            .as_str()
-            .or(answer.body["question"]["text"].as_str())
-            .unwrap_or("")
-            .to_owned()
-    };
     let answer = said(&obid, json!({"said": "HELLO", "new": true}));
     assert!(
         words(&answer).ends_with(

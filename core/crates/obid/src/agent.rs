@@ -123,6 +123,9 @@ pub struct Turn {
     /// What the agent should hear at the start of its next prompt: what obid declined this turn
     /// and why, for a tool whose answer to a permission carries no words (ACP).
     pub notes: Vec<String>,
+    /// obid ended the turn for something trying again won't mend (a conversation's Codex ran a
+    /// command), and why.
+    pub fatal: Option<String>,
 }
 
 impl Turn {

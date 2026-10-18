@@ -593,7 +593,7 @@ async fn attempts(
         place.scrub();
         let (launch, codex) = match tool {
             Tool::Codex => {
-                super::harness_codex::launch(shared, account, place, &url, token, &resume)?
+                super::harness_codex::launch(shared, account, place, &url, token, &resume).await?
             }
             _ => {
                 // As before a job's run (#651): the Keychain's default login refreshed when it's
@@ -633,6 +633,11 @@ async fn attempts(
                 continue;
             }
         };
+        // Ended for good (Codex ran a command): not tried again, and its session never picked up.
+        if let Some(why) = turn.0.fatal.clone() {
+            let _ = std::fs::remove_file(&place.session);
+            return Err(why);
+        }
         if let Some(id) = &turn.0.session {
             let kept = Kept {
                 session: id.clone(),
@@ -1421,6 +1426,13 @@ mod tests {
             &place.repos
         ));
         assert!(taints("LS", &json!({}), &bounds, &place.repos));
+        // Any command taints the turn, even one a tool ran without asking (F4).
+        assert!(taints(
+            "Bash",
+            &json!({"command": "echo hi"}),
+            &bounds,
+            &place.repos
+        ));
         assert!(taints(
             "Glob",
             &json!({"pattern": "*.rs", "path": "repos/o"}),
