@@ -39,7 +39,7 @@ struct AskCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                Text(kind).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(failed ? Tokens.danger : Tokens.needs)
+                Text(kind).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(failed ? Tokens.danger : Tokens.needsInk)
                 if let source, !source.isEmpty { Text(source).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fadeOut() }
             }
             Text(title).font(Tokens.font(Tokens.textBase, .medium)).foregroundStyle(Tokens.ink).lineSpacing(6)
@@ -85,7 +85,7 @@ struct AskCard: View {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(Array(explained.enumerated()), id: \.offset) { _, option in
                             (Text(option.label).foregroundStyle(Tokens.text)
-                                + Text(option.recommended ? " · Recommended" : "").foregroundStyle(Tokens.needs)
+                                + Text(option.recommended ? " · Recommended" : "").foregroundStyle(Tokens.needsInk)
                                 + Text(option.detail.map { ": \($0)" } ?? "").foregroundStyle(Tokens.muted))
                                 .font(Tokens.font(Tokens.textSm)).fixedSize(horizontal: false, vertical: true)
                         }
@@ -133,7 +133,7 @@ struct AskCard: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12).padding(.vertical, 10)
-            .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(Tokens.codeBg, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .padding(.top, 10)
     }
 }
@@ -157,7 +157,7 @@ struct OptionPill: View {
                 Text(option.label).font(Tokens.font(Tokens.textMd, primary ? .medium : .regular)).lineLimit(2)
                     .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
             }
-            .foregroundStyle(primary ? Color(hex: 0x111111) : option.role == .destructive ? Tokens.danger : quiet ? (hovering ? Tokens.ink : Tokens.muted) : hovering ? Tokens.ink : Tokens.item)
+            .foregroundStyle(primary ? Tokens.onInk : option.role == .destructive ? Tokens.danger : quiet ? (hovering ? Tokens.ink : Tokens.muted) : hovering ? Tokens.ink : Tokens.item)
             .padding(.horizontal, 14).padding(.vertical, 6).frame(minHeight: 32)
             .background(background, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -195,7 +195,7 @@ struct PlanText: View {
                         }
                     case .code(let text):
                         Text(text).font(Tokens.mono(12)).padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .background(Tokens.codeBg, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     case .text(let text): Text(inline(text))
                     }
                 }
@@ -207,7 +207,7 @@ struct PlanText: View {
         }
         .frame(maxHeight: 220)
         .fixedSize(horizontal: false, vertical: true)
-        .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(Tokens.codeBg, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private func inline(_ text: String) -> AttributedString { Reading.markdown(text, code: Tokens.mono(12)) }
@@ -281,7 +281,7 @@ struct PillButton: View {
     var body: some View {
         Button(action: action) {
             Text(title).font(Tokens.font(Tokens.textMd, primary ? .medium : .regular)).lineLimit(1)
-                .foregroundStyle(primary ? Color(hex: 0x111111) : danger ? Tokens.danger : quiet && !hovering ? Tokens.muted : hovering ? Tokens.ink : Tokens.item)
+                .foregroundStyle(primary ? Tokens.onInk : danger ? Tokens.danger : quiet && !hovering ? Tokens.muted : hovering ? Tokens.ink : Tokens.item)
                 .padding(.horizontal, 14).frame(height: 32)
                 .background(primary ? (hovering ? .white : Tokens.ink) : quiet ? (hovering ? Tokens.hover : .clear) : hovering ? Color.white.opacity(0.13) : Tokens.pill,
                             in: Capsule())
@@ -473,9 +473,15 @@ struct ObyMark: View {
             var ears = Path()
             ears.addLines([point(5, 6.6), point(7.9, 3.6), point(8.9, 6.6)]); ears.closeSubpath()
             ears.addLines([point(19, 6.6), point(16.1, 3.6), point(15.1, 6.6)]); ears.closeSubpath()
+            let face = Path(roundedRect: CGRect(x: 1.5 * unit, y: 6 * unit, width: 21 * unit, height: 16.5 * unit), cornerRadius: 5 * unit)
+            // On a light ground, a hairline round the white face so it holds its shape (`oby-edge`):
+            // stroked wide under the fill, so only its outer half shows.
+            let edge = StrokeStyle(lineWidth: 1.2 * unit + 1.5, lineJoin: .round)
+            context.stroke(ears, with: .color(Tokens.obyEdge), style: edge)
+            context.stroke(face, with: .color(Tokens.obyEdge), lineWidth: 1.5)
             context.fill(ears, with: .color(body))
             context.stroke(ears, with: .color(body), style: StrokeStyle(lineWidth: 1.2 * unit, lineJoin: .round))
-            context.fill(Path(roundedRect: CGRect(x: 1.5 * unit, y: 6 * unit, width: 21 * unit, height: 16.5 * unit), cornerRadius: 5 * unit), with: .color(body))
+            context.fill(face, with: .color(body))
             for x in [6.0, 14.6] {
                 context.fill(Path(roundedRect: CGRect(x: x * unit, y: 10.6 * unit, width: 2.8 * unit, height: 5 * unit), cornerRadius: 1.4 * unit), with: .color(eye))
             }

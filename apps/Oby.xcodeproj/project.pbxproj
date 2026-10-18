@@ -178,6 +178,7 @@
 			membershipExceptions = (
 				Character.swift,
 				DesignViews.swift,
+				ObyFaceLive.swift,
 			);
 			target = 0B1E0C0A0000000000AD0007 /* ObyWatch */;
 		};
@@ -188,8 +189,19 @@
 				Pokes.swift,
 				DecisionCard.swift,
 				DesignViews.swift,
+				ObyFaceLive.swift,
 			);
 			target = 0B1E0C0A0000000000AE0007 /* ObyWatchWidget */;
+		};
+		0B1E0C0A0000000000AF0010 /* Exceptions for "Shared" folder in "ObyPhone" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				DecisionCard.swift,
+				OBYStyle.swift,
+				ObyFace.swift,
+				StatusPill.swift,
+			);
+			target = 0B1E0C0A000000000000C5 /* ObyPhone */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -217,6 +229,7 @@
 			exceptions = (
 				0B1E0C0A0000000000AD0006 /* Exceptions for "Shared" folder in "ObyWatch" target */,
 				0B1E0C0A0000000000AE0006 /* Exceptions for "Shared" folder in "ObyWatchWidget" target */,
+				0B1E0C0A0000000000AF0010 /* Exceptions for "Shared" folder in "ObyPhone" target */,
 			);
 			path = shared;
 			sourceTree = "<group>";
@@ -998,7 +1011,6 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
-				INFOPLIST_KEY_UIUserInterfaceStyle = Dark;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1042,7 +1054,6 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
-				INFOPLIST_KEY_UIUserInterfaceStyle = Dark;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

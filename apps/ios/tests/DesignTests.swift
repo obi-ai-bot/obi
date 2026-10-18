@@ -49,6 +49,95 @@ struct DesignTests {
         #expect(WorkList.items(items, in: .done).map(\.id) == ["t"])
     }
 
+    /// One "needs you" (docs/oby-ux.md rows 5 and 10): the tasks with an open decision, its own or
+    /// an inbox item, plus the decisions with no task on Home; the line leads to the longest-waiting.
+    @Test func needsYouIsCountedOnceAndLeadsToTheTask() throws {
+        let queued = try job("q", "queued")
+        let running = try job("r", "running")
+        let failed = try job("f", "failed", finished: "2026-10-09T22:00:00Z")
+        let since = ISO8601DateFormatter().date(from: "2026-10-09T21:00:00Z")!
+        func item(_ id: String, _ kind: String, job: String, created: TimeInterval, later: Date? = nil) -> InboxItem {
+            InboxItem(kind: kind, id: id, job: job, title: kind, text: "", options: [], created: Date(timeIntervalSince1970: created), later: later)
+        }
+        let start = item("i1", "start", job: "q", created: 200)
+        let audit = item("i2", "audit", job: "", created: 100)
+        let putOff = item("i3", "question", job: "r", created: 50, later: .now.addingTimeInterval(3600))
+        let elsewhere = item("i4", "question", job: "older-than-the-list", created: 300)
+        let inbox = InboxItem.waiting([start, audit, putOff, elsewhere])
+        let items = PhoneWork.items([queued, running, failed], inbox: inbox, since: since, seen: [])
+        // A Start it? on a queued task makes it need you; a decision put off doesn't, until it's back.
+        #expect(items.first { $0.id == "q" }?.status == .needs)
+        #expect(items.first { $0.id == "r" }?.status == .running)
+        // The Inbox holds only what has no task on Home.
+        let loose = PhoneWork.loose(inbox, among: items)
+        #expect(loose.map(\.id) == ["i2", "i4"])
+        #expect(WorkList.needsYou(items, loose: loose.count) == 4)
+        // The longest-waiting decision first: here the one with no task, so the Inbox.
+        #expect(PhoneWork.firstNeeding(items, inbox: inbox) == .inbox)
+        #expect(PhoneWork.firstNeeding(items, inbox: [start, elsewhere]) == .task("q"))
+        // No inbox item (an older runner): the first task that needs you.
+        #expect(PhoneWork.firstNeeding(items, inbox: []) == .task("f"))
+        #expect(PhoneWork.firstNeeding(items.filter { $0.status != .needs }, inbox: []) == nil)
+    }
+
+    /// Home as Sangam has it (docs/oby-ux.md row 3, docs/ios-design.md "Home"): every kind is a chip
+    /// whatever's in it; under them the running tasks with what each is on, and the latest talk.
+    @Test func homeShowsEveryKindAndWhatsRunning() throws {
+        let needs = try job("n", "running", extra: #", "question": {"text": "Which branch?", "options": ["dev"]}"#)
+        var running = try job("r", "running")
+        running.step = "Running swift test"
+        let queued = try job("q", "queued")
+        let done = try job("d", "done", finished: "2026-10-09T22:00:00Z")
+        let since = ISO8601DateFormatter().date(from: "2026-10-09T23:00:00Z")!
+        let items = PhoneWork.items([needs, running, queued, done], since: since, seen: [])
+        // Only Tasks hold anything, yet Review PR and Issues are chips too, in Home's order.
+        #expect(WorkList.kinds(items).map(\.label) == ["Review PR", "Issues", "Tasks"])
+        #expect(WorkList.kinds(items).map(\.needs) == [0, 0, 1])
+        #expect(WorkList.kinds([] as [WorkList.Item<Job>]).map(\.label) == ["Review PR", "Issues", "Tasks"])
+        // Running: up to three open tasks, what needs you before the rest; each says what it's on.
+        let rows = PhoneWork.running(items)
+        #expect(rows.map(\.id) == ["n", "q", "r"])
+        let question = InboxItem(kind: "question", id: "i", job: "n", title: "", text: "", options: [], created: now)
+        #expect(PhoneWork.step(rows[0], decision: question) == "Needs you · Question")
+        #expect(PhoneWork.step(rows[0], decision: nil) == "Needs you · Question")
+        #expect(PhoneWork.step(rows[1], decision: nil) == "Queued")
+        #expect(PhoneWork.step(rows[2], decision: nil) == "Running swift test")
+        // Recent: the three latest conversations.
+        let talk = (1...4).map { RunnerConversation(id: "c\($0)", title: "", lastActivity: now.addingTimeInterval(Double($0))) }
+        #expect(PhoneWork.recent(talk).map(\.id) == ["c4", "c3", "c2"])
+    }
+
+    /// A task's ⋮ (Sangam's TaskMenu.tsx, docs/oby-ux.md row 21): its conversation; Stop task while
+    /// it goes, Archive task once it's done; Move to… and Mode under them; Dismiss when it needs you.
+    @Test func aTaskMenuHasSangamsItems() throws {
+        let running = try job("r", "running", extra: #", "mode": "ask""#)
+        let done = try job("d", "done", finished: "2026-10-09T22:00:00Z")
+        let failed = try job("f", "failed", finished: "2026-10-09T22:00:00Z")
+        #expect(TaskMenu.items(running, conversation: true) == [.openConversation, .stop, .move, .mode])
+        #expect(TaskMenu.items(done, conversation: false) == [.archive, .move])
+        #expect(TaskMenu.items(failed, conversation: true) == [.openConversation, .dismiss, .move])
+        // Archived on this iPhone: off Home, into Archived; told something, it runs again and comes back.
+        #expect(PhoneWork.archived([done, running], clearedAt: nil, here: ["d"]).map(\.id) == ["d"])
+        #expect(PhoneWork.archived([running], clearedAt: nil, here: ["r"]).isEmpty)
+    }
+
+    /// Oby's live face (Sangam's ObyFaceLive.tsx): while it works the face melts into three
+    /// bouncing dots and holds there; its words in, they run back together into the still face.
+    @Test func obysFaceMeltsIntoDotsAndBack() {
+        var motion = ObyLiveMotion()
+        for _ in 0..<120 { motion.step(1.0 / 60, live: true) }
+        #expect(abs(motion[.dSpread] - 1) < 0.15 && abs(motion[.dR] - 1) < 0.1 && motion[.scale] < 0.15)
+        // Still at work long after: it holds the dots, never coming together on its own.
+        for _ in 0..<600 { motion.step(1.0 / 60, live: true) }
+        #expect(abs(motion[.dSpread] - 1) < 0.15 && !motion.settled)
+        // The words land: back into the face, and done.
+        for _ in 0..<300 { motion.step(1.0 / 60, live: false) }
+        #expect(motion.settled)
+        #expect(abs(motion[.scale] - 1) < 0.01 && motion[.dR] < 0.01 && abs(motion[.inflate] - 0.17) < 0.01)
+        // A face that takes over from one at work starts with the dots out.
+        #expect(abs(ObyLiveMotion(working: true)[.dSpread] - 1) < 0.15)
+    }
+
     @Test func archivedHoldsWhatLeftHome() throws {
         let cleared = try job("c", "done", finished: "2026-10-09T22:00:00Z")
         let dismissed = try job("d", "failed", finished: "2026-10-09T22:00:00Z", extra: #", "dismissed": "2026-10-09T23:00:00Z""#)

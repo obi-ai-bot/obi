@@ -3,7 +3,7 @@ import SwiftUI
 /// One thing only you can answer (`GET /v1/inbox`), as Sangam's decision block (AskBlock, the
 /// shared AskCard): its kind, Oby's headline, what happened, the command or plan, the choices with
 /// the recommended one filled, Later, and your own words. Answered here, it goes from the Mac's
-/// window too. Shown on a task's card and page, in its conversation, and in Home's Needs you.
+/// window too. Shown on a task's card and page, in its conversation, and, with no task on Home, in the Inbox.
 struct InboxDecision: View {
     @Environment(\.openURL) private var openURL
     @Environment(Phone.self) private var phone
@@ -34,10 +34,12 @@ struct InboxDecision: View {
                     plan: item.kind == "question" ? job?.question?.plan : nil,
                     options: CardOption.inbox(item.options, kind: item.kind, question: job?.question, permission: permission,
                                               words: item.words, details: item.details, does: item.title),
-                    busy: busy,
+                    busy: busy || phone.waitsToSend(answer: item.id),
                     onChoose: choose,
                     onLater: { settle(later: .now.addingTimeInterval(3600)) })
-            if takesWords { OwnWords(words: $words, prompt: item.kind == "permission" ? "No, and tell the agent why…" : "Answer in your own words…", busy: busy, send: sendWords) }
+            if phone.waitsToSend(answer: item.id) {
+                Text(ReachNotice.waiting).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 10)
+            } else if takesWords { OwnWords(words: $words, prompt: item.kind == "permission" ? "No, and tell the agent why…" : "Answer in your own words…", busy: busy, send: sendWords) }
             if openTask, !item.job.isEmpty {
                 NavigationLink(value: Route.task(item.job)) {
                     Text("Open task").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)

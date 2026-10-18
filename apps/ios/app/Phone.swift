@@ -1,22 +1,23 @@
 import Foundation
+import Network
 import OSLog
 import Security
 import UIKit
-
-/// The app's tabs (Sangam's design): Home, the stage; Conversations with Oby (`chat`); Settings,
-/// the runner and its accounts.
-nonisolated enum PhoneTab: String, Hashable, Sendable { case home, chat, settings }
 
 /// The jobs as Home's work (#496, as the Mac's `SidebarSections.work`): each one's kind, where it
 /// stands, and whether it's new; and what's been archived.
 nonisolated enum PhoneWork {
     /// Latest first (by when it finished, else when it was made). New: made after `since` (this
-    /// launch) and not opened since (`seen`). No teammates yet: the runner doesn't say who asked.
-    static func items(_ jobs: [Job], since: Date, seen: Set<String>) -> [WorkList.Item<Job>] {
-        jobs.enumerated()
+    /// launch) and not opened since (`seen`). Needs you: a decision is open on it, its own or one
+    /// of `inbox` (what waits now, `InboxItem.waiting`), whatever its agent is doing (Sangam's
+    /// tasks.ts). No teammates yet: the runner doesn't say who asked.
+    static func items(_ jobs: [Job], inbox: [InboxItem] = [], since: Date, seen: Set<String>) -> [WorkList.Item<Job>] {
+        let asked = Set(inbox.map(\.job))
+        return jobs.enumerated()
             .sorted { ($0.element.finished ?? $0.element.created, -$0.offset) > ($1.element.finished ?? $1.element.created, -$1.offset) }
             .map { _, job in
-                let status: WorkStatus = job.needsYou || job.waitsForAnswer || job.waitsForPermission ? .needs : job.isActive ? .running : .done
+                let decides = job.needsYou || job.waitsForAnswer || job.waitsForPermission || asked.contains(job.id)
+                let status: WorkStatus = decides ? .needs : job.isActive ? .running : .done
                 return WorkList.Item(id: job.id, job: job, type: .of(review: job.kind == "review", issue: job.issue, requester: nil),
                                      status: status, queued: job.status == .queued, fresh: job.created > since && !seen.contains(job.id))
             }
@@ -24,8 +25,51 @@ nonisolated enum PhoneWork {
 
     /// Archived (#280), kept by the phone alone: finished jobs Clear done took off Home, and the
     /// ones you let go (Dismiss). The runner keeps them all; this lists the ones it sent.
-    static func archived(_ jobs: [Job], clearedAt: Date?) -> [Job] {
-        jobs.filter { !$0.isActive && ($0.dismissed != nil || !$0.listed(after: clearedAt, among: jobs)) }
+    /// `here`: the tasks archived on this iPhone (a task's ⋮); one that runs again comes back.
+    static func archived(_ jobs: [Job], clearedAt: Date?, here: Set<String> = []) -> [Job] {
+        jobs.filter { !$0.isActive && ($0.dismissed != nil || here.contains($0.id) || !$0.listed(after: clearedAt, among: jobs)) }
+    }
+
+    /// The Inbox (docs/oby-ux.md row 10): of what waits now, the decisions with no task on Home,
+    /// so each one is somewhere. The rest live with their task.
+    static func loose(_ inbox: [InboxItem], among items: [WorkList.Item<Job>]) -> [InboxItem] {
+        let listed = Set(items.map(\.id))
+        return inbox.filter { !listed.contains($0.job) }
+    }
+
+    /// Where Home's "needs you" leads: the decision that has waited longest (`inbox` is what waits
+    /// now, longest first), on its task's page, or the Inbox when it has no task on Home; with no
+    /// inbox item (an older runner), the first task that needs you.
+    static func firstNeeding(_ items: [WorkList.Item<Job>], inbox: [InboxItem]) -> Route? {
+        if let first = inbox.first {
+            return items.contains { $0.id == first.job } ? .task(first.job) : .inbox
+        }
+        return WorkList.ranked(items).first { $0.status == .needs }.map { .task($0.id) }
+    }
+
+    /// Home's Running (docs/ios-design.md: Sangam has these in his side panel): up to three open
+    /// tasks, in the side panel's order.
+    static func running(_ items: [WorkList.Item<Job>]) -> [WorkList.Item<Job>] {
+        Array(WorkList.ranked(items.filter { $0.status != .done }).prefix(3))
+    }
+
+    /// What a Running row says it's on: the decision that waits ("Needs you · Question"), else
+    /// "Queued" and what for, else its live step.
+    static func step(_ item: WorkList.Item<Job>, decision: InboxItem?) -> String {
+        let job = item.job
+        if item.status == .needs {
+            let kind = decision.map { AskKind.label($0.kind, plan: job.question?.plan != nil) }
+                ?? (job.waitsForPermission ? "Permission" : job.waitsForAnswer ? AskKind.label("question", plan: job.question?.plan != nil)
+                    : job.reviewNeedsYou ? AskKind.label("review") : job.mergeNeedsYou ? AskKind.label("merge") : AskKind.label("failed"))
+            return "Needs you · \(kind)"
+        }
+        if item.queued { return job.waiting.map { "Queued · \($0.text)" } ?? "Queued" }
+        return job.step.isEmpty ? "Working" : job.step
+    }
+
+    /// Home's Recent: the three latest conversations.
+    static func recent(_ conversations: [RunnerConversation]) -> [RunnerConversation] {
+        Array(conversations.sorted { $0.latest > $1.latest }.prefix(3))
     }
 }
 
@@ -44,8 +88,8 @@ final class Phone {
     }
 
     let voice = PhoneVoice()
-    /// The tab in front; a notification's job opens on Home.
-    var tab = PhoneTab.home
+    /// The side panel, open on one of its sections, or nil while it's closed (PhoneRoot).
+    var panel: PanelSection?
     /// The runner's conversation, read in pages and followed over `turn` events, for the Chat
     /// tab's thread (apps/shared/ConversationModel.swift): one thread for every device (#11).
     let conversation = ConversationModel()
@@ -92,9 +136,24 @@ final class Phone {
     func markSeen(_ id: String) { seen.insert(id) }
 
     /// Home's work: every job Home lists, with its kind and where it stands.
-    var work: [WorkList.Item<Job>] { PhoneWork.items(visibleJobs, since: since, seen: seen) }
+    var work: [WorkList.Item<Job>] { PhoneWork.items(visibleJobs, inbox: answering, since: since, seen: seen) }
+    /// The Inbox: what waits now with no task on Home.
+    var loose: [InboxItem] { PhoneWork.loose(answering, among: work) }
+    /// The decisions that wait on you now, longest first: not those answered here while the Mac
+    /// was out of reach, which wait to go (docs/oby-ux.md row 18).
+    var answering: [InboxItem] { InboxItem.waiting(inbox).filter { !waitsToSend(answer: $0.id) } }
+    /// An answer, or words, given while the Mac was out of reach: they wait on this iPhone, marked
+    /// "Sends when your Mac is back", and go when it is.
+    func waitsToSend(answer id: String) -> Bool { offlineQueue.answers.contains { $0.id == id } }
+    func waitsToSend(echo id: String) -> Bool { offlineQueue.messages.contains { $0.id == id } }
     /// Archived: done jobs that left Home (Clear done, Dismiss).
-    var archived: [Job] { PhoneWork.archived(jobs, clearedAt: clearedAt) }
+    var archived: [Job] { PhoneWork.archived(jobs, clearedAt: clearedAt, here: archivedHere) }
+    /// Tasks archived with their ⋮ (Sangam's Archive task), kept by this iPhone: obid has no
+    /// archive yet (docs/oby-ux.md row 22, A7).
+    private(set) var archivedHere = Set(UserDefaults.standard.stringArray(forKey: "phone.archived") ?? []) {
+        didSet { UserDefaults.standard.set(Array(archivedHere), forKey: "phone.archived") }
+    }
+    func archive(_ id: String) { archivedHere.insert(id) }
     /// What Oby's answering or asking in the thread shown, else nothing.
     var talkHere: Talk { talkIn == current ? talk : .none }
     @ObservationIgnored private let speaker = PhoneSpeaker()
@@ -131,7 +190,9 @@ final class Phone {
         speaker.stop()
     }
 
-    var runnerURL: URL {
+    /// A runner that isn't a paired Mac, at the address Settings › Runner gives; nil on a fresh
+    /// iPhone, which talks to nobody until it pairs (docs/oby-ux.md row 33).
+    var runnerURL: URL? {
         didSet {
             UserDefaults.standard.set(runnerURL, forKey: "runner.url")
             stop()
@@ -163,6 +224,7 @@ final class Phone {
             } else {
                 UserDefaults.standard.removeObject(forKey: "mac.link")
                 GatewayTokenStore.remove()
+                pairedUntil = nil
             }
             restoreQueuedMessages(for: offlineQueueTarget)
             if loop != nil { finder.find(named: link?.name) { [weak self] url in self?.lan = url } }
@@ -182,15 +244,15 @@ final class Phone {
     var base: URL {
         #if DEBUG
         // `-ObySampleOffline YES`: no runner, the linked Mac's gateway either (the link stays).
-        if Self.offline { return URL(string: "http://127.0.0.1:9")! }
+        if Self.offline { return Runner.nowhere }
         #endif
-        return route?.url ?? runnerURL
+        return route?.url ?? runnerURL ?? Runner.nowhere
     }
     /// A stable identity for the logical runner, unaffected by switching between its home and
     /// tunnel routes. Unpaired runners use their configured URL.
     private var offlineQueueTarget: String {
         if let link { return "mac:\(link.hostname.lowercased())" }
-        return "runner:\(runnerURL.absoluteString)"
+        return "runner:\(runnerURL?.absoluteString ?? "")"
     }
     @ObservationIgnored private let finder = MacFinder()
     var talk: Talk = .none
@@ -229,27 +291,46 @@ final class Phone {
     /// hides the jobs that finished by then. The runner keeps them all.
     private(set) var clearedAt: Date?
     private var loop: Task<Void, Never>?
-    /// What Home's stack and the Conversations tab's have open, over their first page.
+    /// What's open over Home: the app's one stack.
     var homePath: [Route] = []
-    var chatPath: [Route] = []
     /// The job whose notification's Publish was tapped; its screen publishes once it's ready.
     var publishing: String?
 
-    var offlineLine: String {
-        guard connection != .live else { return "Connected to \(host)" }
-        let time = lastSeen.map { $0.formatted(date: .omitted, time: .shortened) } ?? "never"
-        return "Your Mac is asleep or offline. Last seen \(time)"
+    /// Why the Mac can't be reached, the same line on every screen, or nil.
+    var notice: ReachNotice? {
+        ReachNotice.of(connection, online: online, status: refusal, paired: link != nil, lastSeen: lastSeen, expires: pairedUntil)
     }
+    /// When this iPhone's pairing ends (the gateway's 30 days), from the answer that paired it.
+    private(set) var pairedUntil = UserDefaults.standard.object(forKey: "gateway.expiresAt") as? Date {
+        didSet { UserDefaults.standard.set(pairedUntil, forKey: "gateway.expiresAt") }
+    }
+    /// The refusal to keep after a failed request: its status when the runner answered; a 401
+    /// stays through errors with none (a dropped connection), until a request succeeds, so the
+    /// screen doesn't flip between Connect and Home.
+    static func refusal(after error: Error, was: Int?) -> Int? {
+        let status = (error as? RunnerError)?.status
+        return status == nil && was == 401 ? 401 : status
+    }
+    /// Connect instead of Home: no Mac and no runner yet, or the Mac stopped taking this iPhone.
+    var needsPairing: Bool { Self.needsPairing(linked: link != nil, runner: runnerURL, notice: notice) }
+    static func needsPairing(linked: Bool, runner: URL?, notice: ReachNotice?) -> Bool {
+        (!linked && runner == nil) || notice == .removed || notice == .expired
+    }
+    /// This iPhone has a network path (NWPathMonitor).
+    private(set) var online = true
+    @ObservationIgnored private var path: NWPathMonitor?
+    /// The HTTP status of the last refusal (a 401 from the gateway: this iPhone was removed).
+    private(set) var refusal: Int?
 
     init(offlineQueue: OfflineQueue = OfflineQueue(), connection: RunnerConnection = .connecting, inbox: [InboxItem] = []) {
         self.offlineQueue = offlineQueue
         self.connection = connection
         self.inbox = inbox
-        runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
+        runnerURL = UserDefaults.standard.url(forKey: "runner.url")
         #if DEBUG
         // `-ObySampleOffline YES`: the sample screens reach no runner at all, whatever the
         // simulator's settings say (the default runner is a real one).
-        if Self.offline { runnerURL = URL(string: "http://127.0.0.1:9")! }
+        if Self.offline, !UserDefaults.standard.bool(forKey: "ObySampleUnpaired") { runnerURL = Runner.nowhere }
         #endif
         if let data = UserDefaults.standard.data(forKey: "mac.link"), GatewayTokenStore.read() != nil {
             link = try? MacLink.paired(data)
@@ -269,7 +350,9 @@ final class Phone {
         offlineQueue.bindUnscopedEntries(to: offlineQueueTarget)
         restoreQueuedMessages(for: offlineQueueTarget)
         #if DEBUG
-        if SampleTasks.on { jobs = SampleTasks.jobs; loaded = true; SampleTasks.talk(self) }
+        if SampleTasks.on { jobs = SampleTasks.jobs; conversations = SampleTasks.conversations; accounts = SampleTasks.accounts; loaded = true; SampleTasks.talk(self) }
+        // `-ObySampleUnreachable YES`: the Mac out of reach since 40 minutes ago, for the notice's screenshots.
+        if UserDefaults.standard.bool(forKey: "ObySampleUnreachable") { self.connection = .offline(""); self.lastSeen = .now.addingTimeInterval(-2400) }
         #endif
     }
 
@@ -331,7 +414,11 @@ final class Phone {
         if changed.deleted, changed.id == current { show(nil) }
     }
 
-    var runner: Runner { Runner(base: base, token: GatewayTokenStore.read()) }
+    var runner: Runner {
+        // Paired with a Mac, a 401 means the pairing ended: say which, never the Tailscale line.
+        let refused = link.map { _ in (pairedUntil.map { $0 <= .now } ?? false) ? ReachNotice.expired : ReachNotice.removed }
+        return Runner(base: base, token: GatewayTokenStore.read(), refused: refused.map { "\($0.title). \($0.detail)" })
+    }
 
     /// Pairs with a Mac's gateway (#284): the invitation's QR secret or its six-digit code buys this
     /// iPhone's device token, kept in the keychain, and the Mac becomes the linked one. The QR code
@@ -341,6 +428,8 @@ final class Phone {
         guard let link = link ?? answer.link else {
             throw RunnerError(message: "The Mac didn't say how to reach it away from home. Pair with its QR code instead.")
         }
+        pairedUntil = answer.expiresAt
+        refusal = nil
         self.link = link
     }
     var active: [Job] { jobs.filter(\.isActive) }
@@ -348,7 +437,7 @@ final class Phone {
 
     /// The jobs Home lists: all but the settled ones (`Job.settled`) that finished by the last Clear
     /// done, newest first. Home puts them in their groups (JobList.groups), as the Mac's window does.
-    var visibleJobs: [Job] { jobs.filter { $0.listed(after: clearedAt, among: jobs) } }
+    var visibleJobs: [Job] { jobs.filter { $0.listed(after: clearedAt, among: jobs) && ($0.isActive || !archivedHere.contains($0.id)) } }
 
     // MARK: Staying live
 
@@ -356,18 +445,30 @@ final class Phone {
     /// (or the Mac) from there.
     func start() {
         finder.find(named: link?.name) { [weak self] url in self?.lan = url }
+        if path == nil {
+            let monitor = NWPathMonitor()
+            monitor.pathUpdateHandler = { [weak self] update in
+                let online = update.status == .satisfied
+                Task { @MainActor in self?.online = online }
+            }
+            monitor.start(queue: .main)
+            path = monitor
+        }
         follow()
     }
 
     /// The app went to the background: no connection, no battery spent.
     func stop() {
         finder.stop()
+        path?.cancel()
+        path = nil
         unfollow()
     }
 
-    /// The way to the Mac changed (home to away, or back): followed anew, keeping the thread.
+    /// The way to the Mac changed (home to away, or back, or just paired): followed anew, keeping
+    /// the thread, while the app is in front (`path` watches the network only then).
     private func reroute() {
-        guard loop != nil else { return }
+        guard path != nil else { return }
         unfollow()
         follow()
     }
@@ -381,6 +482,8 @@ final class Phone {
         // settings may name a real one).
         if Self.offline { return }
         #endif
+        // Nobody to follow yet: Connect is the first screen.
+        guard route != nil || runnerURL != nil else { return }
         loop = Task {
             var wait = 1.0
             while !Task.isCancelled {
@@ -394,6 +497,7 @@ final class Phone {
                     }
                 } catch {
                     if Task.isCancelled { return }
+                    refusal = Self.refusal(after: error, was: refusal)
                     connection = .offline(error.localizedDescription)
                 }
                 try? await Task.sleep(for: .seconds(wait))
@@ -422,6 +526,7 @@ final class Phone {
         // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
         await Notifications.clear(Set(jobs.filter { !$0.needsYou && !$0.waitsForAnswer }.map(\.id)))
         connection = .live
+        refusal = nil
         lastSeen = .now
         UserDefaults.standard.set(lastSeen, forKey: "runner.lastSeen")
         // Jobs dispatched from the Mac or the runner API notify too, so ask on connecting.
@@ -736,7 +841,7 @@ final class Phone {
 
     /// A notification was tapped: open its job on Home, and publish it if that's what was tapped.
     func open(_ id: String, publish: Bool) {
-        tab = .home
+        panel = nil
         homePath = [.task(id)]
         publishing = publish ? id : nil
     }
@@ -774,8 +879,9 @@ final class Phone {
     /// Settles an inbox item: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
         guard connection == .live else {
+            // The decision stays where it is, marked, until obid takes the answer (or says it was
+            // settled meanwhile: then the inbox fetched on connecting no longer has it).
             offlineQueue.queue(OfflineInboxAnswer(id: id, answer: answer, done: done, later: later, target: offlineQueueTarget))
-            inbox.removeAll { $0.id == id }
             return
         }
         apply(.inbox(try await runner.settle(id, answer: answer, done: done, later: later)))
@@ -865,7 +971,7 @@ final class Phone {
     // MARK: This phone's publishing key
 
     /// By the linked Mac's hostname, the same at home and away, or by the runner's.
-    private var deviceKey: String { "device.\(link?.hostname ?? runnerURL.host() ?? runnerURL.absoluteString)" }
+    private var deviceKey: String { "device.\(link?.hostname ?? runnerURL?.host() ?? runnerURL?.absoluteString ?? "")" }
     var deviceID: String? { UserDefaults.standard.string(forKey: deviceKey) }
 
     /// Registers the phone's Face ID key with the runner and returns its id. On every connection it
@@ -891,6 +997,8 @@ enum GatewayPairing {
         var token: String
         /// The Mac's name and tunnel hostname, so a typed code links the Mac as the QR code would.
         var link: MacLink?
+        /// When the pairing ends: 30 days (docs/runner-api.md, "Redeeming").
+        var expiresAt: Date?
     }
 
     typealias Transport = (URLRequest) async throws -> (Data, URLResponse)

@@ -24,6 +24,22 @@ enum SampleTasks {
         return list.compactMap { try? Runner.decoder.decode(Job.self, from: Data($0.utf8)) }
     }
 
+    /// Two made-up accounts, one past 80% of its week, for the message box's usage gauge.
+    static var accounts: [Account] {
+        let resets = ISO8601DateFormatter().string(from: .now.addingTimeInterval(3 * 86_400))
+        return [#"{"id": "personal", "agent": "claude", "name": "Personal", "signedIn": true, "sevenDay": 0.84, "sevenDayResets": "\#(resets)", "running": 1}"#,
+                #"{"id": "deskree", "agent": "codex", "name": "Deskree", "signedIn": true, "sevenDay": 0.12, "sevenDayResets": "\#(resets)", "running": 0}"#]
+            .compactMap { try? Runner.decoder.decode(Account.self, from: Data($0.utf8)) }
+    }
+
+    /// Two made-up conversations, for Home's Recent.
+    static var conversations: [RunnerConversation] {
+        [RunnerConversation(id: "sample-c1", title: "Why does the login screen look empty?", lastActivity: .now.addingTimeInterval(-120),
+                            turn: .init(text: "On it. Claude is making the empty state say what to do next.")),
+         RunnerConversation(id: "sample-c2", title: "Where is 0.9 at?", lastActivity: .now.addingTimeInterval(-3600),
+                            turn: .init(text: "It went out on Tuesday; the About row came after."))]
+    }
+
     /// With `-ObySampleTalk <seconds>` too: the Oby thread opens with a question of yours, and that
     /// many seconds after launch Oby's answer comes, a word at a time, for a screenshot of it coming in.
     @MainActor static func talk(_ phone: Phone) {
@@ -31,8 +47,7 @@ enum SampleTasks {
         let delay = UserDefaults.standard.double(forKey: "ObySampleTalk")
         guard delay > 0 else { return }
         let model = phone.conversation
-        phone.tab = .chat
-        phone.chatPath = [.conversation(nil)]
+        phone.homePath = [.conversation(nil)]
         model.apply(Turn(id: "sample-ask", who: .user, text: "Where's the login screen task at?"))
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(delay))
@@ -52,8 +67,7 @@ enum SampleTasks {
     @MainActor static func harness(_ phone: Phone) {
         let delay = UserDefaults.standard.double(forKey: "ObySampleHarness")
         guard delay > 0 else { return }
-        phone.tab = .chat
-        phone.chatPath = [.conversation(nil)]
+        phone.homePath = [.conversation(nil)]
         let asked = "Make me a page for the login screen's empty state, then fix it in the app."
         phone.sample(.turn(Turn(id: "sample-harness", who: .user, text: asked)))
         func step(_ index: Int, _ tool: String, _ text: String, _ detail: String, _ state: TurnStep.State) {
