@@ -8,7 +8,8 @@
 //   HELLO          streams "Hello there." in three deltas, reads notes.md in its room, says it
 //   REMEMBER       says "resume=<the session it resumed, or none>"
 //   OBY <tool> <json>  calls the oby tool with the json and says "oby: <what it answered>"
-//   REPEAT <n> OBY <tool> <json>  calls it n times and says what the last call answered
+//   REPEAT <n> OBY <tool> <json>  calls it n times and says what the last call answered; with
+//                  " THEN <words>" after the json, does <words> next instead of saying it
 //   TOOLS          says "tools: <the oby tools, by name>"
 //   WEB <words>    searches the web (a tool call obid isn't asked about), then does <words>
 //   CURL <words>   asks to run curl, then does <words>
@@ -169,9 +170,11 @@ async function act(words, prompt = "") {
     emit({ type: "control_request", request_id: "c1", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "curl -s https://example.com" } } });
     then = (answer) => (answer.behavior === "allow" ? act(words.slice(5), prompt) : Promise.resolve(result(`curl: ${answer.behavior}`))).catch(failed);
   } else if (words.startsWith("REPEAT ")) {
-    const [, times, , tool, ...rest] = words.split(" ");
+    const [repeat, then] = words.split(" THEN ");
+    const [, times, , tool, ...rest] = repeat.split(" ");
     let answer;
     for (let i = 0; i < Number(times); i++) answer = await oby(tool, JSON.parse(rest.join(" ")));
+    if (then) return act(then, prompt);
     say(`oby: ${answer.result?.isError ? "refused: " : ""}${answer.result?.content?.[0]?.text}`);
   } else if (words.startsWith("OBY ")) {
     const [, tool, ...rest] = words.split(" ");

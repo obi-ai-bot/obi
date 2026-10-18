@@ -65,6 +65,20 @@ struct ChatPageTests {
         return job
     }
 
+    /// Told something after it ended, a task gets a follow-up (Sangam's design, the owner's decision
+    /// of 2026-10-18): its thread lists them oldest first, each with Oby's line as the design says it.
+    @Test func aFinishedTaskShowsItsFollowUps() {
+        var first = job(.running), second = job(.queued), other = job(.done)
+        first.id = "f1"; first.followUpOf = "j"; first.created = now.addingTimeInterval(60)
+        second.id = "f0"; second.followUpOf = "j"; second.created = now.addingTimeInterval(30)
+        other.id = "x"
+        #expect(ThreadTaskLine.followUps(of: "j", in: [first, other, second]).map(\.id) == ["f0", "f1"])
+        #expect(ThreadTaskLine.followUp(first, account: "Deskree")
+                == "This one’s finished, so I started a follow-up. Claude Code has it in oby on Deskree.")
+        first.repo = "local"
+        #expect(ThreadTaskLine.followUp(first, account: "") == "This one’s finished, so I started a follow-up. Claude Code has it on a.")
+    }
+
     /// The card under an answer says where its task stands, then who has it where; never "new"
     /// in the thread, where you're already looking at it.
     @Test func eachJobStateGetsItsCard() {

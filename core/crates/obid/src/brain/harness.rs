@@ -63,8 +63,7 @@ pub struct Session {
     /// The turn's own word, which fences what agents wrote in a tool's answer.
     pub nonce: String,
     /// The turn reached the web (a search, a fetch, a command obid let reach it): the work its
-    /// tools start waits for the owner's Start, and a job that ended picks up again only with
-    /// their Confirm (#374).
+    /// tools start waits for the owner's Start, a job that ended's follow-up too (#374).
     pub web: AtomicBool,
     /// How many times this turn's tools started a job, and told one something.
     pub dispatched: AtomicUsize,

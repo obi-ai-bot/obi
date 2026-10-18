@@ -504,8 +504,6 @@ pub struct Context {
     /// What this turn's lookups found, their titles and results: a finding's path must be in it
     /// (#540).
     pub found: String,
-    /// The briefing's jobs whose pull request was merged: they take no more words (#542).
-    pub merged: Vec<String>,
     /// The briefing's jobs that failed, were stopped or ran out of rounds in the last two days:
     /// more work on their issue or pull request goes on in them (#541).
     pub ended: Vec<Ended>,
@@ -762,11 +760,6 @@ impl Plan {
                 }
                 if self.message.as_deref().is_none_or(blank) {
                     problems.push("message_job needs what Oby found and what to change".into());
-                }
-                for id in named.iter().filter(|id| context.merged.contains(id)) {
-                    problems.push(format!(
-                        "{id}'s pull request was merged: it takes no more words, dispatch a new job instead"
-                    ));
                 }
             }
             Action::AskReviewAgain => {
@@ -2228,10 +2221,11 @@ mod tests {
         assert!(system.contains("Never write \"based on your findings\""));
     }
 
-    /// #542: the user may tell a job of the briefing something; one whose pull request merged
-    /// takes no more words. fix_failure stays the event orchestrator's.
+    /// #542: the user may tell a job of the briefing something, one whose pull request merged too
+    /// (it gets a follow-up, the owner's decision of 2026-10-18). fix_failure stays the event
+    /// orchestrator's.
     #[test]
-    fn the_user_may_message_a_job_but_not_a_merged_one() {
+    fn the_user_may_message_a_job_of_the_briefing() {
         let mut context = context();
         context.movable = vec!["ab12cd34".into(), "33aa33aa".into()];
         let message = |ids: &[&str], text: Option<&str>| {
@@ -2260,12 +2254,10 @@ mod tests {
                 .problems(&context, "zq9")
                 .contains(&"message_job names one job".to_owned())
         );
-        context.merged = vec!["33aa33aa".into()];
-        assert_eq!(
-            message(&["33aa33aa"], Some("one more thing")).problems(&context, "zq9"),
-            [
-                "33aa33aa's pull request was merged: it takes no more words, dispatch a new job instead"
-            ]
+        assert!(
+            message(&["33aa33aa"], Some("one more thing"))
+                .problems(&context, "zq9")
+                .is_empty()
         );
         let mut fix = Plan::of(Action::FixFailure, "");
         fix.item = Some("f1".into());

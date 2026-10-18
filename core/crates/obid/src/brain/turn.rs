@@ -401,7 +401,7 @@ impl State {
 /// the next step; one that didn't fails its step and ends the turn, saying why.
 pub fn settle(outcome: &Outcome) -> (State, Option<End>) {
     match outcome {
-        Outcome::Done(_) => (State::Done, None),
+        Outcome::Done(_) | Outcome::Started(..) => (State::Done, None),
         Outcome::Failed(_) => (State::Failed, Some(End::CouldNot)),
         Outcome::NeedsWhich(_) => (State::Failed, Some(End::NeedsWhich)),
     }
@@ -655,6 +655,17 @@ fn checked(
             jobs: earlier.into_iter().chain(jobs).collect(),
         },
     )
+}
+
+/// `talk` with the cards of the jobs its actions started first (a follow-up).
+fn with_jobs(talk: Talk, started: Vec<serde_json::Value>) -> Talk {
+    match talk {
+        Talk::Reply { text, jobs } if !started.is_empty() => Talk::Reply {
+            text,
+            jobs: started.into_iter().chain(jobs).collect(),
+        },
+        talk => talk,
+    }
 }
 
 /// What a turn answers, the longer Markdown under it when the brain gave some, and why it ended.
@@ -1051,8 +1062,19 @@ async fn run_with(
                 (Some(_), Action::MessageJob) => plan.message.clone().unwrap_or_default(),
                 _ => said.to_owned(),
             };
-            let outcome = act(shared, control, plan, &words, index).await;
+            // Whose words they are: an event turn's are the brain's own, and a turn that looked
+            // something up read what isn't the owner's.
+            let source = match (orchestration, researched) {
+                (Some(_), _) => crate::jobs::Source::Event,
+                (None, true) => crate::jobs::Source::Untrusted,
+                (None, false) => crate::jobs::Source::Owner,
+            };
+            let outcome = act(shared, control, plan, &words, index, source).await;
             handled.acted(shared, plan);
+            // A follow-up it started: its card goes on the answer.
+            if let Outcome::Started(_, job) = &outcome {
+                earlier.push(job.clone());
+            }
             if !outcome.text().is_empty() {
                 done.push(outcome.text().to_owned());
             }
@@ -1105,7 +1127,7 @@ async fn run_with(
             &handled,
         )
     } else {
-        (end, talk)
+        (end, with_jobs(talk, earlier))
     };
     if speaks {
         let carried = (!research.entries.is_empty()).then_some(Carried {
@@ -1125,10 +1147,11 @@ async fn act(
     plan: &Plan,
     said: &str,
     index: usize,
+    source: crate::jobs::Source,
 ) -> Outcome {
     let text = actions::step_text(shared, plan);
     step_event(shared, control, index, plan.action, &text, State::Running);
-    let outcome = actions::act(shared, plan, said).await;
+    let outcome = actions::act(shared, plan, said, source).await;
     step_event(
         shared,
         control,
