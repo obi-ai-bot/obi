@@ -206,10 +206,15 @@ struct ChatTests {
         model.apply(Turn(id: "a1", date: answer.date, who: .oby, text: "On it.", jobs: ["j1"]))
         model.apply(Turn(id: "u1", date: clock, who: .user, text: "Thanks"))
         #expect(model.arrived == ["a1": clock])
-        // A new conversation's first answer, read with its page just after it was said.
+        // Opening a conversation whose answer is seconds old reads it whole: no replay.
         runner.turns = old + [Turn(id: "a2", date: clock, who: .oby, text: "Started it.")]
+        model.forget()
         await model.reload()
-        #expect(model.arrived["a2"] == clock.addingTimeInterval(5))
+        #expect(model.arrived.isEmpty)
+        // A new conversation's first answer, read with its page just after it was said, comes in.
+        runner.turns.append(Turn(id: "a3", date: clock, who: .oby, text: "And this one."))
+        await model.reload(arriving: true)
+        #expect(model.arrived == ["a3": clock.addingTimeInterval(5)])
         // History: older pages, and a reload of answers long said, don't.
         let history = FakeRunner((0..<120).map { turn($0, who: .oby) })
         let later = ConversationModel(page: history.page)

@@ -722,7 +722,7 @@ final class Phone {
         guard startingNew else { return }
         startingNew = false
         current = id
-        Task { await conversation.reload() }
+        Task { await conversation.reload(arriving: true) }
     }
 
     private func finish(_ talk: Talk, started: [Job], request: Request, echo: Turn) {
