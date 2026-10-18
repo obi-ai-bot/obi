@@ -243,6 +243,25 @@ struct ChatWindowTests {
         #expect(CardOption.defaultOption(options)?.answer == "D")
     }
 
+    /// A job waiting for an OK alerts, with Allow and Deny in it, again for each new ask; once
+    /// answered, its alert goes (found running two jobs at once on 2026-10-18: nothing said so).
+    @Test func aJobWaitingForAnOKAlertsEachTimeItAsks() {
+        var job = Job(id: "j", request: "Work", agent: "claude", account: "default", repo: "deskree-inc/oby",
+                      branch: "oby/fix-1", base: "dev", pr: nil, kind: .fix, task: "Work")
+        job.status = .running
+        job.permission = Permission(id: "p1", tool: "Bash", title: "Run cargo test", detail: "cargo test")
+        #expect(RunnerFeed.notice(for: job) == .permission)
+        #expect(RunnerFeed.title(.permission, for: job) == "Needs your OK: \(job.heading)")
+        #expect(RunnerFeed.body(.permission, for: job) == "Run cargo test")
+        let (first, seen) = RunnerFeed.notices([job], after: [:])
+        #expect(first.count == 1)
+        #expect(RunnerFeed.notices([job], after: seen).changes.isEmpty)
+        job.permission?.id = "p2"
+        #expect(RunnerFeed.notices([job], after: seen).changes.count == 1)
+        job.permission = nil
+        #expect(RunnerFeed.notices([job], after: seen).changes.first.map { $0.1 == nil } == true)
+    }
+
     @Test func publishReviewAndFailedStatusesKeepTheirMeaning() {
         var job = Job(id: "j", request: "Work", agent: "codex", account: "default", repo: "deskree-inc/oby",
                       branch: "oby/fix-270", base: "dev", pr: nil, kind: .fix, task: "Work")

@@ -134,6 +134,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
         if let id = info[RunnerFeed.jobKey] as? String {
+            // Allow or Deny right in the alert, on the very ask it showed; otherwise the job opens.
+            if let ask = info[RunnerFeed.permissionKey] as? String,
+               [RunnerFeed.allowButton, RunnerFeed.denyButton].contains(response.actionIdentifier) {
+                let decision: RunnerPermission.Decision = response.actionIdentifier == RunnerFeed.allowButton ? .allow : .deny
+                if (try? await island.model.feed.answer(id, decision, ask: ask)) != nil { return }
+            }
             island.model.publishing = response.actionIdentifier == RunnerFeed.publishButton ? id : nil
             chat.show(job: (id: id, local: false))
         } else if let id = info[IslandController.localJobKey] as? String {
