@@ -410,10 +410,20 @@ fn the_room_cannot_write_outside_itself() {
 #[test]
 fn the_plan_loop_answers_when_the_session_cant_run() {
     let (_folder, obid) = obid("harness-fallback", false);
+    // What the plan loop says depends on whether its brain can run (with no usable login it's
+    // keyword rules, #651); its answer, a reply or a question, ends with the line saying why.
+    let words = |answer: &Answer| {
+        answer.body["text"]
+            .as_str()
+            .or(answer.body["question"]["text"].as_str())
+            .unwrap_or("")
+            .to_owned()
+    };
     let answer = said(&obid, json!({"said": "HELLO", "new": true}));
-    assert_eq!(
-        answer.body["text"],
-        "Fine.\n(Oby's plan loop answered: no Claude Code account is signed in for conversations.)",
+    assert!(
+        words(&answer).ends_with(
+            "\n(Oby's plan loop answered: no Claude Code account is signed in for conversations.)"
+        ),
         "{}",
         answer.text
     );
@@ -421,8 +431,8 @@ fn the_plan_loop_answers_when_the_session_cant_run() {
 
     std::fs::write(obid.home.join("accounts/stub/.credentials.json"), "{}").unwrap();
     let failed = said(&obid, json!({"said": "FAIL", "new": true}));
-    assert_eq!(
-        failed.body["text"], "Fine.\n(Oby's plan loop answered: its agent session failed twice.)",
+    assert!(
+        words(&failed).ends_with("\n(Oby's plan loop answered: its agent session failed twice.)"),
         "{}",
         failed.text
     );
