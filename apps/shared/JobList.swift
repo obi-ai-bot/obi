@@ -254,6 +254,18 @@ nonisolated enum WorkList {
         }
     }
 
+    /// Home's chips (Sangam's Home.tsx, docs/oby-ux.md row 3): every kind of work, always, in Home's
+    /// order, whatever's in it; a teammate's once their Oby has asked for something.
+    static func kinds<J>(_ items: [Item<J>]) -> [Group<J>] {
+        let held = groups(items, by: .type)
+        let always: [WorkType] = [.review, .issues, .tasks]
+        let kinds = Set(always + held.compactMap(\.type)).sorted { $0.order < $1.order }
+        return kinds.map { kind in
+            held.first { $0.type == kind }
+                ?? Group(id: kind.id, type: kind, label: kind.label, items: [], count: 0, countLabel: "open", needs: 0, fresh: false)
+        }
+    }
+
     /// Top of each list: new tasks, then what needs you, then what waits to start; the rest as
     /// they came (newest first).
     static func ranked<J>(_ items: [Item<J>]) -> [Item<J>] {

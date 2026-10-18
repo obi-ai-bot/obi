@@ -111,7 +111,7 @@ struct StageBar: View {
                 ForEach(pipeline.stages) { stage in
                     Group {
                         if stage.state == .current && !needs && job.status == .running && !reduceMotion {
-                            PhaseAnimator([1.0, 0.35]) { level in Capsule().fill(Color.white.opacity(0.55)).opacity(level) }
+                            PhaseAnimator([1.0, 0.35]) { level in Capsule().fill(Tokens.stageDone).opacity(level) }
                                 animation: { _ in .easeInOut(duration: 0.8) }
                         } else {
                             Capsule().fill(color(stage.state))
@@ -127,8 +127,8 @@ struct StageBar: View {
 
     private func color(_ state: JobStage.State) -> Color {
         switch state {
-        case .done: Color.white.opacity(0.55)
-        case .current: needs ? Tokens.needs : Color.white.opacity(0.55)
+        case .done: Tokens.stageDone
+        case .current: needs ? Tokens.needs : Tokens.stageDone
         case .failed: Tokens.danger
         case .upcoming, .skipped: Tokens.pill
         }
@@ -335,7 +335,7 @@ struct TaskPage: View {
     /// Publish by hand when Oby's own didn't go: the exact action shows first, and exactly that
     /// goes out once Face ID signs it.
     @ViewBuilder private func publish(_ job: Job) -> some View {
-        if let reason = job.publishError { Text(reason).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needs).padding(.bottom, 8) }
+        if let reason = job.publishError { Text(reason).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needsInk).padding(.bottom, 8) }
         if let action {
             VStack(alignment: .leading, spacing: 10) {
                 Text(action).font(Tokens.font(Tokens.textBase, .medium)).foregroundStyle(Tokens.ink).fixedSize(horizontal: false, vertical: true)
@@ -550,7 +550,7 @@ private struct StageMark: View {
                 .frame(width: 14, height: 14).background(Tokens.done, in: Circle())
         case .current: WorkMarkView(mark: .working, dot: 10)
         case .needs: Circle().fill(Tokens.needs).frame(width: 10, height: 10)
-        case .upcoming: Circle().strokeBorder(Color.white.opacity(0.45), lineWidth: 1.5).frame(width: 10, height: 10)
+        case .upcoming: Circle().strokeBorder(Tokens.check, lineWidth: 1.5).frame(width: 10, height: 10)
         case .skipped: Capsule().fill(Tokens.check).frame(width: 10, height: 2)
         case .failed: Circle().fill(Tokens.danger).frame(width: 10, height: 10)
         }
@@ -565,7 +565,7 @@ private struct DottedLine: View {
                 var y: CGFloat = 1
                 while y < geometry.size.height { path.addEllipse(in: CGRect(x: 0, y: y - 1, width: 2, height: 2)); y += 6 }
             }
-            .fill(Color.white.opacity(0.3))
+            .fill(Tokens.check.opacity(0.75))
         }
     }
 }

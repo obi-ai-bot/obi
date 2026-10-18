@@ -237,11 +237,11 @@ struct ConversationPage: View {
                             .frame(maxWidth: .infinity).padding(.bottom, 16)
                         }
                         if let problem = phone.conversation.problem {
-                            Text("The runner's thread couldn't be read: \(problem)").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needs)
+                            Text("The runner's thread couldn't be read: \(problem)").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needsInk)
                                 .padding(.bottom, 12)
                         }
                         if case .offline = phone.connection {
-                            Text(phone.offlineLine).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needs).padding(.bottom, 12)
+                            Text(phone.offlineLine).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needsInk).padding(.bottom, 12)
                         }
                         if turns.isEmpty, !thinking {
                             Text(phone.loaded ? "Ask Oby anything." : "Reaching the runner…").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
@@ -404,7 +404,7 @@ struct ThreadTask: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(Tokens.cardFill, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Tokens.line) }
             .contentShape(Rectangle())
         }
@@ -431,7 +431,7 @@ private struct ObyAtWork: View {
                         .accessibilityHint("Stops waiting for the answer")
                 }
             }
-            if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needs) }
+            if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needsInk) }
         }
         .accessibilityElement(children: .contain)
     }

@@ -38,7 +38,7 @@ struct Composer: View {
                 TextField("", text: $text, selection: $selection, prompt: Text(prompt).foregroundStyle(Tokens.muted), axis: .vertical)
                     .lineLimit(1...5)
                     .font(Tokens.font(Tokens.textLg))
-                    .foregroundStyle(Color.white.opacity(0.9))
+                    .foregroundStyle(Tokens.openTitle)
                     .tint(Tokens.ink)
                     .focused(typing)
                     .padding(.horizontal, 10).padding(.vertical, 6)
@@ -87,7 +87,7 @@ struct Composer: View {
             } else {
                 Button(action: send) {
                     Image(systemName: "arrow.up").font(Tokens.font(16, .semibold))
-                        .foregroundStyle(Color(hex: 0x111111))
+                        .foregroundStyle(Tokens.onInk)
                         .frame(width: 32, height: 32)
                         .background(Tokens.ink, in: Circle())
                 }

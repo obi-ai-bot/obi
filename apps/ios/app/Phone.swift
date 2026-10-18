@@ -48,6 +48,31 @@ nonisolated enum PhoneWork {
         }
         return WorkList.ranked(items).first { $0.status == .needs }.map { .task($0.id) }
     }
+
+    /// Home's Running (docs/ios-design.md: Sangam has these in his side panel): up to three open
+    /// tasks, in the side panel's order.
+    static func running(_ items: [WorkList.Item<Job>]) -> [WorkList.Item<Job>] {
+        Array(WorkList.ranked(items.filter { $0.status != .done }).prefix(3))
+    }
+
+    /// What a Running row says it's on: the decision that waits ("Needs you · Question"), else
+    /// "Queued" and what for, else its live step.
+    static func step(_ item: WorkList.Item<Job>, decision: InboxItem?) -> String {
+        let job = item.job
+        if item.status == .needs {
+            let kind = decision.map { AskKind.label($0.kind, plan: job.question?.plan != nil) }
+                ?? (job.waitsForPermission ? "Permission" : job.waitsForAnswer ? AskKind.label("question", plan: job.question?.plan != nil)
+                    : job.reviewNeedsYou ? AskKind.label("review") : job.mergeNeedsYou ? AskKind.label("merge") : AskKind.label("failed"))
+            return "Needs you · \(kind)"
+        }
+        if item.queued { return job.waiting.map { "Queued · \($0.text)" } ?? "Queued" }
+        return job.step.isEmpty ? "Working" : job.step
+    }
+
+    /// Home's Recent: the three latest conversations.
+    static func recent(_ conversations: [RunnerConversation]) -> [RunnerConversation] {
+        Array(conversations.sorted { $0.latest > $1.latest }.prefix(3))
+    }
 }
 
 /// The phone's view of the runner: its jobs and accounts, kept live while the app is open, and
@@ -292,7 +317,7 @@ final class Phone {
         offlineQueue.bindUnscopedEntries(to: offlineQueueTarget)
         restoreQueuedMessages(for: offlineQueueTarget)
         #if DEBUG
-        if SampleTasks.on { jobs = SampleTasks.jobs; loaded = true; SampleTasks.talk(self) }
+        if SampleTasks.on { jobs = SampleTasks.jobs; conversations = SampleTasks.conversations; loaded = true; SampleTasks.talk(self) }
         #endif
     }
 

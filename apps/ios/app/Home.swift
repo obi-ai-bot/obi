@@ -48,13 +48,15 @@ extension View {
     }
 }
 
-/// Home (Sangam's Home.tsx): Oby on its stage, what's running and what needs you under it, a chip
-/// for each kind of work, and the message box. What you send there starts a conversation and
-/// opens it. A chip opens its kind's page; the list button, every task; "needs you", the decision
-/// that has waited longest, with its task (docs/oby-ux.md rows 9-10).
+/// Home (Sangam's Home.tsx, docs/ios-design.md "Home"): Oby on its stage, what's running and what
+/// needs you under it, a chip for every kind of work, then, as the iPhone has no side panel, the
+/// running tasks and the latest conversations, and the message box. What you send there starts a
+/// conversation and opens it. A chip opens its kind's page; "needs you", the decision that has
+/// waited longest, with its task (docs/oby-ux.md rows 9-10); See all, every task.
 struct HomeView: View {
     @Environment(Phone.self) private var phone
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
     let character: ObyCharacter
     @State private var text = ""
     @FocusState private var typing: Bool
@@ -62,29 +64,21 @@ struct HomeView: View {
     var body: some View {
         @Bindable var phone = phone
         NavigationStack(path: $phone.homePath) {
-            stage
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .contentShape(Rectangle())
-                .onTapGesture { typing = false }
-                .obyPage()
-                .safeAreaInset(edge: .bottom) {
-                    Composer(text: $text, prompt: HomeLine.placeholder(fullName: HomeLine.owner(ofMac: phone.link?.name) ?? ""),
-                             typing: $typing, onSend: send)
+            ScrollView {
+                VStack(spacing: 0) {
+                    stage
+                    lists.padding(.top, 22).padding(.horizontal, -10)
                 }
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        NavigationLink(value: Route.all) { Image(systemName: "checklist") }
-                            .accessibilityLabel("All tasks")
-                    }
-                    if !phone.active.isEmpty {
-                        ToolbarItem(placement: .topBarLeading) {
-                            // Every job on the runner, as ⌃⌥⌘. does on the Mac.
-                            Button("Stop all", systemImage: "stop.circle") { Task { try? await phone.stopAll() } }
-                                .tint(Tokens.danger)
-                        }
-                    }
-                }
-                .routes()
+                .padding(.horizontal, Tokens.gutter).padding(.top, 6).padding(.bottom, 16)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollDismissesKeyboard(.interactively)
+            .obyPage()
+            .safeAreaInset(edge: .bottom) {
+                Composer(text: $text, prompt: HomeLine.placeholder(fullName: HomeLine.owner(ofMac: phone.link?.name) ?? ""),
+                         typing: $typing, onSend: send)
+            }
+            .routes()
         }
         .pushes(onto: $phone.homePath)
         .onDisappear { phone.cancelVoice() }
@@ -98,19 +92,19 @@ struct HomeView: View {
         return phone.active.contains(where: \.isWorking) ? "working" : "idle"
     }
 
-    /// Oby a little above the middle, the line under it, and the chips.
+    /// Oby, the line under it, and the chips.
     private var stage: some View {
         let work = phone.work
-        let groups = WorkList.groups(work, by: .type)
         let running = work.count { $0.status == .running }
         let needs = WorkList.needsYou(work, loose: phone.loose.count)
-        return VStack(spacing: 16) {
-            Spacer(minLength: 0)
+        return VStack(spacing: 0) {
             WebView(character.page)
                 .webViewContentBackground(.hidden)
                 .opacity(character.ready ? 1 : 0)
                 .allowsHitTesting(false)
-                .frame(width: 240, height: 200)
+                .frame(width: 160, height: 157)
+                // White in both themes: on light, a soft shadow keeps its shape (the design's `--oby-glow`).
+                .shadow(color: .black.opacity(colorScheme == .light ? 0.10 : 0), radius: 11, y: 10)
                 .accessibilityElement()
                 .accessibilityLabel("Oby")
             Button {
@@ -124,23 +118,53 @@ struct HomeView: View {
             .buttonStyle(.plain)
             .allowsHitTesting(needs > 0)
             .accessibilityHint(needs > 0 ? "Opens what needs you" : "")
+            .padding(.top, 14)
             if case .offline = phone.connection {
                 Label(phone.offlineLine, systemImage: "wifi.exclamationmark")
-                    .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needs)
+                    .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needsInk)
                     .multilineTextAlignment(.center)
+                    .padding(.top, 8)
             }
             CenteredFlow(spacing: 8) {
-                ForEach(groups) { group in
+                ForEach(WorkList.kinds(work)) { group in
                     HomeChip(label: group.label, fresh: group.fresh, needs: group.needs > 0) {
                         if let kind = group.type { phone.homePath.append(.kind(kind)) }
                     }
                 }
             }
-            .padding(.horizontal, Tokens.gutter)
+            .frame(maxWidth: 362)
+            .padding(.top, 16)
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Your tasks")
-            Spacer(minLength: 0)
-            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Running and Recent (the iPhone's side panel, cut short).
+    @ViewBuilder private var lists: some View {
+        let rows = PhoneWork.running(phone.work)
+        let recent = phone.conversations.map(PhoneWork.recent) ?? []
+        VStack(alignment: .leading, spacing: 0) {
+            if !rows.isEmpty {
+                ListLabel(title: "Running", more: "See all") { phone.homePath.append(.all) }
+                ForEach(rows) { item in
+                    Button { phone.homePath.append(.task(item.id)) } label: {
+                        HomeTaskRow(item: item, step: PhoneWork.step(item, decision: phone.decision(for: item.job)))
+                    }
+                    .buttonStyle(RowPress())
+                }
+            }
+            if !recent.isEmpty {
+                ListLabel(title: "Recent", more: "All conversations") { phone.tab = .chat }
+                    .padding(.top, rows.isEmpty ? 0 : 14)
+                ForEach(recent) { conversation in
+                    Button { phone.homePath.append(.conversation(conversation.id)) } label: {
+                        HomeConversationRow(conversation: conversation, last: conversation.turn?.text ?? phone.previews[conversation.id])
+                    }
+                    .buttonStyle(RowPress())
+                    .task { await phone.preview(conversation.id) }
+                }
+            }
         }
     }
 
@@ -150,6 +174,76 @@ struct HomeView: View {
         text = ""
         typing = false
         phone.homePath.append(.newConversation)
+    }
+}
+
+/// A list's label with its way to the rest (`.list-label`): 26 tall, 12pt `label`.
+private struct ListLabel: View {
+    let title: String
+    let more: String
+    let action: () -> Void
+
+    var body: some View {
+        HStack {
+            Text(title).accessibilityAddTraits(.isHeader)
+            Spacer()
+            Button(more, action: action).buttonStyle(.plain)
+        }
+        .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.label)
+        .padding(.horizontal, 10).frame(height: 26)
+    }
+}
+
+/// A row pressed: `hover`, 6 round.
+private struct RowPress: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(configuration.isPressed ? Tokens.hover : .clear, in: RoundedRectangle(cornerRadius: Tokens.rowRadius, style: .continuous))
+            .contentShape(Rectangle())
+    }
+}
+
+/// A running task on Home (`.task-row`): its agent's mark, its title, what it's on, its mark.
+private struct HomeTaskRow: View {
+    let item: WorkList.Item<Job>
+    let step: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            AgentMark(agent: item.job.agent).font(Tokens.font(12, .semibold)).frame(width: 16).foregroundStyle(Tokens.ink.opacity(0.7))
+            VStack(alignment: .leading, spacing: 0) {
+                Text(item.job.heading).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.item).fadeOut()
+                Text(step).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).lineLimit(1)
+            }
+            WorkMarkView(mark: item.mark).frame(width: 12, height: 12)
+        }
+        .padding(.horizontal, 10).frame(height: 44)
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(item.mark.rawValue)
+    }
+}
+
+/// A conversation on Home (`.convo-row`): its name, the last thing said, when.
+private struct HomeConversationRow: View {
+    let conversation: RunnerConversation
+    let last: String?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(conversation.title.isEmpty ? "Conversation" : conversation.title)
+                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.item).fadeOut()
+                if let last, !last.isEmpty {
+                    Text(last).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fadeOut()
+                }
+            }
+            if conversation.latest > .distantPast {
+                Text(ConversationOrder.ago(conversation.latest)).font(Tokens.font(Tokens.textSm)).monospacedDigit()
+                    .foregroundStyle(Tokens.muted).padding(.top, 6)
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6).frame(minHeight: 52)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -173,7 +267,7 @@ struct HomeChip: View {
                 Text(label).font(Tokens.font(Tokens.textBase)).lineLimit(1)
             }
             .foregroundStyle(Tokens.text)
-            .padding(.horizontal, 16).frame(height: 36)
+            .padding(.horizontal, 16).frame(height: 34)
             .background(Tokens.pill, in: Capsule())
             .contentShape(Capsule())
         }

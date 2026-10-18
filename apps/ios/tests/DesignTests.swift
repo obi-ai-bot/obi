@@ -80,6 +80,33 @@ struct DesignTests {
         #expect(PhoneWork.firstNeeding(items.filter { $0.status != .needs }, inbox: []) == nil)
     }
 
+    /// Home as Sangam has it (docs/oby-ux.md row 3, docs/ios-design.md "Home"): every kind is a chip
+    /// whatever's in it; under them the running tasks with what each is on, and the latest talk.
+    @Test func homeShowsEveryKindAndWhatsRunning() throws {
+        let needs = try job("n", "running", extra: #", "question": {"text": "Which branch?", "options": ["dev"]}"#)
+        var running = try job("r", "running")
+        running.step = "Running swift test"
+        let queued = try job("q", "queued")
+        let done = try job("d", "done", finished: "2026-10-09T22:00:00Z")
+        let since = ISO8601DateFormatter().date(from: "2026-10-09T23:00:00Z")!
+        let items = PhoneWork.items([needs, running, queued, done], since: since, seen: [])
+        // Only Tasks hold anything, yet Review PR and Issues are chips too, in Home's order.
+        #expect(WorkList.kinds(items).map(\.label) == ["Review PR", "Issues", "Tasks"])
+        #expect(WorkList.kinds(items).map(\.needs) == [0, 0, 1])
+        #expect(WorkList.kinds([] as [WorkList.Item<Job>]).map(\.label) == ["Review PR", "Issues", "Tasks"])
+        // Running: up to three open tasks, what needs you before the rest; each says what it's on.
+        let rows = PhoneWork.running(items)
+        #expect(rows.map(\.id) == ["n", "q", "r"])
+        let question = InboxItem(kind: "question", id: "i", job: "n", title: "", text: "", options: [], created: now)
+        #expect(PhoneWork.step(rows[0], decision: question) == "Needs you · Question")
+        #expect(PhoneWork.step(rows[0], decision: nil) == "Needs you · Question")
+        #expect(PhoneWork.step(rows[1], decision: nil) == "Queued")
+        #expect(PhoneWork.step(rows[2], decision: nil) == "Running swift test")
+        // Recent: the three latest conversations.
+        let talk = (1...4).map { RunnerConversation(id: "c\($0)", title: "", lastActivity: now.addingTimeInterval(Double($0))) }
+        #expect(PhoneWork.recent(talk).map(\.id) == ["c4", "c3", "c2"])
+    }
+
     @Test func archivedHoldsWhatLeftHome() throws {
         let cleared = try job("c", "done", finished: "2026-10-09T22:00:00Z")
         let dismissed = try job("d", "failed", finished: "2026-10-09T22:00:00Z", extra: #", "dismissed": "2026-10-09T23:00:00Z""#)

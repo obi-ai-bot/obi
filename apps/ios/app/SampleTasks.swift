@@ -24,6 +24,14 @@ enum SampleTasks {
         return list.compactMap { try? Runner.decoder.decode(Job.self, from: Data($0.utf8)) }
     }
 
+    /// Two made-up conversations, for Home's Recent.
+    static var conversations: [RunnerConversation] {
+        [RunnerConversation(id: "sample-c1", title: "Why does the login screen look empty?", lastActivity: .now.addingTimeInterval(-120),
+                            turn: .init(text: "On it. Claude is making the empty state say what to do next.")),
+         RunnerConversation(id: "sample-c2", title: "Where is 0.9 at?", lastActivity: .now.addingTimeInterval(-3600),
+                            turn: .init(text: "It went out on Tuesday; the About row came after."))]
+    }
+
     /// With `-ObySampleTalk <seconds>` too: the Oby thread opens with a question of yours, and that
     /// many seconds after launch Oby's answer comes, a word at a time, for a screenshot of it coming in.
     @MainActor static func talk(_ phone: Phone) {

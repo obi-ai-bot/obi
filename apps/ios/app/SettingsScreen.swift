@@ -10,6 +10,8 @@ struct SettingsScreen: View {
     @State private var problem: String?
     @State private var watchPairing = WatchPairing()
     @State private var watchProblem: String?
+    @State private var stopping = false
+    @AppStorage(Appearance.key) private var appearance = Appearance.system
 
     var body: some View {
         NavigationStack {
@@ -56,6 +58,24 @@ struct SettingsScreen: View {
 
                 RunnerModelsSections(options: options, models: phone.models, save: phone.setModels)
 
+                if !phone.active.isEmpty {
+                    Section {
+                        // Off Home (Sangam's has none), and never without asking (docs/oby-ux.md row 20).
+                        Button("Stop every task", role: .destructive) { stopping = true }
+                            .foregroundStyle(Tokens.danger)
+                            .confirmationDialog("Stop \(phone.active.count == 1 ? "the running task" : "all \(phone.active.count) running tasks")?",
+                                                isPresented: $stopping, titleVisibility: .visible) {
+                                Button("Stop every task", role: .destructive) {
+                                    Task { do { try await phone.stopAll(); problem = nil } catch { problem = error.localizedDescription } }
+                                }
+                            } message: {
+                                Text("Each ends where it is. What they changed stays on their branches.")
+                            }
+                    } footer: {
+                        Text("Stops every task on your Mac, as ⌃⌥⌘. does there.")
+                    }
+                }
+
                 Section {
                     TextField("Client ID", text: $watchPairing.clientID)
                         .textInputAutocapitalization(.never)
@@ -91,6 +111,14 @@ struct SettingsScreen: View {
                     if let problem { Text(problem).foregroundStyle(.red) }
                 } footer: {
                     Text("Oby opens a pull request by itself once a job's check passes and the secret scan is clean. Publishing by hand, when that failed, needs Face ID on this iPhone. Oby merges only into dev, once its review approves and your Mac's checks pass.")
+                }
+
+                Section("Appearance") {
+                    Picker("Appearance", selection: $appearance) {
+                        ForEach(Appearance.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
                 }
 
                 Section("About") {
@@ -130,4 +158,19 @@ struct SettingsScreen: View {
         if url != phone.runnerURL { phone.runnerURL = url }
     }
 
+}
+
+/// Settings › Appearance (docs/oby-ux.md row 1): the system's light or dark, or one of them always.
+enum Appearance: String, CaseIterable {
+    case system, light, dark
+
+    static let key = "appearance"
+    var label: String { rawValue.capitalized }
+    var scheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
+        }
+    }
 }
