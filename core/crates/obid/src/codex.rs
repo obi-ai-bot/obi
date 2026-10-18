@@ -320,6 +320,11 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                     .get(server)
                     .and_then(|calls| calls.iter().rfind(|(tool, _)| Some(tool.as_str()) == named));
                 let answer = match call.cloned() {
+                    // Only Oby's own server: another's (ChatGPT's apps, the person's) is never
+                    // run, as before Codex asked.
+                    Some(_) if server != "oby" => {
+                        Answer::Deny(format!("Only Oby's own tools run here, not {server}'s."))
+                    }
                     Some((tool, arguments)) => {
                         let input = match &params["_meta"]["tool_params"] {
                             Value::Object(_) => params["_meta"]["tool_params"].clone(),

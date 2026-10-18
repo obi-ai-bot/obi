@@ -886,8 +886,9 @@ fn placed(text: &str, homes: &[(String, &'static str)]) -> String {
 /// Whether the tool call makes the turn consume something untrusted: a web search or fetch, or a
 /// read of the repositories' checkouts (their code is data, not the owner's words, #374, N1).
 fn taints(tool: &str, input: &Value, bounds: &Bounds, repos: &Path) -> bool {
-    // The web, and a helper (a sub-agent reads and searches as it likes, R2).
-    if matches!(tool, "WebFetch" | "WebSearch" | "Task" | "Agent") {
+    // The web, a helper (a sub-agent reads and searches as it likes, R2), and any command, which a
+    // tool may run without asking (Codex's "safe" reads, F4).
+    if matches!(tool, "WebFetch" | "WebSearch" | "Task" | "Agent" | "Bash") {
         return true;
     }
     if !matches!(tool, "Read" | "Grep" | "Glob" | "LS" | "NotebookRead") {

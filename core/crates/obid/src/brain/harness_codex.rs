@@ -14,6 +14,21 @@ use super::harness::{Place, orientation};
 use crate::agent::{Launch, Tool};
 use crate::api::Shared;
 
+/// What a conversation's Codex runs with besides Oby's server (codex-cli 0.162, `codex features
+/// list`). No shell (`shell_tool`, `unified_exec`): under `untrusted` Codex runs the commands it
+/// deems safe reads (`cat`, `ls`, `grep`) without asking, and one could read its login in
+/// `CODEX_HOME`. Its code mode (`exec`, how it calls MCP tools) stays: its JavaScript has no file,
+/// process or network access. No ChatGPT apps (`apps`: their GitHub tools are a code-host login)
+/// and no plug-ins. The turn's token never reaches a command's environment. Web search is on.
+const SETTINGS: &[&str] = &[
+    "features.shell_tool=false",
+    "features.unified_exec=false",
+    "features.apps=false",
+    "features.plugins=false",
+    r#"shell_environment_policy.exclude=["OBY_MCP_TOKEN"]"#,
+    r#"web_search="live""#,
+];
+
 /// The `app-server` to run for one attempt of the turn, and what its thread is started with:
 /// `resume`'s thread when there is one, the conversation's orientation, the configured model.
 pub(super) fn launch(
@@ -28,7 +43,14 @@ pub(super) fn launch(
     // web search, which is part of talking.
     let argv = crate::codex::argv(Default::default(), Some((url, token)));
     let mut flags: Vec<OsString> = argv[1..argv.len() - 1].to_vec();
-    flags.extend(["-c".into(), "web_search=\"live\"".into()]);
+    for setting in SETTINGS {
+        flags.extend(["-c".into(), (*setting).into()]);
+    }
+    // Whatever repeats the turn's token (a tool's answer, the agent) is redacted.
+    crate::secrets::known().learn(
+        &format!("conversation {} MCP token", place.folder.display()),
+        token,
+    );
     let mut launch = shared.jobs.conversation_launch(
         Tool::Codex,
         account,

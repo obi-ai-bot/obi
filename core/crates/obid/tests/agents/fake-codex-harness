@@ -16,7 +16,10 @@
 //   WEB <words>        searches the web (Codex never asks), then does <words>
 //   PLANT              leaves config.toml and AGENTS.md in its CODEX_HOME and AGENTS.md in its room
 //   LOOK               says "look: <which of those are still there>"
-//   PERMS              asks to write inside, outside and in repos/, and to read ~/.ssh
+//   PERMS              asks to run a command in its room, to write inside, outside and in repos/,
+//                      and to read ~/.ssh
+//   RUN <words>        runs a command without asking (as Codex runs a "safe" one), then does <words>
+//   LEAK               says the tokens of its CODEX_HOME's auth.json and of OBY_MCP_TOKEN
 //   FAIL               the turn fails
 //   anything else      "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable, or
@@ -109,6 +112,17 @@ async function act(turnId, words) {
     event("item/completed", turnId, { item: search });
     return act(turnId, words.slice(4));
   }
+  if (words.startsWith("RUN ")) {
+    const run = { type: "commandExecution", id: randomUUID(), command: "/bin/zsh -lc 'echo hi'", cwd: room, commandActions: [], status: "inProgress" };
+    event("item/started", turnId, { item: run });
+    event("item/completed", turnId, { item: { ...run, status: "completed", exitCode: 0, aggregatedOutput: "hi\n" } });
+    return act(turnId, words.slice(4));
+  }
+  if (words.startsWith("LEAK")) {
+    const auth = JSON.parse(readFileSync(join(home, "auth.json"), "utf8"));
+    const t = auth.tokens ?? {};
+    return say(turnId, `leak: ${t.access_token} ${t.refresh_token} ${t.id_token} ${auth.OPENAI_API_KEY} ${process.env.OBY_MCP_TOKEN}`);
+  }
   if (words.startsWith("PLANT")) {
     for (const file of [join(home, "config.toml"), join(home, "AGENTS.md"), join(room, "AGENTS.md")]) writeFileSync(file, "planted\n");
     return say(turnId, "planted");
@@ -148,7 +162,9 @@ async function act(turnId, words) {
   }
   if (words.startsWith("PERMS")) {
     const answers = [];
-    for (const [name, path] of [["inside", join(room, "inside.md")], ["outside", join(dirname(room), "outside.md")],
+    const command = await ask("item/commandExecution/requestApproval", { threadId: thread, turnId, itemId: "c0", command: "/bin/zsh -lc 'ls'", cwd: room });
+    answers.push(`inside=${command.decision}`);
+    for (const [name, path] of [["write", join(room, "inside.md")], ["outside", join(dirname(room), "outside.md")],
                                 ["repos", join(room, "repos/obi-e2e/fixture-app/README.md")]]) {
       const change = { type: "fileChange", id: randomUUID(), changes: [{ path, kind: { type: "add" } }], status: "inProgress" };
       event("item/started", turnId, { item: change });

@@ -4117,6 +4117,25 @@ fn learn_claude_tokens(bytes: &[u8], service: &str) {
     }
 }
 
+/// The tokens in Codex's login (`auth.json`: its ChatGPT access, refresh and id tokens, and an API
+/// key), learned as secrets obid knows, so whatever repeats them (an agent, a log) is redacted.
+fn learn_codex_tokens(bytes: &[u8], account: &str) {
+    let Ok(login) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return;
+    };
+    let tokens = &login["tokens"];
+    for (key, token) in [
+        ("access_token", &tokens["access_token"]),
+        ("refresh_token", &tokens["refresh_token"]),
+        ("id_token", &tokens["id_token"]),
+        ("OPENAI_API_KEY", &login["OPENAI_API_KEY"]),
+    ] {
+        if let Some(token) = token.as_str().filter(|t| !t.is_empty()) {
+            crate::secrets::known().learn(&format!("Codex {account} {key}"), token);
+        }
+    }
+}
+
 /// Whether `folder` is a real folder, or not there yet: never a link a job left in its place,
 /// which obid would otherwise follow (#643's security review).
 pub(crate) fn not_a_link(folder: &Path) -> Result<(), String> {
@@ -4139,7 +4158,11 @@ pub(crate) fn copy_account_login(tool: Tool, account: &Path, to: &Path) -> std::
     not_a_link(to).map_err(std::io::Error::other)?;
     store::make_private_dir(to)?;
     let (name, keychain) = match tool {
-        Tool::Codex => ("auth.json", None),
+        Tool::Codex => {
+            let bytes = std::fs::read(account.join("auth.json")).unwrap_or_default();
+            learn_codex_tokens(&bytes, &account.display().to_string());
+            ("auth.json", None)
+        }
         _ => (".credentials.json", keychain_login(Some(account))),
     };
     let file = account.join(name);
@@ -4217,10 +4240,11 @@ pub(crate) fn copy_login(
     for name in secret {
         copy(name)?;
     }
-    if tool == Tool::Claude
-        && let Ok(bytes) = std::fs::read(login.join(secret[0]))
-    {
-        learn_claude_tokens(&bytes, &keychain_service(None));
+    if let Ok(bytes) = std::fs::read(login.join(secret[0])) {
+        match tool {
+            Tool::Codex => learn_codex_tokens(&bytes, "~/.codex"),
+            _ => learn_claude_tokens(&bytes, &keychain_service(None)),
+        }
     }
     // On macOS Claude Code's login may be only in the Keychain (keychain_login).
     if keychain

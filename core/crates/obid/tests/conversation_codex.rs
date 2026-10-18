@@ -140,6 +140,17 @@ fn a_codex_turn_streams_its_words_and_ends_in_a_turn() {
         "{argv:?}"
     );
     assert!(argv.contains(&r#"web_search="live""#), "{argv:?}");
+    // No shell (F2: under `untrusted` Codex runs its "safe" reads without asking), no ChatGPT apps
+    // (a code-host login), and the turn's token kept out of any command's environment (F6).
+    for setting in [
+        "features.shell_tool=false",
+        "features.unified_exec=false",
+        "features.apps=false",
+        "features.plugins=false",
+        r#"shell_environment_policy.exclude=["OBY_MCP_TOKEN"]"#,
+    ] {
+        assert!(argv.contains(&setting), "{setting}: {argv:?}");
+    }
     assert!(recorded[0]["resumed"].is_null());
     assert_eq!(recorded[0]["sandbox"], "danger-full-access");
     assert_eq!(recorded[0]["approvalPolicy"], "untrusted");
@@ -182,6 +193,54 @@ fn what_codex_plants_for_its_next_run_is_taken_out() {
     assert_eq!(planted.body["text"], "planted", "{}", planted.text);
     let look = said(&obid, json!({"said": "LOOK", "conversation": conversation}));
     assert_eq!(look.body["text"], "look: nothing", "{}", look.text);
+}
+
+/// The tokens of Codex's login and the turn's MCP token never reach what obid sends (F3, F6).
+#[test]
+fn codex_tokens_never_reach_what_obid_sends() {
+    let (_folder, obid) = obid("codex-conv-leak", true);
+    let (access, refresh, id, key) = (
+        format!("eyJhbGciOiJSUzI1NiJ9.{}", "a".repeat(40)),
+        format!("rt_{}", "b".repeat(40)),
+        format!("eyJhbGciOiJSUzI1NiJ9.{}", "c".repeat(40)),
+        format!("sk-proj-{}", "d".repeat(40)),
+    );
+    std::fs::write(
+        obid.home.join("accounts/codex/auth.json"),
+        json!({"auth_mode": "chatgpt", "OPENAI_API_KEY": key,
+               "tokens": {"access_token": access, "refresh_token": refresh, "id_token": id, "account_id": "acct"}})
+            .to_string(),
+    )
+    .unwrap();
+    let events = follow_events(&obid);
+    let answer = said(&obid, json!({"said": "LEAK", "new": true}));
+    let seen = until_oby_turn(&events, 30);
+    let sent = format!("{} {seen:?}", answer.text);
+    assert!(sent.contains("leak: "), "{sent}");
+    for token in [&access, &refresh, &id, &key] {
+        assert!(!sent.contains(token.as_str()), "{token} in {sent}");
+    }
+    // The four login tokens and the turn's MCP token, each taken out.
+    let said_back = answer.body["text"].as_str().unwrap();
+    assert_eq!(said_back.matches("[redacted: ").count(), 5, "{said_back}");
+}
+
+/// A command Codex ran without asking taints the turn, as the web does (F4).
+#[test]
+fn work_codex_plans_after_a_command_waits_for_the_owners_start() {
+    let (_folder, obid) = obid("codex-conv-run", true);
+    let answer = said(
+        &obid,
+        json!({"said": r#"RUN OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#,
+               "new": true}),
+    );
+    assert_eq!(answer.body["jobs"], json!([]), "{}", answer.text);
+    assert_eq!(
+        inbox(&obid).iter().filter(|i| i["kind"] == "start").count(),
+        1,
+        "{}",
+        answer.text
+    );
 }
 
 /// Work planned after Codex searched the web waits for the owner's Start, as on Claude Code.
@@ -296,14 +355,16 @@ fn oby_dispatch_through_codex_starts_a_job() {
     );
 }
 
-/// Codex's approvals are answered by the conversation's own rule: inside the room yes, outside and
-/// in repos/ no, secrets no, and never the owner's to answer.
+/// Codex's approvals are answered by the conversation's own rule: no command at all, not even one
+/// in the room (F1); a write inside the room yes, outside and in repos/ no; never the owner's to
+/// answer.
 #[test]
 fn codex_approvals_follow_the_conversation_rule() {
     let (_folder, obid) = obid("codex-conv-perms", true);
     let perms = said(&obid, json!({"said": "PERMS", "new": true}));
     assert_eq!(
-        perms.body["text"], "perms: inside=accept outside=decline repos=decline secret=decline",
+        perms.body["text"],
+        "perms: inside=decline write=accept outside=decline repos=decline secret=decline",
         "{}",
         perms.text
     );
