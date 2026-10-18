@@ -258,6 +258,11 @@ impl ClaudeBrain {
         ]);
         // With nothing to read it has no tool at all; with the quoted file it reads, boxed.
         let (launch, own_group) = if quoted.is_some() {
+            self.room
+                .jobs
+                .claude_login_ready(None)
+                .await
+                .map_err(Failure::Failed)?;
             let launch = self
                 .room
                 .jobs
@@ -265,7 +270,12 @@ impl ClaudeBrain {
                 .map_err(Failure::Failed)?;
             (launch, false)
         } else {
-            let env = unboxed_env(|name| std::env::var_os(name), self.home.as_deref());
+            let env = unboxed_env(
+                |name| std::env::var_os(name),
+                self.home.as_deref(),
+                &folder.0,
+            )
+            .map_err(Failure::Failed)?;
             let launch = Launch {
                 argv: std::iter::once(self.bin.clone().into_os_string())
                     .chain(flags)
@@ -377,21 +387,43 @@ impl ClaudeBrain {
 
 /// The brain's environment when it runs unboxed, from `get` (obid's own environment): what a job
 /// keeps of it (`USER` and `LOGNAME` among them: on macOS Claude Code finds its login in the
-/// keychain with them, #564), the person's `HOME`, the tools' `PATH`, and the account's
-/// `CLAUDE_CONFIG_DIR`. Never a Claude Code, Anthropic or GitHub variable (AGENTS.md, "Spawning
-/// claude").
+/// keychain with them, #564) and the person's `HOME`. Never a Claude Code, Anthropic or GitHub
+/// variable (AGENTS.md, "Spawning claude").
+///
+/// With the default login (`account` none), Claude Code's own `~/.claude`, which no box can write,
+/// and the tools' `PATH`. With an account's own folder, never that folder (#651's re-review): its
+/// jobs can write it, and Claude Code applies a `.claude.json`'s `env` from its config folder
+/// whatever `--setting-sources` says, so a job could plant a `PATH` to a `security` of its own, or
+/// plug-in folders, that would run outside the box. Its config folder is then a new private one in
+/// the call's folder `dir`, holding only obid's copy of the login, what calls the API
+/// (`crate::jobs::account_login`; none: Claude Code says it isn't signed in), and `PATH` is the
+/// system's folders. Throws why that folder couldn't be made.
 fn unboxed_env(
     get: impl Fn(&str) -> Option<OsString>,
     account: Option<&Path>,
-) -> Vec<(OsString, OsString)> {
+    dir: &Path,
+) -> Result<Vec<(OsString, OsString)>, String> {
     let mut env = crate::process::kept(&get);
     env.push(("HOME".into(), get("HOME").unwrap_or_default()));
-    env.push(("PATH".into(), crate::process::tools_path()));
-    if let Some(account) = account {
-        env.push(("CLAUDE_CONFIG_DIR".into(), account.as_os_str().to_owned()));
+    match account {
+        None => env.push(("PATH".into(), crate::process::tools_path())),
+        Some(account) => {
+            let config = dir.join("config");
+            let mut builder = std::fs::DirBuilder::new();
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder
+                .create(&config)
+                .map_err(|e| format!("the brain's config folder couldn't be made: {e}"))?;
+            if let Some(login) = crate::jobs::account_login(account) {
+                crate::jobs::write_login(&config.join(".credentials.json"), &login)
+                    .map_err(|e| format!("the brain's login couldn't be copied: {e}"))?;
+            }
+            env.push(("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()));
+            env.push(("CLAUDE_CONFIG_DIR".into(), config.into_os_string()));
+        }
     }
     env.retain(|(name, _)| !crate::process::is_forbidden(&name.to_string_lossy()));
-    env
+    Ok(env)
 }
 
 /// Runs `launch` with `input` on its stdin, for at most `limit`: what it printed and how it ended.
@@ -611,6 +643,8 @@ impl Planner {
         let mut adapters = vec![];
         if let Some(claude) = &config.agents.claude
             && let Some(bin) = crate::process::resolve_bin(&claude.bin)
+            // Run by its absolute path, never one a folder it starts in could change.
+            && bin.is_absolute()
         {
             let account = crate::jobs::claude_accounts(claude).into_iter().next();
             adapters.push(Adapter::Claude(ClaudeBrain {
@@ -1291,11 +1325,12 @@ pub mod tests {
         let account = root.join("account");
         std::fs::create_dir_all(&account).unwrap();
         let bin = root.join("claude");
-        std::fs::write(
-            &bin,
-            "#!/bin/sh\necho launch >> \"$CLAUDE_CONFIG_DIR/launches\"\nexit 15\n",
-        )
-        .unwrap();
+        // Its own config folder is obid's, made new for each call: it counts in the account's.
+        let count = format!(
+            "#!/bin/sh\necho launch >> '{}'\nexit 15\n",
+            account.join("launches").display()
+        );
+        std::fs::write(&bin, count).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let config = crate::config::Config::parse(
             &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"),
@@ -1427,7 +1462,7 @@ pub mod tests {
                 .find(|(n, _)| *n == name)
                 .map(|(_, v)| OsString::from(v))
         };
-        let env = unboxed_env(get, Some(Path::new("/accounts/work")));
+        let env = unboxed_env(get, None, Path::new("/nowhere")).unwrap();
         let value = |name: &str| {
             env.iter()
                 .find(|(n, _)| n == name)
@@ -1439,12 +1474,13 @@ pub mod tests {
             ("LANG", "en_US.UTF-8"),
             ("HTTPS_PROXY", "http://proxy:3128"),
             ("HOME", "/Users/someone"),
-            ("CLAUDE_CONFIG_DIR", "/accounts/work"),
         ] {
             assert_eq!(value(name).as_deref(), Some(expected), "{name} in {env:?}");
         }
         assert!(value("PATH").is_some());
+        // The default login: its own folder, ~/.claude, which no box can write.
         for name in [
+            "CLAUDE_CONFIG_DIR",
             "CLAUDECODE",
             "CLAUDE_CODE_ENTRYPOINT",
             "ANTHROPIC_API_KEY",
@@ -1453,6 +1489,69 @@ pub mod tests {
         ] {
             assert_eq!(value(name), None, "{name} in {env:?}");
         }
+    }
+
+    /// #651's re-review: unboxed, the brain never reads an account's folder, which the account's
+    /// jobs can write. A job could plant a `.claude.json` there whose `env` Claude Code applies
+    /// whatever `--setting-sources` says (a `PATH` to a `security` of its own, plug-in folders),
+    /// which would run outside the box on the next turn. Its config folder is a new private one in
+    /// the call's folder, holding only obid's copy of the login (what calls the API), and its
+    /// `PATH` is the system's folders.
+    #[test]
+    fn the_unboxed_brain_is_never_steered_by_the_accounts_folder() {
+        let root = std::env::temp_dir().join(format!("obid-brain-steer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let account = root.join("account");
+        std::fs::create_dir_all(account.join("bin")).unwrap();
+        std::fs::write(account.join("bin/security"), "#!/bin/sh\n").unwrap();
+        let planted = serde_json::json!({"env": {"PATH": account.join("bin"),
+            "CLAUDE_CODE_PLUGIN_DIRS": account.join("plugins")}});
+        std::fs::write(account.join(".claude.json"), planted.to_string()).unwrap();
+        let login = serde_json::json!({"claudeAiOauth": {"accessToken": "a", "refreshToken": "r",
+            "scopes": ["user:inference"]}});
+        std::fs::write(account.join(".credentials.json"), login.to_string()).unwrap();
+        let call = root.join("call");
+        std::fs::create_dir_all(&call).unwrap();
+        let get = |name: &str| (name == "HOME").then(|| OsString::from("/Users/someone"));
+        let env = unboxed_env(get, Some(&account), &call).unwrap();
+        let value = |name: &str| {
+            env.iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| PathBuf::from(v))
+        };
+        let config = value("CLAUDE_CONFIG_DIR").unwrap();
+        assert!(config.starts_with(&call), "{}", config.display());
+        assert_eq!(
+            value("PATH"),
+            Some(PathBuf::from("/usr/bin:/bin:/usr/sbin:/sbin"))
+        );
+        for (name, value) in &env {
+            assert!(
+                !value.to_string_lossy().contains("account"),
+                "{name:?}={value:?}"
+            );
+        }
+        // Only the login, without its refresh token: nothing else of the account's folder.
+        let names: Vec<_> = std::fs::read_dir(&config)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [".credentials.json"]);
+        let copy: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(config.join(".credentials.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            copy,
+            serde_json::json!({"claudeAiOauth": {"accessToken": "a", "scopes": ["user:inference"]}})
+        );
+        let mode = std::fs::metadata(&config).unwrap().permissions();
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
+            0o700
+        );
+        // A second call in the same folder doesn't take a folder already there.
+        assert!(unboxed_env(get, Some(&account), &call).is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The system prompt says what each tool is called and where the agents' words are quoted.
