@@ -18,6 +18,8 @@
 //   PERMS          asks obid's permission for writes inside, outside and in repos/, the web, a
 //                  secret, a command that sends a file from outside the room, another MCP tool
 //   SAY <words>    streams <words> in three deltas and says them
+//   READREPO <w>   reads a file under repos/ (taints the turn), then does <w>
+//   TOOLSEARCH     makes a ToolSearch tool call (the deferred-tool lookup), then says "searched"
 //   SLOWFAIL <ms>  waits that long, then ends the turn with an error result
 //   FAIL           ends the turn with an error result
 //   anything else  says "Nothing to do." (what it says as a job's agent)
@@ -127,6 +129,14 @@ async function act(words) {
     say(`resume=${resumed ?? "none"}`);
   } else if (words.startsWith("SAY ")) {
     say(words.slice(4));
+  } else if (words.startsWith("READREPO ")) {
+    use("r1", "Read", { file_path: join(room, "repos/obi-e2e/fixture-app/package.json") });
+    used("r1", "{}");
+    await act(words.slice(9));
+  } else if (words.startsWith("TOOLSEARCH")) {
+    use("s1", "ToolSearch", { query: "select:mcp__oby__oby_jobs" });
+    used("s1", "loaded");
+    say("searched");
   } else if (words.startsWith("TOOLS")) {
     const listed = await oby("tools/list");
     say(`tools: ${listed.result.tools.map((t) => t.name).join(",")}`);

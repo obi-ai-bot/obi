@@ -161,11 +161,22 @@ fn a_turn_streams_its_words_and_ends_in_a_turn() {
         "--include-partial-messages",
         "--permission-prompt-tool",
         "--strict-mcp-config",
+        "--restricted",
+        "--tools",
         "--mcp-config",
     ] {
         assert!(argv.contains(&flag), "{flag}: {argv:?}");
     }
     assert!(!argv.contains(&"--resume"), "{argv:?}");
+    // The built-in tools name no Bash or other code-runner (N2).
+    let tools = argv[argv.iter().position(|a| *a == "--tools").unwrap() + 1];
+    assert!(
+        tools.contains("Read") && tools.contains("WebFetch"),
+        "{tools}"
+    );
+    for runner in ["Bash", "PowerShell", "BashOutput"] {
+        assert!(!tools.split(',').any(|t| t == runner), "{runner}: {tools}");
+    }
     let room = obid
         .home
         .join(format!("conversations/{conversation}/room"))
@@ -425,7 +436,7 @@ fn the_plan_loop_answers_when_the_session_cant_run() {
 fn work_planned_after_the_web_waits_for_the_owners_start() {
     let (_folder, obid) = obid("harness-web", true);
     let dispatch = r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#;
-    for (n, words) in [format!("WEB {dispatch}"), format!("CURL {dispatch}")]
+    for (n, words) in [format!("WEB {dispatch}"), format!("READREPO {dispatch}")]
         .iter()
         .enumerate()
     {
@@ -598,4 +609,70 @@ fn the_budget_is_the_whole_turns() {
         "{:?}",
         started.elapsed()
     );
+}
+
+/// Reading repo code taints the turn, and the taint lasts: a later resumed turn that dispatches
+/// still proposes the work for the owner's Start, never starts it at once (N1).
+#[test]
+fn the_taint_lasts_across_resumed_turns() {
+    let (_folder, obid) = obid("harness-taint-persist", true);
+    let first = said(&obid, json!({"said": "READREPO SAY looked", "new": true}));
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    let kept: Value = serde_json::from_slice(
+        &std::fs::read(
+            obid.home
+                .join(format!("conversations/{conversation}/session.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(kept["web"], true, "the turn's taint is kept: {kept}");
+
+    // A later turn that touches nothing untrusted itself still waits, because the taint lasts.
+    let dispatch = r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#;
+    let answer = said(
+        &obid,
+        json!({"said": dispatch, "conversation": conversation}),
+    );
+    assert_eq!(answer.body["jobs"], json!([]), "{}", answer.text);
+    assert!(
+        answer.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("waiting in your inbox"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        inbox(&obid).iter().any(|i| i["kind"] == "start"),
+        "a start item: {:?}",
+        inbox(&obid)
+    );
+    assert_eq!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .map_or(0, Vec::len),
+        0
+    );
+}
+
+/// The ToolSearch call before an MCP tool (the deferred-tool lookup) is Oby's own bookkeeping: no
+/// `step` event for it (the live e2e saw a bare "toolsearch" line).
+#[test]
+fn the_toolsearch_step_is_hidden() {
+    let (_folder, obid) = obid("harness-toolsearch", true);
+    let events = follow_events(&obid);
+    let answer = said(&obid, json!({"said": "TOOLSEARCH", "new": true}));
+    assert_eq!(answer.body["text"], "searched", "{}", answer.text);
+    let seen = until_oby_turn(&events, 30);
+    for (name, data) in &seen {
+        if name == "step" {
+            assert_ne!(data["tool"], "toolsearch", "{data}");
+            assert!(
+                !data["detail"].as_str().unwrap_or("").contains("select:"),
+                "{data}"
+            );
+        }
+    }
 }
