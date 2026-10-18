@@ -691,13 +691,8 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
     var conversation: String?
 
     var turn: Turn {
-        #if os(macOS)
-        Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text,
-             jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details)
-        #else
         Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text,
              jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details, conversation: conversation)
-        #endif
     }
 }
 

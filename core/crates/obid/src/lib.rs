@@ -9,6 +9,7 @@ pub mod acp;
 pub mod agent;
 pub mod api;
 pub mod approval;
+pub mod artifacts;
 pub mod brain;
 pub mod clear;
 pub mod codex;
@@ -180,6 +181,9 @@ pub async fn serve(
     // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
     secrets::known().learn("api-token", &token);
     jobs::use_keychain(config.claude_keychain);
+    if config.claude_keychain {
+        jobs::keep_keychain_logins();
+    }
     vault::install(&config.home, &config.vault);
     let events = events::Events::new();
     let sandbox = std::env::current_exe()
@@ -221,6 +225,13 @@ pub async fn serve(
     let connections = connections::Connections::open(&config.home, &jobs, broker_host);
     jobs.use_connections(connections.clone());
     let conversations = conversation::Conversations::open(&config.home, events.clone());
+    let artifacts = artifacts::Artifacts::open(&config.home, events.clone()).map_err(|source| {
+        StartError::Jobs {
+            path: config.home.join("artifacts"),
+            source,
+        }
+    })?;
+    jobs.use_artifacts(artifacts.clone());
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -233,6 +244,7 @@ pub async fn serve(
         jobs: jobs.clone(),
         events,
         conversations,
+        artifacts,
         turns: brain::turn::Turns::default(),
         presence: brain::recap::Presence::default(),
         link: link.clone(),

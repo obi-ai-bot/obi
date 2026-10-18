@@ -84,10 +84,10 @@ struct DesignTests {
         // A step names its conversation on obid: the thread shows only its own.
         let step = try Runner.decoder.decode(TurnStep.self, from: Data(#"{"turn":"8d","conversation":"c1","index":1,"text":"Thinking","state":"running"}"#.utf8))
         #expect(step.conversation == "c1")
-        #expect(ConversationList.shows(step, in: "c1", startingNew: false))
-        #expect(!ConversationList.shows(step, in: "c2", startingNew: false))
-        #expect(!ConversationList.shows(step, in: nil, startingNew: true))
-        #expect(ConversationList.shows(TurnStep(turn: "t", index: 1, text: "Reading", state: .running), in: nil, startingNew: false))
+        #expect(ConversationOrder.shows(step, in: "c1", startingNew: false))
+        #expect(!ConversationOrder.shows(step, in: "c2", startingNew: false))
+        #expect(!ConversationOrder.shows(step, in: nil, startingNew: true))
+        #expect(ConversationOrder.shows(TurnStep(turn: "t", index: 1, text: "Reading", state: .running), in: nil, startingNew: false))
 
         // A turn names its conversation on obid.
         let turn = try Runner.decoder.decode(RunnerTurn.self, from: Data(#"{"id":"x","who":"user","text":"hi","at":"2026-10-11T09:12:04Z","jobs":[],"conversation":"c1"}"#.utf8)).turn
@@ -99,28 +99,28 @@ struct DesignTests {
         let a = RunnerConversation(id: "a", title: "A", lastActivity: at(30))
         let b = RunnerConversation(id: "b", title: "B", pinned: true, lastActivity: at(300))
         let c = RunnerConversation(id: "c", title: "C", lastActivity: at(5))
-        let sections = ConversationList.sections([a, b, c])
+        let sections = ConversationOrder.sections([a, b, c])
         #expect(sections.pinned.map(\.id) == ["b"])
         #expect(sections.recent.map(\.id) == ["c", "a"])
         // An event puts it in place, or takes it out.
-        let renamed = ConversationList.placed(RunnerConversation(id: "a", title: "A2", lastActivity: at(1)), in: [a, b, c])
+        let renamed = ConversationOrder.placed(RunnerConversation(id: "a", title: "A2", lastActivity: at(1)), in: [a, b, c])
         #expect(renamed.map(\.title) == ["B", "A2", "C"])
-        #expect(ConversationList.placed(RunnerConversation(id: "c", title: "", deleted: true), in: [a, b, c]).map(\.id) == ["b", "a"])
+        #expect(ConversationOrder.placed(RunnerConversation(id: "c", title: "", deleted: true), in: [a, b, c]).map(\.id) == ["b", "a"])
         // Times as the design says them.
-        #expect(ConversationList.ago(at(0.5), now: now) == "now")
-        #expect(ConversationList.ago(at(5), now: now) == "5m")
-        #expect(ConversationList.ago(at(130), now: now) == "2h")
-        #expect(ConversationList.ago(at(3 * 1440 + 10), now: now) == "3d")
+        #expect(ConversationOrder.ago(at(0.5), now: now) == "now")
+        #expect(ConversationOrder.ago(at(5), now: now) == "5m")
+        #expect(ConversationOrder.ago(at(130), now: now) == "2h")
+        #expect(ConversationOrder.ago(at(3 * 1440 + 10), now: now) == "3d")
     }
 
     /// Home's words start a conversation: obid names it in a `conversation` event as the turn
     /// begins, titled from the words, so the phone knows its id before the answer (Stop needs it).
     @Test func aNewConversationIsKnownByItsTitle() {
         let said = "review oby PR #33 and tell me what it changes in the gateway, please"
-        #expect(ConversationList.started(by: said, RunnerConversation(id: "c", title: "Review oby PR #33 and tell me what it changes…")))
-        #expect(ConversationList.started(by: "hihi", RunnerConversation(id: "c", title: "Hihi")))
-        #expect(!ConversationList.started(by: "hihi", RunnerConversation(id: "c", title: "Hi")))
-        #expect(!ConversationList.started(by: "hihi", RunnerConversation(id: "c", title: "Hihi", deleted: true)))
+        #expect(ConversationOrder.started(by: said, RunnerConversation(id: "c", title: "Review oby PR #33 and tell me what it changes…")))
+        #expect(ConversationOrder.started(by: "hihi", RunnerConversation(id: "c", title: "Hihi")))
+        #expect(!ConversationOrder.started(by: "hihi", RunnerConversation(id: "c", title: "Hi")))
+        #expect(!ConversationOrder.started(by: "hihi", RunnerConversation(id: "c", title: "Hihi", deleted: true)))
     }
 
     /// Words queued offline keep the conversation they were for, across a relaunch.
