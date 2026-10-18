@@ -46,10 +46,10 @@ struct ConversationListTests {
     @Test func aTurnNamesItsConversation() throws {
         var parser = EventParser()
         for line in ["event: turn", #"data: {"id":"t1","who":"user","text":"hi","at":"2026-10-11T09:12:04Z","jobs":[],"conversation":"abc"}"#] { #expect(parser.feed(line) == nil) }
-        guard case .turn(let turn)? = parser.feed("") else { Issue.record("not a turn"); return }
+        guard case .turn(let turn, _)? = parser.feed("") else { Issue.record("not a turn"); return }
         #expect(turn.id == "t1" && turn.conversation == "abc")
         for line in ["event: turn", #"data: {"id":"t2","who":"user","text":"hi","at":"2026-10-11T09:12:04Z","jobs":[]}"#] { #expect(parser.feed(line) == nil) }
-        guard case .turn(let plain)? = parser.feed("") else { Issue.record("not a turn"); return }
+        guard case .turn(let plain, _)? = parser.feed("") else { Issue.record("not a turn"); return }
         #expect(plain.id == "t2" && plain.conversation == nil)
     }
 

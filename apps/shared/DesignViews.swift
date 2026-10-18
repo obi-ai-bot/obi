@@ -405,7 +405,7 @@ struct ArrivingSaid: View {
     var body: some View {
         Group {
             if let since, !reduceMotion, !done, Date.now.timeIntervalSince(since) < WordReveal.duration(text, came: came) {
-                TimelineView(.animation) { context in
+                TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
                     let shown = WordReveal.shown(text, came: came, after: context.date.timeIntervalSince(since))
                     SaidText(text: shown.text, color: color, fading: shown.fading)
                 }
@@ -442,7 +442,7 @@ struct Sheen: View {
         if reduceMotion {
             label.foregroundStyle(Tokens.ink)
         } else {
-            TimelineView(.animation) { context in
+            TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
                 let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.6) / 1.6
                 // The band's middle crosses from before the start to past the end.
                 let middle = phase * 1.6 - 0.3

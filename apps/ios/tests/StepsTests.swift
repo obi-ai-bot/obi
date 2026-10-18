@@ -36,7 +36,7 @@ struct StepsTests {
         // Missing: the other events read as before, and a stream with no step ends with no steps.
         var parser = EventParser()
         for line in ["event: turn", #"data: {"id":"a","who":"user","text":"hi","at":"2026-10-11T09:12:04Z","jobs":[]}"#] { _ = parser.feed(line) }
-        guard case .turn(let turn)? = parser.feed("") else {
+        guard case .turn(let turn, _)? = parser.feed("") else {
             Issue.record("the turn event wasn't read")
             return
         }

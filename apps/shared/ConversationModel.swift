@@ -34,6 +34,24 @@ final class ConversationModel {
     /// Now, for `arrived`; tests put in their own.
     @ObservationIgnored var time: () -> Date = { .now }
 
+    /// Oby's words under way (obid's `delta` events), by the user's turn id, with when the first
+    /// came: shown coming in until Oby's turn replaces them.
+    struct Streamed: Equatable {
+        var text: String
+        var since: Date
+    }
+    private(set) var streamed: [String: Streamed] = [:]
+    /// The artifacts a turn made, by the turn's id (the app's Turn doesn't keep them).
+    private(set) var refs: [String: [ArtifactRef]] = [:]
+    /// The turns a job added when it ended (#351), by id: not answers.
+    private var ended: Set<String> = []
+    /// What's known of each artifact, by id: from `artifact` events and `lookUp`.
+    private(set) var artifacts: [String: RunnerArtifact] = [:]
+    /// Artifacts obid deleted or doesn't have.
+    private(set) var gone: Set<String> = []
+    /// `GET /v1/artifacts/{id}`, or nil when there's no such one; the feed sets it.
+    @ObservationIgnored var lookUp: @MainActor (_ id: String) async throws -> RunnerArtifact? = { _ in nil }
+
     init(page: @escaping @MainActor (_ before: String?, _ limit: Int) async throws -> [Turn] = { _, _ in [] }) {
         self.page = page
     }
@@ -56,6 +74,11 @@ final class ConversationModel {
             problem = nil
             // A connection that dropped may have missed the end of a step: none stays running.
             steps = Self.settled(steps)
+            // Nor Oby's answer: words under way that the page answered are done.
+            streamed = streamed.filter { id, _ in
+                guard let at = runnerTurns.firstIndex(where: { $0.id == id }) else { return true }
+                return !runnerTurns[(at + 1)...].contains { answers($0) }
+            }
         } catch {
             guard mine == generation else { return }
             problem = error.localizedDescription
@@ -82,10 +105,78 @@ final class ConversationModel {
 
     /// A `turn` event: the turn with that id is replaced (a job joined it), or the new one takes
     /// its place by time.
-    func apply(_ turn: Turn) {
-        if !runnerTurns.contains(where: { $0.id == turn.id }) { arrive(turn) }
+    func apply(_ turn: Turn, _ extras: TurnExtras = TurnExtras()) {
+        if !extras.artifacts.isEmpty { refs[turn.id] = extras.artifacts }
+        if extras.ended { ended.insert(turn.id) }
+        let new = !runnerTurns.contains(where: { $0.id == turn.id })
+        // Oby's answer, new to the thread, replaces the words that came in, which carry on from when
+        // they started, not again. A turn sent again (a job joined it) or a job's ended turn isn't
+        // an answer: words under way stay.
+        if new, answers(turn), let since = streamed.values.map(\.since).min() {
+            streamed = [:]
+            arrived[turn.id] = arrived[turn.id] ?? since
+        }
+        if new { arrive(turn) }
         runnerTurns = Self.placed(turn, in: runnerTurns)
     }
+
+    /// Whether `turn` is Oby's answer to words: not the turn a job adds when it ends.
+    private func answers(_ turn: Turn) -> Bool { turn.who == .oby && !ended.contains(turn.id) }
+
+    /// A page of the runner's turns: the artifacts they made, for their cards, and which are a job's
+    /// ended turn.
+    func note(_ turns: [RunnerTurn]) {
+        for turn in turns {
+            if let list = turn.artifacts, !list.isEmpty { refs[turn.id] = list }
+            if turn.ended == true { ended.insert(turn.id) }
+        }
+    }
+
+    /// A `delta` event: the words join the answer under way for its turn.
+    func apply(_ delta: TurnDelta) {
+        streamed[delta.turn, default: Streamed(text: "", since: time())].text += delta.text
+    }
+
+    /// The words under way for `turn`, as `steps(under:in:)` finds its steps.
+    func streamed(under turn: Turn, in thread: [Turn]) -> Streamed? {
+        if let own = streamed[turn.id] { return own }
+        guard turn.who == .user, !thread.contains(where: { streamed[$0.id] != nil }),
+              thread.last(where: { $0.who == .user })?.id == turn.id else { return nil }
+        // The phone's echo: the words of the turn the thread doesn't have.
+        return streamed.values.max { $0.since < $1.since }
+    }
+
+    /// The artifacts to show under `turn`.
+    func artifactRefs(of turn: Turn) -> [ArtifactRef] { refs[turn.id] ?? [] }
+
+    /// An `artifact` event: a new one, a new version or title, or one deleted.
+    func apply(_ event: ArtifactEvent) {
+        if event.deleted == true {
+            artifacts[event.id] = nil
+            gone.insert(event.id)
+            return
+        }
+        var artifact = artifacts[event.id] ?? RunnerArtifact(id: event.id, title: event.title ?? "", kind: event.kind ?? "",
+                                                             conversation: event.conversation, job: event.job)
+        if let title = event.title { artifact.title = title }
+        if let kind = event.kind { artifact.kind = kind }
+        if let version = event.version, !artifact.versions.contains(where: { $0.version == version }) {
+            artifact.versions.append(.init(version: version, files: []))
+        }
+        artifacts[event.id] = artifact
+        gone.remove(event.id)
+    }
+
+    /// What's known of artifact `id`, read from obid when it isn't yet.
+    func resolve(_ id: String) async {
+        guard artifacts[id] == nil, !gone.contains(id) else { return }
+        do {
+            if let found = try await lookUp(id) { artifacts[id] = found } else { gone.insert(id) }
+        } catch {
+            // Not now: the card says so, and the next look tries again.
+        }
+    }
+
 
     /// Oby's turn, new to the thread, said in the last few seconds: it comes in word by word.
     private func arrive(_ turn: Turn) {
@@ -120,6 +211,11 @@ final class ConversationModel {
         steps = [:]
         latestStepTurn = nil
         arrived = [:]
+        streamed = [:]
+        refs = [:]
+        ended = []
+        artifacts = [:]
+        gone = []
         runnerTurns = []
         hasOlder = false
         loading = false

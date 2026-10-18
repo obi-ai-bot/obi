@@ -36,7 +36,12 @@ nonisolated enum ConversationOrder {
     /// on obid, only its own conversation's, and none while a new one waits for its id (Thinking
     /// says enough until then).
     static func shows(_ step: TurnStep, in current: String?, startingNew: Bool) -> Bool {
-        guard let id = step.conversation else { return true }
+        shows(step.conversation, in: current, startingNew: startingNew)
+    }
+
+    /// The same for anything else of a turn under way, by its conversation (its words as they're written).
+    static func shows(_ conversation: String?, in current: String?, startingNew: Bool) -> Bool {
+        guard let id = conversation else { return true }
         return !startingNew && id == current
     }
 
