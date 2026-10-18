@@ -162,6 +162,24 @@ struct ChatWindowTests {
         #expect(ConversationModel.decisionAnchor(job: "older", created: now - 60, turns: turns) == nil)
     }
 
+    /// A decision lives with its task (mac-design C3): a conversation of obid's shows only the
+    /// decisions of the jobs it started, and those with no job (nothing else shows them yet, C9).
+    @Test func aConversationShowsOnlyItsOwnJobsDecisions() {
+        let turns = [Turn(id: "start", date: now, who: .oby, text: "Starting", jobs: ["mine"])]
+        let shows = { (job: String, of: String?, shown: String?) in
+            ConversationModel.shows(decisionOf: job, startedIn: of, served: true, shown: shown, turns: turns)
+        }
+        #expect(shows("mine", nil, "c1"))
+        #expect(shows("older", "c1", "c1"))
+        #expect(!shows("other", "c2", "c1"))
+        #expect(!shows("other", nil, "c1"))
+        #expect(shows("", nil, "c1"))
+        // A new conversation, before its first words: none of another's.
+        #expect(!shows("other", "c2", nil))
+        // A runner with one thread shows every decision there, as before.
+        #expect(ConversationModel.shows(decisionOf: "other", startedIn: nil, served: false, shown: nil, turns: turns))
+    }
+
     @Test func confirmedAnswersLeaveTheInboxButStayInTheTranscript() {
         let desk = Desk()
         let feed = RunnerFeed()
