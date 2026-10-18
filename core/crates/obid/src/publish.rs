@@ -501,6 +501,22 @@ fn credentials(remote: &str, gh: Option<&Path>, unset: &[String]) -> Vec<String>
     args
 }
 
+/// The `-c` setting that adds the owner's `gh` login after git's own credential helpers, for a
+/// clone or fetch of an `https` remote ([`crate::git::ensure_clone`]): as a push signs in
+/// ([`credentials`]), so a private repository clones with nothing set up but gh's own sign-in
+/// (no `gh auth setup-git`), and a helper the person already has still answers first. None for
+/// another remote, or without a gh.
+pub(crate) fn fetch_credentials(remote: &str, gh: Option<&Path>) -> Vec<String> {
+    let mut args = credentials(remote, gh, &forbidden_names());
+    // Keep git's own helpers: only the gh one, not credentials()'s reset.
+    if args.len() == 4 {
+        args.drain(..2);
+    } else {
+        args.clear();
+    }
+    args
+}
+
 /// The variables in obid's environment that never reach gh (`crate::process::is_forbidden`),
 /// `GH_TOKEN` and `GITHUB_TOKEN` always among them: names only, never their values.
 fn forbidden_names() -> Vec<String> {
@@ -1245,6 +1261,23 @@ async fn push(head: &str, job: &Job, target: &Target, lease: Option<&str>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clone or fetch adds gh's login after git's own helpers, only for https and with a gh.
+    #[test]
+    fn fetches_add_gh_after_gits_own_helpers() {
+        let gh = Path::new("/opt/gh");
+        let https = fetch_credentials("https://github.com/o/r.git", Some(gh));
+        assert_eq!(https.len(), 2, "{https:?}");
+        assert_eq!(https[0], "-c");
+        assert!(https[1].starts_with("credential.helper=!env "), "{https:?}");
+        assert!(
+            https[1].ends_with("'/opt/gh' auth git-credential"),
+            "{https:?}"
+        );
+        assert!(fetch_credentials("https://github.com/o/r.git", None).is_empty());
+        assert!(fetch_credentials("git@github.com:o/r.git", Some(gh)).is_empty());
+        assert!(fetch_credentials("file:///tmp/r.git", Some(gh)).is_empty());
+    }
 
     fn job() -> Job {
         let mut job = Job::new(

@@ -171,19 +171,17 @@ pub async fn ensure_clone(
             clone.file_name().unwrap_or_default().to_string_lossy()
         ));
         let _ = std::fs::remove_dir_all(&partial);
-        run(
-            parent,
-            &[
-                "clone".as_ref(),
-                "--no-checkout".as_ref(),
-                "--quiet".as_ref(),
-                "--".as_ref(),
-                remote.as_ref(),
-                partial.as_os_str(),
-            ],
-            &[],
-        )
-        .await?;
+        let signed = crate::publish::fetch_credentials(remote, crate::github::gh().as_deref());
+        let mut args: Vec<&OsStr> = signed.iter().map(OsStr::new).collect();
+        args.extend::<[&OsStr; 6]>([
+            "clone".as_ref(),
+            "--no-checkout".as_ref(),
+            "--quiet".as_ref(),
+            "--".as_ref(),
+            remote.as_ref(),
+            partial.as_os_str(),
+        ]);
+        run(parent, &args, &[]).await?;
         git(&partial, &["config", "remote.origin.pushurl", NO_PUSH_URL]).await?;
         std::fs::rename(&partial, &clone)
             .map_err(|e| GitError(format!("can't move the clone into place: {e}")))?;
@@ -198,13 +196,15 @@ pub async fn ensure_clone(
     git(&clone, &["config", "gc.auto", "0"]).await?;
     exclude_obi_folders(&clone)?;
     if !refspecs.is_empty() {
-        let mut args: Vec<&str> = vec![
+        let signed = crate::publish::fetch_credentials(remote, crate::github::gh().as_deref());
+        let mut args: Vec<&str> = signed.iter().map(String::as_str).collect();
+        args.extend([
             "fetch",
             "--quiet",
             "--no-tags",
             "--no-write-fetch-head",
             "origin",
-        ];
+        ]);
         args.extend(refspecs.iter().map(String::as_str));
         git(&clone, &args).await?;
     }
