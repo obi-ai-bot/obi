@@ -9,6 +9,7 @@ pub mod acp;
 pub mod agent;
 pub mod api;
 pub mod approval;
+pub mod artifacts;
 pub mod brain;
 pub mod clear;
 pub mod codex;
@@ -221,6 +222,13 @@ pub async fn serve(
     let connections = connections::Connections::open(&config.home, &jobs, broker_host);
     jobs.use_connections(connections.clone());
     let conversations = conversation::Conversations::open(&config.home, events.clone());
+    let artifacts = artifacts::Artifacts::open(&config.home, events.clone()).map_err(|source| {
+        StartError::Jobs {
+            path: config.home.join("artifacts"),
+            source,
+        }
+    })?;
+    jobs.use_artifacts(artifacts.clone());
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -233,6 +241,7 @@ pub async fn serve(
         jobs: jobs.clone(),
         events,
         conversations,
+        artifacts,
         turns: brain::turn::Turns::default(),
         presence: brain::recap::Presence::default(),
         link: link.clone(),
