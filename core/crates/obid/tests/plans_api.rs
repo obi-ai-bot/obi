@@ -2067,6 +2067,67 @@ fn telling_a_finished_job_something_starts_a_follow_up() {
     );
 }
 
+/// A turn that looked something up (a lookup reads the web, GitHub or a repository: data, never
+/// the owner's words) only proposes the follow-up of a job that ended: a `start` item for the
+/// owner's Start, as research's dispatches are (#374). Nothing starts until they say Start.
+#[test]
+fn a_follow_up_after_research_waits_for_the_owners_start() {
+    let folder = Folder::new("brain-follow-up-research");
+    let obid = started(&folder);
+    let job = job_that(&obid, "Vault secrets", "Nothing", None, "done");
+    let id = job["id"].as_str().unwrap().to_owned();
+    queue(
+        &obid,
+        &[
+            research(vec![lookup(
+                "list_files",
+                json!({"repo": "obi-e2e/fixture-app"}),
+            )]),
+            message_plan(&id),
+            reply(""),
+        ],
+    );
+    let answer = said(
+        &obid,
+        "look at the files, then tell the vault job to add a test",
+    );
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("waits for your Start"),
+        "{answer}"
+    );
+    assert!(
+        answer["jobs"].as_array().is_none_or(Vec::is_empty),
+        "{answer}"
+    );
+    assert_eq!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let starts = items_of(&obid, "start");
+    assert_eq!(starts.len(), 1, "{starts:?}");
+    let item = starts[0]["id"].as_str().unwrap();
+    let started = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{item}/answer"),
+        Some(&json!({"answer": "Start"})),
+    );
+    assert_eq!(started.status, 200, "{}", started.text);
+    let next = get_job(&obid, started.body["job"].as_str().unwrap());
+    assert_eq!(next["followUpOf"], json!(id));
+    assert_eq!(
+        next["request"],
+        "look at the files, then tell the vault job to add a test"
+    );
+}
+
 /// JobActionTests.aJobThatIsStillRunningCantBeTriedAgain, aJobThatNeedsNothingSaysWhyItStays and
 /// startNowStartsAJobWaitingForItsStartWhen's last half: what can't happen says why, and fails.
 #[test]

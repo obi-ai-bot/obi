@@ -373,7 +373,8 @@ struct TaskPage: View {
     /// Each follow-up as Sangam's thread shows it: what you said, Oby's line, and its card.
     private var followUpList: some View {
         ForEach(Array(followUps.enumerated()), id: \.element.id) { index, next in
-            let account = actions.account ?? next.account
+            // Its own account, which a move may have changed: by name, as the iPhone shows it.
+            let account = actions.accounts.first { $0.account.id == next.account }?.account.name ?? next.account
             VStack(alignment: .leading, spacing: 8) {
                 Text(next.request).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).lineSpacing(6)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)

@@ -240,6 +240,10 @@ pub struct Job {
     /// What the job it follows up did, for its first prompt, quoted there. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub earlier: Option<String>,
+    /// The branch in obid's clone its worktree starts from instead of its base: the first job's,
+    /// for a follow-up of work that isn't merged. Never in the API's job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_from: Option<String>,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -333,6 +337,7 @@ impl Job {
             artifact_problems: Vec::new(),
             follow_up_of: None,
             earlier: None,
+            start_from: None,
         }
     }
 
@@ -416,7 +421,7 @@ impl Job {
     }
 
     /// Whether its pull request, if it has one, is open as far as obid knows.
-    fn pull_request_open(&self) -> bool {
+    pub fn pull_request_open(&self) -> bool {
         self.pull_request.as_ref().is_none_or(|pr| pr.is_open())
     }
 

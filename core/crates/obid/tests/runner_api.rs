@@ -1169,6 +1169,81 @@ fn messages_reach_only_jobs_that_can_take_them() {
     assert_eq!(after["notes"], json!([TRY_AGAIN]));
 }
 
+/// A follow-up of a job whose commits aren't merged (here not published: this obid has no `gh`)
+/// starts from that job's branch head, on a branch of its own: its agent sees that work, and only
+/// its own commits count as its. A job takes one follow-up at a time: while one works, more words
+/// for the first job are refused, pointing at it.
+#[test]
+fn a_follow_up_starts_from_the_first_jobs_unmerged_work() {
+    let folder = Folder::new("follow-up-work");
+    let (obid, _) = obid(&folder);
+    let post = |id: &str, text: &str| {
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/messages"),
+            Some(&json!({"text": text})),
+        )
+    };
+    let first = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: one.txt"}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let done = ended(&obid, &first);
+    assert_eq!(done["commits"], 1, "{done}");
+    assert!(done["published"].is_null(), "{done}");
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let head = git_out(
+        &clone,
+        &["rev-parse", &format!("refs/heads/oby/build-{first}")],
+    );
+
+    let followed = post(&first, "COMMIT: two.txt");
+    assert_eq!(followed.status, 201, "{}", followed.text);
+    let next = followed.body["id"].as_str().unwrap().to_owned();
+    assert_eq!(followed.body["branch"], format!("oby/build-{next}"));
+    let after = ended(&obid, &next);
+    assert_eq!(after["startCommit"], head.as_str(), "{after}");
+    assert_eq!(after["commits"], 1, "{after}");
+    let worktree = std::path::Path::new(after["worktree"].as_str().unwrap());
+    assert!(worktree.join("one.txt").is_file() && worktree.join("two.txt").is_file());
+
+    // One follow-up at a time.
+    let looked = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Look around"}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    ended(&obid, &looked);
+    let pausing = post(&looked, "PAUSE: 3000");
+    assert_eq!(pausing.status, 201, "{}", pausing.text);
+    let busy = post(&looked, "and one more");
+    assert_eq!(busy.status, 422, "{}", busy.text);
+    assert!(
+        busy.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("is following it up already"),
+        "{}",
+        busy.text
+    );
+}
+
+fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
 /// What a job hears when the owner tries it again (`Inbox.tryAgainMessage`).
 const TRY_AGAIN: &str =
     "Try again, picking up where you left off. Finish with a short summary as asked.";

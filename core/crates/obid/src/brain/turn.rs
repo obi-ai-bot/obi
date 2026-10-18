@@ -1062,7 +1062,14 @@ async fn run_with(
                 (Some(_), Action::MessageJob) => plan.message.clone().unwrap_or_default(),
                 _ => said.to_owned(),
             };
-            let outcome = act(shared, control, plan, &words, index).await;
+            // Whose words they are: an event turn's are the brain's own, and a turn that looked
+            // something up read what isn't the owner's.
+            let source = match (orchestration, researched) {
+                (Some(_), _) => crate::jobs::Source::Event,
+                (None, true) => crate::jobs::Source::Untrusted,
+                (None, false) => crate::jobs::Source::Owner,
+            };
+            let outcome = act(shared, control, plan, &words, index, source).await;
             handled.acted(shared, plan);
             // A follow-up it started: its card goes on the answer.
             if let Outcome::Started(_, job) = &outcome {
@@ -1140,10 +1147,11 @@ async fn act(
     plan: &Plan,
     said: &str,
     index: usize,
+    source: crate::jobs::Source,
 ) -> Outcome {
     let text = actions::step_text(shared, plan);
     step_event(shared, control, index, plan.action, &text, State::Running);
-    let outcome = actions::act(shared, plan, said).await;
+    let outcome = actions::act(shared, plan, said, source).await;
     step_event(
         shared,
         control,

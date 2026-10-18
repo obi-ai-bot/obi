@@ -584,6 +584,51 @@ fn a_turn_starts_and_tells_at_most_ten() {
     }
 }
 
+/// A follow-up is a job a turn starts: it counts against the turn's ten, and a turn starts at most
+/// one follow-up of a job.
+#[test]
+fn a_turn_starts_one_follow_up_of_a_job_within_its_ten() {
+    let (_folder, obid) = obid("harness-follow-up-caps", true);
+    let started = said(
+        &obid,
+        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#,
+               "new": true}),
+    );
+    let id = started.body["jobs"][0]["id"].as_str().unwrap().to_owned();
+    ended(&obid, &id);
+    let jobs = || {
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    let tell = format!(r#"OBY oby_tell_job {{"id": "{id}", "words": "x"}}"#);
+    let full = said(
+        &obid,
+        json!({"said": format!(r#"REPEAT 10 OBY oby_dispatch {{"repo": "obi-e2e/nowhere", "task": "x"}} THEN {tell}"#), "new": true}),
+    );
+    assert!(
+        full.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("starts jobs at most 10"),
+        "{}",
+        full.text
+    );
+    assert_eq!(jobs(), 1);
+    let twice = said(
+        &obid,
+        json!({"said": format!(r#"REPEAT 2 {tell}"#), "new": true}),
+    );
+    assert!(
+        twice.body["text"].as_str().unwrap().contains("refused"),
+        "{}",
+        twice.text
+    );
+    assert_eq!(jobs(), 2);
+}
+
 /// What the agent could plant for the next turn's Claude Code (instructions, settings, commands,
 /// helpers, hooks) is gone before it starts, links taken away without being followed.
 #[test]

@@ -314,7 +314,20 @@ async fn act(
     words: &str,
 ) -> Result<String, String> {
     problems(shared, session, &plan)?;
-    answered(session, actions::act(shared, &plan, words).await)
+    answered(
+        session,
+        actions::act(shared, &plan, words, source(session)).await,
+    )
+}
+
+/// Whose words this turn's actions pass on: the owner's, or after the turn read something
+/// untrusted, the owner's only as a proposal.
+fn source(session: &Session) -> crate::jobs::Source {
+    if session.web.load(Ordering::SeqCst) {
+        crate::jobs::Source::Untrusted
+    } else {
+        crate::jobs::Source::Owner
+    }
 }
 
 /// A tool's answer for an action's outcome: a job it started (a follow-up) goes on the turn, and
@@ -392,30 +405,33 @@ async fn tell(
         .get(&id)
         .ok_or("That job isn't here any more.")?;
     if job.status.is_active() {
-        return answered(session, actions::act(shared, &plan, &words).await);
+        return answered(
+            session,
+            actions::act(shared, &plan, &words, source(session)).await,
+        );
+    }
+    // A follow-up is a job the turn starts: it counts against the turn's ten, and a job gets one
+    // follow-up a turn.
+    capped(&session.dispatched, "starts jobs")?;
+    let name = job.short_title();
+    let followed = session
+        .jobs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|j| j["followUpOf"] == id.as_str());
+    if followed {
+        return Err(format!(
+            "Oby started a follow-up of {name} this turn already: tell that one instead."
+        ));
     }
     let agent_ready = |text: &str| -> Result<String, String> {
         Ok(crate::secrets::known().redact(&crate::vault::for_agent(text.trim())?))
     };
     let mut new = crate::jobs::follow_up(&job, &agent_ready(&words)?);
     new.request = Some(agent_ready(&session.said)?);
-    let name = job.short_title();
-    if session.web.load(Ordering::SeqCst) {
-        let nonce = super::briefing::nonce();
-        let text = format!(
-            "Oby looked into it first. Start {}, a follow-up of {name}?\n\n{}\n{}",
-            actions::describe(&new),
-            super::briefing::fence_rule(&nonce, "what the follow-up would hear"),
-            super::briefing::fence(&nonce, &new.task),
-        );
-        let title = new
-            .title
-            .clone()
-            .unwrap_or_else(|| format!("Follow-up of {name}"));
-        shared.link.propose(&new, title, text);
-        return Ok(format!(
-            "{name} is finished, and this turn used the web, so its follow-up waits for your Start in your inbox."
-        ));
+    if source(session) == crate::jobs::Source::Untrusted {
+        return Ok(actions::propose_follow_up(shared, &job, &new));
     }
     answered(session, actions::follow_up(shared, &job, new))
 }

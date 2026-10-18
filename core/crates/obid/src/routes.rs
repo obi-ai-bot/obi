@@ -273,6 +273,7 @@ fn new_job(job: &Map<String, Value>) -> Result<NewJob, String> {
         brief: None,
         follow_up_of: None,
         earlier: None,
+        start_from: None,
     })
 }
 
@@ -530,7 +531,7 @@ pub async fn message(
         .ok()
         .and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_owned))
         .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "The body is {\"text\": \"…\"}."))?;
-    match shared.jobs.message(&id, &text) {
+    match shared.jobs.message(&id, &text, crate::jobs::Source::Owner) {
         None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
         Some(Err(refused)) => Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
         Some(Ok(job)) if job.id != id => Ok(json(StatusCode::CREATED, job.to_json())),
