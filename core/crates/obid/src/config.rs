@@ -313,6 +313,12 @@ impl Config {
                             account.id
                         ));
                     }
+                    Some(dir) if holds(dir, &file.home) => {
+                        return invalid(format!(
+                            "agents.{key}.accounts: {}'s configDir {dir:?} holds obid's home: every box would be hidden away with it.",
+                            account.id
+                        ));
+                    }
                     Some(dir) if key == "claude" && in_persons_folder(dir, ".claude") => {
                         return invalid(format!(
                             "agents.claude.accounts: {}'s configDir {dir:?} is the person's own ~/.claude or inside it: an account needs a folder of its own, and ~/.claude must stay the person's own login.",
@@ -610,6 +616,17 @@ fn is_repo_name(name: &str) -> bool {
 /// Whether `dir` is the person's own `~/<folder>` (`.claude`, `.codex`: the default login's
 /// folder) or inside it, in any of their homes, links resolved where they exist and letter case
 /// ignored (macOS ignores it).
+/// Whether `dir` is `inner` or holds it, as written or with links resolved, in lower case.
+fn holds(dir: &std::path::Path, inner: &std::path::Path) -> bool {
+    let forms = |path: &std::path::Path| {
+        let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        [path.to_path_buf(), real]
+            .map(|p| std::path::PathBuf::from(p.to_string_lossy().to_lowercase()))
+    };
+    let (dirs, inners) = (forms(dir), forms(inner));
+    inners.iter().any(|i| dirs.iter().any(|d| i.starts_with(d)))
+}
+
 fn in_persons_folder(dir: &std::path::Path, folder: &str) -> bool {
     // As written and with links resolved, each in lower case.
     let forms = |path: &std::path::Path| {
@@ -754,10 +771,23 @@ mod tests {
     }
 
     /// A Claude account's `configDir` is never the person's own `~/.claude` nor inside it (#651's
-    /// re-review): jobs can write an account's folder, and the default login's folder must stay
-    /// one no box can write, since obid refreshes it unboxed.
-    /// Nor is a Codex account's `configDir` the person's own `~/.codex` or inside it (finding 9):
-    /// a job's Codex runs in its account's folder, which it can write.
+    /// re-review): that is the person's own login, which obid refreshes unboxed. Nor is a Codex
+    /// account's `configDir` the person's own `~/.codex` or inside it (finding 9). An account's
+    /// folder is its own, of which a run gets only a copy of the login (#655).
+    /// A `configDir` never holds obid's home: every box hides every account's folder (#655), and
+    /// obid's home holds the boxes' own folders.
+    #[test]
+    fn a_config_dir_never_holds_obids_home() {
+        for dir in ["/srv", "/srv/obid-home", "/"] {
+            let agents = serde_json::json!({"codex": {"bin": "codex",
+                "accounts": [{"id": "w", "name": "W", "configDir": dir}]}});
+            let error = Config::parse(&with(serde_json::json!({"agents": agents})))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("holds obid's home"), "{dir}: {error}");
+        }
+    }
+
     #[test]
     fn a_codex_config_dir_is_never_the_persons_own_codex_folder() {
         let home = crate::jobs::person_homes().into_iter().next().unwrap();

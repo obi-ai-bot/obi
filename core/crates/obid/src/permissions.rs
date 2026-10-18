@@ -1030,8 +1030,8 @@ const SYSTEM_FOLDERS: &[&str] = &[
 ];
 
 /// Where a job's sandbox ends, as [`reach`] sees it: its worktree, its temporary folder, its
-/// `HOME` (the temporary folder, or the account's folder for Cursor), and the folders that hold its
-/// agent's login.
+/// `HOME` (the temporary folder, or the job's own login folder for Cursor), and the folders that
+/// hold its agent's login (its own copy, and the account's folder, which it never gets, #655).
 #[derive(Debug, Clone, Default)]
 pub struct Bounds {
     pub worktree: PathBuf,

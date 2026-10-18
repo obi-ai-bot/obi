@@ -438,10 +438,11 @@ impl ClaudeBrain {
 /// variable (AGENTS.md, "Spawning claude").
 ///
 /// With the default login (`account` none), Claude Code's own `~/.claude`, which no box can write,
-/// and the tools' `PATH`. With an account's own folder, never that folder (#651's re-review): its
-/// jobs can write it, and Claude Code applies a `.claude.json`'s `env` from its config folder
-/// whatever `--setting-sources` says, so a job could plant a `PATH` to a `security` of its own, or
-/// plug-in folders, that would run outside the box. Its config folder is then a new private one in
+/// and the tools' `PATH`. With an account's own folder, never that folder (#651's re-review): the
+/// Mac app's Swift engine still runs agents unboxed with it (#655's open item), and Claude Code
+/// applies a `.claude.json`'s `env` from its config folder whatever `--setting-sources` says, so
+/// whatever is planted there (a `PATH` to a `security` of its own, plug-in folders) would run
+/// outside any box. Its config folder is then a new private one in
 /// the call's folder `dir`, holding only obid's copy of the login, what calls the API
 /// (`crate::jobs::account_login`; none: Claude Code says it isn't signed in), and `PATH` is the
 /// system's folders. Throws why that folder couldn't be made.
@@ -1627,10 +1628,10 @@ pub mod tests {
         }
     }
 
-    /// #651's re-review: unboxed, the brain never reads an account's folder, which the account's
-    /// jobs can write. A job could plant a `.claude.json` there whose `env` Claude Code applies
-    /// whatever `--setting-sources` says (a `PATH` to a `security` of its own, plug-in folders),
-    /// which would run outside the box on the next turn. Its config folder is a new private one in
+    /// #651's re-review: unboxed, the brain never reads an account's folder, which the Mac app's
+    /// Swift engine can still write unboxed (#655's open item). A `.claude.json` planted there has
+    /// its `env` applied by Claude Code whatever `--setting-sources` says (a `PATH` to a
+    /// `security` of its own, plug-in folders), which would run outside any box on the next turn. Its config folder is a new private one in
     /// the call's folder, holding only obid's copy of the login (what calls the API), and its
     /// `PATH` is the system's folders.
     #[test]
