@@ -223,13 +223,17 @@ pub struct Config {
 /// Where the plug-ins obid ships are when the configuration doesn't say: the `plugins/` folder
 /// of the repository this obid was built from (`core/crates/obid/../../../plugins`).
 pub fn default_bundled_plugins() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../plugins")
+    crate::app::resources()
+        .map(|dir| dir.join("plugins"))
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../plugins"))
 }
 
 /// Where the built web app is when the configuration doesn't say: `apps/web/dist` in the
 /// repository this obid was built from (`core/crates/obid/../../../apps/web/dist`).
 pub fn default_web() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/web/dist")
+    crate::app::resources()
+        .map(|dir| dir.join("web"))
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/web/dist"))
 }
 
 impl Config {

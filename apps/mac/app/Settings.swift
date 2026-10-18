@@ -118,6 +118,8 @@ struct RunnerSettingsView: View {
     @AppStorage(RunnerFeed.thisMacKey) private var onThisMac = false
     /// The login item, registered with "This Mac" and unregistered with a remote runner (apps/mac/app/LoginItem.swift).
     @State private var loginItem = RunnerLoginItem()
+    /// Asking before install.sh's obid is moved into Oby.
+    @State private var confirmingMove = false
     /// Merge checks on this Mac (apps/mac/app/MacChecks.swift).
     @AppStorage(MacChecks.setting) private var runMergeChecks = true
     /// Apple checks agents ask for (Engine/AppleChecks.swift).
@@ -128,7 +130,8 @@ struct RunnerSettingsView: View {
     var body: some View {
         // Sangam's words, but "the window" where his say "the island", which is gone.
         SetGroup("Runner", footer: onThisMac
-                 ? "The runner is Oby’s login item on this Mac, and Oby follows it on 127.0.0.1."
+                 ? (loginItem.byScript ? "Oby’s engine on this Mac was installed with install.sh. Move it into Oby and the app keeps it running and up to date, with the same settings, jobs and token."
+                                       : "Oby’s engine is the app’s login item on this Mac, and Oby follows it on 127.0.0.1.")
                  : "Oby follows the runner at this address: the window lists its jobs.",
                  problem: onThisMac ? loginItem.problem : nil) {
             SetRow("Runner") {
@@ -139,6 +142,9 @@ struct RunnerSettingsView: View {
                     SetValue(loginItem.line)
                     if loginItem.needsApproval {
                         Button("Open Login Items Settings") { RunnerLoginItem.openSettings() }.buttonStyle(.set)
+                    }
+                    if loginItem.byScript {
+                        Button("Move into Oby…") { confirmingMove = true }.buttonStyle(.set)
                     }
                 }
             } else {
@@ -155,6 +161,11 @@ struct RunnerSettingsView: View {
         }
         .onChange(of: onThisMac) { _, on in
             if on { loginItem.register() } else { loginItem.unregister() }
+        }
+        .confirmationDialog("Move Oby’s engine into the app?", isPresented: $confirmingMove) {
+            Button("Move into Oby") { loginItem.moveFromScript() }
+        } message: {
+            Text("Oby stops the obid install.sh set up and starts the one inside the app, with the same configuration, jobs and token. Running jobs pick up where they were.")
         }
         SetGroup("This Mac", footer: "On power, Oby prevents idle sleep while This Mac is enabled and this setting is on. A running job always keeps this Mac awake.") {
             SetRow("Keep my Mac available") {
