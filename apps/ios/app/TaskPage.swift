@@ -9,6 +9,9 @@ struct TaskCard: View {
     @Environment(Phone.self) private var phone
     @Environment(\.push) private var push
     let item: WorkList.Item<Job>
+    /// What a ⋮ action held on the card is doing, and why it didn't go.
+    @State private var busy = false
+    @State private var problem: String?
 
     private var job: Job { item.job }
 
@@ -70,6 +73,7 @@ struct TaskCard: View {
                 }
             }
             if item.status != .done { StageBar(job: job, needs: item.status == .needs).padding(.top, 16) }
+            if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.top, 10) }
         }
         .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 20)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -78,7 +82,8 @@ struct TaskCard: View {
         .onTapGesture { push(.task(job.id)) }
         .contextMenu {
             Button("View details", systemImage: "info.circle") { push(.task(job.id)) }
-            TaskMenuItems(job: job, items: TaskMenu.items(job, conversation: phone.conversation(of: job) != nil).filter { $0 != .move && $0 != .mode })
+            TaskMenuItems(job: job, items: TaskMenu.items(job, conversation: phone.conversation(of: job) != nil).filter { $0 != .move && $0 != .mode },
+                          busy: $busy, onProblem: { problem = $0 })
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(job.heading), \(item.mark.rawValue)")
@@ -109,6 +114,8 @@ struct TaskMenuItems: View {
     let job: Job
     let items: [TaskMenu.Item]
     var onMove: () -> Void = {}
+    /// An action under way: the items wait for it.
+    var busy: Binding<Bool> = .constant(false)
     var onProblem: (String?) -> Void = { _ in }
 
     var body: some View {
@@ -118,9 +125,9 @@ struct TaskMenuItems: View {
                 if let conversation = phone.conversation(of: job) {
                     Button("Open conversation", systemImage: "bubble.left.and.bubble.right") { push(.conversation(conversation)) }
                 }
-            case .stop: Button("Stop task", systemImage: "stop") { run { try await phone.stop(job.id) } }
+            case .stop: Button("Stop task", systemImage: "stop", role: .destructive) { run { try await phone.stop(job.id) } }.disabled(busy.wrappedValue)
             case .archive: Button("Archive task", systemImage: "archivebox") { phone.archive(job.id) }
-            case .dismiss: Button("Dismiss", systemImage: "xmark") { run { try await phone.dismiss(job.id) } }
+            case .dismiss: Button("Dismiss", systemImage: "xmark") { run { try await phone.dismiss(job.id) } }.disabled(busy.wrappedValue)
             case .move: Button("Move to…", systemImage: "arrow.left.arrow.right", action: onMove)
             case .mode:
                 let mode = RunnerMode(job.mode)
@@ -130,12 +137,17 @@ struct TaskMenuItems: View {
                     Label("Mode: \(mode?.label ?? "unknown")", systemImage: mode?.symbol ?? "hand.raised")
                 }
                 .pickerStyle(.menu)
+                .disabled(busy.wrappedValue)
             }
         }
     }
 
     private func run(_ work: @escaping () async throws -> Void) {
-        Task { do { try await work(); onProblem(nil) } catch { onProblem(error.localizedDescription) } }
+        busy.wrappedValue = true
+        Task {
+            defer { busy.wrappedValue = false }
+            do { try await work(); onProblem(nil) } catch { onProblem(error.localizedDescription) }
+        }
     }
 }
 
@@ -294,7 +306,7 @@ struct TaskPage: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         TaskMenuItems(job: job, items: TaskMenu.items(job, conversation: phone.conversation(of: job) != nil),
-                                      onMove: { problem = nil; moving = true }, onProblem: { problem = $0 })
+                                      onMove: { problem = nil; moving = true }, busy: $busy, onProblem: { problem = $0 })
                     } label: { Image(systemName: "ellipsis") }
                         .accessibilityLabel("Task options")
                 }
