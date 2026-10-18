@@ -178,21 +178,16 @@ struct AboutSettingsView: View {
     let updater: Updater
 
     var body: some View {
-        Form {
-            Section {
-                LabeledContent("Version", value: Updater.version)
-                Button("Check for Updates…") { updater.check() }
+        SetGroup("Oby", footer: "Oby checks for updates every 6 hours, downloads them quietly and installs them when it quits. Once one is downloaded, the menu bar offers to restart now; if this Mac is running a check for the runner, the restart waits for it.") {
+            SetRow("Version") { SetValue(Updater.version) }
+            SetRow("") {
+                Button("Check for Updates…") { updater.check() }.buttonStyle(.set)
                 if let pill = updater.pill {
                     Button(pill) { updater.install() }
+                        .buttonStyle(.set)
                         .disabled(updater.waiting)
                 }
-            } header: {
-                Text("Oby")
-            } footer: {
-                Text("Oby checks for updates every 6 hours, downloads them quietly and installs them when it quits. Once one is downloaded, the menu bar offers to restart now; if this Mac is running a check for the runner, the restart waits for it.")
             }
         }
-        .formStyle(.grouped)
-        .frame(width: 460)
     }
 }

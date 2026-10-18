@@ -6,16 +6,25 @@ import SwiftUI
 // titled groups with a note under them. The Mac's Settings pages are made of these, and the iPhone's
 // can be.
 
+extension EnvironmentValues {
+    /// Settings' sections both apps share (SettingsSections.swift, PermissionsSection.swift) draw as
+    /// Sangam's cards instead of a grouped form's sections: the Mac's Settings pages set it.
+    @Entry var settingsCards = false
+}
+
 /// A titled group of rows on a card, a note under it (`.set-group`, `.set-head`, `.set-card`, `.set-foot`).
-/// The rows get a divider between them, never above the first.
+/// The rows get a divider between them, never above the first. What went wrong shows under the card
+/// in `danger` (`.set-problem`), over the note.
 struct SetGroup<Content: View>: View {
     var title: String?
     var footer: String?
+    var problem: String?
     @ViewBuilder var content: Content
 
-    init(_ title: String? = nil, footer: String? = nil, @ViewBuilder content: () -> Content) {
+    init(_ title: String? = nil, footer: String? = nil, problem: String? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
         self.footer = footer
+        self.problem = problem
         self.content = content()
     }
 
@@ -42,6 +51,9 @@ struct SetGroup<Content: View>: View {
             .padding(1)
             .background(Tokens.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Tokens.surfaceEdge))
+            if let problem {
+                SetAbout(problem, color: Tokens.danger).padding(.horizontal, 16).padding(.top, 8)
+            }
             if let footer {
                 SetAbout(footer).padding(.horizontal, 16).padding(.top, 8)
             }

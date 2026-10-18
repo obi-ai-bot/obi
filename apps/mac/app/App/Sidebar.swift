@@ -45,6 +45,13 @@ nonisolated enum SidebarSections {
             }
     }
 
+    /// Under your name in the account menu: the Oby account's email once Remote access signed in,
+    /// else this Mac's name.
+    static func accountLine(email: String?, mac: String?) -> String {
+        if let email, !email.isEmpty { return email }
+        return mac ?? "This Mac"
+    }
+
     /// "WP" for Wellington Prado: the first letters of the first two names.
     static func initials(_ name: String) -> String {
         let parts = name.split(separator: " ").prefix(2).compactMap { $0.first }
@@ -69,7 +76,6 @@ struct SidebarView: View {
     let state: ChatState
     let width: CGFloat
     let onNewTask: () -> Void
-    let onOpenSettings: (SettingsTab) -> Void
     @AppStorage(GroupBy.key) private var groupBy = GroupBy.type
     @State private var search = ""
     /// Why the last Clear done didn't go through, until the next one does.
@@ -85,6 +91,9 @@ struct SidebarView: View {
     private var feed: RunnerFeed { model.feed }
     /// The panel lists obid's conversations (#493) instead of Home's work.
     private var listsConversations: Bool { feed.conversationsOn && state.section == .conversations }
+    /// The panel lists Settings' pages.
+    private var listsSettings: Bool { state.section == .settings }
+    private var title: String { listsSettings ? "Settings" : listsConversations ? "Conversations" : "Home" }
     private var work: [WorkList.Item<SidebarSections.JobRow>] { model.work(since: state.since, seen: state.seen) }
     private var groups: [WorkList.Group<SidebarSections.JobRow>] {
         let query = search.trimmingCharacters(in: .whitespaces)
@@ -111,7 +120,7 @@ struct SidebarView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            IconStrip(model: model, state: state, work: work, onOpenSettings: onOpenSettings)
+            IconStrip(model: model, state: state, work: work)
             content
         }
         .frame(width: width)
@@ -122,11 +131,11 @@ struct SidebarView: View {
     private var content: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4) {
-                Text(listsConversations ? "Conversations" : "Home").font(Tokens.font(Tokens.textTitle, .semibold)).foregroundStyle(Tokens.ink)
+                Text(title).font(Tokens.font(Tokens.textTitle, .semibold)).foregroundStyle(Tokens.ink)
                     .lineLimit(1).frame(height: 32).padding(.horizontal, 10)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 0)
-                if !listsConversations {
+                if !listsConversations && !listsSettings {
                     Menu {
                         Picker("Group by", selection: $groupBy) {
                             ForEach(GroupBy.allCases, id: \.self) { Text($0.label).tag($0) }
@@ -146,8 +155,14 @@ struct SidebarView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    if searching { searchField.transition(.opacity.combined(with: .move(edge: .top))) }
-                    if listsConversations {
+                    if searching && !listsSettings { searchField.transition(.opacity.combined(with: .move(edge: .top))) }
+                    if listsSettings {
+                        ForEach(SettingsPage.allCases, id: \.self) { page in
+                            SettingsRow(page: page, on: state.trail.top == .settings(page)) {
+                                withAnimation(Tokens.warm) { state.openSettings(page) }
+                            }
+                        }
+                    } else if listsConversations {
                         ConversationsPanel(model: model, state: state, search: search)
                     } else {
                         PanelRow(symbol: "plus", title: "New task", action: onNewTask).padding(.bottom, 8)
@@ -165,16 +180,20 @@ struct SidebarView: View {
         }
         .padding(.horizontal, 16).padding(.top, state.chrome.bar)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        // Search, on the panel icon's row at the panel's right edge.
+        // Search, on the panel icon's row at the panel's right edge (not on Settings' list).
         .overlay(alignment: .topTrailing) {
+            if !listsSettings { searchButton }
+        }
+        .background(alignment: .top) { WindowDragArea().frame(height: state.chrome.bar) }
+    }
+
+    private var searchButton: some View {
             IconButton(symbol: "magnifyingglass", on: searching) {
                 withAnimation(Tokens.warm) { searching.toggle() }
                 if !searching { search = "" }
             }
             .accessibilityLabel("Search")
             .padding(.trailing, 10).padding(.top, (state.chrome.bar - 32) / 2)
-        }
-        .background(alignment: .top) { WindowDragArea().frame(height: state.chrome.bar) }
     }
 
     private var searchField: some View {
@@ -327,7 +346,6 @@ private struct IconStrip: View {
     let model: IslandModel
     let state: ChatState
     let work: [WorkList.Item<SidebarSections.JobRow>]
-    let onOpenSettings: (SettingsTab) -> Void
 
     private var homeDot: Color? {
         if work.contains(where: { $0.status == .needs }) { return Tokens.needs }
@@ -338,7 +356,7 @@ private struct IconStrip: View {
         // With obid's conversations (#493) the icons pick the panel's section, as Sangam's do.
         let sections = model.feed.conversationsOn
         VStack(spacing: 12) {
-            RailButton(symbol: "house", label: "Home", on: sections ? state.section == .home : state.trail.isHome, dot: homeDot) {
+            RailButton(symbol: "house", label: "Home", on: sections ? state.section == .home : state.trail.isHome && state.section != .settings, dot: homeDot) {
                 state.section = .home
                 state.trail.closeAll()
             }
@@ -358,22 +376,22 @@ private struct IconStrip: View {
         .background(alignment: .top) { WindowDragArea().frame(height: state.chrome.bar) }
     }
 
-    /// You: your name on this Mac, and who pays for the first account (the team), else this Mac.
+    /// You (Sangam's account menu): your name and the Oby account's email, then Settings, which
+    /// opens on General unless one of its pages shows. There's no Oby login for the Mac itself, so
+    /// no Log out: Remote access signs its account out on its own page.
     private var account: some View {
         let name = NSFullUserName()
-        let payer = model.desk.accounts.accounts.map(\.account.payer).first { !$0.isEmpty }
-            ?? model.feed.host.map { "Runner: \($0)" } ?? "This Mac"
         return Menu {
-            Section("\(name) · \(payer)") {
-                Button("Accounts…") { onOpenSettings(.accounts) }
-                Button("Integrations…") { onOpenSettings(.runner) }
+            Section("\(name) · \(SidebarSections.accountLine(email: model.remote?.email, mac: Host.current().localizedName))") {
+                Button("Settings") { withAnimation(Tokens.warm) { state.openSettings() } }
             }
-            Divider()
-            Button("Settings…") { onOpenSettings(.general) }
         } label: {
             Text(SidebarSections.initials(name)).font(Tokens.font(10, .semibold)).foregroundStyle(.white.opacity(0.92))
                 .frame(width: 24, height: 24).background(Tokens.avatar(name), in: Circle())
-                .frame(width: 32, height: 32).contentShape(Rectangle())
+                .frame(width: 32, height: 32)
+                // Lit while Settings shows, as Sangam's is.
+                .background(state.section == .settings ? Tokens.active : .clear, in: RoundedRectangle(cornerRadius: Tokens.iconRadius, style: .continuous))
+                .contentShape(Rectangle())
         }
         .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
         .help("Account")
@@ -453,6 +471,29 @@ struct PanelRow: View {
             }
         }
         .buttonStyle(PanelButtonStyle(color: Tokens.item, font: Tokens.font(Tokens.textBase), height: 34))
+    }
+}
+
+/// A Settings page in the side panel (Sangam's `.sidebar-item`): its name, 30 tall, lit while it shows.
+private struct SettingsRow: View {
+    let page: SettingsPage
+    let on: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(page.label).font(Tokens.font(Tokens.textBase)).lineLimit(1)
+                .foregroundStyle(on || hovering ? Tokens.ink : Tokens.item)
+                .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 30, maxHeight: 30, alignment: .leading)
+                .background(on ? Tokens.active : hovering ? Tokens.hover : .clear, in: RoundedRectangle(cornerRadius: Tokens.rowRadius, style: .continuous))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.bottom, 2)
+        .onHover { hovering = $0 }
+        .animation(Tokens.fade, value: hovering)
+        .accessibilityAddTraits(on ? .isSelected : [])
     }
 }
 

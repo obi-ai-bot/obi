@@ -2,25 +2,12 @@ import AppKit
 import SwiftUI
 import WebKit
 
-/// The side panel's sections, picked by the icons on its left (Sangam's Sidebar.tsx).
-nonisolated enum PanelSection: Sendable { case home, conversations }
+/// The side panel's sections, picked by the icons on its left and the account menu (Sangam's Sidebar.tsx).
+nonisolated enum PanelSection: Sendable { case home, conversations, settings }
 
-/// The Settings window's tabs, so the sidebar's Accounts and keys, Integrations, Memory and
-/// Settings open the right one.
-nonisolated enum SettingsTab: String, CaseIterable, Sendable { case general, runner, remote, accounts, models, connectors, vault, about }
-
-/// Which Settings tab is up: the sidebar sets it before opening the window.
-@Observable
-final class SettingsSelection {
-    static let shared = SettingsSelection()
-    var tab = SettingsTab.general
-
-    /// Opens Settings on `tab`.
-    static func open(_ tab: SettingsTab) {
-        shared.tab = tab
-        NSApp.activate()
-        _ = NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-    }
+extension EnvironmentValues {
+    /// Opens a Settings page in the window: the message box's usage panel asks for Accounts.
+    @Entry var openSettings: (SettingsPage) -> Void = { _ in }
 }
 
 /// The Oby window (Sangam's design, #11 and #270), opened from the menu bar icon, an alert or ⌘O: the
@@ -45,12 +32,25 @@ final class ChatWindow: NSObject, NSWindowDelegate {
         }
         island.model.chatWindowVisible = true
         if job == nil { island.model.markChatRead() }
+        present()
+    }
+
+    /// Shows the window on Settings (⌘, and the menu bar's Settings…): General, unless one of its
+    /// pages shows already.
+    func showSettings() {
+        state.visible = true
+        state.openSettings()
+        island.model.chatWindowVisible = true
+        present()
+    }
+
+    private func present() {
         NSApp.activate()
         if let window {
             window.makeKeyAndOrderFront(nil)
             return
         }
-        let window = Self.make(ChatView(model: island.model, state: state, character: character, onOpenSettings: SettingsSelection.open))
+        let window = Self.make(ChatView(model: island.model, state: state, character: character))
         window.delegate = self
         window.setFrameAutosaveName("ObyChat")
         if !window.setFrameUsingName("ObyChat") { window.center() }
@@ -167,6 +167,18 @@ final class ChatState {
         trail.closeAll()
         homeFocusRequest += 1
     }
+
+    /// A Settings page over Home, with the side panel on Settings' list. With no page named (the
+    /// account menu, ⌘,): General, unless one of Settings' pages shows already.
+    func openSettings(_ page: SettingsPage? = nil) {
+        section = .settings
+        if let page {
+            trail.start(.settings(page))
+        } else if case .settings = trail.top {
+        } else {
+            trail.start(.settings(.general))
+        }
+    }
 }
 
 /// The window: the side panel and Home, the title bar over Home with its trail, and what's open
@@ -175,7 +187,6 @@ struct ChatView: View {
     let model: IslandModel
     let state: ChatState
     var character: ObyCharacter?
-    let onOpenSettings: (SettingsTab) -> Void
     /// The side panel opens as you left it: closed the first time.
     @AppStorage("ObySidebarOpen") private var sidebarOpen = false
     @AppStorage("ObySidebarWidth") private var sidebarWidth = Double(Tokens.sidebar)
@@ -189,8 +200,7 @@ struct ChatView: View {
         ZStack(alignment: .topLeading) {
             HStack(spacing: 0) {
                 if sidebarOpen {
-                    SidebarView(model: model, state: state, width: panelWidth, onNewTask: { withAnimation(motion) { state.newTask() } },
-                                onOpenSettings: onOpenSettings)
+                    SidebarView(model: model, state: state, width: panelWidth, onNewTask: { withAnimation(motion) { state.newTask() } })
                         .overlay(alignment: .trailing) { resizeHandle }
                         .transition(.move(edge: .leading))
                 }
@@ -207,6 +217,7 @@ struct ChatView: View {
         .background(Tokens.bg)
         .preferredColorScheme(.dark)
         .ignoresSafeArea()
+        .environment(\.openSettings) { page in withAnimation(motion) { state.openSettings(page) } }
         // Esc goes back one page.
         .onExitCommand { if !state.trail.isHome { withAnimation(motion) { state.trail.back() } } }
         // Opened: its blue dot goes.
@@ -359,6 +370,8 @@ private struct HomeView: View {
             GroupPane(model: model, kind: kind, items: work.filter { $0.type == kind },
                       onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })
                 .takesKeys()
+        case .settings(let page):
+            SettingsPane(model: model, page: page)
         }
     }
 }
@@ -514,6 +527,7 @@ enum WindowLabels {
     static func label(_ step: WindowStep, model: IslandModel) -> String {
         switch step {
         case .group(let kind): kind.label
+        case .settings(let page): page.label
         case .talk: model.feed.conversationsOn ? model.feed.conversations.shownTitle : "Oby"
         case .job(let id, let local):
             (local ? model.desk.jobs : model.feed.jobs).first { $0.id == id }?.heading ?? "Task"

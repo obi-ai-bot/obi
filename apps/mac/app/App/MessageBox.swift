@@ -242,6 +242,7 @@ extension IslandModel {
 private struct UsageGauge: View {
     let rows: [UsageRow]
     @State private var open = false
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         let dot = UsageDot.of(weeks: rows.map(\.week))
@@ -265,7 +266,7 @@ private struct UsageGauge: View {
             HStack {
                 Text("Usage this week").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.label)
                 Spacer()
-                IconButton(symbol: "gearshape", size: 28) { open = false; SettingsSelection.open(.accounts) }
+                IconButton(symbol: "gearshape", size: 28) { open = false; openSettings(.accounts) }
                     .help("Manage accounts").accessibilityLabel("Manage accounts")
             }
             .padding(.leading, 8)

@@ -37,7 +37,7 @@ struct WindowInputTests {
         try await withPanel(open: false) {
             let state = ChatState()
             state.trail.start(.group(.review))
-            let window = ChatWindow.make(ChatView(model: model(), state: state, character: nil, onOpenSettings: { _ in }))
+            let window = ChatWindow.make(ChatView(model: model(), state: state, character: nil))
             window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
             window.orderFrontRegardless()
             window.makeKey()
@@ -70,7 +70,7 @@ struct WindowInputTests {
             for start in [WindowStep.group(.review), .talk] {
                 let state = ChatState()
                 if start == .talk { state.open() } else { state.newTask() }
-                let window = ChatWindow.make(ChatView(model: model(), state: state, character: nil, onOpenSettings: { _ in }))
+                let window = ChatWindow.make(ChatView(model: model(), state: state, character: nil))
                 window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
                 window.orderFrontRegardless()
                 window.makeKey()
