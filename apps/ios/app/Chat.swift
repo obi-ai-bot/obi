@@ -27,11 +27,13 @@ nonisolated enum ChatThread {
     }
 }
 
-/// The Conversations tab (Sangam's side panel, #493): obid's conversations, Pinned then Recent,
-/// each with its last line and how long ago; search finds them by what was said. Swipe to delete,
-/// hold for Pin and Rename. A runner that keeps one thread lists just that one.
-struct ConversationsScreen: View {
+/// The side panel's Conversations (Sangam's Sidebar.tsx, #493): obid's conversations, Pinned then
+/// Recent, each with its last line and how long ago; search finds them by what was said. Swipe to
+/// delete, hold for Pin and Rename. A runner that keeps one thread lists just that one.
+struct ConversationsColumn: View {
     @Environment(Phone.self) private var phone
+    /// Opens a conversation over Home, closing the panel.
+    let open: (Route) -> Void
     @State private var query = ""
     /// What the search found, or nil while there's no search.
     @State private var found: [RunnerConversation]?
@@ -40,22 +42,25 @@ struct ConversationsScreen: View {
     @State private var problem: String?
 
     var body: some View {
-        @Bindable var phone = phone
-        NavigationStack(path: $phone.chatPath) {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(Tokens.font(13)).foregroundStyle(Tokens.muted)
+                TextField("Search conversations", text: $query)
+                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.ink)
+                    .submitLabel(.search)
+            }
+            .padding(.horizontal, 10).frame(height: 36)
+            .background(Tokens.field, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Tokens.line) }
+            .padding(.horizontal, 12).padding(.bottom, 8)
             list
-                .obyPage()
-                .navigationTitle("Conversations")
-                .searchable(text: $query, prompt: "Search conversations")
-                .task(id: query) { await search() }
-                .refreshable { await phone.reload() }
-                .alert("Rename conversation", isPresented: Binding { renaming != nil } set: { if !$0 { renaming = nil } }) {
-                    TextField("Name", text: $title)
-                    Button("Save") { if let renaming { rename(renaming.id) } }
-                    Button("Cancel", role: .cancel) {}
-                }
-                .routes()
         }
-        .pushes(onto: $phone.chatPath)
+        .task(id: query) { await search() }
+        .alert("Rename conversation", isPresented: Binding { renaming != nil } set: { if !$0 { renaming = nil } }) {
+            TextField("Name", text: $title)
+            Button("Save") { if let renaming { rename(renaming.id) } }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     @ViewBuilder private var list: some View {
@@ -65,39 +70,52 @@ struct ConversationsScreen: View {
                     let sections = ConversationOrder.sections(conversations)
                     if conversations.isEmpty {
                         Text(found == nil ? "No conversations yet" : "Nothing matches “\(query)”")
-                            .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).listRowBackground(Color.clear)
+                            .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
                     }
                     if !sections.pinned.isEmpty {
-                        Section("Pinned") { rows(sections.pinned, now: context.date) }
+                        Section { rows(sections.pinned, now: context.date) } header: { label("Pinned") }
                     }
                     if !sections.recent.isEmpty {
                         // No headings while nothing's pinned, as the design has it.
                         if sections.pinned.isEmpty { Section { rows(sections.recent, now: context.date) } }
-                        else { Section("Recent") { rows(sections.recent, now: context.date) } }
+                        else { Section { rows(sections.recent, now: context.date) } header: { label("Recent") } }
                     }
                     if let problem {
-                        Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).listRowBackground(Color.clear)
+                        Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger)
                     }
                 }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .contentMargins(.top, 0, for: .scrollContent)
+                .listSectionSpacing(0)
+                .refreshable { await phone.reload() }
             }
         } else {
             // A runner with one thread: that thread.
             List {
-                NavigationLink(value: Route.conversation(nil)) {
+                Button { open(.conversation(nil)) } label: {
                     row(title: "Oby", last: phone.conversation.runnerTurns.last?.text, at: phone.conversation.runnerTurns.last?.date, now: .now)
                 }
-                .listRowBackground(Tokens.surface)
+                .listRowBackground(Color.clear)
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
         }
+    }
+
+    private func label(_ text: String) -> some View {
+        Text(text).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.label).textCase(nil)
     }
 
     private func rows(_ list: [RunnerConversation], now: Date) -> some View {
         ForEach(list) { conversation in
-            NavigationLink(value: Route.conversation(conversation.id)) {
+            Button { open(.conversation(conversation.id)) } label: {
                 row(title: conversation.title.isEmpty ? "Conversation" : conversation.title,
                     last: conversation.turn?.text ?? phone.previews[conversation.id], at: conversation.latest, now: now)
             }
-            .listRowBackground(Tokens.surface)
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+            .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
             .task { await phone.preview(conversation.id) }
             .swipeActions {
                 Button("Delete", systemImage: "trash", role: .destructive) { run { try await phone.delete(conversation.id) } }
@@ -115,14 +133,14 @@ struct ConversationsScreen: View {
     private func row(title: String, last: String?, at: Date?, now: Date) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline) {
-                Text(title).font(Tokens.font(Tokens.textBase, .medium)).foregroundStyle(Tokens.ink).lineLimit(1)
+                Text(title).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.item).fadeOut()
                 Spacer(minLength: 8)
                 if let at, at > .distantPast {
                     Text(ConversationOrder.ago(at, now: now)).font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(Tokens.muted)
                 }
             }
             if let last, !last.isEmpty {
-                Text(last).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted).lineLimit(1)
+                Text(last).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fadeOut()
             }
         }
         .padding(.vertical, 4)

@@ -3,10 +3,6 @@ import OSLog
 import Security
 import UIKit
 
-/// The app's tabs (Sangam's design): Home, the stage; Conversations with Oby (`chat`); Settings,
-/// the runner and its accounts.
-nonisolated enum PhoneTab: String, Hashable, Sendable { case home, chat, settings }
-
 /// The jobs as Home's work (#496, as the Mac's `SidebarSections.work`): each one's kind, where it
 /// stands, and whether it's new; and what's been archived.
 nonisolated enum PhoneWork {
@@ -90,8 +86,8 @@ final class Phone {
     }
 
     let voice = PhoneVoice()
-    /// The tab in front; a notification's job opens on Home.
-    var tab = PhoneTab.home
+    /// The side panel, open on one of its sections, or nil while it's closed (PhoneRoot).
+    var panel: PanelSection?
     /// The runner's conversation, read in pages and followed over `turn` events, for the Chat
     /// tab's thread (apps/shared/ConversationModel.swift): one thread for every device (#11).
     let conversation = ConversationModel()
@@ -277,9 +273,8 @@ final class Phone {
     /// hides the jobs that finished by then. The runner keeps them all.
     private(set) var clearedAt: Date?
     private var loop: Task<Void, Never>?
-    /// What Home's stack and the Conversations tab's have open, over their first page.
+    /// What's open over Home: the app's one stack.
     var homePath: [Route] = []
-    var chatPath: [Route] = []
     /// The job whose notification's Publish was tapped; its screen publishes once it's ready.
     var publishing: String?
 
@@ -784,7 +779,7 @@ final class Phone {
 
     /// A notification was tapped: open its job on Home, and publish it if that's what was tapped.
     func open(_ id: String, publish: Bool) {
-        tab = .home
+        panel = nil
         homePath = [.task(id)]
         publishing = publish ? id : nil
     }

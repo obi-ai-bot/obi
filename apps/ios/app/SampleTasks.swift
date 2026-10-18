@@ -39,8 +39,7 @@ enum SampleTasks {
         let delay = UserDefaults.standard.double(forKey: "ObySampleTalk")
         guard delay > 0 else { return }
         let model = phone.conversation
-        phone.tab = .chat
-        phone.chatPath = [.conversation(nil)]
+        phone.homePath = [.conversation(nil)]
         model.apply(Turn(id: "sample-ask", who: .user, text: "Where's the login screen task at?"))
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(delay))
@@ -60,8 +59,7 @@ enum SampleTasks {
     @MainActor static func harness(_ phone: Phone) {
         let delay = UserDefaults.standard.double(forKey: "ObySampleHarness")
         guard delay > 0 else { return }
-        phone.tab = .chat
-        phone.chatPath = [.conversation(nil)]
+        phone.homePath = [.conversation(nil)]
         let asked = "Make me a page for the login screen's empty state, then fix it in the app."
         phone.sample(.turn(Turn(id: "sample-harness", who: .user, text: asked)))
         func step(_ index: Int, _ tool: String, _ text: String, _ detail: String, _ state: TurnStep.State) {

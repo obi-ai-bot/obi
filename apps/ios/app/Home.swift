@@ -12,6 +12,7 @@ enum Route: Hashable {
     case all
     case archived
     case inbox
+    case settings
 }
 
 extension EnvironmentValues {
@@ -36,6 +37,7 @@ extension View {
             case .all: AllTasksPage()
             case .archived: ArchivedPage()
             case .inbox: InboxPage()
+            case .settings: SettingsScreen()
             }
         }
     }
@@ -77,6 +79,16 @@ struct HomeView: View {
             .safeAreaInset(edge: .bottom) {
                 Composer(text: $text, prompt: HomeLine.placeholder(fullName: HomeLine.owner(ofMac: phone.link?.name) ?? ""),
                          typing: $typing, onSend: send)
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { typing = false; phone.panel = .home } label: { Image(systemName: "sidebar.left") }
+                        .accessibilityLabel("Show sidebar")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { phone.homePath.append(.settings) } label: { OwnerPicture(name: HomeLine.owner(ofMac: phone.link?.name)) }
+                        .accessibilityLabel("Settings")
+                }
             }
             .routes()
         }
@@ -155,7 +167,7 @@ struct HomeView: View {
                 }
             }
             if !recent.isEmpty {
-                ListLabel(title: "Recent", more: "All conversations") { phone.tab = .chat }
+                ListLabel(title: "Recent", more: "All conversations") { phone.panel = .conversations }
                     .padding(.top, rows.isEmpty ? 0 : 14)
                 ForEach(recent) { conversation in
                     Button { phone.homePath.append(.conversation(conversation.id)) } label: {

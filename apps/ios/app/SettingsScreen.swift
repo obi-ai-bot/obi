@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The Settings tab: the runner Oby talks to, the accounts signed in there, each tool's model and
+/// Settings, opened over Home from your picture: the runner Oby talks to, the accounts signed in there, each tool's model and
 /// effort, and the Apple Watches that reach it without this iPhone. The sections the Mac has too
 /// are shared (apps/shared/SettingsSections.swift).
 struct SettingsScreen: View {
@@ -14,7 +14,6 @@ struct SettingsScreen: View {
     @AppStorage(Appearance.key) private var appearance = Appearance.system
 
     var body: some View {
-        NavigationStack {
             Form {
                 Group {
                 Section {
@@ -139,7 +138,6 @@ struct SettingsScreen: View {
                 // A runner older than the Watch API has no list: then there's nothing to show.
                 try? await watchPairing.load(phone)
             }
-        }
     }
 
     /// "0.9 (42)", as the bundle says it.
