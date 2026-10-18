@@ -902,14 +902,43 @@ fn random_bytes() -> [u8; 8] {
     bytes
 }
 
+/// What gitleaks reads first, before every text it's given: a word no rule looks for.
+const FIRST_LINE: &str = "obid";
+
+/// What gitleaks reads last: a made-up GitHub token, new each run and never kept whole, in the
+/// shape its `github-pat` rule always flags (checked by hand with gitleaks 8.30.1: 20 of 20).
+/// When its report doesn't have it, gitleaks didn't read what it was given.
+fn canary() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut bytes = [0u8; 36];
+    getrandom::fill(&mut bytes).expect("the system's random source works");
+    let tail: String = bytes
+        .iter()
+        .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
+        .collect();
+    format!("{}{}{tail}", "gh", "p_")
+}
+
 async fn run_gitleaks(
     bin: &Path,
     lines: &[(String, usize, String)],
     folder: &Path,
 ) -> Result<Vec<Finding>, String> {
-    // Every line, in order, and where each came from.
+    // Every line, in order, and where each came from. A fixed first line goes before them: a
+    // file that starts like a PDF, a zip or a gzip (`%PDF`, `PK\x03\x04`) is one gitleaks skips
+    // whole ("scanned ~0 bytes"), so what comes first is never the texts' own (#648, N1). It
+    // sniffs further in too (`ustar` at byte 257, `CD001` at 32769), so a canary goes last: a
+    // report without it is a scan that couldn't run (#648, R1).
     let places: Vec<(String, usize)> = lines.iter().map(|(n, i, _)| (n.clone(), *i)).collect();
-    let joined: Vec<&str> = lines.iter().map(|(_, _, text)| text.as_str()).collect();
+    // The same neutral line goes between the texts and the canary, so a last line that only
+    // names a secret (`API_KEY=`, `token:`) isn't read on into the canary as its value (S2).
+    let canary = canary();
+    let spacer_line = lines.len() as u64 + 2;
+    let canary_line = spacer_line + 1;
+    let joined: Vec<&str> = std::iter::once(FIRST_LINE)
+        .chain(lines.iter().map(|(_, _, text)| text.as_str()))
+        .chain([FIRST_LINE, canary.as_str()])
+        .collect();
     let input = folder.join("texts.txt");
     let report = folder.join("report.json");
     std::fs::write(&input, joined.join("\n")).map_err(|e| format!("can't write the texts: {e}"))?;
@@ -927,6 +956,8 @@ async fn run_gitleaks(
         .args([
             "--no-banner",
             "--redact",
+            // A `gitleaks:allow` in what's scanned would drop the findings around it (S1).
+            "--ignore-gitleaks-allow",
             "--exit-code=99",
             "--report-format=json",
         ])
@@ -947,26 +978,29 @@ async fn run_gitleaks(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("gitleaks couldn't start: {e}")),
     };
+    let unread =
+        || "gitleaks didn't read its input (it found nothing, not even obid's canary)".to_owned();
     match output.status.code() {
-        Some(0) => Ok(Vec::new()),
+        // Not even the canary: it didn't read what it was given.
+        Some(0) => Err(unread()),
         Some(99) => {
             let leaks: Vec<serde_json::Value> = std::fs::read(&report)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok())
                 .unwrap_or_default();
-            if leaks.is_empty() {
-                return Ok(vec![Finding {
-                    name: "?".into(),
-                    line: None,
-                    rule: "gitleaks".into(),
-                }]);
+            let start = |leak: &serde_json::Value| leak["StartLine"].as_u64();
+            if !leaks.iter().any(|leak| start(leak) == Some(canary_line)) {
+                return Err(unread());
             }
             Ok(leaks
                 .iter()
+                .filter(|leak| start(leak) != Some(canary_line) && start(leak) != Some(spacer_line))
+                // A finding wholly on obid's own first line isn't the texts'; one that runs into
+                // them is.
+                .filter(|leak| leak["EndLine"].as_u64().or(start(leak)).unwrap_or(2) >= 2)
                 .map(|leak| {
-                    let place = leak["StartLine"]
-                        .as_u64()
-                        .and_then(|n| places.get((n as usize).checked_sub(1)?));
+                    let place =
+                        start(leak).and_then(|n| places.get((n.max(2) as usize).checked_sub(2)?));
                     Finding {
                         name: place.map_or("?".into(), |p| p.0.clone()),
                         line: place.map(|p| p.1),
@@ -1089,6 +1123,14 @@ mod tests {
         path
     }
 
+    /// A stand-in gitleaks that reads its input to the end and finds only obid's canary there.
+    const CANARY_ONLY: &str = r#"n=$(awk 'END {print NR}' "$2")
+echo "[{\"StartLine\": $n, \"EndLine\": $n, \"RuleID\": \"github-pat\"}]" > "$report"
+exit 99"#;
+
+    /// A stand-in gitleaks's first line: `$report` is where it writes, `$2` what it reads.
+    const REPORT_PATH: &str = r#"for a in "$@"; do case "$a" in --report-path=*) report="${a#--report-path=}";; esac; done"#;
+
     /// A stand-in gitleaks: `script` is its shell body.
     fn fake_gitleaks(folder: &Path, script: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -1101,11 +1143,13 @@ mod tests {
     #[tokio::test]
     async fn what_gitleaks_reports_is_placed_by_text_and_line() {
         let folder = scratch("report");
-        // Its arguments: dir <file> … --report-path=<report>. It reports line 3 of what it read.
+        // Its arguments: dir <file> … --report-path=<report>. It reports line 4 of the file it
+        // read: obid's own first line, then the texts, so their third line.
         let bin = fake_gitleaks(
             &folder,
             r#"for a in "$@"; do case "$a" in --report-path=*) report="${a#--report-path=}";; esac; done
-echo '[{"StartLine": 3, "RuleID": "generic-api-key"}]' > "$report"
+n=$(awk 'END {print NR}' "$2")
+echo "[{\"StartLine\": 4, \"RuleID\": \"generic-api-key\"}, {\"StartLine\": $n, \"RuleID\": \"github-pat\"}]" > "$report"
 exit 99"#,
         );
         let texts = vec![
@@ -1133,6 +1177,145 @@ exit 99"#,
         let _ = std::fs::remove_dir_all(&folder);
     }
 
+    /// A first line that reads like a PDF's or a zip's header made gitleaks skip everything it
+    /// was given ("scanned ~0 bytes"): a diff whose first added line is `%PDF-1.4`, or an
+    /// artifact whose first file is a PDF, hid a key only gitleaks knows (#648's re-review, N1).
+    #[tokio::test]
+    async fn a_first_line_like_a_pdf_or_a_zip_doesnt_blind_gitleaks() {
+        if crate::process::resolve_bin("gitleaks").is_none() {
+            return;
+        }
+        let folder = scratch("magic");
+        // A made-up Google API key, put together here: no built-in rule has its shape.
+        let key = format!("{}{}", "AIza", "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q");
+        assert!(line_rules(&key).is_empty());
+        for first in ["%PDF-1.4", "PK\u{3}\u{4}\u{14}\u{0}"] {
+            let lines = vec![
+                ("a.pdf".to_owned(), 1, first.to_owned()),
+                ("a.pdf".to_owned(), 2, format!("key = {key}")),
+            ];
+            let found = gitleaks_lines(&lines, &folder).await.unwrap();
+            assert!(
+                found.iter().any(|f| f.name == "a.pdf" && f.line == Some(2)),
+                "{first:?}: {found:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// gitleaks sniffs a file's type further in too: `ustar` at byte 257 (tar) or `CD001` at
+    /// 32769 (ISO), and it reads nothing and finds nothing, whatever comes first. A canary at the
+    /// end it didn't find is a scan that couldn't run (#648's third review, R1).
+    #[tokio::test]
+    async fn a_gitleaks_that_read_nothing_is_a_scan_that_couldnt_run() {
+        if crate::process::resolve_bin("gitleaks").is_none() {
+            return;
+        }
+        let folder = scratch("sniffed");
+        let key = format!("{}{}", "AIza", "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q");
+        // Where the texts start in what gitleaks reads: after obid's own first line.
+        let start = FIRST_LINE.len() + 1;
+        for (at, magic) in [(257, "ustar"), (32769, "CD001")] {
+            let lines = vec![
+                (
+                    "a.html".to_owned(),
+                    1,
+                    format!("{}{magic}", "x".repeat(at - start)),
+                ),
+                ("index.html".to_owned(), 1, format!("key = {key}")),
+            ];
+            let why = gitleaks_lines(&lines, &folder).await.unwrap_err();
+            assert!(why.contains("didn't read"), "{magic}: {why}");
+        }
+        // What it does read, it reads to the end, and the canary isn't a finding.
+        let lines = vec![("a.md".to_owned(), 1, "plain".to_owned())];
+        assert_eq!(gitleaks_lines(&lines, &folder).await, Ok(Vec::new()));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// `gitleaks:allow` in the texts is no way past: gitleaks drops every finding of the part of
+    /// its input that holds it, and past ~300 KB the canary is in another part, so the scan would
+    /// read clean (#648's fourth review, S1). The input is made here, not kept in the repository.
+    #[tokio::test]
+    async fn a_gitleaks_allow_comment_hides_nothing() {
+        if crate::process::resolve_bin("gitleaks").is_none() {
+            return;
+        }
+        let folder = scratch("allow");
+        let key = format!("{}{}", "AIza", "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q");
+        let mut lines = vec![(
+            "config.js".to_owned(),
+            1,
+            format!("const key = \"{key}\"; // gitleaks:allow"),
+        )];
+        lines.extend((0..8_000).map(|i| {
+            (
+                "filler.txt".to_owned(),
+                i + 1,
+                format!("plain words on line {i}, nothing to see here at all"),
+            )
+        }));
+        let found = gitleaks_lines(&lines, &folder).await.unwrap();
+        assert!(
+            found
+                .iter()
+                .any(|f| f.name == "config.js" && f.line == Some(1)),
+            "{found:?}"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A last line that only names a secret (`API_KEY=`, `token:`) isn't read into the canary:
+    /// it's clean, as it was before the canary (S2).
+    #[tokio::test]
+    async fn a_last_line_that_names_a_secret_stays_clean() {
+        if crate::process::resolve_bin("gitleaks").is_none() {
+            return;
+        }
+        let folder = scratch("last-line");
+        for last in ["API_KEY=", "token:", "export GITHUB_TOKEN="] {
+            let lines = vec![
+                (".env.example".to_owned(), 1, "# Fill these in".to_owned()),
+                (".env.example".to_owned(), 2, last.to_owned()),
+            ];
+            assert_eq!(
+                gitleaks_lines(&lines, &folder).await,
+                Ok(Vec::new()),
+                "{last}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A finding that starts on obid's own first line but runs into the texts is kept, on the
+    /// texts' first line; one wholly on it is dropped. The first line holds no keyword (R3).
+    #[tokio::test]
+    async fn a_finding_that_runs_into_the_texts_is_kept() {
+        let folder = scratch("first-line");
+        let bin = fake_gitleaks(
+            &folder,
+            &format!(
+                "{REPORT_PATH}\nn=$(awk 'END {{print NR}}' \"$2\")\n\
+                 echo \"[{{\\\"StartLine\\\": 1, \\\"EndLine\\\": 1, \\\"RuleID\\\": \\\"a\\\"}}, \
+                 {{\\\"StartLine\\\": 1, \\\"EndLine\\\": 2, \\\"RuleID\\\": \\\"b\\\"}}, \
+                 {{\\\"StartLine\\\": $n, \\\"EndLine\\\": $n, \\\"RuleID\\\": \\\"github-pat\\\"}}]\" > \"$report\"\nexit 99"
+            ),
+        );
+        let found = gitleaks_with(&bin, &lines_of(&texts("one\ntwo")), &folder)
+            .await
+            .unwrap();
+        assert_eq!(
+            found,
+            [Finding {
+                name: "summary".into(),
+                line: Some(1),
+                rule: "gitleaks b".into()
+            }]
+        );
+        assert!(line_rules(FIRST_LINE).is_empty() && FIRST_LINE == "obid");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     #[tokio::test]
     async fn a_gitleaks_that_fails_is_a_scan_that_couldnt_run() {
         let folder = scratch("broken");
@@ -1144,11 +1327,18 @@ exit 99"#,
             why.contains("couldn't run") && why.contains("config is broken"),
             "{why}"
         );
-        let clean = fake_gitleaks(&folder, "exit 0");
+        // Clean is a report with only the canary; no report at all is a gitleaks that read
+        // nothing.
+        let clean = fake_gitleaks(&folder, &format!("{REPORT_PATH}\n{CANARY_ONLY}"));
         assert_eq!(
             gitleaks_with(&clean, &lines_of(&texts("clean")), &folder).await,
             Ok(Vec::new())
         );
+        let blind = fake_gitleaks(&folder, "exit 0");
+        let why = gitleaks_with(&blind, &lines_of(&texts("clean")), &folder)
+            .await
+            .unwrap_err();
+        assert!(why.contains("didn't read"), "{why}");
         let _ = std::fs::remove_dir_all(&folder);
     }
 
@@ -1545,7 +1735,8 @@ exit 99"#,
             &folder,
             r#"for a in "$@"; do case "$a" in --report-path=*) report="${a#--report-path=}";; esac; done
 line=$(grep -n '^c$' "$2" | cut -d: -f1)
-echo "[{\"StartLine\": $line, \"RuleID\": \"github-pat\"}]" > "$report"
+n=$(awk 'END {print NR}' "$2")
+echo "[{\"StartLine\": $line, \"RuleID\": \"github-pat\"}, {\"StartLine\": $n, \"RuleID\": \"github-pat\"}]" > "$report"
 exit 99"#,
         );
         let names = vec!["a\nb".to_owned(), "c".to_owned()];

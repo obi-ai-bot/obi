@@ -574,7 +574,7 @@ fn a_job_stopped_while_it_publishes_sends_nothing_more() {
     use std::os::unix::fs::PermissionsExt;
     let folder = Folder::new("publish-stop");
     let bin = fake_gh(&folder.0);
-    std::fs::write(bin.join("gitleaks"), "#!/bin/sh\nsleep 2\nexit 0\n").unwrap();
+    std::fs::write(bin.join("gitleaks"), SLOW_GITLEAKS).unwrap();
     std::fs::set_permissions(bin.join("gitleaks"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let (obid, remote, _) = obid_with(&folder, &bin);
     let id = dispatch(
@@ -840,7 +840,7 @@ fn a_hand_publish_is_for_the_run_that_was_approved() {
     refused(&obid, obi_protocol::time::now());
     // What obid said is kept with the job: a restart doesn't forget it.
     obid.stop();
-    std::fs::write(bin.join("gitleaks"), "#!/bin/sh\nsleep 2\nexit 0\n").unwrap();
+    std::fs::write(bin.join("gitleaks"), SLOW_GITLEAKS).unwrap();
     std::fs::set_permissions(bin.join("gitleaks"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let obid = start(&folder.0, &config, Some(&bin));
     refused(&obid, obi_protocol::time::now() + 1);
@@ -952,27 +952,31 @@ fn names_already_on_the_base_are_the_bases() {
     assert_eq!(remote_branch(&remote, &format!("oby/build-{env}")), None);
 }
 
-/// A gitleaks that reports a finding in the names without saying which (no report it could read,
-/// or a line it wasn't given) still stops the publish: nothing is dropped as clean.
+/// A stand-in gitleaks that takes its time, then reads its input to the end and finds only the
+/// canary obid puts last (crate::scan, `run_gitleaks`).
+const SLOW_GITLEAKS: &str = "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in --report-path=*) r=\"${a#--report-path=}\";; esac; done\n\
+sleep 2\nn=$(awk 'END {print NR}' \"$2\")\necho \"[{\\\"StartLine\\\": $n, \\\"RuleID\\\": \\\"github-pat\\\"}]\" > \"$r\"\nexit 99\n";
+
+/// A gitleaks that reports a finding in the names without saying which (a line it wasn't given)
+/// still stops the publish: nothing is dropped as clean. One with no report it could read is a
+/// gitleaks that didn't read its input, a scan that couldn't run (crate::scan's tests).
 #[test]
 fn a_name_finding_gitleaks_cant_place_still_counts() {
     use std::os::unix::fs::PermissionsExt;
     let folder = Folder::new("publish-unplaced");
     let bin = fake_gh(&folder.0);
     let (obid, remote, _) = obid_with(&folder, &bin);
-    for (file, report) in [
-        ("trigger-one", "[]"),
-        (
-            "trigger-two",
-            r#"[{"StartLine": 999, "RuleID": "github-pat"}]"#,
-        ),
-    ] {
-        // It finds something only in the names (a line that reads exactly the file's name).
+    // It reads to the end (its report has obid's canary, the last line) and, in the names only
+    // (a line that reads exactly the file's name), finds something it can't place: line 999.
+    let file = "trigger-two";
+    {
         std::fs::write(
             bin.join("gitleaks"),
             format!(
                 "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in --report-path=*) r=\"${{a#--report-path=}}\";; esac; done\n\
-                 grep -qx '{file}' \"$2\" || exit 0\necho '{report}' > \"$r\"\nexit 99\n"
+                 n=$(awk 'END {{print NR}}' \"$2\")\n\
+                 if grep -qx '{file}' \"$2\"; then extra='{{\"StartLine\": 999, \"RuleID\": \"github-pat\"}}, '; else extra=''; fi\n\
+                 echo \"[$extra{{\\\"StartLine\\\": $n, \\\"RuleID\\\": \\\"github-pat\\\"}}]\" > \"$r\"\nexit 99\n"
             ),
         )
         .unwrap();

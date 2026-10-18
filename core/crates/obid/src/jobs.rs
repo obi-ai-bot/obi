@@ -22,7 +22,7 @@ use tokio::sync::{Notify, watch};
 use crate::agent::{self, Answer, Event as AgentEvent, Launch, Ruling, Tool};
 use crate::config::{Config, Repo};
 use crate::events::Events;
-use crate::job::{Job, ObiRef, Phase, Status, Waiting};
+use crate::job::{Job, JobArtifact, ObiRef, Phase, Status, Waiting};
 use crate::permissions::{self, Call, Decision, Mode, Permission, Rule};
 use crate::process::{self, Signal};
 use crate::sandbox::{self, Sandbox, Spec};
@@ -210,6 +210,8 @@ pub struct Jobs {
     plugins: std::sync::OnceLock<Arc<crate::plugins::Plugins>>,
     /// The connected-app broker: job-scoped MCP config and use records.
     connections: std::sync::OnceLock<Arc<crate::connections::Connections>>,
+    /// Where a job's `.obi/artifacts/` is published when it ends.
+    artifacts: std::sync::OnceLock<Arc<crate::artifacts::Artifacts>>,
     /// Loopback endpoint given to agents for `oby-check apple`.
     api_url: Mutex<String>,
     /// The approvals devices gave to publish by hand, each let through once.
@@ -268,6 +270,7 @@ impl Jobs {
             permissions: Mutex::new(kept),
             plugins: std::sync::OnceLock::new(),
             connections: std::sync::OnceLock::new(),
+            artifacts: std::sync::OnceLock::new(),
             api_url: Mutex::new(api_url),
             approvals,
             follow: Notify::new(),
@@ -286,6 +289,11 @@ impl Jobs {
 
     pub fn use_connections(&self, connections: Arc<crate::connections::Connections>) {
         let _ = self.connections.set(connections);
+    }
+
+    /// Where jobs' artifacts go (once; without it, a job publishes none).
+    pub fn use_artifacts(&self, artifacts: Arc<crate::artifacts::Artifacts>) {
+        let _ = self.artifacts.set(artifacts);
     }
 
     /// Opens this job's frozen connected-app snapshot. The returned token is safe to expose only
@@ -2171,6 +2179,11 @@ impl Jobs {
             Ok(()) if job.obi.is_some() => self.run_obi_review(id, &signal).await,
             Ok(()) => {
                 let outcome = self.run_owner_job(id, &signal).await;
+                // A job that ends any other way than done (failed, stopped) shows what it made
+                // too; done published them before it ended. A shutdown isn't an end.
+                if *signal.borrow() != Signal::Shutdown {
+                    self.publish_artifacts(id).await;
+                }
                 // Whatever ended it (a limit, a stop, a failure), what it committed is on its
                 // branch.
                 if let Err(e) = self.keep_commits(id).await {
@@ -3417,6 +3430,8 @@ impl Jobs {
                 self.update(id, |job| job.round = Some(round + 1));
             }
 
+            // What it made to be looked at, listed on the job before it ends.
+            self.publish_artifacts(id).await;
             let head = self.keep_commits(id).await?;
             let commits = if start_commit.is_empty() || head == start_commit {
                 0
@@ -3521,6 +3536,80 @@ impl Jobs {
                 }
             }
             return Ok(());
+        }
+    }
+
+    /// Publishes each entry of the job's `.obi/artifacts/` (crate::artifacts): a new artifact of
+    /// the job, or a new version of the one that entry made before; the same files again change
+    /// nothing. What was refused is said in `artifact_problems`, entry by entry.
+    async fn publish_artifacts(&self, id: &str) {
+        let (Some(artifacts), Some(job)) = (self.artifacts.get(), self.get(id)) else {
+            return;
+        };
+        let worktree = self.worktree_path(id);
+        let mut listed = job.artifacts.clone();
+        let mut problems = Vec::new();
+        let entries = crate::artifacts::job_entries(&worktree).unwrap_or_else(|why| {
+            problems.push(why);
+            Vec::new()
+        });
+        let more = entries
+            .len()
+            .saturating_sub(crate::artifacts::MAX_JOB_ENTRIES);
+        let taken = entries.len().min(crate::artifacts::MAX_JOB_ENTRIES);
+        for (done, entry) in entries.into_iter().take(taken).enumerate() {
+            let path = format!("{}/artifacts/{entry}", crate::obi_dir::OBI);
+            let title = crate::artifacts::title_of(&entry);
+            let before = listed.iter().position(|a| a.entry == entry);
+            let published = artifacts
+                .publish(crate::artifacts::Publish {
+                    root: &worktree,
+                    path: &path,
+                    title: &title,
+                    kind: None,
+                    conversation: job.conversation.as_deref(),
+                    job: Some(id),
+                    artifact: before.map(|i| listed[i].id.as_str()),
+                })
+                .await;
+            match (published, before) {
+                (Ok((made, version)), Some(i)) => {
+                    listed[i] = JobArtifact {
+                        id: made,
+                        version,
+                        entry,
+                    }
+                }
+                (Ok((made, version)), None) => listed.push(JobArtifact {
+                    id: made,
+                    version,
+                    entry,
+                }),
+                // A name refused is never said, the entry's least of all.
+                (Err(why), _) if why == crate::artifacts::NAME_REFUSED => problems.push(why),
+                // The job's artifacts are full: one line for this entry and the rest.
+                (Err(why), _) if why.starts_with(crate::artifacts::JOB_FULL) => {
+                    problems.push(format!("{} entries: {why}", taken - done));
+                    break;
+                }
+                // Any other refusal names the entry, only when no part of it looks like a
+                // secret (crate::artifacts, `speakable`, reads each part on its own).
+                (Err(why), _) => {
+                    problems.push(artifacts.speakable(format!("{entry}: {why}")).await)
+                }
+            }
+        }
+        if more > 0 {
+            problems.push(format!(
+                "{more} more entries: Not published: a job publishes at most {} artifacts.",
+                crate::artifacts::MAX_JOB_ENTRIES
+            ));
+        }
+        if listed != job.artifacts || problems != job.artifact_problems {
+            self.update(id, |job| {
+                job.artifacts = listed;
+                job.artifact_problems = problems;
+            });
         }
     }
 
@@ -4424,6 +4513,7 @@ fn owner_prompt(job: &Job) -> String {
     } else if job.max_rounds() > 1 {
         lines.push("End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.".into());
     }
+    lines.push("To show the user something to look at (a page, a document, a chart, an image, a PDF), put it in .obi/artifacts/: one file, or one folder with an index.html, per thing. obid shows each one when the job ends; keep secrets out, or it shows none of it.".into());
     lines.push("Run checks in the foreground, and never end a turn waiting on a background command: obid takes the end of your turn as the end of your work.".into());
     lines.push(
         "Finish with a short summary. Its first line is one sentence the user will see.".into(),
