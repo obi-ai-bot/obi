@@ -55,6 +55,8 @@ pub struct Shared {
     pub link: Arc<crate::sphere::Link>,
     /// The plug-in host (`GET` and `PUT /v1/obid/plugins`).
     pub plugins: Arc<crate::plugins::Plugins>,
+    /// The accounts' sign-ins under way (crate::accounts).
+    pub sign_ins: crate::accounts::SignIns,
     /// The browsers signed in to the web app's own files (crate::web): nothing under `/v1`.
     pub pages: crate::web::Sessions,
     /// True once obid is stopping: streams end.
@@ -99,6 +101,15 @@ impl Cleanup {
 pub fn router(shared: Arc<Shared>) -> Router {
     Router::new()
         .route("/v1/status", get(status))
+        .route("/v1/accounts", post(crate::accounts::add))
+        .route(
+            "/v1/accounts/{id}",
+            axum::routing::patch(crate::accounts::change).delete(crate::accounts::remove),
+        )
+        .route(
+            "/v1/accounts/{id}/sign-in",
+            get(crate::accounts::sign_in).post(crate::accounts::sign_in_code),
+        )
         .route(
             "/v1/jobs",
             get(crate::routes::jobs).post(crate::routes::dispatch),
@@ -472,6 +483,8 @@ pub struct AccountJson {
     pub id: String,
     pub agent: &'static str,
     pub name: String,
+    /// Who pays for it, as the owner put it, or null.
+    pub payer: Option<String>,
     pub label: Option<String>,
     pub signed_in: bool,
     pub five_hour: Option<f64>,
@@ -549,29 +562,44 @@ pub fn worktrees(home: &Path) -> PathBuf {
     home.join("worktrees")
 }
 
-async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>, ApiError> {
-    let agents = &shared.config.agents;
+/// Every account, as `GET /v1/status` and the `accounts` event send them.
+pub fn account_list(shared: &Shared) -> Vec<AccountJson> {
+    let agents = shared.config.agents.get();
+    crate::agent::Tool::ALL
+        .into_iter()
+        .filter_map(|tool| {
+            match tool {
+                crate::agent::Tool::Claude => &agents.claude,
+                crate::agent::Tool::Codex => &agents.codex,
+                crate::agent::Tool::Cursor => &agents.cursor,
+            }
+            .as_ref()
+            .map(|configured| (tool, configured))
+        })
+        .flat_map(|(tool, configured)| {
+            configured
+                .accounts
+                .iter()
+                .map(move |account| account_json(shared, tool, account))
+        })
+        .collect()
+}
+
+/// An account (docs/runner-api.md, "Account"), as obid knows it before any job has run on it.
+pub fn account_json(
+    shared: &Shared,
+    tool: crate::agent::Tool,
+    account: &crate::config::Account,
+) -> AccountJson {
     let home = crate::jobs::login_home();
-    let accounts = [
-        ("claude", &agents.claude),
-        ("codex", &agents.codex),
-        ("cursor", &agents.cursor),
-    ]
-    .into_iter()
-    .flat_map(|(agent, configured)| {
-        configured
-            .iter()
-            .flat_map(|tool| &tool.accounts)
-            .map(move |account| (agent, account))
-    })
-    .map(|(agent, account)| AccountJson {
+    AccountJson {
         id: account.id.clone(),
-        agent,
+        agent: tool.id(),
         name: account.name.clone(),
+        payer: account.payer.clone(),
         label: None,
         // Whether its login file is there (#626); Cursor's is found out when it runs.
-        signed_in: crate::agent::Tool::from_id(agent)
-            .is_none_or(|tool| crate::jobs::signed_in(tool, account, home.as_deref())),
+        signed_in: crate::jobs::signed_in(tool, account, home.as_deref()),
         five_hour: None,
         seven_day: None,
         five_hour_resets: None,
@@ -583,8 +611,11 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         tetrix_used: 0,
         reserved: false,
         reserve_lifted_until: None,
-    })
-    .collect();
+    }
+}
+
+async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>, ApiError> {
+    let accounts = account_list(&shared);
     Ok(axum::Json(Status {
         runner: RunnerJson {
             version: API_VERSION,

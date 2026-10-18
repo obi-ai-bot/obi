@@ -320,7 +320,7 @@ fn tool_name(agent: &str) -> &str {
 
 /// An account's name, by its id.
 fn account_name(shared: &Shared, id: &str) -> String {
-    let agents = &shared.config.agents;
+    let agents = shared.config.agents.get();
     [&agents.claude, &agents.codex, &agents.cursor]
         .into_iter()
         .flatten()
@@ -460,7 +460,7 @@ fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
 
 /// Whether obid's configuration still has the account `account` for the tool `agent`.
 fn account_exists(shared: &Arc<Shared>, agent: &str, account: &str) -> bool {
-    let agents = &shared.config.agents;
+    let agents = shared.config.agents.get();
     let tool = match agent {
         "claude" => &agents.claude,
         "codex" => &agents.codex,

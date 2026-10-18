@@ -5,6 +5,7 @@
 // The job's JSON (`job::Job::to_json`) has every key the apps expect, in one `json!`.
 #![recursion_limit = "256"]
 
+pub mod accounts;
 pub mod acp;
 pub mod agent;
 pub mod api;
@@ -185,6 +186,8 @@ pub async fn serve(
         jobs::keep_keychain_logins();
     }
     vault::install(&config.home, &config.vault);
+    // What the accounts API changed, over the configuration's accounts, before anything uses them.
+    config.agents.open(&config.home);
     let events = events::Events::new();
     let sandbox = std::env::current_exe()
         .map_err(|e| format!("obid can't find its own executable: {e}"))
@@ -250,6 +253,7 @@ pub async fn serve(
         presence: brain::recap::Presence::default(),
         link: link.clone(),
         plugins: plugins.clone(),
+        sign_ins: accounts::SignIns::default(),
         pages: web::Sessions::default(),
         stopping: stopping_rx.clone(),
     });

@@ -247,7 +247,7 @@ fn status_answers_with_engine_obid() {
     assert_eq!(accounts.len(), 2);
     assert_eq!(
         accounts[0],
-        json!({"id": "default", "agent": "claude", "name": "Default", "label": null, "signedIn": false,
+        json!({"id": "default", "agent": "claude", "name": "Default", "payer": null, "label": null, "signedIn": false,
                "fiveHour": null, "sevenDay": null, "fiveHourResets": null, "sevenDayResets": null,
                "running": 0, "fullUntil": null, "tetrix": null, "tetrixJobs": 0, "tetrixUsed": 0,
                "reserved": false, "reserveLiftedUntil": null})

@@ -477,6 +477,14 @@ impl Jobs {
         self.lock().workers.len()
     }
 
+    /// Whether a job that hasn't ended (queued or running) is on `account`.
+    pub fn busy_on(&self, account: &str) -> bool {
+        self.lock()
+            .jobs
+            .values()
+            .any(|j| j.account == account && j.status.is_active())
+    }
+
     /// How many of them run on the account `id`.
     pub fn running_on(&self, account: &str) -> usize {
         let state = self.lock();
@@ -1080,12 +1088,14 @@ impl Jobs {
         }
     }
 
-    /// The configuration of `tool`'s adapter, when obid has one.
-    fn agent_config(&self, tool: Tool) -> Option<&crate::config::Agent> {
+    /// The configuration of `tool`'s adapter, when obid has one, with its accounts as they are now
+    /// (crate::accounts).
+    fn agent_config(&self, tool: Tool) -> Option<crate::config::Agent> {
+        let agents = self.config.agents.get();
         match tool {
-            Tool::Claude => self.config.agents.claude.as_ref(),
-            Tool::Codex => self.config.agents.codex.as_ref(),
-            Tool::Cursor => self.config.agents.cursor.as_ref(),
+            Tool::Claude => agents.claude,
+            Tool::Codex => agents.codex,
+            Tool::Cursor => agents.cursor,
         }
     }
 
@@ -1096,13 +1106,14 @@ impl Jobs {
             return Vec::new();
         };
         match tool {
-            Tool::Claude => claude_accounts(agent),
+            Tool::Claude => claude_accounts(&agent),
             Tool::Codex if agent.accounts.is_empty() => vec![crate::config::Account {
                 id: "codex".into(),
                 name: "Codex".into(),
                 config_dir: None,
+                payer: None,
             }],
-            _ => agent.accounts.clone(),
+            _ => agent.accounts,
         }
     }
 
@@ -4132,6 +4143,7 @@ pub fn claude_accounts(claude: &crate::config::Agent) -> Vec<crate::config::Acco
             id: "default".into(),
             name: "Default".into(),
             config_dir: None,
+            payer: None,
         }]
     } else {
         claude.accounts.clone()

@@ -217,8 +217,8 @@ async fn run(
         .map_err(|why| format!("there's no job sandbox: {why}"))?;
     let agent = config
         .agents
+        .get()
         .claude
-        .as_ref()
         .ok_or("Claude Code isn't configured")?;
     let account = agent.accounts.first().ok_or("Claude Code has no account")?;
     let bin = process::resolve_bin(&agent.bin).ok_or("Claude Code's binary isn't available")?;
