@@ -39,6 +39,8 @@ pub const CHECK_TOO_LONG: &str = "obid stopped it after 20 minutes, the most a t
 const CHECK_OUTPUT_MAX: usize = 64 * 1024;
 /// Claude Code's own turn limit for a round.
 const MAX_TURNS: &str = "200";
+/// How often obid lets git tidy a clone.
+const TIDY_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The model and effort of a routine job's first round (#536's numbers for the brain hold here
 /// too: Sonnet keeps the thread of a small change at a fraction of Opus's time).
 pub const ROUTINE_MODEL: &str = "claude-sonnet-5-5";
@@ -352,11 +354,68 @@ impl Jobs {
         }
     }
 
-    /// Starts the queued jobs there are slots for, and follows the published pull requests.
+    /// Starts the queued jobs there are slots for, follows the published pull requests, and tidies
+    /// the clones once a day.
     pub fn resume(self: &Arc<Self>) {
         self.schedule();
         let jobs = self.clone();
         tokio::spawn(async move { jobs.follow_pull_requests().await });
+        let jobs = self.clone();
+        tokio::spawn(async move { jobs.tidy_clones().await });
+    }
+
+    /// Lets git tidy each clone once a day ([`Jobs::tidy_clone`]).
+    async fn tidy_clones(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(TIDY_EVERY).await;
+            let repos: Vec<String> = self.config.repos.iter().map(|r| r.repo.clone()).collect();
+            for repo in repos {
+                match self.tidy_clone(&repo).await {
+                    Ok(true) => tracing::info!("{repo}: obid's clone tidied (git gc --auto)"),
+                    Ok(false) => {}
+                    Err(e) => tracing::info!("{repo}: obid's clone wasn't tidied: {e}"),
+                }
+            }
+        }
+    }
+
+    /// `git gc --auto` in obid's clone of `repo`, which runs no maintenance by itself
+    /// (git::ensure_clone): only while no job uses the repository, under the lock that gets one
+    /// ready. False when it didn't run.
+    async fn tidy_clone(&self, repo: &str) -> Result<bool, String> {
+        let clone = git::clone_path(&self.config.home, repo);
+        if !clone.join(".git").is_dir() {
+            return Ok(false);
+        }
+        let preparing = self.preparing(repo);
+        let Ok(_held) = preparing.try_lock() else {
+            return Ok(false);
+        };
+        let busy = self
+            .lock()
+            .jobs
+            .values()
+            .any(|job| job.repo == repo && job.status.is_active());
+        if busy {
+            return Ok(false);
+        }
+        // git's own threshold, for this run only (the clone's gc.auto is 0), and in the foreground,
+        // so it ends while the lock is held.
+        git::git(
+            &clone,
+            &[
+                "-c",
+                "gc.auto=6700",
+                "-c",
+                "gc.autoDetach=false",
+                "gc",
+                "--auto",
+                "--quiet",
+            ],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(true)
     }
 
     /// One job.
@@ -4718,6 +4777,110 @@ mod tests {
         );
     }
     use super::*;
+
+    /// git tidies obid's clone (its own automatic maintenance is off) only while no job uses the
+    /// repository: loose objects are packed, and a job that's queued or running holds it off.
+    #[tokio::test]
+    async fn a_clone_is_tidied_only_while_no_job_uses_it() {
+        let root = std::env::temp_dir().join(format!("obid-tidy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let remote = root.join("remote");
+        std::fs::create_dir_all(&remote).unwrap();
+        crate::git::git(&remote, &["init", "-q", "-b", "main"])
+            .await
+            .unwrap();
+        for i in 0..3 {
+            std::fs::write(remote.join("f"), i.to_string()).unwrap();
+            crate::git::git(&remote, &["add", "f"]).await.unwrap();
+            crate::git::git(
+                &remote,
+                &[
+                    "-c",
+                    "user.name=a",
+                    "-c",
+                    "user.email=a@b",
+                    "commit",
+                    "-qm",
+                    "c",
+                ],
+            )
+            .await
+            .unwrap();
+        }
+        let url = format!("file://{}", remote.display());
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "allowFileRemotes": true,
+                "repos": [{"repo": "o/r", "remote": url, "defaultBranch": "main"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let clone = crate::git::ensure_clone(&config.home, "o/r", &url, &[])
+            .await
+            .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        jobs.lock().jobs.insert("j".into(), job);
+        assert_eq!(
+            jobs.tidy_clone("o/r").await,
+            Ok(false),
+            "a queued job uses it"
+        );
+        jobs.lock().jobs.get_mut("j").unwrap().status = Status::Done;
+        // Past git's threshold, as a clone that fetched for months would be.
+        crate::git::git(&clone, &["config", "gc.autoPackLimit", "1"])
+            .await
+            .unwrap();
+        std::fs::write(remote.join("f"), "more").unwrap();
+        crate::git::git(
+            &remote,
+            &[
+                "-c",
+                "user.name=a",
+                "-c",
+                "user.email=a@b",
+                "commit",
+                "-qam",
+                "d",
+            ],
+        )
+        .await
+        .unwrap();
+        crate::git::git(&clone, &["fetch", "-q", "origin"])
+            .await
+            .unwrap();
+        // The fetched objects in a pack of their own, beside the clone's.
+        crate::git::git(&clone, &["repack", "-q"]).await.unwrap();
+        let packs = || {
+            std::fs::read_dir(clone.join(".git/objects/pack"))
+                .unwrap()
+                .filter(|e| {
+                    e.as_ref()
+                        .unwrap()
+                        .path()
+                        .extension()
+                        .is_some_and(|x| x == "pack")
+                })
+                .count()
+        };
+        assert!(packs() > 1, "{}", packs());
+        assert_eq!(jobs.tidy_clone("o/r").await, Ok(true));
+        assert_eq!(packs(), 1);
+        assert_eq!(jobs.tidy_clone("x/none").await, Ok(false), "no clone");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// Each stage of a run is a line in the job's stages.log, with how long it took; the last ends
     /// when the run does.
