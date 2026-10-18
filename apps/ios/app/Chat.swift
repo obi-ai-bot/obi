@@ -285,8 +285,6 @@ struct ConversationPage: View {
                     .padding(.horizontal, Tokens.gutter).padding(.top, 12).padding(.bottom, 16)
                 }
                 .defaultScrollAnchor(.bottom)
-                // Words coming in grow the thread: it stays at the foot while they do.
-                .defaultScrollAnchor(.bottom, for: .sizeChanges)
                 .onChange(of: turns.last?.id) { withAnimation(Tokens.warm) { proxy.scrollTo("end", anchor: .bottom) } }
                 .onChange(of: phone.talk) { proxy.scrollTo("end", anchor: .bottom) }
                 .onChange(of: phone.conversation.steps) { proxy.scrollTo("end", anchor: .bottom) }

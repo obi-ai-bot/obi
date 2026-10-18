@@ -132,8 +132,6 @@ struct ConversationPage: View {
                     }
                     .scrollIndicators(.never)
                     .defaultScrollAnchor(.bottom)
-                    // Words coming in grow the thread: it stays at the foot while they do.
-                    .defaultScrollAnchor(.bottom, for: .sizeChanges)
                     .onChange(of: turns.count) { withAnimation(reduceMotion ? nil : Tokens.warm) { proxy.scrollTo("end", anchor: .bottom) } }
                     .onChange(of: desk.talk) { proxy.scrollTo("end", anchor: .bottom) }
                     .onChange(of: conversation.steps) { proxy.scrollTo("end", anchor: .bottom) }

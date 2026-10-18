@@ -205,7 +205,7 @@ struct ArtifactCard: View {
             VStack(alignment: .leading, spacing: 0) {
                 if let fetch, !gone, artifact?.kind == "html" {
                     // Its first screen, as it looks: not to touch, the card opens it.
-                    ArtifactWebView(ref: ref, path: "index.html", fetch: fetch, zoom: 0.5, onLink: { _ in })
+                    ArtifactWebView(ref: ref, path: "index.html", fetch: fetch, onLink: { _ in })
                         .allowsHitTesting(false)
                         .frame(height: 116)
                         .clipped()
@@ -524,7 +524,10 @@ struct StreamingAnswer: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ObyMark()
-            ArrivingSaid(text: streamed.text, color: Tokens.item, since: streamed.since)
+            // The words that came hold their place at once, so the thread scrolls to them as each
+            // delta comes; the reveal fills it in.
+            SaidText(text: streamed.text, color: Tokens.item).hidden().accessibilityHidden(true)
+                .overlay(alignment: .topLeading) { ArrivingSaid(text: streamed.text, color: Tokens.item, since: streamed.since) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

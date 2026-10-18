@@ -290,6 +290,11 @@ final class Phone {
         self.connection = connection
         self.inbox = inbox
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
+        #if DEBUG
+        // `-ObySampleOffline YES`: the sample screens reach no runner at all, whatever the
+        // simulator's settings say (the default runner is a real one).
+        if UserDefaults.standard.bool(forKey: "ObySampleOffline") { runnerURL = URL(string: "http://127.0.0.1:9")! }
+        #endif
         if let data = UserDefaults.standard.data(forKey: "mac.link"), GatewayTokenStore.read() != nil {
             link = try? MacLink.paired(data)
         } else {
@@ -415,6 +420,11 @@ final class Phone {
     /// tries again, waiting a little longer each time.
     private func follow() {
         guard loop == nil else { return }
+        #if DEBUG
+        // `-ObySampleOffline YES`: the sample screens reach no runner at all (a simulator's
+        // settings may name a real one).
+        if UserDefaults.standard.bool(forKey: "ObySampleOffline") { return }
+        #endif
         loop = Task {
             var wait = 1.0
             while !Task.isCancelled {
