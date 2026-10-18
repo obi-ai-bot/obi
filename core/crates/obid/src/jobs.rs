@@ -3577,6 +3577,9 @@ impl Jobs {
         };
         // What the secret scan found the last time it blocked publishing: the same again stops.
         let mut blocked_before: Option<Vec<crate::publish::Found>> = None;
+        // The turn only the owner's words started after the work's: its reply leaves the job's
+        // summary to the work (#699).
+        let mut noted = false;
         'rounds: loop {
             loop {
                 let job = self.get(id).ok_or("the job is gone")?;
@@ -3692,16 +3695,20 @@ impl Jobs {
                     });
                 }
                 self.update(id, |job| {
-                    job.summary = said.clone();
+                    if !noted || job.summary.is_empty() {
+                        job.summary = said.clone();
+                    }
                     job.summaries
                         .get_or_insert_with(Vec::new)
                         .push(said.clone());
                 });
+                noted = false;
                 // Words the owner sent while it worked: the agent hears them now, in another turn of
                 // this round, before the check.
                 let words = self.take_heard(id);
                 if !words.is_empty() {
                     message = words.join("\n\n");
+                    noted = true;
                     continue;
                 }
                 let job = self.get(id).ok_or("the job is gone")?;
@@ -3723,6 +3730,7 @@ impl Jobs {
                             break;
                         }
                         message = words.join("\n\n");
+                        noted = true;
                         continue;
                     }
                     if !more_rounds {
@@ -3750,6 +3758,7 @@ impl Jobs {
                             break;
                         }
                         message = words.join("\n\n");
+                        noted = true;
                         continue;
                     }
                     message = "Your last line didn't say `GOAL MET`: carry on with what's left, then end with `GOAL MET` or `GOAL NOT MET: <what's left>`.".into();
@@ -3760,6 +3769,7 @@ impl Jobs {
                         break;
                     }
                     message = words.join("\n\n");
+                    noted = true;
                     continue;
                 }
                 // What obid declined last round, for a tool whose answers carry no words (ACP).
