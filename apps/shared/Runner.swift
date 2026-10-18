@@ -298,7 +298,7 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     var usage: Usage.Snapshot {
         Usage.Snapshot(agent: agent, name: name, label: label, fiveHour: fiveHour, sevenDay: sevenDay,
                        fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running,
-                       reserveLiftedUntil: reserveLiftedUntil)
+                       reserveLiftedUntil: reserveLiftedUntil, runnerSignedIn: signedIn)
     }
 }
 #endif
@@ -548,7 +548,7 @@ typealias RunnerAccount = AccountState
 
 extension AccountState: Decodable {
     private enum Keys: String, CodingKey {
-        case id, agent, name, label, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed, reserveLiftedUntil
+        case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed, reserveLiftedUntil
     }
 
     init(from decoder: any Decoder) throws {
@@ -565,7 +565,8 @@ extension AccountState: Decodable {
                   tetrix: try keys.decodeIfPresent(Bool.self, forKey: .tetrix),
                   tetrixJobs: try keys.decodeIfPresent(Int.self, forKey: .tetrixJobs) ?? 0,
                   tetrixUsed: try keys.decodeIfPresent(Int.self, forKey: .tetrixUsed) ?? 0,
-                  reserveLifted: try keys.decodeIfPresent(Date.self, forKey: .reserveLiftedUntil))
+                  reserveLifted: try keys.decodeIfPresent(Date.self, forKey: .reserveLiftedUntil),
+                  runnerSignedIn: try keys.decodeIfPresent(Bool.self, forKey: .signedIn))
     }
 }
 #endif
