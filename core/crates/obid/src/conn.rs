@@ -243,15 +243,21 @@ impl Conn {
     /// Ends the agent and waits for it: at once when the turn was stopped or ran out of time, else
     /// once it exits by itself (10 seconds at most). Everything left of its group goes too. Returns
     /// how it ended: `exit status 0`, `killed by signal 9`.
-    pub async fn finish(mut self) -> String {
+    pub async fn finish(self) -> String {
+        self.finish_within(Duration::from_secs(10)).await
+    }
+
+    /// [`Conn::finish`], with `wait` for the agent to exit by itself.
+    pub async fn finish_within(mut self, wait: Duration) -> String {
         self.close_input();
         if self.timed_out || self.stopped {
             process::end_group(self.pgid, process::STOPPING).await;
         }
-        let status = match tokio::time::timeout(Duration::from_secs(10), self.child.wait()).await {
+        let status = match tokio::time::timeout(wait, self.child.wait()).await {
             Ok(status) => status.ok(),
             Err(_) => {
                 process::end_group(self.pgid, process::STOPPING).await;
+                let _ = self.child.start_kill();
                 self.child.wait().await.ok()
             }
         };

@@ -148,8 +148,11 @@ pub fn user_message(text: &str) -> Value {
     json!({"type": "user", "message": {"role": "user", "content": text}})
 }
 
+/// How long the agent may take to exit by itself once its turn's `result` came.
+const AFTER_RESULT: Duration = Duration::from_millis(300);
+
 /// Runs one turn: starts the agent, sends `prompt`, answers prompts with `decide`, reports with
-/// `on_event`, closes stdin after the `result` line and waits for the agent to exit. Ends the
+/// `on_event`, closes stdin after the `result` line and ends the agent soon after. Ends the
 /// agent and everything it started when `stop` turns true or `limit` passes.
 pub async fn run_turn(
     launch: Launch,
@@ -221,15 +224,22 @@ pub async fn run_turn(
                     turn.session.get_or_insert_with(|| session.to_owned());
                 }
                 turn.result = Some(message);
-                // The turn is over: no more input, so the agent exits once it's idle.
+                // The turn is over: no more input, and nothing more to read.
                 conn.close_input();
+                break;
             }
             _ => {}
         }
     }
     turn.timed_out = conn.timed_out;
     turn.stopped = conn.stopped;
-    turn.exit = conn.finish().await;
+    // After its result Claude Code took 0.8 to 3 seconds to exit by itself, while the check
+    // waited: it gets a moment, then it ends.
+    turn.exit = if turn.result.is_some() {
+        conn.finish_within(AFTER_RESULT).await
+    } else {
+        conn.finish().await
+    };
     Ok(turn)
 }
 
@@ -270,6 +280,49 @@ pub fn step(tool: &str, input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The turn ends with its `result`: obid doesn't wait for Claude Code to exit by itself (0.8
+    /// to 3 seconds a turn), it ends the agent then.
+    #[tokio::test]
+    async fn a_turn_ends_with_its_result() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("obid-result-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let bin = root.join("claude");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nread line\necho '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Done.\",\"session_id\":\"s1\"}'\nexec sleep 5\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launch = Launch {
+            argv: vec![bin.into_os_string()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            cwd: root.clone(),
+            stderr: root.join("agent.log"),
+        };
+        let (_stop, stop) = watch::channel(process::Signal::Run);
+        let began = std::time::Instant::now();
+        let turn = run_turn(
+            launch,
+            "Do it.",
+            Duration::from_secs(60),
+            stop,
+            |_, _| Ruling::Now(Answer::Allow),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert!(turn.succeeded());
+        assert_eq!(turn.text(), "Done.");
+        assert!(
+            began.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            began.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn steps() {
