@@ -123,6 +123,9 @@ pub struct Turn {
     /// What the agent should hear at the start of its next prompt: what obid declined this turn
     /// and why, for a tool whose answer to a permission carries no words (ACP).
     pub notes: Vec<String>,
+    /// obid ended the turn for something trying again won't mend (a conversation's Codex ran a
+    /// command), and why.
+    pub fatal: Option<String>,
 }
 
 impl Turn {
@@ -162,7 +165,7 @@ pub fn user_message(text: &str) -> Value {
 /// How long the agent may take to close its output and exit by itself once its turn's `result`
 /// came: Claude Code took 0.8 to 3.1 seconds, finishing the session file the next turn's
 /// `--resume` reads. Then it's ended, as a stop ends it.
-const AFTER_RESULT: Duration = Duration::from_secs(3);
+pub const AFTER_RESULT: Duration = Duration::from_secs(3);
 
 /// Runs one turn: starts the agent, sends `prompt`, answers prompts with `decide`, reports with
 /// `on_event`, closes stdin after the `result` line and lets the agent exit (`AFTER_RESULT`). Ends the
