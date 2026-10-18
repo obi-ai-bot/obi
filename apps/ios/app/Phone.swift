@@ -25,8 +25,9 @@ nonisolated enum PhoneWork {
 
     /// Archived (#280), kept by the phone alone: finished jobs Clear done took off Home, and the
     /// ones you let go (Dismiss). The runner keeps them all; this lists the ones it sent.
-    static func archived(_ jobs: [Job], clearedAt: Date?) -> [Job] {
-        jobs.filter { !$0.isActive && ($0.dismissed != nil || !$0.listed(after: clearedAt, among: jobs)) }
+    /// `here`: the tasks archived on this iPhone (a task's ⋮); one that runs again comes back.
+    static func archived(_ jobs: [Job], clearedAt: Date?, here: Set<String> = []) -> [Job] {
+        jobs.filter { !$0.isActive && ($0.dismissed != nil || here.contains($0.id) || !$0.listed(after: clearedAt, among: jobs)) }
     }
 
     /// The Inbox (docs/oby-ux.md row 10): of what waits now, the decisions with no task on Home,
@@ -146,7 +147,13 @@ final class Phone {
     func waitsToSend(answer id: String) -> Bool { offlineQueue.answers.contains { $0.id == id } }
     func waitsToSend(echo id: String) -> Bool { offlineQueue.messages.contains { $0.id == id } }
     /// Archived: done jobs that left Home (Clear done, Dismiss).
-    var archived: [Job] { PhoneWork.archived(jobs, clearedAt: clearedAt) }
+    var archived: [Job] { PhoneWork.archived(jobs, clearedAt: clearedAt, here: archivedHere) }
+    /// Tasks archived with their ⋮ (Sangam's Archive task), kept by this iPhone: obid has no
+    /// archive yet (docs/oby-ux.md row 22, A7).
+    private(set) var archivedHere = Set(UserDefaults.standard.stringArray(forKey: "phone.archived") ?? []) {
+        didSet { UserDefaults.standard.set(Array(archivedHere), forKey: "phone.archived") }
+    }
+    func archive(_ id: String) { archivedHere.insert(id) }
     /// What Oby's answering or asking in the thread shown, else nothing.
     var talkHere: Talk { talkIn == current ? talk : .none }
     @ObservationIgnored private let speaker = PhoneSpeaker()
@@ -403,7 +410,7 @@ final class Phone {
 
     /// The jobs Home lists: all but the settled ones (`Job.settled`) that finished by the last Clear
     /// done, newest first. Home puts them in their groups (JobList.groups), as the Mac's window does.
-    var visibleJobs: [Job] { jobs.filter { $0.listed(after: clearedAt, among: jobs) } }
+    var visibleJobs: [Job] { jobs.filter { $0.listed(after: clearedAt, among: jobs) && ($0.isActive || !archivedHere.contains($0.id)) } }
 
     // MARK: Staying live
 

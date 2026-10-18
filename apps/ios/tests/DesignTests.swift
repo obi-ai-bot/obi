@@ -107,6 +107,20 @@ struct DesignTests {
         #expect(PhoneWork.recent(talk).map(\.id) == ["c4", "c3", "c2"])
     }
 
+    /// A task's ⋮ (Sangam's TaskMenu.tsx, docs/oby-ux.md row 21): its conversation; Stop task while
+    /// it goes, Archive task once it's done; Move to… and Mode under them; Dismiss when it needs you.
+    @Test func aTaskMenuHasSangamsItems() throws {
+        let running = try job("r", "running", extra: #", "mode": "ask""#)
+        let done = try job("d", "done", finished: "2026-10-09T22:00:00Z")
+        let failed = try job("f", "failed", finished: "2026-10-09T22:00:00Z")
+        #expect(TaskMenu.items(running, conversation: true) == [.openConversation, .stop, .move, .mode])
+        #expect(TaskMenu.items(done, conversation: false) == [.archive, .move])
+        #expect(TaskMenu.items(failed, conversation: true) == [.openConversation, .dismiss, .move])
+        // Archived on this iPhone: off Home, into Archived; told something, it runs again and comes back.
+        #expect(PhoneWork.archived([done, running], clearedAt: nil, here: ["d"]).map(\.id) == ["d"])
+        #expect(PhoneWork.archived([running], clearedAt: nil, here: ["r"]).isEmpty)
+    }
+
     @Test func archivedHoldsWhatLeftHome() throws {
         let cleared = try job("c", "done", finished: "2026-10-09T22:00:00Z")
         let dismissed = try job("d", "failed", finished: "2026-10-09T22:00:00Z", extra: #", "dismissed": "2026-10-09T23:00:00Z""#)
