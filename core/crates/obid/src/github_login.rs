@@ -31,7 +31,18 @@ const DEVICE_PAGE: &str = "https://github.com/login/device";
 #[derive(Default)]
 pub struct GitHubLogin {
     status: Mutex<Option<(Instant, Status)>>,
-    sign_in: tokio::sync::Mutex<Option<Arc<SignIn>>>,
+    /// Never held across an await: GET and obid's stop read it while gh starts.
+    sign_in: Mutex<Slot>,
+}
+
+/// The sign-in slot: none, one starting (gh hasn't printed its code yet), or one under way, until
+/// it ends and clears the slot.
+#[derive(Default)]
+enum Slot {
+    #[default]
+    Idle,
+    Starting,
+    Running(Arc<SignIn>),
 }
 
 /// Whether gh is signed in to github.com, and as whom.
@@ -58,12 +69,25 @@ impl SignIn {
 }
 
 impl GitHubLogin {
-    /// Kills a sign-in's whole process group (obid is stopping).
+    /// Kills the sign-in under way's whole process group (obid is stopping). Only one still under
+    /// way: an ended one cleared the slot, and its group id may belong to someone else by now.
     pub fn kill(&self) {
-        if let Ok(guard) = self.sign_in.try_lock()
-            && let Some(group) = guard.as_ref().and_then(|s| s.group)
+        if let Some(running) = self.running()
+            && let Some(group) = running.group
         {
             crate::process::signal_group(group, nix::sys::signal::Signal::SIGKILL);
+        }
+    }
+
+    fn slot(&self) -> std::sync::MutexGuard<'_, Slot> {
+        self.sign_in.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The sign-in under way, if one is and it hasn't ended.
+    fn running(&self) -> Option<Arc<SignIn>> {
+        match &*self.slot() {
+            Slot::Running(sign_in) if !*sign_in.ended.borrow() => Some(sign_in.clone()),
+            _ => None,
         }
     }
 
@@ -138,14 +162,7 @@ pub fn decode_status(said: &str) -> Status {
 pub async fn get(State(shared): State<Arc<Shared>>) -> Result<Response, ApiError> {
     let gh = crate::github::gh();
     let status = shared.github.status(gh.as_deref()).await;
-    let sign_in = shared
-        .github
-        .sign_in
-        .lock()
-        .await
-        .as_ref()
-        .filter(|s| !*s.ended.borrow())
-        .map(|s| s.to_json());
+    let sign_in = shared.github.running().map(|s| s.to_json());
     Ok(
         axum::Json(json!({"gh": gh.is_some(), "signedIn": status.signed_in,
                          "user": status.user, "signIn": sign_in}))
@@ -156,12 +173,23 @@ pub async fn get(State(shared): State<Arc<Shared>>) -> Result<Response, ApiError
 /// `POST /v1/github/sign-in`: gh's own sign-in, or the one under way: `{url, userCode, expiresAt}`.
 /// The app opens `url`; the person types `userCode` there (gh also puts it on the clipboard).
 pub async fn sign_in(State(shared): State<Arc<Shared>>) -> Result<Response, ApiError> {
-    let mut current = shared.github.sign_in.lock().await;
-    if let Some(running) = current.as_ref()
-        && !*running.ended.borrow()
     {
-        return Ok(axum::Json(running.to_json()).into_response());
+        let mut slot = shared.github.slot();
+        match &*slot {
+            Slot::Running(running) if !*running.ended.borrow() => {
+                return Ok(axum::Json(running.to_json()).into_response());
+            }
+            Slot::Starting => {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "GitHub's sign-in is starting: ask again in a moment.",
+                ));
+            }
+            _ => *slot = Slot::Starting,
+        }
     }
+    // Back to idle unless the sign-in below takes the slot.
+    let mut starting = Starting(&shared.github, true);
     let gh = crate::github::gh()
         .filter(|gh| gh.is_absolute())
         .ok_or_else(|| {
@@ -174,13 +202,37 @@ pub async fn sign_in(State(shared): State<Arc<Shared>>) -> Result<Response, ApiE
         .await
         .map_err(|why| ApiError::new(StatusCode::BAD_GATEWAY, why))?;
     let answer = started.to_json();
-    *current = Some(started);
+    {
+        let mut slot = shared.github.slot();
+        // A sign-in that ended while being registered leaves the slot idle.
+        *slot = if *started.ended.borrow() {
+            Slot::Idle
+        } else {
+            Slot::Running(started)
+        };
+    }
+    starting.1 = false;
     Ok(axum::Json(answer).into_response())
+}
+
+/// The slot marked starting: put back to idle when dropped armed (gh didn't start, or the request
+/// ended first).
+struct Starting<'a>(&'a GitHubLogin, bool);
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        if self.1 {
+            let mut slot = self.0.slot();
+            if matches!(*slot, Slot::Starting) {
+                *slot = Slot::Idle;
+            }
+        }
+    }
 }
 
 /// `DELETE /v1/github/sign-in`: ends the sign-in under way, if any.
 pub async fn end_sign_in(State(shared): State<Arc<Shared>>) -> Result<Response, ApiError> {
-    if let Some(running) = shared.github.sign_in.lock().await.as_ref() {
+    if let Some(running) = shared.github.running() {
         running.cancel.notify_one();
         let mut ended = running.ended.clone();
         let _ = tokio::time::timeout(Duration::from_secs(5), ended.wait_for(|e| *e)).await;
@@ -256,12 +308,19 @@ async fn start(shared: &Arc<Shared>, gh: &Path) -> Result<Arc<SignIn>, String> {
             () = tokio::time::sleep(SIGN_IN_LASTS) => None,
             () = watched.cancel.notified() => None,
         };
-        kill();
+        // Its group only while gh hasn't been reaped: after that its id may be someone else's.
         if exited.is_none() {
+            kill();
             let _ = child.wait().await;
         }
         let _ = std::fs::remove_dir_all(&scratch);
         shared.github.forget_status();
+        {
+            let mut slot = shared.github.slot();
+            if matches!(&*slot, Slot::Running(s) if Arc::ptr_eq(s, &watched)) {
+                *slot = Slot::Idle;
+            }
+        }
         let signed = exited.is_some_and(|s| s.success());
         tracing::info!(
             "GitHub sign-in ended {}",
@@ -347,6 +406,27 @@ fn user_code(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An ended sign-in is never killed nor shown, even before its task cleared the slot: its group
+    /// id may belong to another process by then.
+    #[test]
+    fn an_ended_sign_in_is_never_the_one_under_way() {
+        let login = GitHubLogin::default();
+        let (ended_tx, ended) = tokio::sync::watch::channel(false);
+        let sign_in = Arc::new(SignIn {
+            user_code: "AB12-CD34".into(),
+            expires: 0,
+            group: Some(999_999),
+            ended,
+            cancel: tokio::sync::Notify::new(),
+        });
+        *login.slot() = Slot::Running(sign_in);
+        assert!(login.running().is_some());
+        ended_tx.send(true).unwrap();
+        assert!(login.running().is_none());
+        *login.slot() = Slot::Starting;
+        assert!(login.running().is_none());
+    }
 
     #[test]
     fn the_code_is_taken_from_either_line_gh_prints() {

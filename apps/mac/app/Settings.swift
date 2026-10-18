@@ -703,11 +703,16 @@ struct ConnectorsSettingsView: View {
             defer { busy = false }
             do {
                 let signIn = try await runner.startGitHubSignIn()
+                guard signIn.isGitHubs else {
+                    problems[row] = "\(feed.name) answered with something other than GitHub's sign-in page and code, so Oby opened nothing."
+                    try? await runner.endGitHubSignIn()
+                    return
+                }
                 problems[row] = nil
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(signIn.userCode, forType: .string)
                 gitHubSignIn = signIn
-                NSWorkspace.shared.open(signIn.url)
+                NSWorkspace.shared.open(GitHubSignIn.devicePage)
             } catch {
                 problems[row] = error.localizedDescription
             }
@@ -764,7 +769,7 @@ private struct GitHubSignInSheet: View {
             }
             HStack(spacing: 8) {
                 Button("Cancel", action: cancel).buttonStyle(.set).keyboardShortcut(.cancelAction)
-                Button("Open the Page Again") { NSWorkspace.shared.open(signIn.url) }.buttonStyle(.set)
+                Button("Open the Page Again") { NSWorkspace.shared.open(GitHubSignIn.devicePage) }.buttonStyle(.set)
             }
             .padding(.top, 6)
             Text("GitHub's CLI on \(place == Connectors.thisMac ? "this Mac" : place) keeps the login. Oby only learns that it worked.")

@@ -21,6 +21,7 @@ case "$1 $2" in
       echo '{"hosts":{}}'
     fi ;;
   "auth login")
+    if [ -f "$HOME/slow" ]; then sleep 3; fi
     printf '%s\n' "$*" > "$HOME/login-args"
     printf '%s\n' "$GIT_CONFIG_GLOBAL" > "$HOME/git-config-global"
     echo '! One-time code (AB12-CD34) copied to clipboard' >&2
@@ -110,4 +111,34 @@ fn a_sign_in_can_be_ended() {
     let after = call(&obid, "GET", "/v1/github", None);
     assert_eq!(after.body["signIn"], json!(null));
     assert_eq!(after.body["signedIn"], false);
+}
+
+/// While gh is slow to print its code, obid answers GET /v1/github at once (no lock held while gh
+/// starts), a second POST says the sign-in is starting, and the first gets the code.
+#[test]
+fn a_starting_sign_in_holds_nothing_up() {
+    let folder = Folder::new("github-sign-in-slow");
+    let remote = folder.0.join("remote.git");
+    let config = config(&folder.0, &remote, &stub_agent());
+    let bin = stand_in_gh(&folder.0);
+    let obid = start(&folder.0, &config, Some(&bin));
+    std::fs::write(folder.0.join("env-home/slow"), "").unwrap();
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| call(&obid, "POST", "/v1/github/sign-in", None));
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let asked = std::time::Instant::now();
+        let status = call(&obid, "GET", "/v1/github", None);
+        assert_eq!(status.status, 200, "{}", status.text);
+        assert!(
+            asked.elapsed() < std::time::Duration::from_secs(2),
+            "GET waited for gh"
+        );
+        assert_eq!(status.body["signIn"], json!(null));
+        let second = call(&obid, "POST", "/v1/github/sign-in", None);
+        assert_eq!(second.status, 409, "{}", second.text);
+        assert!(second.text.contains("starting"), "{}", second.text);
+        let first = first.join().unwrap();
+        assert_eq!(first.status, 200, "{}", first.text);
+        assert_eq!(first.body["userCode"], "AB12-CD34");
+    });
 }

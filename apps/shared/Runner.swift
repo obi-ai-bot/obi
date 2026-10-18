@@ -1496,6 +1496,15 @@ nonisolated struct GitHubSignIn: Decodable, Equatable, Sendable {
     var url: URL
     var userCode: String
     var expiresAt: String
+
+    /// The only page the Mac opens for it.
+    static let devicePage = URL(string: "https://github.com/login/device")!
+
+    /// Whether it's what gh's sign-in gives: exactly GitHub's device page, and a code of two groups
+    /// of four capitals or digits. The Mac opens and copies nothing else a runner answers.
+    var isGitHubs: Bool {
+        url == Self.devicePage && userCode.wholeMatch(of: /[A-Z0-9]{4}-[A-Z0-9]{4}/) != nil
+    }
 }
 
 /// A plug-in obid found, as `GET /v1/obid/plugins` lists it.

@@ -116,6 +116,22 @@ struct ConnectorsTests {
         #expect(none.state == .broken && none.way == nil)
     }
 
+    /// The Mac opens and copies only what gh's sign-in gives: GitHub's device page, and a code of
+    /// two groups of four capitals or digits.
+    @Test func onlyGitHubsDevicePageAndCodeAreTaken() {
+        func signIn(_ url: String, _ code: String) -> GitHubSignIn {
+            GitHubSignIn(url: URL(string: url)!, userCode: code, expiresAt: "2026-10-18T20:00:00Z")
+        }
+        #expect(signIn("https://github.com/login/device", "AB12-CD34").isGitHubs)
+        #expect(!signIn("https://github.com/login/device?x=1", "AB12-CD34").isGitHubs)
+        #expect(!signIn("http://github.com/login/device", "AB12-CD34").isGitHubs)
+        #expect(!signIn("https://github.com.evil.example/login/device", "AB12-CD34").isGitHubs)
+        #expect(!signIn("https://example.com/login/device", "AB12-CD34").isGitHubs)
+        #expect(!signIn("https://github.com/login/device", "ab12-cd34").isGitHubs)
+        #expect(!signIn("https://github.com/login/device", "AB12-CD34 && rm").isGitHubs)
+        #expect(!signIn("https://github.com/login/device", "AB12CD34").isGitHubs)
+    }
+
     /// What can't work isn't connected: a connection whose vault secret is missing (every call
     /// fails, Runner/Broker.swift) and a plug-in obid gave up on need attention, with the reason; a
     /// plug-in still starting isn't confirmed yet.
