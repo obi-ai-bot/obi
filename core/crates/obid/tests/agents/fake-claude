@@ -9,6 +9,10 @@
 //                    "answers: allow, deny: <why>, …"
 //   LOGIN: <home>    reads its login in its HOME, writes a hook into its ~/.claude/settings.json
 //                    and its ~/.claude.json, and tries the same in the person's real <home>
+//   PLANT: <dir>     reads the login in its $CLAUDE_CONFIG_DIR, plants a hook in that folder's
+//                    settings.json and .claude.json, and tries the same in <dir> (its account's own
+//                    folder); says whether its config folder is <dir> and whether its login kept a
+//                    refresh token
 //   ECHO             ends the turn with "heard: <the prompt> resume=<the session it resumed, or none>"
 //   PAUSE: <ms>      waits that long, then ends the turn with "Paused."
 //   ARTIFACTS        writes .obi/artifacts/ in the worktree: a page (a folder with index.html,
@@ -74,6 +78,7 @@ rl.on("line", (line) => {
   const ask = prompt.match(/ASK: (\{.*\})/);
   const asks = prompt.match(/ASKS: (\[.*\])/);
   const login = prompt.match(/LOGIN: (\S+)/);
+  const plant = prompt.match(/PLANT: (\S+)/);
   if (commit) {
     writeFileSync(commit[1], "hello\n");
     execFileSync("git", ["add", commit[1]]);
@@ -100,6 +105,30 @@ rl.on("line", (line) => {
     const real = tries(() => writeFileSync(`${login[1]}/.claude/settings.json`, hook));
     const realState = tries(() => appendFileSync(`${login[1]}/.claude.json`, " "));
     result(`login: creds=${creds} settings=${settings} state=${state} real=${real} real-state=${realState}`);
+  } else if (plant) {
+    const tries = (f) => {
+      try {
+        f();
+        return "ok";
+      } catch {
+        return "no";
+      }
+    };
+    const own = process.env.CLAUDE_CONFIG_DIR;
+    let refresh = "none";
+    try {
+      const creds = JSON.parse(readFileSync(`${own}/.credentials.json`, "utf8"));
+      refresh = creds.claudeAiOauth?.refreshToken ? "kept" : "none";
+    } catch {
+      refresh = "no-login";
+    }
+    const hook = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "touch /tmp/planted" }] }] } });
+    const settings = tries(() => writeFileSync(`${own}/settings.json`, hook));
+    const state = tries(() => appendFileSync(`${own}/.claude.json`, " "));
+    const real = tries(() => writeFileSync(`${plant[1]}/settings.json`, hook));
+    const realState = tries(() => appendFileSync(`${plant[1]}/.claude.json`, " "));
+    const dir = own === plant[1] ? "account" : "own";
+    result(`plant: dir=${dir} refresh=${refresh} settings=${settings} state=${state} real=${real} real-state=${realState}`);
   } else if (prompt.startsWith("ECHO")) {
     const at = process.argv.indexOf("--resume");
     result(`heard: ${prompt} resume=${at >= 0 ? process.argv[at + 1] : "none"}`);

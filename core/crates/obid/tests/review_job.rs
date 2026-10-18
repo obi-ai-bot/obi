@@ -490,11 +490,11 @@ async fn a_committed_obi_link_fails_the_review_and_writes_nothing_outside() {
     assert_eq!(std::fs::read_dir(&victim).unwrap().count(), 1);
 }
 
-/// A review agent that asks for Grep, Glob and LS on its own account folder (the one thing in the
+/// A review agent that asks for Grep, Glob and LS on its own login folder (the one thing in the
 /// job sandbox, beside the worktree, that holds a login) is refused each time, and its review holds
-/// nothing of the folder: the sandbox lets the agent read the folder, so obid's answer is what
-/// keeps the account out of the result that goes back to the requesting Obi
-/// (tests/agents/prying-reviewer).
+/// nothing of the account: its login folder is the job's own copy (#655), never the account's
+/// folder, so the account's file isn't even in the sandbox, and obid's answer keeps the copy out of
+/// the result that goes back to the requesting Obi (tests/agents/prying-reviewer).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_review_agent_cant_search_its_account_folder() {
     let folder = Folder::new("prying");
@@ -533,7 +533,7 @@ async fn a_review_agent_cant_search_its_account_folder() {
         summary.starts_with("Grep deny, Glob deny, LS deny."),
         "{summary}"
     );
-    // The agent could read the folder in the sandbox: the refusal is what kept it out.
+    // The account's own file isn't in the sandbox at all: what the agent could read is its copy.
     let readable = format!(
         "readable in the sandbox: {} bytes",
         format!(
@@ -542,7 +542,11 @@ async fn a_review_agent_cant_search_its_account_folder() {
         )
         .len()
     );
-    assert!(summary.contains(&readable), "{summary} (wanted {readable})");
+    assert!(summary.contains("readable in the sandbox: "), "{summary}");
+    assert!(
+        !summary.contains(&readable),
+        "{summary} (the account's file: {readable})"
+    );
 }
 
 /// feature/average with `links` (path, target) committed on top, pushed to `remote` as `branch`;
@@ -678,8 +682,8 @@ async fn a_committed_link_out_fails_the_review_before_the_agent_reads() {
 
 /// A review agent that reads without asking (tests/agents/reading-reviewer) is started with Read
 /// only (`--tools Read`), finds obid's diff of the change in `.obi/inputs/change.diff`, and reads
-/// nothing of its account through a link inside the worktree: the sandbox lets it read the account
-/// folder, so the worktree holding no link out is what keeps the login out of the review.
+/// nothing of its account through a link inside the worktree: the account's folder isn't in the
+/// sandbox at all (#655), and the worktree holding no link out keeps its own copy out of the review.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_review_agent_reading_without_asking_gets_only_the_worktree() {
     let folder = Folder::new("reading");
@@ -710,12 +714,16 @@ async fn a_review_agent_reading_without_asking_gets_only_the_worktree() {
     let summary = result["summary"].as_str().unwrap();
     assert!(summary.starts_with("Tools: Read. "), "{summary}");
     assert!(summary.contains("Diff: yes."), "{summary}");
-    // The agent could read the folder in the sandbox: no link out is what kept it out.
+    // The account's own file isn't in the sandbox at all: what the agent could read is its copy.
     let readable = format!(
         "readable in the sandbox: {} bytes",
         format!("{{\"login\": \"{canary}\"}}").len()
     );
-    assert!(summary.contains(&readable), "{summary} (wanted {readable})");
+    assert!(summary.contains("readable in the sandbox: "), "{summary}");
+    assert!(
+        !summary.contains(&readable),
+        "{summary} (the account's file: {readable})"
+    );
     // The diff is the change against the base, with what the branch added.
     let worktree = PathBuf::from(ended.worktree.unwrap());
     let diff = std::fs::read_to_string(worktree.join(".obi/inputs/change.diff")).unwrap();

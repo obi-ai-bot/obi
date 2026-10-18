@@ -815,12 +815,26 @@ pub mod cursor {
 
     /// Before each start: no command or edit is allowed ahead of obid (`allowlist` mode over an empty
     /// allowlist). Cursor's own keys (`authInfo`, `version`, …) stay as they are.
+    ///
+    /// The folder is a job's own, which the job can write: obid never reads or writes through a
+    /// link it left there (the file is opened without following one, and the new one is made
+    /// with `O_EXCL`, then renamed over the old, which replaces a link rather than following it).
     pub fn rewrite_config(home: &Path) -> std::io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(home)?;
         let file = home.join("cli-config.json");
-        let mut config = std::fs::read(&file)
-            .ok()
+        let read = || -> Option<Vec<u8>> {
+            let mut opened = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NOFOLLOW)
+                .open(&file)
+                .ok()?;
+            opened.metadata().ok().filter(|m| m.is_file())?;
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut opened, &mut bytes).ok()?;
+            Some(bytes)
+        };
+        let mut config = read()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .filter(Value::is_object)
             .unwrap_or_else(|| json!({}));
@@ -832,8 +846,14 @@ pub mod cursor {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let temporary = home.join(format!(".cli-config.json.obid-{}-{n}", std::process::id()));
-        std::fs::write(&temporary, text)?;
-        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
+        let _ = std::fs::remove_file(&temporary);
+        let mut new = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        std::io::Write::write_all(&mut new, &text)?;
         std::fs::rename(&temporary, &file)
     }
 
@@ -968,6 +988,32 @@ mod tests {
             code: 1,
             message: "The model is busy".into()
         }));
+    }
+
+    /// A link a job left in place of Cursor's settings is never read or written through: the
+    /// settings start over, and the file the link named is as it was.
+    #[test]
+    fn cursor_settings_never_follow_a_link() {
+        let root = std::env::temp_dir().join(format!("obid-cursor-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let elsewhere = root.join("elsewhere.json");
+        std::fs::write(&elsewhere, r#"{"secret": "not for the job"}"#).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, home.join("cli-config.json")).unwrap();
+        cursor::rewrite_config(&home).unwrap();
+        let written = std::fs::read_to_string(home.join("cli-config.json")).unwrap();
+        assert!(!written.contains("secret"), "{written}");
+        assert!(
+            !std::fs::symlink_metadata(home.join("cli-config.json"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&elsewhere).unwrap(),
+            r#"{"secret": "not for the job"}"#
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jobs on one Cursor account start at once: each rewrite of its settings succeeds.

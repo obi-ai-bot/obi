@@ -95,8 +95,8 @@ fn beats(obid: &Obid, id: &str) {
 }
 
 /// A Codex job: the thread starts in obid's sandbox with every approval coming to obid, its file
-/// change and its commit are approved, its commit counts, and its words are the summary. The
-/// account's CODEX_HOME is its own folder.
+/// change and its commit are approved, its commit counts, and its words are the summary. Its
+/// CODEX_HOME is a folder of the job's own (#655), never the account's: a box never writes it.
 #[test]
 fn codex_commits_with_obids_approval() {
     let folder = Folder::new("codex-commits");
@@ -114,9 +114,10 @@ fn codex_commits_with_obids_approval() {
     let thread = job["session"].as_str().unwrap();
     let kept: Value = serde_json::from_str(
         &std::fs::read_to_string(
-            folder
-                .0
-                .join(format!("home/accounts/codex-work/threads/{thread}.json")),
+            obid.home
+                .join("logins")
+                .join(&id)
+                .join(format!("threads/{thread}.json")),
         )
         .unwrap(),
     )
@@ -133,10 +134,16 @@ fn codex_commits_with_obids_approval() {
     let id = dispatch(&obid, json!({"agent": "codex", "task": "ENV"}));
     let job = ended(&obid, &id);
     assert_eq!(job["status"], "done", "{job}");
-    let home = folder.0.join("home/accounts/codex-work");
+    let home = obid.home.join("logins").join(&id);
     assert!(
         summary(&job).contains(&format!("CODEX_HOME={}", home.display())),
         "{job}"
+    );
+    // The account's folder got nothing of the jobs'.
+    let account = folder.0.join("home/accounts/codex-work");
+    assert!(
+        !account.join("threads").exists(),
+        "a job wrote the account's folder"
     );
 
     let status = call(&obid, "GET", "/v1/status", None).body;
@@ -254,8 +261,9 @@ fn codex_resumes_fails_and_stops() {
 }
 
 /// A Cursor job: Cursor writes without asking (as the probe saw), asks before its commit, and
-/// obid picks `allow_once`, never `allow_always`. The account's three folders are its own, and
-/// obid's settings for it allow nothing ahead of obid, keeping Cursor's own keys.
+/// obid picks `allow_once`, never `allow_always`. Its three folders are the job's own (#655), with
+/// a copy of the account's login and settings, and obid's settings for it allow nothing ahead of
+/// obid, keeping Cursor's own keys. The account's own folder is left as it was.
 #[test]
 fn cursor_commits_with_obids_approval() {
     let folder = Folder::new("cursor-commits");
@@ -279,7 +287,13 @@ fn cursor_commits_with_obids_approval() {
     );
     let job = ended(&obid, &id);
     assert_eq!(job["status"], "done", "{job}");
-    let home = folder.0.join("home/accounts/cursor");
+    let home = obid.home.join("logins").join(&id);
+    let account = folder.0.join("home/accounts/cursor");
+    assert_eq!(
+        std::fs::read_to_string(account.join("cli-config.json")).unwrap(),
+        r#"{"authInfo": {"email": "owner@example.com"}, "version": 1, "permissions": {"allow": ["Shell(*)"], "deny": []}}"#,
+        "a job's settings reached the account's folder"
+    );
     assert_eq!(
         summary(&job),
         [

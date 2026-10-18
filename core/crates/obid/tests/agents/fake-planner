@@ -2,9 +2,10 @@
 # A stand-in for Claude Code as obid's brain (`claude -p … --json-schema …`) in obid's tests.
 # Run as a job's agent (no --json-schema), it is fake-claude.
 #
-# Its state is in its account's folder ($CLAUDE_CONFIG_DIR boxed, $HOME/.fake-planner unboxed,
-# else $HOME): the one place it can write both as it is and boxed (when the brain may read its
-# quoted file).
+# Its state is in its account's folder ($HOME/.fake-planner unboxed, else $HOME). Boxed (when the
+# brain may read its quoted file) it can write nothing that outlives the call (#655: never its
+# account's folder), so it asks the test's state server (support::planner_state), whose address
+# is in `fake-planner-url` in a folder above its working folder.
 #   plans        a queue, one line per call, the first taken each time:
 #                  EXIT <code> <stderr…>   prints the words on stderr, nothing on stdout, exits
 #                  PRINT <text>            prints the text as it is, and exits 0
@@ -27,23 +28,35 @@ input=$(cat)
 printf '%s\n' "$input" > "$HOME/plan-input"
 # Unboxed, obid gives an account's brain a config folder of its own (#651), so the tests point at
 # the account's folder from obid's HOME (support::start, \`.fake-planner\`).
-if [ -d "$HOME/.fake-planner" ]; then state=$HOME/.fake-planner; else state=${CLAUDE_CONFIG_DIR:-$HOME}; fi
-mkdir -p "$state/calls"
-until mkdir "$state/lock" 2>/dev/null; do sleep 0.05; done
-n=$(($(ls "$state/calls" | wc -l) + 1))
-call="$state/calls/$n"
-mkdir -p "$call"
-for arg in "$@"; do printf '%s\n' "$arg"; done > "$call/args"
-printf '%s\n' "$input" > "$call/input"
-pwd > "$call/pwd"
-[ -f work.md ] && cp work.md "$call/work.md"
-line=""
-if [ -s "$state/plans" ]; then
-  line=$(head -n 1 "$state/plans")
-  tail -n +2 "$state/plans" > "$state/plans.next"
-  mv "$state/plans.next" "$state/plans"
+url=""
+if [ ! -d "$HOME/.fake-planner" ]; then
+  d=$(pwd)
+  while [ "$d" != / ]; do
+    if [ -r "$d/fake-planner-url" ]; then url=$(cat "$d/fake-planner-url"); break; fi
+    d=$(dirname "$d")
+  done
 fi
-rmdir "$state/lock"
+line=""
+if [ -n "$url" ]; then
+  line=$(printf '%s\n' "$input" | node "$(dirname "$0")/fake-planner-state.mjs" "$url" "$@")
+else
+  if [ -d "$HOME/.fake-planner" ]; then state=$HOME/.fake-planner; else state=$HOME; fi
+  mkdir -p "$state/calls"
+  until mkdir "$state/lock" 2>/dev/null; do sleep 0.05; done
+  n=$(($(ls "$state/calls" | wc -l) + 1))
+  call="$state/calls/$n"
+  mkdir -p "$call"
+  for arg in "$@"; do printf '%s\n' "$arg"; done > "$call/args"
+  printf '%s\n' "$input" > "$call/input"
+  pwd > "$call/pwd"
+  [ -f work.md ] && cp work.md "$call/work.md"
+  if [ -s "$state/plans" ]; then
+    line=$(head -n 1 "$state/plans")
+    tail -n +2 "$state/plans" > "$state/plans.next"
+    mv "$state/plans.next" "$state/plans"
+  fi
+  rmdir "$state/lock"
+fi
 while :; do
   case "$line" in
     "SLEEP "*)
