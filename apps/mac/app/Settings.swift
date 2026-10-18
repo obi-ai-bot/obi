@@ -342,7 +342,6 @@ struct AccountsSettingsView: View {
     @State private var agent = "claude"
     @State private var name = ""
     @State private var payer = ""
-    @State private var removing: Account?
     @State private var problem: String?
 
     private var places: [AccountPlaces] { AccountPlaces.of(local: feed.local, runner: feed.runner != nil) }
@@ -358,7 +357,7 @@ struct AccountsSettingsView: View {
                     } else if state.tetrix == false {
                         Button("Sign In to Tetrix") { attempt { try store.signIn(state.account, tetrix: true) } }.buttonStyle(.set)
                     }
-                    Button("Remove", role: .destructive) { removing = state.account }.buttonStyle(.set)
+                    Button("Remove", role: .destructive) { attempt { try store.remove(state.account) } }.buttonStyle(.set)
                 }
             }
             addAccount
@@ -368,8 +367,7 @@ struct AccountsSettingsView: View {
             // removing them come with obid's accounts API (docs/mac-design.md A2, A3): their buttons go
             // in this row's `buttons`, and the add form after this list.
             AccountSections(feed.local ? "Accounts on this Mac" : "Accounts on \(feed.name)", items: feed.accounts, id: \.account.id,
-                            usage: \.usage, place: both ? "on \(feed.name)" : nil,
-                            footer: feed.local ? "Oby's runner on this Mac runs every job on these. Each signs in through its tool's own login." : nil) { state in
+                            usage: \.usage, place: both ? "on \(feed.name)" : nil) { state in
                 AccountUsageRow(state: state) { lift in
                     // The runner's "accounts" event brings the change back.
                     guard let runner = feed.runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
@@ -404,13 +402,6 @@ struct AccountsSettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await store.refresh() }
         }
-        .confirmationDialog("Remove \(removing?.name ?? "this account")?",
-                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-                            presenting: removing) { account in
-            Button("Remove", role: .destructive) { attempt { try store.remove(account) } }
-        } message: { account in
-            Text(account.home == nil ? "Its login stays in the tool's own settings." : "Oby deletes this account's settings folder.")
-        }
     }
 
     private func attempt(_ action: () throws -> Void) {
@@ -441,7 +432,7 @@ struct AccountUsageRow<Buttons: View>: View {
                     AgentMark(agent: state.account.agent).font(Tokens.font(13)).foregroundStyle(Tokens.muted)
                         .frame(width: 16).padding(.top, 2).accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(usage.title)
+                        Text(state.account.name)
                         SetAbout(Usage.about(usage, payer: payer, now: now))
                         if let week = Usage.week(usage, now: now) {
                             SetMeter(used: week * 100).padding(.top, 4)
@@ -795,8 +786,8 @@ struct ModelsSettingsView: View {
                 if runnerOptions == nil || feed.models == nil {
                     SetGroup(problem: problem) { SetRow("Waiting for the runner on this Mac…", quiet: true) }
                 } else {
-                    RunnerModelsSections(options: runnerOptions, models: feed.models, save: feed.setModels,
-                                         footer: "New jobs use these. Oby's brain plans on Haiku, so it stays quick; conversations run on Sonnet in Claude Code.")
+                    RunnerModelsSections(options: runnerOptions, models: feed.models, save: feed.setModels, place: "on this Mac",
+                                         footer: "New jobs on this Mac use these. Oby’s brain stays on Haiku: it plans and answers in the conversation, so it should be quick.")
                 }
             }
             .task(id: feed.connection) { await loadOptions() }

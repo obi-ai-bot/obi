@@ -273,7 +273,7 @@ nonisolated enum Usage {
         week(snapshot, now: now).map { percent($0) + " used" }
     }
 
-    /// The line under the account's name: "Paid by Deskree · Resets Mon 21:42 · 1 agent running"; why
+    /// The line under the account's name, in Sangam's words: "Paid by Deskree · Resets Thursday"; why
     /// there's no meter in place of the reset ("Signed out", "No usage yet…"). With no payer (obid
     /// has none yet), it starts at the reset.
     static func about(_ snapshot: Snapshot, payer: String, now: Date = .now, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
@@ -282,11 +282,16 @@ nonisolated enum Usage {
         if let notice = notice(snapshot) {
             parts.append(notice)
         } else if let resets = snapshot.sevenDayResets, resets > now, week(snapshot, now: now) != nil {
-            let text = resetText(resets, now: now, locale: locale, timeZone: timeZone)
-            parts.append(text.prefix(1).uppercased() + text.dropFirst())
+            parts.append(resetsDay(resets, now: now, locale: locale, timeZone: timeZone))
         }
-        if snapshot.running > 0 { parts.append(runningText(snapshot.running)) }
         return parts.joined(separator: " · ")
+    }
+
+    /// "Resets Thursday", or "Resets in 5 h" within the day.
+    static func resetsDay(_ date: Date, now: Date = .now, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        let seconds = date.timeIntervalSince(now)
+        if seconds < 24 * 3600 { return "Resets in \(max(1, Int((seconds / 3600).rounded(.up)))) h" }
+        return "Resets " + date.formatted(Date.FormatStyle(locale: locale, timeZone: timeZone).weekday(.wide))
     }
 
     /// The 5-hour window, only once it's past 80% (Sangam shows the week alone): "5-hour limit 85%

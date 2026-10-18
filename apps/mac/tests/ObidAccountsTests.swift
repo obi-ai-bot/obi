@@ -64,10 +64,10 @@ struct AccountRowsTests {
 
     @Test func rowSaysWhoPaysWhenItResetsAndHowMuchIsUsed() {
         let personal = snapshot("Personal", week: 0.36, running: 1)
-        #expect(Usage.about(personal, payer: "Deskree", now: now, locale: english, timeZone: utc)
-                == "Paid by Deskree · Resets Mon 21:42 · 1 agent running")
+        #expect(Usage.about(personal, payer: "Deskree", now: now, locale: english, timeZone: utc) == "Paid by Deskree · Resets Monday")
         // obid has no payer yet: the line starts at the reset.
-        #expect(Usage.about(personal, payer: "", now: now, locale: english, timeZone: utc) == "Resets Mon 21:42 · 1 agent running")
+        #expect(Usage.about(personal, payer: "", now: now, locale: english, timeZone: utc) == "Resets Monday")
+        #expect(Usage.resetsDay(now + 4 * 3600 + 60, now: now) == "Resets in 5 h")
         #expect(Usage.usedText(personal, now: now) == "36% used")
         #expect(Usage.week(personal, now: now) == 0.36)
     }
