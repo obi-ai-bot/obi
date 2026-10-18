@@ -102,6 +102,11 @@ pub struct NewJob {
     /// What the brain found before it planned the job, and what done means (#540).
     #[serde(default)]
     pub brief: Option<crate::job::Brief>,
+    /// The job it follows up, and what that one did, quoted in its first prompt ([`follow_up`]).
+    #[serde(default)]
+    pub follow_up_of: Option<String>,
+    #[serde(default)]
+    pub earlier: Option<String>,
 }
 
 /// A review another Obi asked for, once the owner or a remembered decision accepted it.
@@ -1288,6 +1293,8 @@ impl Jobs {
         job.brief = new
             .brief
             .filter(|b| !b.findings.is_empty() || b.done.is_some());
+        job.earlier = new.earlier.filter(|_| new.follow_up_of.is_some());
+        job.follow_up_of = new.follow_up_of;
         job.mode = Some(
             new.mode
                 .unwrap_or_else(|| self.default_mode().as_str().to_owned()),
@@ -1300,7 +1307,8 @@ impl Jobs {
         {
             Some(branch) if git::is_branch_name(&branch) => branch,
             Some(_) => return Err(Refused("That isn't a branch name obid can create.".into())),
-            None => match new.pr.or(new.issue) {
+            // A follow-up of an issue's job gets a branch of its own: the first job's may be published.
+            None => match new.pr.or(new.issue.filter(|_| job.follow_up_of.is_none())) {
                 Some(number) => format!("oby/{}-{number}", new.kind),
                 None => format!("oby/{}-{id}", new.kind),
             },
@@ -1477,9 +1485,11 @@ impl Jobs {
     }
 
     /// The owner tells the job's agent something (`POST /v1/jobs/{id}/messages`). A job whose
-    /// agent is at work hears it as its next turn, before the check; a finished one picks its
-    /// session up again in the same worktree and branch, for one more round (and one more on a
-    /// loop's limit). `None` for a job obid doesn't have; `Err` says why it can't take the words.
+    /// agent is at work hears it as its next turn, before the check; a finished one gets a
+    /// follow-up ([`follow_up`]), the job answered, as Sangam's design does (the owner's decision
+    /// of 2026-10-18). Only the exact Try-again words pick a finished job's session up again in the
+    /// same worktree and branch, for one more round (and one more on a loop's limit). `None` for a
+    /// job obid doesn't have; `Err` says why it can't take the words.
     pub fn message(self: &Arc<Self>, id: &str, text: &str) -> Option<Result<Job, Refused>> {
         let job = self.get(id)?;
         let text = text.trim();
@@ -1492,6 +1502,9 @@ impl Jobs {
             return Some(Err(Refused(
                 "This is a review another Oby asked for: its answer goes back to that Oby, so it takes no words of yours.".into(),
             )));
+        }
+        if !job.status.is_active() && text != crate::brain::actions::TRY_AGAIN {
+            return Some(self.create(follow_up(&job, text)));
         }
         if self.lock().publishing.contains(id) {
             return Some(Err(Refused(
@@ -5055,6 +5068,63 @@ fn tail(text: &str, max: usize) -> &str {
 }
 
 /// The first prompt of the owner's job (Engine/Jobs.swift, `Prompts.agent`, for what obid does).
+/// A follow-up of `job`, which ended, with the owner's `words` (Sangam's design, the owner's
+/// decision of 2026-10-18): the same kind, agent, account, repository, pull request or issue,
+/// base, check, model, mode and conversation, the words its request and task, titled by their
+/// first line, and what `job` did for its first prompt. Bypass isn't carried: only the owner's own
+/// Confirm starts a job that never asks.
+pub fn follow_up(job: &Job, words: &str) -> NewJob {
+    let line = words.trim().lines().next().unwrap_or("").trim();
+    let mut title: String = if line.chars().count() > 60 {
+        format!("{}…", line.chars().take(59).collect::<String>().trim_end())
+    } else {
+        line.to_owned()
+    };
+    if let Some(first) = title.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    let commits = job.commits.unwrap_or(0);
+    let mut did = vec![
+        format!(
+            "{} ({}, {})",
+            job.short_title(),
+            job.kind,
+            job.status.as_str()
+        ),
+        format!("Asked: {}", job.request),
+    ];
+    if !job.summary.is_empty() {
+        did.push(format!("Its report: {}", job.summary));
+    }
+    did.push(format!(
+        "Branch {}, {commits} commit{}",
+        job.branch,
+        if commits == 1 { "" } else { "s" }
+    ));
+    if let Some(url) = &job.published {
+        did.push(format!("Pull request: {url}"));
+    }
+    NewJob {
+        repo: job.repo.clone(),
+        kind: job.kind.clone(),
+        task: words.to_owned(),
+        title: (!title.is_empty()).then_some(title),
+        request: Some(words.to_owned()),
+        pr: job.pr,
+        issue: job.issue,
+        account: Some(job.account.clone()),
+        agent: Some(job.agent.clone()),
+        base: job.base.clone(),
+        check: job.check.clone(),
+        model: job.model.clone(),
+        mode: job.mode.clone().filter(|m| m != "bypass"),
+        conversation: job.conversation.clone(),
+        follow_up_of: Some(job.id.clone()),
+        earlier: Some(crate::secrets::known().redact(&did.join("\n"))),
+        ..NewJob::default()
+    }
+}
+
 fn owner_prompt(job: &Job) -> String {
     let base = job
         .base
@@ -5090,6 +5160,14 @@ fn owner_prompt(job: &Job) -> String {
         }
     }
     lines.push(format!("What the user asked for: {}", job.task));
+    if let Some(earlier) = &job.earlier {
+        let nonce = crate::brain::briefing::nonce();
+        lines.push(format!(
+            "This follows up an earlier job of yours on this repository, which ended. What it did, quoted:\n\n{}\n{}",
+            crate::brain::briefing::fence_rule(&nonce, "the earlier job and its agent"),
+            crate::brain::briefing::fence(&nonce, earlier)
+        ));
+    }
     if let Some(brief) = &job.brief {
         lines.push(brief_section(brief));
     }

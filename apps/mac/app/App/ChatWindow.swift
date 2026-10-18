@@ -354,7 +354,8 @@ private struct HomeView: View {
             ConversationPage(model: model, composerFocusRequest: state.composerFocusRequest,
                              onOpenJob: { state.trail.push(.job(id: $0, local: $1)) }, onBack: back)
         case .job(let id, let local):
-            JobPane(model: model, id: id, local: local, onBack: back).takesKeys()
+            JobPane(model: model, id: id, local: local, onBack: back,
+                    onOpenJob: { state.trail.push(.job(id: $0, local: local)) }).takesKeys()
         case .group(let kind):
             GroupPane(model: model, kind: kind, items: work.filter { $0.type == kind },
                       onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })
@@ -645,6 +646,7 @@ private struct JobPane: View {
     let id: String
     let local: Bool
     var onBack: (() -> Void)? = nil
+    var onOpenJob: (String) -> Void = { _ in }
     @State private var problem: String?
 
     private var desk: Desk { model.desk }
@@ -655,7 +657,8 @@ private struct JobPane: View {
         Group {
             if let job {
                 TaskPage(job: job, actions: TaskActions.of(job, local: local, model: model), tray: model.tray,
-                         publishNow: model.publishing == job.id, onPublishNow: { model.publishing = nil }, onBack: onBack)
+                         publishNow: model.publishing == job.id, onPublishNow: { model.publishing = nil }, onBack: onBack,
+                         followUps: ThreadTaskLine.followUps(of: job.id, in: local ? desk.jobs : feed.jobs), onOpenJob: onOpenJob)
             } else if let problem {
                 Text(problem).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.danger)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

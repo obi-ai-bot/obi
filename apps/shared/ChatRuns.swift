@@ -135,6 +135,19 @@ nonisolated enum ThreadTaskLine {
         return ([status(mark), job.agentName, account] + [repo].compactMap { $0 }).filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
+    /// What Oby says under the words that started a follow-up of a finished task (Sangam's relay):
+    /// "This one’s finished, so I started a follow-up. Claude Code has it in oby on Deskree."
+    static func followUp(_ next: Job, account: String) -> String {
+        let repo = next.repo.split(separator: "/").last.map { next.repo.contains("/") ? " in \($0)" : "" } ?? ""
+        return "This one’s finished, so I started a follow-up. \(next.agentName) has it\(repo) on \(account.isEmpty ? next.account : account)."
+    }
+
+    /// The follow-ups of the task `id`, oldest first: its thread shows each after the words that
+    /// started it.
+    static func followUps(of id: String, in jobs: [Job]) -> [Job] {
+        jobs.filter { $0.followUpOf == id }.sorted { $0.created < $1.created }
+    }
+
     /// A job's mark in the thread, as in the side panel but never "new": you're looking at it.
     static func mark(_ job: Job) -> WorkMark {
         if job.needsYou || job.waitsForAnswer || job.waitsForPermission { return .needs }

@@ -1006,7 +1006,8 @@ nonisolated struct Runner: Sendable {
     /// Starts a job that waits for its `startWhen` now (#216): the runner answers with the job.
     func startNow(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/start") }
 
-    /// Tells the job's agent something. A finished job picks its session up again.
+    /// Tells the job's agent something: the runner answers with the job, or with the follow-up a
+    /// finished one gets (`followUpOf` set), except Try again's words, which pick its session up again.
     func tell(_ id: String, _ text: String) async throws -> Job {
         struct Body: Encodable { var text: String }
         return try await call("POST", "v1/jobs/\(id)/messages", body: Body(text: text))

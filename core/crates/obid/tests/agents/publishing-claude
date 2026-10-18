@@ -21,10 +21,12 @@
 //   the publish gate's fix prompt ("secret scan blocked publishing … commit <sha>"): takes the key
 //                    out with `git commit --fixup=<sha>`, autosquashes onto the base the prompt
 //                    names, and ends the turn with what it was told
+//   Try again …      (the retried round's words) does what .obi/again in the worktree says, if
+//                    the test left one
 //   anything else    ends the turn with "Nothing to do."
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
@@ -47,7 +49,9 @@ rl.on("line", (line) => {
     return;
   }
   if (message.type !== "user") return;
-  const prompt = typeof message.message.content === "string" ? message.message.content : "";
+  let prompt = typeof message.message.content === "string" ? message.message.content : "";
+  // Try again: the retried round does what the test left in .obi/again.
+  if (prompt.startsWith("Try again") && existsSync(".obi/again")) prompt = readFileSync(".obi/again", "utf8");
   emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Bash", "Read", "Edit"], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
   const fix = prompt.match(/secret scan blocked publishing[\s\S]*— commit ([0-9a-f]{40})[\s\S]*--autosquash (origin\/\S+?)`/);
   const commit = prompt.match(/COMMIT: (\S+)/);

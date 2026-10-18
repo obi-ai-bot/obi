@@ -233,6 +233,13 @@ pub struct Job {
     /// Why an entry of its `.obi/artifacts/` wasn't published, as of its last end.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_problems: Vec<String>,
+    /// The job this one follows up: the owner told that one something after it ended (Sangam's
+    /// design, the owner's decision of 2026-10-18).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up_of: Option<String>,
+    /// What the job it follows up did, for its first prompt, quoted there. Never in the API's job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earlier: Option<String>,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -246,8 +253,7 @@ pub struct JobArtifact {
 
 impl Job {
     /// Whether its pull request was merged, as the job's `pullRequest` says: it's finished for
-    /// good and takes no more words (#542). obid follows no pull request yet, so none reads
-    /// merged until it does.
+    /// good. obid follows no pull request yet, so none reads merged until it does.
     pub fn merged(&self) -> bool {
         self.to_json()["pullRequest"]["state"] == "MERGED"
     }
@@ -325,6 +331,8 @@ impl Job {
             brief: None,
             artifacts: Vec::new(),
             artifact_problems: Vec::new(),
+            follow_up_of: None,
+            earlier: None,
         }
     }
 
@@ -544,6 +552,7 @@ impl Job {
             "conversation": self.conversation,
             "artifacts": self.artifacts.iter().map(|a| json!({"id": a.id, "version": a.version})).collect::<Vec<_>>(),
             "artifactProblems": self.artifact_problems,
+            "followUpOf": self.follow_up_of,
         });
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
@@ -866,11 +875,12 @@ mod tests {
             "waiting",
             "permission",
             "conversation",
+            "followUpOf",
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's seven.
-        assert_eq!(object.len(), 72);
+        // The Swift runner's 65 keys, and obid's eight.
+        assert_eq!(object.len(), 73);
         assert_eq!(value["artifacts"], json!([]));
         assert_eq!(value["artifactProblems"], json!([]));
         assert_eq!(value["answered"], json!([]));

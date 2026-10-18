@@ -189,6 +189,8 @@ struct TaskPage: View {
                                 }
                             }
                         }
+                        let followUps = ThreadTaskLine.followUps(of: job.id, in: phone.jobs)
+                        if !followUps.isEmpty { section("Follow-ups") { followUpList(followUps) } }
                     }
                     .padding(.horizontal, 18)
                     .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.cardRadius, style: .continuous))
@@ -435,8 +437,23 @@ struct TaskPage: View {
         .overlay(alignment: .top) { if !first { Tokens.divider.frame(height: 1) } }
     }
 
+    /// Each follow-up as Sangam's thread shows it: what you said, Oby's line, and its card.
+    private func followUpList(_ followUps: [Job]) -> some View {
+        ForEach(Array(followUps.enumerated()), id: \.element.id) { index, next in
+            let account = phone.accountName(next.account)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(next.request).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).lineSpacing(6)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                Text(ThreadTaskLine.followUp(next, account: account)).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                ThreadTask(job: next, account: account)
+            }
+            .padding(.top, index == 0 ? 0 : 16)
+        }
+    }
+
     /// What you tell Oby about it goes to its agent (`POST /v1/jobs/{id}/messages`); a finished
-    /// one picks its session up again.
+    /// one gets a follow-up, which the runner answers with and its section lists.
     private func tell(_ id: String) {
         guard let text = ChatThread.words(note), text.count <= 2000, !busy else {
             if note.count > 2000 { noteProblem = "Keep your message under 2,000 characters." }

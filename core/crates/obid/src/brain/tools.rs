@@ -42,7 +42,7 @@ fn list() -> Value {
              "issue": {"type": "integer", "description": "The issue the work is about."},
              "title": {"type": "string", "description": "A short title, 3 to 6 words."}},
              "required": ["repo", "task"]}},
-        {"name": "oby_tell_job", "description": "Tells a job something: a running job hears it at its next turn; one that ended picks up again for one more round.",
+        {"name": "oby_tell_job", "description": "Tells a job something: a running job hears it at its next turn; one that ended gets a follow-up job, with the same kind, agent, account and repository, that starts with the owner's words. Its card goes on your answer.",
          "inputSchema": {"type": "object", "properties": {"id": id, "words": {"type": "string"}}, "required": ["id", "words"]}},
         {"name": "oby_stop_job", "description": "Stops a running job.",
          "inputSchema": {"type": "object", "properties": {"id": id}, "required": ["id"]}},
@@ -314,8 +314,23 @@ async fn act(
     words: &str,
 ) -> Result<String, String> {
     problems(shared, session, &plan)?;
-    match actions::act(shared, &plan, words).await {
+    answered(session, actions::act(shared, &plan, words).await)
+}
+
+/// A tool's answer for an action's outcome: a job it started (a follow-up) goes on the turn, and
+/// its card on the answer, as `oby_dispatch`'s do.
+fn answered(session: &Session, outcome: Outcome) -> Result<String, String> {
+    match outcome {
         Outcome::Done(text) => Ok(text),
+        Outcome::Started(text, job) => {
+            let card = json!({"id": job["id"], "title": job["title"], "status": job["status"], "repo": job["repo"]});
+            session
+                .jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(job);
+            Ok(format!("{text}\n{}", json!({"jobs": [card]})))
+        }
         Outcome::Failed(text) | Outcome::NeedsWhich(text) => Err(text),
     }
 }
@@ -358,8 +373,9 @@ fn told(owner: &str, agent: &str, nonce: &str) -> String {
     )
 }
 
-/// oby_tell_job: message_job with the owner's words and the agent's quoted. After the web, a job
-/// that ended picks up again only with the owner's Confirm.
+/// oby_tell_job: message_job with the owner's words and the agent's quoted. A job that ended gets
+/// a follow-up whose request is the owner's words alone; after the web it's only proposed, a
+/// `start` item for the owner's Start (#374).
 async fn tell(
     shared: &Arc<Shared>,
     session: &Session,
@@ -375,36 +391,33 @@ async fn tell(
         .jobs
         .get(&id)
         .ok_or("That job isn't here any more.")?;
-    if session.web.load(Ordering::SeqCst) && !job.status.is_active() {
-        let words = crate::vault::for_agent(&words)?;
-        let words = crate::secrets::known().redact(&words);
-        let name = job.short_title();
-        actions::confirm(
-            shared,
-            &id,
-            format!("Tell {name}: one more round"),
-            format!(
-                "Oby's conversation used the web this turn, so {name}, which ended, picks up again only if you confirm. It hears your words, then what Oby adds, quoted:\n\n{}",
-                words
-                    .lines()
-                    .map(|l| format!("> {l}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ),
-            crate::sphere::inbox::Confirmed {
-                action: crate::sphere::inbox::action::MESSAGE_JOB.into(),
-                target: id.clone(),
-                payload: json!({"words": words}),
-            },
+    if job.status.is_active() {
+        return answered(session, actions::act(shared, &plan, &words).await);
+    }
+    let agent_ready = |text: &str| -> Result<String, String> {
+        Ok(crate::secrets::known().redact(&crate::vault::for_agent(text.trim())?))
+    };
+    let mut new = crate::jobs::follow_up(&job, &agent_ready(&words)?);
+    new.request = Some(agent_ready(&session.said)?);
+    let name = job.short_title();
+    if session.web.load(Ordering::SeqCst) {
+        let nonce = super::briefing::nonce();
+        let text = format!(
+            "Oby looked into it first. Start {}, a follow-up of {name}?\n\n{}\n{}",
+            actions::describe(&new),
+            super::briefing::fence_rule(&nonce, "what the follow-up would hear"),
+            super::briefing::fence(&nonce, &new.task),
         );
+        let title = new
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("Follow-up of {name}"));
+        shared.link.propose(&new, title, text);
         return Ok(format!(
-            "{name} ended, and this turn used the web, so picking it up again waits for your OK: confirm it in your inbox."
+            "{name} is finished, and this turn used the web, so its follow-up waits for your Start in your inbox."
         ));
     }
-    match actions::act(shared, &plan, &words).await {
-        Outcome::Done(text) => Ok(text),
-        Outcome::Failed(text) | Outcome::NeedsWhich(text) => Err(text),
-    }
+    answered(session, actions::follow_up(shared, &job, new))
 }
 
 /// oby_dispatch: the plan loop's dispatch of one job, linked to the conversation.

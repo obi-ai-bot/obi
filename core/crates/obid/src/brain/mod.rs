@@ -395,12 +395,6 @@ pub(super) fn context(shared: &Shared, turns: &[Turn], nonce: &str) -> Context {
             .filter(|i| i.kind != "confirm")
             .map(|i| i.id.clone())
             .collect(),
-        merged: briefing
-            .jobs()
-            .into_iter()
-            .filter(|job| job.merged())
-            .map(|job| job.id.clone())
-            .collect(),
         ended: briefing
             .jobs()
             .into_iter()

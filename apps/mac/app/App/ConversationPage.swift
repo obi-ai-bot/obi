@@ -322,18 +322,18 @@ private struct MessageRow: View {
 
 /// A task an answer started, as a small card under it (Sangam's ThreadTask): its agent's mark,
 /// its title, where it stands and who has it, its mark, and a chevron; a click opens its page.
-private struct ThreadTask: View {
+struct ThreadTask: View {
     let job: Job
     let account: String
     let onOpen: () -> Void
-    let onStop: () -> Void
+    var onStop: (() -> Void)? = nil
     @State private var hovering = false
 
     var body: some View {
         let mark = ThreadTaskLine.mark(job)
         card(mark)
             .overlay(alignment: .topTrailing) {
-                if hovering && job.isActive { StopButton(action: onStop).padding(.top, 8).padding(.trailing, 38) }
+                if hovering && job.isActive, let onStop { StopButton(action: onStop).padding(.top, 8).padding(.trailing, 38) }
             }
             .onHover { hovering = $0 }
     }
@@ -364,7 +364,7 @@ private struct ThreadTask: View {
         .accessibilityLabel("Open \(job.heading), \(ThreadTaskLine.status(mark))")
         .contextMenu {
             Button("Open task", action: onOpen)
-            if job.isActive { Button("Stop", action: onStop) }
+            if job.isActive, let onStop { Button("Stop", action: onStop) }
         }
     }
 }
