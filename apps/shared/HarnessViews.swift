@@ -591,7 +591,8 @@ struct StreamingAnswer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ObyMark()
+            // Its words land: the dots run back together into the face.
+            ObyFaceLive(live: false, working: true)
             // The words that came hold their place at once, so the thread scrolls to them as each
             // delta comes; the reveal fills it in.
             SaidText(text: streamed.text, color: Tokens.item).hidden().accessibilityHidden(true)

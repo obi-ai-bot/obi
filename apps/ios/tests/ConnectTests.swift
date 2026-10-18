@@ -109,6 +109,8 @@ struct ConnectTests {
         #expect(answer.token == "tok-1")
         #expect(answer.link == MacLink(name: "My Mac", hostname: "oby-abc.tetrix.pro"))
         #expect(GatewayTokenStore.read() == "tok-1")
+        // How long the pairing lasts, for "Paired until Nov 12" and a clear word when it ends.
+        #expect(answer.expiresAt == ISO8601DateFormatter().date(from: "2026-11-12T10:00:00Z"))
         // An older runner's answer, without the link, still pairs.
         let bare = try await GatewayPairing.redeem(at: gateway, credential: "123456", name: "Test iPhone",
                                                    transport: answering(200, #"{"token":"tok-2","expiresAt":"2026-11-12T10:00:00Z"}"#, sent: sent))
@@ -130,5 +132,42 @@ struct ConnectTests {
             #expect(error.status == 401)
         }
         #expect(GatewayTokenStore.read() == nil)
+    }
+
+    // MARK: Pairing that just works (docs/oby-ux.md rows 31-34, onboarding.md)
+
+    @Test func aFreshIPhoneTalksToNobodyUntilItPairs() {
+        // No default address: with no Mac and no runner, Connect is the first screen.
+        #expect(Phone.needsPairing(linked: false, runner: nil, notice: nil))
+        #expect(!Phone.needsPairing(linked: true, runner: nil, notice: nil))
+        #expect(!Phone.needsPairing(linked: false, runner: URL(string: "https://runner.example"), notice: nil))
+        // Removed from the Mac, or the 30 days are up: Connect again, with the line saying why.
+        #expect(Phone.needsPairing(linked: true, runner: nil, notice: .removed))
+        #expect(Phone.needsPairing(linked: true, runner: nil, notice: .expired))
+    }
+
+    @Test func theThirtyDaysEndingSaysSoInsteadOfBlamingTailscale() {
+        let seen = Date(timeIntervalSince1970: 1_791_582_173)
+        let ended = seen.addingTimeInterval(-60)
+        #expect(ReachNotice.of(.offline("x"), online: true, status: 401, paired: true, lastSeen: seen, expires: ended, now: seen) == .expired)
+        #expect(ReachNotice.of(.offline("x"), online: true, status: 401, paired: true, lastSeen: seen, expires: seen.addingTimeInterval(86_400), now: seen) == .removed)
+        #expect(ReachNotice.expired.title == "Pairing with your Mac ended")
+        #expect(ReachNotice.expired.detail == "It lasts 30 days. Scan the code in Oby on your Mac to connect again.")
+    }
+
+    /// Review of #683: a paired iPhone's 401 says its pairing ended, never the Tailscale line,
+    /// and it holds through a dropped connection until a request succeeds.
+    @Test func aRefusalSaysThePairingEndedAndHolds() throws {
+        let refused = HTTPURLResponse(url: gateway, statusCode: 401, httpVersion: nil, headerFields: nil)!
+        let said = "\(ReachNotice.expired.title). \(ReachNotice.expired.detail)"
+        do { try Runner.check(refused, nil, refused: said); Issue.record("a 401 went through") } catch let error as RunnerError {
+            #expect(error.message == said && error.status == 401)
+        }
+        do { try Runner.check(refused, nil) } catch let error as RunnerError {
+            #expect(error.status == 401 && !error.message.contains("Tailscale"))
+        }
+        #expect(Phone.refusal(after: URLError(.networkConnectionLost), was: 401) == 401)
+        #expect(Phone.refusal(after: RunnerError(message: "x", status: 500), was: 401) == 500)
+        #expect(Phone.refusal(after: URLError(.timedOut), was: nil) == nil)
     }
 }

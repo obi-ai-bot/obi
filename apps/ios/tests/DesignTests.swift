@@ -107,6 +107,37 @@ struct DesignTests {
         #expect(PhoneWork.recent(talk).map(\.id) == ["c4", "c3", "c2"])
     }
 
+    /// A task's ⋮ (Sangam's TaskMenu.tsx, docs/oby-ux.md row 21): its conversation; Stop task while
+    /// it goes, Archive task once it's done; Move to… and Mode under them; Dismiss when it needs you.
+    @Test func aTaskMenuHasSangamsItems() throws {
+        let running = try job("r", "running", extra: #", "mode": "ask""#)
+        let done = try job("d", "done", finished: "2026-10-09T22:00:00Z")
+        let failed = try job("f", "failed", finished: "2026-10-09T22:00:00Z")
+        #expect(TaskMenu.items(running, conversation: true) == [.openConversation, .stop, .move, .mode])
+        #expect(TaskMenu.items(done, conversation: false) == [.archive, .move])
+        #expect(TaskMenu.items(failed, conversation: true) == [.openConversation, .dismiss, .move])
+        // Archived on this iPhone: off Home, into Archived; told something, it runs again and comes back.
+        #expect(PhoneWork.archived([done, running], clearedAt: nil, here: ["d"]).map(\.id) == ["d"])
+        #expect(PhoneWork.archived([running], clearedAt: nil, here: ["r"]).isEmpty)
+    }
+
+    /// Oby's live face (Sangam's ObyFaceLive.tsx): while it works the face melts into three
+    /// bouncing dots and holds there; its words in, they run back together into the still face.
+    @Test func obysFaceMeltsIntoDotsAndBack() {
+        var motion = ObyLiveMotion()
+        for _ in 0..<120 { motion.step(1.0 / 60, live: true) }
+        #expect(abs(motion[.dSpread] - 1) < 0.15 && abs(motion[.dR] - 1) < 0.1 && motion[.scale] < 0.15)
+        // Still at work long after: it holds the dots, never coming together on its own.
+        for _ in 0..<600 { motion.step(1.0 / 60, live: true) }
+        #expect(abs(motion[.dSpread] - 1) < 0.15 && !motion.settled)
+        // The words land: back into the face, and done.
+        for _ in 0..<300 { motion.step(1.0 / 60, live: false) }
+        #expect(motion.settled)
+        #expect(abs(motion[.scale] - 1) < 0.01 && motion[.dR] < 0.01 && abs(motion[.inflate] - 0.17) < 0.01)
+        // A face that takes over from one at work starts with the dots out.
+        #expect(abs(ObyLiveMotion(working: true)[.dSpread] - 1) < 0.15)
+    }
+
     @Test func archivedHoldsWhatLeftHome() throws {
         let cleared = try job("c", "done", finished: "2026-10-09T22:00:00Z")
         let dismissed = try job("d", "failed", finished: "2026-10-09T22:00:00Z", extra: #", "dismissed": "2026-10-09T23:00:00Z""#)
