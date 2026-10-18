@@ -4168,7 +4168,8 @@ fn keep_one(service: &str, config_dir: Option<&Path>, bin: &Path) -> Fresh {
 /// ([`keychain_login`]): if its token ends within 5 minutes, the Mac's own Claude Code refreshes
 /// it first (or the run waits for the refresh that's going), off obid's async runtime, and the
 /// default login is kept fresh from now on ([`keep_keychain_logins`]). An account with a folder of
-/// its own is never refreshed ([`refresh_claude_login`]). Throws one line when the login can't be
+/// its own is never refreshed ([`refresh_claude_login`]): its login is good while its token is far
+/// from its end, and refused after ([`shared_login_ok`]). Throws one line when the login can't be
 /// used. obid never writes the Keychain: a folder's older copy is only overwritten from it.
 pub(crate) async fn keychain_ready(
     bin: PathBuf,
@@ -4201,21 +4202,51 @@ pub(crate) async fn keychain_ready(
             }),
         }
     }
-    let shared = dir.is_some();
-    let fresh = tokio::task::spawn_blocking(move || keep_one(&service, dir.as_deref(), &bin))
+    if let Some(folder) = dir {
+        // Never refreshed while jobs can write its folder (#655): good far from its end, else
+        // refused, whatever was tried before (#651's re-review).
+        let read = tokio::task::spawn_blocking(move || keychain(Some(&folder), true))
+            .await
+            .unwrap_or(None);
+        return if shared_login_ok(read.as_deref(), now_ms()) {
+            Ok(())
+        } else {
+            Err(format!(
+                "The Mac's Claude login for {} ends soon or has ended, and obid doesn't refresh it while jobs can write its folder: run claude on that account to refresh it, or see {SHARED_FOLDER_ISSUE}.",
+                account.name
+            ))
+        };
+    }
+    let fresh = tokio::task::spawn_blocking(move || keep_one(&service, None, &bin))
         .await
         .unwrap_or(Fresh::SignIn);
     match fresh {
-        Fresh::SignIn if shared => Err(format!(
-            "The Mac's Claude login for {} ends within 5 minutes, and obid doesn't refresh it while jobs can write its folder ({SHARED_FOLDER_ISSUE}).",
-            account.name
-        )),
         Fresh::SignIn => Err(format!(
             "The Mac's Claude login for {} needs signing in again (run claude, then /login).",
             account.name
         )),
         _ => Ok(()),
     }
+}
+
+/// Whether the Keychain `login` of an account whose folder jobs can write is good to copy: there
+/// is none (nothing is copied from it), or its token is far from its end ([`far_from_end`]).
+fn shared_login_ok(login: Option<&[u8]>, now: u64) -> bool {
+    login.is_none_or(|login| far_from_end(expires_at(login), now))
+}
+
+/// An account's login as obid copies it for a run that must not read the account's folder (the
+/// unboxed brain, `crate::brain::planner`): the Keychain's ([`keychain_login`]), else its
+/// `.credentials.json` when that's a regular file, only what calls the API ([`without_refresh`]).
+pub(crate) fn account_login(config_dir: &Path) -> Option<Vec<u8>> {
+    keychain_login(Some(config_dir)).or_else(|| {
+        let file = config_dir.join(".credentials.json");
+        std::fs::symlink_metadata(&file)
+            .is_ok_and(|m| m.is_file())
+            .then(|| std::fs::read(&file).ok())
+            .flatten()
+            .and_then(|bytes| without_refresh(&bytes))
+    })
 }
 
 /// The issue for jobs getting a config folder of their own instead of the account's shared one,
@@ -4363,7 +4394,7 @@ fn refresh_claude_login(bin: &Path, config_dir: Option<&Path>) -> bool {
 /// through a link: not one in place of the file, nor one a job left in place of its folder (the
 /// folder is opened without following a link, and the file made in that very folder; #643's
 /// security review).
-fn write_login(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_login(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use nix::fcntl::{OFlag, open, openat};
     use nix::sys::stat::Mode;
     let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
@@ -5335,6 +5366,52 @@ mod tests {
             assert!(!done.load(std::sync::atomic::Ordering::SeqCst));
             release.send(()).unwrap();
         });
+    }
+
+    /// An account whose folder jobs can write is never refreshed (#655): its Keychain login is
+    /// good while its token is far from its end, and refused otherwise, however long ago anything
+    /// was tried (#651's re-review). No Keychain login: nothing is copied from it.
+    #[test]
+    fn a_shared_folders_login_is_good_only_far_from_its_end() {
+        let now = 1_760_000_000_000u64;
+        assert!(shared_login_ok(
+            a_login(Some(now + 3_600_000)).as_deref(),
+            now
+        ));
+        assert!(!shared_login_ok(
+            a_login(Some(now + 60_000)).as_deref(),
+            now
+        ));
+        assert!(!shared_login_ok(a_login(Some(now - 1)).as_deref(), now));
+        assert!(!shared_login_ok(a_login(None).as_deref(), now));
+        assert!(shared_login_ok(None, now));
+    }
+
+    /// The brain's copy of an account's login, for its own empty config folder: from the
+    /// account's login file when the Keychain isn't used, only what calls the API, never through
+    /// a link.
+    #[test]
+    fn an_accounts_login_copy_carries_only_what_calls_the_api() {
+        let root = std::env::temp_dir().join(format!("obid-login-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("account")).unwrap();
+        let login = json!({"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "scopes": ["user:inference"]}});
+        std::fs::write(root.join("account/.credentials.json"), login.to_string()).unwrap();
+        let copy: Value =
+            serde_json::from_slice(&account_login(&root.join("account")).unwrap()).unwrap();
+        assert_eq!(
+            copy,
+            json!({"claudeAiOauth": {"accessToken": "a", "scopes": ["user:inference"]}})
+        );
+        // A link in the file's place is not a login.
+        std::fs::create_dir_all(root.join("linked")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("account/.credentials.json"),
+            root.join("linked/.credentials.json"),
+        )
+        .unwrap();
+        assert!(account_login(&root.join("linked")).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A folder named with a trailing `/` or `/.` is still looked at as itself, not where a link
