@@ -322,13 +322,22 @@ impl Spec {
         }
         // Outermost first, so an inner one is made inside the outer one's empty folder.
         hidden.sort_by_key(|p| p.components().count());
+        // An account's folder is writable, so a job on the same account could put a link in its
+        // place: it's named by its parent's real path and its own name, never where such a link
+        // leads, and left out when it isn't a real folder now (#643's security review).
+        let account = |p: &PathBuf| -> Option<PathBuf> {
+            let at = real(&p.parent()?.to_path_buf()).join(p.file_name()?);
+            std::fs::symlink_metadata(&at)
+                .is_ok_and(|m| m.is_dir())
+                .then_some(at)
+        };
         Spec {
             worktree: real(&self.worktree),
             git_admin: self.git_admin.as_ref().map(real),
             git_common: self.git_common.as_ref().map(real),
             commits: self.commits,
             temp: real(&self.temp),
-            accounts: self.accounts.iter().map(real).collect(),
+            accounts: self.accounts.iter().filter_map(account).collect(),
             read_only,
             hidden,
             network: self.network,
@@ -1172,6 +1181,26 @@ mod tests {
                 root_real.join("state/default")
             ]
         );
+    }
+
+    /// An account folder is named by its parent's real path and its own name, and one that's a
+    /// link now (a job on the same account put it there) is left out, never followed (#643's
+    /// re-review).
+    #[test]
+    fn an_account_folder_that_became_a_link_is_left_out() {
+        let root = std::env::temp_dir().join(format!("obid-canon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("accounts/real")).unwrap();
+        std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join("accounts/planted")).unwrap();
+        let spec = Spec {
+            accounts: vec![root.join("accounts/real"), root.join("accounts/planted")],
+            ..Spec::default()
+        }
+        .canonical();
+        let real = root.canonicalize().unwrap();
+        assert_eq!(spec.accounts, vec![real.join("accounts/real")]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

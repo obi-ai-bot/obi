@@ -3948,7 +3948,7 @@ pub(crate) fn keychain_login(config_dir: Option<&Path>) -> Option<Vec<u8>> {
     while bytes.last().is_some_and(|b| b.is_ascii_whitespace()) {
         bytes.pop();
     }
-    learn_claude_tokens(&bytes);
+    learn_claude_tokens(&bytes, &keychain_service(config_dir));
     (!bytes.is_empty()).then_some(bytes)
 }
 
@@ -3981,7 +3981,7 @@ fn write_login(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// The tokens in Claude Code's login (`claudeAiOauth`'s access and refresh tokens), learned as
 /// secrets obid knows, so whatever repeats them (an agent, the brain, a log) is redacted.
-fn learn_claude_tokens(bytes: &[u8]) {
+fn learn_claude_tokens(bytes: &[u8], service: &str) {
     let Ok(login) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return;
     };
@@ -3990,7 +3990,8 @@ fn learn_claude_tokens(bytes: &[u8]) {
             .as_str()
             .filter(|t| !t.is_empty())
         {
-            crate::secrets::known().learn(&format!("claude-login {key}"), token);
+            // Named by its Keychain item, so a second account's never replaces the first's.
+            crate::secrets::known().learn(&format!("{service} {key}"), token);
         }
     }
 }
@@ -3998,7 +3999,9 @@ fn learn_claude_tokens(bytes: &[u8]) {
 /// Whether `folder` is a real folder, or not there yet: never a link a job left in its place,
 /// which obid would otherwise follow (#643's security review).
 pub(crate) fn not_a_link(folder: &Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(folder) {
+    // Without a trailing `/` or `/.`, which would make the look follow a link.
+    let folder: PathBuf = folder.components().collect();
+    match std::fs::symlink_metadata(&folder) {
         Ok(meta) if !meta.is_dir() => Err(format!(
             "{} isn't a folder any more (a link or a file is in its place), so nothing started there.",
             folder.display()
@@ -4575,12 +4578,34 @@ mod tests {
         let refresh = ["sk-ant-ort01-", &"y".repeat(40)].concat();
         let login =
             serde_json::json!({"claudeAiOauth": {"accessToken": access, "refreshToken": refresh}});
-        learn_claude_tokens(login.to_string().as_bytes());
-        let said = crate::secrets::known().redact(&format!("{access} and {refresh}"));
+        learn_claude_tokens(login.to_string().as_bytes(), "Claude Code-credentials");
+        // A second account's login doesn't push the first's out (#643's re-review).
+        let other = ["sk-ant-oat01-", &"z".repeat(40)].concat();
+        let second = serde_json::json!({"claudeAiOauth": {"accessToken": other}});
+        learn_claude_tokens(
+            second.to_string().as_bytes(),
+            "Claude Code-credentials-2e25c0fb",
+        );
+        let said = crate::secrets::known().redact(&format!("{access} and {refresh} and {other}"));
         assert!(
-            !said.contains(&access) && !said.contains(&refresh),
+            !said.contains(&access) && !said.contains(&refresh) && !said.contains(&other),
             "{said}"
         );
+    }
+
+    /// A folder named with a trailing `/` or `/.` is still looked at as itself, not where a link
+    /// in its place leads (#643's re-review).
+    #[test]
+    fn a_trailing_slash_doesnt_hide_a_link() {
+        let root = std::env::temp_dir().join(format!("obid-trailing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::os::unix::fs::symlink(root.join("target"), root.join("link")).unwrap();
+        for name in ["link", "link/", "link/."] {
+            assert!(not_a_link(&root.join(name)).is_err(), "{name}");
+        }
+        assert!(not_a_link(&root.join("target/")).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Claude Code's Keychain names, as it makes them: the default folder's, and any other's with
