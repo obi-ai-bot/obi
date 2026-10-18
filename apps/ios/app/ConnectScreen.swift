@@ -18,6 +18,8 @@ struct ConnectScreen: View {
     @State private var pairing = false
     @State private var browser = MacBrowser()
     @State private var unpairing = false
+    @State private var address = ""
+    @State private var another = false
     @FocusState private var typing: Bool
 
     var body: some View {
@@ -42,6 +44,7 @@ struct ConnectScreen: View {
                 if let problem {
                     SetAbout(problem, color: Tokens.danger).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12)
                 }
+                anotherRunner.padding(.top, 28)
             }
             .padding(.horizontal, Tokens.gutter).padding(.bottom, 32)
         }
@@ -49,7 +52,12 @@ struct ConnectScreen: View {
         .environment(\.settingsCards, true)
         .obyPage()
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { browser.start(); chosenMac = phone.link?.name ?? "" }
+        .onAppear {
+            browser.start()
+            chosenMac = phone.link?.name ?? ""
+            address = phone.runnerURL?.absoluteString ?? ""
+            another = phone.runnerURL != nil
+        }
         .onDisappear { browser.stop() }
         .onChange(of: browser.names) { _, names in
             if chosenMac.isEmpty || !names.contains(chosenMac) { chosenMac = names.first ?? "" }
@@ -106,6 +114,46 @@ struct ConnectScreen: View {
         }
     }
 
+    /// A runner that isn't a Mac (one on a server you run), by its address: folded away, as most
+    /// people pair their Mac (docs/oby-ux.md row 33: no address field in Settings any more).
+    private var anotherRunner: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button { withAnimation(Tokens.warm) { another.toggle() } } label: {
+                HStack(spacing: 4) {
+                    Text("Another runner")
+                    Image(systemName: "chevron.right").font(Tokens.font(10, .semibold)).rotationEffect(.degrees(another ? 90 : 0))
+                }
+                .font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16).padding(.bottom, 8)
+            .accessibilityValue(another ? "Open" : "Folded")
+            if another {
+                SetGroup(footer: "For a runner on a server of yours, not your Mac. Clear it to use only your Mac.") {
+                    SetRow("Address") {
+                        SetField("Address", text: $address, prompt: "https://…", width: 200)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .onSubmit(saveAddress)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func saveAddress() {
+        let typed = address.trimmingCharacters(in: .whitespaces)
+        // Cleared: no runner but a paired Mac.
+        if typed.isEmpty { problem = nil; phone.runnerURL = nil; return }
+        guard let url = URL(string: typed), url.scheme == "https" else {
+            problem = "The runner's address starts with https://"
+            return
+        }
+        problem = nil
+        if url != phone.runnerURL { phone.runnerURL = url }
+    }
+
     /// What the QR code said: the gateway's URL, the Mac's link and the one-time secret.
     private func pair(_ value: String) async {
         do {
@@ -149,10 +197,14 @@ private struct DigitBoxes: View {
     var body: some View {
         let digits = Array(code.filter(\.isNumber).prefix(6))
         ZStack {
+            // The field VoiceOver reaches, over the boxes; they only draw what's typed.
             TextField("Six-digit code", text: $code)
                 .keyboardType(.numberPad).textContentType(.oneTimeCode)
                 .focused(typing)
                 .opacity(0.02)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityLabel("Six-digit code")
+                .accessibilityHint("The code Oby on your Mac shows")
                 .onChange(of: code) { _, typed in
                     let kept = String(typed.filter(\.isNumber).prefix(6))
                     if kept != typed { code = kept }
@@ -170,12 +222,10 @@ private struct DigitBoxes: View {
                 }
             }
             .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
         .contentShape(Rectangle())
         .onTapGesture { typing.wrappedValue = true }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Six-digit code")
-        .accessibilityValue(digits.isEmpty ? "Empty" : String(digits))
     }
 }
 

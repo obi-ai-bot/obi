@@ -923,10 +923,14 @@ nonisolated struct RunnerError: LocalizedError {
 nonisolated struct Runner: Sendable {
     var base: URL
     var token: String?
+    /// What a 401 means here: an iPhone paired with a Mac says its pairing ended (docs/oby-ux.md
+    /// row 34); nil says the generic line.
+    var refused: String?
 
-    init(base: URL, token: String? = nil) {
+    init(base: URL, token: String? = nil, refused: String? = nil) {
         self.base = base
         self.token = token
+        self.refused = refused
     }
 
     /// Nowhere: what a request goes to with no Mac paired and no runner set (port 9, discard),
@@ -1184,7 +1188,7 @@ nonisolated struct Runner: Sendable {
         var request = URLRequest(url: base.appending(path: "v1/checks/\(id)/bundle"))
         request.timeoutInterval = 120
         let (data, response) = try await URLSession.shared.data(for: signed(request))
-        try Self.check(response, data)
+        try Self.check(response, data, refused: refused)
         return data
     }
 
@@ -1214,7 +1218,7 @@ nonisolated struct Runner: Sendable {
         let (data, response) = try await URLSession.shared.data(for: signed(request))
         struct Ask: Decodable { var action: String }
         if (response as? HTTPURLResponse)?.statusCode == 403, let ask = try? JSONDecoder().decode(Ask.self, from: data) { return ask.action }
-        try Self.check(response, data)
+        try Self.check(response, data, refused: refused)
         throw RunnerError(message: "The runner didn't say what to approve.")
     }
 
@@ -1253,7 +1257,7 @@ nonisolated struct Runner: Sendable {
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     request.timeoutInterval = 60
                     let (bytes, response) = try await URLSession.shared.bytes(for: signed(request))
-                    try Self.check(response, nil)
+                    try Self.check(response, nil, refused: refused)
                     // The runner answers once it follows this connection: from here, every change arrives.
                     stream.yield(.connected)
                     var parser = EventParser()
@@ -1321,7 +1325,7 @@ nonisolated struct Runner: Sendable {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         let (data, response) = try await URLSession.shared.data(for: signed(request))
-        try Self.check(response, data)
+        try Self.check(response, data, refused: refused)
         return data
     }
 
@@ -1386,11 +1390,13 @@ nonisolated struct Runner: Sendable {
         return (data, http)
     }
 
-    static func check(_ response: URLResponse, _ data: Data?) throws {
+    /// `refused`: what a 401 says (a paired iPhone's pairing ended), else the generic line.
+    static func check(_ response: URLResponse, _ data: Data?, refused: String? = nil) throws {
         guard let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) else { return }
+        if http.statusCode == 401, let refused { throw RunnerError(message: refused, status: 401) }
         struct Problem: Decodable { var error: String }
         if let data, let problem = try? JSONDecoder().decode(Problem.self, from: data) { throw RunnerError(message: problem.error, status: http.statusCode) }
-        throw RunnerError(message: http.statusCode == 401 ? "The runner only answers its owner's Tailscale login." : "The runner answered \(http.statusCode).",
+        throw RunnerError(message: http.statusCode == 401 ? "The runner didn't let this device in." : "The runner answered \(http.statusCode).",
                           status: http.statusCode)
     }
 }

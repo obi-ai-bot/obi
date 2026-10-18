@@ -304,6 +304,13 @@ final class Phone {
     private(set) var pairedUntil = UserDefaults.standard.object(forKey: "gateway.expiresAt") as? Date {
         didSet { UserDefaults.standard.set(pairedUntil, forKey: "gateway.expiresAt") }
     }
+    /// The refusal to keep after a failed request: its status when the runner answered; a 401
+    /// stays through errors with none (a dropped connection), until a request succeeds, so the
+    /// screen doesn't flip between Connect and Home.
+    static func refusal(after error: Error, was: Int?) -> Int? {
+        let status = (error as? RunnerError)?.status
+        return status == nil && was == 401 ? 401 : status
+    }
     /// Connect instead of Home: no Mac and no runner yet, or the Mac stopped taking this iPhone.
     var needsPairing: Bool { Self.needsPairing(linked: link != nil, runner: runnerURL, notice: notice) }
     static func needsPairing(linked: Bool, runner: URL?, notice: ReachNotice?) -> Bool {
@@ -407,7 +414,11 @@ final class Phone {
         if changed.deleted, changed.id == current { show(nil) }
     }
 
-    var runner: Runner { Runner(base: base, token: GatewayTokenStore.read()) }
+    var runner: Runner {
+        // Paired with a Mac, a 401 means the pairing ended: say which, never the Tailscale line.
+        let refused = link.map { _ in (pairedUntil.map { $0 <= .now } ?? false) ? ReachNotice.expired : ReachNotice.removed }
+        return Runner(base: base, token: GatewayTokenStore.read(), refused: refused.map { "\($0.title). \($0.detail)" })
+    }
 
     /// Pairs with a Mac's gateway (#284): the invitation's QR secret or its six-digit code buys this
     /// iPhone's device token, kept in the keychain, and the Mac becomes the linked one. The QR code
@@ -486,7 +497,7 @@ final class Phone {
                     }
                 } catch {
                     if Task.isCancelled { return }
-                    refusal = (error as? RunnerError)?.status
+                    refusal = Self.refusal(after: error, was: refusal)
                     connection = .offline(error.localizedDescription)
                 }
                 try? await Task.sleep(for: .seconds(wait))
