@@ -86,6 +86,10 @@ struct Saved {
     changed: BTreeMap<String, Change>,
     #[serde(default)]
     removed: Vec<String>,
+    /// The folders of the accounts removed: still hidden from every box ([`Live::hidden_folders`]),
+    /// since what was copied there or left there stays.
+    #[serde(default)]
+    retired: Vec<PathBuf>,
 }
 
 /// An account the API added: its folder is obid's own, `home/accounts/<id>`.
@@ -141,6 +145,20 @@ impl Live {
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, Inner> {
         self.0.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Every account's folder no box may read (#655): the accounts' now
+    /// ([`crate::jobs::account_folders`]), and those of the accounts removed, which may still hold
+    /// a login.
+    pub fn hidden_folders(&self, home: &Path) -> Vec<PathBuf> {
+        let mut all = crate::jobs::account_folders(&self.get(), home);
+        let retired = self.read().saved.retired.clone();
+        for dir in retired {
+            if dir.is_dir() && !home.starts_with(&dir) && !all.contains(&dir) {
+                all.push(dir);
+            }
+        }
+        all
     }
 
     /// Lays `home/accounts.json` over the configuration's accounts (crate::serve, before anything
@@ -218,6 +236,11 @@ fn checked(seed: &Agents, saved: Saved, home: &Path) -> Saved {
     };
     let mut kept = Saved {
         removed: saved.removed,
+        retired: saved
+            .retired
+            .into_iter()
+            .filter(|dir| dir.is_absolute())
+            .collect(),
         ..Saved::default()
     };
     for (id, change) in saved.changed {
@@ -630,10 +653,10 @@ pub async fn remove(
             }
             None => {
                 saved.changed.remove(&id);
-                saved.removed.push(id.clone());
                 None
             }
         };
+        retire(saved, &account);
         Ok(made)
     })?;
     // Never through a link in the folder's place: only a real folder is removed, and what's in it
@@ -658,6 +681,10 @@ pub async fn end_sign_in(
     State(shared): State<Arc<Shared>>,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Response, ApiError> {
+    find(&shared.config.agents.get(), &id).ok_or_else(|| no_account(&id))?;
+    // A sign-in starting now finishes registering first, so it's the one ended.
+    let lock = shared.sign_ins.lock_for(&id);
+    let _held = lock.lock().await;
     let (_, account) = find(&shared.config.agents.get(), &id).ok_or_else(|| no_account(&id))?;
     if !shared.sign_ins.end(&id).await {
         return Err(ApiError::new(
@@ -669,6 +696,19 @@ pub async fn end_sign_in(
         ));
     }
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// What's kept of a removed account: its id, never made again ([`new_id`]) nor laid over the
+/// configuration again, and its folder, still hidden from every box.
+fn retire(saved: &mut Saved, account: &Account) {
+    if !saved.removed.contains(&account.id) {
+        saved.removed.push(account.id.clone());
+    }
+    if let Some(dir) = &account.config_dir
+        && !saved.retired.contains(dir)
+    {
+        saved.retired.push(dir.clone());
+    }
 }
 
 fn busy(account: &Account) -> ApiError {
@@ -808,16 +848,6 @@ pub async fn sign_in(
             tool.name()
         ));
     };
-    let home = &shared.config.home;
-    if [home.join("worktrees"), home.join("clones")]
-        .iter()
-        .any(|root| inside(&dir, root))
-    {
-        return conflict(format!(
-            "{}'s folder is inside obid's worktrees or clones, which jobs write: obid never signs it in there.",
-            account.name
-        ));
-    }
     if let Err(why) = login_paths_safe(tool, &dir) {
         return conflict(format!(
             "{}'s folder has {why}: obid never runs a sign-in through it.",
@@ -891,33 +921,6 @@ fn login_paths_safe(tool: Tool, dir: &Path) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// Whether `path` is `root` or inside it, as written or with links resolved (the part that
-/// exists), letter case aside as macOS compares names.
-fn inside(path: &Path, root: &Path) -> bool {
-    let forms = |path: &Path| {
-        let mut existing = path.to_path_buf();
-        let mut rest = Vec::new();
-        let real = loop {
-            if let Ok(real) = std::fs::canonicalize(&existing) {
-                break rest.iter().rev().fold(real, |p: PathBuf, n| p.join(n));
-            }
-            match (
-                existing.file_name().map(|n| n.to_owned()),
-                existing.parent(),
-            ) {
-                (Some(name), Some(parent)) => {
-                    rest.push(name);
-                    existing = parent.to_path_buf();
-                }
-                _ => break path.to_path_buf(),
-            }
-        };
-        [path.to_path_buf(), real].map(|p| PathBuf::from(p.to_string_lossy().to_lowercase()))
-    };
-    let (paths, roots) = (forms(path), forms(root));
-    paths.iter().any(|p| roots.iter().any(|r| p.starts_with(r)))
 }
 
 /// `POST /v1/accounts/{id}/sign-in` with `{"code": "…"}`: the code the page showed, to the login
@@ -1090,6 +1093,8 @@ async fn start(
             kill();
             let _ = child.wait().await;
             let _ = std::fs::remove_dir_all(&scratch);
+            // Reaped: its process group may be another's by now.
+            pending.armed = false;
             return Err(format!(
                 "{}'s sign-in didn't give a link to open.",
                 tool.name()
@@ -1407,6 +1412,7 @@ mod tests {
             account("work", "Work", Some("/srv/work")),
         ]));
         let saved = Saved {
+            retired: Vec::new(),
             added: vec![added("a1b2c3d4", "codex"), added("work", "claude")],
             changed: BTreeMap::from([(
                 "default".into(),
@@ -1464,6 +1470,32 @@ mod tests {
             ..Saved::default()
         };
         assert!(merged(&listed, &saved).claude.is_none());
+    }
+
+    /// A removed account's id is never made again, and its folder stays hidden from every box
+    /// (what was left there stays), across restarts.
+    #[test]
+    fn a_removed_accounts_id_and_folder_are_kept() {
+        let home = std::env::temp_dir().join(format!("obid-retired-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let folder = home.join("elsewhere/work");
+        std::fs::create_dir_all(&folder).unwrap();
+        let seed = || agents(Some(vec![account("work", "Work", folder.to_str())]));
+        let live = Live::new(seed());
+        live.open(&home);
+        assert_eq!(live.hidden_folders(&home), std::slice::from_ref(&folder));
+        live.change(|agents, saved| {
+            let (_, account) = find(agents, "work").unwrap();
+            retire(saved, &account);
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("{}", e.message));
+        assert!(live.get().claude.is_none());
+        let next = Live::new(seed());
+        next.open(&home);
+        assert_eq!(next.hidden_folders(&home), std::slice::from_ref(&folder));
+        assert!(next.read().saved.removed.contains(&"work".to_owned()));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

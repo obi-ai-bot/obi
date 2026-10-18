@@ -324,6 +324,15 @@ impl Config {
                             account.id
                         ));
                     }
+                    Some(dir)
+                        if holds(&file.home, dir)
+                            && dir.parent() != Some(file.home.join("accounts").as_path()) =>
+                    {
+                        return invalid(format!(
+                            "agents.{key}.accounts: {}'s configDir {dir:?} is inside obid's home but not a folder of home/accounts: obid's home holds its database, clones and the jobs' worktrees.",
+                            account.id
+                        ));
+                    }
                     Some(dir) if key == "claude" && in_persons_folder(dir, ".claude") => {
                         return invalid(format!(
                             "agents.claude.accounts: {}'s configDir {dir:?} is the person's own ~/.claude or inside it: an account needs a folder of its own, and ~/.claude must stay the person's own login.",
@@ -792,6 +801,28 @@ mod tests {
                 .to_string();
             assert!(error.contains("holds obid's home"), "{dir}: {error}");
         }
+    }
+
+    /// A `configDir` inside obid's home is only a folder of `home/accounts` (where the accounts API
+    /// makes them): never its clones, the jobs' worktrees or anything else of obid's.
+    #[test]
+    fn a_config_dir_in_obids_home_is_only_one_of_its_accounts() {
+        let at = |dir: &str| {
+            let agents = serde_json::json!({"codex": {"bin": "codex",
+                "accounts": [{"id": "w", "name": "W", "configDir": dir}]}});
+            Config::parse(&with(serde_json::json!({"agents": agents})))
+        };
+        for dir in [
+            "/srv/obid-home/worktrees/abc/acct",
+            "/srv/obid-home/clones/o/r",
+            "/srv/obid-home/accounts/x/inner",
+            "/srv/obid-home/logins",
+        ] {
+            let error = at(dir).unwrap_err().to_string();
+            assert!(error.contains("inside obid's home"), "{dir}: {error}");
+        }
+        assert!(at("/srv/obid-home/accounts/work").is_ok());
+        assert!(at("/srv/elsewhere/work").is_ok());
     }
 
     #[test]

@@ -21,7 +21,8 @@ fn agent(name: &str) -> PathBuf {
 }
 
 /// The tests' configuration with the three stand-in agents; on macOS `claudeKeychain` is on, as
-/// signing a Claude Code account in there needs it (its login goes to the Keychain).
+/// signing a Claude Code account in there needs it (its login goes to the Keychain). obid then asks
+/// the stand-in `security` (support::start), never the person's real Keychain.
 fn accounts_config(folder: &Path) -> Value {
     let remote = folder.join("remote.git");
     let mut config = config(folder, &remote, &agent("fake-claude"));
@@ -129,10 +130,16 @@ fn accounts_are_added_renamed_and_removed_and_kept_across_restarts() {
     );
     assert_eq!(account(&obid, "stub").unwrap()["payer"], "Deskree");
 
-    // Removed: its folder (obid made it) goes with it.
+    // Removed: its folder (obid made it) goes with it, and its id is never made again.
     let events = follow_events(&obid);
     let removed = call(&obid, "DELETE", &format!("/v1/accounts/{id}"), None);
     assert_eq!(removed.status, 204, "{}", removed.text);
+    let kept: Value =
+        serde_json::from_slice(&std::fs::read(obid.home.join("accounts.json")).unwrap()).unwrap();
+    assert!(
+        kept["removed"].as_array().unwrap().contains(&json!(id)),
+        "{kept}"
+    );
     assert!(!dir.exists(), "obid's folder for the account stayed");
     assert!(account(&obid, &id).is_none());
     events_named(&events, "accounts", 10, |got| {
@@ -342,6 +349,12 @@ fn claude_code_signs_in_with_its_own_login() {
                 .any(|a| a["id"] == id && a["signedIn"] == true)
         })
     });
+    // On macOS obid looked in the Keychain through the stand-in, never the real one.
+    if cfg!(target_os = "macos") {
+        let asked = std::fs::read_to_string(folder.0.join("tmp/obid-test-security-calls"))
+            .expect("the stand-in security was asked");
+        assert!(asked.contains("find-generic-password"), "{asked}");
+    }
 
     // Claude Code ran in the account's folder, by its absolute path, with the system's folders,
     // its own and (a `#!/usr/bin/env node` script) node's on its PATH, and wrote its login there
@@ -434,25 +447,6 @@ fn an_abandoned_sign_in_can_be_ended() {
     );
     // A new one starts.
     assert_eq!(call(&obid, "GET", &target, None).status, 200);
-}
-
-/// A configured account whose folder is inside obid's worktrees or clones, which jobs write, is
-/// never signed in there.
-#[test]
-fn a_folder_jobs_can_write_is_never_signed_in() {
-    let folder = Folder::new("accounts-worktree");
-    let mut config = accounts_config(&folder.0);
-    let home = PathBuf::from(config["home"].as_str().unwrap());
-    config["agents"]["codex"]["accounts"] = json!([
-        {"id": "in-worktree", "name": "W", "configDir": home.join("worktrees/abc/acct")},
-        {"id": "in-clone", "name": "C", "configDir": home.join("clones/o/r/acct")}
-    ]);
-    let obid = start(&folder.0, &config, None);
-    for id in ["in-worktree", "in-clone"] {
-        let refused = call(&obid, "GET", &format!("/v1/accounts/{id}/sign-in"), None);
-        assert_eq!(refused.status, 409, "{id}: {}", refused.text);
-        assert!(refused.text.contains("jobs"), "{}", refused.text);
-    }
 }
 
 /// A login file (or its lock) that is a link, or not the person's, in an account's folder is never

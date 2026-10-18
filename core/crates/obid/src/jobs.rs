@@ -2446,10 +2446,7 @@ impl Jobs {
     ) -> Spec {
         let mut hidden = vec![self.config.home.clone()];
         hidden.extend(person_homes());
-        hidden.extend(account_folders(
-            &self.config.agents.get(),
-            &self.config.home,
-        ));
+        hidden.extend(self.config.agents.hidden_folders(&self.config.home));
         let mut read_only = sandbox::tool_roots(
             &process::tools_path(),
             &hidden,
@@ -2738,10 +2735,7 @@ impl Jobs {
         let temp = temp.to_path_buf();
         let mut hidden = vec![self.config.home.clone()];
         hidden.extend(person_homes());
-        hidden.extend(account_folders(
-            &self.config.agents.get(),
-            &self.config.home,
-        ));
+        hidden.extend(self.config.agents.hidden_folders(&self.config.home));
         let mut read_only = sandbox::tool_roots(
             &process::tools_path(),
             &hidden,
@@ -4461,7 +4455,7 @@ fn keychain(config_dir: Option<&Path>, value: bool) -> Option<Vec<u8>> {
     let user = nix::unistd::User::from_uid(nix::unistd::getuid())
         .ok()??
         .name;
-    let mut command = std::process::Command::new("/usr/bin/security");
+    let mut command = std::process::Command::new(security_bin());
     command
         .args(["find-generic-password", "-s"])
         .arg(keychain_service(config_dir))
@@ -4478,6 +4472,17 @@ fn keychain(config_dir: Option<&Path>, value: bool) -> Option<Vec<u8>> {
 #[cfg(not(target_os = "macos"))]
 fn keychain(_config_dir: Option<&Path>, _value: bool) -> Option<Vec<u8>> {
     None
+}
+
+/// The `security` obid reads the Keychain with: `/usr/bin/security`, or the absolute path in
+/// `OBID_SECURITY_BIN`, which obid's tests set to a stand-in so a test's obid never reads the
+/// person's real Keychain (tests/agents/fake-security).
+#[cfg(target_os = "macos")]
+fn security_bin() -> PathBuf {
+    std::env::var_os("OBID_SECURITY_BIN")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| PathBuf::from("/usr/bin/security"))
 }
 
 /// Whether Claude Code keeps a login for `config_dir` in the Keychain (macOS only).

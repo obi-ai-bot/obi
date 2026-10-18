@@ -1,0 +1,6 @@
+#!/bin/sh
+# A stand-in for macOS's /usr/bin/security in obid's tests (OBID_SECURITY_BIN, support::start): it
+# finds no item (exit 44, errSecItemNotFound, as security does) and notes what it was asked in
+# $TMPDIR/obid-test-security-calls, so a test's obid never reads the person's real Keychain.
+printf '%s\n' "$*" >> "${TMPDIR:-/nonexistent}/obid-test-security-calls"
+exit 44

@@ -1297,7 +1297,8 @@ obid serve --config /path/to/config.json
 - `turnBudget`: how long one conversation turn may plan and act, in seconds, 1 to 110; 110 when left out (obid only: the brain).
 - `orchestratorDelay`: how long the event orchestrator waits for nearby events to come together before its turn, in seconds, 1 to 600; 30 when left out (obid only: the brain, "The event orchestrator").
 - `gateway`: where paired phones reach obid, an address on `127.0.0.1` like `127.0.0.1:8810`; no gateway when left out (obid only: the gateway).
-- `claudeKeychain`: `true` lets obid copy Claude Code's login from the macOS Keychain where a boxed run reads it, only what calls the API, and have the Mac's own Claude Code refresh the default login in its last 5 minutes ("The job sandbox", below); `false` when left out. Only on macOS; elsewhere it does nothing.
+- `claudeKeychain`: `true` lets obid copy Claude Code's login from the macOS Keychain where a boxed run reads it, only what calls the API, and have the Mac's own Claude Code refresh the default login in its last 5 minutes ("The job sandbox", below); `false` when left out. Only on macOS; elsewhere it does nothing. obid reads the Keychain with `/usr/bin/security`; its own tests set `OBID_SECURITY_BIN` to an absolute path of a stand-in, so a test's obid never reads the person's real Keychain.
+- An account's `configDir` (any tool) is never one that holds obid's `home`, nor anywhere inside `home` but a folder of `home/accounts` (where the accounts API makes them): obid's home holds its database, clones and the jobs' worktrees.
 - `conversation` (optional): how conversations run (obid only: the conversation harness). `agent`: `"claude"` (each conversation is a Claude Code session, the default), `"codex"` (each is a Codex thread) or `"plan"` (obid's plan loop answers, as before). `model`: the agent's model for conversations, `claude-sonnet-5-5` on Claude Code and Codex's own on Codex when left out. `budget`: how long one turn may take, in seconds, 10 to 3,600; 600 when left out. `turnBudget` stays the plan loop's.
 
 **What Settings changes** is kept in `home` as files, not in the database: the permission rules and Settings › Permissions' default mode (`GET`/`PUT /v1/settings/permissions`, `/v1/permissions/rules`) in `home/permissions.json`, and `maxRunning` (`PUT /v1/settings/jobs`) in `home/settings.json`, both 0600 and kept across restarts.
@@ -1348,7 +1349,7 @@ The owner adds, renames and removes the agents' accounts, and signs them in, fro
 
 - A sign-in under way ends first; `409` (`Personal's sign-in didn't end within 5 seconds: try again in a moment.`) when it doesn't within 5 seconds.
 - `409` while a job of the account is queued or running: `Personal has a job queued or running: stop it, or move it to another account, first.`
-- Its folder is removed only when obid made it (a real folder, never through a link). A configuration account that is removed stays removed across restarts.
+- Its folder is removed only when obid made it (a real folder, never through a link). A configuration account that is removed stays removed across restarts. Its id is never made again, and its folder (one obid didn't make stays) is still hidden from every box, kept in `home/accounts.json` (`retired`).
 - What the tool itself keeps stays: on macOS, Claude Code's Keychain item for the folder (Keychain Access removes it), and the login on the provider's side (signed in with Anthropic, OpenAI or Cursor until the person signs it out there).
 
 **`GET /v1/accounts/{id}/sign-in`** runs the tool's own login for the account, never obid's (AGENTS.md: obid never reads, stores or forwards the login), and answers what the person needs to finish it:
@@ -1376,7 +1377,7 @@ The owner adds, renames and removes the agents' accounts, and signs them in, fro
   - the code is Codex's, a line like `3U0G-DCVSU`.
   Nothing else it prints is kept, answered or logged. obid's log says only that a sign-in started and whether it signed the account in.
 - **Errors.** `404` for an unknown account. `409` in four cases:
-  - the tool's own default login (an account without a folder: it is the person's, signed in with the tool itself), a configured account whose folder is inside obid's worktrees or clones, which jobs write, and a folder whose login file or its lock (Claude Code's `.credentials.json…`, Codex's `auth.json…`, Cursor's `.cursor/auth.json` or `.config/cursor/auth.json` and the folders on the way) is a link or not the person's, since the login would write the new sign-in wherever it leads;
+  - the tool's own default login (an account without a folder: it is the person's, signed in with the tool itself), and a folder whose login file or its lock (Claude Code's `.credentials.json…`, Codex's `auth.json…`, Cursor's `.cursor/auth.json` or `.config/cursor/auth.json` and the folders on the way) is a link or not the person's, since the login would write the new sign-in wherever it leads;
   - a job of the account is queued or running;
   - the account is being removed;
   - Claude Code on macOS without `claudeKeychain`.
