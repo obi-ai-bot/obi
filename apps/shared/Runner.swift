@@ -81,6 +81,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var waiting: Waiting?
     /// The conversation whose words started it (obid only, #493), or nil.
     var conversation: String?
+    /// What it made to be looked at (obid only, its `.obi/artifacts/`), or nil.
+    var artifacts: [ArtifactRef]?
 
     /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
     /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
@@ -110,7 +112,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
-             conversation
+             conversation, artifacts
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -637,11 +639,16 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     #endif
     /// A turn of the conversation was added, from any app, or changed (a job dispatched from it):
     /// the Mac window's and the iPhone's thread replace it by id, or add it by time (#11).
-    case turn(Turn)
+    /// With the artifacts the turn made (obid only), which the app's Turn doesn't keep.
+    case turn(Turn, artifacts: [ArtifactRef] = [])
     /// One step of Oby's turn began, went on or ended (#304). Runners from before the step event never send it.
     case step(TurnStep)
     /// One of obid's conversations started, got a turn, was renamed, pinned or deleted (#493).
     case conversation(RunnerConversation)
+    /// A piece of Oby's words as its agent writes them (obid only, the conversation harness).
+    case delta(TurnDelta)
+    /// An artifact was made, got a version, or was deleted (obid only).
+    case artifact(ArtifactEvent)
 }
 
 #if os(iOS) || os(watchOS)
@@ -689,6 +696,23 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
     var details: String?
     /// obid only (#493): the conversation it's in.
     var conversation: String?
+    /// obid only: what the turn made to be looked at.
+    var artifacts: [ArtifactRef]?
+
+    private enum CodingKeys: String, CodingKey { case id, who, text, at, jobs, details, conversation, artifacts }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        who = try c.decode(String.self, forKey: .who)
+        text = try c.decode(String.self, forKey: .text)
+        at = try c.decode(Date.self, forKey: .at)
+        jobs = try c.decodeIfPresent([String].self, forKey: .jobs)
+        details = try c.decodeIfPresent(String.self, forKey: .details)
+        conversation = try c.decodeIfPresent(String.self, forKey: .conversation)
+        // Tolerant: a list this app can't read leaves the turn without cards, not unread.
+        artifacts = try? c.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
+    }
 
     var turn: Turn {
         #if os(macOS)
@@ -719,10 +743,15 @@ nonisolated struct TurnStep: Codable, Identifiable, Equatable, Sendable {
     var at: Date?
     /// The conversation its turn is in (obid only, #493), or nil.
     var conversation: String?
+    /// On a tool call of a conversation's agent (`action` "tool", obid only): which tool (`read`,
+    /// `web_search`, `bash`, `oby_dispatch`…) and what on (the file, query, URL or command).
+    var tool: String?
+    var detail: String?
 
     var id: String { "\(turn)#\(index)" }
 
-    init(turn: String, index: Int, action: String? = nil, text: String, state: State, at: Date? = nil, conversation: String? = nil) {
+    init(turn: String, index: Int, action: String? = nil, text: String, state: State, at: Date? = nil, conversation: String? = nil,
+         tool: String? = nil, detail: String? = nil) {
         self.turn = turn
         self.index = index
         self.action = action
@@ -730,9 +759,11 @@ nonisolated struct TurnStep: Codable, Identifiable, Equatable, Sendable {
         self.state = state
         self.at = at
         self.conversation = conversation
+        self.tool = tool
+        self.detail = detail
     }
 
-    private enum CodingKeys: String, CodingKey { case turn, index, action, text, state, at, conversation }
+    private enum CodingKeys: String, CodingKey { case turn, index, action, text, state, at, conversation, tool, detail }
 
     /// Tolerant of what a newer runner adds: a state this app doesn't know reads as done, and a
     /// time that doesn't parse is left out, so the step still shows.
@@ -745,6 +776,8 @@ nonisolated struct TurnStep: Codable, Identifiable, Equatable, Sendable {
         state = (try? c.decode(String.self, forKey: .state)).flatMap(State.init(rawValue:)) ?? .done
         at = try? c.decodeIfPresent(Date.self, forKey: .at)
         conversation = try? c.decodeIfPresent(String.self, forKey: .conversation)
+        tool = try? c.decodeIfPresent(String.self, forKey: .tool)
+        detail = try? c.decodeIfPresent(String.self, forKey: .detail)
     }
 }
 
@@ -1307,15 +1340,42 @@ nonisolated struct Runner: Sendable {
     /// ones before the turn `before` names. A runner older than the thread has none.
     /// On obid, `id` names the conversation; without it, the latest.
     func conversation(id: String? = nil, before: String? = nil, limit: Int = 50) async throws -> [Turn] {
+        try await conversationTurns(id: id, before: before, limit: limit).map(\.turn)
+    }
+
+    /// The same page as the runner sends it, with what the app's Turn doesn't keep (the artifacts).
+    func conversationTurns(id: String? = nil, before: String? = nil, limit: Int = 50) async throws -> [RunnerTurn] {
         var query = "limit=\(limit)"
         if let id, let id = id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) { query += "&id=\(id)" }
         if let before, let id = before.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) { query += "&before=\(id)" }
         do {
-            let turns: [RunnerTurn] = try await call("GET", "v1/conversation?\(query)")
-            return turns.map(\.turn)
+            return try await call("GET", "v1/conversation?\(query)")
         } catch let error as RunnerError where error.status == 404 && before == nil {
             return []
         }
+    }
+
+    /// An artifact obid keeps (docs/runner-api.md, "obid only: artifacts"), or nil when there's no
+    /// such one (or the runner keeps none).
+    func artifact(_ id: String) async throws -> RunnerArtifact? {
+        guard let id = id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return nil }
+        do {
+            return try await call("GET", "v1/artifacts/\(id)")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// One file of an artifact's version, with obid's answer as it is (its status and headers,
+    /// the Content-Security-Policy among them): the viewer passes it on to its web view.
+    func artifactFile(_ ref: ArtifactRef, path: String) async throws -> (Data, HTTPURLResponse) {
+        let segments = ([ref.id, String(ref.version)] + path.split(separator: "/").map(String.init))
+            .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(["/"])) ?? $0 }
+        var request = URLRequest(url: URL(string: "v1/artifacts/" + segments.joined(separator: "/"), relativeTo: base.appending(path: "/"))!)
+        request.timeoutInterval = 45
+        let (data, response) = try await URLSession.shared.data(for: signed(request))
+        guard let http = response as? HTTPURLResponse else { throw RunnerError(message: "The runner's answer wasn't HTTP.") }
+        return (data, http)
     }
 
     static func check(_ response: URLResponse, _ data: Data?) throws {
@@ -1463,9 +1523,11 @@ nonisolated struct EventParser {
             #if os(macOS)
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
             #endif
-            case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn) }
+            case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn, artifacts: $0.artifacts ?? []) }
             case "step": return (try? Runner.decoder.decode(TurnStep.self, from: json)).map(RunnerEvent.step)
             case "conversation": return (try? Runner.decoder.decode(RunnerConversation.self, from: json)).map(RunnerEvent.conversation)
+            case "delta": return (try? Runner.decoder.decode(TurnDelta.self, from: json)).map(RunnerEvent.delta)
+            case "artifact": return (try? Runner.decoder.decode(ArtifactEvent.self, from: json)).map(RunnerEvent.artifact)
             default: return nil
             }
         }

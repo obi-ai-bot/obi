@@ -63,7 +63,12 @@ nonisolated enum ConversationList {
     /// on obid, only its own conversation's, and none while a new one waits for its id (Thinking
     /// says enough until then).
     static func shows(_ step: TurnStep, in current: String?, startingNew: Bool) -> Bool {
-        guard let id = step.conversation else { return true }
+        shows(step.conversation, in: current, startingNew: startingNew)
+    }
+
+    /// The same for anything else of a turn under way (its words as they're written).
+    static func shows(_ conversation: String?, in current: String?, startingNew: Bool) -> Bool {
+        guard let id = conversation else { return true }
         return !startingNew && id == current
     }
 
@@ -295,8 +300,11 @@ final class Phone {
         JobsActivity.watchTokens { [weak self] in self?.runner }
         conversation.page = { [weak self] before, limit in
             guard let self, !startingNew else { return [] }
-            return try await runner.conversation(id: current, before: before, limit: limit)
+            let turns = try await runner.conversationTurns(id: current, before: before, limit: limit)
+            conversation.note(turns)
+            return turns.map(\.turn)
         }
+        conversation.lookUp = { [weak self] id in try await self?.runner.artifact(id) }
         offlineQueue.bindUnscopedEntries(to: offlineQueueTarget)
         restoreQueuedMessages(for: offlineQueueTarget)
         #if DEBUG
@@ -486,6 +494,11 @@ final class Phone {
         JobsActivity.markStale()
     }
 
+    #if DEBUG
+    /// The sample screens' made-up events (SampleTasks), through the same path as obid's.
+    func sample(_ event: RunnerEvent) { apply(event) }
+    #endif
+
     private func apply(_ event: RunnerEvent) {
         switch event {
         case .job(let job):
@@ -500,13 +513,17 @@ final class Phone {
             // One that's done leaves the list.
             inbox.removeAll { $0.id == item.id }
             if item.isOpen { inbox.append(item) }
-        case .turn(let turn):
+        case .turn(let turn, let artifacts):
             if let id = turn.conversation { previews[id] = turn.text }
-            if turn.conversation == nil || (turn.conversation == current && !startingNew) { conversation.apply(turn) }
+            if turn.conversation == nil || (turn.conversation == current && !startingNew) { conversation.apply(turn, artifacts: artifacts) }
             // The runner listed what this iPhone said: its echo has done its job.
             settleEchoes()
         case .step(let step):
             if ConversationList.shows(step, in: current, startingNew: startingNew) { conversation.apply(step) }
+        case .delta(let delta):
+            if ConversationList.shows(delta.conversation, in: current, startingNew: startingNew) { conversation.apply(delta) }
+        case .artifact(let artifact):
+            conversation.apply(artifact)
         case .conversation(let changed):
             take(changed)
         }

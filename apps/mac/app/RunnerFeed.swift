@@ -173,8 +173,11 @@ final class RunnerFeed {
     init() {
         conversation.page = { [weak self] before, limit in
             guard let runner = self?.runner else { return [] }
-            return try await runner.conversation(before: before, limit: limit)
+            let turns = try await runner.conversationTurns(before: before, limit: limit)
+            self?.conversation.note(turns)
+            return turns.map(\.turn)
         }
+        conversation.lookUp = { [weak self] id in try await self?.runner?.artifact(id) }
     }
 
     func start() {
@@ -300,8 +303,10 @@ final class RunnerFeed {
                         apply(item, words: words)
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
-                    case .turn(let turn): conversation.apply(turn)
+                    case .turn(let turn, let artifacts): conversation.apply(turn, artifacts: artifacts)
                     case .step(let step): conversation.apply(step)
+                    case .delta(let delta): conversation.apply(delta)
+                    case .artifact(let artifact): conversation.apply(artifact)
                     // The Mac shows one thread until it runs on obid.
                     case .conversation: break
                     }

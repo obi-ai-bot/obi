@@ -105,6 +105,8 @@ struct ConversationPage: View {
                                            isLocal: { id in desk.jobs.contains { $0.id == id } },
                                            steps: conversation.steps(under: row.turn, in: turns),
                                            arrived: conversation.arrived[row.turn.id],
+                                           streamed: conversation.streamed(under: row.turn, in: turns),
+                                           conversation: conversation, feed: feed,
                                            onOpenJob: onOpenJob, onStopJob: { model.stopChatJob($0, local: $1) })
                                     .task(id: row.turn.jobs ?? []) {
                                         // A runner's job older than its list: fetched, so its card shows.
@@ -116,7 +118,7 @@ struct ConversationPage: View {
                                 }
                             }
                             if thinking || conversation.working {
-                                ObyAtWork(working: conversation.working, problem: feed.stopProblem, onStop: stop)
+                                ObyAtWork(working: conversation.working, problem: feed.stopProblem, face: conversation.streamed.isEmpty, onStop: stop)
                                     .padding(.top, rows.last?.turn.who == .oby ? 12 : 16)
                             }
                             if model.speaker.speaking {
@@ -130,9 +132,12 @@ struct ConversationPage: View {
                     }
                     .scrollIndicators(.never)
                     .defaultScrollAnchor(.bottom)
+                    // Words coming in grow the thread: it stays at the foot while they do.
+                    .defaultScrollAnchor(.bottom, for: .sizeChanges)
                     .onChange(of: turns.count) { withAnimation(reduceMotion ? nil : Tokens.warm) { proxy.scrollTo("end", anchor: .bottom) } }
                     .onChange(of: desk.talk) { proxy.scrollTo("end", anchor: .bottom) }
                     .onChange(of: conversation.steps) { proxy.scrollTo("end", anchor: .bottom) }
+                    .onChange(of: conversation.streamed) { proxy.scrollTo("end", anchor: .bottom) }
                 }
             }
         }
@@ -260,6 +265,10 @@ private struct MessageRow: View {
     let steps: [TurnStep]
     /// When Oby's answer came while the thread was open: its words come in from then.
     let arrived: Date?
+    /// Oby's words for these, while they're still being written.
+    let streamed: ConversationModel.Streamed?
+    let conversation: ConversationModel
+    let feed: RunnerFeed
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
     let onStopJob: (_ job: String, _ local: Bool) -> Void
 
@@ -281,12 +290,16 @@ private struct MessageRow: View {
                     Text(markdown).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.item).lineSpacing(6).textSelection(.enabled)
                 }
             }
-            // What Oby did for these words: Oby's side, whoever's turn it hangs from.
-            if !steps.isEmpty { Steps(steps: steps).frame(maxWidth: .infinity, alignment: .leading) }
+            // What Oby did for these words, folded into one line once its words come, then the words as
+            // they arrive: Oby's side, whoever's turn it hangs from.
+            if !steps.isEmpty { ToolSteps(steps: steps, words: streamed != nil) }
+            if let streamed { StreamingAnswer(streamed: streamed) }
+            ForEach(conversation.artifactRefs(of: turn), id: \.self) { artifact($0) }
             ForEach(jobs) { job in
                 let local = isLocal(job.id)
-                ThreadTask(job: job, account: account(job, local), onOpen: { onOpenJob(job.id, local) },
-                           onStop: { onStopJob(job.id, local) })
+                ThreadTask(job: job, account: account(job, local),
+                           onOpen: { onOpenJob(job.id, local) }, onStop: { onStopJob(job.id, local) })
+                if !local { ForEach(feed.extras[job.id]?.artifacts ?? [], id: \.self) { artifact($0) } }
             }
             if row.endsRun {
                 Text(ChatRuns.clock(turn.date, now: now)).font(Tokens.font(11)).monospacedDigit().foregroundStyle(Tokens.muted)
@@ -298,52 +311,13 @@ private struct MessageRow: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(yours ? "You" : "Oby"), \(ChatRuns.clock(turn.date, now: now)): \(turn.text)")
     }
-}
 
-/// What Oby did for your words (#304), folded into one line over its answer: a click opens them,
-/// each with its mark.
-private struct Steps: View {
-    let steps: [TurnStep]
-    @State private var open = false
-
-    private var label: String {
-        let running = steps.contains { $0.state == .running }
-        if running, let current = steps.last(where: { $0.state == .running }) { return current.text }
-        return "Took \(steps.count) step\(steps.count == 1 ? "" : "s")"
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button { withAnimation(Tokens.warm) { open.toggle() } } label: {
-                HStack(spacing: 4) {
-                    Text(label).font(Tokens.font(Tokens.textMd))
-                    Image(systemName: "chevron.right").font(Tokens.font(10, .semibold)).rotationEffect(.degrees(open ? 90 : 0))
-                }
-                .foregroundStyle(Tokens.muted).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityValue(open ? "Open" : "Folded")
-            if open {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(steps) { step in
-                        HStack(spacing: 8) {
-                            Group {
-                                switch step.state {
-                                case .running: ProgressView().controlSize(.mini)
-                                case .done: Image(systemName: "checkmark").foregroundStyle(Tokens.check)
-                                case .failed: Image(systemName: "xmark").foregroundStyle(Tokens.danger)
-                                }
-                            }
-                            .font(Tokens.font(10, .semibold)).frame(width: 12)
-                            Text(step.text).font(Tokens.font(Tokens.textMd)).foregroundStyle(step.state == .failed ? Tokens.danger : Tokens.muted)
-                                .lineLimit(2)
-                        }
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel("\(step.text), \(step.state.spoken)")
-                    }
-                }
-            }
-        }
+    /// An artifact's card, resolved from the runner when the thread doesn't know it yet.
+    private func artifact(_ ref: ArtifactRef) -> some View {
+        let artifact = conversation.artifacts[ref.id]
+        return ArtifactCard(ref: ref, artifact: artifact, gone: conversation.gone.contains(ref.id), runner: feed.runner,
+                            agent: feed.jobs.first { $0.id == artifact?.job }?.agentName)
+            .task(id: ref) { await conversation.resolve(ref.id) }
     }
 }
 
@@ -374,6 +348,7 @@ private struct ThreadTask: View {
                     Text(job.heading).font(Tokens.font(Tokens.textMd, .medium)).foregroundStyle(Tokens.ink).fadeOut()
                     Text(ThreadTaskLine.meta(job: job, mark: mark, account: account)).font(Tokens.font(Tokens.textSm))
                         .foregroundStyle(Tokens.muted).fadeOut()
+                    JobCardLines(job: job).padding(.top, 4)
                 }
                 WorkMarkView(mark: mark).padding(.top, 3)
                 Image(systemName: "chevron.right").font(Tokens.font(11, .semibold)).padding(.top, 3)
@@ -399,11 +374,13 @@ private struct ThreadTask: View {
 private struct ObyAtWork: View {
     let working: Bool
     let problem: String?
+    /// Its face, unless its words already show it under way.
+    var face = true
     let onStop: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ObyMark()
+            if face { ObyMark() }
             HStack(spacing: 10) {
                 Sheen(text: working ? "Working" : "Thinking")
                 StopButton(action: onStop)

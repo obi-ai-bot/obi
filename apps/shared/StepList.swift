@@ -12,8 +12,9 @@ extension TurnStep.State {
 }
 
 /// The steps of Oby's turn, a compact list under the user's message, like Claude Code's tool calls
-/// (#304): a spinner while a step runs, a check when it's done, a cross when it failed. The
-/// iPhone's and the Mac's chats show it at the footnote size; the Watch's, shorter and smaller.
+/// (#304): the working dot while a step runs, a grey check when it's done, a cross in `danger` when
+/// it failed, in Sangam's tokens. The conversations show `ToolSteps` now; the Watch and the Mac's
+/// older chat window show this, the Watch shorter and smaller.
 struct StepList: View {
     let steps: [TurnStep]
     /// The Watch: one line a step, in the caption size.
@@ -25,8 +26,8 @@ struct StepList: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     mark(step.state)
                     Text(step.text)
-                        .font(compact ? .caption2 : .footnote)
-                        .foregroundStyle(step.state == .failed ? Color.red : Color.secondary)
+                        .font(compact ? .caption2 : Tokens.font(Tokens.textSm))
+                        .foregroundStyle(step.state == .failed ? Tokens.danger : Tokens.muted)
                         .lineLimit(compact ? 1 : 2)
                         .truncationMode(.tail)
                 }
@@ -40,11 +41,11 @@ struct StepList: View {
     @ViewBuilder private func mark(_ state: TurnStep.State) -> some View {
         switch state {
         case .running:
-            ProgressView().controlSize(.mini).frame(width: 12, height: 12)
+            Circle().fill(Tokens.working).frame(width: 6, height: 6).frame(width: 12)
         case .done:
-            Image(systemName: "checkmark").font(.caption2.weight(.bold)).foregroundStyle(.green).frame(width: 12)
+            Image(systemName: "checkmark").font(.caption2.weight(.bold)).foregroundStyle(Tokens.check).frame(width: 12)
         case .failed:
-            Image(systemName: "xmark").font(.caption2.weight(.bold)).foregroundStyle(.red).frame(width: 12)
+            Image(systemName: "xmark").font(.caption2.weight(.bold)).foregroundStyle(Tokens.danger).frame(width: 12)
         }
     }
 }

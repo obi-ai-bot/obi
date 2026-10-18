@@ -92,8 +92,10 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     var mode: String?
     var permission: RunnerPermission?
     var question: Question?
+    /// What it made to be looked at (obid only), or nil.
+    var artifacts: [ArtifactRef]?
 
-    private enum Keys: String, CodingKey { case id, mode, permission, question }
+    private enum Keys: String, CodingKey { case id, mode, permission, question, artifacts }
 
     init(id: String, mode: String? = nil, permission: RunnerPermission? = nil, question: Question? = nil) {
         self.id = id
@@ -108,6 +110,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
         mode = try? keys.decodeIfPresent(String.self, forKey: .mode)
         permission = try? keys.decodeIfPresent(RunnerPermission.self, forKey: .permission)
         question = try? keys.decodeIfPresent(Question.self, forKey: .question)
+        artifacts = try? keys.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
     }
 
     /// Each job's, by id; a list that can't be read gives none.

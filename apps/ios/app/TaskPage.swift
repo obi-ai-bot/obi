@@ -212,10 +212,23 @@ struct TaskPage: View {
             // gateway leaves `session` out on purpose, and the runner picks it up itself.
             if let job, job.reviewOf == nil {
                 VStack(alignment: .leading, spacing: 6) {
+                    // The agent's live line (docs/ios-design.md, "A task's thread"): while your words
+                    // wait for its next turn, obid's step reads "You: …".
+                    if let line = job.agentLine {
+                        HStack(spacing: 8) {
+                            WorkMarkView(mark: .working, dot: 6)
+                            Sheen(text: line, size: Tokens.textMd).lineLimit(1)
+                            Spacer(minLength: 8)
+                            if job.maxRounds > 1 {
+                                Text("Round \(job.currentRound) of \(job.maxRounds)").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                            }
+                        }
+                        .padding(.horizontal, Tokens.gutter + 4)
+                    }
                     if let noteProblem {
                         Text(noteProblem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.horizontal, Tokens.gutter + 12)
                     }
-                    Composer(text: $note, prompt: "Tell Oby about this task…", typing: $typing) { _ in tell(job.id) }
+                    Composer(text: $note, prompt: job.isActive ? "Tell \(job.agentName)…" : "Ask for a follow-up…", typing: $typing) { _ in tell(job.id) }
                         .disabled(busy)
                 }
             }

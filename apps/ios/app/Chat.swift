@@ -182,7 +182,8 @@ struct ConversationPage: View {
             .navigationTitle(conversation?.title ?? (isNew ? "New conversation" : "Oby"))
             .navigationBarTitleDisplayMode(.inline)
             .safeAreaInset(edge: .bottom) {
-                Composer(text: $text, prompt: "Reply to Oby…", typing: $typing, onSend: send)
+                Composer(text: $text, prompt: "Reply to Oby…", typing: $typing, onSend: send,
+                         onStop: thinking || working ? { Task { await phone.stopTurn() } } : nil)
             }
             .scrollDismissesKeyboard(.interactively)
             .toolbar {
@@ -250,6 +251,7 @@ struct ConversationPage: View {
                             MessageRow(row: row, first: index == 0, now: context.date,
                                        jobs: ConversationModel.jobs(of: row.turn, among: phone.jobs),
                                        steps: phone.conversation.steps(under: row.turn, in: turns),
+                                       streamed: phone.conversation.streamed(under: row.turn, in: turns),
                                        failure: phone.failures[row.turn.id],
                                        onRetry: { phone.retry(echo: row.turn.id) },
                                        onEdit: { text = row.turn.text; phone.discard(echo: row.turn.id); typing = true })
@@ -262,9 +264,10 @@ struct ConversationPage: View {
                                 InboxDecision(item: item).padding(.top, 12)
                             }
                         }
-                        if thinking || working {
-                            ObyAtWork(line: stepLine, problem: phone.stopProblem, waiting: thinking,
-                                      onStop: { Task { await phone.stopTurn() } }, onCancel: { phone.cancel() })
+                        // Until its words come: they show it at work from then.
+                        if thinking || working, phone.conversation.streamed.isEmpty {
+                            ObyAtWork(line: working ? "Working" : "Thinking", problem: phone.stopProblem, waiting: thinking,
+                                      onCancel: { phone.cancel() })
                                 .padding(.top, rows.last?.turn.who == .oby ? 12 : 16)
                         }
                         if case .question(let said, let question) = phone.talkHere {
@@ -282,18 +285,16 @@ struct ConversationPage: View {
                     .padding(.horizontal, Tokens.gutter).padding(.top, 12).padding(.bottom, 16)
                 }
                 .defaultScrollAnchor(.bottom)
+                // Words coming in grow the thread: it stays at the foot while they do.
+                .defaultScrollAnchor(.bottom, for: .sizeChanges)
                 .onChange(of: turns.last?.id) { withAnimation(Tokens.warm) { proxy.scrollTo("end", anchor: .bottom) } }
                 .onChange(of: phone.talk) { proxy.scrollTo("end", anchor: .bottom) }
                 .onChange(of: phone.conversation.steps) { proxy.scrollTo("end", anchor: .bottom) }
+                .onChange(of: phone.conversation.streamed) { proxy.scrollTo("end", anchor: .bottom) }
                 .onChange(of: typing) { if typing { proxy.scrollTo("end", anchor: .bottom) } }
             }
         }
         .accessibilityLabel("Conversation with Oby")
-    }
-
-    /// What Oby is on: the step it's taking, else Working or Thinking.
-    private var stepLine: String {
-        phone.conversation.steps.values.flatMap { $0 }.last { $0.state == .running }?.text ?? (working ? "Working" : "Thinking")
     }
 
     /// While Oby asks its question, words in the box answer it; else they're a message for Oby.
@@ -324,6 +325,8 @@ private struct MessageRow: View {
     let now: Date
     let jobs: [Job]
     let steps: [TurnStep]
+    /// Oby's words for these, while they're still being written.
+    var streamed: ConversationModel.Streamed?
     /// Why the words didn't reach the runner, on an echo whose request failed.
     var failure: String?
     var onRetry: () -> Void
@@ -356,9 +359,14 @@ private struct MessageRow: View {
                     Text(markdown).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).lineSpacing(6).textSelection(.enabled)
                 }
             }
-            // What Oby did for these words, before its answer (#304).
-            if !steps.isEmpty { StepList(steps: steps).frame(maxWidth: .infinity, alignment: .leading) }
-            ForEach(jobs) { job in ThreadTask(job: job, account: phone.accountName(job.account)) }
+            // What Oby did for these words (#304), folded into one line once its words come, then the words as they arrive.
+            if !steps.isEmpty { ToolSteps(steps: steps, words: streamed != nil) }
+            if let streamed { StreamingAnswer(streamed: streamed) }
+            ForEach(phone.conversation.artifactRefs(of: turn), id: \.self) { ArtifactShelf(ref: $0) }
+            ForEach(jobs) { job in
+                ThreadTask(job: job, account: phone.accountName(job.account))
+                ForEach(job.artifacts ?? [], id: \.self) { ArtifactShelf(ref: $0) }
+            }
             if row.endsRun {
                 Text(ChatRuns.clock(turn.date, now: now)).font(Tokens.font(11)).monospacedDigit().foregroundStyle(Tokens.muted)
                     .padding(.top, -4)
@@ -389,6 +397,7 @@ private struct ThreadTask: View {
                     Text(job.heading).font(Tokens.font(Tokens.textMd, .medium)).foregroundStyle(Tokens.ink).lineLimit(1)
                     Text(ThreadTaskLine.meta(job: job, mark: mark, account: account)).font(Tokens.font(Tokens.textSm))
                         .foregroundStyle(Tokens.muted).lineLimit(1)
+                    JobCardLines(job: job).padding(.top, 4)
                 }
                 Spacer(minLength: 4)
                 WorkMarkView(mark: mark).padding(.top, 3)
@@ -412,7 +421,6 @@ private struct ObyAtWork: View {
     let line: String
     let problem: String?
     let waiting: Bool
-    let onStop: () -> Void
     let onCancel: () -> Void
 
     var body: some View {
@@ -420,13 +428,6 @@ private struct ObyAtWork: View {
             ObyMark()
             HStack(spacing: 12) {
                 Sheen(text: line)
-                Button(action: onStop) {
-                    Image(systemName: "stop.fill").font(Tokens.font(9, .semibold)).foregroundStyle(Tokens.text)
-                        .frame(width: 26, height: 26).background(Tokens.pill, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Stop")
-                .accessibilityHint("Ends what Oby is doing")
                 if waiting {
                     Button("Cancel", action: onCancel).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
                         .accessibilityHint("Stops waiting for the answer")
@@ -435,5 +436,18 @@ private struct ObyAtWork: View {
             if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needs) }
         }
         .accessibilityElement(children: .contain)
+    }
+}
+
+/// An artifact's card, resolved from obid when the thread doesn't know it yet.
+private struct ArtifactShelf: View {
+    @Environment(Phone.self) private var phone
+    let ref: ArtifactRef
+
+    var body: some View {
+        let artifact = phone.conversation.artifacts[ref.id]
+        ArtifactCard(ref: ref, artifact: artifact, gone: phone.conversation.gone.contains(ref.id), runner: phone.runner,
+                     agent: phone.jobs.first { $0.id == artifact?.job }?.agentName)
+            .task(id: ref) { await phone.conversation.resolve(ref.id) }
     }
 }
