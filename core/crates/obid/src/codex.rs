@@ -100,14 +100,22 @@ pub async fn run_turn(
     if let Some((text, failed)) = &run.ended {
         turn.result = Some(agent::result(text, *failed, run.thread.as_deref()));
     }
-    // The turn is over: no more input, so the server exits. Read what's left until it does.
+    // The turn is over: no more input, so the server exits. It gets what a Claude Code turn gets
+    // after its result (`AFTER_RESULT`, #658) to read out and exit by itself, then is ended.
     run.conn.close_input();
+    let until = std::time::Instant::now() + agent::AFTER_RESULT;
     if run.ended.is_some() {
-        run.conn.drain().await;
+        run.conn.drain_within(agent::AFTER_RESULT).await;
     }
     turn.timed_out = run.conn.timed_out;
     turn.stopped = run.conn.stopped;
-    turn.exit = run.conn.finish().await;
+    turn.exit = if run.ended.is_some() {
+        run.conn
+            .finish_within(until.saturating_duration_since(std::time::Instant::now()))
+            .await
+    } else {
+        run.conn.finish().await
+    };
     Ok(turn)
 }
 
@@ -615,6 +623,57 @@ mod tests {
             argv(PathBuf::from("/bin/codex"), None),
             ["/bin/codex", "app-server"]
         );
+    }
+
+    /// A Codex that never exits after its turn completed ends a few seconds later, as Claude Code
+    /// does after its result (#658), not at the round's limit.
+    #[tokio::test]
+    async fn a_codex_that_never_exits_ends_soon_after_its_turn() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("obid-codex-exit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let bin = root.join("codex");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+read l; echo '{"id":1,"result":{}}'
+read l
+read l; echo '{"id":2,"result":{"thread":{"id":"t1"}}}'
+read l; echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
+echo '{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"completed","items":[{"type":"agentMessage","text":"Done."}]}}}'
+exec sleep 30
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launch = Launch {
+            argv: vec![bin.into_os_string()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            cwd: root.clone(),
+            stderr: root.join("agent.log"),
+        };
+        let (_stop, stop) = watch::channel(process::Signal::Run);
+        let began = std::time::Instant::now();
+        let turn = run_turn(
+            launch,
+            "Do it.",
+            &Options::default(),
+            Duration::from_secs(60),
+            stop,
+            |_, _| Ruling::Now(Answer::Allow),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let took = began.elapsed();
+        assert_eq!(turn.text(), "Done.");
+        assert!(turn.succeeded());
+        assert!(
+            took < agent::AFTER_RESULT + Duration::from_secs(2),
+            "{took:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
