@@ -190,8 +190,12 @@ struct ConversationListTests {
         list.startNew()
         list.apply(convo("elsewhere", ago: 1))
         #expect(list.shown == nil && list.starting && list.items.count == 2)
-        #expect(list.target() == .new)
-        list.apply(convo("mine", ago: 0))
+        #expect(list.target("Fix the login screen") == .new)
+        // Another device's new conversation announced meanwhile isn't this window's: its title
+        // isn't these words.
+        list.apply(convo("stranger", "Review oby PR #33", ago: 0))
+        #expect(list.shown == nil && list.starting)
+        list.apply(convo("mine", "Fix the login screen", ago: 0))
         #expect(list.shown == "mine" && !list.starting && list.shows("mine"))
         // The answer names the same one: nothing more to do. Words to it now join it.
         await list.joined("mine")
@@ -251,5 +255,40 @@ struct ConversationListTests {
         #expect(!list.served && list.items.isEmpty)
         list.apply(gone("a"))
         #expect(!list.served && list.items.isEmpty)
+    }
+
+    /// Stop and Cancel name the conversation shown: without it obid ends the latest turn in any
+    /// conversation. A runner with one thread gets neither.
+    @Test func stopAndCancelNameTheConversationShown() async {
+        let stub = RunnerStub { _ in (200, "{}") }
+        let feed = RunnerFeed()
+        feed.conversations.take([convo("a", ago: 10), convo("b", ago: 5)])
+        await feed.conversations.open("a")
+        await feed.stopTurn(on: stub.runner)
+        await feed.cancelPlan(on: stub.runner)
+        feed.conversations.reset()
+        await feed.stopTurn(on: stub.runner)
+        #expect(stub.requests.map(\.path) == ["/v1/conversation/stop", "/v1/plans/cancel", "/v1/conversation/stop"])
+        #expect(stub.requests.map { $0.json?["conversation"] as? String } == ["a", "a", nil])
+    }
+
+    /// Search asks obid (`GET /v1/conversations?q=`), which finds the words in what was said too,
+    /// as the iPhone's does; an empty search asks nothing.
+    @Test func searchAsksTheRunner() async {
+        let stub = RunnerStub { _ in (200, #"[{"id":"x","title":"Moving secrets","pinned":false,"lastActivity":"2026-10-16T09:14:07Z"}]"#) }
+        let (list, _) = make([convo("a", "Vault secrets")])
+        list.runner = { stub.runner }
+        #expect(await list.search("  ") == nil)
+        let found = await list.search("vault")
+        #expect(found?.map(\.id) == ["x"] && stub.requests.map(\.path) == ["/v1/conversations"])
+    }
+
+    /// "stop" or "never mind" said with the talk key ends the turn and sends nothing, so it doesn't
+    /// send the next words to the latest conversation either.
+    @Test func aCancellingSpokenLineDoesNotRedirectTheNextWords() {
+        #expect(IslandController.toLatest("fix the login screen", showsConversation: false))
+        #expect(!IslandController.toLatest("fix the login screen", showsConversation: true))
+        #expect(!IslandController.toLatest("never mind", showsConversation: false))
+        #expect(!IslandController.toLatest("Stop.", showsConversation: false))
     }
 }

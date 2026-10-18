@@ -9,10 +9,14 @@ struct ConversationsPanel: View {
     let state: ChatState
     let search: String
     @State private var renaming: String?
+    /// What obid found for the search, in titles and in what was said; nil until it answers.
+    @State private var results: [RunnerConversation]?
 
     private var list: ConversationList { model.feed.conversations }
     private var grouped: (pinned: [RunnerConversation], recent: [RunnerConversation]) {
-        ConversationList.sections(list.items, matching: search)
+        // Titles here at once; obid's answer, which reads what was said too, when it comes.
+        guard let results, !search.trimmingCharacters(in: .whitespaces).isEmpty else { return ConversationList.sections(list.items, matching: search) }
+        return ConversationOrder.sections(results)
     }
 
     var body: some View {
@@ -37,6 +41,13 @@ struct ConversationsPanel: View {
                     .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
                     .padding(.horizontal, 10).padding(.vertical, 6)
             }
+        }
+        .task(id: search) {
+            results = nil
+            // A pause while typing, as the iPhone's search waits.
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            results = await list.search(search)
         }
     }
 
@@ -64,13 +75,16 @@ private struct ConversationRow: View {
 
     private var picked: Bool { list.shown == conversation.id && state.trail.top == .talk }
     private var editing: Bool { renaming == conversation.id }
+    /// When it last moved, "5m"; nothing when the runner didn't say.
+    private var moved: String { conversation.latest == .distantPast ? "" : ConversationOrder.ago(conversation.latest) }
 
     var body: some View {
         HStack(spacing: 0) {
             if editing { field } else { title }
             ZStack {
-                Text(ConversationOrder.ago(conversation.latest)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                Text(moved).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
                     .opacity(hovering ? 0 : 1)
+                    .accessibilityLabel(moved.isEmpty ? "" : "Last active \(moved)")
                 if hovering && !editing { menu }
             }
             .frame(minWidth: 22).padding(.leading, 4).padding(.trailing, 8)

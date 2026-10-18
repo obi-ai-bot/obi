@@ -359,7 +359,7 @@ final class RunnerFeed {
         // In the conversation shown, or a new one (obid keeps many, #493); neither for one thread.
         let planned: PlannedTurn
         do {
-            planned = try await runner.planned(said, answer: answer, attachments: attachments, in: conversations.target())
+            planned = try await runner.planned(said, answer: answer, attachments: attachments, in: conversations.target(said))
         } catch {
             conversations.failed()
             throw error
@@ -376,9 +376,10 @@ final class RunnerFeed {
         }
     }
 
-    /// Cancels a plan still running on the local runner.
-    func cancelPlan() async {
-        await runner?.cancelPlan()
+    /// Cancels a plan still running on the local runner (tests give their own `runner`).
+    func cancelPlan(on given: Runner? = nil) async {
+        // The conversation shown's (#493): obid otherwise cancels the latest plan in any of them.
+        await (given ?? runner)?.cancelPlan(conversations.shown)
     }
 
     /// The runner's exact sentence for publishing a job: Publish shows it, and Touch ID approves it.
@@ -501,13 +502,14 @@ final class RunnerFeed {
 
     /// Stop: the runner ends the turn Oby is working on (`POST /v1/conversation/stop`, #304), and
     /// the steps that ran show as ended.
-    func stopTurn() async {
-        guard let runner else {
+    func stopTurn(on given: Runner? = nil) async {
+        guard let runner = given ?? runner else {
             stopProblem = "Set the runner's URL in Settings first."
             return
         }
         do {
-            try await runner.stopConversation()
+            // The conversation shown's turn (#493), as the iPhone's Stop does.
+            try await runner.stopConversation(conversations.shown)
             stopProblem = nil
             conversation.settleSteps()
         } catch let error as RunnerError where error.status == 404 {

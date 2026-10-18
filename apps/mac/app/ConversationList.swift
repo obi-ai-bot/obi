@@ -44,6 +44,8 @@ final class ConversationList {
     private(set) var problem: String?
     /// The conversations known when the words that start a new one went out.
     @ObservationIgnored private var known: Set<String> = []
+    /// The words starting a new conversation, while they're on their way.
+    @ObservationIgnored private var creatingWords: String?
     /// The next words are the talk key's, said away from the conversation page: they go to the
     /// latest conversation, as the Watch's do (#493), and obid picks it (no `conversation`, #507).
     @ObservationIgnored var nextToLatest = false
@@ -96,8 +98,11 @@ final class ConversationList {
             shown = nil
             starting = true
             thread.forget()
-        } else if new, creating, starting, shown == nil, !known.contains(conversation.id) {
-            // The words this window sent to start one: it's theirs, before its first turn lands.
+        } else if new, creating, starting, shown == nil, !known.contains(conversation.id),
+                  creatingWords.map({ ConversationOrder.started(by: $0, conversation) }) ?? true {
+            // The words this window sent to start one: it's theirs (obid titles it from them),
+            // before its first turn lands. Another device's new one is only listed; the answer
+            // names this window's anyway (`joined`).
             known.insert(conversation.id)
             // Shown at once, so its first turn (the next event) isn't dropped; its history follows.
             select(conversation.id)
@@ -149,13 +154,14 @@ final class ConversationList {
     // MARK: Words to Oby
 
     /// Where the words about to go to `POST /v1/plans` land. A runner with one thread gets neither
-    /// field. Marks a new conversation as under way.
-    func target() -> PlanTarget {
+    /// field. Marks a new conversation as under way, started by `said`.
+    func target(_ said: String? = nil) -> PlanTarget {
         defer { nextToLatest = false }
         guard served, !nextToLatest else { return .latest }
         if let shown, !starting { return .conversation(shown) }
         known = Set(items.map(\.id))
         creating = true
+        creatingWords = said
         return .new
     }
 
@@ -168,6 +174,14 @@ final class ConversationList {
         guard served, started, starting, let conversation else { return }
         known.insert(conversation)
         await show(conversation)
+    }
+
+    /// What obid finds for `query`, in titles and in what was said (`GET /v1/conversations?q=`),
+    /// or nil: nothing to look for, or the runner couldn't answer.
+    func search(_ query: String) async -> [RunnerConversation]? {
+        let query = query.trimmingCharacters(in: .whitespaces)
+        guard served, !query.isEmpty, let runner = runner() else { return nil }
+        return try? await runner.conversations(query: query, limit: 200)
     }
 
     /// The request failed: nothing was started.
