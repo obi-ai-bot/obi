@@ -14,20 +14,61 @@ struct PermissionsSection: View {
     /// Nil until the runner answered, or when it has no rules to list (older runners).
     @State private var rules: [RunnerRule]?
     @State private var problem: String?
+    @Environment(\.settingsCards) private var cards
+
+    private static let footer = "Ask: the agent asks before it edits or runs anything. Always allow saves a rule, so it doesn’t ask again; remove the rule to be asked again."
+
+    private var mode: Binding<RunnerMode?> {
+        Binding { defaultMode } set: { mode in
+            guard let mode else { return }
+            Task {
+                do { try await setDefault(mode); problem = nil } catch { problem = error.localizedDescription }
+            }
+        }
+    }
 
     var body: some View {
+        Group {
+            if cards { group } else { section }
+        }
+        .task(id: runner?.base) { await load() }
+    }
+
+    /// Sangam's card: the default mode with what it lets the agent do, then each rule with Remove.
+    private var group: some View {
+        SetGroup("Permissions", footer: Self.footer, problem: problem) {
+            if runner == nil {
+                SetRow("Set the runner's address first.", quiet: true)
+            } else if defaultMode == nil && rules == nil {
+                SetRow("This runner doesn't ask before agents act.", quiet: true)
+            } else {
+                SetRow("Default mode", about: defaultMode?.help) {
+                    SetSelect("Default mode", selection: mode, options: RunnerMode.allCases.map { (RunnerMode?.some($0), $0.label) })
+                }
+                if let rules, rules.isEmpty {
+                    SetRow("No saved rules", quiet: true)
+                }
+                ForEach(rules ?? []) { rule in
+                    SetRow(about: [rule.decision == "deny" ? "Denied" : "Allowed", rule.repo].compactMap(\.self).joined(separator: " · ")) {
+                        SetCode(rule.rule)
+                    } control: {
+                        Button("Remove", role: .destructive) { remove([rule.id]) }
+                            .buttonStyle(.set)
+                            .accessibilityLabel("Remove \(rule.rule)")
+                    }
+                }
+            }
+        }
+    }
+
+    private var section: some View {
         Section {
             if runner == nil {
                 Text("Set the runner's address first.").foregroundStyle(.secondary)
             } else if defaultMode == nil && rules == nil {
                 Text("This runner doesn't ask before agents act.").foregroundStyle(.secondary)
             } else {
-                Picker("Default mode", selection: Binding { defaultMode } set: { mode in
-                    guard let mode else { return }
-                    Task {
-                        do { try await setDefault(mode); problem = nil } catch { problem = error.localizedDescription }
-                    }
-                }) {
+                Picker("Default mode", selection: mode) {
                     ForEach(RunnerMode.allCases) { mode in
                         Text(mode.label).tag(RunnerMode?.some(mode))
                     }
@@ -57,9 +98,8 @@ struct PermissionsSection: View {
         } header: {
             Text("Permissions")
         } footer: {
-            Text("Ask: the agent asks before it edits or runs anything. Always allow saves a rule, so it doesn't ask again; remove the rule to be asked again.")
+            Text(Self.footer)
         }
-        .task(id: runner?.base) { await load() }
     }
 
     private func load() async {

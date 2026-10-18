@@ -65,7 +65,7 @@ struct WindowScreens {
     private func picture(_ name: String, model: IslandModel, state: ChatState) async throws {
         // Oby itself, from the app's bundled character, once it has drawn.
         let character = ObyCharacter(query: "embed&size=1.23")
-        let window = ChatWindow.make(ChatView(model: model, state: state, character: character, onOpenSettings: { _ in }))
+        let window = ChatWindow.make(ChatView(model: model, state: state, character: character))
         window.setFrameOrigin(NSPoint(x: 40, y: 40))
         window.orderFrontRegardless()
         defer { window.close() }
@@ -186,6 +186,79 @@ struct WindowScreens {
         defer { window.close() }
         try await Task.sleep(for: .milliseconds(800))
         try await save("mac-settings-components", window: window)
+    }
+
+    /// Each Settings page in the window (docs/mac-design.md A1), with the side panel on Settings.
+    /// Nothing of this Mac's own shows: run it with `TEST_RUNNER_OBY_HOME` set to an empty folder (the
+    /// desk's accounts and rules), and the pages read a defaults suite of their own, a made-up Oby
+    /// account and a vault in a temporary folder.
+    @Test(arguments: SettingsPage.allCases)
+    func settings(_ page: SettingsPage) async throws {
+        let suite = try #require(UserDefaults(suiteName: "oby-screens-\(UUID().uuidString)"))
+        suite.set(true, forKey: "ObySidebarOpen")
+        suite.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
+        suite.set(true, forKey: RunnerFeed.thisMacKey)
+        suite.set("you@example.com", forKey: "remote.email")
+        suite.set("oby-7f3k.example.com", forKey: "remote.hostname")
+        let secrets = FileManager.default.temporaryDirectory.appending(path: "oby-screens-vault-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: secrets, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: secrets) }
+        let vault = Vault(store: FileVault(folder: secrets))
+        for name in ["figma-token", "sentry-dsn", "staging-api-key"] { try vault.add("made-up-value", as: name) }
+
+        let model = model()
+        model.remote = RemoteAccess(secrets: FileVault(folder: secrets), defaults: suite)
+        model.vault = vault
+        let state = ChatState()
+        state.openSettings(page)
+        let character = ObyCharacter(query: "embed&size=1.23")
+        let window = ChatWindow.make(ChatView(model: model, state: state, character: character).defaultAppStorage(suite),
+                                     size: NSSize(width: 994, height: 900))
+        window.setFrameOrigin(NSPoint(x: 40, y: 40))
+        window.orderFrontRegardless()
+        defer { window.close() }
+        ChatWindow.measureLights(window, into: state)
+        try await Task.sleep(for: .milliseconds(1500))
+        try await save("mac-settings-\(page.rawValue)", window: window)
+    }
+
+    /// Settings › Accounts and Models with obid on this Mac (docs/mac-design.md C1, B2, C2): made-up
+    /// accounts and models staged on the feed, no runner asked. Home's box with its gauge after them.
+    @Test(arguments: ["accounts", "models", "home"])
+    func obid(_ screen: String) async throws {
+        let suite = try #require(UserDefaults(suiteName: "oby-screens-\(UUID().uuidString)"))
+        suite.set(true, forKey: "ObySidebarOpen")
+        suite.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
+        func account(_ id: String, _ agent: String, _ name: String, week: Double?, fiveHour: Double? = nil, signedIn: Bool = true,
+                     running: Int = 0, tetrix: Bool? = nil) -> AccountState {
+            AccountState(account: Account(id: id, agent: agent, name: name, payer: "", home: nil), label: nil,
+                         fiveHour: fiveHour, sevenDay: week, fiveHourResets: now + 7200, sevenDayResets: now + 3 * 86_400,
+                         running: running, tetrix: tetrix, runnerSignedIn: signedIn)
+        }
+        let model = model()
+        let efforts = ["low", "medium", "high", "xhigh", "max"]
+        model.feed.stage(
+            accounts: [account("personal", "claude", "Personal", week: 0.36, running: 1, tetrix: true),
+                       account("deskree", "claude", "Deskree", week: 0.84, fiveHour: 0.86, tetrix: true),
+                       account("lab", "codex", "Lab", week: 0.12),
+                       account("spare", "cursor", "Spare", week: nil, signedIn: false)],
+            models: ModelSettings(claude: ModelChoice(model: "claude-opus-5-5", effort: "xhigh"), codex: ModelChoice(model: "gpt-6.1-sol", effort: "high"),
+                                  cursor: CursorModelChoice(model: "auto")),
+            options: ModelOptions(claude: .init(models: [.init(id: "claude-opus-5-5", name: "Opus 5.5"), .init(id: "claude-sonnet-5-5", name: "Sonnet 5.5")], efforts: efforts),
+                                  codex: .init(models: [.init(id: "gpt-6.1-sol", name: "gpt-6.1-sol", efforts: ["low", "medium", "high", "xhigh"])]),
+                                  cursor: .init(models: [.init(id: "claude-opus-5-5", name: "Opus 5.5")])))
+        let state = ChatState()
+        if let page = SettingsPage(rawValue: screen) { state.openSettings(page) }
+        let character = ObyCharacter(query: "embed&size=1.23")
+        let window = ChatWindow.make(ChatView(model: model, state: state, character: character).defaultAppStorage(suite),
+                                     size: NSSize(width: 994, height: 900))
+        window.setFrameOrigin(NSPoint(x: 40, y: 40))
+        window.orderFrontRegardless()
+        defer { window.close() }
+        ChatWindow.measureLights(window, into: state)
+        for _ in 0..<50 where !character.ready { try await Task.sleep(for: .milliseconds(100)) }
+        try await Task.sleep(for: .milliseconds(1500))
+        try await save("mac-obid-\(screen)", window: window)
     }
 
     @Test func taskNeedingYou() async throws {

@@ -117,7 +117,7 @@ struct ObidConversationsTests {
         let open = defaults.object(forKey: "ObySidebarOpen")
         defer { if let open { defaults.set(open, forKey: "ObySidebarOpen") } else { defaults.removeObject(forKey: "ObySidebarOpen") } }
         defaults.set(true, forKey: "ObySidebarOpen")
-        let window = ChatWindow.make(ChatView(model: model, state: state, character: ObyCharacter(query: "embed&size=1.23"), onOpenSettings: { _ in }))
+        let window = ChatWindow.make(ChatView(model: model, state: state, character: ObyCharacter(query: "embed&size=1.23")))
         window.setFrameOrigin(NSPoint(x: 40, y: 40))
         window.orderFrontRegardless()
         defer { window.close() }

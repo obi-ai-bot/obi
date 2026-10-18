@@ -23,7 +23,8 @@ struct ObyApp: App {
             if !AXIsProcessTrusted() {
                 Button("To Talk With fn, Allow Accessibility…") { Task { await Permissions().ask(.accessibility) } }
             }
-            SettingsLink { Text("Settings…") }
+            // Settings are pages in the window (docs/mac-design.md A1).
+            Button("Settings…") { app.chat.showSettings() }
                 .keyboardShortcut(",")
             Button("Show First Launch…") { app.firstLaunch.show() }
             Divider()
@@ -48,10 +49,11 @@ struct ObyApp: App {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { app.island.updater.check() }
             }
-        }
-
-        Settings {
-            SettingsTabs(app: app)
+            // ⌘, opens the window on Settings, with no Settings window of its own.
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { app.chat.showSettings() }
+                    .keyboardShortcut(",")
+            }
         }
     }
 }
@@ -76,25 +78,6 @@ struct MenuBarLabel: View {
         if working > 0 { parts.append("\(working) working") }
         if needsYou > 0 { parts.append(needsYou == 1 ? "1 needs you" : "\(needsYou) need you") }
         return parts.isEmpty ? "Oby" : "Oby: " + parts.joined(separator: ", ")
-    }
-}
-
-/// The Settings tabs, on the one the window's sidebar asked for (SettingsSelection).
-private struct SettingsTabs: View {
-    let app: AppDelegate
-    private let selection = SettingsSelection.shared
-
-    var body: some View {
-        TabView(selection: Binding { selection.tab } set: { selection.tab = $0 }) {
-            SettingsView(desk: app.island.desk).tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general)
-            RunnerSettingsView(feed: app.island.feed, availability: app.island.availability, remote: app.island.remote).tabItem { Label("Runner", systemImage: "server.rack") }.tag(SettingsTab.runner)
-            RemoteAccessSettingsView(remote: app.island.remote).tabItem { Label("Remote", systemImage: "antenna.radiowaves.left.and.right") }.tag(SettingsTab.remote)
-            AccountsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Accounts", systemImage: "person.2") }.tag(SettingsTab.accounts)
-            ModelsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Models", systemImage: "cpu") }.tag(SettingsTab.models)
-            ConnectorsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Connectors", systemImage: "point.3.filled.connected.trianglepath.dotted") }.tag(SettingsTab.connectors)
-            VaultSettingsView(vault: .shared).tabItem { Label("Vault", systemImage: "lock") }.tag(SettingsTab.vault)
-            AboutSettingsView(updater: app.island.updater).tabItem { Label("About", systemImage: "info.circle") }.tag(SettingsTab.about)
-        }
     }
 }
 

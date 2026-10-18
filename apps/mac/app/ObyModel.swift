@@ -23,6 +23,10 @@ final class IslandModel {
     var turn: TalkStage?
     /// The runner's job whose alert's Publish was clicked: its screen starts publishing, once.
     var publishing: String?
+    /// Settings' Remote access (apps/mac/app/RemoteAccess.swift), and the vault its Vault page lists:
+    /// the app's own; nil in tests, which give Settings made-up ones when they show it.
+    var remote: RemoteAccess?
+    var vault: Vault?
 
     @MainActor init(desk: Desk, feed: RunnerFeed, updater: Updater = Updater(), availability: MacAvailability) {
         self.desk = desk

@@ -2,9 +2,48 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
+/// A Settings page over Home (Sangam's SettingsView.tsx `SettingsPage`): its title over its groups of
+/// cards, in a column as wide as a kind of work's, opened from the side panel's Settings list, the
+/// account menu and ⌘,. Esc goes back, as from any page. The pages are made of Sangam's Settings
+/// components (apps/shared/SettingsComponents.swift); the sections the iPhone shares draw as cards here.
+struct SettingsPane: View {
+    let model: IslandModel
+    let page: SettingsPage
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(page.label).font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink)
+                    .padding(.bottom, 16).accessibilityAddTraits(.isHeader)
+                content
+            }
+            .frame(maxWidth: Tokens.column, alignment: .leading)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, Tokens.gutter).padding(.top, 16).padding(.bottom, 32)
+        }
+        .environment(\.settingsCards, true)
+        .takesKeys()
+    }
+
+    @ViewBuilder private var content: some View {
+        let feed = model.feed, store = model.desk.accounts
+        switch page {
+        case .general: GeneralSettingsView(desk: model.desk)
+        case .runner: RunnerSettingsView(feed: feed, availability: model.availability, remote: model.remote)
+        case .remote:
+            if let remote = model.remote { RemoteAccessSettingsView(remote: remote) }
+        case .accounts: AccountsSettingsView(store: store, feed: feed)
+        case .models: ModelsSettingsView(store: store, feed: feed)
+        case .connectors: ConnectorsSettingsView(store: store, feed: feed)
+        case .vault: VaultSettingsView(vault: model.vault ?? .shared)
+        case .about: AboutSettingsView(updater: model.updater)
+        }
+    }
+}
+
 /// Settings › General: what the iPhone's Settings has too (apps/shared/SettingsSections.swift),
 /// opening at login, and how much this Mac's own jobs ask.
-struct SettingsView: View {
+struct GeneralSettingsView: View {
     /// This Mac's desk: Settings › Permissions' default for the jobs it runs itself (#134). The
     /// runner's is in Settings › Runner.
     let desk: Desk
@@ -17,61 +56,43 @@ struct SettingsView: View {
     @AppStorage(Speaker.setting) private var speaks = true
 
     var body: some View {
-        Form {
-            Toggle("Open at login", isOn: $openAtLogin)
-                .onChange(of: openAtLogin) { _, on in
-                    do {
-                        if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-                        problem = nil
-                    } catch {
-                        problem = error.localizedDescription
-                        openAtLogin = SMAppService.mainApp.status == .enabled
-                    }
-                }
-            if let problem {
-                Text(problem).font(.caption).foregroundStyle(.red)
-            }
-            Section {
-                Picker("Default mode", selection: $mode) {
-                    ForEach(RunnerMode.local) { choice in
-                        Text(choice.label).tag(PermissionMode(rawValue: choice.rawValue) ?? .bypass)
-                    }
-                }
-                .onChange(of: mode) { _, chosen in if desk.defaultMode != chosen { desk.defaultMode = chosen } }
-                if let help = RunnerMode(mode.rawValue)?.help {
-                    Text(help).font(.footnote).foregroundStyle(.secondary)
-                }
-                if rules.isEmpty {
-                    Text("No saved rules").foregroundStyle(.secondary)
-                }
-                ForEach(rules) { rule in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(rule.rule).font(.body.monospaced())
-                            Text("\(rule.decision == .deny ? "Denied" : "Allowed") · \(rule.repo)")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Remove", role: .destructive) { forget(rule) }
-                            .buttonStyle(.borderless)
-                            .accessibilityLabel("Remove \(rule.rule)")
-                    }
-                }
-            } header: {
-                Text("Permissions on this Mac")
-            } footer: {
-                Text("How much the jobs this Mac runs itself ask. Each job's Mode menu changes it while it runs. Always allow saves a rule, so it doesn't ask again; remove the rule to be asked again. The runner's jobs follow Settings › Runner.")
-            }
-            VoiceSection(speaks: $speaks, footer: "When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer until you press fn or say “stop”. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
-            NotificationsSection()
+        SetGroup(problem: problem) {
+            SetRow("Open at login") { Toggle("Open at login", isOn: $openAtLogin).toggleStyle(.set) }
         }
-        .formStyle(.grouped)
-        .frame(width: 460)
         .onAppear {
-            NSApp.activate()
             mode = desk.defaultMode
             rules = desk.permissionRules
         }
+        .onChange(of: openAtLogin) { _, on in
+            do {
+                if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+                problem = nil
+            } catch {
+                problem = error.localizedDescription
+                openAtLogin = SMAppService.mainApp.status == .enabled
+            }
+        }
+        SetGroup("Permissions on this Mac", footer: "How much the jobs this Mac runs itself ask. Each job’s Mode menu changes it while it runs. Always allow saves a rule, so it doesn’t ask again; remove the rule to be asked again. The runner’s jobs follow Runner › Permissions.") {
+            SetRow("Default mode", about: RunnerMode(mode.rawValue)?.help) {
+                SetSelect("Default mode", selection: $mode,
+                          options: RunnerMode.local.map { (PermissionMode(rawValue: $0.rawValue) ?? .bypass, $0.label) })
+            }
+            if rules.isEmpty {
+                SetRow("No saved rules", quiet: true)
+            }
+            ForEach(rules) { rule in
+                SetRow(about: "\(rule.decision == .deny ? "Denied" : "Allowed") · \(rule.repo)") {
+                    SetCode(rule.rule)
+                } control: {
+                    Button("Remove", role: .destructive) { forget(rule) }
+                        .buttonStyle(.set)
+                        .accessibilityLabel("Remove \(rule.rule)")
+                }
+            }
+        }
+        .onChange(of: mode) { _, chosen in if desk.defaultMode != chosen { desk.defaultMode = chosen } }
+        VoiceSection(speaks: $speaks, footer: "When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer until you press fn or say “stop”. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
+        NotificationsSection()
     }
 
     private func forget(_ rule: PermissionRule) {
@@ -90,7 +111,7 @@ struct SettingsView: View {
 struct RunnerSettingsView: View {
     let feed: RunnerFeed
     let availability: MacAvailability
-    let remote: RemoteAccess
+    let remote: RemoteAccess?
     /// The always-on runner whose jobs the window lists and RunnerFeed follows; empty turns that off.
     @AppStorage("runnerURL") private var runnerURL = ""
     /// "This Mac" (#283): the runner is Oby's login item on this Mac, and Oby follows it on 127.0.0.1.
@@ -102,108 +123,88 @@ struct RunnerSettingsView: View {
     /// Apple checks agents ask for (Engine/AppleChecks.swift).
     @AppStorage(MacChecks.appleSetting) private var runAppleChecks = true
     @State private var watches: [PairedWatch] = []
-    @State private var removing: PairedWatch?
     @State private var watchProblem: String?
 
     var body: some View {
-        Form {
-            Section {
-                Picker("Runner", selection: $onThisMac) {
-                    Text("This Mac").tag(true)
-                    Text("Remote").tag(false)
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: onThisMac) { _, on in
-                    if on { loginItem.register() } else { loginItem.unregister() }
-                }
-                if onThisMac {
-                    LabeledContent("Login item", value: loginItem.line)
+        // Sangam's words, but "the window" where his say "the island", which is gone.
+        SetGroup("Runner", footer: onThisMac
+                 ? "The runner is Oby’s login item on this Mac, and Oby follows it on 127.0.0.1."
+                 : "Oby follows the runner at this address: the window lists its jobs.",
+                 problem: onThisMac ? loginItem.problem : nil) {
+            SetRow("Runner") {
+                SetSegmented("Runner", selection: $onThisMac, options: [(true, "This Mac"), (false, "Remote")])
+            }
+            if onThisMac {
+                SetRow("Login item") {
+                    SetValue(loginItem.line)
                     if loginItem.needsApproval {
-                        Button("Open Login Items Settings") { RunnerLoginItem.openSettings() }
-                    }
-                    if let problem = loginItem.problem {
-                        Text(problem).font(.caption).foregroundStyle(.red).textSelection(.enabled)
-                    }
-                } else {
-                    TextField("URL", text: $runnerURL, prompt: Text(Runner.defaultURL.absoluteString))
-                }
-                LabeledContent("Status", value: feed.runner == nil && !feed.local ? "Off" : feed.connection.status(host: feed.name))
-                if let cleanup = feed.cleanup {
-                    LabeledContent("Job worktrees", value: ByteCountFormatter.string(fromByteCount: cleanup.bytes, countStyle: .file))
-                    LabeledContent("Last cleanup", value: cleanup.lastRun.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never")
-                }
-            } header: {
-                Text("Runner")
-            } footer: {
-                Text(onThisMac
-                     ? "Oby's runner runs on this Mac as a login item: it starts when you log in and keeps working while Oby's window is closed. Oby plans and runs every job there, on 127.0.0.1, and lists them in the island and the window. Your iPhone and Apple Watch reach it through the gateway."
-                     : "The runner does the work while your Mac is closed. The window lists the jobs running there too, and Oby tells you when one needs you. It answers only your Tailscale login, so this Mac needs Tailscale on. Leave it empty to turn this off.")
-            }
-            Section {
-                Toggle("Keep my Mac available", isOn: Binding(get: { availability.keepAvailable }, set: availability.setKeepAvailable))
-                LabeledContent("Availability", value: availability.label)
-                Link("Recommend Wake for network access", destination: URL(string: "x-apple.systempreferences:com.apple.energysaver")!)
-            } header: {
-                Text("This Mac")
-            } footer: {
-                Text("On power, Oby prevents idle sleep while This Mac is enabled and this setting is on. A running job always keeps this Mac awake.")
-            }
-            // As on the iPhone (apps/shared/PermissionsSection.swift). This Mac's own jobs' default is in General.
-            PermissionsSection(runner: feed.runner, defaultMode: feed.defaultMode, setDefault: feed.setDefaultMode)
-            Section("Checks on this Mac") {
-                Toggle("Run merge checks on this Mac", isOn: $runMergeChecks)
-                Text("When Oby's review approves a pull request, this Mac runs its tests and builds the Mac and iPhone apps, one at a time, before Oby merges it into dev.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle("Build and test agents' work on this Mac", isOn: $runAppleChecks)
-                Text("When an agent on the runner asks (oby-check apple), this Mac builds and tests the Mac and iPhone apps at its latest commit, before Oby's review has read it, and the agent gets the compiler's errors and failing tests.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section {
-                if watches.isEmpty {
-                    Text("None yet").foregroundStyle(.secondary)
-                }
-                ForEach(watches) { watch in
-                    HStack {
-                        LabeledContent(watch.name, value: "Paired")
-                        Button("Remove", role: .destructive) { removing = watch }
+                        Button("Open Login Items Settings") { RunnerLoginItem.openSettings() }.buttonStyle(.set)
                     }
                 }
-                if let watchProblem { Text(watchProblem).font(.caption).foregroundStyle(.red) }
-            } header: {
-                Text("Apple Watch without iPhone")
-            } footer: {
-                Text("Away from your iPhone, a paired watch reaches the runner through your Cloudflare Tunnel. Pair one in Oby's Settings on your iPhone, with Oby open on the watch: pairing asks for Face ID.")
+            } else {
+                SetRow("URL") { SetField("Runner URL", text: $runnerURL, prompt: "http://tetrix-lab:8790") }
             }
-            Section {
-                LabeledContent("Publishing key", value: feed.runner == nil ? "Off" : feed.device.status)
-                // The runner's own line (pairing is closed: how to open it), then Try again.
-                if feed.runner != nil, let problem = feed.device.problem {
-                    Text(problem).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
-                    Button("Try again") { feed.register() }
+            SetRow("Status") {
+                SetValue(feed.runner == nil && !feed.local ? "Off" : feed.connection == .live ? "Connected" : feed.connection.status(host: feed.name),
+                         connected: feed.connection == .live)
+            }
+            if let cleanup = feed.cleanup {
+                SetRow("Job worktrees") { SetValue(ByteCountFormatter.string(fromByteCount: cleanup.bytes, countStyle: .file)) }
+                SetRow("Last cleanup") { SetValue(cleanup.lastRun.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never") }
+            }
+        }
+        .onChange(of: onThisMac) { _, on in
+            if on { loginItem.register() } else { loginItem.unregister() }
+        }
+        SetGroup("This Mac", footer: "On power, Oby prevents idle sleep while This Mac is enabled and this setting is on. A running job always keeps this Mac awake.") {
+            SetRow("Keep my Mac available") {
+                Toggle("Keep my Mac available", isOn: Binding(get: { availability.keepAvailable }, set: availability.setKeepAvailable)).toggleStyle(.set)
+            }
+            SetRow("Availability") { SetValue(availability.label) }
+        }
+        // As on the iPhone (apps/shared/PermissionsSection.swift). This Mac's own jobs' default is in General.
+        PermissionsSection(runner: feed.runner, defaultMode: feed.defaultMode, setDefault: feed.setDefaultMode)
+        SetGroup("Checks on this Mac") {
+            SetRow("Run merge checks on this Mac", about: "When Oby’s review approves a pull request, this Mac runs its tests and builds the Mac and iPhone apps, one at a time, before Oby merges it into dev.") {
+                Toggle("Run merge checks on this Mac", isOn: $runMergeChecks).toggleStyle(.set)
+            }
+            SetRow("Build and test agents’ work on this Mac", about: "When an agent on the runner asks, this Mac builds and tests the Mac and iPhone apps at its latest commit, before Oby’s review has read it, and the agent gets the compiler’s errors and failing tests.") {
+                Toggle("Build and test agents’ work on this Mac", isOn: $runAppleChecks).toggleStyle(.set)
+            }
+        }
+        SetGroup("Apple Watch without iPhone", footer: "Away from your iPhone, a paired watch reaches the runner through your Cloudflare Tunnel. Pair one in Oby’s Settings on your iPhone, with Oby open on the watch: pairing asks for Face ID.",
+                 problem: watchProblem) {
+            if watches.isEmpty {
+                SetRow("None yet", quiet: true)
+            }
+            ForEach(watches) { watch in
+                SetRow(watch.name) {
+                    SetValue("Paired")
+                    Button("Remove", role: .destructive) { remove(watch) }.buttonStyle(.set)
                 }
-            } footer: {
-                Text("Oby opens a pull request by itself once a job's check passes and the secret scan is clean. When that failed, publish by hand here or on your iPhone: this Mac's key, like the iPhone's, signs only after Touch ID, and the runner learns it once, while pairing is open on it. Oby merges only into dev, once its review approves and your Mac's checks pass.")
             }
-            PairingView(feed: feed, remote: remote)
         }
-        .formStyle(.grouped)
-        .frame(width: 460)
-        .onAppear { loginItem.refresh() }
-        // Back from approving the login item in System Settings.
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in loginItem.refresh() }
-        // Once the runner answers, and again after it comes back.
-        .task(id: feed.connection) {
-            guard feed.connection == .live, let runner = feed.runner else { return }
-            // A runner older than the Watch API has no list: then there's nothing to show.
-            watches = (try? await runner.watches()) ?? []
+        SetGroup("Publishing", footer: "Oby opens a pull request by itself once a job’s check passes and the secret scan is clean. When that failed, publish by hand here or on your iPhone: this Mac’s key, like the iPhone’s, signs only after Touch ID. Oby merges only into dev, once its review approves and your Mac’s checks pass.") {
+            SetRow("Publishing key") { SetValue(feed.runner == nil ? "Off" : feed.device.status) }
+            // The runner's own line (pairing is closed: how to open it), then Try again.
+            if feed.runner != nil, let problem = feed.device.problem {
+                SetRow {
+                    SetAbout(problem, color: Tokens.needs)
+                } control: {
+                    Button("Try again") { feed.register() }.buttonStyle(.set)
+                }
+            }
         }
-        .confirmationDialog("Remove \(removing?.name ?? "this watch")?",
-                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-                            presenting: removing) { watch in
-            Button("Remove", role: .destructive) { remove(watch) }
-        } message: { _ in
-            Text("The runner forgets it: away from your iPhone, it reaches the runner again once you pair it on your iPhone.")
-        }
+        PairingView(feed: feed, remote: remote)
+            .onAppear { loginItem.refresh() }
+            // Back from approving the login item in System Settings.
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in loginItem.refresh() }
+            // Once the runner answers, and again after it comes back.
+            .task(id: feed.connection) {
+                guard feed.connection == .live, let runner = feed.runner else { return }
+                // A runner older than the Watch API has no list: then there's nothing to show.
+                watches = (try? await runner.watches()) ?? []
+            }
     }
 
     private func remove(_ watch: PairedWatch) {
@@ -229,61 +230,64 @@ struct RemoteAccessSettingsView: View {
     @State private var code = ""
     @State private var forgetting = false
 
+    private var signedIn: Bool { remote.step == .signedIn || remote.step == .on }
+
     var body: some View {
-        Form {
-            Section {
-                switch remote.step {
-                case .signedOut:
-                    TextField("Email", text: $email, prompt: Text("you@example.com"))
-                        .onSubmit(sendCode)
+        SetGroup("Oby account", footer: "Remote access goes through Oby’s control plane, which signs you in with a code by email and gives this Mac a hostname of its own.",
+                 problem: signedIn ? nil : remote.problem) {
+            switch remote.step {
+            case .signedOut:
+                SetRow("Email") { SetField("Email", text: $email, prompt: "you@example.com").onSubmit(sendCode) }
+                SetRow("") {
                     Button("Send Code") { sendCode() }
+                        .buttonStyle(.set)
                         .disabled(remote.busy || email.trimmingCharacters(in: .whitespaces).isEmpty)
-                case .codeSent(let to):
-                    Text("A six-digit code went to \(to). It works for ten minutes.")
-                    TextField("Code", text: $code, prompt: Text("123456"))
-                        .onSubmit(verify)
-                    HStack {
-                        Button("Sign In") { verify() }
-                            .disabled(remote.busy || code.trimmingCharacters(in: .whitespaces).count != 6)
-                        Button("Use Another Email") { remote.useAnotherEmail() }
-                            .disabled(remote.busy)
-                    }
-                case .signedIn, .on:
-                    LabeledContent("Signed in as", value: remote.email ?? "")
                 }
-            } header: {
-                Text("Oby account")
-            } footer: {
-                Text("Remote access goes through Oby's control plane (oby-control.tetrix.pro), which signs you in with a code by email and gives this Mac a hostname of its own.")
+            case .codeSent(let to):
+                SetRow("Code", about: "A six-digit code went to \(to). It works for ten minutes.") {
+                    SetField("Code", text: $code, prompt: "123456").onSubmit(verify)
+                }
+                SetRow("") {
+                    Button("Use Another Email") { remote.useAnotherEmail() }
+                        .buttonStyle(.set)
+                        .disabled(remote.busy)
+                    Button("Sign In") { verify() }
+                        .buttonStyle(.set)
+                        .disabled(remote.busy || code.trimmingCharacters(in: .whitespaces).count != 6)
+                }
+            case .signedIn, .on:
+                SetRow("Signed in as") { SetValue(remote.email ?? "") }
             }
-            if remote.step == .signedIn || remote.step == .on {
-                Section {
+        }
+        if signedIn {
+            SetGroup("Remote access", footer: "On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Off keeps the hostname for next time. Forget removes this Mac from your account, and the hostname stops answering.",
+                     problem: remote.problem) {
+                SetRow("Reach this Mac from anywhere") {
                     Toggle("Reach this Mac from anywhere", isOn: Binding(get: { remote.step == .on }, set: { on in
                         if on { Task { await remote.turnOn() } } else { remote.turnOff() }
                     }))
+                    .toggleStyle(.set)
                     .disabled(remote.busy)
-                    if let hostname = remote.hostname {
-                        LabeledContent("Hostname", value: hostname).textSelection(.enabled)
-                    }
-                    LabeledContent("Status", value: remote.busy ? "Setting up…" : remote.status)
+                }
+                if let hostname = remote.hostname {
+                    SetRow("Hostname") { SetValue(hostname) }
+                }
+                SetRow("Status") {
+                    let status = remote.busy ? "Setting up…" : remote.status
+                    SetValue(status, connected: status == "Connected")
+                }
+                SetRow("") {
                     Button("Forget This Mac", role: .destructive) { forgetting = true }
+                        .buttonStyle(.set)
                         .disabled(remote.busy)
-                } header: {
-                    Text("Remote access")
-                } footer: {
-                    Text("On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Pair the iPhone to hand it the hostname. Off keeps the hostname for next time. Forget removes this Mac from your account, and the hostname stops answering.")
                 }
             }
-            if let problem = remote.problem {
-                Text(problem).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            // Kept beyond Sangam's mock: the hostname can't be brought back, so macOS's confirmation first.
+            .confirmationDialog("Forget this Mac?", isPresented: $forgetting) {
+                Button("Forget", role: .destructive) { Task { await remote.forget() } }
+            } message: {
+                Text("Its tunnel and hostname are removed from your Oby account, and this Mac signs out. Turning remote access on again makes a new hostname.")
             }
-        }
-        .formStyle(.grouped)
-        .frame(width: 460)
-        .confirmationDialog("Forget this Mac?", isPresented: $forgetting) {
-            Button("Forget", role: .destructive) { Task { await remote.forget() } }
-        } message: {
-            Text("Its tunnel and hostname are removed from your Oby account, and this Mac signs out. Turning remote access on again makes a new hostname.")
         }
     }
 
@@ -299,8 +303,46 @@ struct RemoteAccessSettingsView: View {
     }
 }
 
-/// Settings › Accounts: the logins Oby spreads jobs across, who pays for each, and how much each has
-/// used, on this Mac and on the runner, as the iPhone shows them (apps/shared/SettingsSections.swift).
+/// Sangam's look for the reserve switch (apps/shared/Usage.swift's `ReserveSwitch`): the switch and its
+/// words as a line under the account's meter, then what it does, and what went wrong.
+private struct ReserveLine: View {
+    let snapshot: Usage.Snapshot
+    let on: Bool
+    var lift: @MainActor @Sendable (Bool) async throws -> Void
+    @State private var problem: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Toggle(Usage.liftText, isOn: Binding(get: { on }, set: { on in
+                    Task {
+                        problem = nil
+                        do { try await lift(on) } catch { problem = error.localizedDescription }
+                    }
+                }))
+                .toggleStyle(.set)
+                Text(Usage.liftText).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.text)
+            }
+            .padding(.top, 4)
+            SetAbout(Usage.liftNote(snapshot))
+            if let problem { SetAbout(problem, color: Tokens.danger) }
+        }
+    }
+}
+
+/// Where Settings › Accounts lists accounts from (docs/mac-design.md C1), as one list: with obid on
+/// this Mac (Settings › Runner › This Mac) only obid's, which it plans and runs every job on; with a
+/// remote runner this Mac's own and the runner's; with none, this Mac's.
+nonisolated enum AccountPlaces: Equatable, Sendable {
+    case mac, runner
+
+    static func of(local: Bool, runner: Bool) -> [AccountPlaces] {
+        local ? [.runner] : runner ? [.mac, .runner] : [.mac]
+    }
+}
+
+/// Settings › Accounts: the logins Oby spreads jobs across, who pays for each, and how much of its week
+/// each has used, as Sangam's usage rows, from where jobs run (`AccountPlaces`).
 struct AccountsSettingsView: View {
     let store: AccountStore
     let feed: RunnerFeed
@@ -310,22 +352,48 @@ struct AccountsSettingsView: View {
     @State private var removing: Account?
     @State private var problem: String?
 
+    private var places: [AccountPlaces] { AccountPlaces.of(local: feed.local, runner: feed.runner != nil) }
+
     var body: some View {
-        Form {
+        let both = places.count > 1
+        if places.contains(.mac) {
             AccountSections("Accounts on this Mac", items: store.accounts, id: \.account.id, usage: \.usage,
-                            place: "on this Mac", row: row)
-            Section("Add an account") {
-                Picker("Tool", selection: $agent) {
-                    Text("Claude Code").tag("claude")
-                    Text("Codex").tag("codex")
-                    Text("Cursor").tag("cursor")
+                            place: both ? "on this Mac" : nil) { state in
+                AccountUsageRow(state: state, payer: state.account.payer) { lift in _ = store.liftReserve(state.account.id, lift) } buttons: {
+                    if !state.signedIn {
+                        Button("Sign In") { attempt { try store.signIn(state.account) } }.buttonStyle(.set)
+                    } else if state.tetrix == false {
+                        Button("Sign In to Tetrix") { attempt { try store.signIn(state.account, tetrix: true) } }.buttonStyle(.set)
+                    }
+                    Button("Remove", role: .destructive) { removing = state.account }.buttonStyle(.set)
                 }
-                if agent == "cursor", !CursorFacts.separateLogins {
-                    // Why a second one is refused.
-                    Text("\(CursorFacts.oneLogin): one Cursor account.").font(.caption).foregroundStyle(.secondary)
-                }
-                TextField("Name", text: $name, prompt: Text("Personal"))
-                TextField("Paid by", text: $payer, prompt: Text("Wellington"))
+            }
+            addAccount
+        }
+        if places.contains(.runner) {
+            // obid's own accounts, signed in on it through each tool's own login. Adding, signing in and
+            // removing them come with obid's accounts API (docs/mac-design.md A2, A3): their buttons go
+            // in this row's `buttons`, and the add form after this list.
+            AccountSections(feed.local ? "Accounts on this Mac" : "Accounts on \(feed.name)", items: feed.accounts, id: \.account.id,
+                            usage: \.usage, place: both ? "on \(feed.name)" : nil) { state in
+                AccountUsageRow(state: state) { lift in
+                    // The runner's "accounts" event brings the change back.
+                    guard let runner = feed.runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+                    _ = try await runner.liftReserve(state.account.id, lift)
+                } buttons: {}
+            }
+        }
+    }
+
+    /// Adds to this Mac's own accounts, which only Oby on this Mac uses.
+    private var addAccount: some View {
+        SetGroup("Add an account", problem: problem) {
+            SetRow("Tool", about: agent == "cursor" && !CursorFacts.separateLogins ? "\(CursorFacts.oneLogin): one Cursor account." : nil) {
+                SetSelect("Tool", selection: $agent, options: [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor")])
+            }
+            SetRow("Name") { SetField("Account name", text: $name, prompt: "Personal") }
+            SetRow("Paid by") { SetField("Paid by", text: $payer, prompt: "Wellington") }
+            SetRow("") {
                 Button("Add Account") {
                     attempt {
                         try store.add(agent: agent, name: name.trimmingCharacters(in: .whitespaces), payer: payer.trimmingCharacters(in: .whitespaces))
@@ -333,72 +401,23 @@ struct AccountsSettingsView: View {
                         payer = ""
                     }
                 }
+                .buttonStyle(.set)
                 .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
             }
-            if let problem {
-                Text(problem).font(.caption).foregroundStyle(.red)
-            }
-            if feed.runner != nil {
-                AccountSections("Accounts on \(feed.name)", items: feed.accounts, id: \.account.id, usage: \.usage,
-                                place: "on \(feed.name)") { state in
-                    VStack(alignment: .leading, spacing: 4) {
-                        UsageCard(snapshot: state.usage)
-                        // The runner's "accounts" event brings the change back.
-                        ReserveSwitch(snapshot: state.usage) { lift in
-                            guard let runner = feed.runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
-                            _ = try await runner.liftReserve(state.account.id, lift)
-                        }
-                        if state.signedIn {
-                            Text(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed))
-                                .font(.caption).foregroundStyle(state.tetrix == false ? Color.orange : Color.secondary)
-                        }
-                    }
-                }
-            }
         }
-        .formStyle(.grouped)
-        .frame(width: 460)
         .task { await store.refresh() }
-        // Back from signing in, in Terminal.
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            Task { await store.refresh() }
-        }
+        // Kept beyond Sangam's mock: removing deletes the account's settings folder and its login, so
+        // macOS's confirmation first.
         .confirmationDialog("Remove \(removing?.name ?? "this account")?",
                             isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                             presenting: removing) { account in
             Button("Remove", role: .destructive) { attempt { try store.remove(account) } }
         } message: { account in
-            Text(account.home == nil ? "Its login stays in the tool's own settings." : "Oby deletes this account's settings folder.")
+            Text(account.home == nil ? "Its login stays in the tool's own settings." : "Oby deletes this account's settings folder, with its login. This can’t be undone.")
         }
-    }
-
-    /// The account's usage card, who pays for it, and its buttons.
-    private func row(_ state: AccountState) -> some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                UsageCard(snapshot: state.usage)
-                ReserveSwitch(snapshot: state.usage) { lift in _ = store.liftReserve(state.account.id, lift) }
-                // A job of its hit the limit: no job goes to it until then.
-                if state.isFull(), let until = state.fullUntil {
-                    Text("Full until \(Limits.clock(until))").font(.caption).foregroundStyle(.orange)
-                }
-                if !state.account.payer.isEmpty {
-                    Text("Paid by \(state.account.payer)").font(.caption).foregroundStyle(.secondary)
-                }
-                if state.signedIn {
-                    Text(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed))
-                        .font(.caption).foregroundStyle(state.tetrix == false ? Color.orange : Color.secondary)
-                }
-            }
-            VStack(alignment: .trailing, spacing: 6) {
-                if !state.signedIn {
-                    Button("Sign In") { attempt { try store.signIn(state.account) } }
-                } else if state.tetrix == false {
-                    Button("Sign In to Tetrix") { attempt { try store.signIn(state.account, tetrix: true) } }
-                }
-                Button("Remove", role: .destructive) { removing = state.account }
-            }
-            .padding(.top, 4)
+        // Back from signing in, in Terminal.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await store.refresh() }
         }
     }
 
@@ -408,6 +427,60 @@ struct AccountsSettingsView: View {
             problem = nil
         } catch {
             problem = error.localizedDescription
+        }
+    }
+}
+
+/// One account as Sangam's usage row (`.set-usage`, docs/mac-design.md B2): its tool's mark, its name,
+/// who pays and when its week resets, a meter of its week; the 5-hour window past 80%, its reserve,
+/// "Full until" and Tetrix as lines under it; "N% used" and its buttons at the top right.
+struct AccountUsageRow<Buttons: View>: View {
+    let state: AccountState
+    /// Who pays for it: this Mac's accounts know; obid's don't say yet.
+    var payer = ""
+    var lift: @MainActor @Sendable (Bool) async throws -> Void
+    @ViewBuilder var buttons: Buttons
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            let usage = state.usage, now = context.date
+            SetRow(controlOnTop: true) {
+                HStack(alignment: .top, spacing: 16) {
+                    AgentMark(agent: state.account.agent).font(Tokens.font(13)).foregroundStyle(Tokens.muted)
+                        .frame(width: 16).padding(.top, 2).accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(state.account.name)
+                        SetAbout(Usage.about(usage, payer: payer, now: now))
+                        if let week = Usage.week(usage, now: now) {
+                            SetMeter(used: week * 100).padding(.top, 4)
+                        }
+                        if let line = Usage.fiveHourLine(usage, now: now) {
+                            SetAbout(line, color: SetMeter.fill(used: (usage.fiveHour ?? 0) * 100))
+                        }
+                        if usage.reserved(at: now) {
+                            SetAbout(Usage.reservedText, color: Tokens.needs)
+                        } else if usage.inReserve(at: now), let until = usage.liftedUntil(at: now) {
+                            SetAbout(Usage.liftedText(until))
+                        }
+                        if usage.signedIn, usage.inReserve(at: now) {
+                            ReserveLine(snapshot: usage, on: usage.liftedUntil(at: now) != nil) { try await lift($0) }
+                        }
+                        // A job of its hit the limit: no job goes to it until then.
+                        if state.isFull(at: now), let until = state.fullUntil {
+                            SetAbout("Full until \(Limits.clock(until))", color: Tokens.needs)
+                        }
+                        if state.signedIn {
+                            SetAbout(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed),
+                                     color: state.tetrix == false ? Tokens.needs : Tokens.muted)
+                        }
+                    }
+                }
+            } control: {
+                if let used = Usage.usedText(usage, now: now) { SetValue(used) }
+                buttons
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(Usage.spoken(usage, now: now))
         }
     }
 }
@@ -432,34 +505,27 @@ struct ConnectorsSettingsView: View {
 
     var body: some View {
         let groups = Connectors.groups(list, query: query)
-        Form {
-            Section {
-                HStack {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
-                    TextField("Search connectors", text: $query, prompt: Text("Search connectors"))
-                        .textFieldStyle(.plain)
-                        .labelsHidden()
-                }
-                // The runner's rows are left out while it doesn't answer: they'd be out of date.
-                if feed.runner != nil, let note = Connectors.waiting(for: feed.name, feed.connection) {
-                    Text(note).font(.caption).foregroundStyle(.orange)
-                }
-                ForEach(lists.problems, id: \.self) { problem in
-                    Text(problem).font(.caption).foregroundStyle(.red).textSelection(.enabled)
-                }
+        VStack(alignment: .leading, spacing: 8) {
+            SearchField(text: $query, prompt: "Search connectors")
+            // The runner's rows are left out while it doesn't answer: they'd be out of date.
+            if feed.runner != nil, let note = Connectors.waiting(for: feed.name, feed.connection) {
+                SetAbout(note, color: Tokens.needs).padding(.horizontal, 16)
             }
-            ForEach(groups, id: \.title) { group in
-                Section(group.title) { ForEach(group.items, content: row) }
+            ForEach(lists.problems, id: \.self) { problem in
+                SetAbout(problem, color: Tokens.danger).padding(.horizontal, 16)
             }
-            if groups.isEmpty {
-                let typed = query.trimmingCharacters(in: .whitespaces)
-                Text(typed.isEmpty ? "Nothing is set up yet." : "No connector matches “\(typed)”").foregroundStyle(.secondary)
-            }
-            Text("Each tool and Tetrix sign in through their own login: Oby never reads or shows it. Agents reach the runner's connections through Oby, never seeing their secrets.")
-                .font(.caption).foregroundStyle(.secondary)
         }
-        .formStyle(.grouped)
-        .frame(width: 460)
+        .padding(.bottom, 24)
+        ForEach(groups, id: \.title) { group in
+            SetGroup(group.title) { ForEach(group.items, content: row) }
+        }
+        if groups.isEmpty {
+            let typed = query.trimmingCharacters(in: .whitespaces)
+            Text(typed.isEmpty ? "Nothing is set up yet." : "No connector matches “\(typed)”")
+                .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.horizontal, 16).padding(.bottom, 24)
+        }
+        SetAbout("Each tool and Tetrix sign in through their own login: Oby never reads or shows it. Agents reach the runner's connections through Oby, never seeing their secrets.")
+            .padding(.horizontal, 16)
         .task { await store.refresh() }
         // Back from signing in or out, in Terminal.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -496,37 +562,43 @@ struct ConnectorsSettingsView: View {
 
     private var typedURL: String { url.trimmingCharacters(in: .whitespaces) }
 
+    /// Sangam's connector row: its mark, its name with what it does and where, how it's signed in;
+    /// at the right whether it's connected and its button.
     private func row(_ connector: Connector) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: connector.symbol)
-                .foregroundStyle(.secondary)
-                .frame(width: 20)
-                .padding(.top, 2)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(connector.name)
-                Text("\(connector.about) · \(connector.place)").font(.caption).foregroundStyle(.secondary)
-                Text(connector.how).font(.caption).foregroundStyle(connector.state == .broken ? Color.orange : Color.secondary)
-                if case .steps(let steps) = connector.way {
-                    Text(steps).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                }
-                if let problem = problems[connector.id] {
-                    Text(problem).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+        SetRow(controlOnTop: true) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: connector.symbol)
+                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
+                    .frame(width: 20)
+                    .padding(.top, 1)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(connector.name)
+                    SetAbout("\(connector.about) · \(connector.place)")
+                    SetAbout(connector.how, color: connector.state == .broken ? Tokens.needs : Tokens.muted)
+                    if case .steps(let steps) = connector.way {
+                        SetAbout(steps)
+                    }
+                    if let problem = problems[connector.id] {
+                        SetAbout(problem, color: Tokens.danger)
+                    }
                 }
             }
-            Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 6) {
-                switch connector.state {
-                case .connected: Label("Connected", systemImage: "checkmark").font(.caption)
-                case .broken: Label("Not working", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
-                case .unconfirmed: Text("Not confirmed").font(.caption).foregroundStyle(.secondary)
-                case .available: EmptyView()
-                }
-                if case .button(let label, let action) = connector.way {
-                    Button(label) { perform(action, connector) }
-                        .disabled(busy)
-                        .accessibilityLabel("\(label.replacingOccurrences(of: "…", with: "")) \(connector.name), \(connector.place)")
-                }
+        } control: {
+            switch connector.state {
+            case .connected:
+                Label("Connected", systemImage: "checkmark").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text)
+            case .broken:
+                Label("Not working", systemImage: "exclamationmark.triangle").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.needs)
+            case .unconfirmed:
+                SetValue("Not confirmed")
+            case .available: EmptyView()
+            }
+            if case .button(let label, let action) = connector.way {
+                Button(label) { perform(action, connector) }
+                    .buttonStyle(.set)
+                    .disabled(busy)
+                    .accessibilityLabel("\(label.replacingOccurrences(of: "…", with: "")) \(connector.name), \(connector.place)")
             }
         }
     }
@@ -623,6 +695,30 @@ struct ConnectorsSettingsView: View {
     }
 }
 
+/// A search over a page's rows (Sangam's `.archive-search`): 40 tall, 12 round, a 1-point line that
+/// lights up hovered or focused, the magnifier muted.
+struct SearchField: View {
+    @Binding var text: String
+    var prompt: String
+    @State private var hovering = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).accessibilityHidden(true)
+            TextField(prompt, text: $text, prompt: Text(prompt).foregroundStyle(Tokens.muted))
+                .textFieldStyle(.plain).labelsHidden()
+                .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.ink)
+                .focused($focused)
+        }
+        .padding(.horizontal, 14).frame(height: 40)
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(hovering || focused ? Tokens.fieldEdgeOn : Tokens.line))
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .animation(Tokens.fade, value: hovering || focused)
+    }
+}
+
 /// Settings › Vault: the secrets Oby keeps in the keychain, by name. Never their values: a value
 /// is typed once, into a secure field that empties when it's saved.
 struct VaultSettingsView: View {
@@ -634,22 +730,34 @@ struct VaultSettingsView: View {
     @State private var problem: String?
 
     var body: some View {
-        Form {
-            Section("Secrets") {
-                if names.isEmpty {
-                    Text("No secrets yet.").foregroundStyle(.secondary)
-                }
-                ForEach(names, id: \.self) { name in
-                    HStack {
-                        Label(name, systemImage: "key")
-                        Spacer()
-                        Button("Remove", role: .destructive) { removing = name }
-                    }
+        SetGroup("Secrets") {
+            if names.isEmpty {
+                SetRow("No secrets yet", quiet: true)
+            }
+            ForEach(names, id: \.self) { name in
+                SetRow {
+                    SetCode(name)
+                } control: {
+                    Button("Remove", role: .destructive) { removing = name }
+                        .buttonStyle(.set)
+                        .accessibilityLabel("Remove \(name)")
                 }
             }
-            Section("Add a secret") {
-                TextField("Name", text: $name, prompt: Text("staging-api-key"))
-                SecureField("Value", text: $value)
+        }
+        .onAppear { attempt {} }
+        // Kept beyond Sangam's mock: a secret can't be brought back, so macOS's confirmation first.
+        .confirmationDialog("Remove “\(removing ?? "this secret")”?",
+                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            presenting: removing) { name in
+            Button("Remove", role: .destructive) { attempt { try vault.remove(name) } }
+        } message: { _ in
+            Text("Oby deletes it from the keychain. This can’t be undone.")
+        }
+        SetGroup("Add a secret", footer: "Oby uses a secret only in its own calls, for a connection you made. No agent sees it, and the secret scan stops anything outgoing that holds it, plain or encoded.",
+                 problem: problem) {
+            SetRow("Name") { SetField("Secret name", text: $name, prompt: "staging-api-key") }
+            SetRow("Value") { SetField("Secret value", text: $value, prompt: "Typed once, never shown again", secret: true) }
+            SetRow("") {
                 Button("Add Secret") {
                     attempt {
                         try vault.add(value, as: name.trimmingCharacters(in: .whitespaces))
@@ -657,23 +765,9 @@ struct VaultSettingsView: View {
                         value = ""
                     }
                 }
+                .buttonStyle(.set)
                 .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || value.isEmpty)
             }
-            Text("Oby uses a secret only in its own calls, for a connection you made. No agent sees it, and the secret scan stops anything outgoing that holds it, plain or encoded.")
-                .font(.caption).foregroundStyle(.secondary)
-            if let problem {
-                Text(problem).font(.caption).foregroundStyle(.red)
-            }
-        }
-        .formStyle(.grouped)
-        .frame(width: 460)
-        .onAppear { attempt {} }
-        .confirmationDialog("Remove \(removing ?? "this secret")?",
-                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-                            presenting: removing) { name in
-            Button("Remove", role: .destructive) { attempt { try vault.remove(name) } }
-        } message: { _ in
-            Text("Oby deletes it from the keychain.")
         }
     }
 
@@ -707,48 +801,52 @@ struct ModelsSettingsView: View {
     @State private var cursorModels: [CursorModel] = []
     /// What the runner offers, once it has answered.
     @State private var runnerOptions: ModelOptions?
+    /// Whether the runner serves its models: obid doesn't yet (no `/v1/settings/models` routes), and
+    /// then the page is this Mac's own models, as before.
+    @State private var runnerServesModels = true
     @State private var problem: String?
 
     var body: some View {
-        Form {
-            Section("Claude Code on this Mac") {
-                Picker("Model", selection: $claudeModel) {
-                    ForEach(AgentModels.claude, id: \.0) { Text($0.1).tag($0.0) }
-                }
-                Picker("Effort", selection: $claudeEffort) {
-                    ForEach(AgentModels.claudeEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
-                }
-                Picker("Complex job effort", selection: $claudeComplexEffort) {
-                    ForEach(AgentModels.claudeEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
-                }
-            }
-            Section("Codex on this Mac") {
-                Picker("Model", selection: $codexModel) {
-                    ForEach(codexChoices, id: \.id) { Text($0.name).tag($0.id) }
-                }
-                Picker("Effort", selection: $codexEffort) {
-                    ForEach(codexEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
-                }
-                Picker("Complex job effort", selection: $codexComplexEffort) {
-                    ForEach(codexEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
+        // With obid on this Mac it runs every job: its models are the only ones (docs/mac-design.md C2).
+        if feed.local && runnerServesModels {
+            // In a stack that's always there: the sections are empty until the options arrive, and a
+            // task on an empty view never runs.
+            VStack(alignment: .leading, spacing: 0) {
+                if runnerOptions == nil || feed.models == nil {
+                    SetGroup(problem: problem) { SetRow("Waiting for the runner on this Mac…", quiet: true) }
+                } else {
+                    RunnerModelsSections(options: runnerOptions, models: feed.models, save: feed.setModels, place: "on this Mac",
+                                         footer: "New jobs on this Mac use these. Oby’s brain stays on Haiku: it plans and answers in the conversation, so it should be quick.")
                 }
             }
-            Section("Cursor on this Mac") {
-                Picker("Model", selection: $cursorModel) {
-                    ForEach(cursorChoices, id: \.id) { Text($0.name).tag($0.id) }
-                }
-            }
-            Text("New jobs on this Mac use these. Oby's brain stays on Haiku: it plans and answers in the conversation, so it should be quick.")
-                .font(.caption).foregroundStyle(.secondary)
+            .task(id: feed.connection) { await loadOptions() }
+        } else {
+            mine
             if feed.runner != nil {
                 RunnerModelsSections(options: runnerOptions, models: feed.models, save: feed.setModels, place: "on \(feed.name)")
             }
-            if let problem {
-                Text(problem).font(.caption).foregroundStyle(.red)
+        }
+    }
+
+    /// This Mac's own models, for the jobs its desk runs.
+    @ViewBuilder private var mine: some View {
+        let efforts = AgentModels.claudeEfforts.map { ($0, AgentModels.effortName($0)) }
+        SetGroup("Claude Code on this Mac") {
+            SetRow("Model") { SetSelect("Claude Code model", selection: $claudeModel, options: AgentModels.claude) }
+            SetRow("Effort") { SetSelect("Claude Code effort", selection: $claudeEffort, options: efforts) }
+            SetRow("Complex job effort") { SetSelect("Claude Code complex job effort", selection: $claudeComplexEffort, options: efforts) }
+        }
+        SetGroup("Codex on this Mac") {
+            SetRow("Model") { SetSelect("Codex model", selection: $codexModel, options: codexChoices.map { ($0.id, $0.name) }) }
+            SetRow("Effort") { SetSelect("Codex effort", selection: $codexEffort, options: codexEfforts.map { ($0, AgentModels.effortName($0)) }) }
+            SetRow("Complex job effort") {
+                SetSelect("Codex complex job effort", selection: $codexComplexEffort, options: codexEfforts.map { ($0, AgentModels.effortName($0)) })
             }
         }
-        .formStyle(.grouped)
-        .frame(width: 460)
+        SetGroup("Cursor on this Mac", footer: "New jobs on this Mac use these. Oby’s brain stays on Haiku: it plans and answers in the conversation, so it should be quick.",
+                 problem: problem) {
+            SetRow("Model") { SetSelect("Cursor model", selection: $cursorModel, options: cursorChoices.map { ($0.id, $0.name) }) }
+        }
         .task { codexModels = (try? await CodexAgent.models(home: nil)) ?? [] }
         .task {
             // Jobs run on Oby's own Cursor account: its model list, when one is signed in.
@@ -756,15 +854,27 @@ struct ModelsSettingsView: View {
             cursorModels = await CursorModels.list(home: account.account.home)
         }
         // Once the runner answers, and again after it comes back or its URL changes.
-        .task(id: feed.connection) {
-            guard feed.connection == .live, let runner = feed.runner else { return }
-            do {
-                runnerOptions = try await runner.modelOptions()
-                problem = nil
-            } catch {
-                problem = error.localizedDescription
-            }
+        .task(id: feed.connection) { await loadOptions() }
+    }
+
+    /// What the runner offers, once it answers.
+    private func loadOptions() async {
+        #if DEBUG
+        if let staged = feed.stagedOptions { runnerOptions = staged; return }
+        #endif
+        guard feed.connection == .live, let runner = feed.runner else { return }
+        do {
+            runnerOptions = try await runner.modelOptions()
+            problem = nil
+        } catch {
+            runnerServesModels = Self.servesModels(after: error)
+            problem = runnerServesModels ? error.localizedDescription : nil
         }
+    }
+
+    /// A 404 says the runner has no models to set (obid today): nothing wrong to show.
+    nonisolated static func servesModels(after error: any Error) -> Bool {
+        (error as? RunnerError)?.status != 404
     }
 
     /// The account's models, plus the chosen one while the list loads (or if the plan dropped it).

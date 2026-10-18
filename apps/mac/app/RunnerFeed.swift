@@ -187,6 +187,19 @@ final class RunnerFeed {
         conversation.lookUp = { [weak self] id in try await self?.runner?.artifact(id) }
     }
 
+    #if DEBUG
+    /// What Settings' pictures show (apps/mac/tests/WindowScreens.swift): the runner on this Mac with
+    /// made-up accounts and models, and no runner asked.
+    @ObservationIgnored var stagedOptions: ModelOptions?
+    func stage(accounts: [AccountState], models: ModelSettings, options: ModelOptions) {
+        local = true
+        self.accounts = accounts
+        self.models = models
+        stagedOptions = options
+        connection = .live
+    }
+    #endif
+
     func start() {
         follow()
         // Settings › Runner writes the URL as it's typed: follow it once the typing settles.

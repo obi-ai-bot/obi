@@ -6,16 +6,25 @@ import SwiftUI
 // titled groups with a note under them. The Mac's Settings pages are made of these, and the iPhone's
 // can be.
 
+extension EnvironmentValues {
+    /// Settings' sections both apps share (SettingsSections.swift, PermissionsSection.swift) draw as
+    /// Sangam's cards instead of a grouped form's sections: the Mac's Settings pages set it.
+    @Entry var settingsCards = false
+}
+
 /// A titled group of rows on a card, a note under it (`.set-group`, `.set-head`, `.set-card`, `.set-foot`).
-/// The rows get a divider between them, never above the first.
+/// The rows get a divider between them, never above the first. What went wrong shows under the card
+/// in `danger` (`.set-problem`), over the note.
 struct SetGroup<Content: View>: View {
     var title: String?
     var footer: String?
+    var problem: String?
     @ViewBuilder var content: Content
 
-    init(_ title: String? = nil, footer: String? = nil, @ViewBuilder content: () -> Content) {
+    init(_ title: String? = nil, footer: String? = nil, problem: String? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
         self.footer = footer
+        self.problem = problem
         self.content = content()
     }
 
@@ -42,6 +51,9 @@ struct SetGroup<Content: View>: View {
             .padding(1)
             .background(Tokens.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Tokens.surfaceEdge))
+            if let problem {
+                SetAbout(problem, color: Tokens.danger).padding(.horizontal, 16).padding(.top, 8)
+            }
             if let footer {
                 SetAbout(footer).padding(.horizontal, 16).padding(.top, 8)
             }
@@ -139,6 +151,20 @@ struct SetValue: View {
             if connected { Circle().fill(Self.dot).frame(width: 6, height: 6).accessibilityHidden(true) }
             Text(text).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).textSelection(.enabled)
         }
+    }
+}
+
+/// A name in code (`.tok-code`): a rule, a secret's name. Coral SF Mono 13 on white 8%, 4 round.
+struct SetCode: View {
+    var text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text).font(Tokens.mono(Tokens.textMd)).foregroundStyle(Tokens.code)
+            .padding(.horizontal, 3).padding(.vertical, 1)
+            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .textSelection(.enabled)
     }
 }
 

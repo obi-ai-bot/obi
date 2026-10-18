@@ -37,6 +37,8 @@ final class IslandController {
     init() {
         desk.issueSync.enabled = true
         model = IslandModel(desk: desk, feed: feed, updater: updater, availability: availability)
+        model.remote = remote
+        model.vault = .shared
         // A restart never interrupts a check this Mac runs for the runner.
         updater.busy = { [weak feed] in feed?.checks.current != nil }
     }
