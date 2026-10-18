@@ -2423,7 +2423,8 @@ impl Jobs {
         })
     }
 
-    /// A conversation's agent session (crate::brain::harness), boxed like a job's agent: it
+    /// A conversation's agent session (crate::brain::harness), `tool` (Claude Code or Codex) boxed
+    /// like a job's agent: it
     /// writes only `room` (its working folder), but not `frozen` in it (the repositories'
     /// checkouts), `temp` (its `HOME` and `TMPDIR`) and `login`, its own copy of the account's
     /// login (its `CLAUDE_CONFIG_DIR` for an account with a folder of its own, which it never
@@ -2433,6 +2434,7 @@ impl Jobs {
     #[allow(clippy::too_many_arguments)]
     pub fn conversation_launch(
         &self,
+        tool: Tool,
         account: &crate::config::Account,
         room: &Path,
         temp: &Path,
@@ -2442,7 +2444,7 @@ impl Jobs {
         stderr: PathBuf,
     ) -> Result<Launch, String> {
         self.boxed_launch(Boxed {
-            tool: Tool::Claude,
+            tool,
             account,
             dir: room,
             temp,
@@ -2508,8 +2510,22 @@ impl Jobs {
         match &account.config_dir {
             // A conversation never sees the account's own folder (every job's and conversation's
             // transcripts are in it): `login` is its own, with a copy of the login and nothing else.
+            // Codex's is its `CODEX_HOME` for any account: none of the person's `~/.codex` either
+            // (their config.toml, MCP servers, instructions).
+            _ if confined && tool == Tool::Codex => {
+                let from = account
+                    .config_dir
+                    .clone()
+                    .or_else(|| login_home().map(|home| home.join(".codex")));
+                if let Some(from) = from {
+                    copy_account_login(tool, &from, login)
+                        .map_err(|e| format!("obid can't copy Codex's login: {e}"))?;
+                }
+                spec.accounts.push(login.to_path_buf());
+                extra.push(("CODEX_HOME", login.as_os_str().to_owned()));
+            }
             Some(shared) if confined => {
-                copy_account_login(shared, login)
+                copy_account_login(tool, shared, login)
                     .map_err(|e| format!("obid can't copy Claude Code's login: {e}"))?;
                 spec.accounts.push(login.to_path_buf());
                 extra.push(("CLAUDE_CONFIG_DIR", login.as_os_str().to_owned()));
@@ -2543,8 +2559,12 @@ impl Jobs {
             }
         }
         let argv: Vec<OsString> = match tool {
-            // The brain never gets the connected-app broker.
-            Tool::Codex => codex::argv(bin, None),
+            // The brain never gets the connected-app broker; a conversation's `-c` settings come
+            // before `app-server`.
+            Tool::Codex => std::iter::once(bin.into_os_string())
+                .chain(flags)
+                .chain(["app-server".into()])
+                .collect(),
             _ => std::iter::once(bin.into_os_string()).chain(flags).collect(),
         };
         let argv = if confined {
@@ -2626,6 +2646,7 @@ impl Jobs {
                     resume: job.session.clone(),
                     model: job.model.clone(),
                     plan,
+                    instructions: None,
                 };
                 codex::run_turn(
                     launch,
@@ -4110,22 +4131,26 @@ pub(crate) fn not_a_link(folder: &Path) -> Result<(), String> {
     }
 }
 
-/// A conversation's own copy of an account's Claude Code login (crate::brain::harness): the macOS
-/// Keychain's item for the account's folder when obid copies from there, else that folder's
-/// `.credentials.json` (a regular file only), written into `to` without following a link. Nothing
-/// else of the account's folder.
-pub(crate) fn copy_account_login(account: &Path, to: &Path) -> std::io::Result<()> {
+/// A conversation's own copy of an account's login (crate::brain::harness): for Claude Code the
+/// macOS Keychain's item for the account's folder when obid copies from there, else that folder's
+/// `.credentials.json`; for Codex its `auth.json`. A regular file only, written into `to` without
+/// following a link. Nothing else of the account's folder.
+pub(crate) fn copy_account_login(tool: Tool, account: &Path, to: &Path) -> std::io::Result<()> {
     not_a_link(to).map_err(std::io::Error::other)?;
     store::make_private_dir(to)?;
-    let file = account.join(".credentials.json");
-    let bytes = match keychain_login(Some(account)) {
+    let (name, keychain) = match tool {
+        Tool::Codex => ("auth.json", None),
+        _ => (".credentials.json", keychain_login(Some(account))),
+    };
+    let file = account.join(name);
+    let bytes = match keychain {
         Some(bytes) => bytes,
         None if std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) => {
             std::fs::read(&file)?
         }
         None => return Ok(()),
     };
-    write_login(&to.join(".credentials.json"), &bytes)
+    write_login(&to.join(name), &bytes)
 }
 
 /// Before a boxed Claude Code run on an account with a folder of its own: its `.credentials.json`

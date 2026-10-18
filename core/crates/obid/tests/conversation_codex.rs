@@ -1,0 +1,341 @@
+//! Codex as a conversation's agent (docs/conversation-harness.md, step 4): `codex app-server` in
+//! the conversation's room, boxed like the Claude Code session, one thread per conversation, with
+//! the same Oby tools over MCP and the same rules. The agent here is a stand-in
+//! (tests/agents/fake-codex-harness).
+mod support;
+
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use support::*;
+
+fn agent(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/agents")
+        .join(name)
+}
+
+/// obid with conversations on Codex (the stand-in), and Claude Code's stand-in for the plan loop's
+/// brain; `signed_in` puts a login in the Codex account's folder.
+fn obid(name: &str, signed_in: bool) -> (Folder, Obid) {
+    let folder = Folder::new(name);
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &agent("fake-harness"));
+    config["conversation"] = json!({"agent": "codex"});
+    let account = folder.0.join("home/accounts/codex");
+    config["agents"]["codex"] = json!({"bin": agent("fake-codex-harness"),
+        "accounts": [{"id": "cstub", "name": "Codex stub", "configDir": account}]});
+    std::fs::create_dir_all(&account).unwrap();
+    if signed_in {
+        std::fs::write(account.join("auth.json"), "{}").unwrap();
+    }
+    let obid = start(&folder.0, &config, None);
+    (folder, obid)
+}
+
+/// Every event until Oby's turn in `conversation` (not one telling how a job ended), in order.
+fn until_oby_turn(events: &Receiver<(String, Value)>, seconds: u64) -> Vec<(String, Value)> {
+    let give_up_at = Instant::now() + Duration::from_secs(seconds);
+    let mut got = vec![];
+    loop {
+        let left = give_up_at.saturating_duration_since(Instant::now());
+        let (name, data) = events
+            .recv_timeout(left)
+            .unwrap_or_else(|_| panic!("no Oby turn within {seconds} s: {got:?}"));
+        let done = name == "turn" && data["who"] == "oby" && data["ended"] != true;
+        got.push((name, data));
+        if done {
+            return got;
+        }
+    }
+}
+
+fn said(obid: &Obid, body: Value) -> Answer {
+    let answer = call(obid, "POST", "/v1/plans", Some(&body));
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    answer
+}
+
+/// What the stand-in recorded of each turn, oldest first: in each conversation's own CODEX_HOME.
+fn turns(obid: &Obid) -> Vec<Value> {
+    let mut all: Vec<Value> = std::fs::read_dir(obid.home.join("conversations"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|entry| {
+            std::fs::read_to_string(entry.path().join("config/turns.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|l| serde_json::from_str::<Value>(l).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all.sort_by_key(|t| t["at"].as_u64());
+    all
+}
+
+fn inbox(obid: &Obid) -> Vec<Value> {
+    let inbox = call(obid, "GET", "/v1/inbox", None);
+    inbox.body.as_array().cloned().unwrap_or_default()
+}
+
+/// A turn on Codex streams its words as `delta` events, each tool item is a `step` with its tool
+/// and detail, and the turn ends with Oby's `turn`, as on Claude Code. Codex runs `app-server` in
+/// the room, its own sandbox off inside obid's, every approval obid's, with Oby's MCP server from
+/// its arguments and the turn's token only in its environment.
+#[test]
+fn a_codex_turn_streams_its_words_and_ends_in_a_turn() {
+    let (_folder, obid) = obid("codex-conv-stream", true);
+    let events = follow_events(&obid);
+    let answer = said(&obid, json!({"said": "HELLO", "new": true}));
+    let conversation = answer.body["conversation"].as_str().unwrap().to_owned();
+    assert_eq!(answer.body["kind"], "reply", "{}", answer.text);
+    assert_eq!(answer.body["text"], "Hello there.", "{}", answer.text);
+
+    let seen = until_oby_turn(&events, 30);
+    let deltas: Vec<&Value> = seen
+        .iter()
+        .filter(|(n, _)| n == "delta")
+        .map(|(_, d)| d)
+        .collect();
+    assert!(deltas.len() >= 2, "{seen:?}");
+    assert!(
+        deltas
+            .iter()
+            .all(|d| d["conversation"] == conversation.as_str())
+    );
+    let streamed: String = deltas.iter().map(|d| d["text"].as_str().unwrap()).collect();
+    assert_eq!(streamed, "Hello there.");
+    let steps: Vec<&Value> = seen
+        .iter()
+        .filter(|(n, d)| n == "step" && d["tool"].is_string())
+        .map(|(_, d)| d)
+        .collect();
+    assert_eq!(steps.len(), 2, "{seen:?}");
+    assert_eq!(steps[0]["tool"], "read");
+    assert_eq!(steps[0]["detail"], "notes.md");
+    assert_eq!(steps[0]["state"], "running");
+    assert_eq!(steps[1]["state"], "done");
+    let (_, last) = seen.last().unwrap();
+    assert_eq!(last["text"], "Hello there.");
+
+    let recorded = turns(&obid);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    let argv: Vec<&str> = recorded[0]["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    assert_eq!(argv.last(), Some(&"app-server"), "{argv:?}");
+    assert!(
+        argv.iter().any(|a| a.starts_with("mcp_servers.oby.url=")
+            && a.ends_with(&format!("/v1/agent/mcp/conversation-{conversation}\""))),
+        "{argv:?}"
+    );
+    assert!(
+        argv.contains(&r#"mcp_servers.oby.bearer_token_env_var="OBY_MCP_TOKEN""#),
+        "{argv:?}"
+    );
+    assert!(argv.contains(&r#"web_search="live""#), "{argv:?}");
+    assert!(recorded[0]["resumed"].is_null());
+    assert_eq!(recorded[0]["sandbox"], "danger-full-access");
+    assert_eq!(recorded[0]["approvalPolicy"], "untrusted");
+    assert!(
+        recorded[0]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("oby_dispatch"),
+        "{recorded:?}"
+    );
+    let folder = obid.home.join(format!("conversations/{conversation}"));
+    assert_eq!(
+        Path::new(recorded[0]["cwd"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        folder.join("room").canonicalize().unwrap()
+    );
+    // Its CODEX_HOME is the conversation's own, with a copy of the account's login and nothing
+    // else of the account's; the copy goes when the turn ends.
+    assert_eq!(
+        recorded[0]["codexHome"].as_str().map(PathBuf::from),
+        Some(folder.join("config"))
+    );
+    // (`threads` is the stand-in's own, made when its thread started.)
+    assert_eq!(
+        recorded[0]["holds"],
+        json!(["auth.json", "threads"]),
+        "{recorded:?}"
+    );
+    assert!(!folder.join("config/auth.json").exists());
+}
+
+/// What a turn leaves for the next Codex to load (its settings, instructions) is gone before the
+/// next run.
+#[test]
+fn what_codex_plants_for_its_next_run_is_taken_out() {
+    let (_folder, obid) = obid("codex-conv-scrub", true);
+    let planted = said(&obid, json!({"said": "PLANT", "new": true}));
+    let conversation = planted.body["conversation"].as_str().unwrap().to_owned();
+    assert_eq!(planted.body["text"], "planted", "{}", planted.text);
+    let look = said(&obid, json!({"said": "LOOK", "conversation": conversation}));
+    assert_eq!(look.body["text"], "look: nothing", "{}", look.text);
+}
+
+/// Work planned after Codex searched the web waits for the owner's Start, as on Claude Code.
+#[test]
+fn work_codex_plans_after_the_web_waits_for_the_owners_start() {
+    let (_folder, obid) = obid("codex-conv-web", true);
+    let answer = said(
+        &obid,
+        json!({"said": r#"WEB OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#,
+               "new": true}),
+    );
+    assert_eq!(answer.body["jobs"], json!([]), "{}", answer.text);
+    assert!(
+        answer.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("waiting in your inbox"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(
+        inbox(&obid).iter().filter(|i| i["kind"] == "start").count(),
+        1
+    );
+}
+
+/// Later turns resume the conversation's own thread, also after obid restarts.
+#[test]
+fn a_codex_conversation_resumes_its_thread() {
+    let (folder, obid) = obid("codex-conv-resume", true);
+    let first = said(&obid, json!({"said": "HELLO", "new": true}));
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    let session = obid
+        .home
+        .join(format!("conversations/{conversation}/session.json"));
+    let kept: Value = serde_json::from_slice(&std::fs::read(&session).unwrap()).unwrap();
+    let id = kept["session"].as_str().unwrap().to_owned();
+    assert_eq!(kept["account"], "cstub");
+    let again = said(
+        &obid,
+        json!({"said": "REMEMBER", "conversation": conversation}),
+    );
+    assert_eq!(again.body["text"], format!("resume={id}"), "{}", again.text);
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(folder.0.join("config.json")).unwrap()).unwrap();
+    drop(obid);
+    let restarted = start(&folder.0, &config, None);
+    let after = said(
+        &restarted,
+        json!({"said": "REMEMBER", "conversation": conversation}),
+    );
+    assert_eq!(after.body["text"], format!("resume={id}"), "{}", after.text);
+    let other = said(&restarted, json!({"said": "REMEMBER", "new": true}));
+    assert_eq!(other.body["text"], "resume=none", "{}", other.text);
+}
+
+/// Codex gets the same Oby tools: oby_dispatch, approved by obid's rule, starts a job whose card
+/// is on the turn. Another MCP server's tool is declined.
+#[test]
+fn oby_dispatch_through_codex_starts_a_job() {
+    let (_folder, obid) = obid("codex-conv-dispatch", true);
+    let events = follow_events(&obid);
+    let tools = said(&obid, json!({"said": "TOOLS", "new": true}));
+    let conversation = tools.body["conversation"].as_str().unwrap().to_owned();
+    assert_eq!(
+        tools.body["text"],
+        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_inbox,oby_answer,oby_conversations",
+        "{}",
+        tools.text
+    );
+    let _ = until_oby_turn(&events, 30);
+
+    let answer = said(
+        &obid,
+        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build", "title": "Greeting"}"#,
+               "conversation": conversation}),
+    );
+    let jobs = answer.body["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1, "{}", answer.text);
+    assert_eq!(jobs[0]["conversation"], conversation.as_str());
+    let id = jobs[0]["id"].as_str().unwrap();
+    let seen = until_oby_turn(&events, 30);
+    let (_, turn) = seen.last().unwrap();
+    assert_eq!(turn["jobs"], json!([id]));
+    let dispatch: Vec<&Value> = seen
+        .iter()
+        .filter(|(n, d)| n == "step" && d["tool"] == "oby_dispatch")
+        .map(|(_, d)| d)
+        .collect();
+    assert_eq!(dispatch.len(), 2, "{seen:?}");
+    assert_eq!(dispatch[0]["detail"], "obi-e2e/fixture-app");
+    assert_eq!(dispatch[1]["state"], "done");
+
+    let elsewhere = said(
+        &obid,
+        json!({"said": "ELSEWHERE", "conversation": conversation}),
+    );
+    assert_eq!(
+        elsewhere.body["text"], "elsewhere: declined (decline)",
+        "{}",
+        elsewhere.text
+    );
+    // An approval for a tool that wasn't called is declined.
+    let misnamed = said(
+        &obid,
+        json!({"said": "MISNAMED", "conversation": conversation}),
+    );
+    assert_eq!(
+        misnamed.body["text"], "misnamed: declined (decline)",
+        "{}",
+        misnamed.text
+    );
+}
+
+/// Codex's approvals are answered by the conversation's own rule: inside the room yes, outside and
+/// in repos/ no, secrets no, and never the owner's to answer.
+#[test]
+fn codex_approvals_follow_the_conversation_rule() {
+    let (_folder, obid) = obid("codex-conv-perms", true);
+    let perms = said(&obid, json!({"said": "PERMS", "new": true}));
+    assert_eq!(
+        perms.body["text"], "perms: inside=accept outside=decline repos=decline secret=decline",
+        "{}",
+        perms.text
+    );
+    assert_eq!(
+        inbox(&obid),
+        Vec::<Value>::new(),
+        "the owner is never asked mid-turn"
+    );
+}
+
+/// With no Codex account signed in, or a thread that fails twice, the plan loop answers, and says
+/// so in one line.
+#[test]
+fn the_plan_loop_answers_when_codex_cant_run() {
+    let (_folder, obid) = obid("codex-conv-fallback", false);
+    let answer = said(&obid, json!({"said": "HELLO", "new": true}));
+    assert_eq!(
+        answer.body["text"],
+        "Fine.\n(Oby's plan loop answered: no Codex account is signed in for conversations.)",
+        "{}",
+        answer.text
+    );
+    assert!(turns(&obid).is_empty());
+
+    std::fs::write(obid.home.join("accounts/codex/auth.json"), "{}").unwrap();
+    // Neither run saw the account's own folder.
+    assert!(!obid.home.join("accounts/codex/turns.jsonl").exists());
+    let failed = said(&obid, json!({"said": "FAIL", "new": true}));
+    assert_eq!(
+        failed.body["text"], "Fine.\n(Oby's plan loop answered: its agent session failed twice.)",
+        "{}",
+        failed.text
+    );
+    assert_eq!(turns(&obid).len(), 2);
+}

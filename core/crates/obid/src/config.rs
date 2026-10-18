@@ -90,10 +90,12 @@ struct File {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ConversationSetting {
-    /// `claude` (an agent session, the default) or `plan` (obid's plan loop only).
+    /// `claude` (a Claude Code session, the default), `codex` (a Codex thread) or `plan` (obid's
+    /// plan loop only).
     #[serde(default)]
     agent: Option<String>,
-    /// Claude Code's model for conversations; left out, [`CONVERSATION_MODEL`].
+    /// The agent's model for conversations; left out, [`CONVERSATION_MODEL`] on Claude Code and
+    /// Codex's own on Codex.
     #[serde(default)]
     model: Option<String>,
     /// How long one turn may take, in seconds: 10 to 3,600, 600 when left out.
@@ -107,9 +109,12 @@ pub const CONVERSATION_MODEL: &str = "claude-sonnet-5-5";
 /// How conversations run (docs/runner-api.md, "obid only: the conversation harness").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conversation {
-    /// True: each conversation is a Claude Code session in its room (the default); false: obid's
+    /// True: each conversation is an agent session in its room (the default); false: obid's
     /// plan loop answers (`"agent": "plan"`).
     pub harness: bool,
+    /// The session's agent: Claude Code (the default) or Codex.
+    pub agent: crate::agent::Tool,
+    /// Its model; empty for Codex's own.
     pub model: String,
     /// One turn's budget: 10 minutes unless `budget` says otherwise. Stop ends it sooner.
     pub budget: std::time::Duration,
@@ -395,27 +400,33 @@ impl Config {
         }
 
         let setting = file.conversation.as_ref();
-        let harness = match setting.and_then(|c| c.agent.as_deref()) {
-            None | Some("claude") => true,
-            Some("plan") => false,
+        use crate::agent::Tool;
+        let (harness, agent) = match setting.and_then(|c| c.agent.as_deref()) {
+            None | Some("claude") => (true, Tool::Claude),
+            Some("codex") => (true, Tool::Codex),
+            Some("plan") => (false, Tool::Claude),
             Some(other) => {
                 return invalid(format!(
-                    "conversation.agent is {other:?}: it is \"claude\" or \"plan\"."
+                    "conversation.agent is {other:?}: it is \"claude\", \"codex\" or \"plan\"."
                 ));
             }
         };
-        let model = setting
-            .and_then(|c| c.model.clone())
-            .unwrap_or_else(|| CONVERSATION_MODEL.to_owned());
-        if model.is_empty()
-            || model.len() > 64
+        let model = match setting.and_then(|c| c.model.clone()) {
+            Some(model) => model,
+            // Codex's own model when none is named.
+            None if agent == Tool::Codex => String::new(),
+            None => CONVERSATION_MODEL.to_owned(),
+        };
+        let named = setting.is_some_and(|c| c.model.is_some()) || agent == Tool::Claude;
+        if (named && model.is_empty())
             || model.starts_with('-')
+            || model.len() > 64
             || !model
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"-._[]".contains(&b))
         {
             return invalid(format!(
-                "conversation.model is {model:?}: it is one of Claude Code's model names, like {CONVERSATION_MODEL}."
+                "conversation.model is {model:?}: it is one of the agent's model names, like {CONVERSATION_MODEL}."
             ));
         }
         let budget = setting.and_then(|c| c.budget).unwrap_or(600);
@@ -442,6 +453,7 @@ impl Config {
             claude_keychain: file.claude_keychain,
             conversation: Conversation {
                 harness,
+                agent,
                 model,
                 budget: std::time::Duration::from_secs(budget),
             },
@@ -669,12 +681,24 @@ mod tests {
         let config = Config::parse(&set).unwrap();
         assert!(!config.conversation.harness);
         assert_eq!(config.conversation.model, "claude-opus-5-5");
+        let codex = Config::parse(&with(
+            serde_json::json!({"conversation": {"agent": "codex"}}),
+        ))
+        .unwrap()
+        .conversation;
+        assert!(codex.harness);
+        assert_eq!(codex.agent, crate::agent::Tool::Codex);
+        assert_eq!(codex.model, "", "Codex's own model");
         assert_eq!(
             config.conversation.budget,
             std::time::Duration::from_secs(60)
         );
         for (wrong, field) in [
-            (serde_json::json!({"agent": "codex"}), "conversation.agent"),
+            (serde_json::json!({"agent": "cursor"}), "conversation.agent"),
+            (
+                serde_json::json!({"agent": "codex", "model": ""}),
+                "conversation.model",
+            ),
             (
                 serde_json::json!({"model": "--dangerously"}),
                 "conversation.model",

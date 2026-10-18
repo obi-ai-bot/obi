@@ -29,6 +29,9 @@ pub struct Options {
     pub model: Option<String>,
     /// The job is in Plan mode: Codex reads and plans, and obid declines its file changes.
     pub plan: bool,
+    /// What the thread is told after Codex's own instructions (`developerInstructions`): a
+    /// conversation's orientation.
+    pub instructions: Option<String>,
 }
 
 /// The `command` line `codex app-server` runs as: the binary, then `app-server`.
@@ -66,6 +69,7 @@ pub async fn run_turn(
         worktree: launch.cwd.clone(),
         plan: options.plan,
         files: HashMap::new(),
+        calls: HashMap::new(),
         thread: None,
         turn: None,
         said: None,
@@ -123,6 +127,9 @@ struct Run<D, E> {
     plan: bool,
     /// The files each file change writes, by item id: an approval request names only the item.
     files: HashMap<String, Vec<String>>,
+    /// The MCP tools each server was called for this turn, as their items started: the approval
+    /// Codex asks names the tool only in its words.
+    calls: HashMap<String, Vec<(String, Value)>>,
     thread: Option<String>,
     /// The turn under way.
     turn: Option<String>,
@@ -145,6 +152,9 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
 
         let cwd = self.worktree.to_string_lossy().into_owned();
         let mut params = thread_params(&cwd);
+        if let Some(instructions) = &options.instructions {
+            params["developerInstructions"] = json!(instructions);
+        }
         let (method, what) = match &options.resume {
             Some(thread) => {
                 params["threadId"] = json!(thread);
@@ -207,16 +217,45 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         {
             return;
         }
+        let item = &params["item"];
         match message["method"].as_str() {
             Some("item/started") => {
-                if let Some(step) = step(&params["item"]) {
+                if let Some(step) = step(item) {
                     (self.on_event)(Event::Step(step));
                 }
+                if item["type"] == "mcpToolCall"
+                    && let (Some(server), Some(tool)) =
+                        (item["server"].as_str(), item["tool"].as_str())
+                {
+                    self.calls
+                        .entry(server.to_owned())
+                        .or_default()
+                        .push((tool.to_owned(), item["arguments"].clone()));
+                }
+                if let Some((name, input)) = tool_call(item) {
+                    (self.on_event)(Event::Tool {
+                        id: item["id"].as_str().unwrap_or("").to_owned(),
+                        name,
+                        input,
+                    });
+                }
             }
-            Some("item/completed") if params["item"]["type"] == "agentMessage" => {
-                if let Some(said) = params["item"]["text"].as_str().filter(|s| !s.is_empty()) {
+            Some("item/agentMessage/delta") => {
+                if let Some(delta) = params["delta"].as_str().filter(|d| !d.is_empty()) {
+                    (self.on_event)(Event::Delta(delta.to_owned()));
+                }
+            }
+            Some("item/completed") if item["type"] == "agentMessage" => {
+                if let Some(said) = item["text"].as_str().filter(|s| !s.is_empty()) {
                     self.said = Some(said.to_owned());
                 }
+            }
+            Some("item/completed") if tool_call(item).is_some() => {
+                (self.on_event)(Event::ToolDone {
+                    id: item["id"].as_str().unwrap_or("").to_owned(),
+                    failed: ["failed", "declined"].contains(&item["status"].as_str().unwrap_or(""))
+                        || !item["error"].is_null(),
+                });
             }
             Some("turn/completed") => {
                 self.ended = Some(finished(&params["turn"], self.said.as_deref()));
@@ -263,6 +302,49 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                     .into_iter()
                     .map(|path| ("Edit".to_owned(), json!({"file_path": path})))
                     .collect()
+            }
+            // Codex asks before an MCP tool runs: the tool its words name (`Allow the oby MCP
+            // server to run tool "oby_job"?`), when its server was called for it this turn, with
+            // the arguments it will run with.
+            Some("mcpServer/elicitation/request")
+                if params["_meta"]["codex_approval_kind"] == "mcp_tool_call" =>
+            {
+                let server = params["serverName"].as_str().unwrap_or("");
+                let named = params["message"]
+                    .as_str()
+                    .and_then(|m| m.split_once("tool \""))
+                    .and_then(|(_, rest)| rest.rsplit_once('"'))
+                    .map(|(tool, _)| tool);
+                let call = self
+                    .calls
+                    .get(server)
+                    .and_then(|calls| calls.iter().rfind(|(tool, _)| Some(tool.as_str()) == named));
+                let answer = match call.cloned() {
+                    Some((tool, arguments)) => {
+                        let input = match &params["_meta"]["tool_params"] {
+                            Value::Object(_) => params["_meta"]["tool_params"].clone(),
+                            _ => arguments,
+                        };
+                        let ruling = (self.decide)(&format!("mcp__{server}__{tool}"), &input);
+                        match self.conn.settle(ruling).await {
+                            Ok(answer) => answer,
+                            Err(_) => return,
+                        }
+                    }
+                    None => Answer::Deny("obid couldn't see which tool this runs.".into()),
+                };
+                if let Answer::Deny(why) = &answer {
+                    (self.on_event)(Event::Denied(why.clone()));
+                }
+                let action = if answer == Answer::Allow {
+                    "accept"
+                } else {
+                    "decline"
+                };
+                return self
+                    .conn
+                    .reply(&id, json!({"action": action, "content": {}}))
+                    .await;
             }
             _ => return self.conn.refuse(&id).await,
         };
@@ -366,44 +448,67 @@ fn changes(message: &Value) -> Option<(String, Vec<String>)> {
 /// What Codex is doing, in the same words as Claude Code's steps.
 pub fn step(item: &Value) -> Option<String> {
     match item["type"].as_str()? {
+        "fileChange" if files(item).len() != 1 => {
+            Some(format!("Editing {} files", files(item).len()))
+        }
+        "mcpToolCall" => Some(agent::step(
+            item["tool"].as_str().unwrap_or("a tool"),
+            &json!({}),
+        )),
+        _ => tool_call(item).map(|(name, input)| agent::step(&name, &input)),
+    }
+}
+
+/// A tool item as the Claude Code tool call it is (its name and input), so a conversation shows
+/// and rules on it the same whichever agent runs it: a command that only reads, searches or lists
+/// is `Read`, `Grep` or `Glob`, any other `Bash`; a file change `Edit` (its first file); an MCP
+/// tool `mcp__<server>__<tool>`; a web search `WebSearch`; a helper `Agent`.
+pub fn tool_call(item: &Value) -> Option<(String, Value)> {
+    let call = |name: &str, input: Value| Some((name.to_owned(), input));
+    match item["type"].as_str()? {
         "commandExecution" => {
             if let Some([action]) = item["commandActions"].as_array().map(Vec::as_slice) {
                 match action["type"].as_str() {
                     Some("read") => {
-                        return Some(agent::step(
+                        return call(
                             "Read",
-                            &json!({"file_path": action["path"].as_str().unwrap_or("")}),
-                        ));
+                            json!({"file_path": action["path"].as_str().unwrap_or("")}),
+                        );
                     }
                     Some("search") => {
                         let input = match action["query"].as_str() {
                             Some(query) => json!({"pattern": query}),
                             None => json!({}),
                         };
-                        return Some(agent::step("Grep", &input));
+                        return call("Grep", input);
                     }
-                    Some("listFiles") => return Some(agent::step("Glob", &json!({}))),
+                    Some("listFiles") => return call("Glob", json!({})),
                     _ => {}
                 }
             }
             let command = command_of(&item["command"]).unwrap_or_default();
-            Some(agent::step(
-                "Bash",
-                &json!({"command": unwrap_shell(&command)}),
-            ))
+            call("Bash", json!({"command": unwrap_shell(&command)}))
         }
-        "fileChange" => {
-            let paths = files(item);
-            Some(match paths.as_slice() {
-                [one] => agent::step("Edit", &json!({"file_path": one})),
-                many => format!("Editing {} files", many.len()),
-            })
-        }
-        "mcpToolCall" => Some(agent::step(
-            item["tool"].as_str().unwrap_or("a tool"),
-            &json!({}),
+        "fileChange" => call(
+            "Edit",
+            json!({"file_path": files(item).first().cloned().unwrap_or_default()}),
+        ),
+        "mcpToolCall" => Some((
+            format!(
+                "mcp__{}__{}",
+                item["server"].as_str().unwrap_or(""),
+                item["tool"].as_str().unwrap_or("")
+            ),
+            item["arguments"].clone(),
         )),
-        "webSearch" => Some(agent::step("WebSearch", &json!({}))),
+        "webSearch" => call(
+            "WebSearch",
+            json!({"query": item["query"].as_str().unwrap_or("")}),
+        ),
+        "collabAgentToolCall" => call(
+            "Agent",
+            json!({"description": item["prompt"].as_str().unwrap_or("").lines().next().unwrap_or("")}),
+        ),
         _ => None,
     }
 }
@@ -509,6 +614,34 @@ mod tests {
             Some("Editing 2 files".into())
         );
         assert_eq!(step(&json!({"type": "reasoning"})), None);
+    }
+
+    /// A conversation shows Codex's items as the Claude Code tool calls they are.
+    #[test]
+    fn items_are_the_tool_calls_they_are() {
+        let call = |item: Value| tool_call(&item).unwrap();
+        assert_eq!(
+            call(
+                json!({"type": "commandExecution", "command": "/bin/zsh -lc 'cat a'",
+                        "commandActions": [{"type": "read", "path": "/r/a"}]})
+            ),
+            ("Read".into(), json!({"file_path": "/r/a"}))
+        );
+        assert_eq!(
+            call(json!({"type": "commandExecution", "command": "/bin/zsh -lc 'ls && rm x'"})),
+            ("Bash".into(), json!({"command": "ls && rm x"}))
+        );
+        assert_eq!(
+            call(
+                json!({"type": "mcpToolCall", "server": "oby", "tool": "oby_job", "arguments": {"id": "j1"}})
+            ),
+            ("mcp__oby__oby_job".into(), json!({"id": "j1"}))
+        );
+        assert_eq!(
+            call(json!({"type": "webSearch", "query": "rust"})),
+            ("WebSearch".into(), json!({"query": "rust"}))
+        );
+        assert_eq!(tool_call(&json!({"type": "agentMessage"})), None);
     }
 
     #[test]
