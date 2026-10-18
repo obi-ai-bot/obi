@@ -522,6 +522,8 @@ const NOTICES: &[&str] = &[
     "thread/settings/updated",
     "thread/tokenUsage/updated",
     "thread/compacted",
+    "thread/queue/changed",
+    "thread/closed",
     "turn/started",
     "turn/completed",
     "turn/diff/updated",
@@ -574,6 +576,8 @@ fn ran_outside(message: &Value) -> Option<String> {
         // An item's own news (`item/agentMessage/delta`): its kind, from the method.
         ["item", kind, _] if ITEMS.contains(&kind) => {}
         _ if NOTICES.contains(&method) => {}
+        // Codex says at start whether something remote drives it: only "nobody" passes.
+        ["remoteControl", "status", "changed"] if message["params"]["status"] == "disabled" => {}
         _ => return Some(format!("Codex sent {method}")),
     }
     if item["type"] == "mcpToolCall" {
@@ -870,6 +874,8 @@ exec sleep 30
             "item/mcpToolCall/progress",
             "account/rateLimits/updated",
             "serverRequest/resolved",
+            "thread/queue/changed",
+            "thread/closed",
         ] {
             assert_eq!(ran_outside(&notice(method)), None, "{method}");
         }
@@ -908,6 +914,15 @@ exec sleep 30
                 ran_outside(&notice(method)),
                 Some(format!("Codex sent {method}")),
                 "{method}"
+            );
+        }
+        let remote = |status: &str| json!({"method": "remoteControl/status/changed", "params": {"status": status}});
+        assert_eq!(ran_outside(&remote("disabled")), None);
+        for status in ["connecting", "connected", "errored"] {
+            assert_eq!(
+                ran_outside(&remote(status)),
+                Some("Codex sent remoteControl/status/changed".into()),
+                "{status}"
             );
         }
         assert_eq!(

@@ -388,9 +388,9 @@ fn what_a_conversation_may_do_ends_no_codex_turn() {
 #[test]
 fn codex_that_keeps_a_feature_on_is_refused() {
     for (bin, feature) in [
-        ("fake-codex-shell-on", "shell_tool"),
-        ("fake-codex-hooks-on", "hooks"),
-        ("fake-codex-imagegen-on", "image_generation"),
+        ("fake-codex-on-shell_tool", "shell_tool"),
+        ("fake-codex-on-hooks", "hooks"),
+        ("fake-codex-on-image_generation", "image_generation"),
     ] {
         let (_folder, obid) = obid_with(&format!("codex-conv-{feature}"), true, bin, None);
         let answer = said(&obid, json!({"said": "HELLO", "new": true}));

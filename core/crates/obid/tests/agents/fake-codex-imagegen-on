@@ -1,3 +1,0 @@
-#!/bin/sh
-# fake-codex-harness as a Codex whose image generation stays on whatever -c says (a renamed setting).
-FAKE_CODEX_STAYS_ON=image_generation exec "$(dirname "$0")/fake-codex-harness" "$@"

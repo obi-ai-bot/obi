@@ -340,7 +340,7 @@ impl Place {
         remove_in(&self.temp, &[".agents", ".codex"]);
         // A shell's start-up files in its HOME, which a shell (Codex's snapshot of one, too)
         // sources outside obid's view: zsh's, bash's (every `.bash*`), sh's, csh's and tcsh's,
-        // ksh's and fish's.
+        // ksh's, mksh's and fish's.
         remove_in(
             &self.temp,
             &[
@@ -353,7 +353,9 @@ impl Place {
                 ".cshrc",
                 ".tcshrc",
                 ".login",
+                ".logout",
                 ".kshrc",
+                ".mkshrc",
             ],
         );
         let bash: Vec<String> = std::fs::read_dir(&self.temp)

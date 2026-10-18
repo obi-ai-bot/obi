@@ -35,14 +35,15 @@
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable, or
 // obid's API token, and when a thread isn't danger-full-access with untrusted approvals.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 
 const argv = process.argv.slice(2);
-// `features list`, as Codex prints it: a feature off when the -c settings turn it off, unless
-// FAKE_CODEX_STAYS_ON names it (a Codex that ignores the setting). Run in the conversation's box,
-// it sees the login copy in its CODEX_HOME.
+// `features list`, as Codex prints it: a feature off when the -c settings turn it off, unless it
+// was run by a link named `fake-codex-on-<feature>` (a Codex that ignores the setting). A link, not
+// a script that runs this one: the box lets a Codex outside the home read its own file only, not
+// the folder it's in. Run in the conversation's box, it sees the login copy in its CODEX_HOME.
 if (argv.slice(-2).join(" ") === "features list") {
   // As Codex 0.162.1: a CODEX_HOME that isn't there is an error.
   if (process.env.CODEX_HOME && !existsSync(process.env.CODEX_HOME)) {
@@ -53,7 +54,8 @@ if (argv.slice(-2).join(" ") === "features list") {
     process.stderr.write("fake-codex-harness: features list ran without the run's login copy\n");
     process.exit(1);
   }
-  const off = (name) => argv.includes(`features.${name}=false`) && name !== process.env.FAKE_CODEX_STAYS_ON;
+  const stays = basename(process.argv[1]).match(/^fake-codex-on-(.+)$/)?.[1];
+  const off = (name) => argv.includes(`features.${name}=false`) && name !== stays;
   for (const name of ["apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access", "code_mode_host", "computer_use",
                       "daemon_auto_start", "hooks", "image_generation", "in_app_browser", "in_app_local_automation", "multi_agent", "plugins",
                       "shell_snapshot", "shell_tool", "skill_mcp_dependency_install", "unified_exec", "view_image",
@@ -172,7 +174,8 @@ async function act(turnId, words) {
     mkdirSync(join(user, ".config/fish"), { recursive: true });
     for (const file of [join(home, "config.toml"), join(home, "AGENTS.md"), join(room, "AGENTS.md"), join(user, ".zshrc"),
                         join(user, ".zshenv"), join(user, ".bash_profile"), join(user, ".profile"), join(user, ".config/fish/config.fish"),
-                        join(user, ".cshrc"), join(user, ".tcshrc"), join(user, ".login"), join(user, ".kshrc")])
+                        join(user, ".cshrc"), join(user, ".tcshrc"), join(user, ".login"), join(user, ".logout"), join(user, ".kshrc"),
+                        join(user, ".mkshrc")])
       writeFileSync(file, "planted\n");
     return say(turnId, "planted");
   }
@@ -189,7 +192,8 @@ async function act(turnId, words) {
     const there = [["home/config.toml", join(home, "config.toml")], ["home/AGENTS.md", join(home, "AGENTS.md")], ["room/AGENTS.md", join(room, "AGENTS.md")],
                    ["~/.zshrc", join(user, ".zshrc")], ["~/.zshenv", join(user, ".zshenv")], ["~/.bash_profile", join(user, ".bash_profile")],
                    ["~/.profile", join(user, ".profile")], ["~/.config/fish", join(user, ".config/fish")], ["~/.cshrc", join(user, ".cshrc")],
-                   ["~/.tcshrc", join(user, ".tcshrc")], ["~/.login", join(user, ".login")], ["~/.kshrc", join(user, ".kshrc")]]
+                   ["~/.tcshrc", join(user, ".tcshrc")], ["~/.login", join(user, ".login")], ["~/.logout", join(user, ".logout")],
+                   ["~/.kshrc", join(user, ".kshrc")], ["~/.mkshrc", join(user, ".mkshrc")]]
       .filter(([, file]) => existsSync(file)).map(([name]) => name);
     return say(turnId, `look: ${there.join(",") || "nothing"}`);
   }
