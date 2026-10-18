@@ -24,9 +24,12 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     var voice: Bool?
     /// Longer Markdown answer beneath Oby's short spoken reply; never sent to speech.
     var details: String?
+    /// The conversation it's in, read from obid (#493); nil from a runner with one thread and on
+    /// this Mac's own turns.
+    var conversation: String?
 
     init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String,
-         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil) {
+         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil, conversation: String? = nil) {
         self.id = id
         self.date = date
         self.who = who
@@ -34,6 +37,7 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
         self.jobs = jobs
         self.voice = voice
         self.details = details
+        self.conversation = conversation
     }
 }
 
