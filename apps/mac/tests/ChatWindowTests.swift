@@ -154,6 +154,15 @@ struct ChatWindowTests {
         #expect(window.firstResponder === editor)
     }
 
+    /// The window's voice button (AGENTS.md): what a click heard is a draft after what's typed,
+    /// never sent, and one click listens at most 60 seconds.
+    @Test func whatTheVoiceButtonHeardIsADraft() {
+        #expect(MessageBox.draft("", adding: " add a test ") == "add a test")
+        #expect(MessageBox.draft("Please", adding: "add a test") == "Please add a test")
+        #expect(MessageBox.draft("Please ", adding: "") == "Please ")
+        #expect(MessageBox.listenLimit == .seconds(60))
+    }
+
     @Test func decisionsAttachToTheirJobEvenAfterOtherTurns() {
         let turns = [Turn(id: "start", date: now, who: .oby, text: "Starting", jobs: ["job"]),
                      Turn(id: "later", date: now + 60, who: .user, text: "Another question")]

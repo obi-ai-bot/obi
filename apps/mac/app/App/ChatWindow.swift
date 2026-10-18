@@ -347,7 +347,8 @@ private struct HomeView: View {
         MessageBox(text: $text, focused: $typing, tray: model.tray,
                    placeholder: HomeLine.placeholder(fullName: NSFullUserName()),
                    maximumHeight: height * 0.5, focusRequest: state.homeFocusRequest,
-                   onSend: ask, onScreenshot: screenshot, onStop: { false }, usage: model.usageRows)
+                   onSend: ask, onScreenshot: screenshot, onStop: { false }, usage: model.usageRows,
+                       voice: model.voice, talkKeyListening: model.listening)
             .frame(maxWidth: Tokens.homeBox - 2 * Tokens.gutter)
             .padding(.horizontal, Tokens.gutter).padding(.bottom, Tokens.gutter)
     }
