@@ -5796,10 +5796,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A routine job's first round thinks with Sonnet at low effort: one-line changes waited 11
-    /// to 17 seconds on Opus. Its later rounds (a failed check, the owner's words), a complex job
-    /// and a job that names its model keep theirs.
-
     /// A job from before modes is in Bypass; a mode this obid can't read asks (security review
     /// of #586, S4).
     #[test]
