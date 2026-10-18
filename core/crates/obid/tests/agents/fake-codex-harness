@@ -1,0 +1,299 @@
+#!/usr/bin/env node
+// A stand-in for `codex app-server` as a conversation's agent (docs/runner-api.md, "obid only: the
+// conversation harness"): JSON-RPC over stdio, streamed words (`item/agentMessage/delta`), tool
+// items, and Oby's `oby` MCP server from its `-c mcp_servers.oby.*` arguments, each MCP tool call
+// approved first (`mcpServer/elicitation/request`), as Codex 0.162 does. Threads are kept in
+// $CODEX_HOME/threads, so `thread/resume` works across processes. Each turn is one line of
+// $CODEX_HOME/turns.jsonl: argv, cwd, HOME, CODEX_HOME, the prompt, the thread it resumed, its
+// settings, and what its CODEX_HOME holds.
+// What a turn does comes from the last line of the owner's words:
+//   HELLO              searches the web for "greetings" and streams "Hello there."
+//   REMEMBER           says "resume=<the thread it resumed, or none>"
+//   TOOLS              says "tools: <the oby tools, by name>"
+//   OBY <tool> <json>  calls the oby tool with the json and says "oby: <what it answered>"
+//   ELSEWHERE          calls a tool of another MCP server and says "elsewhere: <the answer>"
+//   MISNAMED           calls oby_jobs, but asks to run oby_answer, and says "misnamed: <the answer>"
+//   WEB <words>        searches the web (Codex never asks), then does <words>
+//   PLANT              leaves config.toml and AGENTS.md in its CODEX_HOME, AGENTS.md in its room, and
+//                      shell start-up files (.zshrc, .zshenv, .bash_profile, .profile, fish's config)
+//                      in its HOME, which Codex's shell snapshot would source
+//   LOOK               says "look: <which of those are still there>"
+//   HELPERRUN          a helper's thread (another threadId) runs a command
+//   OUTPUT             a command's output arrives with no item/started before it
+//   HOOK               a hook runs (hook/started)
+//   PERMS              asks to run a command in its room, to write inside, outside and in repos/,
+//                      and to read ~/.ssh
+//   RUN <words>        runs a command without asking (as Codex runs a "safe" one), then does <words>
+//   MAKEPAGE <words>   writes page/index.html in its room (with apply_patch, no shell), then does <words>
+//   COPY               says which tokens its CODEX_HOME's auth.json holds: "copy: access=… refresh=…"
+//   LEAK               says the tokens of its CODEX_HOME's auth.json and of OBY_MCP_TOKEN
+//   FAIL               the turn fails
+//   anything else      "Nothing to do."
+// It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable, or
+// obid's API token, and when a thread isn't danger-full-access with untrusted approvals.
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
+import { randomUUID } from "node:crypto";
+
+const argv = process.argv.slice(2);
+// `features list`, as Codex prints it: a feature off when the -c settings turn it off, unless
+// FAKE_CODEX_STAYS_ON names it (a Codex that ignores the setting). Run in the conversation's box,
+// it sees the login copy in its CODEX_HOME.
+if (argv.slice(-2).join(" ") === "features list") {
+  // As Codex 0.162.1: a CODEX_HOME that isn't there is an error.
+  if (process.env.CODEX_HOME && !existsSync(process.env.CODEX_HOME)) {
+    process.stderr.write(`Error: CODEX_HOME points to "${process.env.CODEX_HOME}", but that path does not exist\n`);
+    process.exit(1);
+  }
+  if (process.env.CODEX_HOME && !existsSync(join(process.env.CODEX_HOME, "auth.json"))) {
+    process.stderr.write("fake-codex-harness: features list ran without the run's login copy\n");
+    process.exit(1);
+  }
+  const off = (name) => argv.includes(`features.${name}=false`) && name !== process.env.FAKE_CODEX_STAYS_ON;
+  for (const name of ["apps", "browser_use", "browser_use_full_cdp_access", "code_mode_host", "computer_use",
+                      "daemon_auto_start", "hooks", "in_app_browser", "in_app_local_automation", "multi_agent", "plugins",
+                      "shell_snapshot", "shell_tool", "skill_mcp_dependency_install", "unified_exec", "view_image",
+                      "workspace_dependencies", "worktrees"])
+    process.stdout.write(`${name.padEnd(41)}stable             ${off(name) ? "false" : "true"}\n`);
+  process.exit(0);
+}
+if (argv[argv.length - 1] !== "app-server") {
+  process.stderr.write("fake-codex-harness: run as `fake-codex-harness [-c k=v]… app-server`\n");
+  process.exit(2);
+}
+const setting = (key) => {
+  for (let at = 0; at < argv.length - 1; at++) {
+    if (argv[at] === "-c" && argv[at + 1].startsWith(`${key}=`)) return JSON.parse(argv[at + 1].slice(key.length + 1));
+  }
+  return null;
+};
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+const home = process.env.CODEX_HOME || join(process.env.HOME || "/nonexistent", ".codex");
+const threads = join(home, "threads");
+const leaked = Object.keys(process.env).filter((name) =>
+  name === "CLAUDECODE" || name.startsWith("CLAUDE_CODE_") || name.startsWith("ANTHROPIC_") ||
+  name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN");
+
+let nextId = 100;
+const waiting = new Map();
+const ask = (method, params) => new Promise((done) => {
+  const id = nextId++;
+  waiting.set(id, done);
+  send({ id, method, params });
+});
+let thread = null;
+let resumed = null;
+let state = null;
+
+const save = () => writeFileSync(join(threads, `${thread}.json`), JSON.stringify(state));
+const event = (method, turnId, params) => send({ method, params: { threadId: thread, turnId, ...params } });
+const complete = (turnId, text, status = "completed", error = null) =>
+  event("turn/completed", turnId, { turn: { id: turnId, status, error, items: text == null ? [] : [{ type: "agentMessage", id: "m1", text, phase: "final_answer" }] } });
+const say = (turnId, text) => {
+  const id = randomUUID();
+  event("item/started", turnId, { item: { type: "agentMessage", id, text: "", phase: "final_answer" } });
+  const third = Math.ceil(text.length / 3);
+  for (let at = 0; at < text.length; at += third) event("item/agentMessage/delta", turnId, { itemId: id, delta: text.slice(at, at + third) });
+  event("item/completed", turnId, { item: { type: "agentMessage", id, text, phase: "final_answer" } });
+  complete(turnId, text);
+};
+
+async function oby(method, params) {
+  const url = setting("mcp_servers.oby.url");
+  const token = process.env[setting("mcp_servers.oby.bearer_token_env_var")];
+  const answer = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  return answer.json();
+}
+
+// An MCP tool call as Codex makes one: the item starts, Codex asks to run it, then runs it.
+async function mcpCall(turnId, server, tool, args, asked = tool) {
+  const item = { type: "mcpToolCall", id: randomUUID(), server, tool, arguments: args, status: "inProgress" };
+  event("item/started", turnId, { item });
+  const approved = await ask("mcpServer/elicitation/request", { threadId: thread, turnId, serverName: server, mode: "form",
+    _meta: { codex_approval_kind: "mcp_tool_call", tool_params: args }, message: `Allow the ${server} MCP server to run tool "${asked}"?`, requestedSchema: { type: "object", properties: {} } });
+  if (approved.action !== "accept") {
+    event("item/completed", turnId, { item: { ...item, status: "failed", error: { message: "declined" } } });
+    return { declined: approved.action ?? JSON.stringify(approved) };
+  }
+  const answer = server === "oby" ? await oby("tools/call", { name: tool, arguments: args }) : { result: { content: [{ type: "text", text: "ran" }] } };
+  event("item/completed", turnId, { item: { ...item, status: answer.result?.isError ? "failed" : "completed", result: answer.result } });
+  return answer;
+}
+
+async function runTurn(turnId, prompt) {
+  if (leaked.length) return complete(turnId, null, "failed", { message: `leaked: ${leaked.join(", ")}` });
+  if (state.sandbox !== "danger-full-access" || state.approvalPolicy !== "untrusted")
+    return complete(turnId, null, "failed", { message: `started with ${state.sandbox} / ${state.approvalPolicy}` });
+  // As Codex 0.162.1: a ChatGPT login whose tokens have no refresh_token key isn't one at all.
+  const auth = existsSync(join(home, "auth.json")) ? JSON.parse(readFileSync(join(home, "auth.json"), "utf8")) : {};
+  if (auth.tokens && !("refresh_token" in auth.tokens))
+    return complete(turnId, null, "failed", { message: "401 Unauthorized: Missing bearer or basic authentication in header" });
+  return act(turnId, prompt.split("\n").pop());
+}
+
+async function act(turnId, words) {
+  const room = process.cwd();
+  if (words.startsWith("WEB ")) {
+    const search = { type: "webSearch", id: randomUUID(), query: "greetings" };
+    event("item/started", turnId, { item: search });
+    event("item/completed", turnId, { item: search });
+    return act(turnId, words.slice(4));
+  }
+  if (words.startsWith("RUN ")) {
+    const run = { type: "commandExecution", id: randomUUID(), command: "/bin/zsh -lc 'echo hi'", cwd: room, commandActions: [], status: "inProgress" };
+    event("item/started", turnId, { item: run });
+    event("item/completed", turnId, { item: { ...run, status: "completed", exitCode: 0, aggregatedOutput: "hi\n" } });
+    return act(turnId, words.slice(4));
+  }
+  if (words.startsWith("MAKEPAGE ")) {
+    mkdirSync(join(room, "page"), { recursive: true });
+    writeFileSync(join(room, "page/index.html"), "<h1>Functions</h1>\n");
+    return act(turnId, words.slice(9));
+  }
+  if (words.startsWith("COPY")) {
+    const t = JSON.parse(readFileSync(join(home, "auth.json"), "utf8")).tokens ?? {};
+    return say(turnId, `copy: access=${t.access_token ? "yes" : "no"} refresh=${t.refresh_token ? "yes" : "no"}`);
+  }
+  if (words.startsWith("LEAK")) {
+    const auth = JSON.parse(readFileSync(join(home, "auth.json"), "utf8"));
+    const t = auth.tokens ?? {};
+    return say(turnId, `leak: ${t.access_token} ${t.refresh_token} ${t.id_token} ${auth.OPENAI_API_KEY} ${process.env.OBY_MCP_TOKEN}`);
+  }
+  if (words.startsWith("PLANT")) {
+    const user = process.env.HOME;
+    mkdirSync(join(user, ".config/fish"), { recursive: true });
+    for (const file of [join(home, "config.toml"), join(home, "AGENTS.md"), join(room, "AGENTS.md"), join(user, ".zshrc"),
+                        join(user, ".zshenv"), join(user, ".bash_profile"), join(user, ".profile"), join(user, ".config/fish/config.fish")])
+      writeFileSync(file, "planted\n");
+    return say(turnId, "planted");
+  }
+  if (words.startsWith("LOOK")) {
+    const user = process.env.HOME;
+    const there = [["home/config.toml", join(home, "config.toml")], ["home/AGENTS.md", join(home, "AGENTS.md")], ["room/AGENTS.md", join(room, "AGENTS.md")],
+                   ["~/.zshrc", join(user, ".zshrc")], ["~/.zshenv", join(user, ".zshenv")], ["~/.bash_profile", join(user, ".bash_profile")],
+                   ["~/.profile", join(user, ".profile")], ["~/.config/fish", join(user, ".config/fish")]]
+      .filter(([, file]) => existsSync(file)).map(([name]) => name);
+    return say(turnId, `look: ${there.join(",") || "nothing"}`);
+  }
+  if (words.startsWith("HELPERRUN")) {
+    const run = { type: "commandExecution", id: randomUUID(), command: "/bin/zsh -lc 'echo helper'", cwd: room, commandActions: [], status: "inProgress" };
+    send({ method: "item/started", params: { threadId: "helper-thread", turnId: "helper-turn", item: run } });
+    await new Promise((r) => setTimeout(r, 300));
+    return say(turnId, "helper ran");
+  }
+  if (words.startsWith("OUTPUT")) {
+    event("item/commandExecution/outputDelta", turnId, { itemId: "c9", delta: "hi\n" });
+    await new Promise((r) => setTimeout(r, 300));
+    return say(turnId, "output came");
+  }
+  if (words.startsWith("HOOK")) {
+    event("hook/started", turnId, { hook: { id: "h1", command: "echo hook" } });
+    await new Promise((r) => setTimeout(r, 300));
+    return say(turnId, "hook ran");
+  }
+  if (words.startsWith("HELLO")) {
+    const search = { type: "webSearch", id: randomUUID(), query: "greetings" };
+    event("item/started", turnId, { item: search });
+    event("item/completed", turnId, { item: search });
+    return say(turnId, "Hello there.");
+  }
+  if (words.startsWith("REMEMBER")) return say(turnId, `resume=${resumed ?? "none"}`);
+  if (words.startsWith("TOOLS")) {
+    const listed = await oby("tools/list", {});
+    return say(turnId, `tools: ${listed.result.tools.map((t) => t.name).join(",")}`);
+  }
+  if (words.startsWith("OBY ")) {
+    const [, tool, ...rest] = words.split(" ");
+    const answer = await mcpCall(turnId, "oby", tool, JSON.parse(rest.join(" ")));
+    if (answer.declined) return say(turnId, `oby: declined (${answer.declined})`);
+    const text = answer.result?.content?.[0]?.text ?? JSON.stringify(answer);
+    return say(turnId, `oby: ${answer.result?.isError ? "refused: " : ""}${text}`);
+  }
+  if (words.startsWith("ELSEWHERE")) {
+    const answer = await mcpCall(turnId, "elsewhere", "run", {});
+    return say(turnId, `elsewhere: ${answer.declined ? `declined (${answer.declined})` : "ran"}`);
+  }
+  if (words.startsWith("MISNAMED")) {
+    const answer = await mcpCall(turnId, "oby", "oby_jobs", {}, "oby_answer");
+    return say(turnId, `misnamed: ${answer.declined ? `declined (${answer.declined})` : "ran"}`);
+  }
+  if (words.startsWith("PERMS")) {
+    const answers = [];
+    const command = await ask("item/commandExecution/requestApproval", { threadId: thread, turnId, itemId: "c0", command: "/bin/zsh -lc 'ls'", cwd: room });
+    answers.push(`inside=${command.decision}`);
+    for (const [name, path] of [["write", join(room, "inside.md")], ["outside", join(dirname(room), "outside.md")],
+                                ["repos", join(room, "repos/obi-e2e/fixture-app/README.md")]]) {
+      const change = { type: "fileChange", id: randomUUID(), changes: [{ path, kind: { type: "add" } }], status: "inProgress" };
+      event("item/started", turnId, { item: change });
+      const answer = await ask("item/fileChange/requestApproval", { threadId: thread, turnId, itemId: change.id });
+      answers.push(`${name}=${answer.decision}`);
+    }
+    const secret = await ask("item/commandExecution/requestApproval", { threadId: thread, turnId, itemId: "c1", command: "/bin/zsh -lc 'cat ~/.ssh/id_rsa'" });
+    answers.push(`secret=${secret.decision}`);
+    return say(turnId, `perms: ${answers.join(" ")}`);
+  }
+  if (words.startsWith("FAIL")) return complete(turnId, null, "failed", { message: "it broke" });
+  return say(turnId, "Nothing to do.");
+}
+
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", (line) => {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (message.method === undefined) {
+    const done = waiting.get(message.id);
+    waiting.delete(message.id);
+    done?.(message.error ? { error: message.error } : message.result);
+    return;
+  }
+  const { id, method, params } = message;
+  switch (method) {
+    case "initialize":
+      return send({ id, result: { userAgent: "fake-codex-harness/0.0.0" } });
+    case "initialized":
+      return;
+    case "thread/start":
+    case "thread/resume": {
+      mkdirSync(threads, { recursive: true });
+      if (method === "thread/resume") {
+        const file = join(threads, `${params.threadId}.json`);
+        if (!existsSync(file)) return send({ id, error: { code: -32600, message: `no thread ${params.threadId}` } });
+        thread = resumed = params.threadId;
+        state = JSON.parse(readFileSync(file, "utf8"));
+      } else {
+        thread = randomUUID();
+        state = {};
+      }
+      Object.assign(state, { sandbox: params.sandbox, approvalPolicy: params.approvalPolicy, instructions: params.developerInstructions ?? null });
+      save();
+      return send({ id, result: { thread: { id: thread } } });
+    }
+    case "turn/start": {
+      const turnId = randomUUID();
+      const prompt = params.input.map((i) => i.text).join("\n");
+      appendFileSync(join(home, "turns.jsonl"), JSON.stringify({ at: Date.now(), argv, cwd: process.cwd(), home: process.env.HOME,
+        codexHome: process.env.CODEX_HOME ?? null, holds: readdirSync(home).sort(), prompt, resumed,
+        sandbox: state.sandbox, approvalPolicy: state.approvalPolicy, instructions: state.instructions, model: params.model ?? null }) + "\n");
+      send({ id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
+      event("turn/started", turnId, { turn: { id: turnId } });
+      runTurn(turnId, prompt).catch((e) => complete(turnId, null, "failed", { message: `the stand-in failed: ${e}` }));
+      return;
+    }
+    case "turn/steer":
+      return send({ id, result: { turnId: params.expectedTurnId } });
+    case "turn/interrupt":
+      return send({ id, result: {} });
+    default:
+      return send({ id, error: { code: -32601, message: `fake-codex-harness doesn't know ${method}` } });
+  }
+});
+rl.on("close", () => process.exit(0));

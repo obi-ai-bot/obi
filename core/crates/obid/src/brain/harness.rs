@@ -182,8 +182,10 @@ pub async fn run(
     if !shared.config.conversation.harness || super::lead::leads(said) {
         return turn::run(shared, said, given, asked, control).await;
     }
-    let why = match shared.jobs.signed_in_account(Tool::Claude) {
-        None => NO_ACCOUNT.to_owned(),
+    // The agent the configuration names: Claude Code, or Codex (super::harness_codex).
+    let tool = shared.config.conversation.agent;
+    let why = match shared.jobs.signed_in_account(tool) {
+        None => format!("no {} account is signed in for conversations", tool.name()),
         Some(account) => match session(shared, &account, said, given, asked, control).await {
             Ok(answered) => return answered,
             Err(why) => why,
@@ -208,7 +210,7 @@ pub async fn run(
 
 /// The plan loop's answer, with the line that says why it answered.
 fn said_why(talk: Talk, why: &str) -> Talk {
-    let line = format!("(Oby's plan loop answered: {why}.)");
+    let line = format!("(Oby's plan loop answered: {}.)", why.trim_end_matches('.'));
     match talk {
         Talk::Reply { text, jobs } if text.is_empty() => Talk::Reply { text: line, jobs },
         Talk::Reply { text, jobs } => Talk::Reply {
@@ -224,19 +226,20 @@ fn said_why(talk: Talk, why: &str) -> Talk {
 }
 
 /// Where a conversation's session lives: `home/conversations/<id>/`.
-struct Place {
-    folder: PathBuf,
+pub(super) struct Place {
+    pub(super) folder: PathBuf,
     /// The agent's working folder, written.
-    room: PathBuf,
+    pub(super) room: PathBuf,
     /// The repositories' read-only checkouts, in the room.
-    repos: PathBuf,
+    pub(super) repos: PathBuf,
     /// Its `HOME` and `TMPDIR`, written.
-    temp: PathBuf,
+    pub(super) temp: PathBuf,
     /// The tool's own login, copied, for an account with no folder of its own.
     login: PathBuf,
     /// Its own Claude Code folder (`CLAUDE_CONFIG_DIR`) for an account with a folder of its own,
-    /// holding a copy of the account's login, its own sessions and nothing of the account's.
-    config: PathBuf,
+    /// or its Codex's `CODEX_HOME` for any account, holding a copy of the account's login, its own
+    /// sessions and nothing of the account's.
+    pub(super) config: PathBuf,
     /// Its session id and account, never shown to it.
     session: PathBuf,
 }
@@ -281,15 +284,37 @@ impl Place {
         crate::jobs::forget_login_secrets(&self.login);
         if std::fs::symlink_metadata(&self.config).is_ok_and(|m| m.is_dir()) {
             let _ = std::fs::remove_file(self.config.join(".credentials.json"));
+            let _ = std::fs::remove_file(self.config.join("auth.json"));
         }
     }
 
-    /// Before every run: what the agent could have left for the next Claude Code to load
+    /// Before every run: what the agent could have left for the next Claude Code or Codex to load
     /// (instructions, settings, commands, helpers, hooks, MCP servers) in its room, its HOME and
     /// its login folders, removed without following a link. `--setting-sources ""` keeps
     /// settings files out, not instructions (`CLAUDE.md`); this takes out both.
     fn scrub(&self) {
-        const ROOM: &[&str] = &["CLAUDE.md", "CLAUDE.local.md", ".claude", ".mcp.json"];
+        const ROOM: &[&str] = &[
+            "CLAUDE.md",
+            "CLAUDE.local.md",
+            ".claude",
+            ".mcp.json",
+            "AGENTS.md",
+            "AGENTS.override.md",
+            ".codex",
+            ".agents",
+        ];
+        // Codex's: its `CODEX_HOME` is the conversation's `config`.
+        const CODEX: &[&str] = &[
+            "config.toml",
+            "AGENTS.md",
+            "AGENTS.override.md",
+            "skills",
+            "prompts",
+            "rules",
+            "hooks",
+            "hooks.json",
+            "plugins",
+        ];
         const CLAUDE: &[&str] = &[
             "CLAUDE.md",
             "CLAUDE.local.md",
@@ -311,6 +336,33 @@ impl Place {
         ] {
             remove_in(&dir, CLAUDE);
         }
+        remove_in(&self.config, CODEX);
+        remove_in(&self.temp, &[".agents", ".codex"]);
+        // A shell's start-up files in its HOME, which a shell (Codex's snapshot of one, too)
+        // sources outside obid's view: zsh's, bash's (every `.bash*`), sh's and fish's.
+        remove_in(
+            &self.temp,
+            &[
+                ".zshenv",
+                ".zprofile",
+                ".zshrc",
+                ".zlogin",
+                ".zlogout",
+                ".profile",
+            ],
+        );
+        let bash: Vec<String> = std::fs::read_dir(&self.temp)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with(".bash"))
+            .collect();
+        remove_in(
+            &self.temp,
+            &bash.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        remove_in(&self.temp.join(".config"), &["fish"]);
     }
 }
 
@@ -401,10 +453,20 @@ struct Kept {
     web: bool,
 }
 
+/// Whether the conversation's session on `account` read something untrusted, even one that's
+/// never picked up again (ended for good: its id is gone, its taint isn't).
+fn kept_taint(place: &Place, account: &str) -> bool {
+    std::fs::read(&place.session)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Kept>(&bytes).ok())
+        .is_some_and(|kept| kept.account == account && kept.web)
+}
+
 fn kept(place: &Place, account: &str) -> Option<Kept> {
     let bytes = std::fs::read(&place.session).ok()?;
     let kept: Kept = serde_json::from_slice(&bytes).ok()?;
-    // Only a session id Claude Code made: a UUID, never an argument of another kind.
+    // Only a session id the agent made (Claude Code's session, Codex's thread): a UUID, never an
+    // argument of another kind.
     (kept.account == account
         && kept.session.len() == 36
         && uuid::Uuid::parse_str(&kept.session).is_ok())
@@ -440,7 +502,9 @@ async fn session(
         control: control.clone(),
         jobs: Mutex::new(vec![]),
         nonce: super::briefing::nonce(),
-        web: AtomicBool::new(resumed.as_ref().is_some_and(|k| k.web)),
+        web: AtomicBool::new(
+            resumed.as_ref().is_some_and(|k| k.web) || kept_taint(&place, &account.id),
+        ),
         dispatched: AtomicUsize::new(0),
         told: AtomicUsize::new(0),
         kept: place.session.clone(),
@@ -532,6 +596,7 @@ async fn attempts(
     control: &Arc<Control>,
 ) -> Result<(String, End), String> {
     let config = &shared.config.conversation;
+    let tool = config.agent;
     let said = &session.said;
     // The budget is the turn's, both runs together.
     let deadline = Instant::now() + config.budget;
@@ -544,8 +609,11 @@ async fn attempts(
     let servers = json!({"mcpServers": {"oby": {"type": "http", "url": url,
                                                  "headers": {"Authorization": format!("Bearer {token}")}}}});
     // The agent writes in its HOME: never through a link it left there (O_NOFOLLOW, O_EXCL).
-    crate::jobs::write_login(&mcp, servers.to_string().as_bytes())
-        .map_err(|e| format!("the session's MCP configuration couldn't be written: {e}"))?;
+    // Codex is given the server in its arguments instead.
+    if tool == Tool::Claude {
+        crate::jobs::write_login(&mcp, servers.to_string().as_bytes())
+            .map_err(|e| format!("the session's MCP configuration couldn't be written: {e}"))?;
+    }
     // What reaches the agent has the vault's secrets taken out; a vault that can't be read sends
     // nothing.
     // The files the owner attached, in the room, named before their words (quoted).
@@ -610,28 +678,63 @@ async fn attempts(
         }
         flags.extend(["--mcp-config".into(), mcp.clone().into_os_string()]);
         place.scrub();
-        // As before a job's run (#651): the Keychain's default login refreshed when it's due and
-        // kept fresh while the turn runs; an account with a folder of its own refused near its end.
-        shared.jobs.claude_login_ready(Some(account)).await?;
-        let launch = shared.jobs.conversation_launch(
-            account,
-            &place.room,
-            &place.temp,
-            place.login_for(account),
-            vec![place.repos.clone()],
-            flags,
-            place.folder.join("agent.log"),
-        )?;
-        let turn = one(shared, place, session, launch, &prompt, limit).await;
+        let (launch, codex) = match tool {
+            Tool::Codex => {
+                super::harness_codex::launch(shared, account, place, &url, token, &resume).await?
+            }
+            _ => {
+                // As before a job's run (#651): the Keychain's default login refreshed when it's
+                // due and kept fresh while the turn runs; an account with a folder of its own
+                // refused near its end.
+                shared.jobs.claude_login_ready(Some(account)).await?;
+                let launch = shared.jobs.conversation_launch(
+                    Tool::Claude,
+                    account,
+                    &place.room,
+                    &place.temp,
+                    place.login_for(account),
+                    vec![place.repos.clone()],
+                    flags,
+                    place.folder.join("agent.log"),
+                )?;
+                (launch, None)
+            }
+        };
+        let turn = one(
+            shared,
+            place,
+            session,
+            launch,
+            &prompt,
+            limit,
+            codex.as_ref(),
+        )
+        .await;
         let turn = match turn {
             Ok(turn) => turn,
             Err(e) => {
                 failures.push(format!(
-                    "attempt {attempt}: Claude Code couldn't start: {e}"
+                    "attempt {attempt}: {} couldn't start: {e}",
+                    tool.name()
                 ));
                 continue;
             }
         };
+        // Ended for good (Codex ran a command): not tried again, and its session never picked up,
+        // but what ran taints the conversation, and the mark is kept (finding 5).
+        if let Some(why) = turn.0.fatal.clone() {
+            session.web.store(true, Ordering::SeqCst);
+            let kept = Kept {
+                session: String::new(),
+                account: account.id.clone(),
+                web: true,
+            };
+            let _ = crate::store::write_private(
+                &place.session,
+                &serde_json::to_vec(&kept).unwrap_or_default(),
+            );
+            return Err(why);
+        }
         if let Some(id) = &turn.0.session {
             let kept = Kept {
                 session: id.clone(),
@@ -807,7 +910,7 @@ fn first_prompt(words: &str, given: &[Turn]) -> String {
 }
 
 /// [`ORIENTATION`], with the repositories the room holds.
-fn orientation(shared: &Shared) -> String {
+pub(super) fn orientation(shared: &Shared) -> String {
     let repos: Vec<String> = shared
         .config
         .repos
@@ -823,8 +926,8 @@ fn orientation(shared: &Shared) -> String {
     )
 }
 
-/// One run of the agent for the turn, for at most `limit`, its events sent as they come. The
-/// turn, and the words it streamed.
+/// One run of the agent for the turn (Codex's `app-server` with `codex`'s options, else Claude
+/// Code), for at most `limit`, its events sent as they come. The turn, and the words it streamed.
 async fn one(
     shared: &Arc<Shared>,
     place: &Place,
@@ -832,6 +935,7 @@ async fn one(
     launch: agent::Launch,
     prompt: &str,
     limit: Duration,
+    codex: Option<&crate::codex::Options>,
 ) -> std::io::Result<(agent::Turn, String)> {
     let control = &session.control;
     let bounds = Bounds {
@@ -909,7 +1013,12 @@ async fn one(
             session.taint()
         }))
     };
-    let ran = agent::run_turn(launch, prompt, limit, stop, decide, on_event).await;
+    let ran = match codex {
+        Some(options) => {
+            crate::codex::run_turn(launch, prompt, options, limit, stop, decide, on_event).await
+        }
+        None => agent::run_turn(launch, prompt, limit, stop, decide, on_event).await,
+    };
     watching.abort();
     delta(streamed.finish(&secrets));
     ran.map(|turn| (turn, streamed.raw))
@@ -991,8 +1100,9 @@ fn placed(text: &str, homes: &[(String, &'static str)]) -> String {
 /// Whether the tool call makes the turn consume something untrusted: a web search or fetch, or a
 /// read of the repositories' checkouts (their code is data, not the owner's words, #374, N1).
 fn taints(tool: &str, input: &Value, bounds: &Bounds, repos: &Path) -> bool {
-    // The web, and a helper (a sub-agent reads and searches as it likes, R2).
-    if matches!(tool, "WebFetch" | "WebSearch" | "Task" | "Agent") {
+    // The web, a helper (a sub-agent reads and searches as it likes, R2), and any command, which a
+    // tool may run without asking (Codex's "safe" reads, F4).
+    if matches!(tool, "WebFetch" | "WebSearch" | "Task" | "Agent" | "Bash") {
         return true;
     }
     if !matches!(tool, "Read" | "Grep" | "Glob" | "LS" | "NotebookRead") {
@@ -1533,6 +1643,13 @@ mod tests {
             &place.repos
         ));
         assert!(taints("LS", &json!({}), &bounds, &place.repos));
+        // Any command taints the turn, even one a tool ran without asking (F4).
+        assert!(taints(
+            "Bash",
+            &json!({"command": "echo hi"}),
+            &bounds,
+            &place.repos
+        ));
         assert!(taints(
             "Glob",
             &json!({"pattern": "*.rs", "path": "repos/o"}),

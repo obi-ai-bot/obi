@@ -1,0 +1,3 @@
+#!/bin/sh
+# fake-codex-harness as a Codex whose hooks stay on whatever -c says.
+FAKE_CODEX_STAYS_ON=hooks exec "$(dirname "$0")/fake-codex-harness" "$@"

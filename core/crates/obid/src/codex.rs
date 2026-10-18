@@ -29,6 +29,11 @@ pub struct Options {
     pub model: Option<String>,
     /// The job is in Plan mode: Codex reads and plans, and obid declines its file changes.
     pub plan: bool,
+    /// What the thread is told after Codex's own instructions (`developerInstructions`): a
+    /// conversation's orientation.
+    pub instructions: Option<String>,
+    /// A conversation's thread, whose shell is off: a command that runs anyway ends the turn.
+    pub no_commands: bool,
 }
 
 /// The `command` line `codex app-server` runs as: the binary, then `app-server`.
@@ -66,6 +71,9 @@ pub async fn run_turn(
         worktree: launch.cwd.clone(),
         plan: options.plan,
         files: HashMap::new(),
+        calls: HashMap::new(),
+        no_commands: options.no_commands,
+        fatal: None,
         thread: None,
         turn: None,
         said: None,
@@ -88,17 +96,29 @@ pub async fn run_turn(
         }
     }
     turn.session = run.thread.clone();
+    turn.fatal = run.fatal.take();
     if let Some((text, failed)) = &run.ended {
         turn.result = Some(agent::result(text, *failed, run.thread.as_deref()));
     }
-    // The turn is over: no more input, so the server exits. Read what's left until it does.
+    // The turn is over: no more input, so the server exits. It gets what a Claude Code turn gets
+    // after its result (`AFTER_RESULT`, #658) to read out and exit by itself, then is ended.
     run.conn.close_input();
-    if run.ended.is_some() {
-        run.conn.drain().await;
+    let until = std::time::Instant::now() + agent::AFTER_RESULT;
+    if run.ended.is_some() && turn.fatal.is_none() {
+        run.conn.drain_within(agent::AFTER_RESULT).await;
     }
     turn.timed_out = run.conn.timed_out;
     turn.stopped = run.conn.stopped;
-    turn.exit = run.conn.finish().await;
+    turn.exit = if turn.fatal.is_some() {
+        // Ended for good: everything it started ends now, not after a grace.
+        run.conn.finish_within(Duration::ZERO).await
+    } else if run.ended.is_some() {
+        run.conn
+            .finish_within(until.saturating_duration_since(std::time::Instant::now()))
+            .await
+    } else {
+        run.conn.finish().await
+    };
     Ok(turn)
 }
 
@@ -123,6 +143,12 @@ struct Run<D, E> {
     plan: bool,
     /// The files each file change writes, by item id: an approval request names only the item.
     files: HashMap<String, Vec<String>>,
+    /// The MCP tools each server was called for this turn, as their items started: the approval
+    /// Codex asks names the tool only in its words.
+    calls: HashMap<String, Vec<(String, Value)>>,
+    no_commands: bool,
+    /// Why obid ended the turn for good.
+    fatal: Option<String>,
     thread: Option<String>,
     /// The turn under way.
     turn: Option<String>,
@@ -145,6 +171,9 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
 
         let cwd = self.worktree.to_string_lossy().into_owned();
         let mut params = thread_params(&cwd);
+        if let Some(instructions) = &options.instructions {
+            params["developerInstructions"] = json!(instructions);
+        }
         let (method, what) = match &options.resume {
             Some(thread) => {
                 params["threadId"] = json!(thread);
@@ -201,28 +230,80 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             self.files.insert(item, paths);
         }
         let params = &message["params"];
+        // Fail closed, in any thread (a helper's too): a conversation's Codex runs no command, no
+        // hook and no tool of another MCP server, whatever its settings did.
+        if self.no_commands
+            && let Some(what) = ran_outside(&message)
+        {
+            return self.end_for_good(what).await;
+        }
         // Helpers Codex starts run in threads of their own: only this job's thread reports.
         if let (Some(other), Some(thread)) = (params["threadId"].as_str(), &self.thread)
             && other != thread
         {
             return;
         }
+        let item = &params["item"];
         match message["method"].as_str() {
             Some("item/started") => {
-                if let Some(step) = step(&params["item"]) {
+                if let Some(step) = step(item) {
                     (self.on_event)(Event::Step(step));
                 }
+                if item["type"] == "mcpToolCall"
+                    && let (Some(server), Some(tool)) =
+                        (item["server"].as_str(), item["tool"].as_str())
+                {
+                    self.calls
+                        .entry(server.to_owned())
+                        .or_default()
+                        .push((tool.to_owned(), item["arguments"].clone()));
+                }
+                if let Some((name, input)) = tool_call(item) {
+                    (self.on_event)(Event::Tool {
+                        id: item["id"].as_str().unwrap_or("").to_owned(),
+                        name,
+                        input,
+                    });
+                }
             }
-            Some("item/completed") if params["item"]["type"] == "agentMessage" => {
-                if let Some(said) = params["item"]["text"].as_str().filter(|s| !s.is_empty()) {
+            Some("item/agentMessage/delta") => {
+                if let Some(delta) = params["delta"].as_str().filter(|d| !d.is_empty()) {
+                    (self.on_event)(Event::Delta(delta.to_owned()));
+                }
+            }
+            Some("item/completed") if item["type"] == "agentMessage" => {
+                if let Some(said) = item["text"].as_str().filter(|s| !s.is_empty()) {
                     self.said = Some(said.to_owned());
                 }
+            }
+            Some("item/completed") if tool_call(item).is_some() => {
+                (self.on_event)(Event::ToolDone {
+                    id: item["id"].as_str().unwrap_or("").to_owned(),
+                    failed: ["failed", "declined"].contains(&item["status"].as_str().unwrap_or(""))
+                        || !item["error"].is_null(),
+                });
             }
             Some("turn/completed") => {
                 self.ended = Some(finished(&params["turn"], self.said.as_deref()));
             }
             _ => {}
         }
+    }
+
+    /// Ends the turn for good because Codex `what` (ran a command, …): interrupts it, and the run
+    /// ends at once.
+    async fn end_for_good(&mut self, what: String) {
+        let why = format!("{what}, which a conversation never does, so obid stopped it");
+        if let (Some(thread), Some(turn)) = (self.thread.clone(), self.turn.clone()) {
+            self.conn
+                .request(
+                    "turn/interrupt",
+                    json!({"threadId": thread, "turnId": turn}),
+                )
+                .await;
+        }
+        self.fatal = Some(why.clone());
+        self.ended = Some((why, true));
     }
 
     /// obid's answer to an approval: the fixed denials, then the job's own rule. Anything else
@@ -263,6 +344,54 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                     .into_iter()
                     .map(|path| ("Edit".to_owned(), json!({"file_path": path})))
                     .collect()
+            }
+            // Codex asks before an MCP tool runs: the tool its words name (`Allow the oby MCP
+            // server to run tool "oby_job"?`), when its server was called for it this turn, with
+            // the arguments it will run with.
+            Some("mcpServer/elicitation/request")
+                if params["_meta"]["codex_approval_kind"] == "mcp_tool_call" =>
+            {
+                let server = params["serverName"].as_str().unwrap_or("");
+                let named = params["message"]
+                    .as_str()
+                    .and_then(|m| m.split_once("tool \""))
+                    .and_then(|(_, rest)| rest.rsplit_once('"'))
+                    .map(|(tool, _)| tool);
+                let call = self
+                    .calls
+                    .get(server)
+                    .and_then(|calls| calls.iter().rfind(|(tool, _)| Some(tool.as_str()) == named));
+                let answer = match call.cloned() {
+                    // Only Oby's own server: another's (ChatGPT's apps, the person's) is never
+                    // run, as before Codex asked.
+                    Some(_) if server != "oby" => {
+                        Answer::Deny(format!("Only Oby's own tools run here, not {server}'s."))
+                    }
+                    Some((tool, arguments)) => {
+                        let input = match &params["_meta"]["tool_params"] {
+                            Value::Object(_) => params["_meta"]["tool_params"].clone(),
+                            _ => arguments,
+                        };
+                        let ruling = (self.decide)(&format!("mcp__{server}__{tool}"), &input);
+                        match self.conn.settle(ruling).await {
+                            Ok(answer) => answer,
+                            Err(_) => return,
+                        }
+                    }
+                    None => Answer::Deny("obid couldn't see which tool this runs.".into()),
+                };
+                if let Answer::Deny(why) = &answer {
+                    (self.on_event)(Event::Denied(why.clone()));
+                }
+                let action = if answer == Answer::Allow {
+                    "accept"
+                } else {
+                    "decline"
+                };
+                return self
+                    .conn
+                    .reply(&id, json!({"action": action, "content": {}}))
+                    .await;
             }
             _ => return self.conn.refuse(&id).await,
         };
@@ -363,47 +492,119 @@ fn changes(message: &Value) -> Option<(String, Vec<String>)> {
     }
 }
 
+/// What a conversation's Codex did that it never may, from one notification in any thread: a
+/// command (an item of that kind in any `item/*`, or a command's own `item/commandExecution/*`), a
+/// hook (`hook/*`), or a tool of an MCP server that isn't Oby's. Codex's own resource tools
+/// (`list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`, server `codex`) only
+/// reach the servers it has, Oby's alone.
+fn ran_outside(message: &Value) -> Option<String> {
+    let method = message["method"].as_str()?;
+    let item = &message["params"]["item"];
+    if method.starts_with("hook/") {
+        return Some("Codex ran a hook".into());
+    }
+    if method.starts_with("item/commandExecution/")
+        || (method.starts_with("item/") && item["type"] == "commandExecution")
+    {
+        let command = unwrap_shell(&command_of(&item["command"]).unwrap_or_default());
+        let command: String = command
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect();
+        return Some(match command.trim() {
+            "" => "Codex ran a command".into(),
+            command => format!("Codex ran a command ({command})"),
+        });
+    }
+    if method.starts_with("item/") && item["type"] == "mcpToolCall" {
+        let (server, tool) = (
+            item["server"].as_str().unwrap_or(""),
+            item["tool"].as_str().unwrap_or(""),
+        );
+        let own = server == "codex"
+            && matches!(
+                tool,
+                "list_mcp_resources" | "list_mcp_resource_templates" | "read_mcp_resource"
+            );
+        if server != "oby" && !own {
+            return Some(format!("Codex called {server}'s {tool}"));
+        }
+    }
+    None
+}
+
 /// What Codex is doing, in the same words as Claude Code's steps.
 pub fn step(item: &Value) -> Option<String> {
+    match item["type"].as_str()? {
+        "fileChange" if files(item).len() != 1 => {
+            Some(format!("Editing {} files", files(item).len()))
+        }
+        "mcpToolCall" => Some(agent::step(
+            item["tool"].as_str().unwrap_or("a tool"),
+            &json!({}),
+        )),
+        _ => tool_call(item).map(|(name, input)| agent::step(&name, &input)),
+    }
+}
+
+/// A tool item as the Claude Code tool call it is (its name and input), so a conversation shows
+/// and rules on it the same whichever agent runs it: a command that only reads, searches or lists
+/// is `Read`, `Grep` or `Glob`, any other `Bash`; a file change `Edit` (its first file); an MCP
+/// tool `mcp__<server>__<tool>`; a web search `WebSearch`; a helper `Agent`.
+pub fn tool_call(item: &Value) -> Option<(String, Value)> {
+    let call = |name: &str, input: Value| Some((name.to_owned(), input));
     match item["type"].as_str()? {
         "commandExecution" => {
             if let Some([action]) = item["commandActions"].as_array().map(Vec::as_slice) {
                 match action["type"].as_str() {
                     Some("read") => {
-                        return Some(agent::step(
+                        return call(
                             "Read",
-                            &json!({"file_path": action["path"].as_str().unwrap_or("")}),
-                        ));
+                            json!({"file_path": action["path"].as_str().unwrap_or("")}),
+                        );
                     }
                     Some("search") => {
                         let input = match action["query"].as_str() {
                             Some(query) => json!({"pattern": query}),
                             None => json!({}),
                         };
-                        return Some(agent::step("Grep", &input));
+                        return call("Grep", input);
                     }
-                    Some("listFiles") => return Some(agent::step("Glob", &json!({}))),
+                    Some("listFiles") => return call("Glob", json!({})),
                     _ => {}
                 }
             }
             let command = command_of(&item["command"]).unwrap_or_default();
-            Some(agent::step(
-                "Bash",
-                &json!({"command": unwrap_shell(&command)}),
-            ))
+            call("Bash", json!({"command": unwrap_shell(&command)}))
         }
-        "fileChange" => {
-            let paths = files(item);
-            Some(match paths.as_slice() {
-                [one] => agent::step("Edit", &json!({"file_path": one})),
-                many => format!("Editing {} files", many.len()),
-            })
-        }
-        "mcpToolCall" => Some(agent::step(
-            item["tool"].as_str().unwrap_or("a tool"),
-            &json!({}),
+        "fileChange" => call(
+            "Edit",
+            json!({"file_path": files(item).first().cloned().unwrap_or_default()}),
+        ),
+        "mcpToolCall" => Some((
+            format!(
+                "mcp__{}__{}",
+                item["server"].as_str().unwrap_or(""),
+                item["tool"].as_str().unwrap_or("")
+            ),
+            item["arguments"].clone(),
         )),
-        "webSearch" => Some(agent::step("WebSearch", &json!({}))),
+        // A picture it looked at is a file it read (the turn's taint, as Read's).
+        "imageView" => call(
+            "Read",
+            json!({"file_path": item["path"].as_str().unwrap_or("")}),
+        ),
+        "webSearch" => call(
+            "WebSearch",
+            json!({"query": item["query"].as_str().unwrap_or("")}),
+        ),
+        "collabAgentToolCall" => call(
+            "Agent",
+            json!({"description": item["prompt"].as_str().unwrap_or("").lines().next().unwrap_or("")}),
+        ),
         _ => None,
     }
 }
@@ -475,6 +676,113 @@ mod tests {
         );
     }
 
+    /// A Codex that never exits after its turn completed ends a few seconds later, as Claude Code
+    /// does after its result (#658), not at the round's limit.
+    #[tokio::test]
+    async fn a_codex_that_never_exits_ends_soon_after_its_turn() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("obid-codex-exit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let bin = root.join("codex");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+read l; echo '{"id":1,"result":{}}'
+read l
+read l; echo '{"id":2,"result":{"thread":{"id":"t1"}}}'
+read l; echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
+echo '{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"completed","items":[{"type":"agentMessage","text":"Done."}]}}}'
+exec sleep 30
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launch = Launch {
+            argv: vec![bin.into_os_string()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            cwd: root.clone(),
+            stderr: root.join("agent.log"),
+        };
+        let (_stop, stop) = watch::channel(process::Signal::Run);
+        let began = std::time::Instant::now();
+        let turn = run_turn(
+            launch,
+            "Do it.",
+            &Options::default(),
+            Duration::from_secs(60),
+            stop,
+            |_, _| Ruling::Now(Answer::Allow),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let took = began.elapsed();
+        assert_eq!(turn.text(), "Done.");
+        assert!(turn.succeeded());
+        assert!(
+            took < agent::AFTER_RESULT + Duration::from_secs(2),
+            "{took:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A conversation's Codex that runs a command is ended at once, with everything it started:
+    /// no grace to read out (finding 6).
+    #[tokio::test]
+    async fn a_command_ends_the_codex_process_at_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("obid-codex-fatal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let bin = root.join("codex");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+read l; echo '{"id":1,"result":{}}'
+read l
+read l; echo '{"id":2,"result":{"thread":{"id":"t1"}}}'
+read l; echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
+echo '{"method":"item/started","params":{"threadId":"t1","turnId":"u1","item":{"type":"commandExecution","id":"c1","command":"/bin/zsh -lc '"'"'cat x'"'"'"}}}'
+exec sleep 30
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launch = Launch {
+            argv: vec![bin.into_os_string()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            cwd: root.clone(),
+            stderr: root.join("agent.log"),
+        };
+        let (_stop, stop) = watch::channel(process::Signal::Run);
+        let options = Options {
+            no_commands: true,
+            ..Options::default()
+        };
+        let began = std::time::Instant::now();
+        let turn = run_turn(
+            launch,
+            "Do it.",
+            &options,
+            Duration::from_secs(60),
+            stop,
+            |_, _| Ruling::Now(Answer::Allow),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let took = began.elapsed();
+        assert_eq!(
+            turn.fatal.as_deref(),
+            Some(
+                "Codex ran a command (cat x), which a conversation never does, so obid stopped it"
+            )
+        );
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_shell_codex_wraps_commands_in_comes_off() {
         assert_eq!(unwrap_shell("/bin/zsh -lc 'git status'"), "git status");
@@ -509,6 +817,38 @@ mod tests {
             Some("Editing 2 files".into())
         );
         assert_eq!(step(&json!({"type": "reasoning"})), None);
+    }
+
+    /// A conversation shows Codex's items as the Claude Code tool calls they are.
+    #[test]
+    fn items_are_the_tool_calls_they_are() {
+        let call = |item: Value| tool_call(&item).unwrap();
+        assert_eq!(
+            call(
+                json!({"type": "commandExecution", "command": "/bin/zsh -lc 'cat a'",
+                        "commandActions": [{"type": "read", "path": "/r/a"}]})
+            ),
+            ("Read".into(), json!({"file_path": "/r/a"}))
+        );
+        assert_eq!(
+            call(json!({"type": "commandExecution", "command": "/bin/zsh -lc 'ls && rm x'"})),
+            ("Bash".into(), json!({"command": "ls && rm x"}))
+        );
+        assert_eq!(
+            call(
+                json!({"type": "mcpToolCall", "server": "oby", "tool": "oby_job", "arguments": {"id": "j1"}})
+            ),
+            ("mcp__oby__oby_job".into(), json!({"id": "j1"}))
+        );
+        assert_eq!(
+            call(json!({"type": "webSearch", "query": "rust"})),
+            ("WebSearch".into(), json!({"query": "rust"}))
+        );
+        assert_eq!(
+            call(json!({"type": "imageView", "path": "/r/a.png"})),
+            ("Read".into(), json!({"file_path": "/r/a.png"}))
+        );
+        assert_eq!(tool_call(&json!({"type": "agentMessage"})), None);
     }
 
     #[test]

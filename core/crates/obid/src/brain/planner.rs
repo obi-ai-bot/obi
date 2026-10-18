@@ -622,6 +622,8 @@ impl CodexBrain {
             resume: None,
             model: None,
             plan: true,
+            instructions: None,
+            no_commands: false,
         };
         let turn = crate::codex::run_turn(
             launch,
