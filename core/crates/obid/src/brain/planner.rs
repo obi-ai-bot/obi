@@ -258,6 +258,11 @@ impl ClaudeBrain {
         ]);
         // With nothing to read it has no tool at all; with the quoted file it reads, boxed.
         let (launch, own_group) = if quoted.is_some() {
+            self.room
+                .jobs
+                .claude_login_ready(None)
+                .await
+                .map_err(Failure::Failed)?;
             let launch = self
                 .room
                 .jobs

@@ -180,6 +180,9 @@ pub async fn serve(
     // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
     secrets::known().learn("api-token", &token);
     jobs::use_keychain(config.claude_keychain);
+    if config.claude_keychain {
+        jobs::keep_keychain_logins();
+    }
     vault::install(&config.home, &config.vault);
     let events = events::Events::new();
     let sandbox = std::env::current_exe()
