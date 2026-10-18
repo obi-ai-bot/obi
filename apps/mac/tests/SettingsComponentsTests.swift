@@ -32,6 +32,12 @@ struct SettingsComponentsTests {
         #expect(on == off)
     }
 
+    /// A Toggle with the switch's style draws a Button, not a shape with a tap: Full Keyboard Access
+    /// focuses it and Space toggles it.
+    @Test func switchIsAButton() {
+        #expect(String(reflecting: SetSwitch.Knob.Body.self).contains("Button"))
+    }
+
     // MARK: Meter
 
     @Test func meterTurnsYellowPastEightyAndRedPastNinety() {
@@ -92,6 +98,8 @@ struct SettingsComponentsTests {
         #expect(SetSelect.name(of: "en-US", in: options) == "English")
         // A value the options don't hold (a model the plan dropped) shows as itself.
         #expect(SetSelect.name(of: "gpt-old", in: options) == "gpt-old")
+        // No value yet (a runner that hasn't said its default mode): a dash, never "nil".
+        #expect(SetSelect<String?>.name(of: nil, in: [("ask", "Ask")]) == "—")
     }
 
     @Test func segmentedLightsTheOneThatsOn() {

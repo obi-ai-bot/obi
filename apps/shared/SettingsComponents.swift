@@ -156,25 +156,34 @@ struct SetSwitch: ToggleStyle {
         Knob(configuration: configuration)
     }
 
-    private struct Knob: View {
+    /// A plain button underneath, so Full Keyboard Access focuses it and Space toggles it.
+    struct Knob: View {
         let configuration: Configuration
         @Environment(\.isEnabled) private var enabled
         @Environment(\.accessibilityReduceMotion) private var still
 
         var body: some View {
             let on = configuration.isOn
-            Capsule().fill(SetSwitch.track(on: on))
-                .frame(width: 32, height: 18)
-                .overlay(alignment: .leading) {
-                    Circle().fill(SetSwitch.knob(on: on)).frame(width: 14, height: 14).offset(x: SetSwitch.knobX(on: on))
-                }
-                .contentShape(Capsule())
-                .onTapGesture { configuration.isOn.toggle() }
+            Button { configuration.isOn.toggle() } label: {
+                Capsule().fill(SetSwitch.track(on: on))
+                    .frame(width: 32, height: 18)
+                    .overlay(alignment: .leading) {
+                        Circle().fill(SetSwitch.knob(on: on)).frame(width: 14, height: 14).offset(x: SetSwitch.knobX(on: on))
+                    }
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
                 .opacity(enabled ? 1 : 0.3)
                 .animation(still ? nil : SetSwitch.motion, value: on)
                 .accessibilityRepresentation { Toggle(isOn: configuration.$isOn) { configuration.label } }
         }
     }
+}
+
+/// Lets `SetSelect` tell a missing value (nil) from one its options don't hold.
+protocol OptionalProtocol { var isNone: Bool { get } }
+extension Optional: OptionalProtocol {
+    var isNone: Bool { if case .none = self { true } else { false } }
 }
 
 extension ToggleStyle where Self == SetSwitch {
@@ -249,9 +258,12 @@ struct SetSelect<Value: Hashable>: View {
         self.options = options
     }
 
-    /// What the pop-up shows for `value`: its option's name, or the value itself when no option has it.
+    /// What the pop-up shows for `value`: its option's name, the value itself when no option has it
+    /// (a model a plan dropped), or a dash while there's none yet.
     static func name(of value: Value, in options: [(Value, String)]) -> String {
-        options.first { $0.0 == value }?.1 ?? "\(value)"
+        if let name = options.first(where: { $0.0 == value })?.1 { return name }
+        if let optional = value as? any OptionalProtocol, optional.isNone { return "—" }
+        return "\(value)"
     }
 
     var body: some View {
