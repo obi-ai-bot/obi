@@ -178,6 +178,7 @@
 			membershipExceptions = (
 				Character.swift,
 				DesignViews.swift,
+				ObyFaceLive.swift,
 			);
 			target = 0B1E0C0A0000000000AD0007 /* ObyWatch */;
 		};
@@ -188,6 +189,7 @@
 				Pokes.swift,
 				DecisionCard.swift,
 				DesignViews.swift,
+				ObyFaceLive.swift,
 			);
 			target = 0B1E0C0A0000000000AE0007 /* ObyWatchWidget */;
 		};

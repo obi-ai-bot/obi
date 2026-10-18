@@ -163,7 +163,7 @@ struct SetCode: View {
     var body: some View {
         Text(text).font(Tokens.mono(Tokens.textMd)).foregroundStyle(Tokens.code)
             .padding(.horizontal, 3).padding(.vertical, 1)
-            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .background(Tokens.pill, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
             .textSelection(.enabled)
     }
 }
@@ -172,7 +172,7 @@ struct SetCode: View {
 /// (`bg` when on), 200 ms warm; never the system's green toggle. The row carries the name, so the
 /// toggle's own label is only what VoiceOver reads.
 struct SetSwitch: ToggleStyle {
-    static func track(on: Bool) -> Color { on ? Tokens.ink : Color.white.opacity(0.14) }
+    static func track(on: Bool) -> Color { on ? Tokens.ink : Tokens.track }
     static func knob(on: Bool) -> Color { on ? Tokens.bg : Tokens.text }
     /// The knob's left edge.
     static func knobX(on: Bool) -> CGFloat { on ? 16 : 2 }
@@ -331,7 +331,7 @@ struct SetSegmented<Value: Hashable>: View {
         self.options = options
     }
 
-    static func fill(on: Bool) -> Color { on ? Color.white.opacity(0.12) : .clear }
+    static func fill(on: Bool) -> Color { on ? Tokens.bubble : .clear }
     static func text(on: Bool) -> Color { on ? Tokens.ink : Tokens.text }
 
     var body: some View {
