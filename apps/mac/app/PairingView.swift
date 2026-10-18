@@ -9,6 +9,7 @@ import SwiftUI
 struct PairingView: View {
     let feed: RunnerFeed
     let remote: RemoteAccess?
+    @Environment(\.openSettingsPage) private var openSettings
     @State private var invitation: GatewayInvitation?
     @State private var devices: [PairedGatewayDevice] = []
     @State private var problem: String?
@@ -27,14 +28,25 @@ struct PairingView: View {
                     }
                 }
             }
-            SetRow("") {
-                Button(busy ? "Creating…" : invitation == nil ? "Pair a device" : "Create new invitation") {
-                    Task { await create() }
+            if remote != nil, !remoteOn {
+                // A phone pairs through Remote access: the button goes there, and comes back once it's on.
+                SetRow("Remote access is off", about: "Your iPhone reaches this Mac through Remote access. Allow it, then pair.") {
+                    Button("Allow Remote Access") { openSettings(.remote, spotlight: .remoteAccess) }
+                        .buttonStyle(.set)
                 }
-                .buttonStyle(.set)
-                .disabled(busy)
+            } else {
+                SetRow("") {
+                    Button(busy ? "Creating…" : invitation == nil ? "Pair a device" : "Create new invitation") {
+                        openSettings.clear(.pairDevice)
+                        Task { await create() }
+                    }
+                    .buttonStyle(.set)
+                    .disabled(busy)
+                }
+                .spotlit(openSettings.spotlight == .pairDevice, id: .pairDevice)
             }
         }
+        .onDisappear { openSettings.clear(.pairDevice) }
         SetGroup("Paired devices", footer: "Revoke a lost phone here. It will need to pair again before it can reach this Mac.") {
             if devices.isEmpty {
                 SetRow("None yet", quiet: true)
@@ -50,6 +62,8 @@ struct PairingView: View {
         }
         .task { await loadDevices() }
     }
+
+    private var remoteOn: Bool { remote?.step == .on && remote?.hostname.map(MacLink.isHostname) == true }
 
     private func create() async {
         busy = true

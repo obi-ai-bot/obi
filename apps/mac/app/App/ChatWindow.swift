@@ -11,12 +11,20 @@ struct OpenSettingsPage: Equatable {
     weak var state: ChatState?
     var animated = true
 
-    func callAsFunction(_ page: SettingsPage) {
-        withAnimation(animated ? Tokens.warm : nil) { state?.openSettings(page) }
+    func callAsFunction(_ page: SettingsPage, spotlight: SettingsSpotlight? = nil) {
+        withAnimation(animated ? Tokens.warm : nil) { state?.openSettings(page, spotlight: spotlight) }
     }
+
+    /// The setting Settings points at, and done with it.
+    var spotlight: SettingsSpotlight? { state?.spotlight }
+    func clear(_ spotlight: SettingsSpotlight) { if state?.spotlight == spotlight { state?.spotlight = nil } }
 
     static func == (a: Self, b: Self) -> Bool { a.state === b.state && a.animated == b.animated }
 }
+
+/// The one setting a Settings page points at, ringed and scrolled to, when another page sent you
+/// there: Pair a device sends you to turn Remote access on, and once it's on, back to Pair a device.
+nonisolated enum SettingsSpotlight: Hashable, Sendable { case remoteAccess, pairDevice }
 
 extension EnvironmentValues {
     @Entry var openSettingsPage = OpenSettingsPage()
@@ -161,6 +169,8 @@ final class ChatState {
     var more: Set<String> = []
     /// What the side panel lists: Home's work, or (with obid's conversations, #493) the conversations.
     var section = PanelSection.home
+    /// The setting the Settings page showing points at (`SettingsSpotlight`).
+    var spotlight: SettingsSpotlight?
 
     /// A job's page, or the conversation with Oby, from a fresh start.
     func open(job: (id: String, local: Bool)? = nil) {
@@ -182,8 +192,9 @@ final class ChatState {
 
     /// A Settings page over Home, with the side panel on Settings' list. With no page named (the
     /// account menu, ⌘,): General, unless one of Settings' pages shows already.
-    func openSettings(_ page: SettingsPage? = nil) {
+    func openSettings(_ page: SettingsPage? = nil, spotlight: SettingsSpotlight? = nil) {
         section = .settings
+        self.spotlight = spotlight
         if let page {
             trail.start(.settings(page))
         } else if case .settings = trail.top {

@@ -27,6 +27,24 @@ struct SettingsWindowTests {
         #expect(state.trail.top == .settings(.models))
     }
 
+    /// Pair a device sends you to Remote access with its switch pointed at, then back to its own
+    /// button; opening Settings any other way points at nothing.
+    @Test func pairADevicePointsAtRemoteAccessThenBack() {
+        let state = ChatState()
+        let open = OpenSettingsPage(state: state, animated: false)
+        open(.remote, spotlight: .remoteAccess)
+        #expect(state.trail.top == .settings(.remote))
+        #expect(open.spotlight == .remoteAccess)
+        open(.runner, spotlight: .pairDevice)
+        open.clear(.remoteAccess)
+        #expect(open.spotlight == .pairDevice)
+        open.clear(.pairDevice)
+        #expect(open.spotlight == nil)
+        open(.remote, spotlight: .remoteAccess)
+        state.openSettings(.accounts)
+        #expect(state.spotlight == nil)
+    }
+
     @Test func theTrailNamesThePage() {
         let model = IslandModel(desk: Desk(), feed: RunnerFeed(), availability: MacAvailability())
         #expect(WindowLabels.label(.settings(.remote), model: model) == "Remote access")
