@@ -3,8 +3,31 @@ import OSLog
 import Security
 import UIKit
 
-/// The app's tabs (#11): Home is the glance, Chat the thread with Oby, Settings the runner and its accounts.
+/// The app's tabs (Sangam's design): Home, the stage; Conversations with Oby (`chat`); Settings,
+/// the runner and its accounts.
 nonisolated enum PhoneTab: String, Hashable, Sendable { case home, chat, settings }
+
+/// The jobs as Home's work (#496, as the Mac's `SidebarSections.work`): each one's kind, where it
+/// stands, and whether it's new; and what's been archived.
+nonisolated enum PhoneWork {
+    /// Latest first (by when it finished, else when it was made). New: made after `since` (this
+    /// launch) and not opened since (`seen`). No teammates yet: the runner doesn't say who asked.
+    static func items(_ jobs: [Job], since: Date, seen: Set<String>) -> [WorkList.Item<Job>] {
+        jobs.enumerated()
+            .sorted { ($0.element.finished ?? $0.element.created, -$0.offset) > ($1.element.finished ?? $1.element.created, -$1.offset) }
+            .map { _, job in
+                let status: WorkStatus = job.needsYou || job.waitsForAnswer || job.waitsForPermission ? .needs : job.isActive ? .running : .done
+                return WorkList.Item(id: job.id, job: job, type: .of(review: job.kind == "review", issue: job.issue, requester: nil),
+                                     status: status, queued: job.status == .queued, fresh: job.created > since && !seen.contains(job.id))
+            }
+    }
+
+    /// Archived (#280), kept by the phone alone: finished jobs Clear done took off Home, and the
+    /// ones you let go (Dismiss). The runner keeps them all; this lists the ones it sent.
+    static func archived(_ jobs: [Job], clearedAt: Date?) -> [Job] {
+        jobs.filter { !$0.isActive && ($0.dismissed != nil || !$0.listed(after: clearedAt, among: jobs)) }
+    }
+}
 
 /// The phone's view of the runner: its jobs and accounts, kept live while the app is open, and
 /// the conversation that turns words into a plan.
@@ -43,7 +66,34 @@ final class Phone {
         var said: String
         var answer: (question: String, option: String)?
         var voice: Bool
+        /// The conversation the words join (obid, #493), or nil for the latest; `new` starts one.
+        var conversation: String? = nil
+        var new = false
     }
+
+    /// obid's conversations (#493), pinned first, or nil from a runner that keeps one thread.
+    private(set) var conversations: [RunnerConversation]?
+    /// The conversation the thread shows: one of obid's by id, or nil for the latest (the one
+    /// thread of a runner without conversations).
+    private(set) var current: String?
+    /// A conversation is being started (Home's box) and obid hasn't named it yet: the thread
+    /// holds only its words until it does.
+    private(set) var startingNew = false
+    /// The conversation Oby's answer under way (`talk`) belongs to.
+    private var talkIn: String?
+    /// The last line said in each conversation, by id, for its row in the list.
+    private(set) var previews: [String: String] = [:]
+    /// When this launch began, and the tasks opened since: a task is new (blue) until it's opened.
+    let since = Date.now
+    private(set) var seen: Set<String> = []
+    func markSeen(_ id: String) { seen.insert(id) }
+
+    /// Home's work: every job Home lists, with its kind and where it stands.
+    var work: [WorkList.Item<Job>] { PhoneWork.items(visibleJobs, since: since, seen: seen) }
+    /// Archived: done jobs that left Home (Clear done, Dismiss).
+    var archived: [Job] { PhoneWork.archived(jobs, clearedAt: clearedAt) }
+    /// What Oby's answering or asking in the thread shown, else nothing.
+    var talkHere: Talk { talkIn == current ? talk : .none }
     @ObservationIgnored private let speaker = PhoneSpeaker()
     @ObservationIgnored private var planning: Task<Void, Never>?
     @ObservationIgnored private var spoken = false
@@ -84,6 +134,7 @@ final class Phone {
             stop()
             // Another runner: nothing the last one said holds.
             conversation.forget()
+            forgetConversations()
             echoes = []
             failures = [:]
             requests = [:]
@@ -98,6 +149,7 @@ final class Phone {
         didSet {
             if oldValue?.hostname != link?.hostname {
                 conversation.forget()
+                forgetConversations()
                 echoes = []
                 failures = [:]
                 requests = [:]
@@ -153,7 +205,7 @@ final class Phone {
             JobWaiter.shared.wait(for: jobs, runner: base)
         }
     }
-    /// The jobs whose screens are open (JobScreen): a new list keeps them, even older than its 50.
+    /// The jobs whose pages are open (TaskPage): a new list keeps them, even older than its 50.
     @ObservationIgnored private var onScreen: Set<String> = []
     /// The Live Activity's latest update, so a background wake can wait for it to land.
     @ObservationIgnored private var syncing: Task<Void, Never>?
@@ -168,8 +220,9 @@ final class Phone {
     /// hides the jobs that finished by then. The runner keeps them all.
     private(set) var clearedAt: Date?
     private var loop: Task<Void, Never>?
-    /// The job a notification asked to open; Home opens it.
-    var opening: String?
+    /// What Home's stack and the Conversations tab's have open, over their first page.
+    var homePath: [Route] = []
+    var chatPath: [Route] = []
     /// The job whose notification's Publish was tapped; its screen publishes once it's ready.
     var publishing: String?
 
@@ -193,15 +246,73 @@ final class Phone {
         }
         JobsActivity.watchTokens { [weak self] in self?.runner }
         conversation.page = { [weak self] before, limit in
-            guard let self else { return [] }
-            return try await runner.conversation(before: before, limit: limit)
+            guard let self, !startingNew else { return [] }
+            return try await runner.conversation(id: current, before: before, limit: limit)
         }
         offlineQueue.bindUnscopedEntries(to: offlineQueueTarget)
         restoreQueuedMessages(for: offlineQueueTarget)
+        #if DEBUG
+        if SampleTasks.on { jobs = SampleTasks.jobs; loaded = true }
+        #endif
     }
 
-    /// The thread Chat shows: the runner's turns and this iPhone's words still on their way, by time.
-    var thread: [Turn] { conversation.thread(with: ChatThread.pending(echoes, runner: conversation.runnerTurns)) }
+    /// The thread shown: the runner's turns and this iPhone's words for it still on their way, by time.
+    var thread: [Turn] {
+        let here = echoes.filter { (requests[$0.id]?.conversation ?? nil) == current }
+        return conversation.thread(with: ChatThread.pending(here, runner: conversation.runnerTurns))
+    }
+
+    /// Opens a conversation's thread: obid's `id`, or nil for the latest (one thread).
+    func show(_ id: String?) {
+        guard id != current || startingNew else { return }
+        current = id
+        startingNew = false
+        conversation.forget()
+        Task { await conversation.reload() }
+    }
+
+    /// Where a job's page goes for its conversation: obid's (`.some(id)`), the one thread
+    /// (`.some(nil)`) when the runner keeps only that and a turn of it started the job, or nil.
+    func conversation(of job: Job) -> String?? {
+        if conversations != nil { return job.conversation.map { .some($0) } }
+        return ConversationModel.started(job.id, in: conversation.runnerTurns) ? .some(nil) : nil
+    }
+
+    private func forgetConversations() {
+        conversations = nil
+        current = nil
+        startingNew = false
+        previews = [:]
+    }
+
+    /// A conversation's last line, for its row, when this phone hasn't seen one yet.
+    func preview(_ id: String) async {
+        guard previews[id] == nil, let last = try? await runner.conversation(id: id, limit: 1).last else { return }
+        previews[id] = last.text
+    }
+
+    /// Renames or pins a conversation; obid's answer puts it in place.
+    func update(_ id: String, title: String? = nil, pinned: Bool? = nil) async throws {
+        take(try await runner.updateConversation(id, title: title, pinned: pinned))
+    }
+
+    /// Forgets a conversation; the jobs it started stay.
+    func delete(_ id: String) async throws {
+        try await runner.deleteConversation(id)
+        take(RunnerConversation(id: id, title: "", deleted: true))
+    }
+
+    private func take(_ changed: RunnerConversation) {
+        // The conversation Home's words started, named as the turn begins: the thread shown, its
+        // steps and Stop are that one's from now on, before Oby's answer comes.
+        if startingNew, let pending, let request = requests[pending], request.new,
+           !(conversations ?? []).contains(where: { $0.id == changed.id }),
+           ConversationOrder.started(by: request.said, changed) {
+            adopt(changed.id, echo: pending)
+        }
+        if let list = conversations { conversations = ConversationOrder.placed(changed, in: list) }
+        if changed.deleted, changed.id == current { show(nil) }
+    }
 
     var runner: Runner { Runner(base: base, token: GatewayTokenStore.read()) }
 
@@ -279,6 +390,9 @@ final class Phone {
         defaultMode = RunnerMode(status.permissions?.mode)
         await take(try await runner.jobs())
         inbox = try await runner.inbox()
+        do { conversations = try await runner.conversations() } catch {
+            Logger.phone.error("listing conversations failed: \(error.localizedDescription, privacy: .public)")
+        }
         // The thread's latest page every time: what was said on the Mac while the connection was
         // down is in it.
         await conversation.reload()
@@ -339,11 +453,14 @@ final class Phone {
             inbox.removeAll { $0.id == item.id }
             if item.isOpen { inbox.append(item) }
         case .turn(let turn):
-            conversation.apply(turn)
+            if let id = turn.conversation { previews[id] = turn.text }
+            if turn.conversation == nil || (turn.conversation == current && !startingNew) { conversation.apply(turn) }
             // The runner listed what this iPhone said: its echo has done its job.
             settleEchoes()
         case .step(let step):
-            conversation.apply(step)
+            if ConversationOrder.shows(step, in: current, startingNew: startingNew) { conversation.apply(step) }
+        case .conversation(let changed):
+            take(changed)
         }
     }
 
@@ -365,11 +482,19 @@ final class Phone {
 
     // MARK: Planning
 
-    func ask(_ words: String, spoken: Bool = false) {
+    /// `new`: Home's box, which starts a conversation of its own on obid (#493); the thread then
+    /// holds just these words until obid names it.
+    func ask(_ words: String, spoken: Bool = false, new: Bool = false) {
         guard let said = ChatThread.words(words) else { return }
         cancelVoice()
         self.spoken = spoken
-        plan(said, answer: nil, voice: spoken)
+        let starts = new && conversations != nil
+        if starts {
+            current = nil
+            startingNew = true
+            conversation.forget()
+        }
+        plan(said, answer: nil, voice: spoken, new: starts)
     }
 
     /// The user picked one of the brain's options.
@@ -384,7 +509,8 @@ final class Phone {
     /// ran meanwhile shows as ended. The request for the plan stays: the runner answers it.
     func stopTurn() async {
         do {
-            try await runner.stopConversation()
+            // obid stops the latest turn in any conversation unless it's told which (#493).
+            try await runner.stopConversation(talkIn ?? current)
             stopProblem = nil
             conversation.settleSteps()
         } catch let error as RunnerError where error.status == 404 {
@@ -416,7 +542,7 @@ final class Phone {
         guard let request = requests[id] else { return }
         removeQueued(id)
         drop(echo: id)
-        plan(request.said, answer: request.answer, voice: request.voice)
+        plan(request.said, answer: request.answer, voice: request.voice, new: request.new)
     }
 
     /// Edit on words that didn't go through: they leave the thread for the field.
@@ -425,7 +551,7 @@ final class Phone {
         drop(echo: id)
     }
 
-    private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false) {
+    private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false, new: Bool = false) {
         planning?.cancel()
         speaker.stop()
         dropPending()
@@ -434,15 +560,18 @@ final class Phone {
         // The thread shows the words as the runner will list them: an answer is its option.
         let echo = Turn(who: .user, text: answer?.option ?? said, voice: voice ? true : nil)
         echoes.append(echo)
-        requests[echo.id] = Request(said: said, answer: answer, voice: voice)
+        let request = Request(said: said, answer: answer, voice: voice, conversation: current, new: new)
+        requests[echo.id] = request
+        talkIn = current
         pending = echo.id
         if connection != .live {
-            offlineQueue.queue(OfflineMessage(id: echo.id, said: said, question: answer?.question, option: answer?.option, voice: voice, target: offlineQueueTarget))
+            offlineQueue.queue(OfflineMessage(id: echo.id, said: said, question: answer?.question, option: answer?.option, voice: voice,
+                                              target: offlineQueueTarget, conversation: request.conversation, new: request.new ? true : nil))
             talk = .queued(said)
             pending = nil
             return
         }
-        send(Request(said: said, answer: answer, voice: voice), echo: echo)
+        send(request, echo: echo)
     }
 
     private func removeQueued(_ id: String) {
@@ -451,7 +580,8 @@ final class Phone {
 
     private func restoreQueuedMessages(for target: String) {
         for item in offlineQueue.messages where item.target == target {
-            requests[item.id] = Request(said: item.said, answer: item.question.flatMap { question in item.option.map { (question, $0) } }, voice: item.voice)
+            requests[item.id] = Request(said: item.said, answer: item.question.flatMap { question in item.option.map { (question, $0) } }, voice: item.voice,
+                                        conversation: item.conversation, new: item.new ?? false)
             if !echoes.contains(where: { $0.id == item.id }) {
                 echoes.append(Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil))
             }
@@ -467,11 +597,14 @@ final class Phone {
             let request = requests[item.id] ?? Request(
                 said: item.said,
                 answer: item.question.flatMap { question in item.option.map { (question, $0) } },
-                voice: item.voice
+                voice: item.voice,
+                conversation: item.conversation,
+                new: item.new ?? false
             )
             let echo = echoes.first(where: { $0.id == item.id }) ?? Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil)
-            let result = try await destinationRunner.plan(request.said, answer: request.answer)
-            apply(result, request: request, echo: echo)
+            let planned = try await destinationRunner.planned(request.said, answer: request.answer,
+                                                              conversation: request.conversation, new: request.new)
+            apply(planned, request: request, echo: echo)
         }
     }
 
@@ -495,9 +628,10 @@ final class Phone {
     private func send(_ request: Request, echo: Turn) {
         planning = Task {
             do {
-                let result = try await runner.plan(request.said, answer: request.answer)
+                let planned = try await runner.planned(request.said, answer: request.answer,
+                                                       conversation: request.conversation, new: request.new)
                 guard !Task.isCancelled else { return }
-                apply(result, request: request, echo: echo)
+                apply(planned, request: request, echo: echo)
             } catch {
                 // The request didn't go through (or the runner answered with an error): the words
                 // stay in the thread with why, to try again or edit. If the runner got them after
@@ -512,7 +646,9 @@ final class Phone {
 
     /// Applies a response the runner accepted, shared by live sends and the sequential offline
     /// flush. The queue removes its message only after this operation's network call succeeds.
-    private func apply(_ result: PlanResult, request: Request, echo: Turn) {
+    private func apply(_ planned: PlannedTurn, request: Request, echo: Turn) {
+        if request.new, let id = planned.conversation { adopt(id, echo: echo.id) }
+        let result = planned.result
         let talk: Talk
         let started: [Job]
         switch result {
@@ -527,6 +663,18 @@ final class Phone {
             started = []
         }
         finish(talk, started: started, request: request, echo: echo)
+    }
+
+    /// obid named the conversation Home's words started: the words, Oby's answer and the thread
+    /// shown (when it's still that one) are that conversation's now.
+    private func adopt(_ id: String, echo: String) {
+        requests[echo]?.conversation = id
+        requests[echo]?.new = false
+        if talkIn == nil { talkIn = id }
+        guard startingNew else { return }
+        startingNew = false
+        current = id
+        Task { await conversation.reload() }
     }
 
     private func finish(_ talk: Talk, started: [Job], request: Request, echo: Turn) {
@@ -549,7 +697,7 @@ final class Phone {
     /// A notification was tapped: open its job on Home, and publish it if that's what was tapped.
     func open(_ id: String, publish: Bool) {
         tab = .home
-        opening = id
+        homePath = [.task(id)]
         publishing = publish ? id : nil
     }
 
@@ -601,7 +749,11 @@ final class Phone {
     /// A new list from the runner, the latest 50. A job whose screen is open stays even when it's
     /// older than those, fetched again so it's current.
     private func take(_ fresh: [Job]) async {
-        let (list, refetch) = JobList.keeping(fresh, old: jobs, onScreen: onScreen, id: \.id, created: \.created)
+        let (kept, refetch) = JobList.keeping(fresh, old: jobs, onScreen: onScreen, id: \.id, created: \.created)
+        var list = kept
+        #if DEBUG
+        if SampleTasks.on { list = SampleTasks.jobs.filter { sample in !list.contains { $0.id == sample.id } } + list }
+        #endif
         jobs = list
         for id in refetch {
             guard let job = try? await runner.job(id) else { continue }

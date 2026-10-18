@@ -247,7 +247,7 @@ fn status_answers_with_engine_obid() {
     assert_eq!(accounts.len(), 2);
     assert_eq!(
         accounts[0],
-        json!({"id": "default", "agent": "claude", "name": "Default", "label": null, "signedIn": true,
+        json!({"id": "default", "agent": "claude", "name": "Default", "label": null, "signedIn": false,
                "fiveHour": null, "sevenDay": null, "fiveHourResets": null, "sevenDayResets": null,
                "running": 0, "fullUntil": null, "tetrix": null, "tetrixJobs": 0, "tetrixUsed": 0,
                "reserved": false, "reserveLiftedUntil": null})
@@ -267,7 +267,7 @@ fn status_answers_with_engine_obid() {
     assert_eq!(status["clearedAt"], Value::Null);
     assert_eq!(status["github"], "owner");
     assert_eq!(status["checks"], "no app");
-    assert_eq!(status["permissions"], json!({"mode": "bypass"}));
+    assert_eq!(status["permissions"], json!({"mode": "sandbox"}));
     let worktrees = folder.0.join("home").join("worktrees");
     assert_eq!(
         status["cleanup"],
@@ -285,6 +285,38 @@ fn status_answers_with_engine_obid() {
             .unwrap()
             .contains(TOKEN)
     );
+}
+
+/// #626: a Claude Code account is signed in when its login file is there (`.credentials.json` in
+/// its `configDir`, else in the person's `~/.claude`): a login only in the macOS Keychain can't
+/// reach a job's sandbox. obid only looks whether the file exists, never at what it holds.
+#[test]
+fn an_account_is_signed_in_when_its_login_file_is_there() {
+    let folder = Folder::new("signed-in");
+    let config = config(&folder.0, 0);
+    let work = folder.0.join("accounts/work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join(".credentials.json"), "{}").unwrap();
+    let obid = start(&folder.0, &config, Some(TOKEN));
+    let host = format!("127.0.0.1:{}", obid.port);
+    let signed_in = || -> Vec<Value> {
+        let answer = get_status(&obid, &host, TOKEN);
+        assert_eq!(answer.status, 200, "{}", answer.body);
+        answer.body["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["signedIn"].clone())
+            .collect()
+    };
+    assert_eq!(signed_in(), [json!(false), json!(true)]);
+    // The default login, once `claude auth login` wrote it to a file.
+    let person = folder.0.join("env-home/.claude");
+    std::fs::create_dir_all(&person).unwrap();
+    std::fs::write(person.join(".credentials.json"), "{}").unwrap();
+    assert_eq!(signed_in(), [json!(true), json!(true)]);
+    std::fs::remove_file(work.join(".credentials.json")).unwrap();
+    assert_eq!(signed_in(), [json!(true), json!(false)]);
 }
 
 fn answer_contains(value: &Value, needle: &str) -> bool {

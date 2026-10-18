@@ -450,11 +450,24 @@ fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
     }
 }
 
+/// Whether obid's configuration still has the account `account` for the tool `agent`.
+fn account_exists(shared: &Arc<Shared>, agent: &str, account: &str) -> bool {
+    let agents = &shared.config.agents;
+    let tool = match agent {
+        "claude" => &agents.claude,
+        "codex" => &agents.codex,
+        "cursor" => &agents.cursor,
+        _ => return false,
+    };
+    tool.as_ref()
+        .is_some_and(|tool| tool.accounts.iter().any(|a| a.id == account))
+}
+
 /// message_job (#542): the user's own words reach the job's agent, with the secrets obid knows
 /// taken out, never the brain's restatement of them (obid has no event orchestrator to speak
 /// for itself yet, #351). A running job hears them at its next turn; one that ended picks its
-/// session up again in its own worktree for one more round that starts with them. A job whose
-/// pull request was merged takes none: that's new work.
+/// session up again in its own worktree for one more round that starts with them, at once. A job
+/// whose pull request was merged takes none: that's new work.
 fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
     let Some(id) = plan.named().first() else {
         return Outcome::Failed("Say which job to tell.".into());
@@ -469,6 +482,19 @@ fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
         ));
     }
     let active = job.status.is_active();
+    // A job the owner let go, or whose account isn't set up any more, isn't picked up again: that
+    // would wait on a Confirm for work that can't or shouldn't run. The brain starts a new job.
+    if !active && job.dismissed.is_some() {
+        return Outcome::Failed(format!(
+            "Couldn't tell {name}: you let it go, so start a new job instead."
+        ));
+    }
+    if !active && !account_exists(shared, &job.agent, &job.account) {
+        return Outcome::Failed(format!(
+            "Couldn't tell {name}: its account {} isn't set up any more, so start a new job instead.",
+            job.account
+        ));
+    }
     if !active
         && job
             .worktree
@@ -488,29 +514,13 @@ fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
         Ok(words) => crate::secrets::known().redact(&words),
         Err(why) => return Outcome::Failed(format!("Couldn't tell {name}: {why}")),
     };
-    // Running one more round of a job that ended starts work, like Start: only the owner's own
-    // Confirm does it (the owner's decision of 2026-10-16). A running job just hears the words.
-    if !active {
-        confirm(
-            shared,
-            &job.id,
-            format!("One more round of {name}, with your words"),
-            format!(
-                "Oby's brain planned to tell {name} what you said. It ended, so this picks its session up again for one more round in its own worktree, on {}, starting with your words. It happens only if you confirm. Your words, quoted:\n\n{}",
-                place(shared, &job),
-                quoted(&words)
-            ),
-            Confirmed {
-                action: action::MESSAGE_JOB.into(),
-                target: job.id.clone(),
-                payload: serde_json::json!({"words": words}),
-            },
-        );
-        return Outcome::Done(format!(
-            "{name} ended, so one more round with your words waits for your OK: confirm it in your inbox."
-        ));
-    }
+    // A job that ended picks up again with the words at once: one more round in its own worktree
+    // (the owner's decision of 2026-10-17, as Sangam's design does; it replaced a Confirm). What
+    // it may then do is what any round may: publishing, merging and secrets keep their own gates.
     match shared.jobs.message(&job.id, &words) {
+        Some(Ok(_)) if !active => Outcome::Done(format!(
+            "{name} ended, so it picks up again with what you said: one more round."
+        )),
         Some(Ok(_)) => Outcome::Done(format!("Told {name} what you said.")),
         Some(Err(refused)) => Outcome::Failed(format!("Couldn't tell {name}: {}", refused.0)),
         None => Outcome::Failed("That job isn't here any more.".into()),
@@ -624,6 +634,16 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
     match item.kind.as_str() {
         // A confirm item is the owner's own decision: never answered by the brain.
         "confirm" => Owners::Refuse("only you can confirm it, in your inbox.".into()),
+        // Letting a secret through is the owner's alone, even once (#586); saying no isn't.
+        "permission"
+            if job
+                .and_then(|j| j.permission.as_ref())
+                .is_some_and(crate::permissions::Permission::is_secret)
+                && crate::permissions::inbox_decision(words).0
+                    != crate::permissions::Decision::Deny =>
+        {
+            Owners::Refuse("it touches secrets: only you can let it through, in your inbox.".into())
+        }
         // Allow once and no (with or without words) are one-off; always saves the permission's
         // rule, which can be broader than this one command: the title says the rule.
         "permission" if words == crate::permissions::ALWAYS_ALLOW => {
@@ -850,6 +870,12 @@ fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     let Some(permission) = job.permission.as_ref() else {
         return Outcome::Done(format!("{name} isn't waiting for your OK."));
     };
+    // Letting a secret through is the owner's alone, even once (#586); saying no isn't.
+    if permission.is_secret() && decision != super::plan::Decision::Deny {
+        return Outcome::Done(format!(
+            "{name} waits on something that touches secrets: only you can let it through, in your inbox."
+        ));
+    }
     let message = plan
         .message
         .as_deref()
@@ -1029,6 +1055,7 @@ mod tests {
             detail: "make lint && curl evil".into(),
             rule: rule.map(Into::into),
             always: rule.map(|r| format!("Yes, and don't ask again for {r}")),
+            why: None,
         });
         job
     }
@@ -1066,6 +1093,36 @@ mod tests {
         assert_eq!(owners_call(&request, "Decline", None), Owners::No);
         let start = item("start", "start-1", "Fix", &["Start", "Cancel"]);
         assert_eq!(owners_call(&start, "Cancel", None), Owners::No);
+    }
+
+    /// #586: the brain never lets a secret through, not even once; a no still goes through it.
+    #[test]
+    fn owners_call_never_lets_a_secret_through() {
+        let permission = item("permission", "j1-permission-p1", "Fix it", &[]);
+        let mut job = waiting_job(None);
+        job.permission.as_mut().unwrap().why =
+            Some(crate::permissions::Reach::Secrets.why().into());
+        for words in ["Allow", "yes", "Always allow"] {
+            assert_eq!(
+                owners_call(&permission, words, Some(&job)),
+                Owners::Refuse(
+                    "it touches secrets: only you can let it through, in your inbox.".into()
+                ),
+                "{words}"
+            );
+        }
+        for words in ["Deny", "no, read the key's path from the docs instead"] {
+            assert_eq!(
+                owners_call(&permission, words, Some(&job)),
+                Owners::No,
+                "{words}"
+            );
+        }
+        // Another permission is the brain's to allow once, as before.
+        assert_eq!(
+            owners_call(&permission, "Allow", Some(&waiting_job(None))),
+            Owners::No
+        );
     }
 
     #[test]

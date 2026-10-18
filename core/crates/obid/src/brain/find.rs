@@ -26,6 +26,12 @@ pub struct Finds {
 }
 
 impl Finds {
+    /// Whether these words were found already this turn.
+    pub fn has(&self, words: Option<&str>) -> bool {
+        let said = line(words.unwrap_or(""), 200);
+        self.sections.iter().any(|(done, _)| *done == said)
+    }
+
     /// Searches for `words` with `search`. The same words twice are in the file once and don't
     /// count again; a fourth search is refused.
     pub fn find(&mut self, words: Option<&str>, search: impl Fn(&[String]) -> Vec<Found>) {
@@ -35,7 +41,7 @@ impl Finds {
             self.notes.push("Say which words to find.".into());
             return;
         }
-        if self.sections.iter().any(|(done, _)| done == &said) {
+        if self.has(words) {
             self.notes.push(format!(
                 "Oby already searched for “{said}”: it's in {QUOTED_FILE}, read it there."
             ));
@@ -146,6 +152,7 @@ mod tests {
                         at: "2026-10-01T00:00:00Z".into(),
                         jobs: vec![],
                         conversation: "c1".into(),
+                        ended: false,
                     },
                 )
             })

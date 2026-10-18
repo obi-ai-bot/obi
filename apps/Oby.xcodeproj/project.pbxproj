@@ -177,6 +177,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Character.swift,
+				DesignViews.swift,
 			);
 			target = 0B1E0C0A0000000000AD0007 /* ObyWatch */;
 		};
@@ -186,6 +187,7 @@
 				Character.swift,
 				Pokes.swift,
 				DecisionCard.swift,
+				DesignViews.swift,
 			);
 			target = 0B1E0C0A0000000000AE0007 /* ObyWatchWidget */;
 		};

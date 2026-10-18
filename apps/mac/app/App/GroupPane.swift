@@ -48,38 +48,3 @@ struct GroupPane: View {
         .onAppear { picked = picked ?? WorkList.firstTab(items) }
     }
 }
-
-/// Underlined tabs (Sangam's `.line-tabs`): the names alone with their counts, the open one in ink
-/// with a 2-point line on the 1-point line under the row, sliding to the tab picked.
-struct LineTabs: View {
-    let tab: WorkList.Tab
-    let counts: [WorkList.Tab: Int]
-    let onPick: (WorkList.Tab) -> Void
-    @Namespace private var line
-
-    var body: some View {
-        HStack(spacing: 24) {
-            ForEach(WorkList.Tab.allCases, id: \.self) { each in
-                Button { withAnimation(Tokens.warm) { onPick(each) } } label: {
-                    HStack(spacing: 6) {
-                        Text(each.rawValue).font(Tokens.font(Tokens.textBase))
-                            .foregroundStyle(tab == each ? Tokens.ink : Tokens.muted)
-                        Text("\(counts[each] ?? 0)").font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(Tokens.muted)
-                    }
-                    .frame(height: 36)
-                    .overlay(alignment: .bottom) {
-                        if tab == each {
-                            Capsule().fill(Tokens.ink).frame(height: 2).offset(y: 1)
-                                .matchedGeometryEffect(id: "line", in: line)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(tab == each ? .isSelected : [])
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .bottom) { Tokens.line.frame(height: 1) }
-    }
-}

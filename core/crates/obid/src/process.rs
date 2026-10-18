@@ -87,9 +87,15 @@ pub fn sandbox_env(
     for (name, value) in extra {
         env.push(((*name).into(), value.clone()));
     }
-    env.retain(|(name, _)| !is_forbidden(&name.to_string_lossy()));
+    // obid's own CLAUDE_CODE_TMPDIR (a Claude Code run's, below) is the one CLAUDE_CODE_* let in.
+    env.retain(|(name, _)| name == CLAUDE_TMPDIR || !is_forbidden(&name.to_string_lossy()));
     env
 }
+
+/// What a Claude Code launch adds to [`sandbox_env`]'s `extra`: Claude Code makes its Bash folder in
+/// /tmp/claude-<uid> unless told, which the sandbox doesn't let a job write (a field test,
+/// 2026-10-17: every Bash command failed with EPERM), so it's the run's own temporary folder.
+pub const CLAUDE_TMPDIR: &str = "CLAUDE_CODE_TMPDIR";
 
 /// The `PATH` processes get: obid's own, then what the login shell adds (AGENTS.md, "PATH"), so a
 /// tool installed for the person is found even when obid was started with a short `PATH`.
@@ -218,5 +224,39 @@ pub fn describe(status: std::process::ExitStatus) -> String {
     match status.code() {
         Some(code) => format!("exit status {code}"),
         None => "ended".into(),
+    }
+}
+
+#[cfg(test)]
+mod claude_tmpdir_tests {
+    use super::*;
+
+    /// Claude Code's Bash folder is the run's own temporary folder when its launch says so; no
+    /// other CLAUDE_CODE_* gets in.
+    #[test]
+    fn claude_code_makes_its_bash_folder_in_the_jobs_temp() {
+        let temp = Path::new("/tmp/job-temp");
+        let env = sandbox_env(
+            OsStr::new("/usr/bin"),
+            temp,
+            &[
+                (CLAUDE_TMPDIR, temp.into()),
+                ("CLAUDE_CODE_OTHER", "x".into()),
+            ],
+        );
+        let names: Vec<_> = env
+            .iter()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&CLAUDE_TMPDIR.to_owned()), "{names:?}");
+        assert!(
+            !names.contains(&"CLAUDE_CODE_OTHER".to_owned()),
+            "{names:?}"
+        );
+        assert!(
+            sandbox_env(OsStr::new("/usr/bin"), temp, &[])
+                .iter()
+                .all(|(k, _)| k != CLAUDE_TMPDIR)
+        );
     }
 }

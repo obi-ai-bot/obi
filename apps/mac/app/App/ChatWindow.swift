@@ -547,50 +547,6 @@ struct EyeLevel: Layout {
     }
 }
 
-/// Chips in rows, each row centred, wrapping when the next one doesn't fit.
-struct CenteredFlow: Layout {
-    var spacing: CGFloat = 8
-    /// Off: each row starts at the left, as a card's choices do.
-    var centred = true
-
-    private func rows(_ subviews: Subviews, width: CGFloat) -> [[(index: Int, size: CGSize)]] {
-        var rows: [[(index: Int, size: CGSize)]] = [[]]
-        var used: CGFloat = 0
-        for (index, view) in subviews.enumerated() {
-            var size = view.sizeThatFits(.unspecified)
-            if size.width > width { size = view.sizeThatFits(ProposedViewSize(width: width, height: nil)) }
-            if !rows[rows.count - 1].isEmpty && used + spacing + size.width > width {
-                rows.append([]); used = 0
-            }
-            used += (rows[rows.count - 1].isEmpty ? 0 : spacing) + size.width
-            rows[rows.count - 1].append((index, size))
-        }
-        return rows
-    }
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let width = proposal.width ?? .infinity
-        let rows = rows(subviews, width: width)
-        let height = rows.map { $0.map(\.size.height).max() ?? 0 }.reduce(0, +) + spacing * CGFloat(max(0, rows.count - 1))
-        let widest = rows.map { row in row.map(\.size.width).reduce(0, +) + spacing * CGFloat(max(0, row.count - 1)) }.max() ?? 0
-        return CGSize(width: min(width, widest), height: height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var y = bounds.minY
-        for row in rows(subviews, width: bounds.width) {
-            let width = row.map(\.size.width).reduce(0, +) + spacing * CGFloat(max(0, row.count - 1))
-            var x = centred ? bounds.midX - width / 2 : bounds.minX
-            let height = row.map(\.size.height).max() ?? 0
-            for item in row {
-                subviews[item.index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(item.size))
-                x += item.size.width + spacing
-            }
-            y += height + spacing
-        }
-    }
-}
-
 /// Messenger bubbles: no per-message chrome, one centered timestamp above each group.
 struct TurnRow: View {
     let turn: Turn

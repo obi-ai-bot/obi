@@ -481,37 +481,6 @@ struct PanelButtonStyle: ButtonStyle {
     }
 }
 
-/// A task's one mark at the end of its row (#496, Sangam's StatusDot): an 8-point dot, blue while
-/// new, orange when it needs you, grey and pulsing slowly while working; nothing while queued (the
-/// spot stays, so rows line up); a small grey check once done.
-struct WorkMarkView: View {
-    let mark: WorkMark
-    var dot: CGFloat = 8
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        Group {
-            switch mark {
-            case .new: Circle().fill(Tokens.unread).frame(width: dot, height: dot)
-            case .needs: Circle().fill(Tokens.needs).frame(width: dot, height: dot)
-            case .working:
-                if reduceMotion {
-                    Circle().fill(Tokens.working).frame(width: dot, height: dot).opacity(0.8)
-                } else {
-                    PhaseAnimator([0.2, 1.0]) { level in
-                        Circle().fill(Tokens.working).frame(width: dot, height: dot).opacity(level)
-                    } animation: { _ in .easeInOut(duration: 0.8) }
-                }
-            case .queued: Color.clear
-            case .done: Image(systemName: "checkmark").font(Tokens.font(9, .semibold)).foregroundStyle(Tokens.check)
-            }
-        }
-        .frame(width: 12, height: 12)
-        .accessibilityElement()
-        .accessibilityLabel(mark.rawValue)
-    }
-}
-
 /// Empty room in the window's chrome that drags the window, as a title bar does.
 struct WindowDragArea: View {
     var body: some View {

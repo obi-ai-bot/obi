@@ -9,7 +9,7 @@ import Foundation
 
 /// How freely a job's agent works (`Job.mode`).
 nonisolated enum RunnerMode: String, Codable, CaseIterable, Identifiable, Sendable {
-    case ask, acceptEdits, plan, bypass
+    case ask, acceptEdits, plan, bypass, sandbox
 
     var id: String { rawValue }
 
@@ -19,8 +19,12 @@ nonisolated enum RunnerMode: String, Codable, CaseIterable, Identifiable, Sendab
         case .acceptEdits: "Accept edits"
         case .plan: "Plan"
         case .bypass: "Bypass"
+        case .sandbox: "Sandbox"
         }
     }
+
+    /// The modes this Mac's own jobs run (Engine's PermissionMode): obid's `sandbox` is the runner's only.
+    static let local: [RunnerMode] = [.ask, .acceptEdits, .plan, .bypass]
 
     /// What the agent may do in it, in one line.
     var help: String {
@@ -29,6 +33,7 @@ nonisolated enum RunnerMode: String, Codable, CaseIterable, Identifiable, Sendab
         case .acceptEdits: "Edits files without asking; asks before commands"
         case .plan: "Plans first, and works once you approve the plan"
         case .bypass: "Asks nothing"
+        case .sandbox: "Asks only about the network, secrets and reads outside the worktree"
         }
     }
 
@@ -38,6 +43,7 @@ nonisolated enum RunnerMode: String, Codable, CaseIterable, Identifiable, Sendab
         case .acceptEdits: "pencil"
         case .plan: "list.bullet.clipboard"
         case .bypass: "bolt"
+        case .sandbox: "shippingbox"
         }
     }
 

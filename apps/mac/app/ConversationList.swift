@@ -7,6 +7,26 @@ import Observation
 /// goes out as it did before, so the one thread is the latest conversation of a runner that has
 /// them. Only the runner on this Mac plans through the runner (`RunnerFeed.local`); a remote
 /// runner's conversations aren't listed, as the Mac's own brain would answer in them.
+/// Where `POST /v1/plans` puts the user's words (obid only, #493): the conversation it names, a new
+/// one, or (neither) the latest, as every app from before conversations sends them.
+nonisolated enum PlanTarget: Equatable, Sendable {
+    case latest
+    case conversation(String)
+    case new
+}
+
+extension Runner {
+    /// `POST /v1/plans` with the words going where `target` says.
+    func planned(_ said: String, answer: (question: String, option: String)? = nil, attachments: [String] = [],
+                 in target: PlanTarget) async throws -> PlannedTurn {
+        switch target {
+        case .latest: try await planned(said, answer: answer, attachments: attachments)
+        case .conversation(let id): try await planned(said, answer: answer, attachments: attachments, conversation: id)
+        case .new: try await planned(said, answer: answer, attachments: attachments, new: true)
+        }
+    }
+}
+
 @Observable
 final class ConversationList {
     /// The runner serves conversations and this Mac plans through it: the list shows.
@@ -40,14 +60,15 @@ final class ConversationList {
     /// Mac doesn't plan through) leaves the one thread as it was.
     func load(from runner: Runner, planning: Bool) async throws {
         guard planning else { return take(nil) }
-        take(try await runner.conversations())
+        // obid keeps at most 200 unless more are pinned.
+        take(try await runner.conversations(limit: 200))
     }
 
     /// The list the runner gave, or nil: it keeps one thread.
     func take(_ list: [RunnerConversation]?) {
         guard let list else { return reset() }
         served = true
-        items = Self.ordered(list)
+        items = ConversationOrder.ordered(list.filter { !$0.deleted })
         problem = nil
         // The one shown was deleted meanwhile: a new one is open. None shown yet: the latest.
         if let shown, !items.contains(where: { $0.id == shown }) { self.shown = nil }
@@ -64,27 +85,23 @@ final class ConversationList {
         problem = nil
     }
 
-    /// A `conversation` event: it started, got a turn, was renamed or pinned.
-    func apply(_ change: ConversationChange) {
+    /// A `conversation` event: it started, got a turn, was renamed or pinned, or was deleted.
+    func apply(_ conversation: RunnerConversation) {
         guard served else { return }
-        switch change {
-        case .changed(let conversation):
-            let new = !items.contains { $0.id == conversation.id }
-            items = Self.ordered(items.filter { $0.id != conversation.id } + [conversation])
-            // The words this window sent to start one: it's theirs, before its first turn lands.
-            if new, creating, starting, shown == nil, !known.contains(conversation.id) {
-                known.insert(conversation.id)
-                // Shown at once, so its first turn (the next event) isn't dropped; its history follows.
-                select(conversation.id)
-                Task { await thread.reload() }
-            }
-        case .gone(let id):
-            items.removeAll { $0.id == id }
-            guard id == shown else { return }
+        let new = !items.contains { $0.id == conversation.id }
+        items = ConversationOrder.placed(conversation, in: items)
+        if conversation.deleted {
+            guard conversation.id == shown else { return }
             // Deleted where it was open: its next words start a new one.
             shown = nil
             starting = true
             thread.forget()
+        } else if new, creating, starting, shown == nil, !known.contains(conversation.id) {
+            // The words this window sent to start one: it's theirs, before its first turn lands.
+            known.insert(conversation.id)
+            // Shown at once, so its first turn (the next event) isn't dropped; its history follows.
+            select(conversation.id)
+            Task { await thread.reload() }
         }
     }
 
@@ -95,8 +112,12 @@ final class ConversationList {
 
     nonisolated static let newTitle = "New conversation"
 
-    /// Whether a `turn` belongs on the window's thread: one runner conversation is shown at a time.
-    func shows(_ conversation: String) -> Bool { !served || conversation == shown }
+    /// Whether a `turn` or a `step` of `conversation` belongs on the window's thread: one runner
+    /// conversation is shown at a time; one that names none (a runner with one thread) always does.
+    func shows(_ conversation: String?) -> Bool {
+        guard served, let conversation else { return true }
+        return conversation == shown
+    }
 
     // MARK: What the window does
 
@@ -157,19 +178,19 @@ final class ConversationList {
     func rename(_ id: String, to title: String) async {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty, let conversation = items.first(where: { $0.id == id }), conversation.title != title else { return }
-        await change { try await $0.rename(conversation: id, to: title) }
+        await change { try await $0.updateConversation(id, title: title) }
     }
 
     func pin(_ id: String, _ pinned: Bool) async {
-        await change { try await $0.pin(conversation: id, pinned) }
+        await change { try await $0.updateConversation(id, pinned: pinned) }
     }
 
     func delete(_ id: String) async {
         guard let runner = runner() else { return }
         do {
-            try await runner.delete(conversation: id)
+            try await runner.deleteConversation(id)
             problem = nil
-            apply(.gone(id))
+            apply(RunnerConversation(id: id, title: "", deleted: true))
         } catch {
             problem = error.localizedDescription
         }
@@ -178,7 +199,7 @@ final class ConversationList {
     private func change(_ call: (Runner) async throws -> RunnerConversation) async {
         guard let runner = runner() else { return }
         do {
-            apply(.changed(try await call(runner)))
+            apply(try await call(runner))
             problem = nil
         } catch {
             problem = error.localizedDescription
@@ -187,35 +208,15 @@ final class ConversationList {
 
     // MARK: Order
 
-    /// Pinned first, then newest first; a tie keeps the runner's order (by id here).
-    nonisolated static func ordered(_ list: [RunnerConversation]) -> [RunnerConversation] {
-        list.sorted {
-            if $0.pinned != $1.pinned { return $0.pinned }
-            return $0.lastActivity == $1.lastActivity ? $0.id < $1.id : $0.lastActivity > $1.lastActivity
-        }
-    }
-
     /// The one with the latest turn: what the runner continues without a `conversation`.
     nonisolated static func latest(_ list: [RunnerConversation]) -> RunnerConversation? {
-        list.max { $0.lastActivity == $1.lastActivity ? $0.id > $1.id : $0.lastActivity < $1.lastActivity }
+        list.max { $0.latest == $1.latest ? $0.id > $1.id : $0.latest < $1.latest }
     }
 
     /// The list as the panel shows it, matching `query` in the title (any case): Pinned, then Recent.
     nonisolated static func sections(_ list: [RunnerConversation], matching query: String) -> (pinned: [RunnerConversation], recent: [RunnerConversation]) {
         let query = query.trimmingCharacters(in: .whitespaces)
-        let found = ordered(list).filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }
-        return (found.filter(\.pinned), found.filter { !$0.pinned })
-    }
-
-    /// When it last moved, as the row says it: "now", "5m", "2h", "3d".
-    nonisolated static func ago(_ date: Date, now: Date = .now) -> String {
-        let seconds = max(0, Int(now.timeIntervalSince(date)))
-        switch seconds {
-        case ..<60: return "now"
-        case ..<3600: return "\(seconds / 60)m"
-        case ..<86400: return "\(seconds / 3600)h"
-        default: return "\(seconds / 86400)d"
-        }
+        return ConversationOrder.sections(list.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) })
     }
 }
 

@@ -10,8 +10,10 @@ struct ConversationListTests {
     let now = Date(timeIntervalSince1970: 1_791_582_173)
 
     func convo(_ id: String, _ title: String = "Title", pinned: Bool = false, ago: TimeInterval = 0) -> RunnerConversation {
-        RunnerConversation(id: id, title: title, pinned: pinned, created: now - 1000, lastActivity: now - ago, cursor: nil)
+        RunnerConversation(id: id, title: title, pinned: pinned, created: now - 1000, lastActivity: now - ago)
     }
+
+    func gone(_ id: String) -> RunnerConversation { RunnerConversation(id: id, title: "", deleted: true) }
 
     func make(_ conversations: [RunnerConversation]? = nil) -> (ConversationList, ConversationModel) {
         let thread = ConversationModel()
@@ -25,44 +27,33 @@ struct ConversationListTests {
     @Test func aConversationReadsAsTheRunnerSendsIt() throws {
         let wire = #"{"id":"5b0e2c4d-1111-4222-8333-944455556666","title":"Review oby PR #33","pinned":true,"created":"2026-10-16T09:12:00Z","lastActivity":"2026-10-16T09:14:07Z","cursor":"0-42"}"#
         let read = try Runner.decoder.decode(RunnerConversation.self, from: Data(wire.utf8))
-        #expect(read.id == "5b0e2c4d-1111-4222-8333-944455556666" && read.title == "Review oby PR #33" && read.pinned && read.cursor == "0-42")
-        #expect(read.created == ISO8601DateFormatter().date(from: "2026-10-16T09:12:00Z"))
-        #expect(read.lastActivity == ISO8601DateFormatter().date(from: "2026-10-16T09:14:07Z"))
-        #expect(read.lastActivity > read.created)
+        #expect(read.id == "5b0e2c4d-1111-4222-8333-944455556666" && read.title == "Review oby PR #33" && read.pinned && !read.deleted)
+        #expect(read.latest == ISO8601DateFormatter().date(from: "2026-10-16T09:14:07Z"))
     }
 
-    /// obid orders turns exactly: a time with fractions of a second reads too, and a cursor may be missing.
-    @Test func aTimeWithFractionsReads() throws {
-        let wire = #"{"id":"a","title":"T","pinned":false,"created":"2026-10-16T09:12:00.250Z","lastActivity":"2026-10-16T09:14:07.5Z"}"#
-        let read = try Runner.decoder.decode(RunnerConversation.self, from: Data(wire.utf8))
-        #expect(read.lastActivity.timeIntervalSince(read.created) == 127.25 && read.cursor == nil)
-        #expect(throws: (any Error).self) {
-            try Runner.decoder.decode(RunnerConversation.self, from: Data(#"{"id":"a","title":"T","pinned":false,"created":"yesterday","lastActivity":"today"}"#.utf8))
-        }
-    }
-
-    @Test func theConversationEventSaysChangedOrGone() throws {
+    @Test func theConversationEventSaysChangedOrDeleted() throws {
         let changed = #"{"id":"a","title":"T","pinned":false,"created":"2026-10-16T09:12:00Z","lastActivity":"2026-10-16T09:12:00Z","cursor":"1-1"}"#
         var parser = EventParser()
         for line in ["event: conversation", "data: \(changed)"] { #expect(parser.feed(line) == nil) }
-        guard case .conversation(.changed(let read))? = parser.feed("") else { Issue.record("not a changed conversation"); return }
-        #expect(read.id == "a" && read.title == "T")
+        guard case .conversation(let read)? = parser.feed("") else { Issue.record("not a conversation"); return }
+        #expect(read.id == "a" && read.title == "T" && !read.deleted)
         for line in ["event: conversation", #"data: {"id":"a","deleted":true}"#] { #expect(parser.feed(line) == nil) }
-        #expect(parser.feed("") == .conversation(.gone("a")))
+        guard case .conversation(let gone)? = parser.feed("") else { Issue.record("not a conversation"); return }
+        #expect(gone.id == "a" && gone.deleted)
     }
 
-    /// A turn that names its conversation says which; one from a runner with one thread is as before.
+    /// A turn that names its conversation says which; one from a runner with one thread names none.
     @Test func aTurnNamesItsConversation() throws {
         var parser = EventParser()
         for line in ["event: turn", #"data: {"id":"t1","who":"user","text":"hi","at":"2026-10-11T09:12:04Z","jobs":[],"conversation":"abc"}"#] { #expect(parser.feed(line) == nil) }
-        guard case .turnIn(let turn, let id)? = parser.feed("") else { Issue.record("not a turn in a conversation"); return }
-        #expect(turn.id == "t1" && id == "abc")
+        guard case .turn(let turn)? = parser.feed("") else { Issue.record("not a turn"); return }
+        #expect(turn.id == "t1" && turn.conversation == "abc")
         for line in ["event: turn", #"data: {"id":"t2","who":"user","text":"hi","at":"2026-10-11T09:12:04Z","jobs":[]}"#] { #expect(parser.feed(line) == nil) }
         guard case .turn(let plain)? = parser.feed("") else { Issue.record("not a turn"); return }
-        #expect(plain.id == "t2")
+        #expect(plain.id == "t2" && plain.conversation == nil)
     }
 
-    @Test func aJobNamesTheConversationThatStartedIt() throws {
+    @Test func aJobNamesTheConversationThatStartedIt() {
         let wire = #"[{"id":"j1","conversation":"abc"},{"id":"j2","conversation":null},{"id":"j3"}]"#
         let extras = RunnerJobExtras.of(Data(wire.utf8))
         #expect(extras["j1"]?.conversation == "abc" && extras["j2"]?.conversation == nil && extras["j3"]?.conversation == nil)
@@ -73,7 +64,7 @@ struct ConversationListTests {
     /// Pinned above Recent, each newest first.
     @Test func pinnedComesFirstThenNewestFirst() {
         let all = [convo("old", ago: 900), convo("pin-old", pinned: true, ago: 800), convo("new", ago: 10), convo("pin-new", pinned: true, ago: 20)]
-        #expect(ConversationList.ordered(all).map(\.id) == ["pin-new", "pin-old", "new", "old"])
+        #expect(ConversationOrder.ordered(all).map(\.id) == ["pin-new", "pin-old", "new", "old"])
         let sections = ConversationList.sections(all, matching: "")
         #expect(sections.pinned.map(\.id) == ["pin-new", "pin-old"] && sections.recent.map(\.id) == ["new", "old"])
         // Pinning isn't activity: the latest conversation is the one with the latest turn.
@@ -91,9 +82,9 @@ struct ConversationListTests {
     }
 
     @Test func aRowSaysWhenItLastMoved() {
-        #expect(ConversationList.ago(now - 5, now: now) == "now" && ConversationList.ago(now + 30, now: now) == "now")
-        #expect(ConversationList.ago(now - 5 * 60, now: now) == "5m" && ConversationList.ago(now - 2 * 3600, now: now) == "2h")
-        #expect(ConversationList.ago(now - 3 * 86400, now: now) == "3d")
+        #expect(ConversationOrder.ago(now - 5, now: now) == "now" && ConversationOrder.ago(now + 30, now: now) == "now")
+        #expect(ConversationOrder.ago(now - 5 * 60, now: now) == "5m" && ConversationOrder.ago(now - 2 * 3600, now: now) == "2h")
+        #expect(ConversationOrder.ago(now - 3 * 86400, now: now) == "3d")
     }
 
     // MARK: The one shown
@@ -111,7 +102,7 @@ struct ConversationListTests {
         list.take(nil)
         #expect(!list.served && list.items.isEmpty && list.shown == nil)
         #expect(list.target() == .latest && !list.creating)
-        #expect(list.shows("any") && list.shows("other"))
+        #expect(list.shows("any") && list.shows("other") && list.shows(nil))
         list.startNew()
         #expect(list.shown == nil && !list.starting && thread.runnerTurns.isEmpty)
         // A list that goes away (another runner) leaves one thread again.
@@ -141,7 +132,7 @@ struct ConversationListTests {
 
     @Test func onlyTheShownConversationsTurnsJoinTheThread() {
         let (list, _) = make([convo("a", ago: 10), convo("b", ago: 5)])
-        #expect(list.shows("b") && !list.shows("a"))
+        #expect(list.shows("b") && !list.shows("a") && list.shows(nil))
         list.startNew()
         #expect(!list.shows("a") && !list.shows("b"))
     }
@@ -176,19 +167,19 @@ struct ConversationListTests {
     @Test func eventsKeepTheListCurrent() {
         let (list, thread) = make([convo("a", "First", ago: 10), convo("b", "Second", ago: 5)])
         // Renamed and pinned elsewhere: replaced, and ordered again.
-        list.apply(.changed(convo("a", "Renamed", pinned: true, ago: 10)))
+        list.apply(convo("a", "Renamed", pinned: true, ago: 10))
         #expect(list.items.map(\.id) == ["a", "b"] && list.items.first?.title == "Renamed")
         // A turn moves a conversation up.
-        list.apply(.changed(convo("b", "Second", ago: 0)))
+        list.apply(convo("b", "Second", ago: 0))
         #expect(list.items.count == 2)
         // A new one from another device is listed, not shown.
-        list.apply(.changed(convo("c", "Third", ago: 1)))
+        list.apply(convo("c", "Third", ago: 1))
         #expect(list.items.count == 3 && list.shown == "b")
         // Gone, but not the one shown.
-        list.apply(.gone("c"))
+        list.apply(gone("c"))
         #expect(list.items.map(\.id) == ["a", "b"] && list.shown == "b")
         // The one shown deleted: a new one is open, and the thread is empty.
-        list.apply(.gone("b"))
+        list.apply(gone("b"))
         #expect(list.shown == nil && list.starting && thread.runnerTurns.isEmpty && list.target() == .new)
     }
 
@@ -197,10 +188,10 @@ struct ConversationListTests {
     @Test func theNewConversationItStartedOpensWithoutWaitingForTheAnswer() async {
         let (list, _) = make([convo("a", ago: 10)])
         list.startNew()
-        list.apply(.changed(convo("elsewhere", ago: 1)))
+        list.apply(convo("elsewhere", ago: 1))
         #expect(list.shown == nil && list.starting && list.items.count == 2)
         #expect(list.target() == .new)
-        list.apply(.changed(convo("mine", ago: 0)))
+        list.apply(convo("mine", ago: 0))
         #expect(list.shown == "mine" && !list.starting && list.shows("mine"))
         // The answer names the same one: nothing more to do. Words to it now join it.
         await list.joined("mine")
@@ -256,9 +247,9 @@ struct ConversationListTests {
 
     @Test func aRunnerWithOneThreadIgnoresConversationEvents() {
         let (list, _) = make()
-        list.apply(.changed(convo("a")))
+        list.apply(convo("a"))
         #expect(!list.served && list.items.isEmpty)
-        list.apply(.gone("a"))
+        list.apply(gone("a"))
         #expect(!list.served && list.items.isEmpty)
     }
 }

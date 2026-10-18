@@ -359,6 +359,7 @@ pub(super) fn context(shared: &Shared, turns: &[Turn], nonce: &str) -> Context {
         accounts: told,
         repos: config.repos.iter().map(|r| r.repo.clone()).collect(),
         max_running: shared.jobs.max_running(),
+        default_mode: shared.jobs.default_mode().as_str(),
         failures: briefing::week(
             crate::failures::list(&config.home, crate::failures::MOST),
             now,
@@ -580,6 +581,7 @@ fn validate_turns(input: Option<Vec<InputTurn>>) -> Result<Option<Vec<Turn>>, Ap
             at: String::new(),
             jobs: vec![],
             conversation: String::new(),
+            ended: false,
         });
     }
     Ok(Some(out))

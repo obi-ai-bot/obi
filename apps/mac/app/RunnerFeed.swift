@@ -311,10 +311,10 @@ final class RunnerFeed {
                         apply(item, words: words)
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
-                    case .turn(let turn): conversation.apply(turn)
-                    case .turnIn(let turn, let id): if conversations.shows(id) { conversation.apply(turn) }
+                    // obid names each turn's and step's conversation: the window shows one (#493).
+                    case .turn(let turn): if conversations.shows(turn.conversation) { conversation.apply(turn) }
+                    case .step(let step): if conversations.shows(step.conversation) { conversation.apply(step) }
                     case .conversation(let change): conversations.apply(change)
-                    case .step(let step): conversation.apply(step)
                     }
                 }
             } catch {
@@ -357,7 +357,7 @@ final class RunnerFeed {
     func plan(_ said: String, answer: (question: String, option: String)?, attachments: [String] = []) async throws -> Desk.Talk {
         guard let runner else { throw RunnerError(message: "The runner on this Mac isn't running yet.") }
         // In the conversation shown, or a new one (obid keeps many, #493); neither for one thread.
-        let planned: (result: PlanResult, conversation: String?)
+        let planned: PlannedTurn
         do {
             planned = try await runner.planned(said, answer: answer, attachments: attachments, in: conversations.target())
         } catch {

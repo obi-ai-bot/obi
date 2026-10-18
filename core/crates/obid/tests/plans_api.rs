@@ -1952,12 +1952,34 @@ fn the_user_tells_a_running_job_something() {
     assert!(items_of(&obid, "confirm").is_empty());
 }
 
-/// #542, with the owner's decision of 2026-10-16: telling a job that ended done something starts
-/// nothing by itself. It's a confirm item with the user's words (a secret obid holds taken out);
-/// Cancel starts nothing, and the owner's Confirm runs one more round that starts with them, in
-/// the job's own worktree.
+/// A job the owner let go (Dismiss) isn't picked up again by "tell it…": the brain hears that it
+/// should start a new job, and nothing waits for a Confirm (a field test, 2026-10-17, kept being
+/// offered one more round of a dismissed job that had failed for good).
 #[test]
-fn telling_a_finished_job_something_waits_for_the_owners_confirm() {
+fn a_dismissed_job_is_not_told_anything() {
+    let folder = Folder::new("brain-message-dismissed");
+    let obid = started(&folder);
+    let job = job_that(&obid, "Docs line", "FAIL", None, "failed");
+    let id = job["id"].as_str().unwrap().to_owned();
+    let dismissed = call(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None);
+    assert_eq!(dismissed.status, 200, "{}", dismissed.text);
+    queue(&obid, &[message_plan(&id), reply("")]);
+    let text = said(&obid, "Tell the docs job to add one more line")["text"].clone();
+    assert!(
+        text.as_str()
+            .unwrap_or("")
+            .contains("start a new job instead"),
+        "{text}"
+    );
+    assert!(items_of(&obid, "confirm").is_empty());
+}
+
+/// #542, with the owner's decision of 2026-10-17 (it replaced 2026-10-16's Confirm, as Sangam's
+/// design does): telling a job that ended done something starts one more round of it at once, in
+/// its own worktree, starting with the user's words (a secret obid holds taken out). Nothing waits
+/// for a Confirm.
+#[test]
+fn telling_a_finished_job_something_starts_one_more_round_at_once() {
     let folder = Folder::new("brain-message-done");
     let obid = started(&folder);
     let job = job_that(&obid, "Vault secrets", "Nothing", None, "done");
@@ -1967,49 +1989,13 @@ fn telling_a_finished_job_something_waits_for_the_owners_confirm() {
     let token = std::fs::read_to_string(obid.home.join("api-token")).unwrap();
     let token = token.trim();
     let words = format!("one more thing for the vault job: REPORT, and {token} isn't yours");
-    let ask = |obid: &Obid| {
-        queue(obid, &[message_plan(&id), reply("")]);
-        let answer = said(obid, &words);
-        assert_eq!(
-            answer["text"],
-            "Vault secrets ended, so one more round with your words waits for your OK: confirm it in your inbox."
-        );
-        let confirms = items_of(obid, "confirm");
-        assert_eq!(confirms.len(), 1, "{confirms:?}");
-        confirms[0].clone()
-    };
-
-    // Declined: nothing starts.
-    let declined = ask(&obid);
-    assert_eq!(declined["job"], json!(id));
-    assert_eq!(declined["options"], json!(["Confirm", "Cancel"]));
-    let text = declined["text"].as_str().unwrap();
-    assert!(
-        text.contains("> one more thing for the vault job: REPORT, and [redacted: ")
-            && !text.contains(token),
-        "{text}"
-    );
-    let job = get_job(&obid, &id);
+    queue(&obid, &[message_plan(&id), reply("")]);
+    let answer = said(&obid, &words);
     assert_eq!(
-        (job["status"].clone(), job["round"].clone()),
-        (json!("done"), json!(1))
+        answer["text"],
+        "Vault secrets ended, so it picks up again with what you said: one more round."
     );
-    assert!(job["notes"].is_null(), "{job}");
-    assert_eq!(
-        owner_answers(&obid, declined["id"].as_str().unwrap(), "Cancel").status,
-        200
-    );
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    let job = get_job(&obid, &id);
-    assert_eq!(
-        (job["status"].clone(), job["round"].clone()),
-        (json!("done"), json!(1))
-    );
-
-    // Confirmed: one more round, in its own worktree, starting with the words.
-    let confirm = ask(&obid);
-    let confirmed = owner_answers(&obid, confirm["id"].as_str().unwrap(), "Confirm");
-    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    assert!(items_of(&obid, "confirm").is_empty());
     let done = within(30, "its round ended", || {
         let job = get_job(&obid, &id);
         (job["status"] == "done" && job["round"] == 2).then_some(job)
@@ -2756,6 +2742,96 @@ fn codex_gets_the_same_quoted_file() {
     assert_eq!(
         answer["text"],
         "From Codex. It read work.md: # Researched on request, quoted"
+    );
+}
+
+/// #626: a boxed read needs a Claude Code account whose login is a file (a login only in the
+/// macOS Keychain can't reach the box). With none, the brain goes straight to Codex: no Claude
+/// process is started for the read.
+#[test]
+fn a_read_goes_straight_to_codex_when_no_claude_login_reaches_the_box() {
+    let folder = Folder::new("brain-signed-out");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    let agents = planner().parent().unwrap().to_path_buf();
+    config["agents"]["codex"] = json!({"bin": agents.join("fake-codex"), "accounts": []});
+    let obid = start(&folder.0, &config, Some(&agents));
+    let greet = || {
+        research(vec![lookup(
+            "read_file",
+            json!({"repo": "obi-e2e/fixture-app", "path": "src/greet.js"}),
+        )])
+    };
+    // Signed in: Claude reads, boxed.
+    std::fs::create_dir_all(brain(&obid)).unwrap();
+    std::fs::write(brain(&obid).join(".credentials.json"), "{}").unwrap();
+    queue(&obid, &[greet(), reply("Claude read it.")]);
+    assert_eq!(said(&obid, "read greet")["text"], "Claude read it.");
+    assert_eq!(calls(&obid).len(), 2);
+    // Signed out: only the first, unboxed call is Claude's.
+    std::fs::remove_file(brain(&obid).join(".credentials.json")).unwrap();
+    queue(&obid, &[greet(), reply("Never asked.")]);
+    assert_eq!(
+        said(&obid, "read greet")["text"],
+        "From Codex. It read work.md: # Researched on request, quoted"
+    );
+    assert_eq!(calls(&obid).len(), 3);
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["by"], "codex");
+    assert!(
+        record["refused"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("claude skipped: no Claude Code account"),
+        "{record}"
+    );
+}
+
+/// #626: when Claude Code answers but makes no plan, what it said ("Not logged in") is kept in
+/// why it failed, not only its exit code.
+#[test]
+fn claudes_own_words_are_kept_when_it_makes_no_plan() {
+    let folder = Folder::new("brain-own-words");
+    let obid = started(&folder);
+    let answer = json!({"type": "result", "subtype": "success", "is_error": true,
+                        "result": "Not logged in · Please run /login"});
+    queue(&obid, &[format!("FAIL 1 {answer}")]);
+    said(&obid, "hello");
+    let refused = records(&obid).pop().unwrap()["refused"].to_string();
+    assert!(
+        refused
+            .contains("attempt 1: exit code 1: Not logged in · Please run /login, stderr: <empty>"),
+        "{refused}"
+    );
+}
+
+/// #640's security review: only Claude Code's own error is kept, on one line, and never text that
+/// looks like a credential or anything the model wrote that wasn't an error.
+#[test]
+fn only_claudes_own_error_is_kept_and_never_a_credential() {
+    let folder = Folder::new("brain-own-words-safe");
+    let obid = started(&folder);
+    let token = ["sk-ant-oat01-", &"A".repeat(80)].concat();
+    for answer in [
+        json!({"type": "result", "subtype": "success", "is_error": false,
+               "result": "Here is what I found in the file"}),
+        json!({"type": "result", "subtype": "success", "is_error": true,
+               "result": format!("Not logged in: {token}")}),
+    ] {
+        queue(&obid, &[format!("FAIL 1 {answer}")]);
+        said(&obid, "hello");
+        let refused = records(&obid).pop().unwrap()["refused"].to_string();
+        assert!(!refused.contains("Here is what I found"), "{refused}");
+        assert!(!refused.contains("sk-ant-oat01"), "{refused}");
+    }
+    let answer = json!({"type": "result", "subtype": "success", "is_error": true,
+                        "result": "Not logged in\nERROR forged line"});
+    queue(&obid, &[format!("FAIL 1 {answer}")]);
+    said(&obid, "hello");
+    let refused = records(&obid).pop().unwrap()["refused"].to_string();
+    assert!(
+        refused.contains("Not logged in ERROR forged line"),
+        "{refused}"
     );
 }
 
@@ -3524,4 +3600,290 @@ fn no_extra_step_when_the_budget_ran_out() {
     std::thread::sleep(std::time::Duration::from_millis(1500));
     assert!(!checked(&obid));
     assert_eq!(ends(&obid), ["budget_spent"]);
+}
+
+/// #586: `sandbox` stops a job asking the owner about what stays inside its sandbox, so it widens
+/// trust, and it is the owner's to set (`PUT /v1/settings/permissions`, `POST /v1/jobs/{id}/mode`).
+/// The brain's plan can't name it: a plan that sets it, or dispatches a job in it, is refused, and
+/// the job's mode stays as it was, with nothing started and nothing to confirm.
+#[test]
+fn the_brain_cannot_set_sandbox_mode() {
+    let folder = Folder::new("brain-no-sandbox");
+    let obid = started(&folder);
+    let id = job_in(&obid, "Vault secrets", "SLEEP", "ask");
+    within(30, "the job runs", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["status"] == "running").then_some(())
+    });
+    let dispatch = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "fix", "title": "Greeting fix",
+         "task": "Fix the greeting", "rounds": 1, "check": "node --test", "mode": "sandbox"}]});
+    queue(&obid, &[set_mode(&id, "sandbox"), dispatch.to_string()]);
+    // Both plans miss the schema, so the rules answer instead.
+    let answer = said(&obid, "stop asking me about commands");
+    assert_eq!(answer["kind"], "question", "{answer}");
+    assert_eq!(answer["jobs"], json!([]));
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["by"], "rules");
+    let refused: Vec<&str> = record["refused"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert_eq!(refused.len(), 2, "{record}");
+    for plan in refused {
+        assert!(
+            plan.starts_with("claude plan refused (the output doesn't match the schema)")
+                && plan.contains(r#""mode":"sandbox""#),
+            "{plan}"
+        );
+    }
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["mode"], "ask", "{job}");
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
+    assert!(items_of(&obid, "confirm").is_empty());
+}
+
+/// #586: the brain never lets a secret through, not even once. "Allow it" in chat leaves the
+/// permission waiting for the owner's own answer in the inbox, and the agent hears nothing.
+#[test]
+fn the_brain_never_lets_a_secret_through() {
+    let folder = Folder::new("brain-no-secret");
+    let obid = started(&folder);
+    let id = job_in(
+        &obid,
+        "Key reader",
+        r#"ASK: {"tool": "Bash", "input": {"command": "cat ~/.ssh/id_rsa"}}"#,
+        "sandbox",
+    );
+    let permission = within(30, "a permission waits", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        job["permission"]["id"].as_str().map(str::to_owned)
+    });
+    let allow = json!({"action": "answer_permission", "reply": "", "dispatches": [], "question": null,
+                       "jobs": [id], "decision": "allow", "message": null});
+    queue(&obid, &[allow.to_string()]);
+    let answer = said(&obid, "allow it");
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("only you can let it through, in your inbox"),
+        "{answer}"
+    );
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["permission"]["id"], permission.as_str(), "{job}");
+    assert_eq!(job["status"], "running");
+    assert_eq!(items_of(&obid, "permission").len(), 1);
+}
+
+/// Re-review of #586, S2: the brain can't settle a secret by changing the job's mode. After it
+/// sets Ask, Plan and Accept edits, the card still waits and the agent heard nothing.
+#[test]
+fn the_brain_cannot_settle_a_secret_by_changing_the_mode() {
+    let folder = Folder::new("brain-secret-mode");
+    let obid = started(&folder);
+    let id = job_in(
+        &obid,
+        "Env reader",
+        // A read: Ask, Plan and Accept edits all let reads through without asking.
+        r#"ASK: {"tool": "Read", "input": {"file_path": ".env"}}"#,
+        "sandbox",
+    );
+    let permission = within(30, "a permission waits", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        job["permission"]["id"].as_str().map(str::to_owned)
+    });
+    queue(
+        &obid,
+        &[
+            set_mode(&id, "ask"),
+            set_mode(&id, "plan"),
+            set_mode(&id, "acceptEdits"),
+            reply("Done."),
+        ],
+    );
+    said(&obid, "read it, whatever mode it takes");
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["mode"], "acceptEdits", "{job}");
+    assert_eq!(job["permission"]["id"], permission.as_str(), "{job}");
+    assert_eq!(job["status"], "running");
+    assert_eq!(job["summary"], "", "the agent heard an answer: {job}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// A turn always ends with words (#615), and research isn't wasted (#632).
+
+fn search(query: &str) -> String {
+    research(vec![lookup(
+        "search_code",
+        json!({"repo": "obi-e2e/fixture-app", "query": query}),
+    )])
+}
+
+/// The last turn Oby kept in the conversation.
+fn last_oby_turn(obid: &Obid) -> serde_json::Value {
+    call(obid, "GET", "/v1/conversation?limit=500", None)
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|t| t["who"] == "oby")
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// #615: a later step left with too little time to think ends `budget_spent`, after what was
+/// done, with "say continue", never `brain_failed`.
+#[test]
+fn a_later_step_with_no_time_left_to_think_ends_budget_spent() {
+    let folder = Folder::new("brain-no-time-left");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    config["turnBudget"] = json!(3);
+    let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Step 0's first try times out at half the budget; its retry plans with under a second left
+    // for step 1, which no adapter starts.
+    queue(
+        &obid,
+        &[
+            format!("SLEEP 5 {}", reply("")),
+            format!("SLEEP 0.9 {}", set_mode(&id, "ask")),
+        ],
+    );
+    let answer = said(&obid, "ask before anything on Vault secrets");
+    assert_eq!(
+        answer["text"],
+        "Vault secrets is in Ask mode now. That's as far as Oby got in one go: say “continue” for the rest.",
+        "{answer}"
+    );
+    assert_eq!(ends(&obid), ["budget_spent"]);
+}
+
+/// #615: the brain failed after research only: the turn says what it looked at, and is kept.
+#[test]
+fn a_brain_failure_after_research_says_what_was_looked_at() {
+    let folder = Folder::new("brain-failed-research");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &[search("Hello"), "EXIT 15".into(), "EXIT 15".into()],
+    );
+    let answer = said(&obid, "where does the app say hello?");
+    let words = "Oby searched obi-e2e/fixture-app for “Hello”, then couldn't think it through: say “continue” to pick up from there.";
+    assert_eq!(answer["text"], words, "{answer}");
+    assert_eq!(last_oby_turn(&obid)["text"], words);
+    assert_eq!(ends(&obid), ["brain_failed"]);
+}
+
+/// #615: stopped after research only, the turn says what it looked at.
+#[test]
+fn a_stop_after_research_says_what_was_looked_at() {
+    let folder = Folder::new("brain-stopped-research");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &[search("Hello"), format!("SLEEP 2 {}", reply("Late."))],
+    );
+    let answer = std::thread::scope(|scope| {
+        let asking = scope.spawn(|| said(&obid, "where does the app say hello?"));
+        within(10, "the second step's call starts", || {
+            (calls(&obid).len() == 2).then_some(())
+        });
+        call(&obid, "POST", "/v1/conversation/stop", None);
+        asking.join().unwrap()
+    });
+    let words = "Oby searched obi-e2e/fixture-app for “Hello”, then stopped.";
+    assert_eq!(answer["text"], words, "{answer}");
+    assert_eq!(last_oby_turn(&obid)["text"], words);
+    assert_eq!(ends(&obid), ["stopped"]);
+}
+
+/// #632: "continue" picks up the last turn's research: what it found is quoted in the first
+/// step's work.md, with the words it was for, and the same lookup isn't run again.
+#[test]
+fn continue_picks_up_the_last_turns_research() {
+    let folder = Folder::new("brain-continue");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &[search("Hello"), "EXIT 15".into(), "EXIT 15".into()],
+    );
+    said(&obid, "where does the app say hello?");
+    queue(
+        &obid,
+        &[search("Hello"), reply("greet is in src/greet.js.")],
+    );
+    assert_eq!(said(&obid, "continue")["text"], "greet is in src/greet.js.");
+    let calls = calls(&obid);
+    assert_eq!(calls.len(), 5);
+    let first = read(calls[3].join("work.md"));
+    assert!(first.contains("## Lookup 1: search_code"), "{first}");
+    assert!(first.contains("src/greet.js:2: "), "{first}");
+    let input = read(calls[3].join("input"));
+    assert!(
+        input.contains("Oby looked up for “where does the app say hello?” last turn"),
+        "{input}"
+    );
+    let next = read(calls[4].join("work.md"));
+    assert_eq!(next.matches("## Lookup ").count(), 1, "{next}");
+    assert!(read(calls[4].join("input")).contains("already in work.md"));
+}
+
+/// #632: a phrase no line has falls back to its words, the most specific first.
+#[test]
+fn a_search_that_finds_nothing_tries_its_words() {
+    let folder = Folder::new("brain-search-words");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &[
+            search("Hello nowhereatall"),
+            reply("greet is in src/greet.js."),
+        ],
+    );
+    said(&obid, "where does the app say hello?");
+    let file = read(calls(&obid)[1].join("work.md"));
+    assert!(file.contains("status: ok"), "{file}");
+    assert!(
+        file.contains("No line has “Hello nowhereatall”; these have “Hello”:"),
+        "{file}"
+    );
+    assert!(file.contains("src/greet.js:2: "), "{file}");
+}
+
+/// #632: a brain that asks again for what it already read is told to answer from it; the second
+/// time, the turn ends, saying what it looked at.
+#[test]
+fn reading_the_same_job_again_and_again_ends_the_turn() {
+    let folder = Folder::new("brain-read-again");
+    let obid = started(&folder);
+    let id = job_that(&obid, "Vault secrets", "Nothing", None, "done")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    queue(
+        &obid,
+        &[
+            read_plan(&id),
+            read_plan(&id),
+            read_plan(&id),
+            reply("Never heard."),
+        ],
+    );
+    let answer = said(&obid, "what did the vault job do?");
+    assert_eq!(
+        answer["text"],
+        "Oby read Vault secrets, then kept going over the same ground: say “continue” to pick up from there.",
+        "{answer}"
+    );
+    assert_eq!(calls(&obid).len(), 3);
+    assert_eq!(ends(&obid), ["repeated"]);
 }

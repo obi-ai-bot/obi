@@ -416,7 +416,7 @@ fn a_build_job_commits_and_ends_done() {
     assert_eq!(answer.body["branch"], format!("oby/build-{id}"));
     assert_eq!(answer.body["base"], "main");
     assert_eq!(answer.body["title"], "Hello file");
-    assert_eq!(answer.body["mode"], "bypass");
+    assert_eq!(answer.body["mode"], "sandbox");
     let job = wait(&obid, &id);
     assert_eq!(job["status"], "done", "{job}");
     assert_eq!(job["commits"], 1);
@@ -660,6 +660,449 @@ fn permission_prompts_are_answered_by_the_rules() {
     }
 }
 
+/// What a job's agent asks, one after another, as a job's task (the stand-in's `ASKS:`).
+fn asks(list: &[Value]) -> Value {
+    json!({"repo": "obi-e2e/fixture-app", "kind": "investigate",
+           "task": format!("ASKS: {}", Value::Array(list.to_vec()))})
+}
+
+/// The job once it has ended or waits for the owner, so a job that shouldn't ask fails fast
+/// rather than wait for an answer no one gives.
+fn settled(obid: &Obid, id: &str) -> Value {
+    let job = until(obid, id, |j| {
+        j["permission"].is_object() || !matches!(j["status"].as_str(), Some("queued" | "running"))
+    });
+    assert_eq!(job["permission"], Value::Null, "it asked the owner: {job}");
+    wait(obid, id)
+}
+
+fn inbox(obid: &Obid) -> Value {
+    request(obid, "GET", "/v1/inbox", None).body
+}
+
+/// A job in the default mode asks the owner nothing about what stays inside its sandbox (edits in
+/// its worktree, commands, tests, reads): obid answers by its rules, and the job lists what it
+/// answered, the refused ones too. Nothing reaches the inbox (#586).
+#[test]
+fn work_inside_the_sandbox_is_answered_without_the_owner() {
+    let folder = Folder::new("sandbox-inside");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    assert_eq!(
+        request(&obid, "GET", "/v1/settings/permissions", None).body,
+        json!({"mode": "sandbox"})
+    );
+    let id = post_job(
+        &obid,
+        asks(&[
+            json!({"tool": "Edit", "input": {"file_path": "src/greet.js"}}),
+            json!({"tool": "Bash", "input": {"command": "cargo test --workspace"}}),
+            json!({"tool": "Bash", "input": {"command": "node --test && git status"}}),
+            // A commit's message only says "curl" and "~/.ssh": it isn't a download or a key.
+            json!({"tool": "Bash", "input": {"command": "git commit -m \"$(cat <<'EOF'\nfix: don't curl; ~/.ssh stays\nEOF\n)\""}}),
+            json!({"tool": "Bash", "input": {"command": "git commit -am \"keep .env.local and ~/.ssh out of logs\""}}),
+            json!({"tool": "Read", "input": {"file_path": "src/greet.js"}}),
+            json!({"tool": "Grep", "input": {"pattern": "curl", "path": "src"}}),
+            json!({"tool": "Bash", "input": {"command": "git push origin HEAD"}}),
+            json!({"tool": "Read", "input": {"file_path": "/etc/passwd"}}),
+        ]),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = settled(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["mode"], "sandbox");
+    assert_eq!(
+        job["summary"]
+            .as_str()
+            .unwrap()
+            .split(", ")
+            .take(7)
+            .collect::<Vec<_>>(),
+        [
+            "answers: allow",
+            "allow",
+            "allow",
+            "allow",
+            "allow",
+            "allow",
+            "allow"
+        ]
+    );
+    assert!(
+        job["summary"]
+            .as_str()
+            .unwrap()
+            .contains("deny: obid publishes"),
+        "{job}"
+    );
+    assert_eq!(job["permission"], Value::Null);
+    assert_eq!(inbox(&obid), json!([]));
+    let answered = job["answered"].as_array().unwrap();
+    assert_eq!(job["answeredCount"], 9, "{job}");
+    let seen: Vec<(&str, &str)> = answered
+        .iter()
+        .map(|a| {
+            (
+                a["title"].as_str().unwrap(),
+                a["decision"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("Edit greet.js", "allowed"),
+            ("Run cargo test", "allowed"),
+            ("Run node --test && git status", "allowed"),
+            ("Run git commit -m \"$(cat <<'EOF'", "allowed"),
+            ("Run git commit", "allowed"),
+            ("Use Read", "allowed"),
+            ("Use Grep", "allowed"),
+            ("Run git push", "refused"),
+            ("Use Read", "refused"),
+        ]
+    );
+    assert_eq!(answered[1]["detail"], "cargo test --workspace");
+    assert!(
+        answered[7]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("publishes"),
+        "{job}"
+    );
+    assert!(answered[0]["at"].as_str().unwrap().ends_with('Z'));
+    // The record is on the job after it ended, and across a read.
+    let again = request(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(again["answered"], job["answered"]);
+}
+
+/// What leaves the sandbox or sticks still asks the owner, with why: the network beyond the
+/// model's API, secrets, a read outside the worktree. The owner's answer reaches the agent, and a
+/// secret's card offers no "always" (#586).
+#[test]
+fn what_leaves_the_sandbox_still_asks() {
+    let folder = Folder::new("sandbox-outside");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    // The account's own folder (its `configDir`), as obid gives it to the agent.
+    let login = folder.0.join("home/accounts/stub/settings.json");
+    for (ask, why, always) in [
+        (
+            json!({"tool": "Bash", "input": {"command": format!("cat {}", login.display())}}),
+            "It touches secrets or the vault.",
+            false,
+        ),
+        (
+            json!({"tool": "Bash", "input": {"command": "cat /Users/Shared/notes.txt"}}),
+            "It reads outside the job's worktree.",
+            true,
+        ),
+        (
+            json!({"tool": "Bash", "input": {"command": "npm install left-pad"}}),
+            "It reaches the network beyond the model's API.",
+            true,
+        ),
+        (
+            json!({"tool": "WebFetch", "input": {"url": "https://example.com/a"}}),
+            "It reaches the network beyond the model's API.",
+            true,
+        ),
+        (
+            json!({"tool": "Bash", "input": {"command": "cat ~/.ssh/id_rsa"}}),
+            "It touches secrets or the vault.",
+            false,
+        ),
+        (
+            json!({"tool": "Glob", "input": {"pattern": "/etc/*"}}),
+            "It reads outside the job's worktree.",
+            true,
+        ),
+    ] {
+        let id = post_job(
+            &obid,
+            json!({"repo": "obi-e2e/fixture-app", "kind": "investigate",
+                   "task": format!("ASK: {ask}")}),
+        )
+        .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let waiting = until(&obid, &id, |j| j["permission"].is_object());
+        assert_eq!(waiting["permission"]["why"], why, "{ask}");
+        assert_eq!(
+            waiting["permission"]["always"].is_string(),
+            always,
+            "{waiting}"
+        );
+        assert_eq!(waiting["answeredCount"], 0, "{waiting}");
+        let items = inbox(&obid);
+        let items = items.as_array().unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0]["kind"], "permission");
+        let answer = request(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/permission"),
+            Some(&json!({"id": waiting["permission"]["id"], "decision": "deny"}).to_string()),
+        );
+        assert_eq!(answer.status, 200, "{}", answer.text);
+        let job = wait(&obid, &id);
+        assert!(
+            job["summary"].as_str().unwrap().starts_with("answer: deny"),
+            "{job}"
+        );
+        // The owner's own answer isn't one obid made.
+        assert_eq!(job["answeredCount"], 0, "{job}");
+    }
+}
+
+/// Only the owner makes what sticks: an "always" on a network card saves their rule, and the next
+/// job's install goes through without asking; a secret's card can't be saved ("always" is
+/// refused), so the next job asks again (#586).
+#[test]
+fn only_the_owner_saves_a_rule_and_never_for_secrets() {
+    let folder = Folder::new("sandbox-rules");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let job = |command: &str| {
+        let task = format!(
+            "ASK: {}",
+            json!({"tool": "Bash", "input": {"command": command}})
+        );
+        post_job(
+            &obid,
+            json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task}),
+        )
+        .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let answer = |id: &str, permission: &Value, decision: &str| {
+        request(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/permission"),
+            Some(&json!({"id": permission["id"], "decision": decision}).to_string()),
+        )
+    };
+    assert_eq!(
+        request(&obid, "GET", "/v1/permissions/rules", None).body,
+        json!([])
+    );
+    // The network: the owner's "always" saves a rule, and it covers the next job.
+    let id = job("npm install left-pad");
+    let waiting = until(&obid, &id, |j| j["permission"].is_object());
+    assert_eq!(
+        waiting["permission"]["rule"], "Bash(npm install:*)",
+        "{waiting}"
+    );
+    let saved = answer(&id, &waiting["permission"], "always");
+    assert_eq!(saved.status, 200, "{}", saved.text);
+    assert_eq!(wait(&obid, &id)["summary"], "answer: allow");
+    let rules = request(&obid, "GET", "/v1/permissions/rules", None).body;
+    assert_eq!(rules.as_array().unwrap().len(), 1, "{rules}");
+    assert_eq!(rules[0]["rule"], "Bash(npm install:*)");
+    let id = job("npm install left-pad");
+    let covered = settled(&obid, &id);
+    assert_eq!(covered["summary"], "answer: allow", "{covered}");
+    assert_eq!(covered["answered"][0]["decision"], "allowed");
+    assert_eq!(inbox(&obid), json!([]));
+    // A secret: no rule to save, so it is allowed once and asked again.
+    let id = job("cat ~/.ssh/id_rsa");
+    let waiting = until(&obid, &id, |j| j["permission"].is_object());
+    assert_eq!(waiting["permission"]["rule"], Value::Null, "{waiting}");
+    let refused = answer(&id, &waiting["permission"], "always");
+    assert_eq!(refused.status, 422, "{}", refused.text);
+    assert!(refused.text.contains("no rule to save"), "{}", refused.text);
+    assert_eq!(answer(&id, &waiting["permission"], "allow").status, 200);
+    assert_eq!(wait(&obid, &id)["summary"], "answer: allow");
+    let id = job("cat ~/.ssh/id_rsa");
+    let again = until(&obid, &id, |j| j["permission"].is_object());
+    assert_eq!(
+        again["permission"]["why"], "It touches secrets or the vault.",
+        "{again}"
+    );
+    assert_eq!(
+        request(&obid, "GET", "/v1/permissions/rules", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// Upgrading doesn't change a mode the owner chose: an install whose `permissions.json` saved
+/// `bypass` keeps it, and its jobs don't ask about an install. Only an unset mode (no file, or a
+/// file with rules and no mode) becomes `sandbox` (#586).
+#[test]
+fn an_install_that_chose_bypass_keeps_it() {
+    for (kept, mode) in [
+        (Some(json!({"mode": "bypass", "rules": []})), "bypass"),
+        (Some(json!({"rules": []})), "sandbox"),
+        (None, "sandbox"),
+    ] {
+        let folder = Folder::new("sandbox-upgrade");
+        let remote = fixture(&folder.0.join("fixture"));
+        let home = folder.0.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        if let Some(kept) = &kept {
+            std::fs::write(home.join("permissions.json"), kept.to_string()).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    home.join("permissions.json"),
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+            }
+        }
+        let obid = start(&folder.0, &config(&folder.0, &remote));
+        assert_eq!(
+            request(&obid, "GET", "/v1/settings/permissions", None).body,
+            json!({"mode": mode}),
+            "{kept:?}"
+        );
+        let task = format!(
+            "ASK: {}",
+            json!({"tool": "Bash", "input": {"command": "npm install left-pad"}})
+        );
+        let id = post_job(
+            &obid,
+            json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task}),
+        )
+        .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        if mode == "bypass" {
+            let job = settled(&obid, &id);
+            assert_eq!(job["mode"], "bypass");
+            assert_eq!(job["summary"], "answer: allow", "{job}");
+        } else {
+            let job = until(&obid, &id, |j| j["permission"].is_object());
+            assert_eq!(job["mode"], "sandbox");
+        }
+    }
+}
+
+/// Re-review of #586, S2: a secret waits for the owner's own answer. Changing the job's mode, to
+/// any mode, Bypass too, doesn't settle its card, and the agent hears nothing until the owner
+/// answers it.
+#[test]
+fn a_mode_change_never_settles_a_secret() {
+    let folder = Folder::new("sandbox-secret-mode");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let task = format!(
+        "ASK: {}",
+        json!({"tool": "Read", "input": {"file_path": ".env"}})
+    );
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let waiting = until(&obid, &id, |j| j["permission"].is_object());
+    assert_eq!(
+        waiting["permission"]["why"],
+        "It touches secrets or the vault."
+    );
+    for mode in ["ask", "plan", "acceptEdits", "bypass", "sandbox"] {
+        let changed = request(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/mode"),
+            Some(&json!({"mode": mode}).to_string()),
+        );
+        assert_eq!(changed.status, 200, "{}", changed.text);
+        std::thread::sleep(Duration::from_millis(300));
+        let job = request(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        assert_eq!(job["mode"], mode);
+        assert_eq!(
+            job["permission"]["id"], waiting["permission"]["id"],
+            "{mode}: {job}"
+        );
+        assert_eq!(job["status"], "running", "{mode}");
+        assert_eq!(job["summary"], "", "{mode}: the agent heard an answer");
+    }
+    let allowed = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/permission"),
+        Some(&json!({"id": waiting["permission"]["id"], "decision": "allow"}).to_string()),
+    );
+    assert_eq!(allowed.status, 200, "{}", allowed.text);
+    assert_eq!(wait(&obid, &id)["summary"], "answer: allow");
+}
+
+/// Settings › Permissions: the default is Sandbox, and the owner can go back to asking for
+/// commands (Accept edits): then a test run waits for them (#586).
+#[test]
+fn the_owner_can_go_back_to_asking_for_commands() {
+    let folder = Folder::new("sandbox-back");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let put = |mode: &str| {
+        request(
+            &obid,
+            "PUT",
+            "/v1/settings/permissions",
+            Some(&json!({"mode": mode}).to_string()),
+        )
+    };
+    assert_eq!(put("acceptEdits").body, json!({"mode": "acceptEdits"}));
+    assert_eq!(put("nonsense").status, 422);
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate",
+               "task": "ASK: {\"tool\": \"Bash\", \"input\": {\"command\": \"node --test\"}}"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let waiting = until(&obid, &id, |j| j["permission"].is_object());
+    assert_eq!(waiting["mode"], "acceptEdits");
+    assert_eq!(waiting["permission"]["title"], "Run node --test");
+    assert!(waiting["permission"].get("why").is_none(), "{waiting}");
+    let allowed = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/permission"),
+        Some(&json!({"id": waiting["permission"]["id"], "decision": "allow"}).to_string()),
+    );
+    assert_eq!(allowed.status, 200, "{}", allowed.text);
+    assert_eq!(wait(&obid, &id)["summary"], "answer: allow");
+    // Back to Sandbox, and the same command goes through, recorded.
+    assert_eq!(put("sandbox").body, json!({"mode": "sandbox"}));
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate",
+               "task": "ASK: {\"tool\": \"Bash\", \"input\": {\"command\": \"node --test\"}}"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = settled(&obid, &id);
+    assert_eq!(job["summary"], "answer: allow");
+    assert_eq!(job["answered"][0]["title"], "Run node --test");
+    // The setting reads back.
+    assert_eq!(
+        request(&obid, "GET", "/v1/settings/permissions", None).body,
+        json!({"mode": "sandbox"})
+    );
+}
+
 /// Stop ends a running job's agent within 2 seconds, with everything it started; stop-all stops
 /// every queued and running job and says which; a job that ended comes back as it is.
 #[test]
@@ -899,4 +1342,39 @@ fn the_default_login_is_a_copy_the_person_keeps_unchanged() {
     );
     assert!(!login.join(".claude/.credentials.json").exists());
     assert!(login.join(".claude.json").exists());
+}
+
+/// #626: routing skips an account whose login file isn't there (a login only in the macOS
+/// Keychain can't reach the job's sandbox): another account of the tool, else another tool.
+#[test]
+fn routing_skips_an_account_that_isnt_signed_in() {
+    let folder = Folder::new("signed-out");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote);
+    let accounts = folder.0.join("home/accounts");
+    config["agents"]["claude"]["accounts"] = json!([
+        {"id": "keychain", "name": "Keychain", "configDir": accounts.join("keychain")},
+        {"id": "file", "name": "File", "configDir": accounts.join("file")}
+    ]);
+    config["agents"]["codex"] = json!({
+        "bin": Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-codex"),
+        "accounts": [{"id": "codex", "name": "Codex", "configDir": accounts.join("codex")}]
+    });
+    for (account, file) in [("file", ".credentials.json"), ("codex", "auth.json")] {
+        std::fs::create_dir_all(accounts.join(account)).unwrap();
+        std::fs::write(accounts.join(account).join(file), "{}").unwrap();
+    }
+    let obid = start(&folder.0, &config);
+    let job = |agent: Value| {
+        let answer = post_job(
+            &obid,
+            json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Say hello.",
+                   "agent": agent}),
+        );
+        assert_eq!(answer.status, 201, "{}", answer.text);
+        (answer.body["agent"].clone(), answer.body["account"].clone())
+    };
+    assert_eq!(job(json!("claude")), (json!("claude"), json!("file")));
+    std::fs::remove_file(accounts.join("file/.credentials.json")).unwrap();
+    assert_eq!(job(json!("auto")), (json!("codex"), json!("codex")));
 }

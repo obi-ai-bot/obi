@@ -34,6 +34,8 @@ pub struct Shared {
     pub cleared: crate::clear::Cleared,
     /// The devices that may approve publishing (`POST /v1/devices`).
     pub devices: crate::devices::Devices,
+    /// The phones paired with the gateway, and the open invitation (crate::gateway).
+    pub gateway: crate::gateway::Gateway,
     /// Connected apps and their job-scoped MCP broker.
     pub connections: Arc<crate::connections::Connections>,
     pub jobs: Arc<Jobs>,
@@ -193,6 +195,12 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route(
             "/v1/obid/sharing/limits",
             axum::routing::put(crate::sphere::routes::limits),
+        )
+        .route("/v1/pairing/invite", post(crate::gateway::invite))
+        .route("/v1/pairing/devices", get(crate::gateway::devices))
+        .route(
+            "/v1/pairing/devices/{id}",
+            axum::routing::delete(crate::gateway::revoke),
         )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -524,6 +532,7 @@ pub fn worktrees(home: &Path) -> PathBuf {
 
 async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>, ApiError> {
     let agents = &shared.config.agents;
+    let home = crate::jobs::login_home();
     let accounts = [
         ("claude", &agents.claude),
         ("codex", &agents.codex),
@@ -541,8 +550,9 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         agent,
         name: account.name.clone(),
         label: None,
-        // A listed account is usable until one of its jobs fails on its login.
-        signed_in: true,
+        // Whether its login file is there (#626); Cursor's is found out when it runs.
+        signed_in: crate::agent::Tool::from_id(agent)
+            .is_none_or(|tool| crate::jobs::signed_in(tool, account, home.as_deref())),
         five_hour: None,
         seven_day: None,
         five_hour_resets: None,
@@ -570,7 +580,7 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         // obid has no GitHub app: its own GitHub calls, once it makes any, go as the owner.
         github: "owner",
         checks: "no app",
-        // Settings › Permissions: bypass until the owner picks another (Engine/Permissions.swift).
+        // Settings › Permissions: sandbox until the owner picks another (docs/runner-api.md, "Permission modes").
         permissions: ModeJson {
             mode: shared.jobs.default_mode().as_str(),
         },

@@ -105,6 +105,8 @@ pub fn expected_result() -> Value {
 pub struct Obid {
     pub child: Child,
     pub port: u16,
+    /// The gateway's port, when the configuration has a `gateway`.
+    pub gateway: Option<u16>,
     pub home: PathBuf,
     pub folder: PathBuf,
     pub stderr: PathBuf,
@@ -218,9 +220,16 @@ pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
         .spawn()
         .unwrap();
     let mut line = String::new();
-    BufReader::new(child.stdout.take().unwrap())
-        .read_line(&mut line)
-        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    stdout.read_line(&mut line).unwrap();
+    let gateway = config.get("gateway").map(|_| {
+        let mut said = String::new();
+        stdout.read_line(&mut said).unwrap();
+        said.trim()
+            .strip_prefix("obid gateway listening on http://127.0.0.1:")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or_else(|| panic!("no gateway: {said:?}"))
+    });
     let port = line
         .trim()
         .strip_prefix("obid listening on http://127.0.0.1:")
@@ -234,6 +243,7 @@ pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
     Obid {
         child,
         port,
+        gateway,
         home: folder.join("home"),
         folder: folder.to_path_buf(),
         stderr,

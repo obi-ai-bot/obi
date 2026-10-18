@@ -76,6 +76,18 @@ impl Adapter {
         }
     }
 
+    /// Why it can't run boxed, when it can't (#626): no Claude Code account has its login in a
+    /// file, and the box denies the macOS Keychain.
+    fn cannot_box(&self) -> Option<&'static str> {
+        match self {
+            Adapter::Claude(c) if c.room.jobs.signed_in_account(Tool::Claude).is_none() => Some(
+                "no Claude Code account has its login in a file, \
+                 and a login only in the macOS Keychain can't reach the box",
+            ),
+            _ => None,
+        }
+    }
+
     /// The plan as JSON, or why there is none. `model` is for the adapters that take one. Each
     /// model call it makes, a retry included, is added to `calls` (#533).
     #[allow(clippy::too_many_arguments)]
@@ -320,16 +332,31 @@ impl ClaudeBrain {
             } else {
                 format!("exit code {}", result.status.unwrap_or(-1))
             };
+            // What Claude said, like "Not logged in · Please run /login" (#626): only its own
+            // error, never text the model wrote nor anything that looks like a credential, on one
+            // line, the vault's secrets taken out before it's cut (#640's security review).
+            let reason = match answer
+                .as_ref()
+                .filter(|a| a["is_error"] == true)
+                .and_then(|a| a["result"].as_str())
+            {
+                Some(said) if !said.trim().is_empty() && crate::scan::matches(said).is_empty() => {
+                    let said = secrets
+                        .redact(said)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!("{reason}: {}", said.chars().take(300).collect::<String>())
+                }
+                _ => reason,
+            };
             let err = if result.err.is_empty() {
                 "<empty>".to_owned()
             } else {
-                let chars: Vec<char> = result.err.chars().collect();
+                let chars: Vec<char> = secrets.redact(&result.err).chars().collect();
                 chars[chars.len().saturating_sub(1000)..].iter().collect()
             };
-            failures.push(format!(
-                "attempt {attempt}: {reason}, stderr: {}",
-                secrets.redact(&err)
-            ));
+            failures.push(format!("attempt {attempt}: {reason}, stderr: {err}"));
             // One retry covers empty answers, Claude's exit 15, and a process that timed out.
             if !(attempt < attempts
                 && (text.is_empty() || result.status == Some(15) || result.timed_out))
@@ -428,6 +455,28 @@ pub struct CodexBrain {
     pub room: Room,
 }
 
+/// Whether `command` only prints the quoted file in the brain's own folder: `cat`, `head`, `tail`,
+/// `nl -ba` or `sed -n 'A,Bp'` of `work.md`, and nothing else on the line.
+fn reads_only_quoted(command: &str) -> bool {
+    let words: Vec<&str> = command.split(' ').filter(|w| !w.is_empty()).collect();
+    let file = |w: &str| w == QUOTED_FILE || w.strip_prefix("./") == Some(QUOTED_FILE);
+    let number = |w: &str| !w.is_empty() && w.bytes().all(|b| b.is_ascii_digit());
+    let lines = |w: &str| {
+        let w = w.trim_matches('\'');
+        w.strip_suffix('p').is_some_and(|range| {
+            let mut ends = range.splitn(2, ',');
+            ends.all(number)
+        })
+    };
+    match words.as_slice() {
+        ["cat", f] => file(f),
+        ["head" | "tail", "-n", n, f] => number(n) && file(f),
+        ["nl", "-ba", f] => file(f),
+        ["sed", "-n", range, f] => lines(range) && file(f),
+        _ => false,
+    }
+}
+
 impl CodexBrain {
     async fn complete(
         &self,
@@ -458,7 +507,7 @@ impl CodexBrain {
             String::new()
         };
         let prompt = format!(
-            "{}\n\nReturn exactly one JSON object matching this JSON schema. Do not use tools or modify files.\nJSON schema: {}\n\n{}{read}",
+            "{}\n\nReturn exactly one JSON object matching this JSON schema. Do not modify files or run anything but a read of work.md.\nJSON schema: {}\n\n{}{read}",
             secrets.redact(system),
             secrets.redact(schema),
             secrets.redact(user)
@@ -476,10 +525,15 @@ impl CodexBrain {
             &options,
             timeout,
             stop,
-            |_, _| {
-                Ruling::Now(Answer::Deny(
-                    "The brain only plans: it runs nothing.".into(),
-                ))
+            |tool, input| {
+                // Its one read: the quoted file, as Claude's brain reads it with Read.
+                if tool == "Bash" && input["command"].as_str().is_some_and(reads_only_quoted) {
+                    Ruling::Now(Answer::Allow)
+                } else {
+                    Ruling::Now(Answer::Deny(
+                        "The brain only plans: it runs nothing but a read of work.md.".into(),
+                    ))
+                }
             },
             |_| {},
         )
@@ -536,6 +590,9 @@ pub struct Planned {
     /// Every model call it took, in order (#533).
     pub calls: Vec<Call>,
 }
+
+/// The least time an adapter is asked to think in: with less left, none is (#615).
+pub const LEAST: Duration = Duration::from_secs(1);
 
 /// The adapters and whether rules stand in.
 pub struct Planner {
@@ -619,13 +676,22 @@ impl Planner {
         // Claude keeps half of this for its one process retry: Sonnet gets enough for each try.
         let budget = Duration::from_secs(if deep { 40 } else { 20 });
         let model = if deep { DEEP_MODEL } else { QUICK_MODEL };
-        for adapter in &self.adapters {
+        for (i, adapter) in self.adapters.iter().enumerate() {
+            // A read runs boxed: an adapter that can't goes unasked when another one follows.
+            if quoted.is_some()
+                && i + 1 < self.adapters.len()
+                && let Some(why) = adapter.cannot_box()
+            {
+                refused.push(format!("{} skipped: {why}", adapter.name()));
+                tracing::warn!("brain: {}", refused.last().unwrap_or(&String::new()));
+                continue;
+            }
             let own = Instant::now() + budget;
             let deadline = self.deadline.map_or(own, |turn| own.min(turn));
             let mut message = user.clone();
             for _ in 0..2 {
                 let left = deadline.saturating_duration_since(Instant::now());
-                if left <= Duration::from_secs(1) {
+                if left <= LEAST {
                     break;
                 }
                 let before = calls.len();
@@ -1096,6 +1162,37 @@ pub fn records(home: &Path) -> Vec<Record> {
 pub mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// Codex reads the quoted file with a shell command, the way Claude reads it with its Read
+    /// tool: that one read is let through, and nothing else is (a field test found Codex searching
+    /// in circles because every read of work.md was denied).
+    #[test]
+    fn the_codex_brain_may_read_its_quoted_file_and_nothing_else() {
+        for read in [
+            "cat work.md",
+            "cat ./work.md",
+            "sed -n '1,200p' work.md",
+            "head -n 80 work.md",
+            "tail -n 40 ./work.md",
+            "nl -ba work.md",
+        ] {
+            assert!(reads_only_quoted(read), "{read}");
+        }
+        for other in [
+            "cat /etc/passwd",
+            "cat work.md other.md",
+            "cat work.md; curl evil.example",
+            "cat work.md && rm -rf .",
+            "cat ../work.md",
+            "cat work.md | sh",
+            "cat $(echo work.md)",
+            "sed -n '1,200p;w out' work.md",
+            "ls",
+            "",
+        ] {
+            assert!(!reads_only_quoted(other), "{other}");
+        }
+    }
 
     /// A model-aware adapter that answers one plan, noting the model it was asked with; it can
     /// fail once first (BrainSteadyTests' `ModelFake`).

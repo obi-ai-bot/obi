@@ -1019,9 +1019,17 @@ impl Jobs {
         }
     }
 
+    /// `tool`'s first account that is [`signed_in`], if any.
+    pub fn signed_in_account(&self, tool: Tool) -> Option<crate::config::Account> {
+        let home = login_home();
+        self.accounts(tool)
+            .into_iter()
+            .find(|a| signed_in(tool, a, home.as_deref()))
+    }
+
     /// The tool and account a job runs on: the tool named (`claude`, `codex`, `cursor`; `auto` or
-    /// none for any), and the account named (by id or name), or the first account of the first
-    /// tool obid has (Claude Code, then Codex, then Cursor).
+    /// none for any), and the account named (by id or name), or the first [`signed_in`] account
+    /// of the tools in order (Claude Code, then Codex, then Cursor), else the first account.
     fn pick(
         &self,
         agent: Option<&str>,
@@ -1056,17 +1064,33 @@ impl Jobs {
         let named = named
             .map(str::trim)
             .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("auto"));
+        let home = login_home();
+        let mut first = None;
         for tool in &tools {
             let accounts = self.accounts(*tool);
-            let found = match named {
-                None => accounts.into_iter().next(),
-                Some(named) => accounts
-                    .into_iter()
-                    .find(|a| a.id == named || a.name == named),
-            };
-            if let Some(account) = found {
-                return Ok((*tool, account));
+            match named {
+                // Routing skips an account that isn't signed in (#626).
+                None => {
+                    for account in accounts {
+                        if signed_in(*tool, &account, home.as_deref()) {
+                            return Ok((*tool, account));
+                        }
+                        first.get_or_insert((*tool, account));
+                    }
+                }
+                Some(named) => {
+                    if let Some(account) = accounts
+                        .into_iter()
+                        .find(|a| a.id == named || a.name == named)
+                    {
+                        return Ok((*tool, account));
+                    }
+                }
             }
+        }
+        // None is signed in: the first, whose tool then says why it can't run.
+        if let Some(found) = first {
+            return Ok(found);
         }
         Err(Refused(match (named, tools.as_slice()) {
             (Some(named), _) => format!("There's no account {named}."),
@@ -1126,7 +1150,9 @@ impl Jobs {
         if let Some(mode) = &new.mode
             && !crate::job::MODES.contains(&mode.as_str())
         {
-            return Err(Refused("mode is ask, acceptEdits, plan or bypass.".into()));
+            return Err(Refused(
+                "mode is ask, acceptEdits, plan, bypass or sandbox.".into(),
+            ));
         }
         let files = new.files.as_deref().map(claimed_files).transpose()?;
         if let Some(base) = &new.base
@@ -1595,12 +1621,43 @@ impl Jobs {
             .collect()
     }
 
-    /// The job's mode, as it names it.
+    /// The job's mode, as it names it. A job from before modes is in Bypass; a mode this obid
+    /// can't read (one a newer obid wrote) asks rather than allow.
     fn mode_of(job: &Job) -> Mode {
-        job.mode
-            .as_deref()
-            .and_then(Mode::parse)
-            .unwrap_or(Mode::Bypass)
+        match job.mode.as_deref() {
+            None => Mode::Bypass,
+            Some(mode) => Mode::parse(mode).unwrap_or(Mode::Ask),
+        }
+    }
+
+    /// Where the job's sandbox ends, for `permissions::reach`: its worktree, its temporary folder,
+    /// its `HOME` (the account's folder for Cursor) and its agent's login folders.
+    fn bounds(&self, job: &Job, worktree: &Path) -> permissions::Bounds {
+        let temp = self.temp_path(&job.id);
+        let tool = Tool::from_id(&job.agent);
+        let config_dir = tool.and_then(|tool| {
+            self.accounts(tool)
+                .into_iter()
+                .find(|a| a.id == job.account)
+                .and_then(|a| a.config_dir)
+        });
+        let mut logins = vec![
+            self.login_path(&job.id),
+            temp.join(".claude"),
+            temp.join(".claude.json"),
+            temp.join(".codex"),
+        ];
+        logins.extend(config_dir.clone());
+        let home = match (tool, &config_dir) {
+            (Some(Tool::Cursor), Some(dir)) => dir.clone(),
+            _ => temp.clone(),
+        };
+        permissions::Bounds {
+            worktree: worktree.to_path_buf(),
+            temp: Some(temp),
+            home: Some(home),
+            logins,
+        }
     }
 
     /// A prompt obid's fixed rules let through: the job's mode and its repository's rules allow or
@@ -1610,17 +1667,24 @@ impl Jobs {
             return Ruling::Now(Answer::Deny("The job is gone.".into()));
         };
         let call = Call::new(tool, input);
+        let bounds = self.bounds(&job, worktree);
         match permissions::decide(
             &call,
             Self::mode_of(&job),
             &self.rules_for(&job.repo),
-            worktree,
+            &bounds,
         ) {
-            permissions::Verdict::Allow => Ruling::Now(Answer::Allow),
-            permissions::Verdict::Deny(why) => Ruling::Now(Answer::Deny(why)),
+            permissions::Verdict::Allow => {
+                self.answered(id, &call, worktree, None);
+                Ruling::Now(Answer::Allow)
+            }
+            permissions::Verdict::Deny(why) => {
+                self.answered(id, &call, worktree, Some(&why));
+                Ruling::Now(Answer::Deny(why))
+            }
             permissions::Verdict::Ask => {
                 let permission =
-                    permissions::card(&call, &permissions::new_id(), &job.repo, worktree);
+                    permissions::card(&call, &permissions::new_id(), &job.repo, &bounds);
                 let (reply, answer) = tokio::sync::oneshot::channel();
                 let first = {
                     let mut state = self.lock();
@@ -1638,6 +1702,25 @@ impl Jobs {
                 Ruling::Ask(answer)
             }
         }
+    }
+
+    /// Keeps on the job a permission obid answered by its own rules, `refused` with the words the
+    /// agent heard, so the owner can see what was decided without them.
+    pub fn answered(&self, id: &str, call: &Call, worktree: &Path, refused: Option<&str>) {
+        if !permissions::is_noted(&call.tool) {
+            return;
+        }
+        let Some(job) = self.get(id) else { return };
+        let entry = permissions::Answered::of(
+            call,
+            &job.repo,
+            &self.bounds(&job, worktree),
+            refused,
+            obi_protocol::time::now(),
+        );
+        self.update(id, |job| {
+            permissions::keep_answered(&mut job.answered, &mut job.answered_count, entry)
+        });
     }
 
     /// The job shows its first waiting permission, or, with none left, goes on, its step saying
@@ -1674,6 +1757,7 @@ impl Jobs {
     fn reconsider(&self, id: &str) {
         let Some(job) = self.get(id) else { return };
         let worktree = self.worktree_path(id);
+        let bounds = self.bounds(&job, &worktree);
         let rules = self.rules_for(&job.repo);
         let mode = Self::mode_of(&job);
         let mut answered: Vec<(Ask, Answer)> = Vec::new();
@@ -1684,7 +1768,12 @@ impl Jobs {
             };
             let mut kept = VecDeque::new();
             while let Some(ask) = asks.pop_front() {
-                match permissions::decide(&ask.call, mode, &rules, &worktree) {
+                // A secret waits for the owner's own answer: a new mode or rule never settles it.
+                if ask.permission.is_secret() {
+                    kept.push_back(ask);
+                    continue;
+                }
+                match permissions::decide(&ask.call, mode, &rules, &bounds) {
                     permissions::Verdict::Allow => answered.push((ask, Answer::Allow)),
                     permissions::Verdict::Deny(why) => answered.push((ask, Answer::Deny(why))),
                     permissions::Verdict::Ask => kept.push_back(ask),
@@ -1700,6 +1789,11 @@ impl Jobs {
             Answer::Deny(_) => format!("Refused: {}", ask.permission.title),
         });
         for (ask, answer) in answered {
+            let refused = match &answer {
+                Answer::Allow => None,
+                Answer::Deny(why) => Some(why.as_str()),
+            };
+            self.answered(id, &ask.call, &worktree, refused);
             self.note(PermissionNote::Settled {
                 job: id.to_owned(),
                 permission: ask.permission.id.clone(),
@@ -2188,6 +2282,7 @@ impl Jobs {
         }
         match (&account.config_dir, tool) {
             (Some(dir), _) => {
+                not_a_link(dir)?;
                 std::fs::create_dir_all(dir).map_err(|e| {
                     format!(
                         "obid can't make the account's folder {}: {e}",
@@ -2196,7 +2291,12 @@ impl Jobs {
                 })?;
                 spec.accounts.push(dir.clone());
                 match tool {
-                    Tool::Claude => extra.push(("CLAUDE_CONFIG_DIR", dir.clone().into_os_string())),
+                    Tool::Claude => {
+                        refresh_keychain_login(dir).map_err(|e| {
+                            format!("obid can't copy Claude Code's login for this job: {e}")
+                        })?;
+                        extra.push(("CLAUDE_CONFIG_DIR", dir.clone().into_os_string()))
+                    }
                     Tool::Codex => extra.push(("CODEX_HOME", dir.clone().into_os_string())),
                     Tool::Cursor => {
                         acp::cursor::warn_if_long(dir);
@@ -2224,9 +2324,10 @@ impl Jobs {
                 // the person's own ~/.claude, ~/.claude.json and ~/.codex are never writable, so
                 // nothing a job runs can plant something the tool runs later outside the sandbox.
                 let login = self.login_path(&job.id);
-                let names = copy_login(login_home().as_deref(), &login, tool).map_err(|e| {
-                    format!("obid can't copy {}'s login for this job: {e}", tool.name())
-                })?;
+                let names =
+                    copy_login(login_home().as_deref(), &login, tool, true).map_err(|e| {
+                        format!("obid can't copy {}'s login for this job: {e}", tool.name())
+                    })?;
                 for name in names {
                     let link = spec.temp.join(name);
                     let _ = std::fs::remove_file(&link);
@@ -2260,7 +2361,12 @@ impl Jobs {
         };
         Ok(Launch {
             argv: sandbox.wrap(&spec, &argv),
-            env: process::sandbox_env(&process::tools_path(), &spec.temp, &extra),
+            env: {
+                if tool == Tool::Claude {
+                    extra.push((process::CLAUDE_TMPDIR, spec.temp.clone().into_os_string()));
+                }
+                process::sandbox_env(&process::tools_path(), &spec.temp, &extra)
+            },
             cwd: spec.worktree.clone(),
             stderr: self.log_path(&job.id, "agent.log"),
         })
@@ -2269,7 +2375,7 @@ impl Jobs {
     /// The brain's command line when it may read its quoted file (#65): boxed like a job's agent,
     /// so all it sees is `dir` (its working directory, `work.md` in it) and its account's login.
     /// `flags` follow Claude Code's binary; Codex runs `app-server`. The brain thinks with the
-    /// tool's first account. Throws why it can't run.
+    /// tool's first [`signed_in`] account, else its first. Throws why it can't run.
     pub fn brain_launch(
         &self,
         tool: Tool,
@@ -2284,9 +2390,8 @@ impl Jobs {
             .agent_bin(tool)
             .ok_or_else(|| format!("obid can't find {}'s binary.", tool.name()))?;
         let account = self
-            .accounts(tool)
-            .into_iter()
-            .next()
+            .signed_in_account(tool)
+            .or_else(|| self.accounts(tool).into_iter().next())
             .ok_or_else(|| format!("{} has no account.", tool.name()))?;
         let temp = dir.join("home");
         store::make_private_dir(&temp)
@@ -2318,8 +2423,13 @@ impl Jobs {
         let mut extra: Vec<(&str, OsString)> = Vec::new();
         match &account.config_dir {
             Some(folder) => {
+                not_a_link(folder)?;
                 std::fs::create_dir_all(folder)
                     .map_err(|e| format!("obid can't make the account's folder: {e}"))?;
+                if tool == Tool::Claude {
+                    refresh_keychain_login(folder)
+                        .map_err(|e| format!("obid can't copy Claude Code's login: {e}"))?;
+                }
                 spec.accounts.push(folder.clone());
                 extra.push(match tool {
                     Tool::Codex => ("CODEX_HOME", folder.clone().into_os_string()),
@@ -2329,7 +2439,7 @@ impl Jobs {
             None => {
                 // The tool's own login, copied into the brain's folder as a job's is.
                 let login = dir.join("login");
-                let names = copy_login(login_home().as_deref(), &login, tool)
+                let names = copy_login(login_home().as_deref(), &login, tool, true)
                     .map_err(|e| format!("obid can't copy {}'s login: {e}", tool.name()))?;
                 for name in names {
                     #[cfg(unix)]
@@ -2346,7 +2456,12 @@ impl Jobs {
         };
         Ok(Launch {
             argv: sandbox.wrap(&spec, &argv),
-            env: process::sandbox_env(&process::tools_path(), &spec.temp, &extra),
+            env: {
+                if tool == Tool::Claude {
+                    extra.push((process::CLAUDE_TMPDIR, spec.temp.clone().into_os_string()));
+                }
+                process::sandbox_env(&process::tools_path(), &spec.temp, &extra)
+            },
             cwd: dir.to_path_buf(),
             stderr: dir.join("stderr.log"),
         })
@@ -2375,7 +2490,12 @@ impl Jobs {
         // for only reads, and never asks.
         let decide = |name: &str, input: &Value| -> Ruling {
             match policy::decide(name, input, &worktree, obi_review, mcp_rules) {
-                Answer::Deny(why) => Ruling::Now(Answer::Deny(why)),
+                Answer::Deny(why) => {
+                    if !obi_review {
+                        jobs.answered(id, &Call::new(name, input), &worktree, Some(&why));
+                    }
+                    Ruling::Now(Answer::Deny(why))
+                }
                 Answer::Allow if obi_review => Ruling::Now(Answer::Allow),
                 Answer::Allow => jobs.rule_on(id, name, input, &worktree),
             }
@@ -3735,18 +3855,183 @@ pub(crate) fn login_home() -> Option<PathBuf> {
         .or_else(|| homes.into_iter().next())
 }
 
+/// Whether `account` has a login a boxed run can use (#626): its login file is there, in its
+/// `configDir` or else in `home` (Claude Code's `.credentials.json`, Codex's `auth.json`), the file
+/// [`copy_login`] would copy, or Claude Code's item in the macOS Keychain, which obid copies in its
+/// place ([`keychain_login`]). obid only looks whether it exists here. Cursor's login is found out
+/// when it runs (`crate::acp`).
+pub(crate) fn signed_in(tool: Tool, account: &crate::config::Account, home: Option<&Path>) -> bool {
+    let (folder, file) = match tool {
+        Tool::Claude => (".claude", ".credentials.json"),
+        Tool::Codex => (".codex", "auth.json"),
+        Tool::Cursor => return true,
+    };
+    let path = match (&account.config_dir, home) {
+        (Some(dir), _) => dir.join(file),
+        (None, Some(home)) => home.join(folder).join(file),
+        (None, None) => return false,
+    };
+    // A regular file only, as copy_login takes it; or, on macOS, Claude Code's own Keychain item,
+    // which obid copies in its place (keychain_login).
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
+        || (tool == Tool::Claude && keychain_has(account.config_dir.as_deref()))
+}
+
+/// The name Claude Code gives its login in the macOS Keychain for a `CLAUDE_CONFIG_DIR` (none: its
+/// default `~/.claude`): `Claude Code-credentials`, then `-` and the first 8 hex digits of the
+/// folder's SHA-256 for any other folder.
+pub(crate) fn keychain_service(config_dir: Option<&Path>) -> String {
+    match config_dir {
+        None => "Claude Code-credentials".into(),
+        Some(dir) => {
+            let digest = obi_protocol::keys::sha256(dir.as_os_str().as_encoded_bytes());
+            format!("Claude Code-credentials-{}", &hex::encode(digest)[..8])
+        }
+    }
+}
+
+/// Whether obid copies Claude Code's Keychain login (`claudeKeychain` in the configuration, set
+/// when obid starts): off unless the owner turns it on.
+static KEYCHAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the Keychain copy is on.
+pub fn keychain_on() -> bool {
+    KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turns the Keychain copy on or off (crate::serve, from the configuration).
+pub fn use_keychain(on: bool) {
+    KEYCHAIN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `security`'s answer for Claude Code's Keychain item for `config_dir`, as the person (`-a`):
+/// the item itself with `-w`, else only whether it's there.
+#[cfg(target_os = "macos")]
+fn keychain(config_dir: Option<&Path>, value: bool) -> Option<Vec<u8>> {
+    if !KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()??
+        .name;
+    let mut command = std::process::Command::new("/usr/bin/security");
+    command
+        .args(["find-generic-password", "-s"])
+        .arg(keychain_service(config_dir))
+        .args(["-a", &user])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if value {
+        command.arg("-w");
+    }
+    let output = command.output().ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain(_config_dir: Option<&Path>, _value: bool) -> Option<Vec<u8>> {
+    None
+}
+
+/// Whether Claude Code keeps a login for `config_dir` in the Keychain (macOS only).
+fn keychain_has(config_dir: Option<&Path>) -> bool {
+    keychain(config_dir, false).is_some()
+}
+
+/// Claude Code's own login for `config_dir` from the macOS Keychain, the owner's decision of
+/// 2026-10-17: the sandbox denies the Keychain, and Claude Code no longer writes a login file when
+/// it can't use the Keychain, so obid copies the Keychain's item into the place a boxed run reads
+/// its `.credentials.json` from, as it copies a login file. Never logged, shown or kept anywhere
+/// else; none on other systems.
+pub(crate) fn keychain_login(config_dir: Option<&Path>) -> Option<Vec<u8>> {
+    let mut bytes = keychain(config_dir, true)?;
+    while bytes.last().is_some_and(|b| b.is_ascii_whitespace()) {
+        bytes.pop();
+    }
+    learn_claude_tokens(&bytes, &keychain_service(config_dir));
+    (!bytes.is_empty()).then_some(bytes)
+}
+
+/// Writes `bytes` to `path` as only the person may read it (0600), replacing what's there. Never
+/// through a link: not one in place of the file, nor one a job left in place of its folder (the
+/// folder is opened without following a link, and the file made in that very folder; #643's
+/// security review).
+fn write_login(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use nix::fcntl::{OFlag, open, openat};
+    use nix::sys::stat::Mode;
+    let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(std::io::Error::other("no folder for the login"));
+    };
+    let dir = open(
+        folder,
+        OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_RDONLY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let _ = nix::unistd::unlinkat(&dir, name, nix::unistd::UnlinkatFlags::NoRemoveDir);
+    let file = openat(
+        &dir,
+        name,
+        OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_WRONLY | OFlag::O_CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(std::io::Error::from)?;
+    std::io::Write::write_all(&mut std::fs::File::from(file), bytes)
+}
+
+/// The tokens in Claude Code's login (`claudeAiOauth`'s access and refresh tokens), learned as
+/// secrets obid knows, so whatever repeats them (an agent, the brain, a log) is redacted.
+fn learn_claude_tokens(bytes: &[u8], service: &str) {
+    let Ok(login) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return;
+    };
+    for key in ["accessToken", "refreshToken"] {
+        if let Some(token) = login["claudeAiOauth"][key]
+            .as_str()
+            .filter(|t| !t.is_empty())
+        {
+            // Named by its Keychain item, so a second account's never replaces the first's.
+            crate::secrets::known().learn(&format!("{service} {key}"), token);
+        }
+    }
+}
+
+/// Whether `folder` is a real folder, or not there yet: never a link a job left in its place,
+/// which obid would otherwise follow (#643's security review).
+pub(crate) fn not_a_link(folder: &Path) -> Result<(), String> {
+    // Without a trailing `/` or `/.`, which would make the look follow a link.
+    let folder: PathBuf = folder.components().collect();
+    match std::fs::symlink_metadata(&folder) {
+        Ok(meta) if !meta.is_dir() => Err(format!(
+            "{} isn't a folder any more (a link or a file is in its place), so nothing started there.",
+            folder.display()
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Before a boxed Claude Code run on an account with a folder of its own: its `.credentials.json`
+/// from the Keychain, fresh, when the Keychain has one (else the folder is left as it is).
+pub(crate) fn refresh_keychain_login(folder: &Path) -> std::io::Result<()> {
+    match keychain_login(Some(folder)) {
+        Some(bytes) => write_login(&folder.join(".credentials.json"), &bytes),
+        None => Ok(()),
+    }
+}
+
 /// The tool's own login, copied from `home` into the job's `login` folder, for an account with no
 /// `configDir`: Claude Code's `~/.claude/.credentials.json` and `~/.claude.json`, Codex's
 /// `~/.codex/auth.json` and `config.toml`. Nothing else of those folders (no settings, hooks,
 /// commands or sessions of the person's). The credentials are copied again before every start (the
 /// person may have signed in again) and removed when the job's run ends
 /// ([`forget_login_secrets`]); the rest is copied once, then the job's own. Answers the names to
-/// show in the job's `HOME`. On macOS a login that lives only in the keychain is not copied: the
-/// job uses `.credentials.json`, which sign-in writes when the keychain's files are denied.
+/// show in the job's `HOME`. On macOS a login that lives only in the Keychain is copied from there
+/// as `.credentials.json` ([`keychain_login`]).
 pub(crate) fn copy_login(
     home: Option<&Path>,
     login: &Path,
     tool: Tool,
+    keychain: bool,
 ) -> std::io::Result<Vec<&'static str>> {
     let (shown, secret, once): (&[&'static str], &[&str], &[&str]) = match tool {
         Tool::Codex => (&[".codex"], &[".codex/auth.json"], &[".codex/config.toml"]),
@@ -3756,6 +4041,7 @@ pub(crate) fn copy_login(
             &[".claude.json"],
         ),
     };
+    not_a_link(login).map_err(std::io::Error::other)?;
     store::make_private_dir(login)?;
     // The job may have changed its login folder: obid writes only into a real folder there,
     // never through a link the job left in its place.
@@ -3785,6 +4071,14 @@ pub(crate) fn copy_login(
     };
     for name in secret {
         copy(name)?;
+    }
+    // On macOS Claude Code's login may be only in the Keychain (keychain_login).
+    if keychain
+        && tool == Tool::Claude
+        && std::fs::symlink_metadata(home.join(secret[0])).is_err()
+        && let Some(bytes) = keychain_login(None)
+    {
+        write_login(&login.join(secret[0]), &bytes)?;
     }
     for name in once {
         if std::fs::symlink_metadata(login.join(name)).is_err() {
@@ -4248,7 +4542,105 @@ fn tail_chars(text: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// #643's security review: a job that put a link in place of its account folder can't make obid
+    /// write the login wherever the link points; a real folder still gets it, as only the person
+    /// may read it.
+    #[test]
+    fn a_login_is_never_written_through_a_link() {
+        let root = std::env::temp_dir().join(format!("obid-login-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (real, elsewhere, planted) = (
+            root.join("real"),
+            root.join("elsewhere"),
+            root.join("planted"),
+        );
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &planted).unwrap();
+        assert!(write_login(&planted.join(".credentials.json"), b"{}").is_err());
+        assert!(!elsewhere.join(".credentials.json").exists());
+        write_login(&real.join(".credentials.json"), b"{}").unwrap();
+        let mode = std::fs::metadata(real.join(".credentials.json"))
+            .unwrap()
+            .permissions();
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The tokens in a copied Keychain login are secrets obid knows: what repeats them is redacted.
+    #[test]
+    fn a_keychain_logins_tokens_are_redacted() {
+        let access = ["sk-ant-oat01-", &"x".repeat(40)].concat();
+        let refresh = ["sk-ant-ort01-", &"y".repeat(40)].concat();
+        let login =
+            serde_json::json!({"claudeAiOauth": {"accessToken": access, "refreshToken": refresh}});
+        learn_claude_tokens(login.to_string().as_bytes(), "Claude Code-credentials");
+        // A second account's login doesn't push the first's out (#643's re-review).
+        let other = ["sk-ant-oat01-", &"z".repeat(40)].concat();
+        let second = serde_json::json!({"claudeAiOauth": {"accessToken": other}});
+        learn_claude_tokens(
+            second.to_string().as_bytes(),
+            "Claude Code-credentials-2e25c0fb",
+        );
+        let said = crate::secrets::known().redact(&format!("{access} and {refresh} and {other}"));
+        assert!(
+            !said.contains(&access) && !said.contains(&refresh) && !said.contains(&other),
+            "{said}"
+        );
+    }
+
+    /// A folder named with a trailing `/` or `/.` is still looked at as itself, not where a link
+    /// in its place leads (#643's re-review).
+    #[test]
+    fn a_trailing_slash_doesnt_hide_a_link() {
+        let root = std::env::temp_dir().join(format!("obid-trailing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::os::unix::fs::symlink(root.join("target"), root.join("link")).unwrap();
+        for name in ["link", "link/", "link/."] {
+            assert!(not_a_link(&root.join(name)).is_err(), "{name}");
+        }
+        assert!(not_a_link(&root.join("target/")).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Claude Code's Keychain names, as it makes them: the default folder's, and any other's with
+    /// the first 8 hex digits of its SHA-256 (seen on 2026-10-17 for an account's folder).
+    #[test]
+    fn claude_codes_keychain_items_are_named_as_it_names_them() {
+        assert_eq!(keychain_service(None), "Claude Code-credentials");
+        let folder = Path::new(
+            "/Users/wellprado/Library/Application Support/Oby/accounts/32203c5b-b24c-4353-bdcb-f34797790d0a",
+        );
+        assert_eq!(
+            keychain_service(Some(folder)),
+            "Claude Code-credentials-2e25c0fb"
+        );
+    }
     use super::*;
+
+    /// A job from before modes is in Bypass; a mode this obid can't read asks (security review
+    /// of #586, S4).
+    #[test]
+    fn a_mode_obid_cant_read_asks() {
+        let mut job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        assert_eq!(Jobs::mode_of(&job), Mode::Bypass);
+        job.mode = Some("someday".into());
+        assert_eq!(Jobs::mode_of(&job), Mode::Ask);
+        job.mode = Some("sandbox".into());
+        assert_eq!(Jobs::mode_of(&job), Mode::Sandbox);
+    }
 
     #[test]
     fn paths_inside_the_repository() {

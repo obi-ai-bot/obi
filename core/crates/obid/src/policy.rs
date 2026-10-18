@@ -247,6 +247,17 @@ fn inside(path: &str, worktree: &Path, real_worktree: &Path) -> bool {
     resolved(&worktree.join(path)).is_some_and(|real| real.starts_with(real_worktree))
 }
 
+/// Where the absolute `path` leads once symlinks are followed (the part that doesn't exist yet
+/// appended as written), or none when obid can't tell.
+pub fn real_path(path: &Path) -> Option<PathBuf> {
+    resolved(path)
+}
+
+/// Whether the path an agent names leads inside `worktree` once symlinks are followed.
+pub fn path_inside(path: &str, worktree: &Path) -> bool {
+    inside(path, worktree, &real_worktree(worktree))
+}
+
 /// Why a review another Obi asked for may not make this call of one of [`REVIEW_TOOLS`], or
 /// `None`. Every path input must lead inside the worktree once symlinks are followed, so an
 /// absolute path doesn't reach the agent's account, its login or anything else the job sandbox

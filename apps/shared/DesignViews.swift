@@ -1,0 +1,497 @@
+import SwiftUI
+
+// Sangam's design (design/app) as SwiftUI views the Mac's window and the iPhone both draw: a
+// decision's card, pill buttons, chips in rows, what Oby said with its links and code set apart,
+// a line being worked on, Oby's small face, a task's mark and the underlined tabs. Not on the
+// Watch (its screens are its own).
+
+/// A decision's card (Sangam's AskBlock): its kind in orange (red for a failure), the headline,
+/// what happened, the command or file in monospace, the plan, then the choices as pills, the
+/// recommended one filled first and Deny in red, and Later. 1 to 4 pick a choice, Return the
+/// recommended one (never a Deny, Dismiss or Stop), Esc is Later. A pick shows a spinner on its
+/// pill until the runner confirms it; nothing shows as chosen before that.
+struct AskCard: View {
+    let kind: String
+    var failed = false
+    /// The job it's from, after its kind.
+    var source: String? = nil
+    let title: String
+    var happened: String? = nil
+    /// The asker's own words, behind Details, when the title is Oby's headline instead.
+    var behindDetails: String? = nil
+    var detail: String? = nil
+    var plan: String? = nil
+    let options: [CardOption]
+    var busy = false
+    var answered = false
+    var keyboardEnabled = false
+    var focusRequest = 0
+    /// Under the choices: what your own words do, as a link to type them below.
+    var hint: String? = nil
+    var onHint: (() -> Void)? = nil
+    let onChoose: (CardOption) -> Void
+    var onLater: (() -> Void)? = nil
+    var onOpen: (() -> Void)? = nil
+    @State private var picked: String?
+    @State private var showsDetails = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Text(kind).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(failed ? Tokens.danger : Tokens.needs)
+                if let source, !source.isEmpty { Text(source).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fadeOut() }
+            }
+            Text(title).font(Tokens.font(Tokens.textBase, .medium)).foregroundStyle(Tokens.ink).lineSpacing(6)
+                .fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+                .accessibilityAddTraits(.isHeader)
+            if let happened, !happened.isEmpty {
+                Text(happened).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).lineSpacing(6)
+                    .fixedSize(horizontal: false, vertical: true).padding(.top, 4).textSelection(.enabled)
+            }
+            if let behindDetails, !behindDetails.isEmpty {
+                Button { withAnimation(Tokens.warm) { showsDetails.toggle() } } label: {
+                    HStack(spacing: 4) {
+                        Text("Details")
+                        Image(systemName: "chevron.right").font(Tokens.font(9, .semibold)).rotationEffect(.degrees(showsDetails ? 90 : 0))
+                    }
+                    .font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.muted).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).padding(.top, 8)
+                .accessibilityValue(showsDetails ? "Shown" : "Hidden")
+                if showsDetails {
+                    Text(behindDetails).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).lineSpacing(6)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled).padding(.top, 6)
+                }
+            }
+            if let detail, !detail.isEmpty { code(detail) }
+            if let plan, !plan.isEmpty { PlanText(plan: plan).padding(.top, 10) }
+            if !answered {
+                CenteredFlow(spacing: 8, centred: false) {
+                    ForEach(Array(options.enumerated()), id: \.offset) { index, option in
+                        OptionPill(option: option, index: index, primary: index == 0 && option.recommended && option.safeOnReturn,
+                                   pending: busy && picked == option.answer, disabled: busy) {
+                            choose(option)
+                        }
+                    }
+                    if let onLater {
+                        OptionPill(option: CardOption(label: "Later", answer: "Later"), index: nil, quiet: true, disabled: busy, action: onLater)
+                    }
+                }
+                .padding(.top, 14)
+                // What each choice does, the recommended one marked, and the rule Always allow saves.
+                let explained = options.filter { $0.detail != nil || $0.recommended }
+                if !explained.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(explained.enumerated()), id: \.offset) { _, option in
+                            (Text(option.label).foregroundStyle(Tokens.text)
+                                + Text(option.recommended ? " · Recommended" : "").foregroundStyle(Tokens.needs)
+                                + Text(option.detail.map { ": \($0)" } ?? "").foregroundStyle(Tokens.muted))
+                                .font(Tokens.font(Tokens.textSm)).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.top, 10)
+                }
+            }
+            if hint != nil || onOpen != nil {
+                HStack(spacing: 14) {
+                    if let hint {
+                        if let onHint { Button(hint, action: onHint).buttonStyle(.plain).disabled(busy) } else { Text(hint) }
+                    }
+                    if let onOpen { Button("Open task", action: onOpen).buttonStyle(.plain) }
+                }
+                .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                .padding(.top, 10)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onChange(of: busy) { if !busy { picked = nil } }
+        .focusable(keyboardEnabled).focusEffectDisabled().focused($focused)
+        .onChange(of: focusRequest) { if keyboardEnabled { focused = true } }
+        .modifier(TapForKeys(enabled: keyboardEnabled) { focused = true })
+        .onKeyPress(phases: .down) { press in
+            guard keyboardEnabled, focused, press.modifiers.isEmpty else { return .ignored }
+            let key = press.key == .return ? "return" : press.key == .escape ? "escape" : press.characters
+            switch DecisionKey.action(key, options: options, busy: busy) {
+            case .option(let option): choose(option)
+            case .later: onLater?()
+            case .words, .none: return .ignored
+            }
+            return .handled
+        }
+    }
+
+    private func choose(_ option: CardOption) {
+        guard !busy else { return }
+        picked = option.answer
+        onChoose(option)
+    }
+
+    private func code(_ text: String, mono: Bool = true) -> some View {
+        Text(text).font(mono ? Tokens.mono(12) : Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).lineSpacing(6)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .padding(.top, 10)
+    }
+}
+
+/// One choice: a pill, filled in ink for the recommended one, red words for a destructive one, no
+/// fill for Later; its number (1 to 4) is its key.
+struct OptionPill: View {
+    let option: CardOption
+    let index: Int?
+    var primary = false
+    var quiet = false
+    var pending = false
+    var disabled = false
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if pending { ProgressView().controlSize(.mini) }
+                Text(option.label).font(Tokens.font(Tokens.textMd, primary ? .medium : .regular)).lineLimit(2)
+                    .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(primary ? Color(hex: 0x111111) : option.role == .destructive ? Tokens.danger : quiet ? (hovering ? Tokens.ink : Tokens.muted) : hovering ? Tokens.ink : Tokens.item)
+            .padding(.horizontal, 14).padding(.vertical, 6).frame(minHeight: 32)
+            .background(background, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .onHover { hovering = $0 }
+        .animation(Tokens.fade, value: hovering)
+        .help([index.map { "Press \($0 + 1)" }, option.detail].compactMap { $0 }.joined(separator: " · "))
+        .accessibilityHint(option.detail ?? "")
+    }
+
+    private var background: Color {
+        if primary { return hovering ? .white : Tokens.ink }
+        if quiet { return hovering ? Tokens.hover : .clear }
+        return hovering ? Color.white.opacity(0.13) : Tokens.pill
+    }
+}
+
+/// A plan to approve, as its markdown says it (headings, lists, code), in at most 220 points that
+/// scroll, so the choices under it stay in sight.
+struct PlanText: View {
+    let plan: String
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(PlanBlock.blocks(plan).enumerated()), id: \.offset) { _, block in
+                    switch block {
+                    case .heading(let text): Text(inline(text)).font(Tokens.font(Tokens.textMd, .semibold)).foregroundStyle(Tokens.ink)
+                    case .item(let marker, let text):
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(marker).foregroundStyle(Tokens.muted)
+                            Text(inline(text))
+                        }
+                    case .code(let text):
+                        Text(text).font(Tokens.mono(12)).padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    case .text(let text): Text(inline(text))
+                    }
+                }
+            }
+            .font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12).padding(.vertical, 10)
+        }
+        .frame(maxHeight: 220)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func inline(_ text: String) -> AttributedString { Reading.markdown(text, code: Tokens.mono(12)) }
+}
+
+/// A click gives a card the keyboard, where it takes keys; else the click goes past it (a task's
+/// card opens its page).
+struct TapForKeys: ViewModifier {
+    let enabled: Bool
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        if enabled { content.onTapGesture(perform: action) } else { content }
+    }
+}
+
+/// Chips in rows, each row centred, wrapping when the next one doesn't fit.
+struct CenteredFlow: Layout {
+    var spacing: CGFloat = 8
+    /// Off: each row starts at the left, as a card's choices do.
+    var centred = true
+
+    private func rows(_ subviews: Subviews, width: CGFloat) -> [[(index: Int, size: CGSize)]] {
+        var rows: [[(index: Int, size: CGSize)]] = [[]]
+        var used: CGFloat = 0
+        for (index, view) in subviews.enumerated() {
+            var size = view.sizeThatFits(.unspecified)
+            if size.width > width { size = view.sizeThatFits(ProposedViewSize(width: width, height: nil)) }
+            if !rows[rows.count - 1].isEmpty && used + spacing + size.width > width {
+                rows.append([]); used = 0
+            }
+            used += (rows[rows.count - 1].isEmpty ? 0 : spacing) + size.width
+            rows[rows.count - 1].append((index, size))
+        }
+        return rows
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        let rows = rows(subviews, width: width)
+        let height = rows.map { $0.map(\.size.height).max() ?? 0 }.reduce(0, +) + spacing * CGFloat(max(0, rows.count - 1))
+        let widest = rows.map { row in row.map(\.size.width).reduce(0, +) + spacing * CGFloat(max(0, row.count - 1)) }.max() ?? 0
+        return CGSize(width: min(width, widest), height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in rows(subviews, width: bounds.width) {
+            let width = row.map(\.size.width).reduce(0, +) + spacing * CGFloat(max(0, row.count - 1))
+            var x = centred ? bounds.midX - width / 2 : bounds.minX
+            let height = row.map(\.size.height).max() ?? 0
+            for item in row {
+                subviews[item.index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(item.size))
+                x += item.size.width + spacing
+            }
+            y += height + spacing
+        }
+    }
+}
+
+/// A pill button (Sangam's `.tc-option`): white 8% at rest, ink filled for the main one, red
+/// words for a destructive one, no fill for a quiet one.
+struct PillButton: View {
+    let title: String
+    var primary = false
+    var danger = false
+    var quiet = false
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title).font(Tokens.font(Tokens.textMd, primary ? .medium : .regular)).lineLimit(1)
+                .foregroundStyle(primary ? Color(hex: 0x111111) : danger ? Tokens.danger : quiet && !hovering ? Tokens.muted : hovering ? Tokens.ink : Tokens.item)
+                .padding(.horizontal, 14).frame(height: 32)
+                .background(primary ? (hovering ? .white : Tokens.ink) : quiet ? (hovering ? Tokens.hover : .clear) : hovering ? Color.white.opacity(0.13) : Tokens.pill,
+                            in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(Tokens.fade, value: hovering)
+    }
+}
+
+/// What Oby (or you) said: paragraphs a blank line apart, lines starting "- " as a list, and
+/// links, references, paths and `code` set apart as Sangam's message box does.
+struct SaidText: View {
+    let text: String
+    var color: Color = Tokens.item
+    /// Yours: as typed, no paragraphs or lists.
+    var plain = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                if block.allSatisfy({ $0.hasPrefix("- ") }) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(block.enumerated()), id: \.offset) { _, line in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text("•").foregroundStyle(Tokens.muted)
+                                Text(Self.styled(String(line.dropFirst(2))))
+                            }
+                        }
+                    }
+                } else {
+                    Text(Self.styled(block.joined(separator: "\n")))
+                }
+            }
+        }
+        .font(Tokens.font(Tokens.textBase)).foregroundStyle(color).lineSpacing(6)
+        .textSelection(.enabled)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var blocks: [[String]] {
+        if plain { return [[text]] }
+        return text.components(separatedBy: "\n\n").map { $0.trimmingCharacters(in: .newlines) }.filter { !$0.isEmpty }
+            .map { $0.components(separatedBy: "\n") }
+    }
+
+    /// Inline markdown as Oby writes it (bold, links, `code`), then what the message box
+    /// recognises set apart on top: links and references in blue, paths and code in coral monospace.
+    static func styled(_ text: String) -> AttributedString {
+        var string = Reading.markdown(text, code: Tokens.mono(13))
+        for run in string.runs where run.inlinePresentationIntent?.contains(.code) == true { coral(&string, run.range) }
+        let plain = String(string.characters)
+        for match in SaidTokens.matches(plain) {
+            let start = plain.distance(from: plain.startIndex, to: match.range.lowerBound)
+            let count = plain.distance(from: match.range.lowerBound, to: match.range.upperBound)
+            let lower = string.characters.index(string.startIndex, offsetBy: start)
+            let range = lower..<string.characters.index(lower, offsetBy: count)
+            // Already code or a link in the markdown: left as it is.
+            if string[range].runs.contains(where: { $0.inlinePresentationIntent?.contains(.code) == true || $0.link != nil }) { continue }
+            switch match.kind {
+            case .url:
+                string[range].foregroundColor = Tokens.link
+                if let url = URL(string: String(plain[match.range])) { string[range].link = url }
+            case .ref: string[range].foregroundColor = Tokens.link
+            case .code, .path: coral(&string, range)
+            }
+        }
+        for run in string.runs where run.link != nil { string[run.range].foregroundColor = Tokens.link }
+        return string
+    }
+
+    private static func coral(_ string: inout AttributedString, _ range: Range<AttributedString.Index>) {
+        string[range].foregroundColor = Tokens.code
+        string[range].font = Tokens.mono(13)
+        string[range].backgroundColor = Tokens.pill
+    }
+}
+
+/// A line being worked on: a lighter band sweeps across it, left to right, every 1.6 seconds
+/// (Sangam's `sheen`); still, in ink, with Reduce Motion.
+struct Sheen: View {
+    let text: String
+    var size: CGFloat = Tokens.textMd
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let label = Text(text).font(Tokens.font(size))
+        if reduceMotion {
+            label.foregroundStyle(Tokens.ink)
+        } else {
+            TimelineView(.animation) { context in
+                let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.6) / 1.6
+                // The band's middle crosses from before the start to past the end.
+                let middle = phase * 1.6 - 0.3
+                label.foregroundStyle(LinearGradient(stops: [
+                    .init(color: Tokens.muted, location: 0),
+                    .init(color: Tokens.muted, location: min(1, max(0, middle - 0.15))),
+                    .init(color: Tokens.ink, location: min(1, max(0, middle))),
+                    .init(color: Tokens.muted, location: min(1, max(0, middle + 0.15))),
+                    .init(color: Tokens.muted, location: 1),
+                ], startPoint: .leading, endPoint: .trailing))
+            }
+            .accessibilityLabel(text)
+        }
+    }
+}
+
+/// Oby's small face in a conversation (Sangam's ObyFace.tsx): its soft white block, a little wider
+/// than tall, two tall dark eyes, and two short ears on top leaning toward each other. Drawn in a
+/// 24-unit square.
+struct ObyMark: View {
+    var size: CGFloat = 22
+
+    var body: some View {
+        Canvas { context, canvas in
+            let unit = canvas.width / 24
+            let body = Color(hex: 0xF1F1EE), eye = Color(hex: 0x0D0D0E)
+            func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: x * unit, y: y * unit) }
+            var ears = Path()
+            ears.addLines([point(5, 6.6), point(7.9, 3.6), point(8.9, 6.6)]); ears.closeSubpath()
+            ears.addLines([point(19, 6.6), point(16.1, 3.6), point(15.1, 6.6)]); ears.closeSubpath()
+            context.fill(ears, with: .color(body))
+            context.stroke(ears, with: .color(body), style: StrokeStyle(lineWidth: 1.2 * unit, lineJoin: .round))
+            context.fill(Path(roundedRect: CGRect(x: 1.5 * unit, y: 6 * unit, width: 21 * unit, height: 16.5 * unit), cornerRadius: 5 * unit), with: .color(body))
+            for x in [6.0, 14.6] {
+                context.fill(Path(roundedRect: CGRect(x: x * unit, y: 10.6 * unit, width: 2.8 * unit, height: 5 * unit), cornerRadius: 1.4 * unit), with: .color(eye))
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A task's one mark at the end of its row (#496, Sangam's StatusDot): an 8-point dot, blue while
+/// new, orange when it needs you, grey and pulsing slowly while working; nothing while queued (the
+/// spot stays, so rows line up); a small grey check once done.
+struct WorkMarkView: View {
+    let mark: WorkMark
+    var dot: CGFloat = 8
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Group {
+            switch mark {
+            case .new: Circle().fill(Tokens.unread).frame(width: dot, height: dot)
+            case .needs: Circle().fill(Tokens.needs).frame(width: dot, height: dot)
+            case .working:
+                if reduceMotion {
+                    Circle().fill(Tokens.working).frame(width: dot, height: dot).opacity(0.8)
+                } else {
+                    PhaseAnimator([0.2, 1.0]) { level in
+                        Circle().fill(Tokens.working).frame(width: dot, height: dot).opacity(level)
+                    } animation: { _ in .easeInOut(duration: 0.8) }
+                }
+            case .queued: Color.clear
+            case .done: Image(systemName: "checkmark").font(Tokens.font(9, .semibold)).foregroundStyle(Tokens.check)
+            }
+        }
+        .frame(width: 12, height: 12)
+        .accessibilityElement()
+        .accessibilityLabel(mark.rawValue)
+    }
+}
+
+/// Underlined tabs (Sangam's `.line-tabs`): the names alone with their counts, the open one in ink
+/// with a 2-point line on the 1-point line under the row, sliding to the tab picked.
+struct LineTabs: View {
+    let tab: WorkList.Tab
+    let counts: [WorkList.Tab: Int]
+    let onPick: (WorkList.Tab) -> Void
+    @Namespace private var line
+
+    var body: some View {
+        HStack(spacing: 24) {
+            ForEach(WorkList.Tab.allCases, id: \.self) { each in
+                Button { withAnimation(Tokens.warm) { onPick(each) } } label: {
+                    HStack(spacing: 6) {
+                        Text(each.rawValue).font(Tokens.font(Tokens.textBase))
+                            .foregroundStyle(tab == each ? Tokens.ink : Tokens.muted)
+                        Text("\(counts[each] ?? 0)").font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(Tokens.muted)
+                    }
+                    .frame(height: 36)
+                    .overlay(alignment: .bottom) {
+                        if tab == each {
+                            Capsule().fill(Tokens.ink).frame(height: 2).offset(y: 1)
+                                .matchedGeometryEffect(id: "line", in: line)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(tab == each ? .isSelected : [])
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .bottom) { Tokens.line.frame(height: 1) }
+    }
+}
+
+/// Your bubble hugs its words, at most 80% of the column, at its right.
+struct BubbleLayout: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? Tokens.column
+        let size = subviews[0].sizeThatFits(ProposedViewSize(width: width * 0.8, height: nil))
+        return CGSize(width: width, height: size.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let size = subviews[0].sizeThatFits(ProposedViewSize(width: bounds.width * 0.8, height: nil))
+        subviews[0].place(at: CGPoint(x: bounds.maxX - size.width, y: bounds.minY), proposal: ProposedViewSize(size))
+    }
+}

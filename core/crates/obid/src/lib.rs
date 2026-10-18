@@ -19,6 +19,7 @@ pub mod conversation;
 pub mod devices;
 pub mod events;
 pub mod failures;
+pub mod gateway;
 pub mod git;
 pub mod github;
 pub mod job;
@@ -149,6 +150,15 @@ pub async fn serve(
     let bound = listener
         .local_addr()
         .map_err(|source| StartError::Listen { address, source })?;
+    // The gateway's address is taken now too, so a busy one stops obid before anything starts.
+    let gateway = match config.gateway {
+        Some(address) => Some(
+            tokio::net::TcpListener::bind(address)
+                .await
+                .map_err(|source| StartError::Listen { address, source })?,
+        ),
+        None => None,
+    };
     let host = gethostname::gethostname().to_string_lossy().into_owned();
     let home = config.home.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -169,6 +179,7 @@ pub async fn serve(
     };
     // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
     secrets::known().learn("api-token", &token);
+    jobs::use_keychain(config.claude_keychain);
     vault::install(&config.home, &config.vault);
     let events = events::Events::new();
     let sandbox = std::env::current_exe()
@@ -201,6 +212,7 @@ pub async fn serve(
     jobs.use_plugins(plugins.clone());
     let cleared = clear::Cleared::open(&config.home);
     let devices = devices::Devices::open(&config.home);
+    let paired = gateway::Gateway::open(&config.home);
     let broker_host = if cfg!(target_os = "linux") {
         format!("http://10.0.2.2:{}", bound.port())
     } else {
@@ -216,6 +228,7 @@ pub async fn serve(
         cleanup,
         cleared,
         devices,
+        gateway: paired,
         connections,
         jobs: jobs.clone(),
         events,
@@ -229,14 +242,39 @@ pub async fn serve(
     });
     let app = api::router(shared.clone());
 
-    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+    let server = axum::serve(listener, app.clone()).with_graceful_shutdown(async move {
         stop.await;
         let _ = stopping_tx.send(true);
     });
     ready(bound);
+    // The gateway (crate::gateway): paired phones' calls, forwarded to the same router.
+    if let Some(listener) = gateway {
+        let address = listener.local_addr().map_err(StartError::Serve)?;
+        println!("obid gateway listening on http://{address}");
+        tracing::info!(%address, "obid gateway listening");
+        let app = gateway::router(shared.clone(), app.clone());
+        let mut stopping = stopping_rx.clone();
+        tokio::spawn(async move {
+            let stopped = async move {
+                while !*stopping.borrow() {
+                    if stopping.changed().await.is_err() {
+                        return;
+                    }
+                }
+            };
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(stopped)
+                .await
+            {
+                tracing::error!("the gateway stopped: {e}");
+            }
+        });
+    }
     // Jobs that were queued or running when obid last stopped carry on, and so does its Sphere.
     jobs.resume();
     link.start();
+    // A job a conversation started tells it how it ended (#351).
+    conversation::report_job_ends(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
     brain::orchestrator::spawn(shared);
     // Every event a plug-in emits becomes a `pluginEvent` inbox item. The receiver ends once

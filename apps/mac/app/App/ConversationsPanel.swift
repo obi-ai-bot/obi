@@ -69,7 +69,7 @@ private struct ConversationRow: View {
         HStack(spacing: 0) {
             if editing { field } else { title }
             ZStack {
-                Text(ConversationList.ago(conversation.lastActivity)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                Text(ConversationOrder.ago(conversation.latest)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
                     .opacity(hovering ? 0 : 1)
                 if hovering && !editing { menu }
             }

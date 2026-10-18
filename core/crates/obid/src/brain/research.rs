@@ -205,36 +205,60 @@ impl Tools {
         };
         let output = match lookup.tool {
             LookupTool::SearchCode => {
-                let args = with_path(vec![
-                    "grep".into(),
-                    "-n".into(),
-                    "-I".into(),
-                    "-F".into(),
-                    "--max-count=5".into(),
-                    "-e".into(),
-                    lookup.query.clone().unwrap_or_default(),
-                    sha.clone(),
-                    "--".into(),
-                ]);
-                let result = git_owned(&clone_dir, &args, &[0, 1]).await?;
-                String::from_utf8_lossy(&result.out)
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .take(50)
-                    .map(|hit| {
-                        let bits: Vec<&str> = hit.splitn(4, ':').collect();
-                        match bits.as_slice() {
-                            [_, path, number, text] if number.parse::<u64>().is_ok() => {
-                                let text: String = text.chars().take(200).collect();
-                                format!(
-                                    "{path}:{number}: {text}\nhttps://github.com/{repo}/blob/{sha}/{path}#L{number}"
-                                )
+                let query = lookup.query.clone().unwrap_or_default();
+                // A phrase no line has falls back to its words, the longest (the most specific)
+                // first, until one is found (#632).
+                let mut words: Vec<&str> = query
+                    .split_whitespace()
+                    .filter(|w| w.chars().count() >= 3)
+                    .collect();
+                words.sort_by_key(|w| std::cmp::Reverse(w.chars().count()));
+                words.dedup();
+                let mut tries = vec![query.as_str()];
+                if words.len() > 1 {
+                    tries.extend(words.into_iter().take(3));
+                }
+                let mut hits = String::new();
+                for words in tries {
+                    let args = with_path(vec![
+                        "grep".into(),
+                        "-n".into(),
+                        "-I".into(),
+                        "-F".into(),
+                        "--max-count=5".into(),
+                        "-e".into(),
+                        words.to_owned(),
+                        sha.clone(),
+                        "--".into(),
+                    ]);
+                    let result = git_owned(&clone_dir, &args, &[0, 1]).await?;
+                    hits = String::from_utf8_lossy(&result.out)
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .take(50)
+                        .map(|hit| {
+                            let bits: Vec<&str> = hit.splitn(4, ':').collect();
+                            match bits.as_slice() {
+                                [_, path, number, text] if number.parse::<u64>().is_ok() => {
+                                    let text: String = text.chars().take(200).collect();
+                                    format!(
+                                        "{path}:{number}: {text}\nhttps://github.com/{repo}/blob/{sha}/{path}#L{number}"
+                                    )
+                                }
+                                _ => hit.to_owned(),
                             }
-                            _ => hit.to_owned(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    if !hits.is_empty() {
+                        if words != query {
+                            hits =
+                                format!("No line has “{query}”; these have “{words}”:\n\n{hits}");
                         }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
+                        break;
+                    }
+                }
+                hits
             }
             LookupTool::ListFiles => {
                 let args = with_path(vec![
@@ -733,6 +757,9 @@ async fn curl(url: String, address: String) -> Result<Response, String> {
 pub struct Log {
     pub entries: Vec<(String, Lookup, Found)>,
     pub notes: Vec<String>,
+    /// How many of `entries` came from the last turn, for a "continue" (#632): they don't count
+    /// against this turn's [`MOST`].
+    carried: usize,
 }
 
 fn key(lookup: &Lookup) -> String {
@@ -740,6 +767,23 @@ fn key(lookup: &Lookup) -> String {
 }
 
 impl Log {
+    /// A turn's log that starts with what the last turn found (#632).
+    pub fn carry(entries: Vec<(String, Lookup, Found)>) -> Log {
+        Log {
+            carried: entries.len(),
+            entries,
+            notes: vec![],
+        }
+    }
+
+    /// Whether every one of `lookups` already ran this turn (or the last, carried).
+    pub fn has_all(&self, lookups: &[Lookup]) -> bool {
+        !lookups.is_empty()
+            && lookups
+                .iter()
+                .all(|l| self.entries.iter().any(|(k, ..)| *k == key(l)))
+    }
+
     /// Runs the lookups not run yet this turn, side by side, up to [`MOST`] in the turn. A web
     /// address that isn't in the user's words (`said`) or an earlier lookup's result this turn is
     /// refused whole, before anything resolves or fetches it: its path or host could carry what
@@ -783,7 +827,7 @@ impl Log {
                     "{} is already in work.md; read it there.",
                     lookup.tool.as_str()
                 ));
-            } else if self.entries.len() + fresh.len() >= MOST {
+            } else if self.entries.len() - self.carried + fresh.len() >= MOST {
                 self.notes.push(format!(
                     "Oby reads at most {MOST} lookups in one turn. It did not run {}; answer from work.md or say what remains.",
                     lookup.tool.as_str()
@@ -887,6 +931,27 @@ impl Log {
         } else {
             format!("{request}\n\n({})", self.notes.join(" "))
         }
+    }
+}
+
+/// What a lookup did, in Oby's words, for a turn that ends before the brain answers (#615). A web
+/// address is never echoed.
+pub fn looked(lookup: &Lookup) -> String {
+    let repo = lookup.repo.as_deref().unwrap_or("the code");
+    match lookup.tool {
+        LookupTool::SearchCode => format!(
+            "searched {repo} for “{}”",
+            lookup.query.as_deref().unwrap_or("")
+        ),
+        LookupTool::ListFiles => format!("listed the files in {repo}"),
+        LookupTool::ReadFile => format!("read {}", lookup.path.as_deref().unwrap_or("a file")),
+        LookupTool::GitLog => format!(
+            "read the history of {}",
+            lookup.path.as_deref().unwrap_or(repo)
+        ),
+        LookupTool::ViewIssue => format!("read issue #{}", lookup.number.unwrap_or(0)),
+        LookupTool::ViewPr => format!("read pull request #{}", lookup.number.unwrap_or(0)),
+        LookupTool::FetchUrl => "read a web page".into(),
     }
 }
 
@@ -1047,7 +1112,7 @@ mod tests {
                 lookup,
                 Found::new(Status::Ok, "list_files", "x\n".repeat(10_000)),
             )],
-            notes: vec![],
+            ..Log::default()
         };
         let combined = log.quoted(Some("x".repeat(47 * 1024)), "n0nce").unwrap();
         assert!(combined.len() <= SIZE);
