@@ -23,7 +23,9 @@ Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json
 {"mcpServers": {"oby": {"command": "/path/to/oby/.build/release/oby-mcp"}}}
 ```
 
-**Where the runner is:** `OBY_RUNNER_URL` if it's set (`claude mcp add … -e OBY_RUNNER_URL=https://…`, or `"env"` in Claude Desktop's JSON). Otherwise, the address in Oby's Settings › Runner on this Mac (`runnerURL` in `com.deskree.oby`'s defaults). Otherwise, `https://tetrix-lab.tail8de49b.ts.net:8443`. Like the apps, `oby-mcp` sends no token: `tailscale serve` adds the owner's `Tailscale-User-Login`, so it only works from a machine on the owner's tailnet, signed in as the owner.
+**Where the runner is:** `OBY_RUNNER_URL` if it's set (`claude mcp add … -e OBY_RUNNER_URL=https://…`, or `"env"` in Claude Desktop's JSON). Otherwise, the address in Oby's Settings › Runner on this Mac (`runnerURL` in `com.deskree.oby`'s defaults). Otherwise, obid on this machine (`http://127.0.0.1:7777`) when its token is there. Otherwise, `https://tetrix-lab.tail8de49b.ts.net:8443`.
+
+**The token:** a runner on this machine (`127.0.0.1`, `localhost` or `[::1]`) gets obid's own token as `Authorization: Bearer`, read from `api-token` in obid's home (`~/Library/Application Support/Oby/Runner` on a Mac, `~/.local/share/obid` elsewhere), and only when that is a regular file of yours that no one else may read, as the Mac app reads it ([install.md](install.md), "The token, and how the apps find obid"). It is never sent to a runner anywhere else. Over the tailnet `oby-mcp` sends no token: `tailscale serve` adds the owner's `Tailscale-User-Login`, so that works only from a machine on the owner's tailnet, signed in as the owner. To reach obid on this Mac while Oby's Settings name another runner, set `OBY_RUNNER_URL=http://127.0.0.1:7777`.
 
 ## Tools
 
