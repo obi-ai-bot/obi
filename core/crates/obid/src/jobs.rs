@@ -1269,8 +1269,7 @@ impl Jobs {
             .or(repo.check.clone())
             .filter(|c| !c.trim().is_empty());
         job.model = new.model.map(|m| m.trim().to_owned());
-        // The routine effort is Claude Code's (model_flags): other tools run at their own.
-        job.effort = new.effort.filter(|_| tool == Tool::Claude);
+        job.effort = new.effort;
         job.files = files;
         job.attachments = new.attachments;
         job.conversation = new.conversation;
@@ -4908,6 +4907,7 @@ fn tail(text: &str, max: usize) -> &str {
     &text[start..]
 }
 
+/// The first prompt of the owner's job (Engine/Jobs.swift, `Prompts.agent`, for what obid does).
 /// The model a Claude Code round runs with: the job's own, when it names one; else a routine job's
 /// first round (`effort` set from the plan's `complexity`) on [`ROUTINE_MODEL`], and every other
 /// round at Claude Code's own default.
@@ -4924,7 +4924,6 @@ fn model_flags(job: &Job) -> Vec<OsString> {
     }
 }
 
-/// The first prompt of the owner's job (Engine/Jobs.swift, `Prompts.agent`, for what obid does).
 fn owner_prompt(job: &Job) -> String {
     let base = job
         .base
@@ -5691,43 +5690,6 @@ mod tests {
     }
     use super::*;
 
-    /// A routine job's lighter first round is Claude Code's: a Codex job takes no effort from the
-    /// plan, and runs at its own default.
-    #[tokio::test]
-    async fn only_a_claude_job_takes_the_routine_effort() {
-        let root = std::env::temp_dir().join(format!("obid-effort-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let config = crate::config::Config::parse(
-            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
-                "allowFileRemotes": true,
-                "agents": {"claude": {"bin": "/usr/bin/true", "accounts": [{"id": "a", "name": "A", "configDir": null}]},
-                           "codex": {"bin": "/usr/bin/true", "accounts": [{"id": "w", "name": "W", "configDir": root.join("codex")}]}},
-                "repos": [{"repo": "o/r", "remote": "file:///nowhere/remote.git", "defaultBranch": "main"}]})
-            .to_string(),
-        )
-        .unwrap();
-        let jobs = Jobs::open(
-            config,
-            crate::events::Events::new(),
-            Err("no sandbox".into()),
-        )
-        .unwrap();
-        let new = |agent: &str| NewJob {
-            repo: "o/r".into(),
-            kind: "fix".into(),
-            task: "Fix it".into(),
-            agent: Some(agent.into()),
-            effort: Some(ROUTINE_EFFORT.into()),
-            ..NewJob::default()
-        };
-        let claude = jobs.create(new("claude")).unwrap();
-        assert_eq!(claude.effort.as_deref(), Some(ROUTINE_EFFORT));
-        let codex = jobs.create(new("codex")).unwrap();
-        assert_eq!(codex.agent, "codex");
-        assert_eq!(codex.effort, None);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
     /// git tidies obid's clone (its own automatic maintenance is off) only while no job uses the
     /// repository: loose objects are packed, and a job that's queued or running holds it off.
     #[tokio::test]
@@ -5857,8 +5819,7 @@ mod tests {
     }
 
     /// A routine job's first round thinks with Sonnet at low effort: one-line changes waited 11
-    /// to 17 seconds on Opus. Its later rounds (after a failed check, or picked up again by the owner's
-    /// words once it ended), a complex job
+    /// to 17 seconds on Opus. Its later rounds (a failed check, the owner's words), a complex job
     /// and a job that names its model keep theirs.
     #[test]
     fn a_routine_first_round_runs_on_a_lighter_model() {
