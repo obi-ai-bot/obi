@@ -236,6 +236,14 @@ fn what_codex_plants_for_its_next_run_is_taken_out() {
     assert_eq!(planted.body["text"], "planted", "{}", planted.text);
     let look = said(&obid, json!({"said": "LOOK", "conversation": conversation}));
     assert_eq!(look.body["text"], "look: nothing", "{}", look.text);
+    // A HOME whose `.config` is a link to fish's config: the link goes.
+    let planted = said(
+        &obid,
+        json!({"said": "PLANTLINK", "conversation": conversation}),
+    );
+    assert_eq!(planted.body["text"], "planted", "{}", planted.text);
+    let look = said(&obid, json!({"said": "LOOK", "conversation": conversation}));
+    assert_eq!(look.body["text"], "look: nothing", "{}", look.text);
 }
 
 /// The tokens of Codex's login and the turn's MCP token never reach what obid sends (F3, F6).
@@ -328,6 +336,20 @@ fn whatever_runs_outside_obys_tools_ends_a_codex_turn() {
         ("OUTPUT", "Codex ran a command"),
         ("HOOK", "Codex ran a hook"),
         ("ELSEWHERE", "Codex called elsewhere's run"),
+        // Anything that isn't on the list of what a conversation's Codex may do, new kinds too.
+        ("ITEM imageGeneration", "Codex used imageGeneration"),
+        ("ITEM collabAgentToolCall", "Codex used collabAgentToolCall"),
+        ("ITEM subAgentActivity", "Codex used subAgentActivity"),
+        ("ITEM dynamicToolCall", "Codex used dynamicToolCall"),
+        ("ITEM somethingNew", "Codex used somethingNew"),
+        (
+            "NOTICE process/outputDelta",
+            "Codex sent process/outputDelta",
+        ),
+        (
+            "NOTICE somethingNew/started",
+            "Codex sent somethingNew/started",
+        ),
     ] {
         let answer = said(&obid, json!({"said": words_said, "new": true}));
         assert!(
@@ -340,13 +362,35 @@ fn whatever_runs_outside_obys_tools_ends_a_codex_turn() {
     }
 }
 
+/// What's on the list ends no turn: thinking, a plan, a compaction, a pause, the owner's words.
+#[test]
+fn what_a_conversation_may_do_ends_no_codex_turn() {
+    let (_folder, obid) = obid("codex-conv-allowed", true);
+    for kind in [
+        "reasoning",
+        "plan",
+        "contextCompaction",
+        "sleep",
+        "userMessage",
+    ] {
+        let answer = said(&obid, json!({"said": format!("ITEM {kind}"), "new": true}));
+        assert_eq!(answer.body["text"], "item ran", "{kind}: {}", answer.text);
+    }
+    let answer = said(
+        &obid,
+        json!({"said": "NOTICE thread/tokenUsage/updated", "new": true}),
+    );
+    assert_eq!(answer.body["text"], "notice sent", "{}", answer.text);
+}
+
 /// A Codex that keeps a feature on whatever obid sets (`features list`, run in the conversation's
 /// own box, says so) never runs a conversation: its shell (G1), its hooks (finding 4).
 #[test]
 fn codex_that_keeps_a_feature_on_is_refused() {
     for (bin, feature) in [
-        ("fake-codex-shell-on", "shell_tool"),
-        ("fake-codex-hooks-on", "hooks"),
+        ("fake-codex-on-shell_tool", "shell_tool"),
+        ("fake-codex-on-hooks", "hooks"),
+        ("fake-codex-on-image_generation", "image_generation"),
     ] {
         let (_folder, obid) = obid_with(&format!("codex-conv-{feature}"), true, bin, None);
         let answer = said(&obid, json!({"said": "HELLO", "new": true}));
