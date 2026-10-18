@@ -4657,14 +4657,15 @@ fn learn_claude_tokens(bytes: &[u8], service: &str) {
     }
 }
 
-/// Codex's `auth.json` as obid copies it, jobs' and conversations' alike: all of it but
-/// `tokens.refresh_token`, which the provider rotates, so a refresh inside a copy would sign the
-/// owner's own Codex out (as #651 for Claude). `None` when it isn't JSON. obid never writes a
-/// token back.
+/// Codex's `auth.json` as obid copies it, jobs' and conversations' alike: all of it but the
+/// refresh token, which the provider rotates, so a refresh inside a copy would sign the owner's own
+/// Codex out (as #651 for Claude). `tokens.refresh_token` is kept as an empty string: codex-cli
+/// 0.162.1 sends no credentials at all for ChatGPT tokens without that key (401, "Missing bearer").
+/// `None` when it isn't JSON. obid never writes a token back.
 fn codex_without_refresh(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut login: Value = serde_json::from_slice(bytes).ok()?;
     if let Some(tokens) = login.get_mut("tokens").and_then(Value::as_object_mut) {
-        tokens.remove("refresh_token");
+        tokens.insert("refresh_token".into(), json!(""));
     }
     serde_json::to_vec(&login).ok()
 }
@@ -5743,7 +5744,7 @@ mod tests {
             root.join("conversation/auth.json"),
         ] {
             let copied: Value = serde_json::from_slice(&std::fs::read(&copy).unwrap()).unwrap();
-            assert!(copied["tokens"].get("refresh_token").is_none(), "{copied}");
+            assert_eq!(copied["tokens"]["refresh_token"], "", "{copied}");
             assert_eq!(copied["tokens"]["access_token"], access.as_str());
             assert_eq!(copied["last_refresh"], login["last_refresh"]);
             assert_eq!(codex_copy_ready(&copy, "Codex"), Ok(()));

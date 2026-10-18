@@ -115,6 +115,10 @@ async function runTurn(turnId, prompt) {
   if (leaked.length) return complete(turnId, null, "failed", { message: `leaked: ${leaked.join(", ")}` });
   if (state.sandbox !== "danger-full-access" || state.approvalPolicy !== "untrusted")
     return complete(turnId, null, "failed", { message: `started with ${state.sandbox} / ${state.approvalPolicy}` });
+  // As Codex 0.162.1: a ChatGPT login whose tokens have no refresh_token key isn't one at all.
+  const auth = existsSync(join(home, "auth.json")) ? JSON.parse(readFileSync(join(home, "auth.json"), "utf8")) : {};
+  if (auth.tokens && !("refresh_token" in auth.tokens))
+    return complete(turnId, null, "failed", { message: "401 Unauthorized: Missing bearer or basic authentication in header" });
   return act(turnId, prompt.split("\n").pop());
 }
 
