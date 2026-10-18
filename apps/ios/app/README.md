@@ -7,7 +7,7 @@ It wears Sangam's design (`design/app`, dark only, `apps/shared/Tokens.swift`), 
 - Home, the stage: Oby, "N running tasks · M need you", a chip per kind of work (Review PR, Issues, Tasks; Needs you when the inbox has something) and the message box. What you send there starts a conversation of its own (obid, #493) and opens it. A chip opens its kind's page (Running and Completed, a card per task with its live step, its decision or what it left behind); the list button shows every task by type or status, Clear done and Archived (kept by the phone: what Clear done or Dismiss took off Home).
 - Conversations: obid's conversations, Pinned then Recent, searchable (`GET /v1/conversations?q=`), swipe to delete, hold to pin or rename. A runner with one thread lists just that one.
 - A task's page: its result, stages, details and what you asked, its decision answered in place, Move, Mode, Stop, Dismiss, Publish with Face ID, and the box that tells Oby about it (`POST /v1/jobs/{id}/messages`).
-- Debug builds launched with `-ObySampleTasks YES` show three made-up tasks, for screenshots on a simulator with no jobs.
+- Debug builds launched with `-ObySampleTasks YES` show three made-up tasks, for screenshots on a simulator with no jobs; add `-ObySampleTalk 15` and Oby's answer comes into the Oby thread, a word at a time, 15 seconds after launch.
 
 Before the redesign, in three tabs (Home, Chat, Settings); all of it still works, in the places above:
 

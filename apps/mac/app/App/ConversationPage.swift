@@ -104,6 +104,7 @@ struct ConversationPage: View {
                                            account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
                                            isLocal: { id in desk.jobs.contains { $0.id == id } },
                                            steps: conversation.steps(under: row.turn, in: turns),
+                                           arrived: conversation.arrived[row.turn.id],
                                            onOpenJob: onOpenJob, onStopJob: { model.stopChatJob($0, local: $1) })
                                     .task(id: row.turn.jobs ?? []) {
                                         // A runner's job older than its list: fetched, so its card shows.
@@ -257,6 +258,8 @@ private struct MessageRow: View {
     let account: (_ job: Job, _ local: Bool) -> String
     let isLocal: (_ id: String) -> Bool
     let steps: [TurnStep]
+    /// When Oby's answer came while the thread was open: its words come in from then.
+    let arrived: Date?
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
     let onStopJob: (_ job: String, _ local: Bool) -> Void
 
@@ -273,7 +276,7 @@ private struct MessageRow: View {
                         .background(Tokens.bubble, in: RoundedRectangle(cornerRadius: Tokens.bubbleRadius, style: .continuous))
                 }
             } else {
-                if !turn.text.isEmpty { SaidText(text: turn.text, color: Tokens.item) }
+                if !turn.text.isEmpty { ArrivingSaid(text: turn.text, color: Tokens.item, since: arrived) }
                 if let markdown = ConversationModel.markdownDetails(for: turn) {
                     Text(markdown).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.item).lineSpacing(6).textSelection(.enabled)
                 }
