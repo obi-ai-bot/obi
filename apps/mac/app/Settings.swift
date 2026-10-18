@@ -228,6 +228,7 @@ struct RemoteAccessSettingsView: View {
     let remote: RemoteAccess
     @State private var email = ""
     @State private var code = ""
+    @State private var forgetting = false
 
     private var signedIn: Bool { remote.step == .signedIn || remote.step == .on }
 
@@ -276,10 +277,16 @@ struct RemoteAccessSettingsView: View {
                     SetValue(status, connected: status == "Connected")
                 }
                 SetRow("") {
-                    Button("Forget This Mac", role: .destructive) { Task { await remote.forget() } }
+                    Button("Forget This Mac", role: .destructive) { forgetting = true }
                         .buttonStyle(.set)
                         .disabled(remote.busy)
                 }
+            }
+            // Kept beyond Sangam's mock: the hostname can't be brought back, so macOS's confirmation first.
+            .confirmationDialog("Forget this Mac?", isPresented: $forgetting) {
+                Button("Forget", role: .destructive) { Task { await remote.forget() } }
+            } message: {
+                Text("Its tunnel and hostname are removed from your Oby account, and this Mac signs out. Turning remote access on again makes a new hostname.")
             }
         }
     }
@@ -640,6 +647,7 @@ struct VaultSettingsView: View {
     @State private var names: [String] = []
     @State private var name = ""
     @State private var value = ""
+    @State private var removing: String?
     @State private var problem: String?
 
     var body: some View {
@@ -651,13 +659,21 @@ struct VaultSettingsView: View {
                 SetRow {
                     SetCode(name)
                 } control: {
-                    Button("Remove", role: .destructive) { attempt { try vault.remove(name) } }
+                    Button("Remove", role: .destructive) { removing = name }
                         .buttonStyle(.set)
                         .accessibilityLabel("Remove \(name)")
                 }
             }
         }
         .onAppear { attempt {} }
+        // Kept beyond Sangam's mock: a secret can't be brought back, so macOS's confirmation first.
+        .confirmationDialog("Remove “\(removing ?? "this secret")”?",
+                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            presenting: removing) { name in
+            Button("Remove", role: .destructive) { attempt { try vault.remove(name) } }
+        } message: { _ in
+            Text("Oby deletes it from the keychain. This can’t be undone.")
+        }
         SetGroup("Add a secret", footer: "Oby uses a secret only in its own calls, for a connection you made. No agent sees it, and the secret scan stops anything outgoing that holds it, plain or encoded.",
                  problem: problem) {
             SetRow("Name") { SetField("Secret name", text: $name, prompt: "staging-api-key") }

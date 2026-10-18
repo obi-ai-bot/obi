@@ -242,7 +242,7 @@ extension IslandModel {
 private struct UsageGauge: View {
     let rows: [UsageRow]
     @State private var open = false
-    @Environment(\.openSettings) private var openSettings
+    @Environment(\.openSettingsPage) private var openSettings
 
     var body: some View {
         let dot = UsageDot.of(weeks: rows.map(\.week))

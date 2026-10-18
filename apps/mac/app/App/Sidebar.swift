@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SystemConfiguration
 
 /// The sidebar's sections, as the window lists them: what each row says, with no view in the
 /// way, so the tests read them (apps/mac/tests/SidebarTests.swift).
@@ -44,6 +45,10 @@ nonisolated enum SidebarSections {
                                      status: status, queued: job.status == .queued, fresh: job.created > since && !seen.contains(row.id))
             }
     }
+
+    /// This Mac's name (System Settings › General › Sharing), read once: `Host.current()` can block
+    /// the main thread on name lookups.
+    static let macName = SCDynamicStoreCopyComputerName(nil, nil) as String?
 
     /// Under your name in the account menu: the Oby account's email once Remote access signed in,
     /// else this Mac's name.
@@ -384,7 +389,7 @@ private struct IconStrip: View {
         return Menu {
             // Sangam's head: your name, the address under it.
             Text(name)
-            Text(SidebarSections.accountLine(email: model.remote?.email, mac: Host.current().localizedName))
+            Text(SidebarSections.accountLine(email: model.remote?.email, mac: SidebarSections.macName))
             Divider()
             Button("Settings") { withAnimation(Tokens.warm) { state.openSettings() } }
         } label: {

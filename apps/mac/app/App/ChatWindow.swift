@@ -5,9 +5,21 @@ import WebKit
 /// The side panel's sections, picked by the icons on its left and the account menu (Sangam's Sidebar.tsx).
 nonisolated enum PanelSection: Sendable { case home, conversations, settings }
 
+/// Opens a Settings page in the window: the message box's usage panel asks for Accounts. Equal while
+/// it opens on the same window's state, so views reading it don't redraw on every update.
+struct OpenSettingsPage: Equatable {
+    weak var state: ChatState?
+    var animated = true
+
+    func callAsFunction(_ page: SettingsPage) {
+        withAnimation(animated ? Tokens.warm : nil) { state?.openSettings(page) }
+    }
+
+    static func == (a: Self, b: Self) -> Bool { a.state === b.state && a.animated == b.animated }
+}
+
 extension EnvironmentValues {
-    /// Opens a Settings page in the window: the message box's usage panel asks for Accounts.
-    @Entry var openSettings: (SettingsPage) -> Void = { _ in }
+    @Entry var openSettingsPage = OpenSettingsPage()
 }
 
 /// The Oby window (Sangam's design, #11 and #270), opened from the menu bar icon, an alert or ⌘O: the
@@ -217,7 +229,7 @@ struct ChatView: View {
         .background(Tokens.bg)
         .preferredColorScheme(.dark)
         .ignoresSafeArea()
-        .environment(\.openSettings) { page in withAnimation(motion) { state.openSettings(page) } }
+        .environment(\.openSettingsPage, OpenSettingsPage(state: state, animated: !reduceMotion))
         // Esc goes back one page.
         .onExitCommand { if !state.trail.isHome { withAnimation(motion) { state.trail.back() } } }
         // Opened: its blue dot goes.
