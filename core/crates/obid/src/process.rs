@@ -68,8 +68,8 @@ pub fn kept(get: impl Fn(&str) -> Option<OsString>) -> Vec<(OsString, OsString)>
 }
 
 /// The environment of a process in the job sandbox: `PATH`, `HOME` and `TMPDIR` (the job's
-/// temporary folder), an empty GitHub CLI configuration, git that never prompts, the kept
-/// variables above, then `extra` (an account's `CLAUDE_CONFIG_DIR`).
+/// temporary folder), an empty GitHub CLI configuration, git that never prompts, xcrun's cache in
+/// the temporary folder, the kept variables above, then `extra` (an account's `CLAUDE_CONFIG_DIR`).
 pub fn sandbox_env(
     path: &OsStr,
     temp: &Path,
@@ -84,6 +84,9 @@ pub fn sandbox_env(
         temp.join(".config/gh-none").into_os_string(),
     ));
     env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
+    // macOS's /usr/bin/git is xcrun's shim: its cache goes here, not in /var/folders, which the
+    // sandbox doesn't let a job write.
+    env.push(("xcrun_db".into(), temp.join("xcrun_db").into_os_string()));
     for (name, value) in extra {
         env.push(((*name).into(), value.clone()));
     }
@@ -257,6 +260,19 @@ mod claude_tmpdir_tests {
             sandbox_env(OsStr::new("/usr/bin"), temp, &[])
                 .iter()
                 .all(|(k, _)| k != CLAUDE_TMPDIR)
+        );
+    }
+    /// macOS's /usr/bin/git is xcrun's shim, whose cache goes in the user's /var/folders, which the
+    /// sandbox doesn't let a job write: every git call printed "couldn't create cache file". Its
+    /// cache is in the job's temporary folder instead.
+    #[test]
+    fn xcrun_keeps_its_cache_in_the_jobs_temp() {
+        let temp = Path::new("/tmp/job-temp");
+        let env = sandbox_env(OsStr::new("/usr/bin"), temp, &[]);
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "xcrun_db" && Path::new(v) == temp.join("xcrun_db")),
+            "{env:?}"
         );
     }
 }
