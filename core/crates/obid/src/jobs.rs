@@ -1915,6 +1915,13 @@ impl Jobs {
         let call = Call::new(tool, input);
         let bounds = self.bounds(&job, worktree);
         let mode = Self::mode_of(&job);
+        // A job that only reads (#630) never leaves Plan mode, so its plan is no question for
+        // the owner: it reports what it found instead.
+        if call.tool == "ExitPlanMode" && job.read_only() {
+            let why = "This job only reads: stay in Plan mode and end with your findings as your summary.".to_owned();
+            self.answered(id, &call, worktree, Some(&why));
+            return Ruling::Now(Answer::Deny(why));
+        }
         // Claude Code's plan in Plan mode waits for the owner's own answer (#609). Codex ends its
         // turn with its plan, and Cursor's goes on as it did.
         let plan = call.tool == "ExitPlanMode"
@@ -7205,11 +7212,15 @@ mod tests {
             Err("no sandbox".into()),
         )
         .unwrap();
-        for (id, agent) in [("j", "claude"), ("c", "cursor")] {
+        for (id, agent, kind) in [
+            ("j", "claude", "fix"),
+            ("c", "cursor", "fix"),
+            ("r", "claude", "review"),
+        ] {
             let mut job = Job::new(
                 id.into(),
                 "o/r".into(),
-                "fix".into(),
+                kind.into(),
                 "Fix it".into(),
                 agent.into(),
                 "a".into(),
@@ -7223,6 +7234,12 @@ mod tests {
             jobs.rule_on(id, "ExitPlanMode", &json!({"plan": text}), &worktree)
         };
         assert!(matches!(plan("c", "1. Fix"), Ruling::Now(Answer::Allow)));
+        // A job that only reads never leaves Plan: its plan is declined, never the owner's card.
+        let Ruling::Now(Answer::Deny(why)) = plan("r", "1. Report") else {
+            panic!("a review's plan wasn't declined");
+        };
+        assert!(why.contains("only reads"), "{why}");
+        assert!(jobs.get("r").unwrap().permission.is_none());
         let Ruling::Ask(sent_back) = plan("j", "1. Fix") else {
             panic!("the plan went through by itself");
         };
