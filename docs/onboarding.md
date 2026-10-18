@@ -238,12 +238,13 @@ Small pull requests into `dev`, each usable on its own: first the ones that remo
 21. **feat(cloud, obid, ios): pushes through the relay.** (part of the relay's L)
 22. **feat(cloud, apps): the Obysphere,** on `obi-sphere`'s server: several spheres, roles, invites, Knowledge per sphere held by its admin. (L), with **teams** (M) for billing.
 
-## 8. Still for the owner
+## 8. Decided
 
-The paths, remote access per path, Sangam's lead, follow-up tasks, the pointer, the voice button, Knowledge per sphere and learned workflow are decided. What's left:
+The owner's decisions of 2026-10-18, besides the paths, remote access per path, Sangam's lead, follow-up tasks, the pointer, the voice button, Knowledge per sphere and learned workflow:
 
-1. **GitHub:** a `gh` bundled in Oby.app (recommended), or require the user's own `gh`.
-2. **`claudeKeychain`:** on by itself when Claude Code's login is only in the Keychain (recommended, under the decision of 2026-10-17), or asked.
-3. **The Swift runner:** no longer registered by Oby.app once obid is bundled (recommended).
-4. **AGENTS.md's merge rules.** "Squash-merges a PR into `dev`… merges `dev` into `main` only when…" are workflow choices under the decision on learned memory; they belong in this repository's memory, with AGENTS.md keeping only the safety rules.
-5. **Oby Cloud's billing:** through the App Store or a web checkout.
+1. **GitHub:** Oby.app bundles a pinned, signed `gh` and drives its own device sign-in; nobody installs `gh` to use Oby.
+2. **`claudeKeychain`:** obid turns it on by itself on macOS when Claude Code's login is only in the Keychain, and Settings › Accounts says so.
+3. **The Swift runner:** once obid is bundled, Oby.app registers obid and no longer registers `oby-runner`; an existing install.sh setup is moved over.
+4. **Merge rules:** AGENTS.md keeps only the safety rules; how this repository merges is its remembered workflow, and every other repository starts on the safe default.
+
+Still open: **Oby Cloud's billing**, through the App Store or a web checkout.
