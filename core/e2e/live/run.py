@@ -467,6 +467,10 @@ NAMES = {"0": "obid starts", "1": "README question streams", "2": "follow-up kee
          "7": "artifact with CSP", "8": "attached PNG"}
 
 
+def load():
+    return " ".join(f"{x:.0f}" for x in os.getloadavg()) + f" on {os.cpu_count()} cores"
+
+
 def compact(events, secrets, limit=4000):
     """Events as lines, consecutive deltas joined, tokens redacted."""
     lines, deltas = [], []
@@ -507,7 +511,8 @@ def main():
     o = None
     try:
         o = Obid(binary, run_dir, args.account_dir, args.remote)
-        print(f"obid {args.label} on 127.0.0.1:{o.port}, harness {'yes' if has_harness else 'no'}, run {run_dir}", flush=True)
+        print(f"obid {args.label} on 127.0.0.1:{o.port}, harness {'yes' if has_harness else 'no'}, run {run_dir}, "
+              f"load {load()}", flush=True)
         suite = Suite(o, has_harness, args.job_timeout)
         mark = o.mark()
         for num, fn in ORDER:
@@ -554,7 +559,7 @@ def main():
         r = results[num]
         print(f"{num:<3}{NAMES.get(num, num):<34}{r['result']:<8}{r['seconds']:>5}s  {redact(r['why'], secrets)[:160]}")
     if timings:
-        print("\nscenario 4, the job's stages (from its first event):")
+        print(f"\nscenario 4, the job's stages (from its first event; load now {load()}, so times under load aren't representative):")
         for i, (t, status, step) in enumerate(timings):
             end = timings[i + 1][0] if i + 1 < len(timings) else t
             print(f"  {t:7.1f}s +{end - t:6.1f}s  {status:<11} {redact(str(step), secrets)[:100]}")
@@ -567,7 +572,7 @@ def main():
         print(f"\n--- obid log (tail)\n{log_tail}")
     if args.json:
         with open(args.json, "w") as f:
-            json.dump({"label": args.label, "harness": has_harness, "stages": timings,
+            json.dump({"label": args.label, "harness": has_harness, "stages": timings, "load": load(),
                        "results": {k: {**v, "events": json.loads(redact(json.dumps(v["events"]), secrets))}
                                    for k, v in results.items()}}, f, indent=1)
     return 1 if any(r["result"] == "fail" for r in results.values()) else 0
