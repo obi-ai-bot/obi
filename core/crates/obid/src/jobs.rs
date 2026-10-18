@@ -2288,7 +2288,9 @@ impl Jobs {
         if !git::is_sha(&head) {
             return Err(format!("the worktree's HEAD isn't a commit: {head}"));
         }
-        if !git::has_commit(&clone, &head).await {
+        let pack = if git::has_commit(&clone, &head).await {
+            None
+        } else {
             let sandbox = self.sandbox.as_ref().map_err(String::clone)?;
             let temp = self.temp_path(id);
             prepare_folder(&temp).map_err(|e| e.to_string())?;
@@ -2322,13 +2324,21 @@ impl Jobs {
                 None,
             )
             .await?;
-            let pack = sandboxed_output(
-                &git_args(&["pack-objects", "--stdout", "--quiet"]),
-                &env,
-                &worktree,
-                Some(objects),
+            Some(
+                sandboxed_output(
+                    &git_args(&["pack-objects", "--stdout", "--quiet"]),
+                    &env,
+                    &worktree,
+                    Some(objects),
+                )
+                .await?,
             )
-            .await?;
+        };
+        // Into the clone under the lock a publish fetches the base with (#628): a pack and a
+        // branch landing mid-fetch can fail it.
+        let fetching = self.preparing(&job.repo);
+        let _fetching = fetching.lock().await;
+        if let Some(pack) = pack {
             git::take_pack(&clone, pack)
                 .await
                 .map_err(|e| e.to_string())?;
