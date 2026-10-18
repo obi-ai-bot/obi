@@ -793,6 +793,9 @@ pub mod cursor {
             ("CURSOR_CONFIG_DIR", home.as_os_str().to_owned()),
             ("HOME", home.as_os_str().to_owned()),
             ("XDG_CONFIG_HOME", home.join(".config").into_os_string()),
+            // Its login in a file under its HOME ([`crate::jobs::cursor_login_file`]), never the
+            // macOS Keychain, which a job's box denies: the job gets a copy of that file.
+            ("AGENT_CLI_CREDENTIAL_STORE", "file".into()),
         ]
     }
 
@@ -801,13 +804,14 @@ pub mod cursor {
     /// the job sandbox doesn't let it write, and it stops.
     pub const SOCKET_ROOM: usize = 84;
 
-    /// Says in obid's log when the account's folder is too long for Cursor's sockets.
+    /// Says in obid's log when a Cursor job's folder (its own login folder, under obid's home) is too
+    /// long for Cursor's sockets.
     pub fn warn_if_long(home: &Path) {
         let real = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
         let length = real.as_os_str().len();
         if length > SOCKET_ROOM {
             tracing::warn!(
-                "Cursor's account folder {} is {length} characters: past {SOCKET_ROOM}, Cursor puts its sockets in /tmp/.cursor, which the job sandbox doesn't let it write. Use a shorter configDir.",
+                "Cursor's folder {} is {length} characters: past {SOCKET_ROOM}, Cursor puts its sockets in /tmp/.cursor, which the job sandbox doesn't let it write. Give obid a shorter home.",
                 real.display()
             );
         }

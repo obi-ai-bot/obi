@@ -1347,14 +1347,16 @@ fn the_default_login_is_a_copy_the_person_keeps_unchanged() {
 /// #655: a job never gets its account's own folder, only a folder of its own with a copy of the
 /// login (no refresh token: a refresh inside a box would rotate the account's login away, #651)
 /// and the account's trimmed `.claude.json`. Nothing it writes reaches the account's folder, which
-/// unboxed processes (the tool's own sign-in, the keeper's refresh) read; the copied credentials
-/// are gone once its run ends.
+/// unboxed processes (the tool's own sign-in, the keeper's refresh) read, nor can it read it, even
+/// where the account's folder is outside obid's home and the person's; the copied credentials are
+/// gone once its run ends.
 #[test]
 fn a_job_never_writes_its_accounts_folder() {
     let folder = Folder::new("account-folder");
     let remote = fixture(&folder.0.join("fixture"));
-    let config = config(&folder.0, &remote);
-    let account = folder.0.join("home/accounts/stub");
+    let mut config = config(&folder.0, &remote);
+    let account = folder.0.join("elsewhere/stub");
+    config["agents"]["claude"]["accounts"][0]["configDir"] = json!(account);
     std::fs::create_dir_all(&account).unwrap();
     let files = [
         (
@@ -1383,7 +1385,7 @@ fn a_job_never_writes_its_accounts_folder() {
     assert_eq!(job["status"], "done", "{job}");
     assert_eq!(
         job["summary"],
-        "plant: dir=own refresh=none settings=ok state=ok real=no real-state=no"
+        "plant: dir=own refresh=none settings=ok state=ok real=no real-state=no read=no"
     );
     // The account's folder is as it was: nothing planted, nothing added.
     for (name, text) in files {

@@ -38,9 +38,16 @@ fn obid_and_remote(folder: &Folder, signed_out: bool) -> (Obid, PathBuf) {
                    "accounts": [{"id": "cursor", "name": "Personal", "configDir": accounts.join("cursor")}]}
     });
     let cursor = accounts.join("cursor");
-    std::fs::create_dir_all(cursor.join(".config/cursor")).unwrap();
+    // Where Cursor's file store keeps its login.
+    let login = cursor.join(if cfg!(target_os = "macos") {
+        ".cursor/auth.json"
+    } else {
+        ".config/cursor/auth.json"
+    });
+    std::fs::create_dir_all(login.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(cursor.join(".config")).unwrap();
     if !signed_out {
-        std::fs::write(cursor.join(".config/cursor/auth.json"), "{}").unwrap();
+        std::fs::write(&login, "{}").unwrap();
     }
     // Cursor's own settings: obid keeps its keys and empties what it would let through.
     std::fs::write(

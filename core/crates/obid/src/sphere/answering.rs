@@ -250,6 +250,7 @@ async fn run(
 
     let mut hidden = vec![config.home.clone()];
     hidden.extend(crate::jobs::person_homes());
+    hidden.extend(crate::jobs::account_folders(&config.agents, &config.home));
     let mut read_only = sandbox::tool_roots(
         &process::tools_path(),
         &hidden,

@@ -10,9 +10,9 @@
 //   LOGIN: <home>    reads its login in its HOME, writes a hook into its ~/.claude/settings.json
 //                    and its ~/.claude.json, and tries the same in the person's real <home>
 //   PLANT: <dir>     reads the login in its $CLAUDE_CONFIG_DIR, plants a hook in that folder's
-//                    settings.json and .claude.json, and tries the same in <dir> (its account's own
-//                    folder); says whether its config folder is <dir> and whether its login kept a
-//                    refresh token
+//                    settings.json and .claude.json, tries the same in <dir> (its account's own
+//                    folder) and to read <dir>'s login; says whether its config folder is <dir> and
+//                    whether its login kept a refresh token
 //   ECHO             ends the turn with "heard: <the prompt> resume=<the session it resumed, or none>"
 //   PAUSE: <ms>      waits that long, then ends the turn with "Paused."
 //   ARTIFACTS        writes .obi/artifacts/ in the worktree: a page (a folder with index.html,
@@ -127,8 +127,9 @@ rl.on("line", (line) => {
     const state = tries(() => appendFileSync(`${own}/.claude.json`, " "));
     const real = tries(() => writeFileSync(`${plant[1]}/settings.json`, hook));
     const realState = tries(() => appendFileSync(`${plant[1]}/.claude.json`, " "));
+    const read = tries(() => readFileSync(`${plant[1]}/.credentials.json`));
     const dir = own === plant[1] ? "account" : "own";
-    result(`plant: dir=${dir} refresh=${refresh} settings=${settings} state=${state} real=${real} real-state=${realState}`);
+    result(`plant: dir=${dir} refresh=${refresh} settings=${settings} state=${state} real=${real} real-state=${realState} read=${read}`);
   } else if (prompt.startsWith("ECHO")) {
     const at = process.argv.indexOf("--resume");
     result(`heard: ${prompt} resume=${at >= 0 ? process.argv[at + 1] : "none"}`);

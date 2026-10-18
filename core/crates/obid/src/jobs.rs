@@ -2301,6 +2301,7 @@ impl Jobs {
     ) -> Spec {
         let mut hidden = vec![self.config.home.clone()];
         hidden.extend(person_homes());
+        hidden.extend(account_folders(&self.config.agents, &self.config.home));
         let mut read_only = sandbox::tool_roots(
             &process::tools_path(),
             &hidden,
@@ -2384,12 +2385,6 @@ impl Jobs {
                 })?;
                 match tool {
                     Tool::Claude => {
-                        if keychain_on() {
-                            keep_keychain_copy(
-                                &keychain_service(Some(dir)),
-                                login.join(".credentials.json"),
-                            );
-                        }
                         extra.push(("CLAUDE_CONFIG_DIR", login.clone().into_os_string()))
                     }
                     Tool::Codex => {
@@ -2588,6 +2583,7 @@ impl Jobs {
         let temp = temp.to_path_buf();
         let mut hidden = vec![self.config.home.clone()];
         hidden.extend(person_homes());
+        hidden.extend(account_folders(&self.config.agents, &self.config.home));
         let mut read_only = sandbox::tool_roots(
             &process::tools_path(),
             &hidden,
@@ -4462,13 +4458,11 @@ fn refresh_if_due(
     fresh
 }
 
-/// An account whose boxed runs get a copy of its Keychain login, as the keeper knows it: the
-/// default login, or an account's folder's (#655: no box ever gets that folder).
+/// The account whose boxed runs get the Keychain's default login (no `configDir`), as the keeper
+/// knows it. An account with a folder of its own isn't refreshed ([`refresh_claude_login`]).
 struct Kept {
     /// Its Keychain item ([`keychain_service`]).
     service: String,
-    /// The account's folder, naming its Keychain item; none for the default login.
-    config_dir: Option<PathBuf>,
     /// The Mac's own Claude Code, which refreshes it.
     bin: PathBuf,
     /// When a boxed run last started on it.
@@ -4523,10 +4517,10 @@ fn keep_one(service: &str, config_dir: Option<&Path>, bin: &Path) -> Fresh {
 /// Before a boxed Claude Code run on `account` that gets the Keychain's login
 /// ([`keychain_login`]): if its token ends within 5 minutes, the Mac's own Claude Code refreshes
 /// it first (or the run waits for the refresh that's going), off obid's async runtime, and the
-/// login is kept fresh from now on ([`keep_keychain_logins`]), the default one and an account's
-/// folder's alike: no box writes an account's folder (#655), so nothing a job does can steer or
-/// catch that refresh. Throws one line when the login can't be used. obid never writes the
-/// Keychain.
+/// default login is kept fresh from now on ([`keep_keychain_logins`]). An account with a folder of
+/// its own isn't refreshed ([`refresh_claude_login`]): its login is good while its token is far
+/// from its end, and refused after ([`folder_login_ok`]). Throws one line when the login can't be
+/// used. obid never writes the Keychain.
 pub(crate) async fn keychain_ready(
     bin: PathBuf,
     account: &crate::config::Account,
@@ -4542,7 +4536,22 @@ pub(crate) async fn keychain_ready(
     {
         return Ok(());
     }
-    let service = keychain_service(dir.as_deref());
+    if let Some(folder) = dir {
+        // Never refreshed by obid while the Mac app may run unboxed on the folder (#655's open
+        // item, [`refresh_claude_login`]): good far from its end, else refused.
+        let read = tokio::task::spawn_blocking(move || keychain(Some(&folder), true))
+            .await
+            .unwrap_or(None);
+        return if folder_login_ok(read.as_deref(), now_ms()) {
+            Ok(())
+        } else {
+            Err(format!(
+                "The Mac's Claude login for {} ends soon or has ended, and obid doesn't refresh an account's own folder while the Mac app may run on it unboxed ({SHARED_FOLDER_ISSUE}): run claude on that account to refresh it.",
+                account.name
+            ))
+        };
+    }
+    let service = keychain_service(None);
     {
         let mut all = kept();
         match all.iter_mut().find(|k| k.service == service) {
@@ -4552,14 +4561,13 @@ pub(crate) async fn keychain_ready(
             }
             None => all.push(Kept {
                 service: service.clone(),
-                config_dir: dir.clone(),
                 bin: bin.clone(),
                 used: std::time::Instant::now(),
                 copies: Vec::new(),
             }),
         }
     }
-    let fresh = tokio::task::spawn_blocking(move || keep_one(&service, dir.as_deref(), &bin))
+    let fresh = tokio::task::spawn_blocking(move || keep_one(&service, None, &bin))
         .await
         .unwrap_or(Fresh::SignIn);
     match fresh {
@@ -4570,6 +4578,16 @@ pub(crate) async fn keychain_ready(
         _ => Ok(()),
     }
 }
+
+/// Whether the Keychain login of an account with a folder of its own, which obid doesn't refresh,
+/// is good to copy: there is none (nothing is copied from it), or its token is far from its end.
+fn folder_login_ok(login: Option<&[u8]>, now: u64) -> bool {
+    login.is_none_or(|login| far_from_end(expires_at(login), now))
+}
+
+/// The issue for the Mac app's Swift engine still running agents unboxed on an account's folder,
+/// after which obid can refresh an account's own login too.
+const SHARED_FOLDER_ISSUE: &str = "#655";
 
 /// Whether an account's login file is good to copy for a run (the Keychain isn't used): there is
 /// none (nothing is copied), it doesn't say when it ends (the tool decides), or its token is far
@@ -4609,14 +4627,114 @@ pub(crate) fn account_login(config_dir: &Path) -> Option<Vec<u8>> {
 }
 
 /// An account's `.credentials.json` when it's a regular file, only what calls the API
-/// ([`without_refresh`]); never the Keychain's.
+/// ([`without_refresh`]), its tokens learned as secrets obid knows; never the Keychain's.
 pub(crate) fn folder_login(config_dir: &Path) -> Option<Vec<u8>> {
     let file = config_dir.join(".credentials.json");
-    std::fs::symlink_metadata(&file)
+    let bytes = std::fs::symlink_metadata(&file)
         .is_ok_and(|m| m.is_file())
         .then(|| std::fs::read(&file).ok())
-        .flatten()
-        .and_then(|bytes| without_refresh(&bytes))
+        .flatten()?;
+    learn_claude_tokens(&bytes, &keychain_service(Some(config_dir)));
+    without_refresh(&bytes)
+}
+
+/// At obid's start, each configured account's folder looked at once: what a box of an older obid
+/// could have planted there for the next unboxed run (#655), said in obid's log
+/// ([`planted`]); and, with the Keychain in use, a `.credentials.json` an older obid copied there
+/// (it has no refresh token) taken out, since it would make the account look signed in after its
+/// Keychain item is gone.
+pub fn check_account_folders(agents: &crate::config::Agents) {
+    for (tool, agent) in [
+        (Tool::Claude, &agents.claude),
+        (Tool::Codex, &agents.codex),
+        (Tool::Cursor, &agents.cursor),
+    ] {
+        for account in agent.iter().flat_map(|a| &a.accounts) {
+            let Some(dir) = &account.config_dir else {
+                continue;
+            };
+            for found in planted(tool, dir) {
+                tracing::warn!(
+                    "account {}: {found} in {}: a job of an older obid could have put it there (#655); look before running {} on that folder.",
+                    account.id,
+                    dir.display(),
+                    tool.name()
+                );
+            }
+            if tool == Tool::Claude && keychain_on() && remove_older_copy(dir) {
+                tracing::info!(
+                    "account {}: took out an older obid's copy of its login from its folder",
+                    account.id
+                );
+            }
+        }
+    }
+}
+
+/// What in an account's folder would run something, or change where a tool sends its requests,
+/// the next time the tool runs unboxed on it: Claude Code's `hooks` and `env` (in
+/// `settings.json`, `settings.local.json` or `.claude.json`), Codex's `notify`, `mcp_servers` and
+/// `model_providers` (in `config.toml`).
+fn planted(tool: Tool, dir: &Path) -> Vec<String> {
+    let read = |name: &str| {
+        let file = dir.join(name);
+        std::fs::symlink_metadata(&file)
+            .is_ok_and(|m| m.is_file())
+            .then(|| std::fs::read_to_string(&file).ok())
+            .flatten()
+    };
+    let mut found = Vec::new();
+    match tool {
+        Tool::Claude => {
+            for name in ["settings.json", "settings.local.json", ".claude.json"] {
+                let Some(json) = read(name).and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                else {
+                    continue;
+                };
+                for key in ["hooks", "env"] {
+                    if json.get(key).is_some_and(|v| !v.is_null()) {
+                        found.push(format!("`{key}` in {name}"));
+                    }
+                }
+            }
+        }
+        Tool::Codex => {
+            if let Some(text) = read("config.toml") {
+                for key in ["notify", "mcp_servers", "model_providers"] {
+                    let set = text.lines().map(str::trim).any(|line| {
+                        line.starts_with(&format!("[{key}"))
+                            || line
+                                .strip_prefix(key)
+                                .is_some_and(|rest| rest.trim_start().starts_with(['=', '.']))
+                    });
+                    if set {
+                        found.push(format!("`{key}` in config.toml"));
+                    }
+                }
+            }
+        }
+        Tool::Cursor => {}
+    }
+    found
+}
+
+/// Takes out a `.credentials.json` in an account's folder that has no refresh token: a copy an
+/// older obid wrote there from the Keychain before every run (Claude Code's own has one). Never
+/// through a link. Whether one was taken out.
+fn remove_older_copy(dir: &Path) -> bool {
+    let file = dir.join(".credentials.json");
+    let older = std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file())
+        && std::fs::read(&file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|login| {
+                login["claudeAiOauth"].is_object()
+                    && login["claudeAiOauth"]
+                        .get("refreshToken")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+            });
+    older && std::fs::remove_file(&file).is_ok()
 }
 
 /// A job's private copy (`path`) of the Keychain login `service`, kept fresh while its run goes.
@@ -4635,8 +4753,8 @@ fn forget_keychain_copy(path: &Path) {
     }
 }
 
-/// With `claudeKeychain` on, obid's keeper: every 60 seconds, on a thread of its own, each login
-/// boxed runs use (the default one, and accounts' folders') is refreshed when it's due and the running jobs' copies written again ([`keep_one`]),
+/// With `claudeKeychain` on, obid's keeper: every 60 seconds, on a thread of its own, the default
+/// login is refreshed when it's due and the running jobs' copies written again ([`keep_one`]),
 /// while a boxed run used it in the last hour or a job of it still runs. A running Claude Code
 /// reads its `.credentials.json` again when the file changes, before it calls the model (2.1.296),
 /// so a long job goes on with the renewed token. Started once, by obid's start.
@@ -4646,7 +4764,7 @@ pub fn keep_keychain_logins() {
         .spawn(|| {
             loop {
                 std::thread::sleep(Duration::from_secs(60));
-                let due: Vec<(String, Option<PathBuf>, PathBuf)> = {
+                let due: Vec<(String, PathBuf)> = {
                     let mut all = kept();
                     for account in all.iter_mut() {
                         account
@@ -4657,11 +4775,11 @@ pub fn keep_keychain_logins() {
                         !k.copies.is_empty() || k.used.elapsed() < Duration::from_secs(60 * 60)
                     });
                     all.iter()
-                        .map(|k| (k.service.clone(), k.config_dir.clone(), k.bin.clone()))
+                        .map(|k| (k.service.clone(), k.bin.clone()))
                         .collect()
                 };
-                for (service, config_dir, bin) in due {
-                    keep_one(&service, config_dir.as_deref(), &bin);
+                for (service, bin) in due {
+                    keep_one(&service, None, &bin);
                 }
             }
         });
@@ -4712,11 +4830,13 @@ fn refresh_command(bin: &Path, storage: Option<&Path>, scratch: &Path, home: &Pa
 /// Has the Mac's own Claude Code (`bin`, not boxed, so it reaches the Keychain) refresh its
 /// default login ([`refresh_command`]) within 60 seconds. Claude Code 2.1.296 has no command that
 /// only refreshes (`claude auth status` reads the login without refreshing it). What it says is
-/// never kept. For an account with a folder of its own (`config_dir`), Claude Code keeps that
-/// item's refresh lock, write lock and plaintext fallback in that folder: no box ever gets it
-/// (#655), so nothing a job does can make a refresh fail to save or catch the new login.
+/// never kept. Never for an account with a folder of its own (`config_dir`): no box of obid's gets
+/// that folder (#655), but on a Mac the Swift engine still runs agents unboxed with it
+/// ([`SHARED_FOLDER_ISSUE`]'s open item), and Claude Code keeps the item's refresh lock, write
+/// lock and plaintext fallback there, so a refresh could be made to rotate the login and fail to
+/// save it, or have the new one caught.
 fn refresh_claude_login(bin: &Path, config_dir: Option<&Path>) -> bool {
-    if !bin.is_absolute() {
+    if config_dir.is_some() || !bin.is_absolute() {
         return false;
     }
     let Some(home) = login_home() else {
@@ -4811,6 +4931,39 @@ fn codex_without_refresh(bytes: &[u8]) -> Option<Vec<u8>> {
     serde_json::to_vec(&login).ok()
 }
 
+/// Where Cursor keeps its login when it keeps it in a file (`AGENT_CLI_CREDENTIAL_STORE=file`), from
+/// its `HOME`: `~/.cursor/auth.json` on macOS, `$XDG_CONFIG_HOME/cursor/auth.json` elsewhere
+/// (cursor-agent 2026.10.01's own credentials store); obid sets `XDG_CONFIG_HOME` to `~/.config`.
+pub(crate) fn cursor_login_file() -> &'static str {
+    if cfg!(target_os = "macos") {
+        ".cursor/auth.json"
+    } else {
+        ".config/cursor/auth.json"
+    }
+}
+
+/// Cursor's `auth.json` as obid copies it for a job: all of it but the refresh token, which is
+/// kept as an empty string (Cursor takes an empty one as none), so a refresh inside a box can't
+/// rotate the account's own login away (#651). Its tokens are learned as secrets obid knows. `None`
+/// when it isn't a JSON object.
+fn cursor_without_refresh(bytes: &[u8], account: &Path) -> Option<Vec<u8>> {
+    let mut login: Value = serde_json::from_slice(bytes).ok()?;
+    let fields = login.as_object_mut()?;
+    for key in ["accessToken", "refreshToken", "apiKey"] {
+        if let Some(token) = fields
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+        {
+            crate::secrets::known().learn(&format!("Cursor {} {key}", account.display()), token);
+        }
+    }
+    if fields.contains_key("refreshToken") {
+        fields.insert("refreshToken".into(), json!(""));
+    }
+    serde_json::to_vec(&login).ok()
+}
+
 /// Whether a copied Codex login (`copy`, its `auth.json`) can run: none was copied, an API-key
 /// login (no access token), or an access token whose JWT says it ends more than 5 minutes from now.
 /// A copy can't refresh itself, so else the run stops with the one line that says so.
@@ -4857,6 +5010,19 @@ fn learn_codex_tokens(bytes: &[u8], account: &str) {
     }
 }
 
+/// Every configured account's own folder that is a folder now (but one holding obid's home): what
+/// no box reads, wherever it is (#655: macOS lets a box read what isn't hidden, and Linux binds `/`
+/// read-only). A run reads its own copy of the login instead.
+pub(crate) fn account_folders(agents: &crate::config::Agents, home: &Path) -> Vec<PathBuf> {
+    [&agents.claude, &agents.codex, &agents.cursor]
+        .into_iter()
+        .flatten()
+        .flat_map(|agent| &agent.accounts)
+        .filter_map(|account| account.config_dir.clone())
+        .filter(|dir| dir.is_dir() && !home.starts_with(dir))
+        .collect()
+}
+
 /// Whether `folder` is a real folder, or not there yet: never a link a job left in its place,
 /// which obid would otherwise follow (#643's security review).
 pub(crate) fn not_a_link(folder: &Path) -> Result<(), String> {
@@ -4892,8 +5058,8 @@ pub(crate) fn copy_account_login(tool: Tool, account: &Path, to: &Path) -> std::
         return write_login(&to.join("auth.json"), &copy);
     }
     // Only what calls the API, never a refresh token, from the Keychain or the folder's file
-    // ([`account_login`], #651). A job registers its copy with the keeper (`launch`); a
-    // conversation's and the brain's live one turn.
+    // ([`account_login`], #651). An account with a folder of its own isn't refreshed by obid
+    // ([`keychain_ready`]), so no copy of its login is kept fresh by the keeper.
     let Some(bytes) = account_login(account) else {
         return Ok(());
     };
@@ -4908,9 +5074,9 @@ pub(crate) fn copy_account_login(tool: Tool, account: &Path, to: &Path) -> std::
 ///   keeps it signed in ([`trimmed_claude_json`]).
 /// - Codex (`CODEX_HOME`): `auth.json` without its refresh token, again before every start; once,
 ///   its `config.toml`.
-/// - Cursor (`HOME`, `XDG_CONFIG_HOME`, `CURSOR_CONFIG_DIR`): its login file
-///   (`.config/cursor/auth.json`, as it is: obid never reads it), again before every start; once,
-///   its `cli-config.json` and `mcp.json`; then obid's settings over it
+/// - Cursor (`HOME`, `XDG_CONFIG_HOME`, `CURSOR_CONFIG_DIR`): its login file ([`cursor_login_file`])
+///   without its refresh token ([`cursor_without_refresh`]), again before every start; once, its
+///   `cli-config.json` and `mcp.json`; then obid's settings over it
 ///   ([`acp::cursor::rewrite_config`]).
 ///
 /// The rest is the job's own: what it writes there reaches no other run and no unboxed process.
@@ -4945,14 +5111,20 @@ pub(crate) fn copy_account_folder(tool: Tool, account: &Path, login: &Path) -> s
             once("config.toml", read("config.toml"))
         }
         Tool::Cursor => {
-            const LOGIN: &str = ".config/cursor/auth.json";
-            if let Some(bytes) = read(LOGIN) {
-                for folder in [".config", ".config/cursor"] {
-                    let folder = login.join(folder);
+            let file = cursor_login_file();
+            if let Some(copy) = read(file).and_then(|bytes| cursor_without_refresh(&bytes, account))
+            {
+                let mut folder = login.to_path_buf();
+                for part in Path::new(file)
+                    .parent()
+                    .into_iter()
+                    .flat_map(Path::components)
+                {
+                    folder.push(part);
                     not_a_link(&folder).map_err(std::io::Error::other)?;
                     store::make_private_dir(&folder)?;
                 }
-                write_login(&login.join(LOGIN), &bytes)?;
+                write_login(&login.join(file), &copy)?;
             }
             once("cli-config.json", read("cli-config.json"))?;
             once("mcp.json", read("mcp.json"))?;
@@ -5087,23 +5259,41 @@ fn trimmed_claude_json(bytes: &[u8]) -> Vec<u8> {
 /// again before its next start.
 pub(crate) fn forget_login_secrets(login: &Path) {
     forget_keychain_copy(&login.join(".claude/.credentials.json"));
-    forget_keychain_copy(&login.join(".credentials.json"));
-    // A copy of an account's folder's login ([`copy_account_folder`]).
-    if std::fs::symlink_metadata(login).is_ok_and(|m| m.is_dir()) {
-        let _ = std::fs::remove_file(login.join(".credentials.json"));
-        let _ = std::fs::remove_file(login.join("auth.json"));
+    if !std::fs::symlink_metadata(login).is_ok_and(|m| m.is_dir()) {
+        return;
     }
-    for (folder, name) in [
-        (".claude", ".credentials.json"),
-        (".codex", "auth.json"),
-        (".config/cursor", "auth.json"),
+    for name in [
+        // A copy of an account's folder's login ([`copy_account_folder`]).
+        ".credentials.json",
+        "auth.json",
+        ".config/cursor/auth.json",
+        ".cursor/auth.json",
+        // A copy of the tool's own login ([`copy_login`]).
+        ".claude/.credentials.json",
+        ".codex/auth.json",
     ] {
-        let folder = login.join(folder);
-        // Only in a real folder: never through a link the job left in its place.
-        if std::fs::symlink_metadata(&folder).is_ok_and(|m| m.is_dir()) {
-            let _ = std::fs::remove_file(folder.join(name));
-        } else {
-            let _ = std::fs::remove_file(&folder);
+        remove_inside(login, name);
+    }
+}
+
+/// Removes `login/<name>`, each folder on the way looked at without following a link: a link (or
+/// a file) a job left in place of one is removed itself, and nothing past it is touched.
+fn remove_inside(login: &Path, name: &str) {
+    let mut path = login.to_path_buf();
+    let mut parts = name.split('/').peekable();
+    while let Some(part) = parts.next() {
+        path.push(part);
+        if parts.peek().is_none() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
+            Err(_) => return,
         }
     }
 }
@@ -5851,32 +6041,150 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// An account with a folder of its own is refreshed as the default login is (#655: no box
-    /// gets that folder any more): the Mac's own Claude Code, by its absolute path, with the
-    /// account's folder only naming its Keychain item and a config folder of obid's own.
+    /// An account with a folder of its own isn't refreshed by obid: on a Mac the Swift engine still
+    /// runs agents unboxed with that folder (#655's open item), so a refresh could be steered or
+    /// caught there. Nothing runs.
     #[test]
-    fn an_accounts_folder_is_refreshed_through_its_keychain_item() {
-        let root = std::env::temp_dir().join(format!("obid-refresh-acct-{}", std::process::id()));
+    fn an_account_folder_the_mac_app_may_run_on_is_never_refreshed() {
+        let root = std::env::temp_dir().join(format!("obid-no-refresh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let saw = root.join("saw");
+        let ran = root.join("ran");
         let bin = root.join("claude");
-        std::fs::write(
-            &bin,
-            format!(
-                "#!/bin/sh\nprintf '%s|%s' \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" \"$CLAUDE_CONFIG_DIR\" > '{}'\n",
-                saw.display()
-            ),
-        )
-        .unwrap();
+        std::fs::write(&bin, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
-        let account = root.join("account");
-        assert!(refresh_claude_login(&bin, Some(&account)));
-        let saw = std::fs::read_to_string(&saw).unwrap();
-        let (storage, config) = saw.split_once('|').unwrap();
-        assert_eq!(storage, account.display().to_string());
-        assert!(!config.contains("account"), "{config}");
+        assert!(!refresh_claude_login(&bin, Some(&root)));
+        assert!(!ran.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Taking a run's login copy out never follows a link the job left in its login folder: a
+    /// `.config` or `.cursor` leading out of the box is removed, and what it led to stays.
+    #[test]
+    fn forgetting_a_login_never_follows_a_link_out() {
+        let root = std::env::temp_dir().join(format!("obid-forget-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (login, outside) = (root.join("login"), root.join("outside"));
+        std::fs::create_dir_all(&login).unwrap();
+        std::fs::create_dir_all(outside.join("cursor")).unwrap();
+        std::fs::write(outside.join("cursor/auth.json"), "person's").unwrap();
+        std::fs::write(outside.join("auth.json"), "person's").unwrap();
+        std::os::unix::fs::symlink(&outside, login.join(".config")).unwrap();
+        std::os::unix::fs::symlink(&outside, login.join(".cursor")).unwrap();
+        std::os::unix::fs::symlink(&outside, login.join(".claude")).unwrap();
+        forget_login_secrets(&login);
+        assert_eq!(
+            std::fs::read_to_string(outside.join("cursor/auth.json")).unwrap(),
+            "person's"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.join("auth.json")).unwrap(),
+            "person's"
+        );
+        for name in [".config", ".cursor", ".claude"] {
+            assert!(
+                std::fs::symlink_metadata(login.join(name)).is_err(),
+                "{name} stayed"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A Cursor job's copy of its account's login has no refresh token (the key stays, empty): a
+    /// box that refreshed would rotate the account's own login away, as #651 found for Claude
+    /// Code. Its access token and API key stay, learned as secrets obid knows.
+    #[test]
+    fn a_cursor_login_copy_has_no_refresh_token() {
+        let root = std::env::temp_dir().join(format!("obid-cursor-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (account, login) = (root.join("account"), root.join("login"));
+        let file = if cfg!(target_os = "macos") {
+            ".cursor/auth.json"
+        } else {
+            ".config/cursor/auth.json"
+        };
+        std::fs::create_dir_all(account.join(file).parent().unwrap()).unwrap();
+        let access = ["cursor-access-", &"a".repeat(30)].concat();
+        let refresh = ["cursor-refresh-", &"r".repeat(30)].concat();
+        std::fs::write(
+            account.join(file),
+            json!({"accessToken": access, "refreshToken": refresh, "apiKey": null}).to_string(),
+        )
+        .unwrap();
+        copy_account_folder(Tool::Cursor, &account, &login).unwrap();
+        let copied: Value =
+            serde_json::from_slice(&std::fs::read(login.join(file)).unwrap()).unwrap();
+        assert_eq!(copied["accessToken"], access.as_str());
+        assert_eq!(copied["refreshToken"], "", "{copied}");
+        assert!(
+            !crate::secrets::known().redact(&access).contains(&access),
+            "not learned"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What a box of an older obid could have planted in an account's folder for the next unboxed
+    /// run is found: Claude Code's hooks and env, Codex's notify, MCP servers and model providers.
+    #[test]
+    fn whats_planted_in_an_accounts_folder_is_found() {
+        let root = std::env::temp_dir().join(format!("obid-planted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(planted(Tool::Claude, &root).is_empty());
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{"hooks": {"SessionStart": []}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".claude.json"),
+            r#"{"env": {"PATH": "/x"}, "userID": "u"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            planted(Tool::Claude, &root),
+            ["`hooks` in settings.json", "`env` in .claude.json"]
+        );
+        std::fs::write(
+            root.join("config.toml"),
+            "model = \"o3\"\nnotify = [\"sh\"]\n[mcp_servers.x]\ncommand = \"x\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            planted(Tool::Codex, &root),
+            ["`notify` in config.toml", "`mcp_servers` in config.toml"]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `.credentials.json` an older obid copied into an account's folder (no refresh token) is
+    /// taken out; Claude Code's own (with one) and a link stay.
+    #[test]
+    fn an_older_copy_of_a_login_is_taken_out() {
+        let root = std::env::temp_dir().join(format!("obid-older-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join(".credentials.json");
+        std::fs::write(
+            &file,
+            r#"{"claudeAiOauth": {"accessToken": "a", "expiresAt": 1}}"#,
+        )
+        .unwrap();
+        assert!(remove_older_copy(&root));
+        assert!(!file.exists());
+        std::fs::write(
+            &file,
+            r#"{"claudeAiOauth": {"accessToken": "a", "refreshToken": "r"}}"#,
+        )
+        .unwrap();
+        assert!(!remove_older_copy(&root));
+        assert!(file.exists());
+        std::fs::remove_file(&file).unwrap();
+        std::fs::write(root.join("elsewhere"), r#"{"claudeAiOauth": {}}"#).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), &file).unwrap();
+        assert!(!remove_older_copy(&root));
+        assert!(root.join("elsewhere").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
