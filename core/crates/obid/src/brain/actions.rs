@@ -466,8 +466,8 @@ fn account_exists(shared: &Arc<Shared>, agent: &str, account: &str) -> bool {
 /// message_job (#542): the user's own words reach the job's agent, with the secrets obid knows
 /// taken out, never the brain's restatement of them (obid has no event orchestrator to speak
 /// for itself yet, #351). A running job hears them at its next turn; one that ended picks its
-/// session up again in its own worktree for one more round that starts with them. A job whose
-/// pull request was merged takes none: that's new work.
+/// session up again in its own worktree for one more round that starts with them, at once. A job
+/// whose pull request was merged takes none: that's new work.
 fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
     let Some(id) = plan.named().first() else {
         return Outcome::Failed("Say which job to tell.".into());
@@ -514,29 +514,13 @@ fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str) -> Outcome {
         Ok(words) => crate::secrets::known().redact(&words),
         Err(why) => return Outcome::Failed(format!("Couldn't tell {name}: {why}")),
     };
-    // Running one more round of a job that ended starts work, like Start: only the owner's own
-    // Confirm does it (the owner's decision of 2026-10-16). A running job just hears the words.
-    if !active {
-        confirm(
-            shared,
-            &job.id,
-            format!("One more round of {name}, with your words"),
-            format!(
-                "Oby's brain planned to tell {name} what you said. It ended, so this picks its session up again for one more round in its own worktree, on {}, starting with your words. It happens only if you confirm. Your words, quoted:\n\n{}",
-                place(shared, &job),
-                quoted(&words)
-            ),
-            Confirmed {
-                action: action::MESSAGE_JOB.into(),
-                target: job.id.clone(),
-                payload: serde_json::json!({"words": words}),
-            },
-        );
-        return Outcome::Done(format!(
-            "{name} ended, so one more round with your words waits for your OK: confirm it in your inbox."
-        ));
-    }
+    // A job that ended picks up again with the words at once: one more round in its own worktree
+    // (the owner's decision of 2026-10-17, as Sangam's design does; it replaced a Confirm). What
+    // it may then do is what any round may: publishing, merging and secrets keep their own gates.
     match shared.jobs.message(&job.id, &words) {
+        Some(Ok(_)) if !active => Outcome::Done(format!(
+            "{name} ended, so it picks up again with what you said: one more round."
+        )),
         Some(Ok(_)) => Outcome::Done(format!("Told {name} what you said.")),
         Some(Err(refused)) => Outcome::Failed(format!("Couldn't tell {name}: {}", refused.0)),
         None => Outcome::Failed("That job isn't here any more.".into()),
