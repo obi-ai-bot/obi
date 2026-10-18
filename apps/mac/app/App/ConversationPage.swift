@@ -339,10 +339,9 @@ struct ThreadTask: View {
 
     var body: some View {
         let mark = ThreadTaskLine.mark(job)
+        // No Stop on hover (Sangam's ThreadTask has none, and it covered the mark): the menu and the
+        // task's page stop it.
         card(mark)
-            .overlay(alignment: .topTrailing) {
-                if hovering && job.isActive, let onStop { StopButton(action: onStop).padding(.top, 8).padding(.trailing, 38) }
-            }
             .onHover { hovering = $0 }
     }
 
