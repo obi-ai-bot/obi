@@ -455,6 +455,27 @@ fn a_folder_jobs_can_write_is_never_signed_in() {
     }
 }
 
+/// A login file (or its lock) that is a link, or not the person's, in an account's folder is never
+/// signed in through: the tool's login would write the new sign-in wherever the link leads.
+#[test]
+fn a_login_file_that_is_a_link_is_never_signed_in_through() {
+    let folder = Folder::new("accounts-link");
+    let config = accounts_config(&folder.0);
+    let obid = start(&folder.0, &config, None);
+    let added = add(&obid, json!({"agent": "codex", "name": "Work"}));
+    let id = added.body["id"].as_str().unwrap().to_owned();
+    let dir = obid.home.join("accounts").join(&id);
+    std::fs::write(folder.0.join("elsewhere.json"), "{}").unwrap();
+    std::os::unix::fs::symlink(folder.0.join("elsewhere.json"), dir.join("auth.json")).unwrap();
+    let refused = call(&obid, "GET", &format!("/v1/accounts/{id}/sign-in"), None);
+    assert_eq!(refused.status, 409, "{}", refused.text);
+    assert!(refused.text.contains("auth.json"), "{}", refused.text);
+    assert_eq!(
+        std::fs::read_to_string(folder.0.join("elsewhere.json")).unwrap(),
+        "{}"
+    );
+}
+
 /// obid stopping ends a sign-in's login with everything it started.
 #[test]
 fn a_sign_in_ends_with_obid() {
@@ -538,7 +559,11 @@ fn codex_and_cursor_sign_in_with_their_own_logins() {
     );
     assert_eq!(started_cursor.body["userCode"], Value::Null);
     assert_eq!(started_cursor.body["pasteCode"], false);
-    let login = dir.join(".config/cursor/auth.json");
+    let login = dir.join(if cfg!(target_os = "macos") {
+        ".cursor/auth.json"
+    } else {
+        ".config/cursor/auth.json"
+    });
     within(15, "Cursor's login was written", || {
         login.is_file().then_some(())
     });

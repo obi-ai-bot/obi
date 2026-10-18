@@ -7,7 +7,8 @@
 //   fake-codex login --device-auth -c cli_auth_credentials_store="file"   prints the link and a
 //       one-time code in colour, then after 2 seconds writes $CODEX_HOME/auth.json and exits 0
 //   fake-cursor login                                               prints the link, then after
-//       2 seconds writes $XDG_CONFIG_HOME/cursor/auth.json and exits 0
+//       2 seconds writes its login where Cursor's file store keeps it ($HOME/.cursor/auth.json on
+//       macOS, $XDG_CONFIG_HOME/cursor/auth.json elsewhere) and exits 0
 // Each login file holds a made-up token and what the login saw (its arguments, folders and
 // environment), so the tests can check how obid ran it. Each also prints a made-up secret obid
 // must never repeat, and refuses to run with a Claude Code, Anthropic or GitHub variable.
@@ -89,7 +90,9 @@ export async function login(tool) {
     process.stdout.write("Starting login process...\nWaiting for browser authentication...\n");
     process.stdout.write("Open a browser and navigate to this link: https://cursor.com/loginDeepControl?challenge=fake&mode=login\n");
     await sleep(2000);
-    write(join(process.env.XDG_CONFIG_HOME, "cursor", "auth.json"));
+    write(process.platform === "darwin"
+      ? join(process.env.HOME, ".cursor", "auth.json")
+      : join(process.env.XDG_CONFIG_HOME, "cursor", "auth.json"));
     process.exit(0);
   }
   process.exit(2);

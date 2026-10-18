@@ -107,7 +107,9 @@ cursor-agent --sandbox disabled acp
 - Every Cursor job runs on an Oby-made account home (`accounts/<id>`), never `~/.cursor`:
   `CURSOR_CONFIG_DIR`, `XDG_CONFIG_HOME` (`<home>/.config`) and `HOME` are all the account's. Before
   each start Oby rewrites only `permissions: {allow: [], deny: []}` and `approvalMode: "allowlist"` in
-  `<home>/cli-config.json`, keeping `authInfo` and `version`.
+  `<home>/cli-config.json`, keeping `authInfo` and `version`. (That is the Swift engine. obid gives
+  each Cursor job a folder of its own instead, with a copy of the account's login file and settings,
+  never the account's folder: docs/runner-api.md, "The job sandbox", #655.)
 - `CURSOR_API_KEY` and `CURSOR_AUTH_TOKEN` are removed from every agent's environment (Shell.swift).
 - A repository's `.cursor/cli.json` with a non-empty `allow` is asked about once per repository,
   before Cursor starts.

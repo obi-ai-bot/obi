@@ -190,6 +190,8 @@ pub async fn serve(
     // and what sign-ins cut short by the last stop left behind.
     config.agents.open(&config.home);
     accounts::sweep(&config.home);
+    // What an older obid's boxes could have left in the accounts' folders (#655), said once.
+    jobs::check_account_folders(&config.agents.get());
     let events = events::Events::new();
     let sandbox = std::env::current_exe()
         .map_err(|e| format!("obid can't find its own executable: {e}"))

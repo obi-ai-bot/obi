@@ -320,13 +320,13 @@ impl Config {
                     }
                     Some(dir) if key == "claude" && in_persons_folder(dir, ".claude") => {
                         return invalid(format!(
-                            "agents.claude.accounts: {}'s configDir {dir:?} is the person's own ~/.claude or inside it: an account's folder is one its jobs can write, and ~/.claude must stay one no job can.",
+                            "agents.claude.accounts: {}'s configDir {dir:?} is the person's own ~/.claude or inside it: an account needs a folder of its own, and ~/.claude must stay the person's own login.",
                             account.id
                         ));
                     }
                     Some(dir) if key == "codex" && in_persons_folder(dir, ".codex") => {
                         return invalid(format!(
-                            "agents.codex.accounts: {}'s configDir {dir:?} is the person's own ~/.codex or inside it: an account's folder is one its jobs can write, and ~/.codex must stay one no job can.",
+                            "agents.codex.accounts: {}'s configDir {dir:?} is the person's own ~/.codex or inside it: an account needs a folder of its own, and ~/.codex must stay the person's own login.",
                             account.id
                         ));
                     }

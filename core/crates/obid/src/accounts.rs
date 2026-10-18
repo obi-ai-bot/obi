@@ -644,11 +644,8 @@ pub async fn remove(
     {
         tracing::warn!("account {id}: its folder {} stayed: {e}", dir.display());
     }
-    // Nothing of obid's is kept for it any more. The tool's own login stays where the tool kept
-    // it (on macOS, Claude Code's Keychain item) and with its provider.
-    if let Some(dir) = &account.config_dir {
-        crate::jobs::forget_kept(dir);
-    }
+    // The tool's own login stays where the tool kept it (on macOS, Claude Code's Keychain item)
+    // and with its provider.
     shared.sign_ins.forget(&id);
     tracing::info!("account {id}: removed");
     send_accounts(&shared).await;
@@ -821,6 +818,12 @@ pub async fn sign_in(
             account.name
         ));
     }
+    if let Err(why) = login_paths_safe(tool, &dir) {
+        return conflict(format!(
+            "{}'s folder has {why}: obid never runs a sign-in through it.",
+            account.name
+        ));
+    }
     if tool == Tool::Claude && cfg!(target_os = "macos") && !crate::jobs::keychain_on() {
         return conflict("On macOS Claude Code keeps its login in the Keychain, which obid uses only with claudeKeychain on in its configuration.".into());
     }
@@ -845,6 +848,49 @@ pub async fn sign_in(
         .await
         .map_err(|why| ApiError::new(StatusCode::BAD_GATEWAY, why))?;
     Ok(answer(StatusCode::OK, sign_in.to_json()))
+}
+
+/// Whether what a tool's login writes in the account's folder `dir` is the person's own: the
+/// folder, and the login file, its locks and the folders on the way to it, where they're there,
+/// each a real file or folder (not a link) owned by the person. Else why not.
+fn login_paths_safe(tool: Tool, dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = nix::unistd::getuid().as_raw();
+    let check = |path: &Path, shown: &str| match std::fs::symlink_metadata(path) {
+        Err(_) => Ok(()),
+        Ok(meta) if meta.file_type().is_symlink() => Err(format!("{shown} as a link")),
+        Ok(meta) if meta.uid() != uid => Err(format!("{shown} owned by someone else")),
+        Ok(_) => Ok(()),
+    };
+    check(dir, "its folder itself")?;
+    let (prefixes, paths): (&[&str], &[&str]) = match tool {
+        Tool::Claude => (&[".credentials"], &[]),
+        Tool::Codex => (&["auth.json"], &[]),
+        Tool::Cursor => (
+            &[],
+            &[
+                ".cursor",
+                ".cursor/auth.json",
+                ".config",
+                ".config/cursor",
+                ".config/cursor/auth.json",
+            ],
+        ),
+    };
+    for name in paths {
+        check(&dir.join(name), name)?;
+    }
+    if !prefixes.is_empty()
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if prefixes.iter().any(|p| name.starts_with(p)) {
+                check(&entry.path(), &name)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether `path` is `root` or inside it, as written or with links resolved (the part that
