@@ -4,141 +4,154 @@ import Observation
 import SwiftUI
 import UIKit
 
-/// Settings › Your Mac (#285, #284): how this iPhone reaches the Mac, at home over the local
-/// network and away through the Mac's tunnel (apps/shared/RemoteRoute.swift), and how it pairs: the QR
-/// code the Mac's Settings › Runner shows, or its six-digit code typed here with the Mac picked
-/// from those Bonjour finds on this network. Either buys the device token every gateway request
-/// carries (apps/ios/app/Phone.swift, GatewayTokenStore). A hostname alone cannot authorize the gateway.
+/// Connect (docs/ios-design.md "Connect", onboarding.md iPhone 1): the first screen until this
+/// iPhone pairs, and Settings › Your Mac after. Oby, "Connect to your Mac", where the Mac shows its
+/// code; the QR code first ("Scan the code"), then the Macs Bonjour finds on this network and the
+/// six digits typed for one, or an invitation pasted from a message. Either buys the device token
+/// every gateway request carries (Phone.swift, GatewayTokenStore); a hostname alone can't.
 struct ConnectScreen: View {
     @Environment(Phone.self) private var phone
-    @State private var name = ""
-    @State private var hostname = ""
     @State private var problem: String?
     @State private var scanning = false
-    @State private var enteringCode = false
     @State private var code = ""
     @State private var chosenMac = ""
     @State private var pairing = false
-    @State private var paired: String?
     @State private var browser = MacBrowser()
+    @State private var unpairing = false
+    @State private var address = ""
+    @State private var another = false
+    @FocusState private var typing: Bool
 
     var body: some View {
-        Form {
-            Group {
-            Section {
-                if let link = phone.link {
-                    LabeledContent("Mac", value: link.name)
-                    LabeledContent("Hostname", value: link.hostname)
-                    LabeledContent("Reached", value: phone.route?.label ?? "Not yet")
-                    LabeledContent("Status", value: phone.connection.status(host: phone.host))
-                    LabeledContent("Device token", value: GatewayTokenStore.read() == nil ? "None: pair below" : "In the keychain")
-                    Button("Unlink", role: .destructive) { phone.link = nil }
-                } else {
-                    Text("No Mac linked yet: Oby talks to the runner at the address in Settings.")
-                        .foregroundStyle(.secondary)
-                }
-            } header: {
-                Text("Your Mac")
-            } footer: {
-                Text("At home, Oby finds your Mac on the local network and talks to it directly. Away, it goes through the Mac's own Cloudflare Tunnel, at the hostname the Mac's Settings › Remote access shows. Nothing to open on your router.")
-            }
-            Section {
-                Button("Scan QR code") { scanning = true }
-                // The QR code's text, copied from wherever the Mac's invitation was sent: pairing
-                // from away, with no Mac screen to scan.
+        ScrollView {
+            VStack(spacing: 0) {
+                ObyMark(size: 112).padding(.top, 24).accessibilityHidden(true)
+                Text("Connect to your Mac").font(Tokens.font(22, .semibold)).foregroundStyle(Tokens.ink)
+                    .padding(.top, 20).accessibilityAddTraits(.isHeader)
+                Text("Oby on your Mac shows a code to pair with: Settings › Runner › Pair a device.")
+                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).multilineTextAlignment(.center)
+                    .padding(.top, 8)
+                if let link = phone.link, !phone.needsPairing { paired(link).padding(.top, 24) }
+                PrimaryButton(title: "Scan the code") { problem = nil; scanning = true }.padding(.top, 24)
+                // The QR code's text, sent from wherever the Mac is: pairing from away.
                 PasteButton(payloadType: String.self) { values in
                     guard let value = values.first else { return }
                     Task { await pair(value) }
                 }
-                Button(enteringCode ? "Hide code entry" : "Enter code") { enteringCode.toggle() }
-                if enteringCode {
-                    TextField("Six-digit code", text: $code, prompt: Text("123456"))
-                        .keyboardType(.numberPad)
-                        .font(.title3.monospacedDigit())
-                    if browser.names.isEmpty {
-                        LabeledContent("Mac", value: "Looking on this network…")
-                    } else {
-                        Picker("Mac", selection: $chosenMac) {
-                            ForEach(browser.names, id: \.self) { Text($0).tag($0) }
-                        }
-                    }
-                    Button(pairing ? "Pairing…" : "Pair") { Task { await pairWithCode() } }
-                        .disabled(pairing || PairingCode.normalized(code) == nil || chosenMac.isEmpty)
+                .buttonBorderShape(.capsule).tint(Tokens.pill).foregroundStyle(Tokens.item)
+                .padding(.top, 10)
+                onThisNetwork.padding(.top, 28)
+                if let problem {
+                    SetAbout(problem, color: Tokens.danger).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12)
                 }
-                if let paired { Text(paired).foregroundStyle(.secondary) }
-                if let problem { Text(problem).foregroundStyle(.red) }
-            } header: {
-                Text("Pair with your Mac")
-            } footer: {
-                Text("On the Mac, Settings › Runner › Pair a device shows a QR code and a six-digit code, good for two minutes and once. On the local network, pairing is plain HTTP plus the device token this iPhone keeps in its keychain; away from home, the Mac's tunnel carries it.")
+                anotherRunner.padding(.top, 28)
             }
-            Section {
-                TextField("Mac's name", text: $name, prompt: Text("As Sharing settings name it"))
-                TextField("Hostname", text: $hostname, prompt: Text("oby-….tetrix.pro"))
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .onSubmit(link)
-                Button("Save Mac name") { link() }
-                    .disabled(!canSaveMacName)
-            } header: {
-                Text("Link by hand")
-            } footer: {
-                Text("Pair with the QR code or six-digit code first. The tunnel and local network both require the device token pairing stores in this iPhone's keychain. This form can update the name for the same paired Mac.")
-            }
-            }
-            .listRowBackground(Tokens.surface)
+            .padding(.horizontal, Tokens.gutter).padding(.bottom, 32)
         }
-        .environment(\.defaultMinListRowHeight, 56)
+        .scrollDismissesKeyboard(.interactively)
+        .environment(\.settingsCards, true)
         .obyPage()
-        .navigationTitle("Your Mac")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
-            name = phone.link?.name ?? ""
-            hostname = phone.link?.hostname ?? ""
+            browser.start()
             chosenMac = phone.link?.name ?? ""
+            address = phone.runnerURL?.absoluteString ?? ""
+            another = phone.runnerURL != nil
         }
-        .onChange(of: enteringCode) { _, entering in
-            if entering { browser.start() } else { browser.stop() }
-        }
+        .onDisappear { browser.stop() }
         .onChange(of: browser.names) { _, names in
             if chosenMac.isEmpty || !names.contains(chosenMac) { chosenMac = names.first ?? "" }
         }
-        .onDisappear { browser.stop() }
         .sheet(isPresented: $scanning) {
             QRScanner { value in
                 scanning = false
                 Task { await pair(value) }
             }
         }
+        .confirmationDialog("Unpair from \(phone.link?.name ?? "your Mac")?", isPresented: $unpairing, titleVisibility: .visible) {
+            Button("Unpair", role: .destructive) { phone.link = nil }
+        } message: {
+            Text("This iPhone forgets its device token. Scan the code on your Mac to connect again.")
+        }
     }
 
-    private func link() {
-        guard GatewayTokenStore.read() != nil, let pairedLink = phone.link else {
-            problem = "Pair with the Mac's QR code or six-digit code before linking it here."
-            return
+    /// The Mac this iPhone is paired with: how it's reached, until when, and Unpair.
+    private func paired(_ link: MacLink) -> some View {
+        SetGroup("Your Mac") {
+            SetRow(link.name, about: [phone.route?.label, phone.pairedUntil.map { "Paired until \($0.formatted(.dateTime.month(.abbreviated).day()))" }]
+                .compactMap(\.self).joined(separator: " · ")) {
+                SetValue(phone.notice?.title ?? (phone.connection == .live ? "Connected" : "Connecting…"), connected: phone.connection == .live)
+            }
+            SetRow("Unpair", about: "Pair again with a new code.") {
+                Button("Unpair", role: .destructive) { unpairing = true }.buttonStyle(.set)
+            }
         }
-        guard let host = MacLink.hostname(from: hostname) else {
-            problem = "The hostname looks like oby-….tetrix.pro, as the Mac's Settings › Remote access shows it."
-            return
+    }
+
+    /// The Macs on this network, and the six digits for the one picked.
+    private var onThisNetwork: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SetGroup("On this network", footer: "A code works once, for two minutes. This iPhone then stays paired for 30 days.") {
+                if browser.names.isEmpty {
+                    SetRow("Looking for Oby on this network…", quiet: true)
+                }
+                ForEach(browser.names, id: \.self) { name in
+                    Button { chosenMac = name } label: {
+                        SetRow(name) {
+                            if name == chosenMac { Image(systemName: "checkmark").font(Tokens.font(13, .semibold)).foregroundStyle(Tokens.ink) }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(name == chosenMac ? .isSelected : [])
+                }
+            }
+            DigitBoxes(code: $code, typing: $typing)
+            PrimaryButton(title: pairing ? "Connecting…" : "Connect") { Task { await pairWithCode() } }
+                .disabled(pairing || PairingCode.normalized(code) == nil || chosenMac.isEmpty)
+                .opacity(pairing || PairingCode.normalized(code) == nil || chosenMac.isEmpty ? 0.3 : 1)
+                .padding(.top, 16)
         }
-        guard pairedLink.hostname == host else {
-            problem = "Pair with that Mac first. A hostname alone can't authorize the gateway."
-            return
+    }
+
+    /// A runner that isn't a Mac (one on a server you run), by its address: folded away, as most
+    /// people pair their Mac (docs/oby-ux.md row 33: no address field in Settings any more).
+    private var anotherRunner: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button { withAnimation(Tokens.warm) { another.toggle() } } label: {
+                HStack(spacing: 4) {
+                    Text("Another runner")
+                    Image(systemName: "chevron.right").font(Tokens.font(10, .semibold)).rotationEffect(.degrees(another ? 90 : 0))
+                }
+                .font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16).padding(.bottom, 8)
+            .accessibilityValue(another ? "Open" : "Folded")
+            if another {
+                SetGroup(footer: "For a runner on a server of yours, not your Mac. Clear it to use only your Mac.") {
+                    SetRow("Address") {
+                        SetField("Address", text: $address, prompt: "https://…", width: 200)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .onSubmit(saveAddress)
+                    }
+                }
+            }
         }
-        let name = name.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else {
-            problem = "The Mac's name is what its Sharing settings call it."
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func saveAddress() {
+        let typed = address.trimmingCharacters(in: .whitespaces)
+        // Cleared: no runner but a paired Mac.
+        if typed.isEmpty { problem = nil; phone.runnerURL = nil; return }
+        guard let url = URL(string: typed), url.scheme == "https" else {
+            problem = "The runner's address starts with https://"
             return
         }
         problem = nil
-        phone.link = MacLink(name: name, hostname: host)
-    }
-
-    private var canSaveMacName: Bool {
-        guard GatewayTokenStore.read() != nil, let pairedLink = phone.link,
-              let host = MacLink.hostname(from: hostname) else { return false }
-        return pairedLink.hostname == host && !name.trimmingCharacters(in: .whitespaces).isEmpty
+        if url != phone.runnerURL { phone.runnerURL = url }
     }
 
     /// What the QR code said: the gateway's URL, the Mac's link and the one-time secret.
@@ -146,7 +159,7 @@ struct ConnectScreen: View {
         do {
             let envelope = try GatewayEnvelope.decode(value)
             try await phone.pairGateway(url: envelope.url, credential: envelope.secret, link: envelope.link)
-            linked(envelope.link.name)
+            problem = nil
         } catch { problem = error.localizedDescription }
     }
 
@@ -169,16 +182,65 @@ struct ConnectScreen: View {
             }
             try await phone.pairGateway(url: url, credential: digits)
             code = ""
-            enteringCode = false
-            linked(mac)
+            typing = false
+            problem = nil
         } catch { problem = error.localizedDescription }
     }
+}
 
-    private func linked(_ mac: String) {
-        name = phone.link?.name ?? mac
-        hostname = phone.link?.hostname ?? ""
-        problem = nil
-        paired = "Paired with \(mac). The device token is in this iPhone's keychain."
+/// Six boxes for the Mac's code (docs/ios-design.md "Connect"): one field underneath, the digits
+/// shown in 44pt boxes, the next one edged in `fieldEdgeOn` while typing.
+private struct DigitBoxes: View {
+    @Binding var code: String
+    var typing: FocusState<Bool>.Binding
+
+    var body: some View {
+        let digits = Array(code.filter(\.isNumber).prefix(6))
+        ZStack {
+            // The field VoiceOver reaches, over the boxes; they only draw what's typed.
+            TextField("Six-digit code", text: $code)
+                .keyboardType(.numberPad).textContentType(.oneTimeCode)
+                .focused(typing)
+                .opacity(0.02)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityLabel("Six-digit code")
+                .accessibilityHint("The code Oby on your Mac shows")
+                .onChange(of: code) { _, typed in
+                    let kept = String(typed.filter(\.isNumber).prefix(6))
+                    if kept != typed { code = kept }
+                }
+            HStack(spacing: 8) {
+                ForEach(0..<6, id: \.self) { index in
+                    Text(index < digits.count ? String(digits[index]) : "")
+                        .font(Tokens.mono(22)).foregroundStyle(Tokens.ink)
+                        .frame(maxWidth: .infinity).frame(height: 52)
+                        .background(Tokens.field, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(typing.wrappedValue && index == min(digits.count, 5) ? Tokens.fieldEdgeOn : Tokens.line)
+                        }
+                }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { typing.wrappedValue = true }
+    }
+}
+
+/// The screen's one `ink` button, full width.
+private struct PrimaryButton: View {
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title).font(Tokens.font(Tokens.textLg, .medium)).foregroundStyle(Tokens.onInk)
+                .frame(maxWidth: .infinity).frame(height: 48)
+                .background(Tokens.ink, in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }
 

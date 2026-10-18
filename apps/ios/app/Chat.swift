@@ -444,7 +444,8 @@ private struct ObyAtWork: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ObyMark()
+            // Melting into dots that bounce until its words land (Sangam's ObyFaceLive).
+            ObyFaceLive(live: true)
             HStack(spacing: 12) {
                 Sheen(text: line)
                 if waiting {

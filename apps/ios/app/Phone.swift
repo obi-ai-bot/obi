@@ -190,7 +190,9 @@ final class Phone {
         speaker.stop()
     }
 
-    var runnerURL: URL {
+    /// A runner that isn't a paired Mac, at the address Settings › Runner gives; nil on a fresh
+    /// iPhone, which talks to nobody until it pairs (docs/oby-ux.md row 33).
+    var runnerURL: URL? {
         didSet {
             UserDefaults.standard.set(runnerURL, forKey: "runner.url")
             stop()
@@ -222,6 +224,7 @@ final class Phone {
             } else {
                 UserDefaults.standard.removeObject(forKey: "mac.link")
                 GatewayTokenStore.remove()
+                pairedUntil = nil
             }
             restoreQueuedMessages(for: offlineQueueTarget)
             if loop != nil { finder.find(named: link?.name) { [weak self] url in self?.lan = url } }
@@ -241,15 +244,15 @@ final class Phone {
     var base: URL {
         #if DEBUG
         // `-ObySampleOffline YES`: no runner, the linked Mac's gateway either (the link stays).
-        if Self.offline { return URL(string: "http://127.0.0.1:9")! }
+        if Self.offline { return Runner.nowhere }
         #endif
-        return route?.url ?? runnerURL
+        return route?.url ?? runnerURL ?? Runner.nowhere
     }
     /// A stable identity for the logical runner, unaffected by switching between its home and
     /// tunnel routes. Unpaired runners use their configured URL.
     private var offlineQueueTarget: String {
         if let link { return "mac:\(link.hostname.lowercased())" }
-        return "runner:\(runnerURL.absoluteString)"
+        return "runner:\(runnerURL?.absoluteString ?? "")"
     }
     @ObservationIgnored private let finder = MacFinder()
     var talk: Talk = .none
@@ -294,7 +297,25 @@ final class Phone {
     var publishing: String?
 
     /// Why the Mac can't be reached, the same line on every screen, or nil.
-    var notice: ReachNotice? { ReachNotice.of(connection, online: online, status: refusal, paired: link != nil, lastSeen: lastSeen) }
+    var notice: ReachNotice? {
+        ReachNotice.of(connection, online: online, status: refusal, paired: link != nil, lastSeen: lastSeen, expires: pairedUntil)
+    }
+    /// When this iPhone's pairing ends (the gateway's 30 days), from the answer that paired it.
+    private(set) var pairedUntil = UserDefaults.standard.object(forKey: "gateway.expiresAt") as? Date {
+        didSet { UserDefaults.standard.set(pairedUntil, forKey: "gateway.expiresAt") }
+    }
+    /// The refusal to keep after a failed request: its status when the runner answered; a 401
+    /// stays through errors with none (a dropped connection), until a request succeeds, so the
+    /// screen doesn't flip between Connect and Home.
+    static func refusal(after error: Error, was: Int?) -> Int? {
+        let status = (error as? RunnerError)?.status
+        return status == nil && was == 401 ? 401 : status
+    }
+    /// Connect instead of Home: no Mac and no runner yet, or the Mac stopped taking this iPhone.
+    var needsPairing: Bool { Self.needsPairing(linked: link != nil, runner: runnerURL, notice: notice) }
+    static func needsPairing(linked: Bool, runner: URL?, notice: ReachNotice?) -> Bool {
+        (!linked && runner == nil) || notice == .removed || notice == .expired
+    }
     /// This iPhone has a network path (NWPathMonitor).
     private(set) var online = true
     @ObservationIgnored private var path: NWPathMonitor?
@@ -305,11 +326,11 @@ final class Phone {
         self.offlineQueue = offlineQueue
         self.connection = connection
         self.inbox = inbox
-        runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
+        runnerURL = UserDefaults.standard.url(forKey: "runner.url")
         #if DEBUG
         // `-ObySampleOffline YES`: the sample screens reach no runner at all, whatever the
         // simulator's settings say (the default runner is a real one).
-        if Self.offline { runnerURL = URL(string: "http://127.0.0.1:9")! }
+        if Self.offline, !UserDefaults.standard.bool(forKey: "ObySampleUnpaired") { runnerURL = Runner.nowhere }
         #endif
         if let data = UserDefaults.standard.data(forKey: "mac.link"), GatewayTokenStore.read() != nil {
             link = try? MacLink.paired(data)
@@ -329,7 +350,7 @@ final class Phone {
         offlineQueue.bindUnscopedEntries(to: offlineQueueTarget)
         restoreQueuedMessages(for: offlineQueueTarget)
         #if DEBUG
-        if SampleTasks.on { jobs = SampleTasks.jobs; conversations = SampleTasks.conversations; loaded = true; SampleTasks.talk(self) }
+        if SampleTasks.on { jobs = SampleTasks.jobs; conversations = SampleTasks.conversations; accounts = SampleTasks.accounts; loaded = true; SampleTasks.talk(self) }
         // `-ObySampleUnreachable YES`: the Mac out of reach since 40 minutes ago, for the notice's screenshots.
         if UserDefaults.standard.bool(forKey: "ObySampleUnreachable") { self.connection = .offline(""); self.lastSeen = .now.addingTimeInterval(-2400) }
         #endif
@@ -393,7 +414,11 @@ final class Phone {
         if changed.deleted, changed.id == current { show(nil) }
     }
 
-    var runner: Runner { Runner(base: base, token: GatewayTokenStore.read()) }
+    var runner: Runner {
+        // Paired with a Mac, a 401 means the pairing ended: say which, never the Tailscale line.
+        let refused = link.map { _ in (pairedUntil.map { $0 <= .now } ?? false) ? ReachNotice.expired : ReachNotice.removed }
+        return Runner(base: base, token: GatewayTokenStore.read(), refused: refused.map { "\($0.title). \($0.detail)" })
+    }
 
     /// Pairs with a Mac's gateway (#284): the invitation's QR secret or its six-digit code buys this
     /// iPhone's device token, kept in the keychain, and the Mac becomes the linked one. The QR code
@@ -403,6 +428,8 @@ final class Phone {
         guard let link = link ?? answer.link else {
             throw RunnerError(message: "The Mac didn't say how to reach it away from home. Pair with its QR code instead.")
         }
+        pairedUntil = answer.expiresAt
+        refusal = nil
         self.link = link
     }
     var active: [Job] { jobs.filter(\.isActive) }
@@ -438,9 +465,10 @@ final class Phone {
         unfollow()
     }
 
-    /// The way to the Mac changed (home to away, or back): followed anew, keeping the thread.
+    /// The way to the Mac changed (home to away, or back, or just paired): followed anew, keeping
+    /// the thread, while the app is in front (`path` watches the network only then).
     private func reroute() {
-        guard loop != nil else { return }
+        guard path != nil else { return }
         unfollow()
         follow()
     }
@@ -454,6 +482,8 @@ final class Phone {
         // settings may name a real one).
         if Self.offline { return }
         #endif
+        // Nobody to follow yet: Connect is the first screen.
+        guard route != nil || runnerURL != nil else { return }
         loop = Task {
             var wait = 1.0
             while !Task.isCancelled {
@@ -467,7 +497,7 @@ final class Phone {
                     }
                 } catch {
                     if Task.isCancelled { return }
-                    refusal = (error as? RunnerError)?.status
+                    refusal = Self.refusal(after: error, was: refusal)
                     connection = .offline(error.localizedDescription)
                 }
                 try? await Task.sleep(for: .seconds(wait))
@@ -941,7 +971,7 @@ final class Phone {
     // MARK: This phone's publishing key
 
     /// By the linked Mac's hostname, the same at home and away, or by the runner's.
-    private var deviceKey: String { "device.\(link?.hostname ?? runnerURL.host() ?? runnerURL.absoluteString)" }
+    private var deviceKey: String { "device.\(link?.hostname ?? runnerURL?.host() ?? runnerURL?.absoluteString ?? "")" }
     var deviceID: String? { UserDefaults.standard.string(forKey: deviceKey) }
 
     /// Registers the phone's Face ID key with the runner and returns its id. On every connection it
@@ -967,6 +997,8 @@ enum GatewayPairing {
         var token: String
         /// The Mac's name and tunnel hostname, so a typed code links the Mac as the QR code would.
         var link: MacLink?
+        /// When the pairing ends: 30 days (docs/runner-api.md, "Redeeming").
+        var expiresAt: Date?
     }
 
     typealias Transport = (URLRequest) async throws -> (Data, URLResponse)

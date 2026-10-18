@@ -121,6 +121,18 @@ struct WindowScreens {
         try await shoot("mac-convo", model: model, state: state)
     }
 
+    /// Oby at work on an answer: its face melted into bouncing dots (Sangam's ObyFaceLive), over
+    /// "Working" and the tool line it's on.
+    @Test func conversationAtWork() async throws {
+        let model = model()
+        model.feed.conversation.apply(Turn(id: "w1", date: now - 20, who: .user, text: "Why does the iOS build fail?"))
+        model.feed.conversation.apply(TurnStep(turn: "w1", index: 0, action: "tool", text: "Reading the log", state: .running,
+                                               tool: "read", detail: ".github/workflows/ios.yml"))
+        let state = ChatState()
+        state.trail.start(.talk)
+        try await shoot("mac-convo-working", model: model, state: state, sidebar: false)
+    }
+
     @Test func task() async throws {
         let state = ChatState()
         state.trail.start(.group(.review), .job(id: "r2", local: false))
