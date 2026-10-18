@@ -65,6 +65,9 @@ struct HomeView: View {
 
     var body: some View {
         @Bindable var phone = phone
+        // Why the Mac can't be reached: one line over every screen, the bars under it.
+        VStack(spacing: 0) {
+        if let notice = phone.notice { ReachLine(notice: notice) }
         NavigationStack(path: $phone.homePath) {
             ScrollView {
                 VStack(spacing: 0) {
@@ -93,6 +96,8 @@ struct HomeView: View {
             .routes()
         }
         .pushes(onto: $phone.homePath)
+        }
+        .animation(Tokens.warm, value: phone.notice)
         .onDisappear { phone.cancelVoice() }
         .onChange(of: scenePhase) { if scenePhase != .active { phone.leftForeground(background: scenePhase == .background) } }
         .onChange(of: phone.homePath) { if !phone.homePath.isEmpty { phone.cancelVoice(); typing = false } }
@@ -120,7 +125,7 @@ struct HomeView: View {
                 .accessibilityElement()
                 .accessibilityLabel("Oby")
             Button {
-                if let first = PhoneWork.firstNeeding(work, inbox: InboxItem.waiting(phone.inbox)) { phone.homePath.append(first) }
+                if let first = PhoneWork.firstNeeding(work, inbox: phone.answering) { phone.homePath.append(first) }
             } label: {
                 Text(HomeLine.attention(running: running, needs: needs))
                     .font(Tokens.font(Tokens.textBase))
@@ -131,12 +136,6 @@ struct HomeView: View {
             .allowsHitTesting(needs > 0)
             .accessibilityHint(needs > 0 ? "Opens what needs you" : "")
             .padding(.top, 14)
-            if case .offline = phone.connection {
-                Label(phone.offlineLine, systemImage: "wifi.exclamationmark")
-                    .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needsInk)
-                    .multilineTextAlignment(.center)
-                    .padding(.top, 8)
-            }
             CenteredFlow(spacing: 8) {
                 ForEach(WorkList.kinds(work)) { group in
                     HomeChip(label: group.label, fresh: group.fresh, needs: group.needs > 0) {

@@ -34,10 +34,12 @@ struct InboxDecision: View {
                     plan: item.kind == "question" ? job?.question?.plan : nil,
                     options: CardOption.inbox(item.options, kind: item.kind, question: job?.question, permission: permission,
                                               words: item.words, details: item.details, does: item.title),
-                    busy: busy,
+                    busy: busy || phone.waitsToSend(answer: item.id),
                     onChoose: choose,
                     onLater: { settle(later: .now.addingTimeInterval(3600)) })
-            if takesWords { OwnWords(words: $words, prompt: item.kind == "permission" ? "No, and tell the agent why…" : "Answer in your own words…", busy: busy, send: sendWords) }
+            if phone.waitsToSend(answer: item.id) {
+                Text(ReachNotice.waiting).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 10)
+            } else if takesWords { OwnWords(words: $words, prompt: item.kind == "permission" ? "No, and tell the agent why…" : "Answer in your own words…", busy: busy, send: sendWords) }
             if openTask, !item.job.isEmpty {
                 NavigationLink(value: Route.task(item.job)) {
                     Text("Open task").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)

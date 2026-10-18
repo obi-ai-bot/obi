@@ -72,6 +72,7 @@ struct OfflineMessage: Codable, Equatable, Sendable {
     }
 }
 
+@Observable
 final class OfflineQueue: @unchecked Sendable {
     enum FlushError: Error { case alreadySettled }
     static let maxEntries = 50

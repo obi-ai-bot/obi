@@ -22,7 +22,7 @@ struct SettingsScreen: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .onSubmit(saveAddress)
-                    LabeledContent("Status", value: phone.connection == .live ? phone.connection.status(host: phone.host) : phone.offlineLine)
+                    LabeledContent("Status", value: phone.notice?.title ?? phone.connection.status(host: phone.host))
                 } header: {
                     Text("Runner")
                 } footer: {

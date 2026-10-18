@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import OSLog
 import Security
 import UIKit
@@ -134,9 +135,16 @@ final class Phone {
     func markSeen(_ id: String) { seen.insert(id) }
 
     /// Home's work: every job Home lists, with its kind and where it stands.
-    var work: [WorkList.Item<Job>] { PhoneWork.items(visibleJobs, inbox: InboxItem.waiting(inbox), since: since, seen: seen) }
+    var work: [WorkList.Item<Job>] { PhoneWork.items(visibleJobs, inbox: answering, since: since, seen: seen) }
     /// The Inbox: what waits now with no task on Home.
-    var loose: [InboxItem] { PhoneWork.loose(InboxItem.waiting(inbox), among: work) }
+    var loose: [InboxItem] { PhoneWork.loose(answering, among: work) }
+    /// The decisions that wait on you now, longest first: not those answered here while the Mac
+    /// was out of reach, which wait to go (docs/oby-ux.md row 18).
+    var answering: [InboxItem] { InboxItem.waiting(inbox).filter { !waitsToSend(answer: $0.id) } }
+    /// An answer, or words, given while the Mac was out of reach: they wait on this iPhone, marked
+    /// "Sends when your Mac is back", and go when it is.
+    func waitsToSend(answer id: String) -> Bool { offlineQueue.answers.contains { $0.id == id } }
+    func waitsToSend(echo id: String) -> Bool { offlineQueue.messages.contains { $0.id == id } }
     /// Archived: done jobs that left Home (Clear done, Dismiss).
     var archived: [Job] { PhoneWork.archived(jobs, clearedAt: clearedAt) }
     /// What Oby's answering or asking in the thread shown, else nothing.
@@ -278,11 +286,13 @@ final class Phone {
     /// The job whose notification's Publish was tapped; its screen publishes once it's ready.
     var publishing: String?
 
-    var offlineLine: String {
-        guard connection != .live else { return "Connected to \(host)" }
-        let time = lastSeen.map { $0.formatted(date: .omitted, time: .shortened) } ?? "never"
-        return "Your Mac is asleep or offline. Last seen \(time)"
-    }
+    /// Why the Mac can't be reached, the same line on every screen, or nil.
+    var notice: ReachNotice? { ReachNotice.of(connection, online: online, status: refusal, paired: link != nil, lastSeen: lastSeen) }
+    /// This iPhone has a network path (NWPathMonitor).
+    private(set) var online = true
+    @ObservationIgnored private var path: NWPathMonitor?
+    /// The HTTP status of the last refusal (a 401 from the gateway: this iPhone was removed).
+    private(set) var refusal: Int?
 
     init(offlineQueue: OfflineQueue = OfflineQueue(), connection: RunnerConnection = .connecting, inbox: [InboxItem] = []) {
         self.offlineQueue = offlineQueue
@@ -313,6 +323,8 @@ final class Phone {
         restoreQueuedMessages(for: offlineQueueTarget)
         #if DEBUG
         if SampleTasks.on { jobs = SampleTasks.jobs; conversations = SampleTasks.conversations; loaded = true; SampleTasks.talk(self) }
+        // `-ObySampleUnreachable YES`: the Mac out of reach since 40 minutes ago, for the notice's screenshots.
+        if UserDefaults.standard.bool(forKey: "ObySampleUnreachable") { self.connection = .offline(""); self.lastSeen = .now.addingTimeInterval(-2400) }
         #endif
     }
 
@@ -399,12 +411,23 @@ final class Phone {
     /// (or the Mac) from there.
     func start() {
         finder.find(named: link?.name) { [weak self] url in self?.lan = url }
+        if path == nil {
+            let monitor = NWPathMonitor()
+            monitor.pathUpdateHandler = { [weak self] update in
+                let online = update.status == .satisfied
+                Task { @MainActor in self?.online = online }
+            }
+            monitor.start(queue: .main)
+            path = monitor
+        }
         follow()
     }
 
     /// The app went to the background: no connection, no battery spent.
     func stop() {
         finder.stop()
+        path?.cancel()
+        path = nil
         unfollow()
     }
 
@@ -437,6 +460,7 @@ final class Phone {
                     }
                 } catch {
                     if Task.isCancelled { return }
+                    refusal = (error as? RunnerError)?.status
                     connection = .offline(error.localizedDescription)
                 }
                 try? await Task.sleep(for: .seconds(wait))
@@ -465,6 +489,7 @@ final class Phone {
         // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
         await Notifications.clear(Set(jobs.filter { !$0.needsYou && !$0.waitsForAnswer }.map(\.id)))
         connection = .live
+        refusal = nil
         lastSeen = .now
         UserDefaults.standard.set(lastSeen, forKey: "runner.lastSeen")
         // Jobs dispatched from the Mac or the runner API notify too, so ask on connecting.
@@ -817,8 +842,9 @@ final class Phone {
     /// Settles an inbox item: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
         guard connection == .live else {
+            // The decision stays where it is, marked, until obid takes the answer (or says it was
+            // settled meanwhile: then the inbox fetched on connecting no longer has it).
             offlineQueue.queue(OfflineInboxAnswer(id: id, answer: answer, done: done, later: later, target: offlineQueueTarget))
-            inbox.removeAll { $0.id == id }
             return
         }
         apply(.inbox(try await runner.settle(id, answer: answer, done: done, later: later)))
