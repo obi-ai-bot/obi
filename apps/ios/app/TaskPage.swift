@@ -9,6 +9,9 @@ struct TaskCard: View {
     @Environment(Phone.self) private var phone
     @Environment(\.push) private var push
     let item: WorkList.Item<Job>
+    /// What a ⋮ action held on the card is doing, and why it didn't go.
+    @State private var busy = false
+    @State private var problem: String?
 
     private var job: Job { item.job }
 
@@ -70,6 +73,7 @@ struct TaskCard: View {
                 }
             }
             if item.status != .done { StageBar(job: job, needs: item.status == .needs).padding(.top, 16) }
+            if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.top, 10) }
         }
         .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 20)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -78,11 +82,72 @@ struct TaskCard: View {
         .onTapGesture { push(.task(job.id)) }
         .contextMenu {
             Button("View details", systemImage: "info.circle") { push(.task(job.id)) }
-            if job.isActive { Button("Stop", systemImage: "stop", role: .destructive) { Task { try? await phone.stop(job.id) } } }
+            TaskMenuItems(job: job, items: TaskMenu.items(job, conversation: phone.conversation(of: job) != nil).filter { $0 != .move && $0 != .mode },
+                          busy: $busy, onProblem: { problem = $0 })
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(job.heading), \(item.mark.rawValue)")
         .accessibilityAction(named: "Open") { push(.task(job.id)) }
+    }
+}
+
+/// A task's ⋮ (Sangam's TaskMenu.tsx, docs/oby-ux.md row 21): its conversation; Stop task while it
+/// goes, Archive task once it's done (Dismiss instead while it needs you); then the iPhone's Move
+/// to… and Mode. His Rename and Delete task wait for obid, which can't rename or delete a job yet.
+nonisolated enum TaskMenu {
+    enum Item: Equatable { case openConversation, stop, archive, dismiss, move, mode }
+
+    static func items(_ job: Job, conversation: Bool) -> [Item] {
+        var items: [Item] = conversation ? [.openConversation] : []
+        items.append(job.isActive ? .stop : job.needsYou || job.canPublish ? .dismiss : .archive)
+        // Oby's own reviews pick their account themselves.
+        if job.reviewOf == nil { items.append(.move) }
+        if job.isActive, job.mode != nil { items.append(.mode) }
+        return items
+    }
+}
+
+/// The ⋮'s buttons, on the task's page and held on its card. Move to… and Mode are the page's own.
+struct TaskMenuItems: View {
+    @Environment(Phone.self) private var phone
+    @Environment(\.push) private var push
+    let job: Job
+    let items: [TaskMenu.Item]
+    var onMove: () -> Void = {}
+    /// An action under way: the items wait for it.
+    var busy: Binding<Bool> = .constant(false)
+    var onProblem: (String?) -> Void = { _ in }
+
+    var body: some View {
+        ForEach(items, id: \.self) { item in
+            switch item {
+            case .openConversation:
+                if let conversation = phone.conversation(of: job) {
+                    Button("Open conversation", systemImage: "bubble.left.and.bubble.right") { push(.conversation(conversation)) }
+                }
+            case .stop: Button("Stop task", systemImage: "stop", role: .destructive) { run { try await phone.stop(job.id) } }.disabled(busy.wrappedValue)
+            case .archive: Button("Archive task", systemImage: "archivebox") { phone.archive(job.id) }
+            case .dismiss: Button("Dismiss", systemImage: "xmark") { run { try await phone.dismiss(job.id) } }.disabled(busy.wrappedValue)
+            case .move: Button("Move to…", systemImage: "arrow.left.arrow.right", action: onMove)
+            case .mode:
+                let mode = RunnerMode(job.mode)
+                Picker(selection: Binding { mode } set: { choice in if let choice { run { try await phone.setMode(job.id, choice) } } }) {
+                    ForEach(RunnerMode.allCases) { Label($0.label, systemImage: $0.symbol).tag(Optional($0)) }
+                } label: {
+                    Label("Mode: \(mode?.label ?? "unknown")", systemImage: mode?.symbol ?? "hand.raised")
+                }
+                .pickerStyle(.menu)
+                .disabled(busy.wrappedValue)
+            }
+        }
+    }
+
+    private func run(_ work: @escaping () async throws -> Void) {
+        busy.wrappedValue = true
+        Task {
+            defer { busy.wrappedValue = false }
+            do { try await work(); onProblem(nil) } catch { onProblem(error.localizedDescription) }
+        }
     }
 }
 
@@ -111,7 +176,7 @@ struct StageBar: View {
                 ForEach(pipeline.stages) { stage in
                     Group {
                         if stage.state == .current && !needs && job.status == .running && !reduceMotion {
-                            PhaseAnimator([1.0, 0.35]) { level in Capsule().fill(Color.white.opacity(0.55)).opacity(level) }
+                            PhaseAnimator([1.0, 0.35]) { level in Capsule().fill(Tokens.stageDone).opacity(level) }
                                 animation: { _ in .easeInOut(duration: 0.8) }
                         } else {
                             Capsule().fill(color(stage.state))
@@ -127,8 +192,8 @@ struct StageBar: View {
 
     private func color(_ state: JobStage.State) -> Color {
         switch state {
-        case .done: Color.white.opacity(0.55)
-        case .current: needs ? Tokens.needs : Color.white.opacity(0.55)
+        case .done: Tokens.stageDone
+        case .current: needs ? Tokens.needs : Tokens.stageDone
         case .failed: Tokens.danger
         case .upcoming, .skipped: Tokens.pill
         }
@@ -237,9 +302,13 @@ struct TaskPage: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if let job, let conversation = phone.conversation(of: job) {
+            if let job {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Go to conversation") { push(.conversation(conversation)) }
+                    Menu {
+                        TaskMenuItems(job: job, items: TaskMenu.items(job, conversation: phone.conversation(of: job) != nil),
+                                      onMove: { problem = nil; moving = true }, busy: $busy, onProblem: { problem = $0 })
+                    } label: { Image(systemName: "ellipsis") }
+                        .accessibilityLabel("Task options")
                 }
             }
         }
@@ -335,7 +404,7 @@ struct TaskPage: View {
     /// Publish by hand when Oby's own didn't go: the exact action shows first, and exactly that
     /// goes out once Face ID signs it.
     @ViewBuilder private func publish(_ job: Job) -> some View {
-        if let reason = job.publishError { Text(reason).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needs).padding(.bottom, 8) }
+        if let reason = job.publishError { Text(reason).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needsInk).padding(.bottom, 8) }
         if let action {
             VStack(alignment: .leading, spacing: 10) {
                 Text(action).font(Tokens.font(Tokens.textBase, .medium)).foregroundStyle(Tokens.ink).fixedSize(horizontal: false, vertical: true)
@@ -375,8 +444,8 @@ struct TaskPage: View {
         .font(Tokens.font(Tokens.textBase))
     }
 
-    /// What the job can still do: start now, use an account past its reserve, move, change its
-    /// mode, stop, or let it go.
+    /// What applies now, on the page (docs/oby-ux.md row 21): start now, or use an account past its
+    /// reserve. The rest is in the ⋮.
     @ViewBuilder private func controls(_ job: Job) -> some View {
         let offers = TaskFacts.controls(job)
         let reserved = job.waitsToStart ? Usage.liftable(job.waiting?.reserved, among: phone.accounts, id: \.id, usage: \.usage) : []
@@ -390,40 +459,10 @@ struct TaskPage: View {
                 }
                 .disabled(busy)
             }
-            // Oby's own reviews pick their account themselves.
-            if job.reviewOf == nil {
-                PillButton(title: "Move to…") { problem = nil; moving = true }.disabled(busy)
-            }
-            if job.isActive, job.mode != nil { modeMenu(job) }
-            if offers.stop { PillButton(title: "Stop task", danger: true) { Task { await run { try await phone.stop(job.id) } } }.disabled(busy) }
-            if offers.dismiss { PillButton(title: "Dismiss", quiet: true) { Task { await run { try await phone.dismiss(job.id) } } }.disabled(busy) }
         }
         ForEach(reserved) { account in
             Text(Usage.liftNote(account.usage)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 6)
         }
-    }
-
-    /// Ask, Accept edits, Plan or Bypass, while it runs: a permission the new mode allows is answered.
-    private func modeMenu(_ job: Job) -> some View {
-        let mode = RunnerMode(job.mode)
-        return Menu {
-            ForEach(RunnerMode.allCases) { choice in
-                Button { Task { await run { try await phone.setMode(job.id, choice) } } } label: {
-                    Label {
-                        Text(choice.label)
-                        Text(choice.help)
-                    } icon: {
-                        Image(systemName: choice == mode ? "checkmark" : choice.symbol)
-                    }
-                }
-            }
-        } label: {
-            Label(mode?.label ?? "Mode", systemImage: mode?.symbol ?? "hand.raised")
-                .font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.item)
-                .padding(.horizontal, 14).frame(height: 32).background(Tokens.pill, in: Capsule())
-        }
-        .disabled(busy)
-        .accessibilityLabel("Mode: \(mode?.label ?? "unknown")")
     }
 
     private func section(_ title: String, first: Bool = false, @ViewBuilder content: () -> some View) -> some View {
@@ -550,7 +589,7 @@ private struct StageMark: View {
                 .frame(width: 14, height: 14).background(Tokens.done, in: Circle())
         case .current: WorkMarkView(mark: .working, dot: 10)
         case .needs: Circle().fill(Tokens.needs).frame(width: 10, height: 10)
-        case .upcoming: Circle().strokeBorder(Color.white.opacity(0.45), lineWidth: 1.5).frame(width: 10, height: 10)
+        case .upcoming: Circle().strokeBorder(Tokens.check, lineWidth: 1.5).frame(width: 10, height: 10)
         case .skipped: Capsule().fill(Tokens.check).frame(width: 10, height: 2)
         case .failed: Circle().fill(Tokens.danger).frame(width: 10, height: 10)
         }
@@ -565,7 +604,7 @@ private struct DottedLine: View {
                 var y: CGFloat = 1
                 while y < geometry.size.height { path.addEllipse(in: CGRect(x: 0, y: y - 1, width: 2, height: 2)); y += 6 }
             }
-            .fill(Color.white.opacity(0.3))
+            .fill(Tokens.check.opacity(0.75))
         }
     }
 }
