@@ -47,6 +47,18 @@ struct SettingsWindowTests {
         #expect(SidebarSections.accountLine(email: "", mac: nil) == "This Mac")
     }
 
+    /// The usage panel's gear opens Accounts in its own window; the action is equal for the same
+    /// window, so the box doesn't redraw for a new closure on every update.
+    @Test func usageGearOpensAccountsInItsWindow() {
+        let state = ChatState(), other = ChatState()
+        let open = OpenSettingsPage(state: state, animated: false)
+        #expect(open == OpenSettingsPage(state: state, animated: false))
+        #expect(open != OpenSettingsPage(state: other, animated: false))
+        open(.accounts)
+        #expect(state.trail.top == .settings(.accounts))
+        #expect(other.trail.isHome)
+    }
+
     /// ⌘, stays: the app menu has one Settings… on it, which opens the window's Settings.
     @Test func commandCommaIsSettings() {
         let items = NSApp.mainMenu?.items.flatMap { $0.submenu?.items ?? [] } ?? []
