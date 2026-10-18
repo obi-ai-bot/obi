@@ -2262,6 +2262,9 @@ impl Jobs {
                 .unwrap_or_default();
             format!("obid can't find {}'s binary ({named}).", tool.name())
         })?;
+        if tool == Tool::Claude {
+            fresh_keychain_login(&bin, account)?;
+        }
         let mut spec = spec.clone();
         let mut extra: Vec<(&str, OsString)> = spec.git_env();
         if let Some(token) = self.apple_check_token(&job.id) {
@@ -2393,6 +2396,9 @@ impl Jobs {
             .signed_in_account(tool)
             .or_else(|| self.accounts(tool).into_iter().next())
             .ok_or_else(|| format!("{} has no account.", tool.name()))?;
+        if tool == Tool::Claude {
+            fresh_keychain_login(&bin, &account)?;
+        }
         let temp = dir.join("home");
         store::make_private_dir(&temp)
             .map_err(|e| format!("obid can't make the brain's folder: {e}"))?;
@@ -3942,14 +3948,177 @@ fn keychain_has(config_dir: Option<&Path>) -> bool {
 /// 2026-10-17: the sandbox denies the Keychain, and Claude Code no longer writes a login file when
 /// it can't use the Keychain, so obid copies the Keychain's item into the place a boxed run reads
 /// its `.credentials.json` from, as it copies a login file. Never logged, shown or kept anywhere
-/// else; none on other systems.
+/// else; none on other systems. The copy never carries the refresh token ([`without_refresh`]);
+/// the Mac's own Claude Code keeps the login fresh ([`fresh_keychain_login`]).
 pub(crate) fn keychain_login(config_dir: Option<&Path>) -> Option<Vec<u8>> {
-    let mut bytes = keychain(config_dir, true)?;
-    while bytes.last().is_some_and(|b| b.is_ascii_whitespace()) {
-        bytes.pop();
-    }
+    let bytes = keychain(config_dir, true)?;
     learn_claude_tokens(&bytes, &keychain_service(config_dir));
-    (!bytes.is_empty()).then_some(bytes)
+    without_refresh(&bytes)
+}
+
+/// Claude Code's login as obid copies it from the Keychain: what calls the API (the access token,
+/// when it ends, its scopes), never the refresh token. Anthropic rotates refresh tokens, so a boxed
+/// run that refreshed with a copied one revoked the Keychain's own and signed the Mac's own
+/// `claude` out (2026-10-17). None when it isn't JSON.
+fn without_refresh(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut login: Value = serde_json::from_slice(bytes).ok()?;
+    if let Some(oauth) = login
+        .get_mut("claudeAiOauth")
+        .and_then(Value::as_object_mut)
+    {
+        oauth.remove("refreshToken");
+        oauth.remove("refreshTokenExpiresAt");
+    }
+    serde_json::to_vec(&login).ok()
+}
+
+/// When the access token in Claude Code's `login` ends (milliseconds since 1970), if it says.
+fn expires_at(login: &[u8]) -> Option<u64> {
+    serde_json::from_slice::<Value>(login).ok()?["claudeAiOauth"]["expiresAt"].as_u64()
+}
+
+/// Whether the Keychain login `read` answers is good to copy (none is: nothing is copied). When its
+/// token ends within 30 minutes of `now` or doesn't say when, the Mac's own Claude Code refreshes it
+/// first (`refresh`), and then it's good if that worked and its token hasn't ended. At most once
+/// per 10 minutes (`last`: when it ran and whether it worked), unless the last one worked and
+/// Claude Code would refresh now: it refreshes only in a token's last 5 minutes (2.1.296).
+/// When the Mac's own Claude Code last refreshed an account's login, and whether that worked.
+type Refreshed = Option<(std::time::Instant, bool)>;
+
+fn keep_fresh(
+    last: &mut Refreshed,
+    now: u64,
+    read: impl Fn() -> Option<Vec<u8>>,
+    refresh: impl FnOnce() -> bool,
+) -> bool {
+    let Some(login) = read() else {
+        return true;
+    };
+    let ends = expires_at(&login);
+    if ends.is_some_and(|t| t > now + 30 * 60_000) {
+        return true;
+    }
+    let recent = last
+        .filter(|(at, _)| at.elapsed() < Duration::from_secs(10 * 60))
+        .map(|(_, worked)| worked);
+    match recent {
+        Some(false) => return false,
+        Some(true) if ends.is_none_or(|t| t > now + 5 * 60_000) => return true,
+        _ => {}
+    }
+    let worked = refresh() && read().is_some_and(|l| expires_at(&l).is_none_or(|t| t > now));
+    *last = Some((std::time::Instant::now(), worked));
+    worked
+}
+
+/// Before a boxed Claude Code run that gets the Keychain's login ([`keychain_login`]): the Mac's
+/// own Claude Code refreshes it when it ends soon ([`keep_fresh`]), since the copy has no refresh
+/// token. Throws one line when it can't: the Mac's Claude login needs signing in again. obid never
+/// writes the Keychain: a folder's older copy is only overwritten from it.
+pub(crate) fn fresh_keychain_login(
+    bin: &Path,
+    account: &crate::config::Account,
+) -> Result<(), String> {
+    if !keychain_on() {
+        return Ok(());
+    }
+    let dir = account.config_dir.as_deref();
+    // With no folder of its own, the Keychain's login is copied only when there's no login file.
+    if dir.is_none()
+        && login_home()
+            .is_some_and(|h| std::fs::symlink_metadata(h.join(".claude/.credentials.json")).is_ok())
+    {
+        return Ok(());
+    }
+    // ponytail: one lock for every account, held while Claude Code refreshes (a few seconds), so
+    // parallel runs don't all refresh; per-account locks if that ever queues runs noticeably.
+    static LAST: Mutex<Vec<(String, Refreshed)>> = Mutex::new(Vec::new());
+    let mut all = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let service = keychain_service(dir);
+    let at = match all.iter().position(|(s, _)| *s == service) {
+        Some(at) => at,
+        None => {
+            all.push((service, None));
+            all.len() - 1
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    if keep_fresh(
+        &mut all[at].1,
+        now,
+        || keychain(dir, true),
+        || refresh_claude_login(bin, dir),
+    ) {
+        Ok(())
+    } else {
+        Err(format!(
+            "The Mac's Claude login for {} needs signing in again (run claude, then /login).",
+            account.name
+        ))
+    }
+}
+
+/// Has the Mac's own Claude Code (`bin`, not boxed, so it reaches the Keychain) refresh its login
+/// for `config_dir`, as it does before it calls the model: `claude -p ok` with haiku, no tools and
+/// none of the person's settings, in an empty folder, with none of obid's Claude Code or Anthropic
+/// variables, within 60 seconds. Claude Code 2.1.296 has no command that only refreshes (`claude
+/// auth status` reads the login without refreshing it). What it says is never kept.
+fn refresh_claude_login(bin: &Path, config_dir: Option<&Path>) -> bool {
+    use std::os::unix::process::CommandExt;
+    let Some(home) = login_home() else {
+        return false;
+    };
+    let dir = std::env::temp_dir().join(format!("obid-refresh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    if store::make_private_dir(&dir).is_err() {
+        return false;
+    }
+    let mut command = Command::new(bin);
+    command
+        .args([
+            "-p",
+            "ok",
+            "--model",
+            "haiku",
+            "--max-turns",
+            "1",
+            "--tools",
+            "",
+        ])
+        .args(["--strict-mcp-config", "--setting-sources", ""])
+        .arg("--no-session-persistence")
+        .current_dir(&dir)
+        .env_clear()
+        .envs(process::kept(|name| std::env::var_os(name)))
+        .env("PATH", process::tools_path())
+        .env("HOME", home)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0);
+    if let Some(config_dir) = config_dir {
+        command.env("CLAUDE_CONFIG_DIR", config_dir);
+    }
+    let worked = command.spawn().is_ok_and(|mut child| {
+        let give_up_at = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status.success(),
+                Ok(None) if std::time::Instant::now() < give_up_at => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                _ => {
+                    process::signal_group(child.id(), nix::sys::signal::Signal::SIGKILL);
+                    let _ = child.wait();
+                    break false;
+                }
+            }
+        }
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    worked
 }
 
 /// Writes `bytes` to `path` as only the person may read it (0600), replacing what's there. Never
@@ -4591,6 +4760,98 @@ mod tests {
             !said.contains(&access) && !said.contains(&refresh) && !said.contains(&other),
             "{said}"
         );
+    }
+
+    /// A copy of the Keychain's login never carries the refresh token: a boxed run that refreshed
+    /// with it would rotate the Mac's own login away (2026-10-17). What calls the API stays.
+    #[test]
+    fn a_keychain_copy_carries_no_refresh_token() {
+        let login = json!({"claudeAiOauth": {
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "refreshTokenExpiresAt": 1,
+            "expiresAt": 1_760_000_000_000u64,
+            "scopes": ["user:inference"],
+            "subscriptionType": "max",
+        }});
+        let copy: Value =
+            serde_json::from_slice(&without_refresh(login.to_string().as_bytes()).unwrap())
+                .unwrap();
+        let oauth = &copy["claudeAiOauth"];
+        assert!(oauth.get("refreshToken").is_none(), "{oauth}");
+        assert!(oauth.get("refreshTokenExpiresAt").is_none(), "{oauth}");
+        assert_eq!(oauth["accessToken"], "access");
+        assert_eq!(oauth["expiresAt"], 1_760_000_000_000u64);
+        assert_eq!(oauth["scopes"], json!(["user:inference"]));
+        assert_eq!(oauth["subscriptionType"], "max");
+        // Not a login: nothing to copy.
+        assert!(without_refresh(b"").is_none());
+    }
+
+    /// The Mac's own Claude Code refreshes a login obid copies when its token ends within 30
+    /// minutes or doesn't say when, and not when it's far off; a refresh that failed isn't tried
+    /// again for 10 minutes.
+    #[test]
+    fn the_macs_claude_code_refreshes_a_login_near_its_end() {
+        let now = 1_760_000_000_000u64;
+        let login = |ends: Option<u64>| {
+            let mut oauth = json!({"accessToken": "a", "scopes": ["user:inference"]});
+            if let Some(ends) = ends {
+                oauth["expiresAt"] = ends.into();
+            }
+            Some(json!({"claudeAiOauth": oauth}).to_string().into_bytes())
+        };
+        let hour = 60 * 60 * 1000;
+        let ran = std::cell::Cell::new(0);
+        let refresh = |works: bool| {
+            ran.set(ran.get() + 1);
+            works
+        };
+        // Far off: nothing runs.
+        let mut last = None;
+        assert!(keep_fresh(
+            &mut last,
+            now,
+            || login(Some(now + 2 * hour)),
+            || refresh(true)
+        ));
+        assert_eq!(ran.get(), 0);
+        // No Keychain login: nothing to copy, nothing runs.
+        assert!(keep_fresh(&mut last, now, || None, || refresh(true)));
+        assert_eq!(ran.get(), 0);
+        // Within 30 minutes: it runs.
+        assert!(keep_fresh(
+            &mut None,
+            now,
+            || login(Some(now + 60_000)),
+            || refresh(true)
+        ));
+        assert_eq!(ran.get(), 1);
+        // No end said: it runs; one that fails fails the run.
+        let mut last = None;
+        assert!(!keep_fresh(
+            &mut last,
+            now,
+            || login(None),
+            || refresh(false)
+        ));
+        assert_eq!(ran.get(), 2);
+        // ...and isn't tried again within 10 minutes.
+        assert!(!keep_fresh(
+            &mut last,
+            now,
+            || login(None),
+            || refresh(true)
+        ));
+        assert_eq!(ran.get(), 2);
+        // A refresh that worked but left a token already ended fails too.
+        assert!(!keep_fresh(
+            &mut None,
+            now,
+            || login(Some(now - 1)),
+            || refresh(true)
+        ));
+        assert_eq!(ran.get(), 3);
     }
 
     /// A folder named with a trailing `/` or `/.` is still looked at as itself, not where a link
