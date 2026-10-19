@@ -793,9 +793,10 @@ fn try_again_after_a_limit_keeps_the_rounds_summary() {
             ),
         );
         assert_eq!(more.status, 200, "{}", more.text);
-        let job = until(&obid, &id, |j| {
-            j["round"] == 2 && j["status"] != "queued" && j["status"] != "running"
-        });
+        // Round 2 starts, then ends however long publishing takes on a busy machine.
+        until(&obid, &id, |j| j["round"] == 2);
+        let job = wait(&obid, &id);
+        assert_eq!(job["round"], 2, "{job}");
         assert_eq!(job["status"], "done", "{job}");
         job
     };

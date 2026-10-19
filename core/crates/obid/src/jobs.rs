@@ -3953,7 +3953,7 @@ impl Jobs {
                     });
                     return Err("Stopped at a limit: the round ran past 45 minutes. The branch is kept and nothing was pushed; one more round is possible.".into());
                 }
-                let said = turn.text();
+                let said = turn.last_said();
                 if !turn.succeeded() {
                     let first = said.lines().next().unwrap_or("").trim().to_owned();
                     return Err(if first.is_empty() {
