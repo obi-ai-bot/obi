@@ -623,6 +623,37 @@ fn a_check_that_keeps_failing_stops_at_a_limit() {
     assert!(log.contains("the check failed"), "{log}");
 }
 
+/// A check that fails the way the owner asked for (a test meant to fail): the fix round quotes the
+/// task, the agent says the failure is intended, and the job ends with that round instead of
+/// another one that would undo it.
+#[test]
+fn a_failure_the_task_asked_for_ends_the_rounds() {
+    let folder = Folder::new("intended");
+    let remote = fixture(&folder.0.join("fixture"));
+    let bin = fake_gh(&folder.0);
+    let obid = start_with(&folder.0, &config(&folder.0, &remote), Some(&bin));
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt, a test that fails ON PURPOSE", "check": "echo the check failed; false", "rounds": 3}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["round"], 2);
+    assert_eq!(job["limit"], Value::Null);
+    assert_eq!(job["commits"], 1);
+    assert!(
+        job["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("FAILS AS ASKED"),
+        "{job}"
+    );
+}
+
 /// obid answers the agent's permission prompts: publishing and leaving the worktree are refused,
 /// the rest of a bypass job's work is allowed; and none of obid's own secrets reach the agent.
 #[test]
