@@ -285,6 +285,19 @@ fn oby_dispatch_starts_a_job_whose_card_is_on_the_turn() {
             .any(|(n, d)| n == "step" && d["tool"] == "oby_dispatch"),
         "{seen:?}"
     );
+    // The job names the words that started it, and says so as it starts, before Oby's answer
+    // lists it: the conversation shows its card at once.
+    let user = seen
+        .iter()
+        .find(|(n, d)| n == "turn" && d["who"] == "user")
+        .map(|(_, d)| d["id"].clone())
+        .expect("the user's turn");
+    assert_eq!(job.body["turn"], user, "{}", job.text);
+    let started = seen
+        .iter()
+        .position(|(n, d)| n == "job" && d["id"] == id && d["turn"] == user)
+        .expect("the job's event with its turn");
+    assert!(started < seen.len() - 1, "{seen:?}");
 }
 
 /// What widens trust is the owner's alone: a Bypass job waits for their Confirm, and the agent

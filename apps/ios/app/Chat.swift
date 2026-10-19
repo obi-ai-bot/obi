@@ -238,6 +238,8 @@ struct ConversationPage: View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             let turns = phone.thread
             let rows = ChatRuns.rows(turns)
+            // The jobs shown where they started: a follow-up told elsewhere goes with its parent's card.
+            let shown = ThreadTaskLine.shown(in: turns, jobs: phone.jobs, startedBy: \.turn, ended: phone.conversation.endedTurn)
             let decisions = InboxItem.waiting(phone.inbox, now: context.date)
             ScrollViewReader { proxy in
                 ScrollView {
@@ -264,7 +266,8 @@ struct ConversationPage: View {
                         }
                         ForEach(Array(rows.enumerated()), id: \.element.turn.id) { index, row in
                             MessageRow(row: row, first: index == 0, now: context.date,
-                                       jobs: ConversationModel.jobs(of: row.turn, among: phone.jobs),
+                                       jobs: ThreadTaskLine.cards(under: row.turn, in: turns, jobs: phone.jobs, startedBy: \.turn),
+                                       followUps: { phone.conversation.endedTurn(row.turn) ? [] : ThreadTaskLine.attached(to: $0, in: phone.jobs, shown: shown) },
                                        steps: phone.conversation.steps(under: row.turn, in: turns),
                                        streamed: phone.conversation.streamed(under: row.turn, in: turns),
                                        failure: phone.failures[row.turn.id],
@@ -338,6 +341,8 @@ private struct MessageRow: View {
     let first: Bool
     let now: Date
     let jobs: [Job]
+    /// The follow-ups that go with a job's card, told somewhere the thread doesn't show.
+    let followUps: (Job) -> [Job]
     let steps: [TurnStep]
     /// Oby's words for these, while they're still being written.
     var streamed: ConversationModel.Streamed?
@@ -385,6 +390,12 @@ private struct MessageRow: View {
             ForEach(jobs) { job in
                 ThreadTask(job: job, account: phone.accountName(job.account))
                 ForEach(job.artifacts ?? [], id: \.self) { ArtifactShelf(ref: $0) }
+                ForEach(followUps(job)) { next in
+                    Text(ThreadTaskLine.followUp(next, account: phone.accountName(next.account))).font(Tokens.font(Tokens.textMd))
+                        .foregroundStyle(Tokens.muted).fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    ThreadTask(job: next, account: phone.accountName(next.account))
+                }
             }
             if row.endsRun {
                 Text(ChatRuns.clock(turn.date, now: now)).font(Tokens.font(11)).monospacedDigit().foregroundStyle(Tokens.muted)

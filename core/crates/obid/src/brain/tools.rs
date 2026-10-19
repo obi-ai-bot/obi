@@ -540,6 +540,7 @@ async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Resul
         said: &session.said,
         attachments: &session.attachments,
         conversation: &session.conversation,
+        turn: &session.control.turn,
     };
     let control = session.control.clone();
     let live = move || control.live();

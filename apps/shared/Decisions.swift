@@ -94,17 +94,21 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     var question: Question?
     /// obid only (#493): the conversation whose words started the job, kept when that one is deleted.
     var conversation: String?
+    /// obid only: the user's turn whose words started it, so its card shows under them as it starts.
+    var turn: String?
     /// What it made to be looked at (obid only), or nil.
     var artifacts: [ArtifactRef]?
 
-    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, artifacts }
+    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, turn, artifacts }
 
-    init(id: String, mode: String? = nil, permission: RunnerPermission? = nil, question: Question? = nil, conversation: String? = nil) {
+    init(id: String, mode: String? = nil, permission: RunnerPermission? = nil, question: Question? = nil, conversation: String? = nil,
+         turn: String? = nil) {
         self.id = id
         self.mode = mode
         self.permission = permission
         self.question = question
         self.conversation = conversation
+        self.turn = turn
     }
 
     init(from decoder: any Decoder) throws {
@@ -114,6 +118,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
         permission = try? keys.decodeIfPresent(RunnerPermission.self, forKey: .permission)
         question = try? keys.decodeIfPresent(Question.self, forKey: .question)
         conversation = try? keys.decodeIfPresent(String.self, forKey: .conversation)
+        turn = try? keys.decodeIfPresent(String.self, forKey: .turn)
         artifacts = try? keys.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
     }
 

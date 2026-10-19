@@ -79,6 +79,40 @@ struct ChatPageTests {
         #expect(ThreadTaskLine.followUp(first, account: "") == "This one’s finished, so I started a follow-up. Claude Code has it on a.")
     }
 
+    /// A job shows the moment its words start it, as Claude Code's tasks do: under those words
+    /// (obid's `turn`) until Oby's answer lists it, then under the answer, never twice. A follow-up
+    /// told from the task's page goes with its parent's card, Sangam's line over it; one the
+    /// thread shows where it started doesn't, nor anything under a turn a job added as it ended.
+    @Test func jobsShowAsTheyStartAndFollowUpsGoWithTheirParent() {
+        let asked = Turn(id: "u", date: now, who: .user, text: "fix it")
+        var fix = job(.running), told = job(.queued), started = job(.running), other = job(.running)
+        fix.id = "fix"; told.id = "told"; told.followUpOf = "fix"
+        started.id = "started"; started.followUpOf = "fix"
+        other.id = "other"
+        let turns: [String: String] = ["fix": "u", "started": "u2", "other": "elsewhere"]
+        let startedBy = { (job: Job) in turns[job.id] }
+        let all = [fix, told, started, other]
+        // Under way: the card is under the words, and only theirs.
+        #expect(ThreadTaskLine.cards(under: asked, in: [asked], jobs: all, startedBy: startedBy).map(\.id) == ["fix"])
+        // Answered: it's on the answer, not under the words any more.
+        let answer = Turn(id: "o", date: now + 5, who: .oby, text: "On it.", jobs: ["fix"])
+        #expect(ThreadTaskLine.cards(under: asked, in: [asked, answer], jobs: all, startedBy: startedBy).isEmpty)
+        #expect(ThreadTaskLine.cards(under: answer, in: [asked, answer], jobs: all, startedBy: startedBy).map(\.id) == ["fix"])
+        // The follow-up told from the page goes with fix; the one words here started shows under them.
+        let more = Turn(id: "u2", date: now + 60, who: .user, text: "and the docs")
+        let thread = [asked, answer, more]
+        let shown = ThreadTaskLine.shown(in: thread, jobs: all, startedBy: startedBy, ended: { _ in false })
+        #expect(shown == ["fix", "started"])
+        #expect(ThreadTaskLine.attached(to: fix, in: all, shown: shown).map(\.id) == ["told"])
+        // Its own follow-ups come after it; a turn a job added as it ended doesn't count as shown.
+        var again = job(.queued)
+        again.id = "again"; again.followUpOf = "told"; again.created = now + 120
+        let ended = Turn(id: "e", date: now + 90, who: .oby, text: "Fix is done.", jobs: ["told"])
+        let later = all + [again]
+        let shownLater = ThreadTaskLine.shown(in: thread + [ended], jobs: later, startedBy: startedBy, ended: { $0.id == "e" })
+        #expect(ThreadTaskLine.attached(to: fix, in: later, shown: shownLater).map(\.id) == ["told", "again"])
+    }
+
     /// The card under an answer says where its task stands, then who has it where; never "new"
     /// in the thread, where you're already looking at it.
     @Test func eachJobStateGetsItsCard() {

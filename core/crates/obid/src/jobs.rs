@@ -103,6 +103,9 @@ pub struct NewJob {
     pub mode: Option<String>,
     /// The conversation whose plan started it (#493).
     pub conversation: Option<String>,
+    /// The user's turn whose words started it ([`Job::turn`]).
+    #[serde(default)]
+    pub turn: Option<String>,
     /// What the brain found before it planned the job, and what done means (#540).
     #[serde(default)]
     pub brief: Option<crate::job::Brief>,
@@ -1364,6 +1367,7 @@ impl Jobs {
         job.files = files;
         job.attachments = new.attachments;
         job.conversation = new.conversation;
+        job.turn = new.turn.filter(|_| job.conversation.is_some());
         job.brief = new
             .brief
             .filter(|b| !b.findings.is_empty() || b.done.is_some());

@@ -2280,6 +2280,9 @@ fn a_plan_starts_its_jobs_and_links_them_to_the_turn() {
         turns.as_array().unwrap().last().unwrap()["jobs"],
         json!(ids)
     );
+    // Each names the words that started it, so its card shows under them as it starts.
+    let user = turn_of(&obid, "fix fixture-app #176 and review PR 33");
+    assert!(jobs.iter().all(|j| j["turn"] == user.as_str()), "{jobs:?}");
     assert_eq!(call(&obid, "GET", "/v1/inbox", None).body, json!([]));
     assert_eq!(ends(&obid), ["started_jobs"]);
 }
@@ -2683,6 +2686,8 @@ fn research_then_dispatch_waits_for_start() {
     assert_eq!(jobs.as_array().unwrap().len(), 1);
     assert_eq!(jobs[0]["title"], "Greeting fix");
     assert_eq!(started.body["job"], jobs[0]["id"]);
+    // Started by the Start, not by the words: no turn of the conversation started it.
+    assert!(jobs[0]["turn"].is_null(), "{jobs}");
 }
 
 /// A dispatch after research, with what the turn found (#540).

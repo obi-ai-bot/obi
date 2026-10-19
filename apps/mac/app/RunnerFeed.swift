@@ -512,6 +512,13 @@ final class RunnerFeed {
         }
     }
 
+    /// A `job` event as the event loop takes it: what obid adds to the job, then the job (the
+    /// window's pictures use it; ponytail: the loop still does it inline, to stay off #723's lines).
+    func apply(_ job: Job, extras: RunnerJobExtras) {
+        self.extras[job.id] = extras
+        apply(job)
+    }
+
     /// The runner's answer to Stop or a message, or one of its events: the job with that id.
     func apply(_ job: Job) {
         if let index = jobs.firstIndex(where: { $0.id == job.id }) { jobs[index] = job } else { jobs.insert(job, at: 0) }

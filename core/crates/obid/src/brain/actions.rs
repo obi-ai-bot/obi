@@ -65,6 +65,9 @@ pub struct Asked<'a> {
     pub said: &'a str,
     pub attachments: &'a [String],
     pub conversation: &'a str,
+    /// The user's turn the words are, which the jobs started now name (`Job::turn`); empty for an
+    /// event turn's, which no turn of the conversation holds.
+    pub turn: &'a str,
 }
 
 /// A plan that answers rather than acts: a reply, a question, or jobs it starts (#269). `live` is
@@ -198,6 +201,11 @@ async fn dispatch(
             waiting.push(what);
             continue;
         }
+        // Started now, by these words: its card shows under them before the answer lists it.
+        let new = NewJob {
+            turn: (!asked.turn.is_empty()).then(|| asked.turn.to_owned()),
+            ..new
+        };
         match shared.jobs.create(new) {
             Ok(job) => {
                 jobs.push(job.to_json());
