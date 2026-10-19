@@ -708,7 +708,8 @@ pub struct Planned {
     pub calls: Vec<Call>,
 }
 
-/// The least time an adapter is asked to think in: with less left, none is (#615).
+/// The least time an adapter is asked to think in: with less left, none is (#615). Tests may set
+/// more with `leastThink` (#763).
 pub const LEAST: Duration = Duration::from_secs(1);
 
 /// The adapters and whether rules stand in.
@@ -720,6 +721,8 @@ pub struct Planner {
     pub falls_back_to_rules: bool,
     /// When the turn's budget ends, if it has one: no adapter thinks past it.
     pub deadline: Option<Instant>,
+    /// The least time an adapter is asked to think in: [`LEAST`], or the config's `leastThink`.
+    pub least: Duration,
 }
 
 impl Planner {
@@ -811,7 +814,7 @@ impl Planner {
             let mut message = user.clone();
             for _ in 0..2 {
                 let left = deadline.saturating_duration_since(Instant::now());
-                if left <= LEAST {
+                if left <= self.least {
                     break;
                 }
                 let before = calls.len();
@@ -1391,6 +1394,7 @@ pub mod tests {
             adapters: vec![Adapter::Fake(fake.clone())],
             falls_back_to_rules: true,
             deadline: None,
+            least: LEAST,
         }
     }
 
@@ -1549,6 +1553,7 @@ pub mod tests {
             adapters: vec![Adapter::Claude(brain)],
             falls_back_to_rules: true,
             deadline: None,
+            least: LEAST,
         };
         let planned = turn.plan("hello", &context(), &going).await;
         assert_eq!(planned.by, "rules");
