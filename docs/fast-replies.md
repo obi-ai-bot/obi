@@ -36,8 +36,20 @@ Measured with a throwaway obid (debug build, its own home, events followed over 
 
 "After" covers two runs of the same script: one with the warm process and spare trees, and one with the final code. A new conversation now waits only for Claude Code to start. The extraction is gone, but at load 300 the start itself took 1.3 to 7.2 s.
 
+## A new conversation's Claude Code, started ahead
+
+Claude Code connects its MCP servers when it starts, before any prompt: with a test server that took 4 s per request and a prompt sent 25 s after the start, `init` came 41 ms after the prompt. So a Claude Code started ahead saves both its start and the connection, as the Agent SDK's `prewarm()` does.
+
+After each of the owner's turns, obid names the next new conversation's id and readies its room, box, login copy and MCP configuration, then starts its Claude Code with no prompt. Until a turn is under way, its token may only connect to Oby's tools and list them. The new conversation's first turn is written to it like a follow-up.
+
+Measured the same way, back to back with #726's code, at load 290–350. The second new conversation in a run got:
+
+| | #726 | Started ahead |
+|---|---|---|
+| POST until Claude Code had the prompt (`session` in the stopwatch line) | 1.8–2.8 s | **0.14–0.29 s** |
+| First words | 3.2–10.0 s | **0.85–4.8 s** (the model's own latency was noisy in this window: follow-ups took 0.8–4.9 s too) |
+
 ## What's left
 
-- **Start the next new conversation's Claude Code before it's needed**, as the SDK's `prewarm()` does: obid would reserve the next conversation's id and room and start its process without a prompt, so a new conversation also answers in about 1 s. This is the remaining big one.
 - **Codex conversations** still start `codex app-server` every turn. One app-server for all of a conversation's turns, or all conversations' threads, would do for Codex what the change above does for Claude Code.
 - Show the model's thinking (`thinking_delta`) and a tool's start (`content_block_start`) as they stream, instead of waiting for the whole tool-use block.
