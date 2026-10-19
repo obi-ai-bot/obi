@@ -251,6 +251,9 @@ pub struct Job {
     /// for a follow-up of work that isn't merged. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_from: Option<String>,
+    /// What its turns used, in tokens and cost, as its tool reported them (#731).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::usage::Tokens>,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -346,6 +349,7 @@ impl Job {
             follow_up_of: None,
             earlier: None,
             start_from: None,
+            usage: None,
         }
     }
 
@@ -584,6 +588,9 @@ impl Job {
         });
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
+        }
+        if let Some(usage) = &self.usage {
+            value["usage"] = json!(usage);
         }
         value
     }

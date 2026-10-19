@@ -1685,3 +1685,33 @@ fn the_api_lifts_and_restores_the_reserve() {
         assert_eq!(lift(&obid, body).status, status, "{body}");
     }
 }
+
+/// A Claude Code job's turns sum into its `usage` as their result lines report them, and it
+/// stays once the job ended (#731).
+#[test]
+fn a_jobs_turns_sum_into_its_usage() {
+    let folder = Folder::new("job-usage");
+    let remote = fixture(&folder.0);
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let plain = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Nothing to do", "check": "true"}),
+    );
+    let plain = wait(&obid, plain.body["id"].as_str().unwrap());
+    // The stand-in's plain result reports a cost of 0 and no tokens.
+    assert_eq!(plain["usage"], json!({"costUsd": 0.0, "priced": "plan"}));
+
+    let job = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "TOKENS", "check": "false", "rounds": 2}),
+    );
+    assert_eq!(job.status, 201, "{}", job.text);
+    let job = wait(&obid, job.body["id"].as_str().unwrap());
+    assert_eq!(job["round"], 2, "{job}");
+    // Two turns, each 110 in, 25 out, 1000 read from the cache, 50 written to it, $0.25.
+    assert_eq!(
+        job["usage"],
+        json!({"input": 220, "output": 50, "cacheRead": 2000, "cacheWrite": 100, "costUsd": 0.5, "priced": "plan"}),
+        "{job}"
+    );
+}

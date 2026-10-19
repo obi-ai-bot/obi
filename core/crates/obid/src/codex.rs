@@ -84,6 +84,9 @@ pub async fn run_turn(
         calls: HashMap::new(),
         no_commands: options.no_commands,
         limits_read: None,
+        account_read: None,
+        tokens_before: None,
+        priced: None,
         fatal: None,
         thread: None,
         turn: None,
@@ -160,6 +163,11 @@ struct Run<D, E> {
     no_commands: bool,
     /// The `account/rateLimits/read` request not answered yet.
     limits_read: Option<u64>,
+    /// The `account/read` request not answered yet, and what it said the account pays by.
+    account_read: Option<u64>,
+    priced: Option<String>,
+    /// What the thread had used before this turn (crate::usage::codex_turn).
+    tokens_before: Option<crate::usage::Tokens>,
     /// Why obid ended the turn for good.
     fatal: Option<String>,
     thread: Option<String>,
@@ -188,6 +196,7 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                 .request("account/rateLimits/read", json!({}))
                 .await,
         );
+        self.account_read = Some(self.conn.request("account/read", json!({})).await);
 
         let cwd = self.worktree.to_string_lossy().into_owned();
         let mut params = thread_params(&cwd);
@@ -254,6 +263,16 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             }
             return;
         }
+        if let Some(answer) = self
+            .account_read
+            .and_then(|id| conn::answer_to(&message, id))
+        {
+            self.account_read = None;
+            self.priced = answer
+                .ok()
+                .and_then(|read| crate::usage::codex_priced(&read));
+            return;
+        }
         if message["method"] == "account/rateLimits/updated"
             && let Some(usage) = crate::usage::codex(&message["params"]["rateLimits"])
         {
@@ -278,6 +297,13 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             && other != thread
         {
             return;
+        }
+        if message["method"] == "thread/tokenUsage/updated"
+            && let Some(mut tokens) =
+                crate::usage::codex_turn(&params["tokenUsage"], &mut self.tokens_before)
+        {
+            tokens.priced.clone_from(&self.priced);
+            (self.on_event)(Event::Tokens(tokens));
         }
         let item = &params["item"];
         match message["method"].as_str() {
@@ -840,8 +866,9 @@ mod tests {
 read l; echo '{"id":1,"result":{}}'
 read l
 read l
-read l; echo '{"id":3,"result":{"thread":{"id":"t1"}}}'
-read l; echo '{"id":4,"result":{"turn":{"id":"u1"}}}'
+read l
+read l; echo '{"id":4,"result":{"thread":{"id":"t1"}}}'
+read l; echo '{"id":5,"result":{"turn":{"id":"u1"}}}'
 echo '{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"completed","items":[{"type":"agentMessage","text":"Done."}]}}}'
 exec sleep 30
 "#,
@@ -892,8 +919,9 @@ exec sleep 30
 read l; echo '{"id":1,"result":{}}'
 read l
 read l
-read l; echo '{"id":3,"result":{"thread":{"id":"t1"}}}'
-read l; echo '{"id":4,"result":{"turn":{"id":"u1"}}}'
+read l
+read l; echo '{"id":4,"result":{"thread":{"id":"t1"}}}'
+read l; echo '{"id":5,"result":{"turn":{"id":"u1"}}}'
 echo '{"method":"item/started","params":{"threadId":"t1","turnId":"u1","item":{"type":"commandExecution","id":"c1","command":"/bin/zsh -lc '"'"'cat x'"'"'"}}}'
 exec sleep 30
 "#,

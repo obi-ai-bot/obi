@@ -71,6 +71,7 @@ pub async fn run_turn(
         before: String::new(),
         notes: Vec::new(),
         plan_approved: false,
+        tokens: crate::usage::Tokens::default(),
     };
     let mut turn = Turn::default();
     let ended = match run.turn(prompt).await {
@@ -427,6 +428,8 @@ struct Run<D, E> {
     notes: Vec<String>,
     /// The tool's plan was approved while it was in plan mode: it goes ahead in its agent mode.
     plan_approved: bool,
+    /// What this turn's prompts used, when the agent reports it (crate::usage::acp_tokens).
+    tokens: crate::usage::Tokens,
 }
 
 impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
@@ -591,6 +594,10 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             .await?;
         match answer {
             Ok(answer) => {
+                if let Some(tokens) = crate::usage::acp_tokens(&answer) {
+                    self.tokens = self.tokens.plus(&tokens);
+                    (self.on_event)(Event::Tokens(self.tokens.clone()));
+                }
                 let said = if self.current.trim().is_empty() {
                     self.before.clone()
                 } else {

@@ -3167,7 +3167,12 @@ impl Jobs {
                 Answer::Allow => jobs.rule_on(id, name, input, &worktree),
             }
         };
+        // What the job used before this turn: each report of the turn's own counts goes on top.
+        let before = job.usage.clone().unwrap_or_default();
         let on_event = |event| match event {
+            AgentEvent::Tokens(tokens) => {
+                jobs.update(id, |job| job.usage = Some(before.plus(&tokens)));
+            }
             AgentEvent::Usage(usage) => {
                 if let Err(error) = jobs.usage.record(&job.account, &usage) {
                     tracing::warn!("could not keep account usage: {error}");

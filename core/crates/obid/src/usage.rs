@@ -333,6 +333,143 @@ pub fn codex_read(result: &Value) -> Option<Usage> {
     }
 }
 
+/// What a job's turns used, summed as the tools reported them (#731). A count no tool reported
+/// stays `None`, never 0. `input` is the input not read from the cache.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tokens {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
+    /// What the tool says it cost at API prices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// `api`: the account pays per token (an API key); `plan`: a subscription covers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priced: Option<String>,
+}
+
+fn plus<T: std::ops::Add<Output = T> + Default>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or_default() + b.unwrap_or_default()),
+    }
+}
+
+impl Tokens {
+    /// `self` and `other` together; `other`'s `priced` when it says.
+    pub fn plus(&self, other: &Tokens) -> Tokens {
+        Tokens {
+            input: plus(self.input, other.input),
+            output: plus(self.output, other.output),
+            cache_read: plus(self.cache_read, other.cache_read),
+            cache_write: plus(self.cache_write, other.cache_write),
+            cost_usd: plus(self.cost_usd, other.cost_usd),
+            priced: other.priced.clone().or_else(|| self.priced.clone()),
+        }
+    }
+
+    fn minus(&self, other: &Tokens) -> Tokens {
+        let less = |a: Option<u64>, b: Option<u64>| a.map(|a| a.saturating_sub(b.unwrap_or(0)));
+        Tokens {
+            input: less(self.input, other.input),
+            output: less(self.output, other.output),
+            cache_read: less(self.cache_read, other.cache_read),
+            ..self.clone()
+        }
+    }
+}
+
+/// A Claude Code `result` line's counts: its `modelUsage` summed over the models when it's there
+/// (it counts the subagents' models too), else its `usage`, and `total_cost_usd`. `priced` from
+/// the run's `init` line: `apiKeySource` `none` is the account's subscription login.
+pub fn claude_tokens(result: &Value, api_key_source: Option<&str>) -> Tokens {
+    let count = |v: &Value| v.as_u64();
+    let mut tokens = match result["modelUsage"].as_object().filter(|m| !m.is_empty()) {
+        Some(models) => models.values().fold(Tokens::default(), |sum, m| {
+            sum.plus(&Tokens {
+                input: count(&m["inputTokens"]),
+                output: count(&m["outputTokens"]),
+                cache_read: count(&m["cacheReadInputTokens"]),
+                cache_write: count(&m["cacheCreationInputTokens"]),
+                ..Tokens::default()
+            })
+        }),
+        None => {
+            let usage = &result["usage"];
+            Tokens {
+                input: count(&usage["input_tokens"]),
+                output: count(&usage["output_tokens"]),
+                cache_read: count(&usage["cache_read_input_tokens"]),
+                cache_write: count(&usage["cache_creation_input_tokens"]),
+                ..Tokens::default()
+            }
+        }
+    };
+    tokens.cost_usd = result["total_cost_usd"]
+        .as_f64()
+        .filter(|c| c.is_finite() && *c >= 0.0);
+    tokens.priced =
+        api_key_source.map(|source| if source == "none" { "plan" } else { "api" }.into());
+    tokens
+}
+
+/// One of Codex's `tokenUsage` breakdowns (`total` or `last`, from `thread/tokenUsage/updated`).
+/// Its `inputTokens` include the cached ones; Codex reports no cache writes or cost.
+fn codex_breakdown(b: &Value) -> Option<Tokens> {
+    let input = b["inputTokens"].as_u64()?;
+    let cached = b["cachedInputTokens"].as_u64();
+    Some(Tokens {
+        input: Some(input.saturating_sub(cached.unwrap_or(0))),
+        output: b["outputTokens"].as_u64(),
+        cache_read: cached,
+        ..Tokens::default()
+    })
+}
+
+/// A Codex turn's counts so far, from a `thread/tokenUsage/updated`'s `tokenUsage`: its thread's
+/// `total` less what the thread had used before this turn (`before`, worked out from the turn's
+/// first update as its `total` less its `last`). A thread resumed in a new round keeps its total,
+/// and an update sent twice counts once.
+// ponytail: assumes the turn's first update is for a new response; an update Codex repeats
+// before the turn's first response would count its `last` twice.
+pub fn codex_turn(usage: &Value, before: &mut Option<Tokens>) -> Option<Tokens> {
+    let total = codex_breakdown(&usage["total"])?;
+    let base = before.get_or_insert_with(|| {
+        codex_breakdown(&usage["last"]).map_or_else(Tokens::default, |last| total.minus(&last))
+    });
+    Some(total.minus(base))
+}
+
+/// Codex's `account/read` answer: `apiKey` pays per token, `chatgpt` is a plan. Only the type is
+/// read, never who is signed in.
+pub fn codex_priced(result: &Value) -> Option<String> {
+    match result["account"]["type"].as_str()? {
+        "apiKey" => Some("api".into()),
+        "chatgpt" => Some("plan".into()),
+        _ => None,
+    }
+}
+
+/// An ACP `session/prompt` answer's `usage`, when the agent reports one.
+pub fn acp_tokens(answer: &Value) -> Option<Tokens> {
+    let usage = answer.get("usage").filter(|u| u.is_object())?;
+    let count = |key: &str| usage[key].as_u64();
+    Some(Tokens {
+        input: count("inputTokens"),
+        output: count("outputTokens"),
+        cache_read: count("cachedReadTokens"),
+        cache_write: count("cachedWriteTokens"),
+        ..Tokens::default()
+    })
+    .filter(|t| t != &Tokens::default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,5 +680,81 @@ mod tests {
             .reserve_lifted_until
             .unwrap();
         assert!((until - (time::now() + WEEK)).abs() <= 2);
+    }
+
+    #[test]
+    fn claude_results_count_their_models_and_cost() {
+        let result = json!({"type": "result", "total_cost_usd": 0.25,
+            "usage": {"input_tokens": 10, "output_tokens": 2, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 5},
+            "modelUsage": {
+                "claude-opus-5-5": {"inputTokens": 10, "outputTokens": 2, "cacheReadInputTokens": 100, "cacheCreationInputTokens": 5, "costUSD": 0.2},
+                "claude-haiku-5-5": {"inputTokens": 3, "outputTokens": 1, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0, "costUSD": 0.05}}});
+        let tokens = claude_tokens(&result, Some("none"));
+        assert_eq!(
+            tokens,
+            Tokens {
+                input: Some(13),
+                output: Some(3),
+                cache_read: Some(100),
+                cache_write: Some(5),
+                cost_usd: Some(0.25),
+                priced: Some("plan".into()),
+            }
+        );
+        let older = json!({"usage": {"input_tokens": 10, "output_tokens": 2}});
+        let tokens = claude_tokens(&older, Some("ANTHROPIC_API_KEY"));
+        assert_eq!(
+            (tokens.input, tokens.cache_read, tokens.cost_usd),
+            (Some(10), None, None)
+        );
+        assert_eq!(tokens.priced.as_deref(), Some("api"));
+        assert_eq!(claude_tokens(&json!({}), None), Tokens::default());
+        // Summing keeps what no tool reported absent.
+        let sum = tokens.plus(&Tokens {
+            cache_read: Some(4),
+            ..Tokens::default()
+        });
+        assert_eq!(
+            (sum.input, sum.cache_read, sum.cache_write),
+            (Some(10), Some(4), None)
+        );
+        assert_eq!(serde_json::to_value(Tokens::default()).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn a_codex_turn_counts_what_its_thread_used_since_it_began() {
+        let update = |total: u64, last: u64| {
+            json!({"total": {"inputTokens": total, "cachedInputTokens": total / 2, "outputTokens": total / 10},
+                   "last": {"inputTokens": last, "cachedInputTokens": last / 2, "outputTokens": last / 10}})
+        };
+        // A resumed thread had used 1000 before this turn; the turn's two responses use 400 and
+        // 600, and the second update comes twice.
+        let mut before = None;
+        assert_eq!(
+            codex_turn(&update(1400, 400), &mut before).unwrap().input,
+            Some(200)
+        );
+        let turn = codex_turn(&update(2000, 600), &mut before).unwrap();
+        assert_eq!(
+            codex_turn(&update(2000, 600), &mut before),
+            Some(turn.clone())
+        );
+        assert_eq!(
+            (turn.input, turn.cache_read, turn.output),
+            (Some(500), Some(500), Some(100))
+        );
+        assert_eq!(codex_turn(&json!({}), &mut None), None);
+        assert_eq!(
+            codex_priced(&json!({"account": {"type": "apiKey"}})).as_deref(),
+            Some("api")
+        );
+        assert_eq!(
+            codex_priced(&json!({"account": {"type": "chatgpt", "planType": "plus"}})).as_deref(),
+            Some("plan")
+        );
+        assert_eq!(codex_priced(&json!({"account": null})), None);
+        let acp = json!({"stopReason": "end_turn", "usage": {"inputTokens": 7, "outputTokens": 3, "totalTokens": 10}});
+        assert_eq!(acp_tokens(&acp).unwrap().input, Some(7));
+        assert_eq!(acp_tokens(&json!({"stopReason": "end_turn"})), None);
     }
 }

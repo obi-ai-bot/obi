@@ -718,3 +718,22 @@ fn codex_reports_its_accounts_usage() {
         obi_protocol::time::format(reset - 1_800)
     );
 }
+
+/// A Codex job's tokens: each round's own, though its thread is resumed with the earlier round's
+/// total, and an update sent twice counts once; `account/read` says a plan pays (#731).
+#[test]
+fn codex_reports_a_jobs_tokens() {
+    let folder = Folder::new("codex-tokens");
+    let obid = obid(&folder, false);
+    let id = dispatch(
+        &obid,
+        json!({"agent": "codex", "kind": "build", "task": "TOKENS", "check": "false", "rounds": 2}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["round"], 2, "{job}");
+    assert_eq!(
+        job["usage"],
+        json!({"input": 800, "output": 200, "cacheRead": 1200, "priced": "plan"}),
+        "{job}"
+    );
+}

@@ -16,6 +16,9 @@
 //   READ: <json>     answers the `account/rateLimits/read` obid sent at start with the JSON (a
 //                    snapshot); without it, that request is answered as unknown when the turn starts
 //   LIMITS: <json>   sends the JSON as an `account/rateLimits/updated` snapshot
+//   TOKENS           its thread uses 1000 input tokens (600 of them cached) and 100 output tokens
+//                    more, reported in `thread/tokenUsage/updated` twice
+// It answers `account/read` as a ChatGPT (plan) login.
 //   a brain's prompt answers one plan: a reply "From Codex.", with work.md's first line
 //   anything else    "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable, or
@@ -140,6 +143,13 @@ async function runTurn(turnId, prompt) {
     writeFileSync(".obi/twice", "");
     return complete(turnId, `Round ${state.rounds} on thread ${thread}, which remembers: ${task}\nGOAL MET`);
   }
+  if (task.includes("TOKENS")) {
+    const last = { inputTokens: 1000, cachedInputTokens: 600, outputTokens: 100 };
+    const was = state.tokens ?? { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+    state.tokens = Object.fromEntries(Object.entries(was).map(([k, v]) => [k, v + last[k]]));
+    save();
+    for (let i = 0; i < 2; i++) send({ method: "thread/tokenUsage/updated", params: { threadId: thread, turnId, tokenUsage: { total: state.tokens, last } } });
+  }
   const limits = task.match(/LIMITS: (\{.*\})/);
   if (limits) send({ method: "account/rateLimits/updated", params: { rateLimits: JSON.parse(limits[1]) } });
   if (task.includes("ENV")) return complete(turnId, `CODEX_HOME=${process.env.CODEX_HOME}\nHOME=${process.env.HOME}`);
@@ -169,6 +179,8 @@ rl.on("line", (line) => {
       return send({ id, result: { userAgent: "fake-codex/0.0.0" } });
     case "initialized":
       return;
+    case "account/read":
+      return send({ id, result: { account: { type: "chatgpt", email: "owner@example.com", planType: "plus" }, requiresOpenaiAuth: true } });
     case "account/rateLimits/read":
       limitsRead = id;
       return;
