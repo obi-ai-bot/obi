@@ -109,6 +109,7 @@
 				Info.plist,
 				Oby.entitlements,
 				Tools/bundle-cloudflared.sh,
+				Tools/bundle-gh.sh,
 				Tools/bundle-obid.sh,
 				Tools/com.deskree.oby.obid.plist,
 			);
@@ -352,6 +353,7 @@
 				FB61F80930795FDE00A9523D /* Resources */,
 				0B1E0C0A00000000000000F1 /* Bundle the character */,
 				0B1E0C0A00000000000000F2 /* Bundle cloudflared */,
+				0B1E0C0A00000000000000F4 /* Bundle gh */,
 				0B1E0C0A00000000000000F3 /* Bundle obid */,
 			);
 			buildRules = (
@@ -627,6 +629,27 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
 			shellScript = "set -e\n# Download (once, into the cache), bundle and sign cloudflared (#285): apps/mac/app/Tools/bundle-cloudflared.sh.\nzsh \"$SRCROOT/mac/app/Tools/bundle-cloudflared.sh\"\n";
+		};
+		0B1E0C0A00000000000000F4 /* Bundle gh */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/mac/app/Tools/bundle-gh.sh",
+			);
+			name = "Bundle gh";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/gh",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/zsh;
+			shellScript = "set -e\n# Download (once, into the cache), bundle and sign GitHub's CLI: apps/mac/app/Tools/bundle-gh.sh.\nzsh \"$SRCROOT/mac/app/Tools/bundle-gh.sh\"\n";
 		};
 		0B1E0C0A00000000000000F1 /* Bundle the character */ = {
 			isa = PBXShellScriptBuildPhase;
