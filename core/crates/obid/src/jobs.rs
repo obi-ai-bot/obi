@@ -103,6 +103,9 @@ pub struct NewJob {
     pub mode: Option<String>,
     /// The conversation whose plan started it (#493).
     pub conversation: Option<String>,
+    /// The user's turn whose words started it ([`Job::turn`]).
+    #[serde(default)]
+    pub turn: Option<String>,
     /// What the brain found before it planned the job, and what done means (#540).
     #[serde(default)]
     pub brief: Option<crate::job::Brief>,
@@ -264,6 +267,10 @@ pub struct Jobs {
     approvals: crate::approval::Approvals,
     /// Wakes the pull request follower: a job just published.
     follow: Notify,
+    /// Each account's usage and weekly reserve (crate::usage).
+    pub usage: crate::usage::Usages,
+    /// Told when an account's usage changed: the `accounts` event goes out (crate::lib).
+    pub usage_changed: Notify,
 }
 
 impl Jobs {
@@ -300,6 +307,7 @@ impl Jobs {
                     .is_none_or(|f| now - f < crate::transcript::KEPT_DAYS * 86_400)
             })
         });
+        let usage = crate::usage::Usages::open(&config.home);
         Ok(Arc::new(Jobs {
             config,
             store,
@@ -331,6 +339,8 @@ impl Jobs {
             api_url: Mutex::new(api_url),
             approvals,
             follow: Notify::new(),
+            usage,
+            usage_changed: Notify::new(),
         }))
     }
 
@@ -683,6 +693,46 @@ impl Jobs {
             .keys()
             .filter(|id| state.jobs.get(*id).is_some_and(|j| j.account == account))
             .count()
+    }
+
+    /// Divides each rise of `account`'s windows, from `was` to `now`, among the jobs that were
+    /// running on it at its last report too, by their tokens since (#732), and marks where each
+    /// running job's tokens stand. A job's first report only marks it: what rose before it ran
+    /// (another job, the owner's own use) isn't its.
+    fn share_rise(&self, account: &str, was: &crate::usage::Usage, now: &crate::usage::Usage) {
+        let rises = crate::usage::rises(was, now, obi_protocol::time::now());
+        let running: Vec<(String, u64, Option<u64>)> = {
+            let state = self.lock();
+            state
+                .workers
+                .keys()
+                .filter_map(|id| state.jobs.get(id).filter(|j| j.account == account))
+                .map(|job| {
+                    let total = job.usage.as_ref().map_or(0, crate::usage::Tokens::total);
+                    let mark = job.window_share.as_ref().and_then(|s| s.mark);
+                    (job.id.clone(), total, mark.map(|m| total.saturating_sub(m)))
+                })
+                .collect()
+        };
+        let weights: Vec<u64> = running.iter().filter_map(|(_, _, since)| *since).collect();
+        let parts = rises.map(|rise| {
+            rise.filter(|_| !weights.is_empty())
+                .map(|(points, resets)| (crate::usage::split(points, &weights), resets))
+        });
+        let mut marked = 0;
+        for (id, total, since) in &running {
+            let share_of = since.map(|_| marked);
+            marked += usize::from(since.is_some());
+            self.update(id, |job| {
+                let share = job.window_share.get_or_insert_with(Default::default);
+                for (window, part) in parts.iter().enumerate() {
+                    if let (Some((parts, resets)), Some(i)) = (part, share_of) {
+                        share.add(window, parts[i], *resets);
+                    }
+                }
+                share.mark = Some(*total);
+            });
+        }
     }
 
     /// Changes the job `id` with `change`, keeps it and tells the apps. `None` for a job obid
@@ -1353,7 +1403,9 @@ impl Jobs {
             .map(str::trim)
             .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("auto"));
         let home = login_home();
+        let now = obi_protocol::time::now();
         let mut first = None;
+        let mut held = Vec::new();
         for tool in &tools {
             let mut accounts = self.accounts(*tool);
             if let Some(changing) = named.and_then(|named| {
@@ -1369,13 +1421,17 @@ impl Jobs {
             // Routing skips an account being signed in or removed.
             accounts.retain(|a| !self.being_changed(&a.id));
             match named {
-                // Routing skips an account that isn't signed in (#626).
+                // Routing skips an account that isn't signed in (#626), and one without room
+                // (crate::usage): full, at 95% of a window, or in its weekly reserve.
                 None => {
                     for account in accounts {
-                        if signed_in(*tool, &account, home.as_deref()) {
+                        if !signed_in(*tool, &account, home.as_deref()) {
+                            first.get_or_insert((*tool, account));
+                        } else if let Some(why) = self.usage.get(&account.id).held(now) {
+                            held.push(format!("{} {why}", account.name));
+                        } else {
                             return Ok((*tool, account));
                         }
-                        first.get_or_insert((*tool, account));
                     }
                 }
                 Some(named) => {
@@ -1387,6 +1443,12 @@ impl Jobs {
                     }
                 }
             }
+        }
+        if !held.is_empty() {
+            return Err(Refused(format!(
+                "No account has room: {}.",
+                held.join("; ")
+            )));
         }
         // None is signed in: the first, whose tool then says why it can't run.
         if let Some(found) = first {
@@ -1498,6 +1560,7 @@ impl Jobs {
         job.files = files;
         job.attachments = new.attachments;
         job.conversation = new.conversation;
+        job.turn = new.turn.filter(|_| job.conversation.is_some());
         job.brief = new
             .brief
             .filter(|b| !b.findings.is_empty() || b.done.is_some());
@@ -2667,6 +2730,12 @@ impl Jobs {
                 let keeps_none = self.get(id).is_some_and(|j| {
                     j.kind == "review" || j.status == Status::Done && j.commits.unwrap_or(0) > 0
                 });
+                // What it committed itself ends here, before obid's `wip:` commit, which never
+                // counts: counted once keep_commits has its objects in the clone.
+                let worktree = self.worktree_path(id);
+                let own_head = git::git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
+                    .await
+                    .unwrap_or_default();
                 if *signal.borrow() != Signal::Shutdown
                     && !keeps_none
                     && let Err(e) = self.keep_wip(id).await
@@ -2674,9 +2743,24 @@ impl Jobs {
                     tracing::info!("job {id}: its uncommitted work stays in its worktree: {e}");
                 }
                 // Whatever ended it (a limit, a stop, a failure), what it committed is on its
-                // branch.
-                if let Err(e) = self.keep_commits(id).await {
-                    tracing::info!("job {id}: its commits stay in its worktree: {e}");
+                // branch, and counted, so a follow-up starts from them and Dismiss warns (#757).
+                // Done counted its own.
+                match self.keep_commits(id).await {
+                    Ok(_) => {
+                        let start_commit = self
+                            .get(id)
+                            .and_then(|j| j.start_commit)
+                            .unwrap_or_default();
+                        let made = count_commits(&worktree, &start_commit, &own_head).await;
+                        if made > 0 {
+                            self.update(id, |job| {
+                                if job.status != Status::Done {
+                                    job.commits = Some(made);
+                                }
+                            });
+                        }
+                    }
+                    Err(e) => tracing::info!("job {id}: its commits stay in its worktree: {e}"),
                 }
                 outcome
             }
@@ -3165,9 +3249,34 @@ impl Jobs {
                 Answer::Allow => jobs.rule_on(id, name, input, &worktree),
             }
         };
+        // What the job used before this turn: each report of the turn's own counts goes on top.
+        let before = job.usage.clone().unwrap_or_default();
         let on_event = |event: AgentEvent| {
             jobs.transcribed(id, jobs.transcripts.record(id, &event));
             match event {
+                AgentEvent::Tokens(tokens) => {
+                    jobs.update(id, |job| {
+                        // Claude Code's counts are its session's so far, the turns it resumed
+                        // included: this turn's own are what grew since the session's last ones.
+                        let own = if tool == Tool::Claude {
+                            let session = job.session.clone().unwrap_or_default();
+                            let own = match &job.usage_seen {
+                                Some((seen_in, seen)) if *seen_in == session => tokens.minus(seen),
+                                _ => tokens.clone(),
+                            };
+                            job.usage_seen = Some((session, tokens));
+                            own
+                        } else {
+                            tokens
+                        };
+                        job.usage = Some(before.plus(&own));
+                    });
+                }
+                AgentEvent::Usage(usage) => {
+                    let (was, now) = jobs.usage.record(&job.account, &usage);
+                    jobs.share_rise(&job.account, &was, &now);
+                    jobs.usage_changed.notify_one();
+                }
                 AgentEvent::Session(session) => {
                     jobs.update(id, |job| job.session = Some(session));
                 }
@@ -3202,6 +3311,8 @@ impl Jobs {
                     plan,
                     instructions: None,
                     no_commands: false,
+                    usage: true,
+                    priced: self.usage.get(&job.account).priced,
                 };
                 codex::run_turn(
                     launch,
@@ -4103,17 +4214,10 @@ impl Jobs {
             stages.begin("keep commits");
             let head = self.keep_commits(id).await?;
             self.tetrix_ended(id, &worktree, &start_commit).await;
-            let commits = if start_commit.is_empty() || head == start_commit {
+            let commits = if head == start_commit {
                 0
             } else {
-                git::git(
-                    &worktree,
-                    &["rev-list", "--count", &format!("{start_commit}..HEAD")],
-                )
-                .await
-                .ok()
-                .and_then(|n| n.parse::<u64>().ok())
-                .unwrap_or(0)
+                count_commits(&worktree, &start_commit, "HEAD").await
             };
             let job = self.get(id).ok_or("the job is gone")?;
             let first_line = job.summary.lines().next().unwrap_or("").trim().to_owned();
@@ -6116,6 +6220,21 @@ fn tail(text: &str, max: usize) -> &str {
         start += 1;
     }
     &text[start..]
+}
+
+/// The commits in `worktree` from `start_commit` to `head`: none without either.
+async fn count_commits(worktree: &Path, start_commit: &str, head: &str) -> u64 {
+    if start_commit.is_empty() || head.is_empty() {
+        return 0;
+    }
+    git::git(
+        worktree,
+        &["rev-list", "--count", &format!("{start_commit}..{head}")],
+    )
+    .await
+    .ok()
+    .and_then(|n| n.parse::<u64>().ok())
+    .unwrap_or(0)
 }
 
 /// `job` hears `text`: its notes, what it heard, and its step.

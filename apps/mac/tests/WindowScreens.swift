@@ -133,6 +133,28 @@ struct WindowScreens {
         try await shoot("mac-convo-working", model: model, state: state, sidebar: false)
     }
 
+    /// Oby starting work, as Claude Code does: the job's card is under your words the moment it
+    /// starts, still at work on its answer, and a follow-up told from a task's page goes with that
+    /// task's card, under Sangam's line.
+    @Test func conversationStartingWork() async throws {
+        let model = model()
+        model.feed.conversation.apply(Turn(id: "s1", date: now - 900, who: .user, text: "the timezone test is flaky again, fix it"))
+        model.feed.conversation.apply(Turn(id: "s2", date: now - 890, who: .oby, text: "On it. Claude Code is fixing #470 in oby on Deskree.", jobs: ["i3"]))
+        var follow = job("f1", "Follow-up: Flaky timezone test", status: .running, ago: 120)
+        follow.followUpOf = "i3"
+        follow.step = "Reading Tests/ScheduleTests.swift"
+        model.feed.apply(follow)
+        model.feed.conversation.apply(Turn(id: "s3", date: now - 20, who: .user, text: "Dark mode flashes on launch, fix it"))
+        model.feed.conversation.apply(TurnStep(turn: "s3", index: 0, action: "tool", text: "Starting a job", state: .done,
+                                               tool: "oby_dispatch", detail: "deskree-inc/oby"))
+        var started = job("t3", "Dark mode flashes on launch", status: .running, ago: 10)
+        started.step = "Getting ready"
+        model.feed.apply(started, extras: RunnerJobExtras(id: "t3", turn: "s3"))
+        let state = ChatState(defaults: .scratch)
+        state.trail.start(.talk)
+        try await shoot("mac-convo-starting", model: model, state: state, sidebar: false)
+    }
+
     /// Your GitHub work (`GET /v1/github/work`): Review PR with what waits for your review and your
     /// own pull request, beside the jobs already on it.
     @Test func gitHubReview() async throws {

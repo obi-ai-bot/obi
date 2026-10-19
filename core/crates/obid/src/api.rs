@@ -13,6 +13,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use obi_protocol::time;
 use serde::Serialize;
 
 use crate::config::Config;
@@ -112,6 +113,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
             "/v1/accounts/{id}",
             axum::routing::patch(crate::accounts::change).delete(crate::accounts::remove),
         )
+        .route("/v1/accounts/{id}/reserve", post(crate::accounts::reserve))
         .route("/v1/github", get(crate::github_login::get))
         .route(
             "/v1/github/sign-in",
@@ -325,6 +327,7 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
                 || agent_mcp.is_some_and(|id| {
                     shared.connections.allows(id, token)
                         || shared.harness.session(id, token).is_some()
+                        || shared.harness.waiting_with(id, token)
                 })
         }) {
             Ok(())
@@ -614,13 +617,15 @@ pub fn account_list(shared: &Shared) -> Vec<AccountJson> {
         .collect()
 }
 
-/// An account (docs/runner-api.md, "Account"), as obid knows it before any job has run on it.
+/// An account (docs/runner-api.md, "Account"), with the usage its tool last reported.
 pub fn account_json(
     shared: &Shared,
     tool: crate::agent::Tool,
     account: &crate::config::Account,
 ) -> AccountJson {
     let home = crate::jobs::login_home();
+    let usage = shared.jobs.usage.get(&account.id);
+    let now = time::now();
     AccountJson {
         id: account.id.clone(),
         agent: tool.id(),
@@ -629,18 +634,18 @@ pub fn account_json(
         label: None,
         // Whether its login file is there (#626); Cursor's is found out when it runs.
         signed_in: crate::jobs::signed_in(tool, account, home.as_deref()),
-        five_hour: None,
-        seven_day: None,
-        five_hour_resets: None,
-        seven_day_resets: None,
+        five_hour: usage.five_hour_at(now),
+        seven_day: usage.seven_day_at(now),
+        five_hour_resets: usage.five_hour_resets.map(time::format),
+        seven_day_resets: usage.seven_day_resets.map(time::format),
         running: shared.jobs.running_on(&account.id) as u32,
-        full_until: None,
+        full_until: usage.full_until_at(now).map(time::format),
         // Every tool's agents get Tetrix through obid while Oby is signed in (crate::tetrix).
         tetrix: shared.tetrix.connected().then_some(true),
         tetrix_jobs: shared.jobs.tetrix_counts(&account.id).0,
         tetrix_used: shared.jobs.tetrix_counts(&account.id).1,
-        reserved: false,
-        reserve_lifted_until: None,
+        reserved: usage.reserved(now),
+        reserve_lifted_until: usage.lifted_until(now).map(time::format),
     }
 }
 
