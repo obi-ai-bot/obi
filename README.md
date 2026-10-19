@@ -33,6 +33,10 @@ Hold the **fn** key, say what you need, let go. I listen on your Mac, only while
 
 Say the word and the work starts, like Claude Code or Codex: no card to confirm. I tell you which agent, which account, which repository and which branch, under my reply, with **Stop** on the job. Change any of it after: move the job to another tool, account or model, or tell its agent something. Every job gets its own branch, so your working copy stays exactly how you left it. Only when my brain can't answer and I had to guess do I ask first.
 
+## I do it again, on schedule
+
+“Every weekday at 9, review the open pull requests in obi.” I save it as a routine once you confirm it in your inbox, and from then on each run is an ordinary job, with the same checks, scan and review as one you ask for, in the conversation you asked in. If I wasn't running at 9, I catch up once when I'm back; if yesterday's run is still going, I skip today's and say so. Pause, resume, run now or delete it by asking me, or in Settings › Routines on your Mac and iPhone.
+
 ## Then I get out of your way
 
 While agents work, I sit quietly in the menu bar with a tiny counter of what’s working or needs you. Click the Oby icon for **Open Oby**, **Stop all agents** and the rest. When something is yours to decide, I send a notification, and clicking it opens my window on that item.

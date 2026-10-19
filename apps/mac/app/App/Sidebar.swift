@@ -31,7 +31,9 @@ nonisolated enum SidebarSections {
     /// No job lands in a teammate's group yet: the runner this Mac talks to doesn't say who asked
     /// for a job (only obid's jobs carry `obi.fromOwner`, docs/runner-api.md), so there's no
     /// requester to group by rather than one made up.
-    static func work(local: [Job], runner: [Job], since: Date, seen: Set<String>) -> [WorkList.Item<JobRow>] {
+    /// `routines`: the runner's jobs that are a routine's run (obid's `routine`, #395), which go
+    /// under Routines.
+    static func work(local: [Job], runner: [Job], since: Date, seen: Set<String>, routines: Set<String> = []) -> [WorkList.Item<JobRow>] {
         let rows = local.map { JobRow(job: $0, local: true) } + runner.map { JobRow(job: $0, local: false) }
         return rows
             .sorted {
@@ -41,7 +43,8 @@ nonisolated enum SidebarSections {
             .map { row in
                 let job = row.job
                 let status: WorkStatus = job.needsYou || job.waitsForAnswer || job.waitsForPermission ? .needs : job.isActive ? .running : .done
-                return WorkList.Item(id: row.id, job: row, type: .of(review: job.kind == .review, issue: job.issue, requester: nil),
+                let routine = !row.local && routines.contains(job.id)
+                return WorkList.Item(id: row.id, job: row, type: .of(review: job.kind == .review, issue: job.issue, requester: nil, routine: routine),
                                      status: status, queued: job.status == .queued, fresh: job.created > since && !seen.contains(row.id))
             }
     }
@@ -67,7 +70,8 @@ nonisolated enum SidebarSections {
 extension IslandModel {
     /// Home's tasks (#496, `SidebarSections.work`), less what Clear done took (`lists`).
     func work(since: Date, seen: Set<String>) -> [WorkList.Item<SidebarSections.JobRow>] {
-        SidebarSections.work(local: desk.jobs.filter(lists), runner: feed.jobs.filter(lists), since: since, seen: seen)
+        SidebarSections.work(local: desk.jobs.filter(lists), runner: feed.jobs.filter(lists), since: since, seen: seen,
+                             routines: Set(feed.extras.compactMap { $0.value.routine == nil ? nil : $0.key }))
     }
 }
 

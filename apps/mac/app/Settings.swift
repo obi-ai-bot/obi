@@ -184,6 +184,7 @@ struct RunnerSettingsView: View {
         }
         // As on the iPhone (apps/shared/PermissionsSection.swift). This Mac's own jobs' default is in General.
         PermissionsSection(runner: feed.runner, defaultMode: feed.defaultMode, setDefault: feed.setDefaultMode)
+        RoutinesSection(runner: feed.runner, changes: feed.routineChanges)
         SetGroup("Checks on this Mac") {
             SetRow("Run merge checks on this Mac", about: "When Oby’s review approves a pull request, this Mac runs its tests and builds the Mac and iPhone apps, one at a time, before Oby merges it into dev.") {
                 Toggle("Run merge checks on this Mac", isOn: $runMergeChecks).toggleStyle(.set)

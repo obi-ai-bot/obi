@@ -96,8 +96,10 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     var conversation: String?
     /// What it made to be looked at (obid only), or nil.
     var artifacts: [ArtifactRef]?
+    /// obid only (#395): the routine whose run started it.
+    var routine: RoutineMark?
 
-    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, artifacts }
+    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, artifacts, routine }
 
     init(id: String, mode: String? = nil, permission: RunnerPermission? = nil, question: Question? = nil, conversation: String? = nil) {
         self.id = id
@@ -115,6 +117,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
         question = try? keys.decodeIfPresent(Question.self, forKey: .question)
         conversation = try? keys.decodeIfPresent(String.self, forKey: .conversation)
         artifacts = try? keys.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
+        routine = try? keys.decodeIfPresent(RoutineMark.self, forKey: .routine)
     }
 
     /// Each job's, by id; a list that can't be read gives none.

@@ -86,6 +86,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The job this one follows up (obid only): the owner told that one something after it ended,
     /// and its page lists this one (Sangam's design). Nil otherwise.
     var followUpOf: String?
+    /// obid only (#395): the routine whose run started it, or nil.
+    var routine: RoutineMark?
 
     /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
     /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
@@ -654,6 +656,9 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     case delta(TurnDelta)
     /// An artifact was made, got a version, or was deleted (obid only).
     case artifact(ArtifactEvent)
+    /// A routine was made, changed, paused, run or deleted (obid only, #395): Settings › Routines
+    /// reads them again.
+    case routine
 }
 
 #if os(iOS) || os(watchOS)
@@ -1046,6 +1051,33 @@ nonisolated struct Runner: Sendable {
         let body = Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }, attachments: attachments,
                         conversation: conversation, new: new ? true : nil)
         return try await call("POST", "v1/plans", body: body, timeout: Self.planTimeout)
+    }
+
+    // MARK: Routines (obid only, #395)
+
+    /// obid's routines, by name, or nil from a runner that has none (the Swift runner).
+    func routines() async throws -> [RunnerRoutine]? {
+        do {
+            return try await call("GET", "v1/routines")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// Pauses (false) or resumes (true) a routine; obid answers with it.
+    func setRoutine(_ id: String, enabled: Bool) async throws -> RunnerRoutine {
+        struct Body: Encodable { var enabled: Bool }
+        return try await call("PATCH", "v1/routines/\(id)", body: Body(enabled: enabled))
+    }
+
+    /// Run now: its job starts, and its next time stays as it was.
+    func runRoutine(_ id: String) async throws {
+        try await send("POST", "v1/routines/\(id)/run")
+    }
+
+    /// Forgets a routine; the jobs its runs started stay.
+    func deleteRoutine(_ id: String) async throws {
+        try await send("DELETE", "v1/routines/\(id)")
     }
 
     // MARK: Conversations (obid only, #493)
@@ -1587,11 +1619,88 @@ nonisolated struct EventParser {
             case "conversation": return (try? Runner.decoder.decode(RunnerConversation.self, from: json)).map(RunnerEvent.conversation)
             case "delta": return (try? Runner.decoder.decode(TurnDelta.self, from: json)).map(RunnerEvent.delta)
             case "artifact": return (try? Runner.decoder.decode(ArtifactEvent.self, from: json)).map(RunnerEvent.artifact)
+            case "routine": return .routine
             default: return nil
             }
         }
         if line.hasPrefix("event:") { name = line.dropFirst(6).trimmingCharacters(in: .whitespaces) }
         if line.hasPrefix("data:") { data += (data.isEmpty ? "" : "\n") + line.dropFirst(5).trimmingCharacters(in: .whitespaces) }
         return nil
+    }
+}
+
+/// Which routine's run a job is (docs/runner-api.md, "obid only: routines (#395)").
+nonisolated struct RoutineMark: Codable, Equatable, Sendable {
+    var id: String
+    var name: String
+    var scheduled: Date?
+    var catchUp: Bool?
+
+    /// What a job's card and page say: "From routine: Review open PRs" (Sangam's design).
+    var line: String { "From routine: \(name)" }
+}
+
+/// A routine as obid lists it: a saved request it runs on a schedule, a job each time.
+nonisolated struct RunnerRoutine: Codable, Identifiable, Equatable, Sendable {
+    struct Run: Codable, Equatable, Sendable {
+        var scheduled: Date
+        var at: Date
+        /// `started`, `skipped`, `missed` or `failed`.
+        var outcome: String
+        var reason: String?
+        var job: String?
+        var catchUp: Bool?
+        /// Its job's end once it ended: `done`, `failed`, `stopped`, `interrupted`.
+        var ended: String?
+    }
+
+    var id: String
+    var name: String
+    var repo: String
+    var kind: String
+    var task: String
+    /// obid's words for its schedule: "Weekdays at 9:00".
+    var when: String
+    var zone: String
+    var enabled: Bool
+    var nextRun: Date?
+    var failuresInARow: Int?
+    var lastRun: Run?
+    var conversation: String?
+
+    var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
+
+    /// Under its name: the schedule and repository, then when it runs next (Sangam's "Starts
+    /// Monday at 9") or that it's paused, then how the last run went.
+    func about(now: Date = .now) -> String {
+        var parts = ["\(when) · \(repoName)"]
+        if let next = nextRun, enabled {
+            parts.append("Next " + Self.day(next, now: now))
+        } else {
+            parts.append("Paused")
+        }
+        if let last = lastRun {
+            switch (last.outcome, last.ended) {
+            case ("started", nil): parts.append("Running now")
+            case ("started", "done"): parts.append("Last run done")
+            case ("started", "failed"): parts.append("Last run failed")
+            case ("started", let end?): parts.append("Last run \(end)")
+            case ("skipped", _): parts.append("Last run skipped")
+            case ("missed", _): parts.append("Missed a run")
+            default: parts.append("Last run couldn't start")
+            }
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// "today at 9:00", "tomorrow at 9:00", "Monday at 9:00", or "Oct 30 at 9:00", in this device's zone.
+    static func day(_ date: Date, now: Date = .now, calendar: Calendar = .current) -> String {
+        let time = date.formatted(.dateTime.hour().minute())
+        if calendar.isDate(date, inSameDayAs: now) { return "today at \(time)" }
+        if let tomorrow = calendar.date(byAdding: .day, value: 1, to: now), calendar.isDate(date, inSameDayAs: tomorrow) {
+            return "tomorrow at \(time)"
+        }
+        if date.timeIntervalSince(now) < 6 * 24 * 3600 { return "\(date.formatted(.dateTime.weekday(.wide))) at \(time)" }
+        return "\(date.formatted(.dateTime.month(.abbreviated).day())) at \(time)"
     }
 }

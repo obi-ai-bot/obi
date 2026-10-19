@@ -63,6 +63,8 @@ final class RunnerFeed {
     private(set) var accounts: [AccountState] = []
     /// What each job carries that Engine's Job doesn't read yet (its mode, the permission it waits
     /// on, its question's recommended option and plan), by job id.
+    /// Counts the `routine` events (#395): Settings › Routines reads the routines again on each.
+    private(set) var routineChanges = 0
     private(set) var extras: [String: RunnerJobExtras] = [:] {
         didSet { capturePermissions() }
     }
@@ -334,6 +336,7 @@ final class RunnerFeed {
                     case .delta(let delta): if conversations.shows(delta.conversation) { conversation.apply(delta) }
                     case .artifact(let artifact): conversation.apply(artifact)
                     case .conversation(let change): conversations.apply(change)
+                    case .routine: routineChanges += 1
                     }
                 }
             } catch {

@@ -18,7 +18,7 @@ nonisolated enum PhoneWork {
             .map { _, job in
                 let decides = job.needsYou || job.waitsForAnswer || job.waitsForPermission || asked.contains(job.id)
                 let status: WorkStatus = decides ? .needs : job.isActive ? .running : .done
-                return WorkList.Item(id: job.id, job: job, type: .of(review: job.kind == "review", issue: job.issue, requester: nil),
+                return WorkList.Item(id: job.id, job: job, type: .of(review: job.kind == "review", issue: job.issue, requester: nil, routine: job.routine != nil),
                                      status: status, queued: job.status == .queued, fresh: job.created > since && !seen.contains(job.id))
             }
     }
@@ -281,6 +281,8 @@ final class Phone {
     /// The Live Activity's latest update, so a background wake can wait for it to land.
     @ObservationIgnored private var syncing: Task<Void, Never>?
     private(set) var accounts: [Account] = []
+    /// Counts the `routine` events (#395): Settings › Routines reads the routines again on each.
+    private(set) var routineChanges = 0
     /// What waits in the runner's inbox, put-off items too: answered on the Mac, it goes from here too.
     private(set) var inbox: [InboxItem]
     private let offlineQueue: OfflineQueue
@@ -603,6 +605,8 @@ final class Phone {
             conversation.apply(artifact)
         case .conversation(let changed):
             take(changed)
+        case .routine:
+            routineChanges += 1
         }
     }
 

@@ -91,9 +91,9 @@ struct DesignTests {
         let since = ISO8601DateFormatter().date(from: "2026-10-09T23:00:00Z")!
         let items = PhoneWork.items([needs, running, queued, done], since: since, seen: [])
         // Only Tasks hold anything, yet Review PR and Issues are chips too, in Home's order.
-        #expect(WorkList.kinds(items).map(\.label) == ["Review PR", "Issues", "Tasks"])
-        #expect(WorkList.kinds(items).map(\.needs) == [0, 0, 1])
-        #expect(WorkList.kinds([] as [WorkList.Item<Job>]).map(\.label) == ["Review PR", "Issues", "Tasks"])
+        #expect(WorkList.kinds(items).map(\.label) == ["Review PR", "Issues", "Tasks", "Routines"])
+        #expect(WorkList.kinds(items).map(\.needs) == [0, 0, 1, 0])
+        #expect(WorkList.kinds([] as [WorkList.Item<Job>]).map(\.label) == ["Review PR", "Issues", "Tasks", "Routines"])
         // Running: up to three open tasks, what needs you before the rest; each says what it's on.
         let rows = PhoneWork.running(items)
         #expect(rows.map(\.id) == ["n", "q", "r"])
