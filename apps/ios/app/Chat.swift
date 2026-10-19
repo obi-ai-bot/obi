@@ -1,26 +1,6 @@
 import SwiftUI
 
-/// What the Chat tab works out with no view in the way, so the tests read it (apps/ios/tests/ChatTests.swift).
-nonisolated enum ChatThread {
-    /// The words a send carries: trimmed, or nil for nothing to send.
-    static func words(_ text: String) -> String? {
-        let said = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return said.isEmpty ? nil : said
-    }
-
-    /// The runner lists the user's turn with Oby's answer, seconds after the send; its clock may
-    /// differ from the phone's by this much.
-    static let tolerance: TimeInterval = 60
-
-    /// The echoes the runner hasn't listed yet. One is settled once the runner's turns hold the
-    /// same words from the user, said at or after it (within `tolerance`): an older turn with the
-    /// same words is another message.
-    static func pending(_ echoes: [Turn], runner: [Turn]) -> [Turn] {
-        echoes.filter { echo in
-            !runner.contains { $0.who == .user && $0.text == echo.text && $0.date >= echo.date - tolerance }
-        }
-    }
-
+extension ChatThread {
     /// "Claude Code · Deskree · Running pnpm test", the job card's second line, from what's there.
     static func cardLine(_ job: Job, account: String) -> String {
         [job.agentName, account, job.line].filter { !$0.isEmpty }.joined(separator: " · ")
@@ -203,6 +183,7 @@ struct ConversationPage: View {
                 Composer(text: $text, prompt: "Reply to Oby…", typing: $typing, onSend: send,
                          onStop: thinking || working ? { Task { await phone.stopTurn() } } : nil)
             }
+            .keepsDraft($text, as: Drafts.conversation(shown))
             .scrollDismissesKeyboard(.interactively)
             .toolbar {
                 if let conversation {

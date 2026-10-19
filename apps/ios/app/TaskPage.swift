@@ -297,6 +297,7 @@ struct TaskPage: View {
                     }
                     Composer(text: $note, prompt: job.isActive ? "Tell \(job.agentName)…" : "Ask for a follow-up…", typing: $typing) { _ in tell(job.id) }
                         .disabled(busy)
+                        .keepsDraft($note, as: Drafts.task(job.id))
                 }
             }
         }

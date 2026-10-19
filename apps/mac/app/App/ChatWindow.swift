@@ -360,6 +360,7 @@ private struct HomeView: View {
                    maximumHeight: height * 0.5, focusRequest: state.homeFocusRequest,
                    onSend: ask, onScreenshot: screenshot, onStop: { false }, usage: model.usageRows,
                        voice: model.voice, talkKeyListening: model.listening)
+            .keepsDraft($text, as: Drafts.home)
             .frame(maxWidth: Tokens.homeBox - 2 * Tokens.gutter)
             .padding(.horizontal, Tokens.gutter).padding(.bottom, Tokens.gutter)
     }

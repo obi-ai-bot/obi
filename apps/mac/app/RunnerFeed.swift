@@ -263,6 +263,7 @@ final class RunnerFeed {
         notified = nil
         conversation.forget()
         conversations.reset()
+        echoes = []
         device.reset()
     }
 
@@ -329,7 +330,9 @@ final class RunnerFeed {
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     // obid names each turn's, step's and word's conversation: the window shows one (#493).
-                    case .turn(let turn, let extras): if conversations.shows(turn.conversation) { conversation.apply(turn, extras) }
+                    case .turn(let turn, let extras):
+                        if conversations.shows(turn.conversation) { conversation.apply(turn, extras) }
+                        settleEchoes(turn)
                     case .step(let step): if conversations.shows(step.conversation) { conversation.apply(step) }
                     case .delta(let delta): if conversations.shows(delta.conversation) { conversation.apply(delta) }
                     case .artifact(let artifact): conversation.apply(artifact)
@@ -371,18 +374,73 @@ final class RunnerFeed {
 
     // MARK: Planning through the runner on this Mac (#283)
 
+    /// Words this Mac sent to obid that its thread doesn't list yet (the iPhone's echoes): in the
+    /// thread the instant Send is pressed, Oby's Thinking under them, until obid's own turn with
+    /// the same words takes their place in the same update (`ChatThread.pending`), so nothing
+    /// shows twice. `problem`: why they didn't reach obid, with Try again and Edit.
+    struct Echo: Equatable {
+        var turn: Turn
+        /// The conversation shown when they went, nil for a new one.
+        var conversation: String?
+        var problem: String?
+        /// `plan` sends them: an echo made at Send waits for it (`echo`).
+        var sending = false
+    }
+    private(set) var echoes: [Echo] = []
+
+    /// The echoes the conversation shown lists: its own, and a new one's while it starts.
+    var shownEchoes: [Turn] {
+        let mine = echoes.filter { $0.conversation == conversations.shown || ($0.conversation == nil && (conversations.shown == nil || conversations.creating)) }
+        return ChatThread.pending(mine.map(\.turn), runner: conversation.runnerTurns)
+    }
+
+    func echoProblem(_ id: String) -> String? { echoes.first { $0.turn.id == id }?.problem }
+
+    /// Lets go of an echo: listed by obid, given up, edited or sent again.
+    func dropEcho(_ id: String) { echoes.removeAll { $0.turn.id == id } }
+
+    /// obid listed the user's `turn`, in any conversation: its echo has done its job.
+    private func settleEchoes(_ turn: Turn) {
+        echoes.removeAll { ChatThread.lists(turn, $0.turn) }
+    }
+
+    /// Send was pressed: the words show now. `Desk.ask` may first wait for the turn they replace to
+    /// let go, and `plan` then takes this echo up. Words that only stop a turn never plan.
+    func echo(_ said: String) {
+        let said = said.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !said.isEmpty, !Conversation.cancels(said) else { return }
+        echoes.append(Echo(turn: Turn(who: .user, text: said), conversation: conversations.shown))
+    }
+
     /// The runner's brain's answer to the user's words, as the window's cards
     /// show it (`Desk.planElsewhere`): the drafts are its, and Dispatch sends them back to it.
-    func plan(_ said: String, answer: (question: String, option: String)?, attachments: [String] = []) async throws -> Desk.Talk {
-        guard let runner else { throw RunnerError(message: "The runner on this Mac isn't running yet.") }
+    /// Tests give their own `runner`.
+    func plan(_ said: String, answer: (question: String, option: String)?, attachments: [String] = [], on given: Runner? = nil) async throws -> Desk.Talk {
+        guard let runner = given ?? runner else { throw RunnerError(message: "The runner on this Mac isn't running yet.") }
+        // Shown at once (or since Send), as obid will list them: an answer is its option.
+        let text = answer?.option ?? said
+        let echo: String
+        if let made = echoes.firstIndex(where: { !$0.sending && $0.problem == nil && $0.turn.text == text }) {
+            echoes[made].sending = true
+            echo = echoes[made].turn.id
+        } else {
+            let made = Echo(turn: Turn(who: .user, text: text), conversation: conversations.shown, sending: true)
+            echoes.append(made)
+            echo = made.turn.id
+        }
         // In the conversation shown, or a new one (obid keeps many, #493); neither for one thread.
         let planned: PlannedTurn
         do {
             planned = try await runner.planned(said, answer: answer, attachments: attachments, in: conversations.target(said))
         } catch {
             conversations.failed()
+            // Given up (Stop, or other words in their place): they leave the thread. Else they stay, failed.
+            if Task.isCancelled || (error as? URLError)?.code == .cancelled { dropEcho(echo) }
+            else if let at = echoes.firstIndex(where: { $0.turn.id == echo }) { echoes[at].problem = error.localizedDescription }
             throw error
         }
+        // obid listed them before it answered: whatever its event missed, they're its now.
+        dropEcho(echo)
         await conversations.joined(planned.conversation)
         switch planned.result {
         case .question(let said, let question):
