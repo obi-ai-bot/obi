@@ -605,6 +605,16 @@ impl Job {
     /// The job as the runner API shows it.
     pub fn to_json(&self) -> Value {
         let date = |t: Option<i64>| t.map(obi_protocol::time::format);
+        // Out of the object below, which is as big as json! takes.
+        let supervised: Vec<Value> = self
+            .supervised
+            .iter()
+            .map(|s| {
+                json!({"at": obi_protocol::time::format(s.at), "decision": s.decision,
+                       "jobs": s.jobs, "turn": s.turn, "count": s.count,
+                       "of": crate::brain::supervisor::MOST})
+            })
+            .collect();
         // `title` is the derived one, always a string, as the Swift runner sends it.
         let mut value = json!({
             "id": self.id,
@@ -689,10 +699,7 @@ impl Job {
             "artifacts": self.artifacts.iter().map(|a| json!({"id": a.id, "version": a.version})).collect::<Vec<_>>(),
             "artifactProblems": self.artifact_problems,
             "followUpOf": self.follow_up_of,
-            "supervised": self.supervised.iter().map(|s| json!({
-                "at": obi_protocol::time::format(s.at), "decision": s.decision, "jobs": s.jobs,
-                "turn": s.turn, "count": s.count, "of": crate::brain::supervisor::MOST,
-            })).collect::<Vec<_>>(),
+            "supervised": supervised,
         });
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
