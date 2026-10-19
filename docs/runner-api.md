@@ -1400,6 +1400,24 @@ The owner adds, renames and removes the agents' accounts, and signs them in, fro
 
 When a sign-in ends, every app gets `accounts`, with `signedIn` as obid finds it (the login file, or the Keychain item with `claudeKeychain`).
 
+### obid only: GitHub's sign-in
+
+The owner signs obid's `gh` in to GitHub from the Mac (Settings › Connectors › GitHub, and the setup's GitHub step), with GitHub's own device sign-in; nobody types `gh auth login` (the owner's decision of 2026-10-18). obid never reads, holds or passes the token: gh keeps it in its own Keychain item, as `gh auth login` always does. None of these endpoints is on the gateway's allowlist: a paired phone never signs the Mac in to someone's GitHub.
+
+**`GET /v1/github`** answers `{"gh": true, "signedIn": true, "user": "well-prado", "signIn": null}`:
+
+- `gh`: whether obid has a GitHub CLI (the one Oby.app carries, else the login shell's).
+- `signedIn` and `user`: the active github.com account in `gh auth status --hostname github.com --active --json hosts` whose `state` is `success` (never `--show-token`); signed out otherwise. `user` is a GitHub login name or null. Read again at most every 30 seconds, and after a sign-in ends.
+- `signIn`: the sign-in under way, as `POST` answers it, or null.
+
+**`POST /v1/github/sign-in`** starts gh's own sign-in, or answers the one under way: `{"url": "https://github.com/login/device", "userCode": "AB12-CD34", "expiresAt": "…"}`. The app opens `url` and the person types `userCode` there (gh also puts it on its machine's clipboard).
+
+- It runs `gh auth login --hostname github.com --git-protocol https --web --skip-ssh-key`, unboxed (it must reach the Keychain and the network), by its absolute path, with obid's kept environment (no token, no agent variable), the person's `HOME` (where gh keeps its settings), `GH_BROWSER` and `BROWSER` set to `true` (nothing opens on the runner), prompts off, and `GIT_CONFIG_GLOBAL` a file in the sign-in's own folder (`home/tmp/github-sign-in-…`, removed when it ends), so gh never changes the person's global git settings. obid needs no `gh auth setup-git`: it gives git gh's login itself (obid only: publishing).
+- obid reads what gh prints only for its one-time code (`! One-time code (AB12-CD34) …` or `! First copy your one-time code: AB12-CD34`); nothing else is kept, answered or logged. The page is always GitHub's device page.
+- One at a time. It ends when gh does (signed in, or not), after 15 minutes (a device code's life), with `DELETE`, or when obid stops; its process group is killed with it. `502` when gh gave no code within 30 seconds; `503` without a gh.
+
+**`DELETE /v1/github/sign-in`** ends the sign-in under way, if any: `204`.
+
 ### obid only: the gateway
 
 obid serves the LAN gateway's pairing and forwarding (LAN gateway (#284), above) as the Swift runner does, with these differences (`core/crates/obid/src/gateway.rs`, #446):
