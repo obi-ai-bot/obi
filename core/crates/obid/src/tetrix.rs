@@ -1545,7 +1545,10 @@ async fn agent(
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
         .unwrap_or("");
-    if !shared.connections.allows(&job, token) {
+    // Only an owner's job: an Obi-to-Obi review never gets Tetrix.
+    if !shared.connections.allows(&job, token)
+        || shared.jobs.get(&job).is_none_or(|j| j.obi.is_some())
+    {
         return ApiError::new(StatusCode::UNAUTHORIZED, crate::api::NO_TOKEN).into_response();
     }
     let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
