@@ -507,6 +507,112 @@ impl Link {
         }
     }
 
+    /// What a read of the owner's GitHub work found (crate::github_work): a `github` item for each
+    /// of `new` that never had one, open or done; and, with `present` (every item the feed holds
+    /// now, when no list was cut), each open `github` item whose work left the feed is done by
+    /// itself, with no answer.
+    pub fn github_work(
+        &self,
+        new: &[crate::github_work::Item],
+        present: Option<&std::collections::HashSet<String>>,
+    ) {
+        let now = time::now();
+        let mut changed = Vec::new();
+        {
+            let mut state = self.lock();
+            if let Some(present) = present {
+                for item in state.inbox.values_mut() {
+                    let gone = item.kind == "github"
+                        && item.done.is_none()
+                        && item
+                            .github
+                            .as_deref()
+                            .and_then(|g| g["id"].as_str())
+                            .is_some_and(|id| !present.contains(id));
+                    if gone {
+                        item.done = Some(now);
+                        changed.push(item.clone());
+                    }
+                }
+            }
+            for work in new {
+                let item = inbox::github_item(work, now);
+                if !state.inbox.contains_key(&item.id) {
+                    state.inbox.insert(item.id.clone(), item.clone());
+                    changed.push(item);
+                }
+            }
+        }
+        for item in &changed {
+            self.save_item(item);
+        }
+    }
+
+    /// Work on the feed item `work` started from the feed (`POST /v1/github/work/{id}/start`):
+    /// its open `github` item is done, answered with its start option, `job` the job on it.
+    pub fn github_started(&self, work: &str, job: &str) {
+        let id = inbox::github_item_id(work);
+        let item = {
+            let mut state = self.lock();
+            let Some(item) = state.inbox.get_mut(&id).filter(|i| i.done.is_none()) else {
+                return;
+            };
+            item.done = Some(time::now());
+            item.answer = item.options.first().cloned();
+            item.job = job.to_owned();
+            item.clone()
+        };
+        self.save_item(&item);
+    }
+
+    /// `POST /v1/inbox/{id}/answer` on a `github` item: `Review it` or `Fix it` starts the work as
+    /// `POST /v1/github/work/{id}/start` does (an error leaves the item open), `Dismiss` or done
+    /// settle it, later puts it off. Nothing is sent to GitHub.
+    async fn answer_github(
+        &self,
+        mut item: Item,
+        answer: Option<String>,
+        later: Option<i64>,
+    ) -> Result<Value, ApiError> {
+        if let Some(at) = later {
+            item.later = Some(at);
+        } else {
+            if let Some(answer) = &answer {
+                let start = item.options.first().cloned().unwrap_or_default();
+                if *answer != start && answer != inbox::DISMISS {
+                    return Err(api(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("The answer is {start} or {}.", inbox::DISMISS),
+                    ));
+                }
+                if *answer == start {
+                    let work = item.github.as_deref().cloned().unwrap_or_default();
+                    let started = crate::github_work::start_work(
+                        &self.jobs,
+                        &self.config,
+                        work["list"].as_str().unwrap_or_default(),
+                        work["repo"].as_str().unwrap_or_default(),
+                        work["number"].as_u64().unwrap_or_default(),
+                    )
+                    .await;
+                    match started {
+                        Ok((job, _)) => item.job = job.id,
+                        // `answer` claimed it; what couldn't start leaves it open again.
+                        Err(why) => {
+                            self.lock().inbox.insert(item.id.clone(), item.clone());
+                            return Err(why);
+                        }
+                    }
+                }
+            }
+            item.done = Some(time::now());
+            item.answer = answer;
+        }
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        Ok(item.to_json())
+    }
+
     /// `POST /v1/inbox/{id}/answer` on a `pluginEvent` item: `Dismiss` or `{"done": true}` settles
     /// it, `later` puts it off. Nothing is sent anywhere.
     fn answer_plugin_event(
@@ -2576,6 +2682,7 @@ impl Link {
             arrived: Some(inbox::arrival()),
             confirm: None,
             start: serde_json::to_value(new).ok().map(Box::new),
+            github: None,
         };
         self.lock().inbox.insert(item.id.clone(), item.clone());
         self.save_item(&item);
@@ -2724,6 +2831,31 @@ impl Link {
                 Given::Done => return self.answer_question(item, None).await,
                 Given::Later(_) => {}
             }
+        }
+        // An offer of GitHub work: its start reads GitHub first, with no lock held, so its start
+        // answer claims the item under the lock (done), as Start does: nothing settles it
+        // meanwhile, and a second answer finds it done.
+        let github = {
+            let mut state = self.lock();
+            let item = state
+                .inbox
+                .get(id)
+                .filter(|i| i.done.is_none() && i.kind == "github")
+                .cloned();
+            if let Some(item) = &item
+                && matches!(&given, Given::Answer(a) if item.options.first() == Some(a))
+                && let Some(kept) = state.inbox.get_mut(id)
+            {
+                kept.done = Some(time::now());
+            }
+            item
+        };
+        if let Some(item) = github {
+            return match given {
+                Given::Answer(answer) => self.answer_github(item, Some(answer), None).await,
+                Given::Done => self.answer_github(item, None, None).await,
+                Given::Later(at) => self.answer_github(item, None, Some(at)).await,
+            };
         }
         let now = time::now();
         let (item, exchange, decisions) = {

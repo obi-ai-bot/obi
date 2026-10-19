@@ -5,6 +5,28 @@
 #   unreadable    when it exists, `gh project list` fails
 #   body-<n>      issue n's body, for `gh issue view <n> … -q .body`
 #   edits         one line per `gh issue edit`: <issue> <repo> <label added> <last line of the body>
+# With $HOME/github, it serves the GitHub work feed (crate::github_work):
+#   work.json   what `gh api graphql` answers
+#   fail        when it exists, `gh api graphql` fails, saying what it holds on stderr
+#   partial     when it exists, `gh api graphql` answers work.json and fails, saying what it holds,
+#               as gh does on an answer with both data and errors
+#   slow        when it exists, `gh issue view` and `gh pr view` take a second
+#   view.json   what `gh issue view` and `gh pr view` answer
+#   calls       one line per call: its first two arguments
+work="$HOME/github"
+if [ -d "$work" ]; then
+  echo "$1 $2" >> "$work/calls"
+  case "$1 $2" in
+    "api graphql")
+      if [ -f "$work/fail" ]; then cat "$work/fail" >&2; exit 1; fi
+      cat "$work/work.json"
+      if [ -f "$work/partial" ]; then cat "$work/partial" >&2; exit 1; fi
+      exit 0 ;;
+    "issue view"|"pr view")
+      if [ -f "$work/slow" ]; then sleep 1; fi
+      cat "$work/view.json"; exit 0 ;;
+  esac
+fi
 board="$HOME/board"
 if [ -d "$board" ]; then
   case "$1 $2" in
