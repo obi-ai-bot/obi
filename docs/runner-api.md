@@ -348,6 +348,7 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
   | `permission` | the job's agent waits for the user's OK (`permission` on the job) | the permission's `title` | `Allow`, `Always allow`, `Deny` (only `Allow` and `Deny` when it has no `rule`) |
   | `plan` | obid only (#609): a Claude Code job in `plan` mode presented its plan (`ExitPlanMode`) and waits for the owner (`permission` on the job, its `tool` `ExitPlanMode`); `details` holds the plan as the agent wrote it, quoted data. Only the owner answers it: the brain is refused either way | `Approve the plan?` | `Approve`, `Keep planning`; any other words keep it planning, with them |
   | `confirm` | obid only (#546): Oby's brain planned something that persists or widens trust, which it never does in a turn (obid only: the brain, below); `title` says exactly what `Confirm` does, like `Always allow Bash(make lint:*) in acme/app`, and `job` is the job it's about, or empty | what was planned and why it waits | `Confirm`, `Cancel`, none recommended |
+  | `github` | obid only: a read of the owner's GitHub work found a new review request or assigned issue on a repository obid knows (obid only: GitHub work); one per item, ever | `Your review is requested on pull request #702 in obi-ai-bot/obi.` or `Issue #640 in obi-ai-bot/obi is assigned to you.` | `Review it` or `Fix it`, `Dismiss` |
 
   A `confirm` item (obid only) also carries `confirm`, what its `Confirm` carries out: `{"action": "always_allow", "target": "ab12cd34", "payload": {"permission": "p1a2b3c"}}`. `action` is a typed name, `target` what it acts on (a job's id or an inbox item's id, as the action says) and `payload` what else it needs (`null` when nothing). obid carries every action out through one dispatcher, so a new action is a new name with its own `target` and `payload`, the shape unchanged. The actions so far:
 
@@ -1416,7 +1417,7 @@ obid serves the LAN gateway's pairing and forwarding (LAN gateway (#284), above)
 What GitHub wants from the owner, so Oby can show it and do it for them: the open issues assigned to them, the open pull requests waiting for their review (asked of them or of a team they're on), and their own open pull requests. obid reads it with its own `gh` login, as the Lead reads the board: `gh` signs in with its own login (gh's device sign-in from the Mac, or a token the owner gave gh's own store), and obid never reads, holds or passes a token (no file, argument, environment variable, log or event of obid's has one). No webhooks: obid is local and self-hostable, so it asks.
 
 - **How it reads.** One `gh api graphql` query per read, with three searches of up to 100 items each (`is:open is:issue archived:false assignee:<login>`, `is:open is:pr archived:false review-requested:<login>`, `is:open is:pr archived:false author:<login>`, newest update first) and GitHub's `rateLimit`; `<login>` is `gh api user`'s, read once per sign-in. Every 3 minutes while obid runs, the first right after it starts. A `403` or `429` (GitHub's rate limits, the secondary ones included) waits 3 minutes, then doubles, up to 30 minutes, until a read succeeds; a read that leaves fewer than 50 points waits until `rateLimit.resetAt`. Other failures (no network, a `5xx`) keep the last lists and try again at the next tick.
-- **Not signed in.** When `gh` isn't installed or isn't signed in, the lists are empty and `signedIn` is false: the apps show Connect GitHub. obid reads again at every tick, so signing in shows the work within 3 minutes (or at once with a refresh).
+- **Not signed in.** When `gh` isn't installed or isn't signed in, the lists are empty and `signedIn` is false: the apps show Connect GitHub. obid reads again at every tick, so signing in shows the work within 3 minutes (or at once with a refresh). The first read after signing in again (maybe as someone else) is a first read: it offers nothing in the inbox.
 
 #### `GET /v1/github/work`
 
@@ -1438,11 +1439,11 @@ What GitHub wants from the owner, so Oby can show it and do it for them: the ope
 
 #### `GET /v1/events`: `github`
 
-A `github` event comes, carrying the same object as `GET /v1/github/work`, when a read changes anything in it but `checkedAt` and `nextCheck` (an item came, went or changed, `signedIn`, `login`, `error`), and when a job starts on an item or ends. Replace the whole feed with it.
+A `github` event comes, carrying the same object as `GET /v1/github/work`, when a read changes anything in it but `checkedAt` and `nextCheck` (an item came, went or changed, `signedIn`, `login`, `error`), and when `POST /v1/github/work/{id}/start` starts a job (its `job`). The first read after obid starts sends none: fetch the feed when you connect, as after every reconnect. Replace the whole feed with it; how that job goes comes as `job` events.
 
 #### `POST /v1/github/work/refresh`
 
-Reads now, as a tick does, and answers the feed as `GET /v1/github/work` does once the read ends (up to 2 minutes; one read at a time, so a refresh during a read waits for it and answers that one). During a rate-limit wait it doesn't read: it answers the feed as it is, `error` and `nextCheck` saying until when. No body.
+Reads now, as a tick does, and answers the feed as `GET /v1/github/work` does once the read ends (up to 2 minutes; one read at a time, so a refresh during a read waits for it, then reads). During a rate-limit wait it doesn't read: it answers the feed as it is, `error` and `nextCheck` saying until when. No body.
 
 #### `POST /v1/github/work/{id}/start`
 
