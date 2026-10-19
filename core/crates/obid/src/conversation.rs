@@ -67,6 +67,10 @@ struct Thread {
     /// The task list its agent keeps for itself (`oby_tasks`), in its order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tasks: Vec<Task>,
+    /// The list was written in a turn that read something untrusted: every turn it's fed back to
+    /// is treated as having read it too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    tasks_tainted: bool,
 }
 
 /// The most tasks a conversation's list holds.
@@ -126,8 +130,16 @@ pub fn checked_tasks(mut tasks: Vec<Task>) -> Result<Vec<Task>, String> {
         if task.note.as_ref().is_some_and(|n| n.chars().count() > 500) {
             return Err("A task's note is at most 500 characters.".into());
         }
-        if task.id.chars().count() > 40 || task.id.chars().any(|c| c.is_control()) {
+        if task.id.chars().count() > 40 || task.id.chars().any(|c| c.is_control() || breaks_line(c))
+        {
             return Err("A task's id is at most 40 characters, on one line.".into());
+        }
+        if task.job.as_ref().is_some_and(|j| {
+            j.is_empty()
+                || j.chars().count() > 40
+                || j.chars().any(|c| c.is_control() || breaks_line(c))
+        }) {
+            return Err("A task's job is a job's id: 1 to 40 characters, on one line.".into());
         }
     }
     let mut next = 1;
@@ -365,6 +377,7 @@ impl Conversations {
                     id,
                     turns,
                     tasks: vec![],
+                    tasks_tainted: false,
                 };
                 // The conversation's name in its folder must be on disk before the old file goes.
                 if let Err(e) = self.write(&thread).and_then(|()| sync_dir(&self.dir)) {
@@ -446,6 +459,7 @@ impl Conversations {
                 sequence: 0,
                 turns: vec![],
                 tasks: vec![],
+                tasks_tainted: false,
             });
             threads.len() - 1
         });
@@ -702,26 +716,31 @@ impl Conversations {
         Ok(summary)
     }
 
-    /// The task list of the conversation `id`.
-    pub fn tasks(&self, id: &str) -> Result<Vec<Task>, Error> {
+    /// The task list of the conversation `id`, and whether a turn that read something untrusted
+    /// wrote it.
+    pub fn tasks(&self, id: &str) -> Result<(Vec<Task>, bool), Error> {
         let threads = self.lock();
         let thread = threads
             .iter()
             .find(|t| t.id == id)
             .ok_or(Error::NoConversation)?;
-        Ok(thread.tasks.clone())
+        Ok((thread.tasks.clone(), thread.tasks_tainted))
     }
 
-    /// Replaces the task list of the conversation `id`, kept, written and announced.
-    pub fn set_tasks(&self, id: &str, tasks: Vec<Task>) -> Result<(), Error> {
+    /// Replaces the task list of the conversation `id` (`tainted`: written in a turn that read
+    /// something untrusted), kept, written and announced.
+    pub fn set_tasks(&self, id: &str, tasks: Vec<Task>, tainted: bool) -> Result<(), Error> {
         let mut threads = self.lock();
         let thread = threads
             .iter_mut()
             .find(|t| t.id == id)
             .ok_or(Error::NoConversation)?;
-        let kept = std::mem::replace(&mut thread.tasks, tasks);
+        let kept = (
+            std::mem::replace(&mut thread.tasks, tasks),
+            std::mem::replace(&mut thread.tasks_tainted, tainted),
+        );
         if let Err(e) = self.write(thread) {
-            thread.tasks = kept;
+            (thread.tasks, thread.tasks_tainted) = kept;
             return Err(Error::Io(e));
         }
         self.events.send("conversation", thread.summary());

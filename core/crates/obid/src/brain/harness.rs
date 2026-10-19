@@ -1103,13 +1103,15 @@ async fn attempts(
         session.taint();
     }
     // Its own task list while something on it is still to do, so a summarized session keeps it.
-    let tasks = tasks_line(
-        &shared
-            .conversations
-            .tasks(&control.conversation)
-            .unwrap_or_default(),
-        &session.nonce,
-    );
+    let (listed, tainted) = shared
+        .conversations
+        .tasks(&control.conversation)
+        .unwrap_or_default();
+    let tasks = tasks_line(&listed, &session.nonce);
+    // A list written after something untrusted was read carries that in: so does this turn.
+    if tasks.is_some() && tainted {
+        session.taint();
+    }
     let with = |prompt: String| {
         let prompt = match &attached {
             Some(names) => format!("{names}\n\n{prompt}"),

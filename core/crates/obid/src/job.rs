@@ -396,6 +396,14 @@ impl Job {
         }
     }
 
+    /// What a Confirm about it is proposed against: its round, status, commits, mode, tool and
+    /// account. Confirmed after any of them changed, it's refused.
+    pub fn snapshot(&self) -> Value {
+        json!({"round": self.current_round(), "status": self.status.as_str(),
+               "commits": self.commits, "unpublished": self.unpublished(),
+               "mode": self.mode, "agent": self.agent, "account": self.account})
+    }
+
     /// Adds `what` to its changes, dated now.
     pub fn changed(&mut self, what: String) {
         self.changes.push(Change {

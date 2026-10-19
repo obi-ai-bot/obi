@@ -141,7 +141,7 @@ pub async fn delete(
     match shared.jobs.delete(&id).await {
         None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
         Some(Err(refused)) => Err(ApiError::new(StatusCode::CONFLICT, refused.0)),
-        Some(Ok(())) => {
+        Some(Ok(_)) => {
             shared.link.settle_job(&id);
             Ok(StatusCode::NO_CONTENT.into_response())
         }

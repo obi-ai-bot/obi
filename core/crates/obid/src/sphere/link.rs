@@ -2494,8 +2494,6 @@ impl Link {
         Value::Array(items.into_iter().map(Item::to_json).collect())
     }
 
-    /// Something Oby's brain planned that persists or widens trust waits in the inbox for the
-    /// owner's own `Confirm` (#546): the brain never carries it out itself.
     /// The open items of a job that's gone are done, with no answer.
     pub fn settle_job(&self, job: &str) {
         let now = time::now();
@@ -2516,6 +2514,8 @@ impl Link {
         }
     }
 
+    /// Something Oby's brain planned that persists or widens trust waits in the inbox for the
+    /// owner's own `Confirm` (#546): the brain never carries it out itself.
     pub fn add_confirm(&self, item: Item) -> Item {
         self.lock().inbox.insert(item.id.clone(), item.clone());
         self.save_item(&item);
@@ -2638,6 +2638,19 @@ impl Link {
                     None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
                 }
             }
+            // Proposed against the job as it was: after another round, a move or a new mode,
+            // the title no longer says what Confirm would do.
+            inbox::action::CONTINUE_JOB | inbox::action::DELETE_JOB | inbox::action::CHANGE_JOB
+                if self
+                    .jobs
+                    .get(target)
+                    .is_some_and(|j| j.snapshot() != confirmed.payload["snapshot"]) =>
+            {
+                Err(api(
+                    StatusCode::CONFLICT,
+                    "The job changed since Oby asked (another round, a move or a new mode): ask Oby again.",
+                ))
+            }
             inbox::action::CONTINUE_JOB => {
                 let words = confirmed.payload["words"].as_str();
                 match self.jobs.continue_job(target, words, "on your Confirm") {
@@ -2647,7 +2660,7 @@ impl Link {
                 }
             }
             inbox::action::DELETE_JOB => match self.jobs.delete(target).await {
-                Some(Ok(())) => {
+                Some(Ok(_)) => {
                     self.settle_job(target);
                     Ok(())
                 }
