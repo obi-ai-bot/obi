@@ -132,43 +132,29 @@ impl Secrets {
     /// that decodes to text holding one.
     pub fn redact(&self, text: &str) -> String {
         self.refreshed();
-        let label = self.label();
         let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        if inner.needles.is_empty() {
-            return text.to_owned();
+        redacted(&inner.needles, text, self.label())
+    }
+
+    /// The set as it is now, read once (the vault refreshed once): what a scan of many lines
+    /// asks, rather than reading the vault again for each one.
+    pub fn snapshot(&self) -> Snapshot {
+        self.refreshed();
+        let needles = self
+            .inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .needles
+            .clone();
+        let lower = needles
+            .iter()
+            .map(|needle| needle.text.to_ascii_lowercase())
+            .collect();
+        Snapshot {
+            needles,
+            lower,
+            label: self.label(),
         }
-        let mut text = text.to_owned();
-        // A value over lines first, whole (a key as a log writes it); then wrapped runs, judged
-        // whole: a shorter value's needle inside one line would break the run and leave the rest.
-        if text.contains('\n') || text.contains("\\n") {
-            for needle in inner
-                .needles
-                .iter()
-                .filter(|n| n.text.contains('\n') || n.text.contains("\\n"))
-            {
-                text = replace(&text, needle, label);
-            }
-            text = unwrapped(&inner.needles, &text, label);
-        }
-        for needle in &inner.needles {
-            text = replace(&text, needle, label);
-        }
-        // What is left: runs that decode to a value (hex inside base64, a value partly
-        // URL-encoded, base64 cut where the needles' offsets don't reach).
-        for run in runs() {
-            text = run
-                .replace_all(&text, |found: &regex::Captures<'_>| {
-                    let whole = &found[0];
-                    let names = hits(&inner.needles, whole);
-                    if names.is_empty() {
-                        whole.to_owned()
-                    } else {
-                        marker(label, &names)
-                    }
-                })
-                .into_owned();
-        }
-        text
     }
 
     /// How many bytes at the end of `text` could be the start of a value still being written: the
@@ -223,6 +209,97 @@ impl Secrets {
     pub fn marker(&self, names: &[String]) -> String {
         marker(self.label(), names)
     }
+}
+
+/// The values of a set at one moment ([`Secrets::snapshot`]).
+pub struct Snapshot {
+    needles: Vec<Needle>,
+    /// Each needle's text in lower case, in the same order.
+    lower: Vec<String>,
+    label: &'static str,
+}
+
+impl Snapshot {
+    pub fn is_empty(&self) -> bool {
+        self.needles.is_empty()
+    }
+
+    /// As [`Secrets::redact`].
+    pub fn redact(&self, text: &str) -> String {
+        redacted(&self.needles, text, self.label)
+    }
+
+    /// Whether [`Snapshot::redact`] would change `text`, told cheaply. Nothing changes until a
+    /// needle is found in `text` as it is, or a run in it decodes to one; and text over lines is
+    /// left to [`Snapshot::redact`] itself, whose joined runs are no part of `text` as it is.
+    pub fn holds(&self, text: &str) -> bool {
+        if self.needles.is_empty() || text.is_empty() {
+            return false;
+        }
+        if text.contains('\n') || text.contains("\\n") {
+            return self.redact(text) != text;
+        }
+        let lower = text.to_ascii_lowercase();
+        if self
+            .lower
+            .iter()
+            .any(|needle| lower.contains(needle.as_str()))
+        {
+            return self.redact(text) != text;
+        }
+        runs().iter().any(|run| {
+            run.find_iter(text).any(|found| {
+                decodings(found.as_str()).iter().any(|decoded| {
+                    let lower = decoded.to_ascii_lowercase();
+                    self.needles.iter().zip(&self.lower).any(|(needle, low)| {
+                        if needle.any_case {
+                            lower.contains(low.as_str())
+                        } else {
+                            decoded.contains(&needle.text)
+                        }
+                    })
+                })
+            })
+        })
+    }
+}
+
+/// `text` with every copy of the `needles` taken out, as [`Secrets::redact`] says.
+fn redacted(needles: &[Needle], text: &str, label: &str) -> String {
+    if needles.is_empty() {
+        return text.to_owned();
+    }
+    let mut text = text.to_owned();
+    // A value over lines first, whole (a key as a log writes it); then wrapped runs, judged
+    // whole: a shorter value's needle inside one line would break the run and leave the rest.
+    if text.contains('\n') || text.contains("\\n") {
+        for needle in needles
+            .iter()
+            .filter(|n| n.text.contains('\n') || n.text.contains("\\n"))
+        {
+            text = replace(&text, needle, label);
+        }
+        text = unwrapped(needles, &text, label);
+    }
+    for needle in needles {
+        text = replace(&text, needle, label);
+    }
+    // What is left: runs that decode to a value (hex inside base64, a value partly
+    // URL-encoded, base64 cut where the needles' offsets don't reach).
+    for run in runs() {
+        text = run
+            .replace_all(&text, |found: &regex::Captures<'_>| {
+                let whole = &found[0];
+                let names = hits(needles, whole);
+                if names.is_empty() {
+                    whole.to_owned()
+                } else {
+                    marker(label, &names)
+                }
+            })
+            .into_owned();
+    }
+    text
 }
 
 /// `text` with base64 or hex wrapped over lines taken out (Engine/Vault.swift, `Leaks.unwrapped`):
