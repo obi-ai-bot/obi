@@ -5,6 +5,32 @@ import Foundation
 // doesn't serve it yet, and its part of the page hides; nothing shows 0 or an invented value.
 // Foundation only: the Watch compiles it with the iPhone's Job.
 
+/// A value the runner sends that this app may not be able to read: decoding it never throws, and
+/// one that can't be read is nil, so a newer or malformed part never fails what it's in.
+nonisolated struct Lenient<Value: Codable & Equatable & Sendable>: Codable, Equatable, Sendable {
+    var value: Value?
+
+    init(_ value: Value?) { self.value = value }
+
+    init(from decoder: any Decoder) throws {
+        // Through the container, so the decoder's date strategy applies to a `Date`.
+        value = try? decoder.singleValueContainer().decode(Value.self)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        if let value { try container.encode(value) } else { try container.encodeNil() }
+    }
+}
+
+/// A job's published address, only when it's a GitHub page over https: what the apps open.
+nonisolated enum PublishedLink {
+    static func url(_ published: String?) -> URL? {
+        guard let published, let url = URL(string: published), url.scheme == "https", url.host == "github.com" else { return nil }
+        return url
+    }
+}
+
 /// What each kind of tool ran, by kind; a kind the tool doesn't report is absent, never 0.
 nonisolated struct ToolCounts: Codable, Equatable, Sendable {
     var read: Int?
@@ -259,6 +285,14 @@ nonisolated struct TranscriptEntry: Codable, Equatable, Identifiable, Sendable {
     var removed: Int?
 
     var id: Int { n }
+
+    /// The lines in an answer, a list or `{entries: […]}`; a line that can't be read is skipped.
+    static func list(_ data: Data) throws -> [TranscriptEntry] {
+        struct Wrapped: Decodable { var entries: [Lenient<TranscriptEntry>] }
+        if let lines = try? Runner.decoder.decode([Lenient<TranscriptEntry>].self, from: data) { return lines.compactMap(\.value) }
+        return try Runner.decoder.decode(Wrapped.self, from: data).entries.compactMap(\.value)
+    }
+
     /// Words rather than a tool: set in the reading font.
     var spoken: Bool { kind == "said" || kind == "you" }
     /// Its tag in the log's second column: the tool's name, or the kind.

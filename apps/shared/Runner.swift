@@ -90,25 +90,27 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var tetrix: TetrixJobReport?
     /// The job page's facts (#739), each nil until obid serves it: its tools, tokens, share of the
     /// limit windows, the estimate, the check's commands, the secret scan, the diff and what the
-    /// current stage is doing (`JobFacts`).
-    var activity: JobActivity?
-    var usage: JobUsage?
-    var windowShare: WindowShare?
-    var estimate: JobEstimate?
-    var checks: [CheckRound]?
-    var scan: JobScan?
-    var diff: JobDiff?
-    var context: String?
+    /// current stage is doing (`JobFacts`). Each is `Lenient`: one this phone can't read is left
+    /// out, never failing the job (or the list it's in).
+    var activity: Lenient<JobActivity>?
+    var usage: Lenient<JobUsage>?
+    var windowShare: Lenient<WindowShare>?
+    var estimate: Lenient<JobEstimate>?
+    var checks: Lenient<[CheckRound]>?
+    var scan: Lenient<JobScan>?
+    var diff: Lenient<JobDiff>?
+    var context: Lenient<String>?
 
     /// The same facts as the Mac reads them, with each stage's times.
     var facts: JobFacts {
         var stages: [String: StageTiming] = [:]
         for stage in pipeline?.stages ?? [] {
-            let timing = StageTiming(started: stage.started, finished: stage.finished, waited: stage.waited, estimate: stage.estimate)
+            let timing = StageTiming(started: stage.started?.value, finished: stage.finished?.value, waited: stage.waited?.value,
+                                     estimate: stage.estimate?.value)
             if timing != StageTiming() { stages[stage.id] = timing }
         }
-        return JobFacts(activity: activity, usage: usage, windowShare: windowShare, estimate: estimate, checks: checks,
-                        scan: scan, diff: diff, context: context, stages: stages)
+        return JobFacts(activity: activity?.value, usage: usage?.value, windowShare: windowShare?.value, estimate: estimate?.value,
+                        checks: checks?.value, scan: scan?.value, diff: diff?.value, context: context?.value, stages: stages)
     }
 
     /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
@@ -236,11 +238,11 @@ nonisolated struct JobStage: Codable, Equatable, Identifiable, Sendable {
     var state: State
     var detail: String?
     var reason: String?
-    /// Its times (#733), nil until obid serves them.
-    var started: Date?
-    var finished: Date?
-    var waited: Double?
-    var estimate: Span?
+    /// Its times (#733), nil until obid serves them; one that can't be read is left out (`Lenient`).
+    var started: Lenient<Date>?
+    var finished: Lenient<Date>?
+    var waited: Lenient<Double>?
+    var estimate: Lenient<Span>?
 }
 
 nonisolated struct JobPipeline: Codable, Equatable, Sendable {
@@ -1038,10 +1040,7 @@ nonisolated struct Runner: Sendable {
 
     /// The job's raw session after line `after` (#381), oldest first: a list, or `{entries: […]}`.
     func transcript(_ id: String, after: Int? = nil) async throws -> [TranscriptEntry] {
-        struct Wrapped: Decodable { var entries: [TranscriptEntry] }
-        let data = try await send("GET", "v1/jobs/\(id)/transcript" + (after.map { "?after=\($0)" } ?? ""))
-        if let list = try? Self.decoder.decode([TranscriptEntry].self, from: data) { return list }
-        return try Self.decoder.decode(Wrapped.self, from: data).entries
+        try TranscriptEntry.list(await send("GET", "v1/jobs/\(id)/transcript" + (after.map { "?after=\($0)" } ?? "")))
     }
     func fileProposal(_ id: String, index: Int, start: Bool) async throws -> FileProposalResult {
         try await call("POST", "v1/jobs/\(id)/proposals/\(index)/file", body: FileProposalBody(start: start))

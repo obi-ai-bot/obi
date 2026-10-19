@@ -250,6 +250,18 @@ struct DesignTests {
             let bare = try Runner.decoder.decode(Job.self, from: fixture.json(now: now, bare: true))
             #expect(bare.facts == JobFacts(), "\(fixture)")
         }
+        // One part this phone can't read is left out: the job, and the list it's in, still read.
+        var odd = try #require(JSONSerialization.jsonObject(with: JobPageFixture.working.json(now: now)) as? [String: Any])
+        odd["estimate"] = ["low": 60]
+        odd["checks"] = "x"
+        var pipeline = try #require(odd["pipeline"] as? [String: Any])
+        var stages = try #require(pipeline["stages"] as? [[String: Any]])
+        stages[0]["started"] = "nope"
+        pipeline["stages"] = stages
+        odd["pipeline"] = pipeline
+        let list = try Runner.decoder.decode([Job].self, from: JSONSerialization.data(withJSONObject: [odd, odd]))
+        #expect(list.count == 2 && list[0].facts.estimate == nil && list[0].facts.checks == nil)
+        #expect(list[0].facts.stages["prepare"]?.started == nil && list[0].facts.usage?.tokens != nil)
         let needs = try Runner.decoder.decode(Job.self, from: JobPageFixture.needs.json(now: now))
         #expect(needs.facts.waited == 120)
         #expect(JobClock.of(needs, facts: needs.facts, mode: needs.mode, needs: true, now: now).aside(compact: true) == "Paused · then 9–13m")

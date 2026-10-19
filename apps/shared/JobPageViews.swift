@@ -384,7 +384,8 @@ struct JobTimeline: View {
     private var timed: Bool { facts?.estimate != nil || !(facts?.stages.isEmpty ?? true) }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        // Ticks once a second only while the job is active.
+        TimelineView(.animation(minimumInterval: 1, paused: !job.isActive)) { context in
             let clock = JobClock.of(job, facts: facts, mode: mode, needs: needs, now: context.date)
             let basis = clock.phase == .done ? nil : facts?.estimate?.basis
             PageSection(timed ? "Timeline" : "Stages", aside: timed ? aside(clock) : nil, first: first) {
@@ -401,10 +402,9 @@ struct JobTimeline: View {
         }
     }
 
+    /// Done, how long it took against its estimate (Sangam's #741); before that, where it stands.
     private func aside(_ clock: JobClock) -> String? {
-        if clock.phase == .done, let started = job.started, let finished = job.finished {
-            return "\(started.formatted(date: .omitted, time: .shortened)) – \(finished.formatted(date: .omitted, time: .shortened))"
-        }
+        if clock.phase == .done { return compact ? clock.took.replacingOccurrences(of: "estimated", with: "est.") : clock.took }
         return clock.aside(compact: compact)
     }
 
@@ -430,6 +430,11 @@ struct JobTimeline: View {
                     if let time = duration(stage, mark: mark, timing: timing, now: now) {
                         Text(time).font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(Tokens.muted)
                     }
+                }
+                // The live step under the stage it's on while the agent works (Sangam's
+                // `tc-stage-step`), unless the stage's own line already says it.
+                if mark == .current, job.status == .running, !job.step.isEmpty, !(stage.detail ?? "").contains(job.step) {
+                    Sheen(text: job.step, size: Tokens.textBase).padding(.top, 2)
                 }
                 if let detail = detail(stage, mark: mark) {
                     detail.font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.top, 2)
@@ -485,6 +490,10 @@ struct JobTimeline: View {
         // On the iPhone, upcoming stages are just their names and times.
         if compact && mark == .upcoming && job.isActive { return nil }
         var parts = [stage.detail ?? ""]
+        // Work says its round (Sangam's design), when the runner's line doesn't already.
+        if stage.key == "work", !(stage.detail ?? "").hasPrefix("Round ") {
+            parts.insert("Round \(job.currentRound) of \(max(job.currentRound, job.maxRounds))", at: 0)
+        }
         let diff = stage.key == "work" && mark == .done ? facts?.diff : nil
         if stage.key == "work", mark == .done {
             if let commits = job.commits, commits > 0 { parts.append("\(commits) commit\(commits == 1 ? "" : "s")") }
@@ -537,7 +546,7 @@ struct JobTimeline: View {
             } else if mark == .done || mark == .failed, let line = activity.counts?.line {
                 Button { onSession?() } label: {
                     HStack(spacing: 6) {
-                        Text(line + (onSession == nil ? "" : " · Activity")).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                        Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
                             .multilineTextAlignment(.leading)
                         if onSession != nil { Image(systemName: "chevron.right").font(Tokens.font(9, .semibold)).foregroundStyle(Tokens.muted) }
                     }
@@ -654,36 +663,48 @@ struct WentOut: View {
     }
 }
 
+/// The failed card's choices (Sangam's #741): another round first, the session, and Stop here.
+nonisolated enum FailedChoice: String {
+    case round, session, dismiss
+
+    /// The words another round sends its agent: the same as Try again's (#725).
+    static let roundWords = "Try again, picking up where you left off. Finish with a short summary as asked."
+
+    static func options(session: Bool) -> [CardOption] {
+        [CardOption(label: "Give it another round", answer: round.rawValue, recommended: true)]
+            + (session ? [CardOption(label: "Open the session", answer: Self.session.rawValue)] : [])
+            + [CardOption(label: "Stop here", answer: dismiss.rawValue)]
+    }
+}
+
 /// The raw session (`.raw`): every step the agent took, as it sent them, newest at the foot, with
-/// tabs by kind. It asks obid for what's new every two seconds while it's open, so the job keeps
-/// updating behind it.
+/// tabs by kind. While the job runs it asks obid for what's new every two seconds, so the job keeps
+/// updating behind it; once the job ends, or if the runner has no session for it, it asks no more.
+/// It keeps the latest `most` lines, and follows the foot only while you're at it.
 struct SessionLog: View {
     let agent: String
     let load: (Int?) async throws -> [TranscriptEntry]
+    /// The job is running or queued: new lines may come.
+    var live = false
     var compact = false
     @State private var entries: [TranscriptEntry] = []
+    @State private var trimmed = false
     @State private var filter = TranscriptEntry.Filter.all
     @State private var problem: String?
     @State private var loaded = false
+    @State private var atFoot = true
+
+    /// The most lines kept.
+    static let most = 2000
 
     var body: some View {
+        let counts = Dictionary(uniqueKeysWithValues: TranscriptEntry.Filter.allCases.map { tab in (tab, entries.count { tab.takes($0) }) })
+        let shown = filter == .all ? entries : entries.filter(filter.takes)
         VStack(alignment: .leading, spacing: 0) {
             ScrollView(.horizontal) {
                 HStack(spacing: 6) {
                     ForEach(TranscriptEntry.Filter.allCases, id: \.self) { tab in
-                        let count = entries.filter(tab.takes).count
-                        if tab == .all || count > 0 {
-                            Button { filter = tab } label: {
-                                Text("\(tab.rawValue) \(count)").font(Tokens.font(Tokens.textSm)).monospacedDigit()
-                                    .foregroundStyle(filter == tab ? Tokens.onInk : Tokens.text)
-                                    .padding(.horizontal, 11).frame(height: compact ? 32 : 26)
-                                    .background(filter == tab ? Tokens.ink : Tokens.pill, in: Capsule())
-                                    // 44 points to touch on the iPhone.
-                                    .frame(minHeight: compact ? 44 : 26).contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityAddTraits(filter == tab ? .isSelected : [])
-                        }
+                        if tab == .all || counts[tab, default: 0] > 0 { tabButton(tab, count: counts[tab, default: 0]) }
                     }
                 }
             }
@@ -692,7 +713,10 @@ struct SessionLog: View {
             ScrollViewReader { reader in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: compact ? 6 : 3) {
-                        ForEach(entries.filter(filter.takes)) { entry in line(entry).id(entry.n) }
+                        if trimmed {
+                            Text("The latest \(Self.most.formatted()) lines.").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                        }
+                        ForEach(shown) { entry in line(entry).id(entry.n) }
                         if let problem {
                             Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 8)
                         } else if loaded && entries.isEmpty {
@@ -703,13 +727,29 @@ struct SessionLog: View {
                         Text("Kept with the job. Secrets the scan or the vault knows are masked before they're shown here.")
                             .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 16)
                             .fixedSize(horizontal: false, vertical: true)
+                            .id("foot")
+                            .onAppear { atFoot = true }
+                            .onDisappear { atFoot = false }
                     }
                     .textSelection(.enabled)
                 }
-                .onChange(of: entries.last?.n) { _, last in if let last { reader.scrollTo(last, anchor: .bottom) } }
+                .onChange(of: entries.last?.n) { if atFoot { reader.scrollTo("foot", anchor: .bottom) } }
             }
         }
-        .task { await follow() }
+        .task(id: live) { await follow() }
+    }
+
+    private func tabButton(_ tab: TranscriptEntry.Filter, count: Int) -> some View {
+        Button { filter = tab } label: {
+            Text("\(tab.rawValue) \(count)").font(Tokens.font(Tokens.textSm)).monospacedDigit()
+                .foregroundStyle(filter == tab ? Tokens.onInk : Tokens.text)
+                .padding(.horizontal, 11).frame(height: compact ? 32 : 26)
+                .background(filter == tab ? Tokens.ink : Tokens.pill, in: Capsule())
+                // 44 points to touch on the iPhone.
+                .frame(minHeight: compact ? 44 : 26).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(filter == tab ? .isSelected : [])
     }
 
     private func line(_ entry: TranscriptEntry) -> some View {
@@ -728,18 +768,36 @@ struct SessionLog: View {
         .font(Tokens.mono(12))
     }
 
+    /// New lines now, then every two seconds while the job runs. A runner without the session
+    /// (404) is asked no more.
     private func follow() async {
-        while !Task.isCancelled {
+        repeat {
             do {
-                let new = try await load(entries.last?.n)
-                let known = Set(entries.map(\.n))
-                entries += new.filter { !known.contains($0.n) }
+                take(try await load(entries.last?.n))
                 problem = nil
+            } catch let error as RunnerError where error.status == 404 {
+                problem = "\(agent)'s session isn't available from this runner yet."
+                loaded = true
+                return
             } catch {
-                problem = entries.isEmpty ? "\(agent)'s session isn't available from this runner yet." : nil
+                if entries.isEmpty { problem = "\(agent)'s session couldn't be read: \(error.localizedDescription)" }
             }
             loaded = true
+            guard live else { return }
             try? await Task.sleep(for: .seconds(2))
-        }
+        } while !Task.isCancelled
+    }
+
+    private func take(_ new: [TranscriptEntry]) {
+        let (kept, cut) = Self.kept(entries, adding: new)
+        entries = kept
+        trimmed = trimmed || cut
+    }
+
+    /// What the log keeps of `new` after `kept`: only lines after the last it has, at most `most`.
+    static func kept(_ kept: [TranscriptEntry], adding new: [TranscriptEntry]) -> (entries: [TranscriptEntry], trimmed: Bool) {
+        let last = kept.last?.n ?? -1
+        let all = kept + new.filter { $0.n > last }
+        return all.count > most ? (Array(all.suffix(most)), true) : (all, false)
     }
 }

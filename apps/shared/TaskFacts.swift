@@ -84,7 +84,6 @@ nonisolated enum TaskFacts {
             ("Model", job.model.map(ModelChoice.name) ?? "Account default", false),
         ]
         if let mode = RunnerMode(mode) { facts.append(("Mode", mode.label, false)) }
-        if job.maxRounds > 1 { facts.append(("Rounds", "Round \(job.currentRound) of \(job.maxRounds)", false)) }
         if let check = job.check { facts.append(("Done when", "\(check) passes", true)) }
         return facts
     }

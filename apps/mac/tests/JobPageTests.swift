@@ -124,4 +124,49 @@ struct JobPageTests {
         #expect(edit.text == "jobs.rs · +22 −6")
         #expect(edit.tag == "Edit" && said.tag == "said")
     }
+
+    /// The iPhone's and the Watch's Job hold each new part as `Lenient`: one they can't read is nil,
+    /// and the job, and the list it's in, still read.
+    @Test func aLenientPartNeverFailsWhatItsIn() throws {
+        struct Wire: Codable, Equatable { var id: String; var estimate: Lenient<JobEstimate>?; var checks: Lenient<[CheckRound]>?; var at: Lenient<Date>? }
+        let list = #"[{"id": "a", "estimate": {"low": 60}, "checks": "x", "at": "nope"}, {"id": "b", "estimate": {"low": 60, "high": 120}, "at": "2026-10-19T09:41:00Z"}]"#
+        let wires = try Runner.decoder.decode([Wire].self, from: Data(list.utf8))
+        #expect(wires.map(\.id) == ["a", "b"])
+        #expect(wires[0].estimate?.value == nil && wires[0].checks?.value == nil && wires[0].at?.value == nil)
+        #expect(wires[1].estimate?.value == JobEstimate(low: 60, high: 120))
+        #expect(wires[1].at?.value == ISO8601DateFormatter().date(from: "2026-10-19T09:41:00Z"))
+        #expect(try Runner.decoder.decode(Wire.self, from: Runner.encoder.encode(wires[1])) == wires[1])
+    }
+
+    /// A transcript line that can't be read is skipped, never the whole answer.
+    @Test func aBadSessionLineIsSkipped() throws {
+        let list = #"[{"n": 1, "kind": "said", "summary": "Builds."}, {"n": "two"}, {"n": 3, "kind": "tool", "tool": "Bash"}]"#
+        #expect(try TranscriptEntry.list(Data(list.utf8)).map(\.n) == [1, 3])
+        #expect(try TranscriptEntry.list(Data(#"{"entries": [{"n": 4, "kind": "you"}, 5]}"#.utf8)).map(\.n) == [4])
+    }
+
+    /// The log keeps only what's after its last line, and at most its latest `most` lines.
+    @Test func theSessionLogKeepsTheLatestLines() {
+        func lines(_ range: ClosedRange<Int>) -> [TranscriptEntry] { range.map { TranscriptEntry(n: $0, kind: "tool") } }
+        let first = SessionLog.kept([], adding: lines(1...3))
+        #expect(first.entries.map(\.n) == [1, 2, 3] && !first.trimmed)
+        #expect(SessionLog.kept(first.entries, adding: lines(2...5)).entries.map(\.n) == [1, 2, 3, 4, 5])
+        let many = SessionLog.kept(lines(1...SessionLog.most), adding: lines(SessionLog.most + 1...SessionLog.most + 10))
+        #expect(many.trimmed && many.entries.count == SessionLog.most && many.entries.first?.n == 11)
+    }
+
+    @Test func aFailedJobOffersAnotherRoundFirst() {
+        #expect(FailedChoice.options(session: true).map(\.label) == ["Give it another round", "Open the session", "Stop here"])
+        #expect(FailedChoice.options(session: false).map(\.label) == ["Give it another round", "Stop here"])
+        #expect(CardOption.defaultOption(FailedChoice.options(session: true))?.answer == FailedChoice.round.rawValue)
+    }
+
+    /// Only a GitHub page over https opens from a job's published address.
+    @Test func onlyAGitHubPageOpens() {
+        #expect(PublishedLink.url("https://github.com/obi-ai-bot/obi/pull/722")?.host() == "github.com")
+        #expect(PublishedLink.url("http://github.com/obi-ai-bot/obi/pull/722") == nil)
+        #expect(PublishedLink.url("https://github.com.evil.example/pull/1") == nil)
+        #expect(PublishedLink.url("file:///etc/passwd") == nil)
+        #expect(PublishedLink.url(nil) == nil)
+    }
 }

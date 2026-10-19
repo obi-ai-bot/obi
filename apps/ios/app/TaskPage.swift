@@ -65,7 +65,7 @@ struct TaskCard: View {
                 if let line = TaskFacts.resultLine(job) {
                     HStack(spacing: 8) {
                         Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
-                        if let url = job.published.flatMap(URL.init(string:)) {
+                        if let url = PublishedLink.url(job.published) {
                             Link("Open PR", destination: url).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.link)
                         }
                     }
@@ -232,7 +232,8 @@ struct TaskPage: View {
         ScrollView {
             if let job {
                 JobPageBody(job: job, decision: phone.decision(for: job), account: phone.accounts.first { $0.id == job.account }?.usage,
-                            onSession: { showingSession = true }, onDismiss: { Task { await run { try await phone.dismiss(job.id) } } }) {
+                            onSession: { showingSession = true }, onDismiss: { Task { await run { try await phone.dismiss(job.id) } } },
+                            onAnotherRound: { Task { await run { try await phone.tell(job.id, FailedChoice.roundWords) } } }) {
                     if let item = phone.decision(for: job) {
                         InboxDecision(item: item)
                     } else {
@@ -294,7 +295,7 @@ struct TaskPage: View {
         }
         .sheet(isPresented: $showingSession) {
             NavigationStack {
-                SessionLog(agent: job?.agentName ?? "The agent", load: { [runner = phone.runner, id] after in try await runner.transcript(id, after: after) }, compact: true)
+                SessionLog(agent: job?.agentName ?? "The agent", load: { [runner = phone.runner, id] after in try await runner.transcript(id, after: after) }, live: job?.isActive ?? false, compact: true)
                     .padding(.horizontal, Tokens.gutter).padding(.top, 10)
                     .background(Tokens.bg)
                     .navigationTitle("Session")
@@ -335,7 +336,7 @@ struct TaskPage: View {
         } else if let commits = job.commits, commits > 0 {
             Text("\(commits) commit\(commits == 1 ? "" : "s") on \(job.branch)").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 8)
         }
-        if let url = job.published.flatMap(URL.init(string:)) {
+        if let url = PublishedLink.url(job.published) {
             Link("Open pull request", destination: url).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.link).padding(.top, 6)
         }
         if let outgoing = job.outgoing, !outgoing.isEmpty { WentOut(outgoing: outgoing).padding(.top, 14) }
@@ -491,6 +492,8 @@ struct JobPageBody<Decision: View, Result: View, Asked: View>: View {
     var onSession: (() -> Void)? = nil
     /// Stop here on a failure: let it go.
     var onDismiss: () -> Void = {}
+    /// Give it another round on a failure.
+    var onAnotherRound: () -> Void = {}
     @ViewBuilder var decisionCard: () -> Decision
     @ViewBuilder var result: () -> Result
     @ViewBuilder var asked: () -> Asked
@@ -506,7 +509,7 @@ struct JobPageBody<Decision: View, Result: View, Asked: View>: View {
             VStack(alignment: .leading, spacing: 0) {
                 // Once it's done (Sangam's #741), or while a published one runs again.
                 let hasResult = TaskFacts.hasResult(job) && !failure && (!job.isActive || job.published != nil)
-                if hasResult { PageSection("Result", aside: job.status == .done ? took : nil, first: true) { result() } }
+                if hasResult { PageSection("Result", first: true) { result() } }
                 JobTimeline(job: job, facts: facts, mode: job.mode, needs: waits && job.isActive, compact: true, onSession: onSession, first: !hasResult)
                 if JobUsageLine.shows(facts) {
                     PageSection("Usage") {
@@ -534,9 +537,6 @@ struct JobPageBody<Decision: View, Result: View, Asked: View>: View {
         }
     }
 
-    private var took: String {
-        JobClock.of(job, facts: facts, mode: job.mode, needs: false, now: .now).took.replacingOccurrences(of: "estimated", with: "est.")
-    }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -555,7 +555,7 @@ struct JobPageBody<Decision: View, Result: View, Asked: View>: View {
                 Text(TaskMeta.line(job, account: account?.name ?? job.account)).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted)
                     .lineLimit(1)
                 Text(job.badge.text).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(tone(job.badge.tone))
-                if job.isActive, let mode = RunnerMode(job.mode) {
+                if job.status != .done, let mode = RunnerMode(job.mode) {
                     HStack(spacing: 3) {
                         Text(mode.label)
                         Image(systemName: "chevron.down").font(Tokens.font(8, .semibold))
@@ -583,14 +583,21 @@ struct JobPageBody<Decision: View, Result: View, Asked: View>: View {
     }
 
     /// What failed and what it left (Sangam's failed card, #741), with the failing tests once obid
-    /// serves them, the session, and Stop here.
+    /// serves them; another round, the session, and Stop here.
     private var failed: some View {
         let lines = job.summary.split(separator: "\n", maxSplits: 1).map(String.init)
         let failing = facts.checks?.last?.failing?.map { [$0.test, $0.message.map { "  " + $0 }].compactMap { $0 }.joined(separator: "\n") }
         return AskCard(kind: "Failed", failed: true, title: lines.first ?? job.line, happened: lines.count > 1 ? lines[1] : nil,
                        detail: failing?.joined(separator: "\n"),
-                       options: (onSession == nil ? [] : [CardOption(label: "Open the session", answer: "session")]) + [CardOption(label: "Stop here", answer: "dismiss")],
-                       onChoose: { option in if option.answer == "dismiss" { onDismiss() } else { onSession?() } })
+                       options: FailedChoice.options(session: onSession != nil),
+                       onChoose: { option in
+                           switch FailedChoice(rawValue: option.answer) {
+                           case .round: onAnotherRound()
+                           case .session: onSession?()
+                           case .dismiss: onDismiss()
+                           case nil: break
+                           }
+                       })
             .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 16)
             .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
     }
