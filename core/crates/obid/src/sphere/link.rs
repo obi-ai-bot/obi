@@ -334,6 +334,12 @@ impl Link {
             }
         }));
         let hook = Arc::downgrade(&link);
+        link.jobs.on_confirm(Arc::new(move |item| {
+            if let Some(link) = hook.upgrade() {
+                link.add_confirm_once(item);
+            }
+        }));
+        let hook = Arc::downgrade(&link);
         link.jobs.on_review_end(Arc::new(move |job, done| {
             let link = hook.upgrade();
             Box::pin(async move {
@@ -2573,6 +2579,25 @@ impl Link {
         item
     }
 
+    /// [`Link::add_confirm`], unless a `confirm` item for the same job and action is still open:
+    /// that one stands, so a caller asking again and again adds nothing (crate::jobs,
+    /// `confirm_past_safety`).
+    pub fn add_confirm_once(&self, item: Item) -> Item {
+        let action = |i: &Item| i.confirm.as_ref().map(|c| c.action.clone());
+        {
+            let state = self.lock();
+            if let Some(open) = state.inbox.values().find(|i| {
+                i.kind == "confirm"
+                    && i.done.is_none()
+                    && i.job == item.job
+                    && action(i) == action(&item)
+            }) {
+                return open.clone();
+            }
+        }
+        self.add_confirm(item)
+    }
+
     /// `POST /v1/inbox/{id}/answer` on a `confirm` item: `Confirm` carries out what its title
     /// says; `Cancel`, done or later do nothing.
     async fn answer_confirm(
@@ -2664,7 +2689,10 @@ impl Link {
             // words for a job that ended do.
             inbox::action::MESSAGE_JOB => {
                 let words = confirmed.payload["words"].as_str().unwrap_or("");
-                match self.jobs.message(target, words, crate::jobs::Source::Owner) {
+                match self
+                    .jobs
+                    .message(target, words, crate::jobs::Source::Confirmed)
+                {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
                     None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
@@ -2682,7 +2710,7 @@ impl Link {
                 match self.jobs.message(
                     target,
                     crate::brain::actions::TRY_AGAIN,
-                    crate::jobs::Source::Owner,
+                    crate::jobs::Source::Confirmed,
                 ) {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
