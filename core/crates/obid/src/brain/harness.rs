@@ -40,13 +40,16 @@ const MAX_TURNS: &str = "50";
 /// web, writes in the room, a to-do list and sub-agents. No Bash or other code-running tool, so
 /// nothing the session runs can read its login copy and send it out; running anything is a job.
 const TOOLS: &str = "Read,Grep,Glob,LS,NotebookRead,WebSearch,WebFetch,Write,Edit,MultiEdit,NotebookEdit,Task,TodoWrite";
-/// The built-in tools of a turn nobody watches (super::supervisor): no web and no helpers, so what
-/// an agent's note says can't send the conversation anywhere.
-const UNATTENDED_TOOLS: &str =
-    "Read,Grep,Glob,LS,NotebookRead,Write,Edit,MultiEdit,NotebookEdit,TodoWrite";
-/// Why a turn nobody watches is refused the web or a helper.
+/// The built-in tools of a turn nobody watches (super::supervisor): a to-do list only. No web,
+/// helpers or files (the room holds what the owner's own turns wrote), so what an agent's note
+/// says can't reach the owner's work or send anything anywhere; it reads its job with oby_job.
+const UNATTENDED_TOOLS: &str = "TodoWrite";
+/// Why a turn nobody watches is refused a built-in tool.
 const UNATTENDED: &str =
-    "A turn nobody watches doesn't reach the web or start helpers: say what you'd look up instead.";
+    "A turn nobody watches reads only its job, with oby_job: no web, helpers or files.";
+/// Where a supervisor turn keeps its own session's id and taint, beside the conversation's
+/// `session.json`, which it never reads or writes.
+const SUPERVISOR_KEPT: &str = "supervisor-session.json";
 /// The file in the session's `HOME` that gives it Oby's MCP server.
 const MCP_FILE: &str = "oby-mcp.json";
 /// The line the plan loop's answer ends with when there was no Claude Code account to talk with.
@@ -986,7 +989,10 @@ async fn session(
     checkouts(shared, &place, &|| control.live()).await;
     watch.mark("repositories");
     super::thinking(shared, control, 1, "Thinking", State::Running);
-    let resumed = kept(&place, &account.id);
+    // A supervisor turn runs in a session of its own, never the conversation's: nothing of the
+    // owner's history is in it (super::supervisor), and its id is kept apart.
+    let unattended = supervising.is_some();
+    let resumed = kept(&place, &account.id).filter(|_| !unattended);
     let session = Arc::new(Session {
         conversation: control.conversation.clone(),
         said: said.to_owned(),
@@ -999,7 +1005,11 @@ async fn session(
         ),
         dispatched: AtomicUsize::new(0),
         told: AtomicUsize::new(0),
-        kept: place.session.clone(),
+        kept: if unattended {
+            place.folder.join(SUPERVISOR_KEPT)
+        } else {
+            place.session.clone()
+        },
         account: account.id.clone(),
         room: place.room.clone(),
         artifacts: Mutex::new(vec![]),
@@ -1011,7 +1021,7 @@ async fn session(
         session.taint();
     }
     // Its Claude Code still running from the turn before, on the same session and account.
-    let warm = (shared.config.conversation.agent == Tool::Claude)
+    let warm = (shared.config.conversation.agent == Tool::Claude && !unattended)
         .then(|| {
             shared.harness.take_warm(
                 &control.conversation,
@@ -1279,7 +1289,7 @@ async fn attempts(
                 web: true,
             };
             let _ = crate::store::write_private(
-                &place.session,
+                &session.kept,
                 &serde_json::to_vec(&kept).unwrap_or_default(),
             );
             return Err(why);
@@ -1291,22 +1301,27 @@ async fn attempts(
                 web: session.web.load(Ordering::SeqCst),
             };
             let _ = crate::store::write_private(
-                &place.session,
+                &session.kept,
                 &serde_json::to_vec(&kept).unwrap_or_default(),
             );
         }
-        // Kept for the conversation's next turn when this one answered; else it ends.
+        // Kept for the conversation's next turn when this one answered; else it ends. A
+        // supervisor turn's session is never the conversation's (super::supervisor).
         let kept_for = match (running, &turn.session) {
-            (Some(conn), Some(id)) if turn.succeeded() && control.live() => Some(Warm {
-                conn,
-                token: token.to_owned(),
-                account: account.id.clone(),
-                config_dir: account.config_dir.clone(),
-                session: Some(id.clone()),
-                key,
-                place: place.clone(),
-                since: Instant::now(),
-            }),
+            (Some(conn), Some(id))
+                if turn.succeeded() && control.live() && session.supervising.is_none() =>
+            {
+                Some(Warm {
+                    conn,
+                    token: token.to_owned(),
+                    account: account.id.clone(),
+                    config_dir: account.config_dir.clone(),
+                    session: Some(id.clone()),
+                    key,
+                    place: place.clone(),
+                    since: Instant::now(),
+                })
+            }
             // As before: it may take a few seconds to finish the session file a `--resume` reads.
             (Some(mut conn), _) => {
                 let until = Instant::now() + agent::AFTER_RESULT;
@@ -1619,7 +1634,8 @@ async fn one(
     };
     let decide = |tool: &str, input: &Value| {
         if session.supervising.is_some()
-            && matches!(tool, "WebFetch" | "WebSearch" | "Task" | "Agent")
+            && !tool.starts_with("mcp__oby__")
+            && !UNATTENDED_TOOLS.split(',').any(|t| t == tool)
         {
             return Ruling::Now(Answer::Deny(UNATTENDED.into()));
         }
@@ -2533,11 +2549,22 @@ mod tests {
     }
 
     /// The mark goes to `session.json` as soon as it's set, before the run ends (crash safety).
-    /// A turn nobody watches has no web and no helpers.
+    /// A turn nobody watches has no web, helpers or files.
     #[test]
     fn an_unattended_turn_has_no_web_or_helpers() {
         let tools: Vec<&str> = UNATTENDED_TOOLS.split(',').collect();
-        for gone in ["WebSearch", "WebFetch", "Task", "Agent", "Bash"] {
+        for gone in [
+            "WebSearch",
+            "WebFetch",
+            "Task",
+            "Agent",
+            "Bash",
+            "Read",
+            "Grep",
+            "Glob",
+            "LS",
+            "Write",
+        ] {
             assert!(!tools.contains(&gone), "{gone}");
         }
         assert!(tools.iter().all(|t| TOOLS.split(',').any(|o| o == *t)));

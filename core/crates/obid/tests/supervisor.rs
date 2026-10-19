@@ -494,3 +494,60 @@ fn the_step_cap_holds_across_split_generations() {
     std::thread::sleep(std::time::Duration::from_secs(5));
     assert_eq!(jobs(&obid).len(), 4);
 }
+
+/// A supervisor turn runs in a fresh session of its own, never the conversation's: no `--resume`,
+/// not the Claude Code waiting from the owner's turn, its id kept apart from `session.json`. It
+/// has no files or web, and can't list Oby's other jobs.
+#[test]
+fn a_supervisor_turn_is_a_fresh_session_that_cant_list_jobs() {
+    let (_folder, obid) = obid("supervisor-fresh");
+    let (conversation, id) = started(
+        &obid,
+        "OBY oby_continue_job {\"id\": \"$JOB\"}\nOBY oby_jobs {}",
+        "investigate",
+        "Look into both halves STALLS-ONCE",
+    );
+    let folder = obid.home.join(format!("conversations/{conversation}"));
+    let owners = std::fs::read(folder.join("session.json")).unwrap();
+    let step = supervised(&obid, &id, 1)["supervised"][0].clone();
+    assert_eq!(step["decision"], "continue", "{step}");
+    let said = within(30, "the conversation's line", || {
+        obys(&obid, &conversation)
+            .into_iter()
+            .find(|t| t.contains("automatic steps"))
+    });
+    assert!(
+        said.starts_with("oby: refused: A turn nobody watches reads only its own job"),
+        "{said}"
+    );
+    // The conversation's own session is as the owner's turns left it.
+    assert_eq!(std::fs::read(folder.join("session.json")).unwrap(), owners);
+    assert!(folder.join("supervisor-session.json").is_file());
+    let records: Vec<Value> = std::fs::read_to_string(folder.join("config/turns.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let (theirs, mine): (Vec<&Value>, Vec<&Value>) = records.iter().partition(|r| {
+        r["prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("Oby here, not the owner")
+    });
+    assert_eq!(theirs.len(), 1, "{records:?}");
+    let argv: Vec<&str> = theirs[0]["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    assert!(!argv.contains(&"--resume"), "{argv:?}");
+    let tools = argv[argv.iter().position(|a| *a == "--tools").unwrap() + 1];
+    assert_eq!(tools, "TodoWrite");
+    assert!(theirs[0]["resumed"].is_null());
+    // Not the owner's Claude Code, which was waiting for the conversation's next turn.
+    assert!(
+        mine.iter().all(|r| r["pid"] != theirs[0]["pid"]),
+        "{records:?}"
+    );
+}
