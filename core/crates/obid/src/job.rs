@@ -257,6 +257,9 @@ pub struct Job {
     /// Each run of its own check, oldest first, the running one live (#734).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<crate::facts::CheckRecord>,
+    /// How its last publish's secret scan went (#735).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<crate::publish::Scanned>,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -354,6 +357,7 @@ impl Job {
             start_from: None,
             diffs: Vec::new(),
             checks: Vec::new(),
+            scan: None,
         }
     }
 
@@ -601,6 +605,20 @@ impl Job {
         // The latest run only, on every event (#734); every run's is in `detail_json`.
         if let Some(last) = self.checks.last() {
             value["checks"] = json!([last]);
+        }
+        // The scan's own record; else why it never ran: its checks failed, or publishing stopped
+        // before it (#735).
+        let scan = if self.status == Status::Failed && self.phase == Some(Phase::Check) {
+            Some(json!({"ran": false, "reason": "checks failed"}))
+        } else if let Some(scan) = &self.scan {
+            Some(json!(scan))
+        } else {
+            self.publish_error
+                .as_ref()
+                .map(|why| json!({"ran": false, "reason": why}))
+        };
+        if let Some(scan) = scan {
+            value["scan"] = scan;
         }
         value
     }

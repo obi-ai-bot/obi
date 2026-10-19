@@ -4728,8 +4728,17 @@ struct PublishHooks {
 impl crate::publish::Hooks for PublishHooks {
     fn progress(&self, step: crate::publish::Step) {
         self.stages.begin(step.as_str());
-        self.jobs
-            .update(&self.id, |job| job.publish_step = Some(step));
+        self.jobs.update(&self.id, |job| {
+            job.publish_step = Some(step);
+            // A new publish: the last one's scan no longer says how this one went.
+            if step == crate::publish::Step::Scan {
+                job.scan = None;
+            }
+        });
+    }
+
+    fn scanned(&self, scanned: crate::publish::Scanned) {
+        self.jobs.update(&self.id, |job| job.scan = Some(scanned));
     }
 
     fn proceed(&self) -> bool {

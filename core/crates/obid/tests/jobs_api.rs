@@ -743,6 +743,11 @@ fn a_check_that_keeps_failing_stops_at_a_limit() {
         .map(|run| run["round"].clone())
         .collect();
     assert_eq!(rounds, [json!(1), json!(2)]);
+    // Nothing went out, so no scan ran (#735).
+    assert_eq!(
+        job["scan"],
+        json!({"ran": false, "reason": "checks failed"})
+    );
 }
 
 /// Each round's change against the start commit is kept as that round's (#736): paths and the
