@@ -36,15 +36,25 @@ pub struct Options {
     pub no_commands: bool,
 }
 
-/// The `command` line `codex app-server` runs as: the binary, then `app-server`.
-pub fn argv(bin: PathBuf, mcp: Option<(&str, &str)>) -> Vec<std::ffi::OsString> {
+/// The `command` line `codex app-server` runs as: the binary, then `app-server`. Oby's broker
+/// (`mcp`) and Oby's Tetrix server (`tetrix`, crate::tetrix) take the job's token from the
+/// environment, never an argument.
+pub fn argv(
+    bin: PathBuf,
+    mcp: Option<(&str, &str)>,
+    tetrix: Option<&str>,
+) -> Vec<std::ffi::OsString> {
     let mut argv = vec![bin.into_os_string()];
-    if let Some((url, _)) = mcp {
+    let servers = mcp
+        .map(|(url, _)| ("oby", url))
+        .into_iter()
+        .chain(tetrix.map(|url| ("tetrix", url)));
+    for (name, url) in servers {
         argv.extend([
             "-c".into(),
-            format!("mcp_servers.oby.url=\"{url}\"").into(),
+            format!("mcp_servers.{name}.url=\"{url}\"").into(),
             "-c".into(),
-            "mcp_servers.oby.bearer_token_env_var=\"OBY_MCP_TOKEN\"".into(),
+            format!("mcp_servers.{name}.bearer_token_env_var=\"OBY_MCP_TOKEN\"").into(),
         ]);
     }
     argv.push("app-server".into());
@@ -364,7 +374,7 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                 let answer = match call.cloned() {
                     // Only Oby's own server: another's (ChatGPT's apps, the person's) is never
                     // run, as before Codex asked.
-                    Some(_) if server != "oby" => {
+                    Some(_) if server != "oby" && server != "tetrix" => {
                         Answer::Deny(format!("Only Oby's own tools run here, not {server}'s."))
                     }
                     Some((tool, arguments)) => {
@@ -751,7 +761,7 @@ mod tests {
     fn codex_reaches_the_broker_with_the_token_out_of_its_arguments() {
         let url = "http://127.0.0.1:7777/v1/agent/mcp/job1";
         let token = "job-token-0123456789abcdef";
-        let args: Vec<String> = argv(PathBuf::from("/bin/codex"), Some((url, token)))
+        let args: Vec<String> = argv(PathBuf::from("/bin/codex"), Some((url, token)), None)
             .into_iter()
             .map(|a| a.into_string().unwrap())
             .collect();
@@ -768,8 +778,24 @@ mod tests {
         );
         assert!(!args.iter().any(|a| a.contains(token)));
         assert_eq!(
-            argv(PathBuf::from("/bin/codex"), None),
+            argv(PathBuf::from("/bin/codex"), None, None),
             ["/bin/codex", "app-server"]
+        );
+        // Oby's Tetrix server (crate::tetrix) takes the same token from the environment.
+        assert_eq!(
+            argv(
+                PathBuf::from("/bin/codex"),
+                None,
+                Some("http://127.0.0.1:7777/v1/agent/tetrix/job1")
+            ),
+            [
+                "/bin/codex",
+                "-c",
+                r#"mcp_servers.tetrix.url="http://127.0.0.1:7777/v1/agent/tetrix/job1""#,
+                "-c",
+                r#"mcp_servers.tetrix.bearer_token_env_var="OBY_MCP_TOKEN""#,
+                "app-server"
+            ]
         );
     }
 
