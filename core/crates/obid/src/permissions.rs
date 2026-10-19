@@ -1462,10 +1462,12 @@ fn with_folders<'a>(
     let mut open: Vec<usize> = Vec::new();
     let mut folders = vec![bounds.worktree.clone()];
     let mut lost = false;
+    let mut before: Option<&Simple> = None;
     commands
         .iter()
         .map(|command| {
             let words = command.words.as_slice();
+            let previous = before.replace(command);
             if lost {
                 return (words, None);
             }
@@ -1483,7 +1485,21 @@ fn with_folders<'a>(
             }
             let here = folders.last_mut().expect("the line's own folder");
             let at = here.clone();
-            if program_index(words)
+            // `cd "$(git rev-parse --show-toplevel)"` from inside the worktree: the substitution ran
+            // just before, from here, and its answer is the worktree's top (agents use it a lot).
+            // From anywhere else git's answer is another repository's, or none.
+            let to_the_top = words.len() == 2
+                && base(&words[0]) == "cd"
+                && words[1].is_empty()
+                && previous.is_some_and(|p| {
+                    !p.nested
+                        && p.subshells.len() == command.subshells.len() + 1
+                        && p.words == ["git", "rev-parse", "--show-toplevel"]
+                })
+                && crate::policy::path_inside(&here.to_string_lossy(), &bounds.worktree);
+            if to_the_top && !command.nested && !command.piped {
+                *here = bounds.worktree.clone();
+            } else if program_index(words)
                 .is_some_and(|p| matches!(base(&words[p]), "cd" | "pushd" | "popd"))
             {
                 match bounds
@@ -1520,10 +1536,32 @@ const GIT_QUIET_VARIABLES: &[&str] = &[
     "GIT_TERMINAL_PROMPT=0",
 ];
 
-/// The only setting a command may give git on its command line (`git -c key=value`), exactly as
-/// written (#636). Any other could run a program (`core.sshCommand`, `core.fsmonitor`,
+/// The settings a command may give git on its command line (`git -c key=value`) exactly as
+/// written (#636), besides who a commit is by and colours ([`quiet_git_setting`]). Any other could
+/// run a program (`core.sshCommand`, `core.fsmonitor`,
 /// `core.pager`, `diff.external`, `alias.*`, `credential.helper`, …), so the command asks.
-const GIT_QUIET_SETTINGS: &[&str] = &["core.editor=true"];
+const GIT_QUIET_SETTINGS: &[&str] = &["core.editor=true", "commit.gpgsign=false"];
+
+/// What a commit is by and when, whatever the value: they run no program, and agents set them all
+/// the time (as before #636).
+const GIT_WHO_VARIABLES: &[&str] = &[
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_DATE",
+    "GIT_PAGER_IN_USE",
+];
+
+/// Whether `git -c key=value` is one of the settings that run nothing: the quiet ones exactly as
+/// written, who a commit is by, and colours, whatever the value.
+fn quiet_git_setting(kv: &str) -> bool {
+    let key = kv.split_once('=').map_or(kv, |(key, _)| key);
+    GIT_QUIET_SETTINGS.contains(&kv)
+        || matches!(key, "user.name" | "user.email")
+        || key.starts_with("color.")
+}
 
 /// Whether a command gives git a setting, or a variable, that can run a program obid doesn't read:
 /// any but [`GIT_QUIET_VARIABLES`] and [`GIT_QUIET_SETTINGS`].
@@ -1538,7 +1576,12 @@ fn runs_through_git_settings(command: &str) -> bool {
         let variables = words[..program.unwrap_or(words.len())]
             .iter()
             .filter(|w| is_assignment(w))
-            .any(|w| w.starts_with("GIT_") && !GIT_QUIET_VARIABLES.contains(&w.as_str()));
+            .any(|w| {
+                let name = w.split_once('=').map_or(w.as_str(), |(name, _)| name);
+                w.starts_with("GIT_")
+                    && !GIT_QUIET_VARIABLES.contains(&w.as_str())
+                    && !GIT_WHO_VARIABLES.contains(&name)
+            });
         let Some(p) = program.filter(|p| base(&words[*p]) == "git") else {
             return variables;
         };
@@ -1550,7 +1593,7 @@ fn runs_through_git_settings(command: &str) -> bool {
                 "-C" => None,
                 _ => w.strip_prefix("-c").filter(|kv| !kv.is_empty()),
             };
-            if setting.is_some_and(|kv| !GIT_QUIET_SETTINGS.contains(&kv))
+            if setting.is_some_and(|kv| !quiet_git_setting(kv))
                 || w.starts_with("--config-env")
                 || w.starts_with("--exec-path=")
             {
@@ -2944,10 +2987,7 @@ mod tests {
             ("git -c alias.st=status st", Some(Reach::Unknown)),
             ("git -cdiff.external=x diff", Some(Reach::Unknown)),
             ("GIT_SSH_COMMAND=x git status", Some(Reach::Unknown)),
-            (
-                "git -c user.name=t -c user.email=t@t commit -m x",
-                Some(Reach::Unknown),
-            ),
+            ("git -c user.name=t -c user.email=t@t commit -m x", None),
             ("git log -c HEAD", None),
             ("busybox wget https://x", Some(Reach::Network)),
             ("python3 -m pytest -c setup.cfg", None),
@@ -2969,8 +3009,19 @@ mod tests {
         for (command, reach) in [
             ("cd - && ls", Some(Reach::Outside)),
             ("cd $OLDPWD && cat a", Some(Reach::Outside)),
+            // The worktree's top, from inside it: where git's answer leads (agents use it a lot).
+            ("cd \"$(git rev-parse --show-toplevel)\" && ls", None),
             (
-                "cd \"$(git rev-parse --show-toplevel)\" && ls",
+                "cd src && cd $(git rev-parse --show-toplevel) && cat a",
+                None,
+            ),
+            // From outside the worktree, git's answer is another repository's, or none.
+            (
+                "cd /tmp && cd \"$(git rev-parse --show-toplevel)\" && ls",
+                Some(Reach::Outside),
+            ),
+            (
+                "cd \"$(git -C /tmp rev-parse --show-toplevel)\" && ls",
                 Some(Reach::Outside),
             ),
             ("pushd src && popd && ls", Some(Reach::Outside)),
@@ -3046,6 +3097,14 @@ mod tests {
             "GIT_TERMINAL_PROMPT=0 git status",
             "git -c core.editor=true commit --amend",
             "GIT_EDITOR=true GIT_PAGER=cat git -c core.editor=true log",
+            // Who a commit is by, and colours, run no program, whatever their value: agents use
+            // them all the time, and asking would stop jobs for nothing.
+            "GIT_AUTHOR_NAME=t git commit -m x",
+            "GIT_COMMITTER_EMAIL=t@t git commit -m x",
+            "git -c user.name=t -c user.email=t@t commit -m x",
+            "git -c color.ui=never log",
+            // Not signing runs no program (agents have no key, and commit unsigned).
+            "git -c commit.gpgsign=false commit --fixup HEAD",
         ] {
             assert_eq!(super::reach(&bash(command), worktree), None, "{command}");
         }
@@ -3054,11 +3113,11 @@ mod tests {
             "GIT_PAGER=less git log",
             "GIT_SEQUENCE_EDITOR=true git rebase -i HEAD~2",
             "GIT_TERMINAL_PROMPT=1 git status",
-            "GIT_AUTHOR_NAME=t git commit -m x",
             "env GIT_PAGER=less git log",
             "git -c core.editor=vim commit",
-            "git -c color.ui=never log",
             "git -ccore.pager=less log",
+            "git -c commit.gpgsign=true commit -m x",
+            "git -c gpg.program=./x commit -m x",
         ] {
             assert_eq!(
                 super::reach(&bash(command), worktree),
