@@ -33,6 +33,13 @@
 //                    the `tetrix` server's search_entities, get_entity, save_session and
 //                    resume_session, and commits tetrix.txt with a Tetrix-Session trailer naming
 //                    the session save_session answered
+//   QUIET            says nothing and writes nothing until it is ended (a stalled job)
+//   CHATTY: <ms>     streams a word every 100 ms for that long, then ends the turn with "Chatted."
+//   LOOP             runs the same failing command 6 times, then waits until it is ended
+//   MAXTURNS         ends the turn as Claude Code's --max-turns does (error_max_turns)
+//   TRANSIENT        ends the turn with an overloaded API's error
+//   a handoff note   asked for one (obid's prompt when a job stalls): ends the turn with the note,
+//                    "Done: … Left: … Failed: …", or says nothing when the task said NO NOTE
 //   ON PURPOSE       in a fix round's quoted task: ends the turn with "FAILS AS ASKED: …"
 //   anything else    ends the turn with "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
@@ -92,6 +99,10 @@ rl.on("line", (line) => {
   if (prompt.includes("failed after your last round") && quote >= 0) {
     if (prompt.slice(quote).includes("ON PURPOSE")) return result("FAILS AS ASKED: the test fails on purpose, as the task says.");
     prompt = prompt.slice(0, quote);
+  }
+  if (prompt.includes("write a handoff note")) {
+    if (existsSync(".obi/no-note")) return setInterval(() => {}, 1000);
+    return result("Done: the parser.\nLeft: the tests.\nFailed: npm test, three times: a missing fixture.");
   }
   const commit = prompt.match(/COMMIT: (\S+)/);
   const ask = prompt.match(/ASK: (\{.*\})/);
@@ -182,6 +193,25 @@ rl.on("line", (line) => {
     let beats = 0;
     writeFileSync(".obi/beat", String(beats));
     setInterval(() => writeFileSync(".obi/beat", String(++beats)), 50);
+  } else if (prompt.includes("QUIET")) {
+    if (prompt.includes("NO NOTE")) {
+      mkdirSync(".obi", { recursive: true });
+      writeFileSync(".obi/no-note", "");
+    }
+    setInterval(() => {}, 1000);
+  } else if (prompt.match(/CHATTY: (\d+)/)) {
+    const tick = setInterval(() => emit({ type: "stream_event", session_id: session, event: { type: "content_block_delta", delta: { type: "text_delta", text: "working " } } }), 100);
+    setTimeout(() => (clearInterval(tick), result("Chatted.")), Number(prompt.match(/CHATTY: (\d+)/)[1]));
+  } else if (prompt.includes("LOOP")) {
+    for (let i = 1; i <= 6; i++) {
+      emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: `l${i}`, name: "Bash", input: { command: "npm test" } }] } });
+      emit({ type: "user", session_id: session, message: { role: "user", content: [{ type: "tool_result", tool_use_id: `l${i}`, is_error: true, content: "npm ERR! missing fixture" }] } });
+    }
+    setInterval(() => {}, 1000);
+  } else if (prompt.includes("MAXTURNS")) {
+    emit({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 200, session_id: session, total_cost_usd: 0 });
+  } else if (prompt.includes("TRANSIENT")) {
+    result('API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', true);
   } else if (prompt.includes("FAIL")) {
     result("it broke", true);
   } else if (asks) {

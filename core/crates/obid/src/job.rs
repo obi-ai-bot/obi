@@ -108,6 +108,27 @@ pub struct Brief {
     pub done: Option<String>,
 }
 
+/// Why and where a stalled job stopped, with its handoff note (docs/runner-api.md, `stalled`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stalled {
+    /// `quiet`, `loop`, `turns` or `ceiling`.
+    pub why: String,
+    /// The same as the job's `limit`.
+    pub text: String,
+    pub at: i64,
+    pub round: u32,
+    pub branch: String,
+    /// The branch's head when it stalled, and the job's own commits.
+    pub commit: Option<String>,
+    pub commits: u64,
+    /// A session is kept to carry on in (its id stays obid's).
+    pub session: bool,
+    /// The handoff note, quoted as data, secrets taken out; `agent` or `obid` wrote it.
+    pub note: String,
+    pub note_by: String,
+}
+
 /// A job as obid keeps it (`home/jobs/<id>.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,6 +188,8 @@ pub struct Job {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<String>>,
     pub limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled: Option<Stalled>,
     pub start_commit: Option<String>,
     pub mode: Option<String>,
     pub waiting: Option<Waiting>,
@@ -317,6 +340,7 @@ impl Job {
             files: None,
             attachments: None,
             limit: None,
+            stalled: None,
             start_commit: None,
             mode: None,
             waiting: None,
@@ -551,6 +575,11 @@ impl Job {
             "outgoing": self.outgoing.iter().map(crate::publish::Outgoing::to_json).collect::<Vec<_>>(),
             "question": null,
             "limit": self.limit,
+            "stalled": self.stalled.as_ref().map(|s| json!({
+                "why": s.why, "text": s.text, "at": date(Some(s.at)), "round": s.round,
+                "branch": s.branch, "commit": s.commit, "commits": s.commits,
+                "session": s.session, "note": s.note, "noteBy": s.note_by,
+            })),
             "startCommit": self.start_commit,
             "firstSwiftBuildSeconds": null,
             "macCheck": mac_check_json(self.mac_check.clone(), "merge"),
@@ -901,6 +930,7 @@ mod tests {
             "claim",
             "question",
             "limit",
+            "stalled",
             "startCommit",
             "firstSwiftBuildSeconds",
             "macCheck",
@@ -919,7 +949,7 @@ mod tests {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
         // The Swift runner's 65 keys, and obid's eight.
-        assert_eq!(object.len(), 73);
+        assert_eq!(object.len(), 74);
         assert_eq!(value["artifacts"], json!([]));
         assert_eq!(value["artifactProblems"], json!([]));
         assert_eq!(value["answered"], json!([]));
