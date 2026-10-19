@@ -254,6 +254,9 @@ pub struct Job {
     /// Its change against `start_commit` after each round, oldest first (#736): `diff` in the API.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diffs: Vec<crate::facts::Diff>,
+    /// Each run of its own check, oldest first, the running one live (#734).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<crate::facts::CheckRecord>,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -350,6 +353,7 @@ impl Job {
             earlier: None,
             start_from: None,
             diffs: Vec::new(),
+            checks: Vec::new(),
         }
     }
 
@@ -593,6 +597,9 @@ impl Job {
         // round ends.
         if let Some(last) = self.diffs.last() {
             value["diff"] = json!(last);
+        }
+        if !self.checks.is_empty() {
+            value["checks"] = json!(self.checks);
         }
         value
     }

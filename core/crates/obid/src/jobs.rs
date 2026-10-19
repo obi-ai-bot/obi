@@ -45,6 +45,8 @@ const SANDBOXED_GIT_STDERR_MAX: usize = 64 * 1024;
 /// on without its stat rather than wait on it.
 const DIFF_LIMIT: Duration = Duration::from_secs(60);
 const DIFF_OUTPUT_MAX: usize = 2 * 1024 * 1024;
+/// How often a running check's record is brought up to date on its job (#734).
+const CHECK_TICK: Duration = Duration::from_secs(2);
 /// The commit obid keeps a job's uncommitted work in when it ends without commits to publish.
 const WIP_MESSAGE: &str = "wip: work left uncommitted when the job ended\n\nobid committed what the agent left uncommitted, to keep it on the job's branch. It is never published by itself, and the job's next run takes it back out.";
 /// What a round's summary starts with when the check's failure is what the task asked for.
@@ -3302,12 +3304,52 @@ impl Jobs {
         let mut spec = spec.clone();
         spec.network = false;
         spec.accounts.clear();
-        let argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), command.into()];
+        // Each step between its top-level `&&`s timed, its tests counted, live (#734).
+        let round = self.get(id).map_or(1, |job| job.current_round());
+        let marker = format!("obid-step-{}", random_check_id()?);
+        let watch = Arc::new(Mutex::new(crate::facts::CheckWatch::new(
+            marker,
+            crate::facts::steps(command),
+        )));
+        let record = |ended| {
+            let record = watch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record(round, ended);
+            self.update(id, |job| match job.checks.last_mut() {
+                Some(last) if ended.is_some() || last.steps.iter().any(|s| s.running) => {
+                    *last = record
+                }
+                _ => job.checks.push(record),
+            });
+        };
+        record(None);
+        let script = watch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .script();
+        let argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), script.into()];
         let argv = sandbox.wrap(&spec, &argv);
         let env = process::sandbox_env(&process::tools_path(), &spec.temp, &spec.git_env());
-        let run = run_check(&argv, &env, &spec.worktree, CHECK_LIMIT, signal.clone())
-            .await
-            .map_err(|e| format!("obid couldn't run the check: {e}"))?;
+        let running = run_check(
+            &argv,
+            &env,
+            &spec.worktree,
+            CHECK_LIMIT,
+            signal.clone(),
+            Some(watch.clone()),
+        );
+        tokio::pin!(running);
+        let mut tick = tokio::time::interval(CHECK_TICK);
+        tick.tick().await;
+        let run = loop {
+            tokio::select! {
+                run = &mut running => break run,
+                _ = tick.tick() => record(None),
+            }
+        };
+        record(Some(run.as_ref().is_ok_and(|run| run.passed)));
+        let run = run.map_err(|e| format!("obid couldn't run the check: {e}"))?;
         let _ = std::fs::write(self.log_path(id, "check.log"), &run.output);
         Ok(run)
     }
@@ -6353,6 +6395,7 @@ pub async fn run_check(
     cwd: &Path,
     limit: Duration,
     mut signal: watch::Receiver<Signal>,
+    watch: Option<Arc<Mutex<crate::facts::CheckWatch>>>,
 ) -> std::io::Result<CheckRun> {
     let (reader, writer) = std::io::pipe()?;
     clear_recorded_exit(env);
@@ -6375,14 +6418,24 @@ pub async fn run_check(
     // The writing ends live in the child now: the reader ends when it (and what it started) does.
     drop(command);
     let pgid = child.id().unwrap_or(0);
+    let fed = watch.clone();
     let reading = tokio::task::spawn_blocking(move || {
         let mut reader = reader;
+        let feed = |bytes: &[u8]| {
+            if let Some(watch) = &fed {
+                watch
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .feed(bytes);
+            }
+        };
         let mut kept: Vec<u8> = Vec::new();
         let mut buffer = [0u8; 8192];
         loop {
             match std::io::Read::read(&mut reader, &mut buffer) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    feed(&buffer[..n]);
                     kept.extend_from_slice(&buffer[..n]);
                     if kept.len() > 2 * CHECK_OUTPUT_MAX {
                         kept.drain(..kept.len() - CHECK_OUTPUT_MAX);
@@ -6390,6 +6443,8 @@ pub async fn run_check(
                 }
             }
         }
+        // The last line, when it has no newline of its own.
+        feed(b"\n");
         kept
     });
     let mut timed_out = false;
@@ -6413,6 +6468,15 @@ pub async fn run_check(
         .and_then(Result::ok)
         .unwrap_or_default();
     let mut output = String::from_utf8_lossy(&kept).into_owned();
+    if let Some(watch) = &watch {
+        let watch = watch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        output = output
+            .split_inclusive('\n')
+            .filter(|line| !watch.is_marker(line))
+            .collect();
+    }
     if output.len() > CHECK_OUTPUT_MAX {
         output = tail(&output, CHECK_OUTPUT_MAX).to_owned();
     }
