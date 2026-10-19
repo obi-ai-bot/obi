@@ -1151,7 +1151,15 @@ async fn act(
 ) -> Outcome {
     let text = actions::step_text(shared, plan);
     step_event(shared, control, index, plan.action, &text, State::Running);
-    let outcome = actions::act(shared, plan, said, source, &control.conversation).await;
+    let outcome = actions::act(
+        shared,
+        plan,
+        said,
+        source,
+        &control.conversation,
+        &control.turn,
+    )
+    .await;
     step_event(
         shared,
         control,
