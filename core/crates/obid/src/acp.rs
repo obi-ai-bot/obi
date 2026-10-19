@@ -1020,6 +1020,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A link put in place of the folder itself (#645: another job on the account swaps it in
+    /// after obid's check) is never written through: the rewrite fails, the other folder untouched.
+    #[test]
+    fn cursor_settings_never_follow_a_linked_folder() {
+        let root = std::env::temp_dir().join(format!("obid-cursor-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let home = root.join("home");
+        std::os::unix::fs::symlink(&elsewhere, &home).unwrap();
+        assert!(cursor::rewrite_config(&home).is_err());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Jobs on one Cursor account start at once: each rewrite of its settings succeeds.
     #[test]
     fn cursor_settings_are_rewritten_by_many_jobs_at_once() {
