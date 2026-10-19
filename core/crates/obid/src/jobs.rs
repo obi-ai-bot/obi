@@ -3166,7 +3166,10 @@ impl Jobs {
             }
         };
         let on_event = |event: AgentEvent| {
-            jobs.transcribed(id, jobs.transcripts.record(id, &event));
+            let entries = jobs
+                .transcripts
+                .record(id, &event, &worktree, job.check.as_deref());
+            jobs.transcribed(id, entries);
             match event {
                 AgentEvent::Session(session) => {
                     jobs.update(id, |job| job.session = Some(session));
@@ -3251,11 +3254,25 @@ impl Jobs {
         ran.map_err(|e| format!("obid couldn't start {}: {e}", tool.name()))
     }
 
-    /// Tells the apps about transcript entries that came or changed (`transcript` events).
+    /// Tells the apps about transcript entries that came or changed (`transcript` events), and
+    /// keeps the job's `activity` and `context` up to date with them.
     fn transcribed(&self, id: &str, entries: Vec<crate::transcript::Entry>) {
+        if entries.is_empty() {
+            return;
+        }
         for entry in entries {
             self.events
                 .send("transcript", json!({"job": id, "entry": entry}));
+        }
+        // ponytail: a `job` event per change in the activity (a call's start and end); throttle
+        // here if that's ever too many.
+        let (activity, context) = self.transcripts.glance(id);
+        let job = self.get(id);
+        if job.is_some_and(|j| j.activity != activity || j.context != context) {
+            self.update(id, |job| {
+                job.activity = activity;
+                job.context = context;
+            });
         }
     }
 

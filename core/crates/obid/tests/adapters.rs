@@ -221,6 +221,14 @@ fn a_codex_jobs_transcript_matches_claudes() {
     assert_eq!(entries[11]["summary"], "Running cargo test");
     assert_eq!(entries[11]["exit"], 101);
     assert!(!answer.text.contains("raw output"), "{}", answer.text);
+    // The same kinds in its activity (#730).
+    assert_eq!(
+        job["activity"]["counts"],
+        json!({"read": 5, "search": 0, "edit": 2, "command": 0, "test": 1, "tetrix": 0, "web": 0, "mcp": 0}),
+        "{job}"
+    );
+    assert_eq!(job["activity"]["groups"][1]["title"], "Found it");
+    assert_eq!(job["context"], "Found it. Fixing it.");
 }
 
 /// obid's fixed denials hold for Codex: a push is declined, and since the decision carries no
