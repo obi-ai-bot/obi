@@ -285,8 +285,7 @@ fn the_fourth_stall_asks_the_owner() {
 }
 
 /// What the agent wrote in its note can't make the supervisor do what's the owner's: a Bypass
-/// start is only proposed, an inbox confirm can't be answered, and with no decision of its own
-/// the owner is asked. The note never reaches the turn's prompt, only oby_job's quoted answer.
+/// start is only proposed, and with no decision of its own the owner is asked. The note never reaches the turn's prompt, only oby_job's quoted answer.
 #[test]
 fn the_note_cant_trigger_a_gated_action() {
     let (_folder, obid) = obid("supervisor-note");
