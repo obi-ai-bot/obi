@@ -529,13 +529,14 @@ fn a_build_job_commits_and_ends_done() {
         ]
     );
     assert_eq!(stages[3], ("publish".into(), "done".into()));
-    // The list, newest first, and the job by id, the same.
+    // The list, newest first, and the job by id, the same, but for each round's diff stat, only
+    // there (#736).
     let list = request(&obid, "GET", "/v1/jobs?limit=5", None).body;
     assert_eq!(list[0]["id"], id.as_str());
-    assert_eq!(
-        request(&obid, "GET", &format!("/v1/jobs/{id}"), None).body,
-        job
-    );
+    let mut by_id = request(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(by_id["diff"]["rounds"].as_array().map(Vec::len), Some(1));
+    by_id["diff"].as_object_mut().unwrap().remove("rounds");
+    assert_eq!(by_id, job);
 }
 
 /// A fix that commits nothing failed: `Nothing committed: ` and the agent's first line. Dismiss lets
@@ -762,7 +763,11 @@ fn each_round_keeps_its_diff_stat() {
     let mut served = diff["byFile"].as_array().unwrap().clone();
     served.sort_by_key(|f| f["path"].as_str().unwrap().to_owned());
     assert_eq!(served, by_file);
-    let rounds = diff["rounds"].as_array().unwrap();
+    // Every round's only on the job itself, not on every event.
+    assert!(diff.get("rounds").is_none(), "{job}");
+    let detail = request(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(detail["diff"]["byFile"], diff["byFile"]);
+    let rounds = detail["diff"]["rounds"].as_array().unwrap();
     assert_eq!(
         rounds
             .iter()

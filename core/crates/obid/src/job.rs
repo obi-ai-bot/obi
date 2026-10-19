@@ -589,9 +589,19 @@ impl Job {
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
         }
-        // The latest round's, with every round's (#736). Absent before the first round ends.
+        // The latest round's (#736); every round's is in `detail_json`. Absent before the first
+        // round ends.
         if let Some(last) = self.diffs.last() {
             value["diff"] = json!(last);
+        }
+        value
+    }
+
+    /// The job as `GET /v1/jobs/{id}` shows it: [`Self::to_json`] with what's too big to send on
+    /// every event, each round's diff stat (`diff.rounds`, #736).
+    pub fn detail_json(&self) -> Value {
+        let mut value = self.to_json();
+        if value.get("diff").is_some() {
             value["diff"]["rounds"] = json!(self.diffs);
         }
         value
