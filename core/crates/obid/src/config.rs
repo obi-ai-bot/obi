@@ -70,6 +70,10 @@ struct File {
     /// How long one conversation turn may act, in seconds: 1 to 110, 110 when left out.
     #[serde(default)]
     turn_budget: Option<u64>,
+    /// The least time a brain is asked to think in, in seconds: 1 to 110, 1 when left out. For
+    /// tests, which widen it so a busy machine can't miss it.
+    #[serde(default)]
+    least_think: Option<u64>,
     orchestrator_delay: Option<u64>,
     /// How long a job may go without progress before it stalls, in seconds: 1 to 86,400, 900
     /// when left out.
@@ -220,6 +224,9 @@ pub struct Config {
     /// How long one conversation turn may plan and act (`Desk.turnBudget`): 110 seconds unless
     /// `turnBudget` says less, under the apps' 120-second wait.
     pub turn_budget: std::time::Duration,
+    /// The least time a brain is asked to think in (#615): with less of the turn left, none is.
+    /// [`crate::brain::planner::LEAST`] unless `leastThink` says otherwise, which only tests do.
+    pub least_think: std::time::Duration,
     /// How long the event orchestrator waits for nearby events to come together before its
     /// turn (#590): 30 seconds unless `orchestratorDelay` says otherwise (1 to 600).
     pub orchestrator_delay: std::time::Duration,
@@ -452,6 +459,19 @@ impl Config {
             }
         };
 
+        let least_think = match file.least_think {
+            None => crate::brain::planner::LEAST,
+            // Less than the whole budget: a turn no brain may ever think in is no turn.
+            Some(least) if (1..turn_budget).contains(&least) => {
+                std::time::Duration::from_secs(least)
+            }
+            Some(least) => {
+                return invalid(format!(
+                    "leastThink is {least}: it is 1 second to less than turnBudget ({turn_budget})."
+                ));
+            }
+        };
+
         let orchestrator_delay = file.orchestrator_delay.unwrap_or(30);
         if !(1..=600).contains(&orchestrator_delay) {
             return invalid(format!(
@@ -528,6 +548,7 @@ impl Config {
             telemetry: file.telemetry,
             vault,
             turn_budget: std::time::Duration::from_secs(turn_budget),
+            least_think,
             orchestrator_delay: std::time::Duration::from_secs(orchestrator_delay),
             stall_after: std::time::Duration::from_secs(stall_after),
             job_ceiling: std::time::Duration::from_secs(job_ceiling_hours * 3600),
@@ -970,6 +991,31 @@ mod tests {
             let text = with(serde_json::json!({"orchestratorDelay": wrong}));
             assert!(problem(&text).contains("orchestratorDelay"), "{wrong}");
         }
+    }
+
+    /// #763: tests may give a brain more than a second as the least it thinks in.
+    #[test]
+    fn the_least_think_time_is_1_second_to_under_the_budget() {
+        let config = Config::parse(&with(serde_json::json!({}))).unwrap();
+        assert_eq!(config.least_think, std::time::Duration::from_secs(1));
+        let config = Config::parse(&with(serde_json::json!({"leastThink": 10}))).unwrap();
+        assert_eq!(config.least_think, std::time::Duration::from_secs(10));
+        for wrong in [0, 111] {
+            let text = with(serde_json::json!({"leastThink": wrong}));
+            assert!(problem(&text).contains("leastThink"), "{wrong}");
+        }
+        let text = with(serde_json::json!({"turnBudget": 10, "leastThink": 10}));
+        assert!(
+            problem(&text).contains("less than turnBudget (10)"),
+            "{text}"
+        );
+        let config = Config::parse(&with(
+            serde_json::json!({"turnBudget": 10, "leastThink": 9}),
+        ));
+        assert_eq!(
+            config.unwrap().least_think,
+            std::time::Duration::from_secs(9)
+        );
     }
 
     #[test]

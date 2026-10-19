@@ -336,7 +336,7 @@ impl Link {
         let hook = Arc::downgrade(&link);
         link.jobs.on_confirm(Arc::new(move |item| {
             if let Some(link) = hook.upgrade() {
-                link.add_confirm(item);
+                link.add_confirm_once(item);
             }
         }));
         let hook = Arc::downgrade(&link);
@@ -2526,6 +2526,25 @@ impl Link {
         self.lock().inbox.insert(item.id.clone(), item.clone());
         self.save_item(&item);
         item
+    }
+
+    /// [`Link::add_confirm`], unless a `confirm` item for the same job and action is still open:
+    /// that one stands, so a caller asking again and again adds nothing (crate::jobs,
+    /// `confirm_past_safety`).
+    pub fn add_confirm_once(&self, item: Item) -> Item {
+        let action = |i: &Item| i.confirm.as_ref().map(|c| c.action.clone());
+        {
+            let state = self.lock();
+            if let Some(open) = state.inbox.values().find(|i| {
+                i.kind == "confirm"
+                    && i.done.is_none()
+                    && i.job == item.job
+                    && action(i) == action(&item)
+            }) {
+                return open.clone();
+            }
+        }
+        self.add_confirm(item)
     }
 
     /// `POST /v1/inbox/{id}/answer` on a `confirm` item: `Confirm` carries out what its title

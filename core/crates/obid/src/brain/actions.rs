@@ -476,24 +476,19 @@ fn retry(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
             false,
         );
     }
-    // Past its safety ceiling or budget, only the owner carries it on (docs/runner-api.md, `limit`).
-    let safety = crate::jobs::past_safety(job);
-    if theirs || safety {
-        let why = if safety {
-            format!(
-                "{name} stopped at its safety limit ({}). Oby's brain planned to carry it on, which happens only if you confirm.",
-                job.limit.as_deref().unwrap_or("")
-            )
-        } else {
-            format!(
-                "Oby's brain planned to try {name} again, which another conversation started. It happens only if you confirm."
-            )
-        };
+    // Past its safety ceiling or budget, only the owner's Confirm carries it on (docs/runner-api.md,
+    // `limit`): one item, however often it's asked.
+    if crate::jobs::past_safety(job) {
+        return (shared.jobs.confirm_past_safety(job, TRY_AGAIN).0, true);
+    }
+    if theirs {
         confirm(
             shared,
             &job.id,
             format!("Try {name} again"),
-            why,
+            format!(
+                "Oby's brain planned to try {name} again, which another conversation started. It happens only if you confirm."
+            ),
             Confirmed {
                 action: action::RETRY_JOB.into(),
                 target: job.id.clone(),
@@ -501,15 +496,9 @@ fn retry(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
             },
         );
         return (
-            if safety {
-                format!(
-                    "{name} stopped at its safety limit, so carrying it on waits for your OK: confirm it in your inbox."
-                )
-            } else {
-                format!(
-                    "{name} was started in another conversation, so trying it again waits for your OK: confirm it in your inbox."
-                )
-            },
+            format!(
+                "{name} was started in another conversation, so trying it again waits for your OK: confirm it in your inbox."
+            ),
             true,
         );
     }
