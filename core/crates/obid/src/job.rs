@@ -251,6 +251,9 @@ pub struct Job {
     /// for a follow-up of work that isn't merged. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_from: Option<String>,
+    /// Its change against `start_commit` after each round, oldest first (#736): `diff` in the API.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diffs: Vec<crate::facts::Diff>,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -346,6 +349,7 @@ impl Job {
             follow_up_of: None,
             earlier: None,
             start_from: None,
+            diffs: Vec::new(),
         }
     }
 
@@ -584,6 +588,11 @@ impl Job {
         });
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
+        }
+        // The latest round's, with every round's (#736). Absent before the first round ends.
+        if let Some(last) = self.diffs.last() {
+            value["diff"] = json!(last);
+            value["diff"]["rounds"] = json!(self.diffs);
         }
         value
     }

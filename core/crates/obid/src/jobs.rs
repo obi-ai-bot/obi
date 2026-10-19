@@ -2574,6 +2574,35 @@ impl Jobs {
         Ok(())
     }
 
+    /// The job's change against `start_commit` after `round`, kept as that round's (#736): paths
+    /// and counts only, read in its sandbox as git shows it with nothing the repository set up.
+    /// ponytail: tracked files only; a new file counts once the agent commits it (it's told to).
+    async fn note_diff(&self, id: &str, start_commit: &str, round: u32) {
+        if !git::is_sha(start_commit) {
+            return;
+        }
+        let args = [
+            "--no-replace-objects",
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            start_commit,
+            "--",
+        ];
+        let Ok(out) = self.sandboxed_git(id, &args, None).await else {
+            return;
+        };
+        let mut diff = crate::facts::numstat(&String::from_utf8_lossy(&out));
+        diff.round = Some(round);
+        self.update(id, |job| {
+            job.diffs.retain(|d| d.round != Some(round));
+            job.diffs.push(diff);
+        });
+    }
+
     /// Takes obid's own `wip:` commit back out as the job runs again: what it held is uncommitted,
     /// as the agent left it. One the job started from (a follow-up's) stays.
     async fn unkeep_wip(&self, id: &str, start_commit: &str) -> Result<(), String> {
@@ -3955,6 +3984,7 @@ impl Jobs {
                         .push(said.clone());
                 });
                 noted = false;
+                self.note_diff(id, &start_commit, round).await;
                 // Words the owner sent while it worked: the agent hears them now, in another turn of
                 // this round, before the check.
                 let words = self.take_heard(id);

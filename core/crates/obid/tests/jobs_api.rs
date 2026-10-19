@@ -723,6 +723,56 @@ fn a_check_that_keeps_failing_stops_at_a_limit() {
     assert!(log.contains("the check failed"), "{log}");
 }
 
+/// Each round's change against the start commit is kept as that round's (#736): paths and the
+/// counts `git diff --numstat` gives, never what the files hold.
+#[test]
+fn each_round_keeps_its_diff_stat() {
+    let folder = Folder::new("diff");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "EDIT: src/greet.js COMMIT: a.txt", "check": "false", "rounds": 2}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}");
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let start = job["startCommit"].as_str().unwrap();
+    let numstat = git(
+        &clone,
+        &["diff", "--numstat", start, &format!("oby/build-{id}")],
+    );
+    let mut by_file: Vec<Value> = numstat
+        .lines()
+        .map(|line| {
+            let parts: Vec<&str> = line.split('\t').collect();
+            json!({"path": parts[2], "added": parts[0].parse::<u64>().unwrap(), "removed": parts[1].parse::<u64>().unwrap()})
+        })
+        .collect();
+    by_file.sort_by_key(|f| f["path"].as_str().unwrap().to_owned());
+    assert_eq!(by_file.len(), 2, "{numstat}");
+    let diff = &job["diff"];
+    assert_eq!(diff["files"], 2, "{job}");
+    assert_eq!(diff["added"], 2, "{job}");
+    assert_eq!(diff["removed"], 0, "{job}");
+    let mut served = diff["byFile"].as_array().unwrap().clone();
+    served.sort_by_key(|f| f["path"].as_str().unwrap().to_owned());
+    assert_eq!(served, by_file);
+    let rounds = diff["rounds"].as_array().unwrap();
+    assert_eq!(
+        rounds
+            .iter()
+            .map(|r| r["round"].clone())
+            .collect::<Vec<_>>(),
+        [json!(1), json!(2)]
+    );
+    assert_eq!(rounds[0]["byFile"].as_array().unwrap().len(), 2);
+}
+
 /// A check that fails the way the owner asked for (a test meant to fail): the fix round quotes the
 /// task, the agent says the failure is intended, and the job ends with that round instead of
 /// another one that would undo it.

@@ -21,6 +21,7 @@ pub mod connections;
 pub mod conversation;
 pub mod devices;
 pub mod events;
+pub mod facts;
 pub mod failures;
 pub mod gateway;
 pub mod git;
