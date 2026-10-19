@@ -828,7 +828,7 @@ fn each_round_keeps_its_diff_stat() {
         .unwrap()
         .to_owned();
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     let clone = obid.home.join("clones/obi-e2e/fixture-app");
     let start = job["startCommit"].as_str().unwrap();
     let numstat = git(

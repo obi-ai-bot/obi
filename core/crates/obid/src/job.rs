@@ -764,7 +764,10 @@ impl Job {
         }
         // The scan's own record; else why it never ran: its checks failed, or publishing stopped
         // before it (#735).
-        let scan = if self.status == Status::Failed && self.phase == Some(Phase::Check) {
+        // A check that never passed ends needing the owner (`interrupted`, #725) or failed.
+        let scan = if matches!(self.status, Status::Failed | Status::Interrupted)
+            && self.phase == Some(Phase::Check)
+        {
             Some(json!({"ran": false, "reason": "checks failed"}))
         } else if let Some(scan) = &self.scan {
             Some(json!(scan))
