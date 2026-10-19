@@ -591,6 +591,106 @@ fn nothing_committed_fails_and_dismiss_lets_it_go() {
     );
 }
 
+/// #606: what the agent left uncommitted when its job ends without being done is one `wip:`
+/// commit on the job's branch, published by nothing; a round the owner asks for afterwards takes
+/// it back out, so it counts as none of the job's commits.
+#[test]
+fn uncommitted_work_is_kept_as_a_wip_commit() {
+    let folder = Folder::new("wip");
+    let remote = fixture(&folder.0.join("fixture"));
+    let bin = fake_gh(&folder.0);
+    let obid = start_with(&folder.0, &config(&folder.0, &remote), Some(&bin));
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "DRAFT: draft.txt"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "failed");
+    assert_eq!(job["summary"], "Nothing committed: Nothing to do.");
+    let branch = format!("oby/fix-{id}");
+    let start = job["startCommit"].as_str().unwrap();
+    assert_eq!(
+        git(&clone, &["log", "-1", "--format=%s", &branch]),
+        "wip: work left uncommitted when the job ended"
+    );
+    assert_eq!(git(&clone, &["rev-parse", &format!("{branch}~1")]), start);
+    assert_eq!(
+        git(&clone, &["show", &format!("{branch}:draft.txt")]),
+        "draft"
+    );
+    let worktree = obid.home.join("worktrees").join(&id);
+    assert_eq!(git(&worktree, &["status", "--porcelain"]), "");
+    assert_eq!(job["published"], Value::Null);
+    // Nothing tried to publish (the GitHub feed's own `api graphql` calls aside).
+    assert!(
+        !std::fs::read_to_string(folder.0.join("gh-calls"))
+            .unwrap_or_default()
+            .lines()
+            .any(|call| call.starts_with("pr "))
+    );
+
+    // Tried again: the agent finds its work uncommitted, as it left it, and ends with nothing
+    // committed of its own, so nothing is published, and the work is kept again.
+    let more = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(
+            &json!({"text": "Try again, picking up where you left off. Finish with a short summary as asked."})
+                .to_string(),
+        ),
+    );
+    assert_eq!(more.status, 200, "{}", more.text);
+    let job = until(&obid, &id, |j| {
+        j["round"] == 2 && j["status"] != "queued" && j["status"] != "running"
+    });
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["commits"], 0, "{job}");
+    assert_eq!(job["published"], Value::Null, "{job}");
+    // Nothing tried to publish (the GitHub feed's own `api graphql` calls aside).
+    assert!(
+        !std::fs::read_to_string(folder.0.join("gh-calls"))
+            .unwrap_or_default()
+            .lines()
+            .any(|call| call.starts_with("pr "))
+    );
+    // The job ends before its worker keeps the work.
+    until(&obid, &id, |_| {
+        git(&clone, &["log", "-1", "--format=%s", &branch])
+            == "wip: work left uncommitted when the job ended"
+    });
+    assert_eq!(git(&clone, &["rev-parse", &format!("{branch}~1")]), start);
+
+    // Stopped mid-round: the same.
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "DRAFT: notes.txt SLEEP"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    beat(&obid, &id);
+    request(&obid, "POST", &format!("/v1/jobs/{id}/stop"), None);
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "stopped");
+    let branch = format!("oby/build-{id}");
+    // Stop answers before its worker keeps the work.
+    until(&obid, &id, |_| {
+        git(&clone, &["log", "-1", "--format=%s", &branch])
+            == "wip: work left uncommitted when the job ended"
+    });
+    assert_eq!(
+        git(&clone, &["show", &format!("{branch}:notes.txt")]),
+        "draft"
+    );
+}
+
 /// A check that keeps failing gets the agent another round with its output, then stops at a limit.
 #[test]
 fn a_check_that_keeps_failing_stops_at_a_limit() {

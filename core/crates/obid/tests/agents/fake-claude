@@ -2,6 +2,8 @@
 // A stand-in for Claude Code in obid's tests: stream-json in and out, as obid runs `claude`. What
 // it does comes from the prompt (the job's task):
 //   COMMIT: <file>   writes the file in the worktree and commits it
+//   DRAFT: <file>    writes the file in the worktree and leaves it uncommitted, then goes on with
+//                    the rest of the prompt
 //   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is ended
 //   FAIL             ends the turn with an error result
 //   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
@@ -92,6 +94,8 @@ rl.on("line", (line) => {
   const asks = prompt.match(/ASKS: (\[.*\])/);
   const login = prompt.match(/LOGIN: (\S+)/);
   const plant = prompt.match(/PLANT: (\S+)/);
+  const draft = prompt.match(/DRAFT: (\S+)/);
+  if (draft) writeFileSync(draft[1], "draft\n");
   if (commit) {
     writeFileSync(commit[1], "hello\n");
     execFileSync("git", ["add", commit[1]]);

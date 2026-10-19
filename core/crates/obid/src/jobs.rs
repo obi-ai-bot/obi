@@ -37,6 +37,8 @@ pub const CHECK_LIMIT: Duration = Duration::from_secs(20 * 60);
 pub const CHECK_TOO_LONG: &str = "obid stopped it after 20 minutes, the most a test run may take.";
 /// How much of a check's output obid keeps: its end.
 const CHECK_OUTPUT_MAX: usize = 64 * 1024;
+/// The commit obid keeps a job's uncommitted work in when it ends without commits to publish.
+const WIP_MESSAGE: &str = "wip: work left uncommitted when the job ended\n\nobid committed what the agent left uncommitted, to keep it on the job's branch. It is never published by itself, and the job's next run takes it back out.";
 /// What a round's summary starts with when the check's failure is what the task asked for.
 const FAILS_AS_ASKED: &str = "FAILS AS ASKED";
 /// Claude Code's own turn limit for a round.
@@ -2325,7 +2327,7 @@ impl Jobs {
         if !worktree.join(".git").exists() {
             return Err("the job has no worktree".into());
         }
-        let (admin, common) = git::worktree_dirs(&worktree)
+        let (_, common) = git::worktree_dirs(&worktree)
             .await
             .map_err(|e| e.to_string())?;
         let clone = common
@@ -2341,47 +2343,24 @@ impl Jobs {
         let pack = if git::has_commit(&clone, &head).await {
             None
         } else {
-            let sandbox = self.sandbox.as_ref().map_err(String::clone)?;
-            let temp = self.temp_path(id);
-            prepare_folder(&temp).map_err(|e| e.to_string())?;
-            let mut spec = self.spec(&worktree, &admin, &common, &temp, true, Tool::Claude);
-            spec.network = false;
-            spec.read_only.clear();
-            let git_args = |args: &[&str]| -> Vec<OsString> {
-                let mut argv: Vec<OsString> = vec![
-                    "git".into(),
-                    "-c".into(),
-                    "core.hooksPath=/dev/null".into(),
-                    "-c".into(),
-                    "core.fsmonitor=false".into(),
-                ];
-                argv.extend(args.iter().map(OsString::from));
-                sandbox.wrap(&spec, &argv)
-            };
-            let env = process::sandbox_env(&process::tools_path(), &temp, &spec.git_env());
-            let objects = sandboxed_output(
-                &git_args(&[
-                    "rev-list",
-                    "--objects",
-                    &head,
-                    "--not",
-                    "--branches",
-                    "--remotes",
-                    "--tags",
-                ]),
-                &env,
-                &worktree,
-                None,
-            )
-            .await?;
-            Some(
-                sandboxed_output(
-                    &git_args(&["pack-objects", "--stdout", "--quiet"]),
-                    &env,
-                    &worktree,
-                    Some(objects),
+            let objects = self
+                .sandboxed_git(
+                    id,
+                    &[
+                        "rev-list",
+                        "--objects",
+                        &head,
+                        "--not",
+                        "--branches",
+                        "--remotes",
+                        "--tags",
+                    ],
+                    None,
                 )
-                .await?,
+                .await?;
+            Some(
+                self.sandboxed_git(id, &["pack-objects", "--stdout", "--quiet"], Some(objects))
+                    .await?,
             )
         };
         // Into the clone under the lock a publish fetches the base with (#628): a pack and a
@@ -2397,6 +2376,95 @@ impl Jobs {
             .await
             .map_err(|e| e.to_string())?;
         Ok(head)
+    }
+
+    /// Runs git in the job's worktree inside its sandbox, without the network, so git reads and
+    /// runs nothing the job couldn't (no hooks, no fsmonitor): its output.
+    async fn sandboxed_git(
+        &self,
+        id: &str,
+        args: &[&str],
+        input: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, String> {
+        let sandbox = self.sandbox.as_ref().map_err(String::clone)?;
+        let worktree = self.worktree_path(id);
+        let (admin, common) = git::worktree_dirs(&worktree)
+            .await
+            .map_err(|e| e.to_string())?;
+        let temp = self.temp_path(id);
+        prepare_folder(&temp).map_err(|e| e.to_string())?;
+        let mut spec = self.spec(&worktree, &admin, &common, &temp, true, Tool::Claude);
+        spec.network = false;
+        spec.read_only.clear();
+        let mut argv: Vec<OsString> = vec![
+            "git".into(),
+            "-c".into(),
+            "core.hooksPath=/dev/null".into(),
+            "-c".into(),
+            "core.fsmonitor=false".into(),
+        ];
+        argv.extend(args.iter().map(OsString::from));
+        let env = process::sandbox_env(&process::tools_path(), &temp, &spec.git_env());
+        sandboxed_output(&sandbox.wrap(&spec, &argv), &env, &worktree, input).await
+    }
+
+    /// What the agent left uncommitted when its job ended without commits to publish (stopped, at
+    /// a limit, failed, or done with none of its own): one [`WIP_MESSAGE`] commit of all of it, in
+    /// the job's sandbox, so keep_commits keeps it on the job's branch (#606). It never counts as
+    /// the job's: its next run takes it back out ([`Self::unkeep_wip`]).
+    async fn keep_wip(&self, id: &str) -> Result<(), String> {
+        let changes = self
+            .sandboxed_git(
+                id,
+                &["status", "--porcelain", "--untracked-files=all"],
+                None,
+            )
+            .await?;
+        if changes.is_empty() {
+            return Ok(());
+        }
+        self.sandboxed_git(id, &["add", "--all"], None).await?;
+        let (name, email) = &self.identity;
+        self.sandboxed_git(
+            id,
+            &[
+                "-c",
+                &format!("user.name={name}"),
+                "-c",
+                &format!("user.email={email}"),
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "--no-verify",
+                "--message",
+                WIP_MESSAGE,
+            ],
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Takes obid's own `wip:` commit back out as the job runs again: what it held is uncommitted,
+    /// as the agent left it. One the job started from (a follow-up's) stays.
+    async fn unkeep_wip(&self, id: &str, start_commit: &str) -> Result<(), String> {
+        let worktree = self.worktree_path(id);
+        let head = git::git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
+            .await
+            .map_err(|e| e.to_string())?;
+        if head == start_commit {
+            return Ok(());
+        }
+        let message = self
+            .sandboxed_git(id, &["log", "-1", "--format=%B", "HEAD"], None)
+            .await?;
+        if String::from_utf8_lossy(&message).trim() != WIP_MESSAGE {
+            return Ok(());
+        }
+        self.sandboxed_git(id, &["reset", "--quiet", "HEAD~1"], None)
+            .await
+            .map(|_| ())
     }
 
     fn log_path(&self, id: &str, name: &str) -> PathBuf {
@@ -2448,6 +2516,17 @@ impl Jobs {
                 // too; done published them before it ended. A shutdown isn't an end.
                 if *signal.borrow() != Signal::Shutdown {
                     self.publish_artifacts(id).await;
+                }
+                // Ended without commits to publish, what it left uncommitted is kept as a `wip:`
+                // commit (#606). A shutdown isn't an end, and a review keeps nothing.
+                let keeps_none = self.get(id).is_some_and(|j| {
+                    j.kind == "review" || j.status == Status::Done && j.commits.unwrap_or(0) > 0
+                });
+                if *signal.borrow() != Signal::Shutdown
+                    && !keeps_none
+                    && let Err(e) = self.keep_wip(id).await
+                {
+                    tracing::info!("job {id}: its uncommitted work stays in its worktree: {e}");
                 }
                 // Whatever ended it (a limit, a stop, a failure), what it committed is on its
                 // branch.
@@ -3520,6 +3599,11 @@ impl Jobs {
             std::fs::create_dir_all(own.join("info"))
                 .map_err(|e| format!("obid can't make the job's object folder: {e}"))?;
         }
+        // The work an earlier run left uncommitted is the agent's to commit again, never counted
+        // as the job's commits.
+        self.unkeep_wip(id, &start_commit)
+            .await
+            .map_err(|e| format!("obid couldn't take its wip commit back out: {e}"))?;
         if tool == Tool::Cursor {
             let allowed = acp::cursor::repository_allowlist(&worktree);
             if !allowed.is_empty() {
@@ -5857,6 +5941,7 @@ fn owner_prompt(job: &Job) -> String {
     lines.push("Commit your changes here when they're ready. Don't push, open pull requests or post anything to GitHub: obid publishes the work itself.".into());
     lines.push("A packed-refs.lock warning after a commit is harmless: the commit landed if `git log -1` shows it.".into());
     if COMMITTING.contains(&job.kind.as_str()) {
+        lines.push("Commit each small step that works as you go, with a Conventional Commits message, unsigned (`git -c commit.gpgsign=false commit`), and always before you end a turn: a round has a time limit, and work left uncommitted when it ends is only kept as a `wip:` commit.".into());
         lines.push(format!("If you can't commit, say why in your summary's first line: a {} job that ends with no commits counts as nothing committed.", job.kind));
     }
     if let Some(check) = &job.check {
@@ -7194,6 +7279,13 @@ mod tests {
         );
         assert!(prompt.contains("without cd"), "{prompt}");
         assert!(prompt.contains("never /tmp"), "{prompt}");
+        // #606: 45-minute rounds ended with the work only in uncommitted files.
+        assert!(
+            prompt.contains("Commit each small step that works as you go"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Conventional Commits"), "{prompt}");
+        assert!(prompt.contains("unsigned"), "{prompt}");
         // Seen live: both jobs of a round ran `gh issue view` for the issue they were about.
         let mut about = job.clone();
         about.issue = Some(627);
