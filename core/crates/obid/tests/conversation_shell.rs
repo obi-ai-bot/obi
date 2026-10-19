@@ -254,9 +254,9 @@ fn a_long_command_goes_to_the_background_and_ends_with_the_turn() {
     let (text, conversation) = shell(
         &obid,
         None,
-        json!({"command": format!("echo started; {marker}"), "timeout": 1000}),
+        json!({"command": format!("echo started; {marker}"), "timeout": 5000}),
     );
-    assert!(text.contains("Still running after 1 s"), "{text}");
+    assert!(text.contains("Still running after 5 s"), "{text}");
     assert!(text.contains("in the background as cmd-"), "{text}");
     assert!(text.contains("started"), "{text}");
     within(15, "the command ends with its turn", || {
@@ -272,4 +272,53 @@ fn a_long_command_goes_to_the_background_and_ends_with_the_turn() {
         left.is_empty().then_some(())
     });
     std::thread::sleep(Duration::from_millis(200));
+}
+
+/// A command sees only its own conversation's room: another's is hidden, even read by a script
+/// the rules can't follow (#774's review, 10).
+#[test]
+fn a_command_never_reads_another_conversations_room() {
+    let (_folder, obid) = obid("shell-rooms");
+    let (text, other) = shell(
+        &obid,
+        None,
+        json!({"command": "echo OTHER-ROOM-SECRET > mine.txt"}),
+    );
+    assert!(text.contains("Exit status 0."), "{text}");
+    let (text, _) = shell(
+        &obid,
+        None,
+        json!({"command": format!(
+            "printf 'cat ../../%s/room/mine.txt\\n' {other} > peek.sh; sh peek.sh || echo NO-OTHER-ROOM"
+        )}),
+    );
+    assert!(text.contains("NO-OTHER-ROOM"), "{text}");
+    assert!(!text.contains("OTHER-ROOM-SECRET"), "{text}");
+}
+
+/// A command the owner let reach the network still never reaches this machine's loopback, where
+/// obid's API and its MCP endpoints listen (#774's review, 4 and 10).
+#[test]
+fn an_allowed_network_command_never_reaches_obid() {
+    let (_folder, obid) = obid("shell-loopback");
+    let command = format!(
+        "curl -sS -m 5 -o /dev/null http://127.0.0.1:{}/v1/status && echo REACHED-OBID || echo NO-LOOPBACK",
+        obid.port
+    );
+    scope(|turns| {
+        let waiting = turns.spawn(|| shell(&obid, None, json!({"command": command})));
+        let first = within(30, "the conversation", || {
+            call(&obid, "GET", "/v1/conversations", None)
+                .body
+                .as_array()?
+                .first()
+                .cloned()
+        });
+        let item = waiting_item(&obid, first["id"].as_str().unwrap());
+        assert!(item["text"].as_str().unwrap().contains("network"), "{item}");
+        assert_eq!(answer(&obid, &item, "Allow").status, 200);
+        let (text, _) = waiting.join().unwrap();
+        assert!(text.contains("NO-LOOPBACK"), "{text}");
+        assert!(!text.contains("REACHED-OBID"), "{text}");
+    });
 }

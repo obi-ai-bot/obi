@@ -42,6 +42,8 @@ const STEP_LINES: usize = 20;
 const STEP_CHARS: usize = 2_000;
 /// The most a command writes before obid stops it.
 const LOG_MOST: u64 = 64 * 1024 * 1024;
+/// The most of a command the owner's card shows: a longer one is never asked about.
+pub const CARD_CHARS: usize = 2_000;
 /// The longest command obid takes.
 const COMMAND_CHARS: usize = 20_000;
 
@@ -77,6 +79,16 @@ fn rules_of<'a>(rules: &'a [Rule], decision: &'a str) -> impl Iterator<Item = &'
 /// "The rules"), in their order: refused, deny rules, always asked, read-only, allow rules, the
 /// mode and the taint.
 pub fn judge(command: &str, mode: Mode, rules: &[Rule], bounds: &Bounds, tainted: bool) -> Judged {
+    match by_rules(command, mode, rules, bounds, tainted) {
+        // The owner reads what they allow, whole.
+        Judged::Ask(_) if command.chars().count() > CARD_CHARS => Judged::Refuse(format!(
+            "It would wait for the owner's OK, but it's longer than the {CARD_CHARS} characters their card shows whole: split it into shorter commands."
+        )),
+        judged => judged,
+    }
+}
+
+fn by_rules(command: &str, mode: Mode, rules: &[Rule], bounds: &Bounds, tainted: bool) -> Judged {
     let room = bounds.worktree.as_path();
     let input = json!({"command": command});
     // 1. Pushing or posting: only Publish does, whatever the mode.
@@ -161,127 +173,272 @@ pub fn judge(command: &str, mode: Mode, rules: &[Rule], bounds: &Bounds, tainted
     }
 }
 
-/// Programs that only read, whatever follows them (but the options [`reads_only`] looks at).
-const READS: &[&str] = &[
-    "ls",
-    "cat",
-    "head",
-    "tail",
-    "wc",
-    "grep",
-    "egrep",
-    "fgrep",
-    "rg",
-    "ag",
-    "find",
-    "tree",
-    "du",
-    "df",
-    "pwd",
-    "echo",
-    "printf",
-    "which",
-    "type",
-    "file",
-    "stat",
-    "sort",
-    "cut",
-    "tr",
-    "nl",
-    "od",
-    "jq",
-    "diff",
-    "cmp",
-    "comm",
-    "basename",
-    "dirname",
-    "realpath",
-    "readlink",
-    "date",
-    "whoami",
-    "id",
-    "uname",
-    "true",
-    "false",
-    "test",
-    "[",
-    "shasum",
-    "sha256sum",
-    "md5",
-    "md5sum",
-    "cksum",
-    "column",
-];
-
-/// git's subcommands that only read.
-const GIT_READS: &[&str] = &[
-    "status",
-    "log",
-    "diff",
-    "show",
-    "ls-files",
-    "grep",
-    "blame",
-    "rev-parse",
-    "describe",
-    "shortlog",
-];
-
-/// Whether one simple command only reads: a program of [`READS`] as its first word (no variable set
-/// before it, no wrapper), or git with a subcommand of [`GIT_READS`], and none of the options that
-/// make one of them write a file or run a program. Best-effort; whatever passes still runs boxed.
-pub fn reads_only(words: &[String]) -> bool {
-    let Some(first) = words.first() else {
-        return false;
-    };
-    let program = first.rsplit('/').next().unwrap_or(first);
-    let rest = &words[1..];
-    let has = |bad: &[&str]| {
-        rest.iter().any(|w| {
-            bad.iter()
-                .any(|b| w == b || w.starts_with(&format!("{b}=")))
-        })
-    };
-    match program {
-        "git" => {
-            rest.first()
-                .is_some_and(|sub| GIT_READS.contains(&sub.as_str()))
-                && !has(&["--output", "-O", "--open-files-in-pager", "--ext-diff"])
-        }
-        "find" => !has(&[
-            "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf",
-            "-fls",
-        ]),
-        "sort" => !has(&["-o", "--output", "--compress-program"]),
-        "tree" => !has(&["-o"]),
-        "rg" => !has(&["--pre"]),
-        "ag" => !has(&["--pager"]),
-        "file" => !has(&["-C", "--compile"]),
-        _ => READS.contains(&program),
-    }
+/// The options a read-only program may be given: any (none of its options writes a file or runs
+/// a program), or only these: single letters that may be bunched (`-la`), options whose value may
+/// follow them or be attached (`-k2`, `-g '*.rs'`), and whole words (`--hidden`, `-name`; one
+/// ending in `=` takes its value attached, `--glob=*.rs`). Anything else, an abbreviated long
+/// option too (`--compress=` for `--compress-program`), makes the command one that may write.
+struct Options {
+    any: bool,
+    letters: &'static str,
+    valued: &'static [&'static str],
+    words: &'static [&'static str],
 }
 
-/// Whether the line sends output to a file: any `>` but to `/dev/null` or another descriptor.
-pub fn writes_a_file(command: &str) -> bool {
-    let mut rest = command.to_owned();
-    for harmless in [
-        "&>/dev/null",
-        "&> /dev/null",
-        ">/dev/null",
-        "> /dev/null",
-        ">&1",
-        ">&2",
-    ] {
-        rest = rest.replace(harmless, "");
+const ANY: Options = Options {
+    any: true,
+    letters: "",
+    valued: &[],
+    words: &[],
+};
+
+/// The programs that only read, by name, and the options each may be given. Not git: the room's
+/// own git settings, which the agent can write with a command, name programs git runs.
+fn read_options(program: &str) -> Option<Options> {
+    Some(match program {
+        "ls" | "cat" | "head" | "tail" | "wc" | "grep" | "egrep" | "fgrep" | "du" | "df"
+        | "pwd" | "echo" | "printf" | "which" | "type" | "stat" | "cut" | "tr" | "nl" | "od"
+        | "jq" | "diff" | "cmp" | "comm" | "basename" | "dirname" | "realpath" | "readlink"
+        | "whoami" | "id" | "uname" | "true" | "false" | "test" | "[" | "shasum" | "sha256sum"
+        | "md5" | "md5sum" | "cksum" | "column" => ANY,
+        // Not -o (it writes), -T (a folder it writes in) or --compress-program (it runs one).
+        "sort" => Options {
+            any: false,
+            letters: "bdfghiMnRrsuVcCmz",
+            valued: &["-k", "-t"],
+            words: &[
+                "--reverse",
+                "--numeric-sort",
+                "--unique",
+                "--ignore-case",
+                "--human-numeric-sort",
+                "--general-numeric-sort",
+                "--version-sort",
+                "--stable",
+                "--check",
+                "--zero-terminated",
+                "--key=",
+                "--field-separator=",
+            ],
+        },
+        // Tests and printing only: not -exec, -ok, -delete or -fprint.
+        "find" => Options {
+            any: false,
+            letters: "",
+            valued: &[],
+            words: &[
+                "-name",
+                "-iname",
+                "-path",
+                "-ipath",
+                "-wholename",
+                "-lname",
+                "-ilname",
+                "-regex",
+                "-iregex",
+                "-type",
+                "-maxdepth",
+                "-mindepth",
+                "-size",
+                "-mtime",
+                "-mmin",
+                "-atime",
+                "-amin",
+                "-ctime",
+                "-cmin",
+                "-newer",
+                "-empty",
+                "-perm",
+                "-user",
+                "-group",
+                "-links",
+                "-inum",
+                "-samefile",
+                "-print",
+                "-print0",
+                "-ls",
+                "-prune",
+                "-o",
+                "-a",
+                "-or",
+                "-and",
+                "-not",
+                "-true",
+                "-false",
+                "-depth",
+                "-xdev",
+                "-mount",
+                "-L",
+                "-H",
+                "-P",
+            ],
+        },
+        // Not --pre (it runs a program on each file) or -z (it runs decompressors).
+        "rg" => Options {
+            any: false,
+            letters: "iInlcwvFxsSHhuLo0qUp",
+            valued: &[
+                "-g", "-t", "-T", "-e", "-A", "-B", "-C", "-m", "-M", "-j", "-d",
+            ],
+            words: &[
+                "--hidden",
+                "--no-ignore",
+                "--files",
+                "--files-with-matches",
+                "--files-without-match",
+                "--count",
+                "--line-number",
+                "--ignore-case",
+                "--smart-case",
+                "--fixed-strings",
+                "--word-regexp",
+                "--invert-match",
+                "--only-matching",
+                "--json",
+                "--column",
+                "--heading",
+                "--no-heading",
+                "--follow",
+                "--multiline",
+                "--no-messages",
+                "--null",
+                "--vimgrep",
+                "--trim",
+                "--type-list",
+                "--glob=",
+                "--type=",
+                "--max-count=",
+                "--context=",
+                "--after-context=",
+                "--before-context=",
+                "--max-depth=",
+                "--max-columns=",
+                "--sort=",
+                "--color=",
+            ],
+        },
+        // Not -o (it writes).
+        "tree" => Options {
+            any: false,
+            letters: "adfislhDCFrtpugNQ",
+            valued: &["-L", "-I", "-P"],
+            words: &[],
+        },
+        // Not -C (it writes) or -m.
+        "file" => Options {
+            any: false,
+            letters: "bLhiIkNnr",
+            valued: &[],
+            words: &[],
+        },
+        _ => return None,
+    })
+}
+
+/// Where a program that only reads may come from: the system's software, which nothing in a box
+/// writes, never the room or the person's folders.
+const SYSTEM_SOFTWARE: &[&str] = &["/bin/", "/sbin/", "/usr/", "/opt/", "/nix/", "/System/"];
+
+/// bash's own commands, which no file on `PATH` stands in for.
+const BUILTINS: &[&str] = &[
+    "pwd", "echo", "printf", "type", "test", "[", "true", "false",
+];
+
+/// Whether `name`, as bash finds it on the box's `PATH`, is the system's software. A name with a
+/// folder in it (`./cat`, `bin/git`) never is: the agent could have written it.
+fn system_program(name: &str) -> bool {
+    if name.contains('/') || name.is_empty() {
+        return false;
     }
-    rest.contains('>')
+    if BUILTINS.contains(&name) {
+        return true;
+    }
+    let path = crate::process::tools_path();
+    let Some(found) = std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|p| crate::sandbox::is_executable(p))
+    else {
+        return false;
+    };
+    found.is_absolute()
+        && std::fs::canonicalize(&found).is_ok_and(|real| {
+            SYSTEM_SOFTWARE.iter().any(|s| {
+                real.to_string_lossy().starts_with(s) && found.to_string_lossy().starts_with(s)
+            })
+        })
+}
+
+/// Whether one simple command only reads: a program [`read_options`] names, as its first word (no
+/// variable set before it, no wrapper, no folder), found among the system's software, given only
+/// the options it allows. Best-effort; whatever passes still runs boxed.
+pub fn reads_only(words: &[String]) -> bool {
+    let Some(program) = words.first() else {
+        return false;
+    };
+    let Some(options) = read_options(program) else {
+        return false;
+    };
+    if !system_program(program) {
+        return false;
+    }
+    if options.any {
+        return true;
+    }
+    let mut operands = false;
+    words[1..].iter().all(|word| {
+        if operands || !word.starts_with('-') || word == "-" {
+            return true;
+        }
+        if word == "--" {
+            operands = true;
+            return true;
+        }
+        options
+            .words
+            .iter()
+            .any(|w| word == w || (w.ends_with('=') && word.starts_with(w)))
+            || options.valued.iter().any(|v| word.starts_with(v))
+            || (!word.starts_with("--")
+                && !options.letters.is_empty()
+                && word[1..].chars().all(|c| options.letters.contains(c)))
+    })
+}
+
+/// Whether the line sends output to a file: any `>` but one to `/dev/null` or to another
+/// descriptor (`2>&1`), each read whole (`>&1foo` writes the file `1foo`), and `>(…)`.
+pub fn writes_a_file(command: &str) -> bool {
+    static HARMLESS: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^>?(?:&[0-9]+|&-|\s*/dev/null)").expect("a regex"));
+    let ends = |rest: &str| {
+        rest.chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || matches!(c, ';' | '|' | '&' | ')'))
+    };
+    command.match_indices('>').any(|(at, _)| {
+        // The second of `>>` is read with the first.
+        if at > 0 && command.as_bytes()[at - 1] == b'>' {
+            return false;
+        }
+        let rest = &command[at + 1..];
+        match HARMLESS.find(rest) {
+            Some(found) => !ends(&rest[found.end()..]),
+            None => true,
+        }
+    })
 }
 
 /// Every conversation's commands, by conversation: what `oby_shell_output` reads and
 /// `oby_shell_stop` ends, and what ends with the turn.
 #[derive(Default)]
 pub struct Tasks {
-    by: Mutex<HashMap<String, Vec<Arc<Task>>>>,
+    by: Mutex<Kept>,
+}
+
+#[derive(Default)]
+struct Kept {
+    tasks: HashMap<String, Vec<Arc<Task>>>,
+    /// Each conversation's turn that ended last: a command of it that comes after never starts.
+    ended: HashMap<String, String>,
 }
 
 /// One command, running or ended.
@@ -342,6 +499,7 @@ impl Task {
     }
 
     fn forget(&self) {
+        let _ = std::fs::remove_file(self.log.with_extension("pgid"));
         let _ = std::fs::remove_file(&self.log);
         let _ = std::fs::remove_dir_all(&self.temp);
     }
@@ -349,17 +507,26 @@ impl Task {
 
 impl Tasks {
     fn of(&self, conversation: &str) -> Vec<Arc<Task>> {
-        self.lock().get(conversation).cloned().unwrap_or_default()
+        self.lock()
+            .tasks
+            .get(conversation)
+            .cloned()
+            .unwrap_or_default()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<Arc<Task>>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Kept> {
         self.by.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The turn of `conversation` ended: each of its commands ends with everything it started, and
-    /// what they wrote goes; a command waiting for the owner never runs.
-    pub fn end(&self, conversation: &str) {
-        let tasks = self.lock().remove(conversation).unwrap_or_default();
+    /// The turn `turn` of `conversation` ended: each of its commands ends with everything it
+    /// started, and what they wrote goes; a command waiting for the owner never runs, and one about
+    /// to start doesn't.
+    pub fn end(&self, conversation: &str, turn: &str) {
+        let tasks = {
+            let mut kept = self.lock();
+            kept.ended.insert(conversation.to_owned(), turn.to_owned());
+            kept.tasks.remove(conversation).unwrap_or_default()
+        };
         forget_asks(conversation);
         if tasks.is_empty() {
             return;
@@ -383,10 +550,54 @@ impl Tasks {
 
     /// obid stops: every conversation's commands end.
     pub fn end_all(&self) {
-        let conversations: Vec<String> = self.lock().keys().cloned().collect();
+        let conversations: Vec<String> = self.lock().tasks.keys().cloned().collect();
         for conversation in conversations {
-            self.end(&conversation);
+            self.end(&conversation, "");
         }
+    }
+}
+
+/// What names a shell command's processes (bash's `$0`), for [`reap_leftovers`].
+pub const NAME: &str = "oby-shell";
+
+/// At obid's start: the commands an obid that crashed left running end, with everything they
+/// started, and what they wrote goes. A process group is ended only while its leader is still
+/// one of the shell's boxes (its command line names [`NAME`]), never another that took its id.
+pub fn reap_leftovers(home: &Path) {
+    let conversations = home.join("conversations");
+    for entry in std::fs::read_dir(&conversations)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let folder = entry.path().join("shell");
+        if !std::fs::symlink_metadata(&folder).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        for file in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let path = file.path();
+            if path.extension().is_none_or(|e| e != "pgid") {
+                continue;
+            }
+            let Some(pgid) = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| t.trim().parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let leader = std::process::Command::new("ps")
+                .args(["-o", "command=", "-p", &pgid.to_string()])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            if leader.contains(NAME) {
+                crate::process::signal_group(pgid, nix::sys::signal::Signal::SIGTERM);
+                std::thread::sleep(crate::process::STOPPING);
+                crate::process::signal_group(pgid, nix::sys::signal::Signal::SIGKILL);
+                tracing::info!("ended a shell command left running ({pgid})");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }
 
@@ -585,29 +796,32 @@ async fn run(shared: &Arc<Shared>, session: &Session, args: Value) -> Result<Sho
         Judged::Refuse(why) => return Err(format!("Oby refused that: {why}")),
         Judged::Ask(ask) => ask_owner(shared, session, &command, &ask, &bounds).await?,
     };
-    if !session.control.live() {
-        return Err("The turn was stopped: the command didn't run.".into());
-    }
-    let tasks = &shared.harness.shell;
-    if tasks
-        .of(&session.conversation)
-        .iter()
-        .filter(|t| t.running())
-        .count()
-        >= RUNNING_MOST
-    {
-        return Err(format!(
-            "{RUNNING_MOST} commands of this conversation run already: wait for one, or stop one with oby_shell_stop."
-        ));
-    }
-    // What it prints may be the repositories', an attachment's or the web's.
-    session.taint();
-    let task = start(shared, &place, &folder, &id, &temp, &command, network)?;
-    tasks
-        .lock()
-        .entry(session.conversation.clone())
-        .or_default()
-        .push(task.clone());
+    let task = {
+        // Under the lock the turn's end takes: a command never starts after it.
+        let mut kept = shared.harness.shell.lock();
+        if !session.control.live()
+            || kept.ended.get(&session.conversation) == Some(&session.control.turn)
+        {
+            return Err("The turn ended: the command didn't run.".into());
+        }
+        let running = kept
+            .tasks
+            .get(&session.conversation)
+            .map_or(0, |t| t.iter().filter(|t| t.running()).count());
+        if running >= RUNNING_MOST {
+            return Err(format!(
+                "{RUNNING_MOST} commands of this conversation run already: wait for one, or stop one with oby_shell_stop."
+            ));
+        }
+        // What it prints may be the repositories', an attachment's or the web's.
+        session.taint();
+        let task = start(shared, &place, &folder, &id, &temp, &command, network)?;
+        kept.tasks
+            .entry(session.conversation.clone())
+            .or_default()
+            .push(task.clone());
+        task
+    };
     if run_in_background == Some(true) {
         return Ok(Shown {
             head: format!(
@@ -673,6 +887,11 @@ fn start(
         .spawn()
         .map_err(|e| format!("obid couldn't start the command: {e}"))?;
     let pgid = child.id();
+    // For the sweep after a crash of obid's (reap_leftovers).
+    if let Some(pgid) = pgid {
+        let _ =
+            crate::store::write_private(&log.with_extension("pgid"), pgid.to_string().as_bytes());
+    }
     let (said, ended) = watch::channel(None);
     let status_file = temp.join(".obid-status");
     let written = log.clone();
@@ -740,11 +959,7 @@ async fn ask_owner(
         kind: "permission".into(),
         job: String::new(),
         title: secrets.redact(&super::briefing::line(&card.title, 80)),
-        text: secrets.redact(&format!(
-            "{}\n\n{}",
-            ask.why,
-            command.chars().take(2000).collect::<String>()
-        )),
+        text: secrets.redact(&format!("{}\n\n{}", ask.why, command)),
         options,
         details: None,
         recommended: None,
@@ -848,10 +1063,10 @@ mod tests {
         for command in [
             "ls -la",
             "cat notes.md | grep todo | wc -l",
-            "git status && git log --oneline -5",
-            "find repos -name '*.rs' 2>/dev/null",
-            "rg -n fn repos/acme/app/src",
+            "find repos -name '*.rs' -type f -print 2>/dev/null",
+            "sort -k2 -n -r notes.txt | head -n 5",
             "head -n 20 repos/acme/app/README.md",
+            "ls -la 2>&1 >/dev/null",
         ] {
             for mode in Mode::ALL {
                 assert_eq!(
@@ -861,6 +1076,118 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Only the system's own programs count as reads: one the agent could have written in the room,
+    /// named with a folder, follows the mode and the taint (#774's review, 1).
+    #[test]
+    fn a_program_in_the_room_is_never_a_read() {
+        assert_eq!(judged("cat notes.md", Mode::Plan, &[], true), Judged::Run);
+        for command in ["./cat notes.md", "bin/cat notes.md", "./ls", "/tmp/cat x"] {
+            let plan = judged(command, Mode::Plan, &[], false);
+            assert!(matches!(plan, Judged::Refuse(_)), "{command}: {plan:?}");
+            let tainted = judged(command, Mode::Sandbox, &[], true);
+            assert!(
+                matches!(tainted, Judged::Refuse(_) | Judged::Ask(_)),
+                "{command}: {tainted:?}"
+            );
+        }
+        assert!(!reads_only(&["./cat".into(), "x".into()]));
+        assert!(!reads_only(&["no-such-program-anywhere".into()]));
+    }
+
+    /// Options are allowed by name, per program: an attached short one or an abbreviated long one
+    /// that writes or runs a program isn't a read (#774's review, 2). git never is (3).
+    #[test]
+    fn only_known_options_are_reads() {
+        let words = |c: &str| c.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        for command in [
+            "sort -ofile notes.txt",
+            "sort -o file notes.txt",
+            "sort -bo file notes.txt",
+            "sort --compress=sh notes.txt",
+            "sort --output=file notes.txt",
+            "sort -T /tmp notes.txt",
+            "find . -fprint out",
+            "find . -exec rm {} ;",
+            "find . -delete",
+            "rg --pre=sh foo",
+            "rg --pre sh foo",
+            "rg -z foo",
+            "tree -o out",
+            "file -C -m magic",
+            "git status",
+            "git log --oneline",
+            "git grep -Ocat foo",
+            "git grep --open=cat foo",
+        ] {
+            assert!(!reads_only(&words(command)), "{command}");
+            assert!(
+                matches!(judged(command, Mode::Plan, &[], false), Judged::Refuse(_)),
+                "{command}"
+            );
+        }
+        for command in [
+            "sort -k2 -t , -n notes.txt",
+            "sort --numeric-sort --key=2 notes.txt",
+            "find repos -maxdepth 2 -name *.md -o -type d -print",
+            "head -n5 a",
+            "ls -la -- -o",
+        ] {
+            assert!(reads_only(&words(command)), "{command}");
+        }
+    }
+
+    /// Output to a file is a write, each redirection read whole (#774's review, 6).
+    #[test]
+    fn redirections_are_read_whole() {
+        for writes in [
+            "echo x >&1foo",
+            "echo x > out",
+            "cat a >> b",
+            "ls >/dev/nullx",
+            "diff <(ls) >(cat)",
+            "echo x 2>err",
+        ] {
+            assert!(writes_a_file(writes), "{writes}");
+        }
+        for harmless in [
+            "ls 2>&1",
+            "ls >/dev/null",
+            "ls > /dev/null 2>&1",
+            "ls &>/dev/null",
+            "ls >&2; ls 1>&2",
+            "ls 2>&-",
+            "ls",
+        ] {
+            assert!(!writes_a_file(harmless), "{harmless}");
+        }
+    }
+
+    /// What asks the owner is shown whole: a command longer than the card is refused, not asked
+    /// about (#774's review, 5).
+    #[test]
+    fn a_command_too_long_for_the_card_is_never_asked_about() {
+        let long = format!("curl https://example.com/{}", "a".repeat(CARD_CHARS));
+        assert!(matches!(
+            judged(&long, Mode::Bypass, &[], false),
+            Judged::Refuse(why) if why.contains("longer than")
+        ));
+        let short = format!("curl https://example.com/{}", "a".repeat(100));
+        assert!(asks(&judged(&short, Mode::Bypass, &[], false)).is_some());
+        let read = format!("cat {}", "a".repeat(CARD_CHARS));
+        assert_eq!(judged(&read, Mode::Plan, &[], false), Judged::Run);
+    }
+
+    /// A turn's end is kept under the lock a command starts under, so one that comes after it
+    /// never starts (#774's review, 7).
+    #[test]
+    fn a_turns_end_is_kept_for_its_commands() {
+        let tasks = Tasks::default();
+        tasks.end("c1", "t1");
+        assert_eq!(tasks.lock().ended.get("c1").map(String::as_str), Some("t1"));
+        tasks.end("c1", "t2");
+        assert_eq!(tasks.lock().ended.get("c1").map(String::as_str), Some("t2"));
     }
 
     /// What installs or reaches the network asks in every mode, Bypass too, with no rule to save,

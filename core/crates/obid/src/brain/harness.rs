@@ -866,13 +866,14 @@ struct TurnEnd<'a> {
     token: &'a str,
     place: &'a Place,
     conversation: &'a str,
+    turn: &'a str,
 }
 
 impl Drop for TurnEnd<'_> {
     fn drop(&mut self) {
         self.harness.close(self.token);
         // Nothing a conversation runs outlives its turn: its commands end, its asks never run.
-        self.harness.shell.end(self.conversation);
+        self.harness.shell.end(self.conversation, self.turn);
         // A Claude Code kept for the next turn keeps its login copy until it ends ([`Warm::end`]).
         if !self.harness.warm().contains_key(self.conversation) {
             self.place.forget_login();
@@ -1008,6 +1009,7 @@ async fn session(
         token: &token,
         place: &place,
         conversation: &control.conversation,
+        turn: &control.turn,
     };
     let ran = attempts(
         shared,
@@ -1759,9 +1761,24 @@ fn rule(tool: &str, input: &Value, bounds: &Bounds, repos: &Path, taint: &dyn Fn
     let in_repos = call.paths.iter().any(|p| {
         crate::policy::real_path(&bounds.worktree.join(p)).is_some_and(|p| p.starts_with(&real))
     });
-    if in_repos && ["Edit", "MultiEdit", "Write", "NotebookEdit"].contains(&tool) {
+    let edit = ["Edit", "MultiEdit", "Write", "NotebookEdit"].contains(&tool);
+    if in_repos && edit {
         return Answer::Deny(
             "repos/ holds read-only checkouts of the owner's repositories: changing them is work for a job (oby_dispatch).".into(),
+        );
+    }
+    // A git folder's settings and hooks name programs git runs (`core.fsmonitor`, a diff or filter
+    // driver): the agent never writes one, as written or after links.
+    let in_git = |p: &Path| p.components().any(|c| c.as_os_str() == ".git");
+    if edit
+        && call.paths.iter().any(|p| {
+            let full = bounds.worktree.join(p);
+            in_git(Path::new(p)) || crate::policy::real_path(&full).is_some_and(|r| in_git(&r))
+        })
+    {
+        return Answer::Deny(
+            "A .git folder's files name programs git runs: a conversation never writes them."
+                .into(),
         );
     }
     // No code-running tool in a conversation: it could read this session's login copy and send it
@@ -2555,6 +2572,29 @@ mod tests {
                 "{command}"
             );
         }
+        // A .git folder's files are never written, as named or through a link (#774's review, 3).
+        std::fs::create_dir_all(place.room.join("sub/.git")).unwrap();
+        let _ = std::fs::remove_file(place.room.join("lnk"));
+        std::os::unix::fs::symlink(place.room.join("sub/.git"), place.room.join("lnk")).unwrap();
+        for file in [".git/config", "sub/.git/hooks/pre-commit", "lnk/config"] {
+            for tool in ["Write", "Edit"] {
+                let path = place.room.join(file);
+                assert!(
+                    matches!(
+                        decide(tool, json!({"file_path": path, "content": "x"})),
+                        Answer::Deny(why) if why.contains(".git")
+                    ),
+                    "{tool} {file}"
+                );
+            }
+        }
+        assert_eq!(
+            decide(
+                "Write",
+                json!({"file_path": place.room.join("notes.md"), "content": "x"})
+            ),
+            Answer::Allow
+        );
         // The backstop refuses them by name, pointing at Oby's own shell (not only as an unknown
         // tool): a command runs in a box of its own, never in the agent's.
         for runner in ["Bash", "PowerShell", "REPL", "JavaScript"] {
