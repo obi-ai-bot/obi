@@ -559,7 +559,7 @@ pub async fn publish_action(
 }
 
 /// `POST /v1/jobs/{id}/publish`: publishes by hand, once a registered device approved obid's own
-/// sentence for it (crate::approval): `{"url"}`, `403` for an approval that doesn't hold, `409`
+/// sentence for it (crate::approval): `{"url"}` (null for a remote with no pull requests), `403` for an approval that doesn't hold, `409`
 /// when there's nothing to publish or publishing failed (the line says why, never a secret).
 /// Never a merge.
 pub async fn publish(

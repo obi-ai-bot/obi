@@ -145,7 +145,8 @@ impl Obid {
     }
 }
 
-/// obid's configuration: owner wellington, the fixture repository with `node --test`, and
+/// obid's configuration: owner wellington, the fixture repository with `node --test` (its
+/// `file://` remote's pull requests on whatever `gh` the test puts first on `PATH`), and
 /// `agent` as Claude Code's binary. Conversations run on obid's plan loop, which these tests
 /// drive; tests/conversation_harness.rs turns the agent session on.
 pub fn config(folder: &Path, remote: &Path, agent: &Path) -> Value {
@@ -157,7 +158,7 @@ pub fn config(folder: &Path, remote: &Path, agent: &Path) -> Value {
         "agents": {"claude": {"bin": agent,
                               "accounts": [{"id": "stub", "name": "Stub", "configDir": folder.join("home/accounts/stub")}]}},
         "repos": [{"repo": "obi-e2e/fixture-app", "remote": format!("file://{}", remote.display()),
-                   "defaultBranch": "main", "check": "node --test"}],
+                   "defaultBranch": "main", "check": "node --test", "pullRequests": true}],
         "allowFileRemotes": true,
         "telemetry": false
     })

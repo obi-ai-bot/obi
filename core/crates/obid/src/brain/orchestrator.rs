@@ -151,8 +151,10 @@ impl Seen {
                 evidence: vec![format!("jobs/{}/report", id)],
             });
         }
+        // Every published job says obid doesn't run Oby's review yet (#525): that's no event (#710).
         if let Some(error) = &now.review_error
             && Some(error) != before.review_error.as_ref()
+            && error.trim() != crate::publish::NOT_REVIEWED
         {
             events.push(Event {
                 kind: "review_error".into(),
@@ -296,6 +298,9 @@ pub struct Escalation {
     pub why: String,
     pub reply: &'static str,
 }
+
+/// What settles an escalation once the owner has looked (#710).
+pub const DONE: &str = "Done";
 
 fn escalate(why: impl Into<String>, reply: &'static str) -> Escalation {
     Escalation {
@@ -519,7 +524,7 @@ impl Orchestration {
             job,
             title,
             text: format!("{} {}", escalation.why, summary.join(" ")),
-            options: vec![],
+            options: vec![DONE.into()],
             details: None,
             recommended: None,
             created: obi_protocol::time::now(),
@@ -887,6 +892,20 @@ mod tests {
         let mut dismissed = job("failed");
         dismissed["dismissed"] = serde_json::json!("2026-10-17T00:00:00Z");
         assert!(Seen::default().job(&dismissed).is_empty());
+    }
+
+    /// Every published job says obid doesn't run Oby's review yet (#525): that's no event, or
+    /// each pull request would ask the owner for a decision that isn't one (#710).
+    #[test]
+    fn the_review_obid_doesnt_run_yet_is_no_event() {
+        let mut seen = Seen::default();
+        let job = |error: &str| serde_json::json!({"id": "j1", "status": "done", "title": "Fix", "limit": null, "reviewError": error, "dismissed": null});
+        assert!(seen.job(&job(crate::publish::NOT_REVIEWED)).is_empty());
+        assert_eq!(
+            seen.job(&job("Oby's review couldn't run: the model failed"))
+                .len(),
+            1
+        );
     }
 
     /// The events reach the brain inside the turn's fence.

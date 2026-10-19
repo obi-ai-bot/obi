@@ -134,16 +134,22 @@ pub fn section(job: &Job, home: &Path) -> String {
     } else {
         job.summary.chars().take(3000).collect()
     });
-    // The section doesn't read what obid published yet (#530): it says nothing went out.
-    lines.extend([
-        String::new(),
-        "### Outgoing actions".into(),
-        "(nothing went out)".into(),
-    ]);
+    // What obid sent for it, ids only: a push that went out is never read as nothing (#627).
+    lines.extend([String::new(), "### Outgoing actions".into()]);
+    if job.outgoing.is_empty() {
+        lines.push("(nothing went out)".into());
+    }
+    for sent in &job.outgoing {
+        lines.push(match &sent.branch {
+            Some(branch) => format!("- {} {} to {branch}", sent.action, sent.id),
+            None => format!("- {} {}", sent.action, sent.id),
+        });
+    }
     lines.extend([String::new(), "### Pull request".into()]);
-    lines.push(match job.pr {
-        Some(pr) => format!("#{pr}: its state isn't in this section yet"),
-        None => "(no pull request)".into(),
+    lines.push(match (&job.published, job.pr) {
+        (Some(url), _) => format!("{url}: its state isn't in this section yet"),
+        (None, Some(pr)) => format!("#{pr}: its state isn't in this section yet"),
+        (None, None) => "(no pull request)".into(),
     });
     if let Some(error) = &job.publish_error {
         lines.push(format!("Publishing failed: {}", line(error, 300)));
@@ -315,6 +321,24 @@ mod tests {
         ] {
             assert!(empty.contains(part), "{part}");
         }
+        // A push that went out is listed, and a pull request that failed after it says so (#627).
+        bare.outgoing = vec![crate::publish::Outgoing::new(
+            "push",
+            &bare.repo,
+            &"a".repeat(40),
+            Some("oby/build-bbbb2222"),
+        )];
+        bare.publish_error = Some("Pushed, but couldn't open the pull request: gh broke".into());
+        let pushed = section(&bare, Path::new("/nonexistent"));
+        assert!(
+            pushed.contains(&format!("- push {} to oby/build-bbbb2222", "a".repeat(40))),
+            "{pushed}"
+        );
+        assert!(!pushed.contains("(nothing went out)"), "{pushed}");
+        assert!(
+            pushed.contains("Publishing failed: Pushed, but couldn't open the pull request"),
+            "{pushed}"
+        );
     }
 
     /// #591: read_job on a failed job carries its failure records, each with what the job kept and
