@@ -357,6 +357,20 @@ impl Jobs {
         });
     }
 
+    /// The session job `id`'s agent saved in Tetrix, in its outgoing actions.
+    pub fn sent_to_tetrix(&self, id: &str, session: &str) {
+        self.update(id, |job| {
+            let sent = crate::publish::Outgoing::new("tetrixSession", &job.repo, session, None);
+            if !job
+                .outgoing
+                .iter()
+                .any(|o| o.action == sent.action && o.id == sent.id)
+            {
+                job.outgoing.push(sent);
+            }
+        });
+    }
+
     /// Of `account`'s latest 50 ended jobs that had Tetrix through obid: how many, and how many
     /// of them called it.
     pub fn tetrix_counts(&self, account: &str) -> (u32, u32) {
@@ -2352,7 +2366,7 @@ impl Jobs {
         crate::api::worktrees(&self.config.home).join(id)
     }
 
-    fn temp_path(&self, id: &str) -> PathBuf {
+    pub(crate) fn temp_path(&self, id: &str) -> PathBuf {
         self.config.home.join("tmp").join(id)
     }
 
@@ -3608,7 +3622,7 @@ impl Jobs {
             if let (Some(tetrix), Some(connections)) =
                 (self.tetrix_for(&job), self.connections.get())
             {
-                let (items, seen) = tetrix.context(connections, &job).await;
+                let (items, seen) = tetrix.context(connections, &job, &temp).await;
                 self.tetrix_used(id, |used| used.absorb(seen));
                 if !items.is_empty() {
                     more.push((

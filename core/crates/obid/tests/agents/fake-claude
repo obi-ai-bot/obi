@@ -255,6 +255,8 @@ async function report(prompt) {
         toolCalls.entity = await call(22, "get_entity", { id: "repo:acme/legacy" });
         toolCalls.saved = await call(23, "save_session", { client: "claude-code", state: { did: "tetrix.txt" } });
         toolCalls.resume = await call(24, "resume_session", { session_id: "someone-elses" });
+        // Put together here, so this file holds no key a scanner flags.
+        toolCalls.leak = await call(25, "save_session", { client: "claude-code", state: { key: "AKIA" + "QWERTYUIOPASDFGH" } });
       }
       if (prompt.includes("MCP_PROBE") && name === "oby") {
         // More broker calls, then the broker token everywhere else on the runner.

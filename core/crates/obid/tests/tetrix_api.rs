@@ -97,6 +97,14 @@ fn fake_tetrix() -> (String, Arc<Mutex<Seen>>) {
                 .push((method.clone(), target.clone(), auth.clone(), body.clone()));
             let issuer = format!("{origin}/auth");
             match (method.as_str(), path.as_str()) {
+                // A server whose metadata is for another one: obid must not sign in there.
+                ("GET", "/.well-known/oauth-protected-resource/evil-mcp") => reply(
+                    &mut stream,
+                    "200 OK",
+                    "application/json",
+                    &json!({"resource": "https://other.example/mcp", "authorization_servers": [issuer]})
+                        .to_string(),
+                ),
                 // Only where its 401 says: obid must read the challenge.
                 ("GET", "/meta/tetrix-resource") => reply(
                     &mut stream,
@@ -241,6 +249,16 @@ fn fake_tetrix() -> (String, Arc<Mutex<Seen>>) {
     (base, seen)
 }
 
+/// `text` as a form or query string writes it.
+fn form_encode(text: &str) -> String {
+    reqwest::Url::parse_with_params("http://x/", &[("v", text)])
+        .unwrap()
+        .query()
+        .unwrap()
+        .trim_start_matches("v=")
+        .to_owned()
+}
+
 /// A GET to `url` (the browser following the sign-in), its status and body.
 fn browse(url: &str) -> (u16, String) {
     let url = reqwest::Url::parse(url).unwrap();
@@ -322,6 +340,25 @@ fn obid_signs_in_to_tetrix_once_and_agents_use_it_without_its_login() {
         );
     }
 
+    // Metadata for another server: a token minted for it would go to this one.
+    let evil = call(
+        &obid,
+        "POST",
+        "/v1/tetrix/sign-in",
+        Some(&json!({"url": format!("{base}/evil-mcp")})),
+    );
+    assert_eq!(evil.status, 502, "{}", evil.text);
+    assert!(evil.text.contains("another server"), "{}", evil.text);
+
+    // A sign-in started and replaced: the second reuses the client and its port.
+    let first = call(
+        &obid,
+        "POST",
+        "/v1/tetrix/sign-in",
+        Some(&json!({"url": format!("{base}/mcp")})),
+    );
+    assert_eq!(first.status, 200, "{}", first.text);
+
     // Sign in: the page to open is the fake's, with PKCE, the scopes and the resource.
     let started = call(
         &obid,
@@ -354,15 +391,24 @@ fn obid_signs_in_to_tetrix_once_and_agents_use_it_without_its_login() {
         call(&obid, "GET", "/v1/tetrix", None).body["signIn"],
         started.body
     );
-    // The registration asked for a public client with this redirect alone.
-    let registered = seen
+    // The registration asked for a public client with this redirect alone, once.
+    let registrations: Vec<Value> = seen
         .lock()
         .unwrap()
         .requests
         .iter()
-        .find(|r| r.1 == "/auth/register")
+        .filter(|r| r.1 == "/auth/register")
         .map(|r| serde_json::from_str::<Value>(&r.3).unwrap())
-        .unwrap();
+        .collect();
+    assert_eq!(registrations.len(), 1, "{registrations:?}");
+    let registered = &registrations[0];
+    assert!(
+        first.body["url"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("redirect_uri={}", form_encode(&redirect))),
+        "the same port"
+    );
     assert_eq!(registered["token_endpoint_auth_method"], "none");
     assert_eq!(registered["redirect_uris"], json!([redirect]));
 
@@ -466,6 +512,19 @@ fn obid_signs_in_to_tetrix_once_and_agents_use_it_without_its_login() {
         ]
     );
     assert_eq!(report["toolCalls"]["resume"]["result"]["isError"], true);
+    // What the secret scan finds never leaves obid under Oby's login.
+    let leak = &report["toolCalls"]["leak"]["result"];
+    assert_eq!(leak["isError"], true, "{leak}");
+    assert!(leak.to_string().contains("secret scan"), "{leak}");
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|r| r.3.contains(&format!("AKIA{}", "QWERTYUIOPASDFGH"))),
+        "the key never reached Tetrix"
+    );
     assert!(
         !seen
             .lock()
@@ -500,6 +559,15 @@ fn obid_signs_in_to_tetrix_once_and_agents_use_it_without_its_login() {
     assert_eq!(gaps["unknownFiles"], json!(["tetrix.txt"]));
     assert_eq!(gaps["session"], "sess-gaps-1");
     assert!(gaps["sent"].is_string(), "{gaps}");
+    assert!(
+        job["outgoing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["action"] == "tetrixSession" && o["id"] == "sess-agent-1"),
+        "{}",
+        job["outgoing"]
+    );
     assert!(
         job["outgoing"]
             .as_array()

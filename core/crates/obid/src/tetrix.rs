@@ -138,6 +138,8 @@ struct SignIn {
     preset: Option<String>,
     end: tokio::sync::Notify,
     taken: AtomicBool,
+    /// True once its page has stopped listening, so its port is free.
+    closed: tokio::sync::watch::Sender<bool>,
 }
 
 impl SignIn {
@@ -174,16 +176,67 @@ pub fn url_problem(text: &str) -> Option<String> {
     .problem()
 }
 
-/// `text` as an endpoint a server's metadata names, when obid may use it: HTTPS (HTTP only on
-/// 127.0.0.1 or localhost), with no login or fragment.
-fn endpoint(text: Option<&str>) -> Option<reqwest::Url> {
+/// Whether `url` is on this machine (127.0.0.1, localhost, ::1).
+fn on_loopback(url: &reqwest::Url) -> bool {
+    matches!(
+        url.host_str().unwrap_or(""),
+        "127.0.0.1" | "localhost" | "[::1]"
+    )
+}
+
+/// `text` as an endpoint a server's metadata names, when obid may use it: HTTPS with no login or
+/// fragment; plain HTTP on this machine only when `local`, the Tetrix it was given is on this
+/// machine too (a remote server can't send a code, a verifier or a registration to a local
+/// process).
+fn endpoint(text: Option<&str>, local: bool) -> Option<reqwest::Url> {
     let url = reqwest::Url::parse(text?).ok()?;
-    let loopback = matches!(url.host_str()?, "127.0.0.1" | "localhost" | "[::1]");
-    let fine = (url.scheme() == "https" || url.scheme() == "http" && loopback)
+    let fine = (url.scheme() == "https" || url.scheme() == "http" && local && on_loopback(&url))
         && url.username().is_empty()
         && url.password().is_none()
         && url.fragment().is_none();
     fine.then_some(url)
+}
+
+/// Whether RFC 9728's `resource` is the MCP server obid was given (RFC 9728 3.3): the same
+/// origin, and its path the server's own or a prefix of it at a `/`.
+fn resource_fits(resource: &str, mcp: &reqwest::Url) -> bool {
+    let Ok(resource) = reqwest::Url::parse(resource) else {
+        return false;
+    };
+    let own = resource.origin() == mcp.origin()
+        && resource.username().is_empty()
+        && resource.password().is_none()
+        && resource.query().is_none()
+        && resource.fragment().is_none();
+    let (given, named) = (
+        mcp.path().trim_end_matches('/'),
+        resource.path().trim_end_matches('/'),
+    );
+    own && (given == named || given.starts_with(&format!("{named}/")))
+}
+
+/// The JSON a sign-in server answered, read up to 256 KB; null past that or when it isn't JSON.
+async fn small_json(mut response: reqwest::Response) -> Value {
+    let mut bytes = Vec::new();
+    while let Ok(Some(chunk)) = response.chunk().await {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > 256 * 1024 {
+            return Value::Null;
+        }
+    }
+    serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+}
+
+/// Why `what` can't go to Tetrix, or none: the secret scan runs first on everything obid sends
+/// it, and a finding or a scan that can't run sends nothing.
+async fn scanned(what: &Value, scratch: &Path) -> Result<(), String> {
+    match crate::scan::scan(&[("tetrix.json".into(), what.to_string())], scratch).await {
+        crate::scan::Verdict::Clean => Ok(()),
+        crate::scan::Verdict::Found(_) => Err("the secret scan found something in it".into()),
+        crate::scan::Verdict::CouldNotRun(why) => {
+            Err(format!("the secret scan couldn't run ({why})"))
+        }
+    }
 }
 
 fn well_known(base: &reqwest::Url, path: &str) -> reqwest::Url {
@@ -305,13 +358,7 @@ impl Tetrix {
         if !response.status().is_success() {
             return None;
         }
-        let bytes = response.bytes().await.ok()?;
-        if bytes.len() > 256 * 1024 {
-            return None;
-        }
-        serde_json::from_slice::<Value>(&bytes)
-            .ok()
-            .filter(Value::is_object)
+        Some(small_json(response).await).filter(Value::is_object)
     }
 
     /// Starts a sign-in to `target` (a preset's id or a URL), in place of the one under way, and
@@ -340,6 +387,7 @@ impl Tetrix {
         }
         let mcp = reqwest::Url::parse(&url).expect("checked");
         let host = mcp.host_str().unwrap_or("").to_owned();
+        let local = on_loopback(&mcp);
         // RFC 9728, as MCP's authorization spec finds it: the `resource_metadata` of the server's
         // own 401, else the well-known places (the path's first).
         let path = mcp.path().trim_end_matches('/').to_owned();
@@ -363,12 +411,23 @@ impl Tetrix {
                 "{host} doesn't say where to sign in (no protected-resource metadata)."
             ))
         })?;
-        let issuer = endpoint(resource_metadata["authorization_servers"][0].as_str())
-            .ok_or_else(|| gateway(format!("{host} names no authorization server Oby can use.")))?;
+        let issuer = endpoint(
+            resource_metadata["authorization_servers"][0].as_str(),
+            local,
+        )
+        .ok_or_else(|| gateway(format!("{host} names no authorization server Oby can use.")))?;
+        // The token is minted for `resource` and goes to the URL the owner gave: they must be the
+        // same server.
         let resource = resource_metadata["resource"]
             .as_str()
             .unwrap_or(&url)
             .to_owned();
+        if !resource_fits(&resource, &mcp) {
+            return Err(gateway(format!(
+                "{host}'s metadata is for another server ({}), so Oby doesn't sign in there.",
+                resource.chars().take(200).collect::<String>()
+            )));
+        }
         let mut scopes: Vec<String> = resource_metadata["scopes_supported"]
             .as_array()
             .map(|list| {
@@ -421,8 +480,8 @@ impl Tetrix {
             ))
         })?;
         let (Some(authorize), Some(token_endpoint)) = (
-            endpoint(server["authorization_endpoint"].as_str()),
-            endpoint(server["token_endpoint"].as_str()),
+            endpoint(server["authorization_endpoint"].as_str(), local),
+            endpoint(server["token_endpoint"].as_str(), local),
         ) else {
             return Err(gateway(format!(
                 "Tetrix's sign-in server {issuer_text} names no endpoints Oby can use."
@@ -443,7 +502,18 @@ impl Tetrix {
             )));
         }
         let revocation_endpoint =
-            endpoint(server["revocation_endpoint"].as_str()).map(|u| u.to_string());
+            endpoint(server["revocation_endpoint"].as_str(), local).map(|u| u.to_string());
+        // The sign-in under way ends first, so the port its client names is free again.
+        let before = self
+            .sign_in
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(before) = before {
+            before.end.notify_one();
+            let mut closed = before.closed.subscribe();
+            let _ = tokio::time::timeout(Duration::from_secs(5), closed.wait_for(|c| *c)).await;
+        }
         // The redirect: a port of its own on 127.0.0.1, the one a registered client names when
         // it is free.
         let mut registered = match client {
@@ -471,7 +541,7 @@ impl Tetrix {
             (Some(client), _) => client.to_owned(),
             (None, Some(registered)) => registered.id,
             (None, None) => {
-                let register = endpoint(server["registration_endpoint"].as_str()).ok_or_else(|| {
+                let register = endpoint(server["registration_endpoint"].as_str(), local).ok_or_else(|| {
                     gateway(format!(
                         "Tetrix's sign-in server {issuer_text} offers no client registration, and Oby has no client there."
                     ))
@@ -523,14 +593,16 @@ impl Tetrix {
             preset,
             end: tokio::sync::Notify::new(),
             taken: AtomicBool::new(false),
+            closed: tokio::sync::watch::channel(false).0,
         });
-        let before = self
+        // A sign-in started meanwhile ends too: the newest wins.
+        let meanwhile = self
             .sign_in
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .replace(sign_in.clone());
-        if let Some(before) = before {
-            before.end.notify_one();
+        if let Some(meanwhile) = meanwhile {
+            meanwhile.end.notify_one();
         }
         let tetrix = self.clone();
         let running = sign_in.clone();
@@ -551,6 +623,7 @@ impl Tetrix {
             {
                 tracing::warn!("Tetrix's sign-in page stopped: {e}");
             }
+            running.closed.send_replace(true);
             tetrix.ended(&running);
         });
         self.changed();
@@ -581,7 +654,7 @@ impl Tetrix {
             .to_str()
             .ok()?;
         let (_, rest) = challenge.split_once("resource_metadata=\"")?;
-        endpoint(rest.split('"').next())
+        endpoint(rest.split('"').next(), on_loopback(mcp))
     }
 
     /// Dynamic client registration (RFC 7591): a public client with this redirect alone.
@@ -601,7 +674,7 @@ impl Tetrix {
             )
         })?;
         let status = response.status();
-        let answer: Value = response.json().await.unwrap_or(Value::Null);
+        let answer = small_json(response).await;
         match answer["client_id"].as_str() {
             Some(id) if status.is_success() && !id.is_empty() => Ok(id.to_owned()),
             _ => Err(format!(
@@ -653,7 +726,7 @@ impl Tetrix {
                 ))
             })?;
         let status = response.status();
-        let answer: Value = response.json().await.unwrap_or(Value::Null);
+        let answer = small_json(response).await;
         if !status.is_success() {
             return Err(
                 if matches!(status, StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED) {
@@ -948,27 +1021,34 @@ impl Tetrix {
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                let allowed = TOOLS.contains(&tool);
+                let short: String = tool.chars().take(64).collect();
+                // Only the tools agents may call, and only what the secret scan passes: it
+                // leaves obid under Oby's own login.
+                let refused = if !TOOLS.contains(&tool) {
+                    Some(format!("Oby doesn't let agents call Tetrix's {short}."))
+                } else {
+                    scanned(&arguments, &shared.jobs.temp_path(job))
+                        .await
+                        .err()
+                        .map(|why| format!("Oby didn't send this to Tetrix: {why}."))
+                };
                 connections.record(ConnectionUse {
                     job: job.to_owned(),
                     connection: "tetrix".into(),
-                    tool: tool.chars().take(64).collect(),
+                    tool: short,
                     access: if tool == "save_session" {
                         "write"
                     } else {
                         "read"
                     }
                     .into(),
-                    allowed,
+                    allowed: refused.is_none(),
                     secret: ACCESS.into(),
                     host: self.upstream().map(|c| c.host()).unwrap_or_default(),
                     date: obi_protocol::time::format(obi_protocol::time::now()),
                 });
-                if !allowed {
-                    failure(format!(
-                        "Oby doesn't let agents call Tetrix's {}.",
-                        tool.chars().take(64).collect::<String>()
-                    ))
+                if let Some(why) = refused {
+                    failure(why)
                 } else {
                     let answer = self.call_tool(connections, job, tool, &arguments).await;
                     shared.jobs.tetrix_used(job, |seen| {
@@ -979,6 +1059,13 @@ impl Tetrix {
                             true,
                         )
                     });
+                    // What the agent wrote into Tetrix is the job's outgoing action.
+                    if tool == "save_session"
+                        && let Ok(answer) = &answer
+                        && let Some(session) = session_id(answer)
+                    {
+                        shared.jobs.sent_to_tetrix(job, &session);
+                    }
                     answer.unwrap_or_else(|e| failure(format!("Oby couldn't reach Tetrix: {e}")))
                 }
             }
@@ -996,6 +1083,7 @@ impl Tetrix {
         &self,
         connections: &Connections,
         job: &crate::job::Job,
+        scratch: &Path,
     ) -> (Vec<obi_plugin_api::ContextItem>, Use) {
         let mut seen = Use::default();
         let query = match job.issue.or(job.pr) {
@@ -1008,6 +1096,11 @@ impl Tetrix {
         ];
         let mut items = Vec::new();
         for (tool, arguments) in asks {
+            // The query holds the job's title: through the secret scan, like every call.
+            if let Err(why) = scanned(&arguments, scratch).await {
+                tracing::info!("job {}: Tetrix wasn't asked {tool}: {why}", job.id);
+                continue;
+            }
             let answer = tokio::time::timeout(
                 ASK_WITHIN,
                 self.call_tool(connections, &job.id, tool, &arguments),
@@ -1111,16 +1204,9 @@ impl Tetrix {
                 "agentSessions": seen.saved},
             "status": "saved",
         });
-        let text = arguments.to_string();
-        match crate::scan::scan(&[("tetrix-gaps.json".into(), text)], scratch).await {
-            crate::scan::Verdict::Clean => {}
-            crate::scan::Verdict::Found(_) => {
-                return Err("Not sent: the secret scan found something in it.".into());
-            }
-            crate::scan::Verdict::CouldNotRun(why) => {
-                return Err(format!("Not sent: the secret scan couldn't run ({why})."));
-            }
-        }
+        scanned(&arguments, scratch)
+            .await
+            .map_err(|why| format!("Not sent: {why}."))?;
         let answer = self
             .call_tool(connections, &job.id, "save_session", &arguments)
             .await
@@ -1643,9 +1729,31 @@ mod tests {
             assert!(url_problem(bad).is_some(), "{bad}");
         }
         assert!(PRESETS.iter().all(|p| url_problem(p.url).is_none()));
-        assert!(endpoint(Some("http://evil.example/token")).is_none());
-        assert!(endpoint(Some("https://a@evil.example/token")).is_none());
-        assert!(endpoint(Some("https://auth.example/token")).is_some());
+        assert!(endpoint(Some("http://evil.example/token"), true).is_none());
+        assert!(endpoint(Some("https://a@evil.example/token"), false).is_none());
+        assert!(endpoint(Some("https://auth.example/token"), false).is_some());
+        // Plain HTTP on this machine only for a Tetrix on this machine.
+        assert!(endpoint(Some("http://127.0.0.1:9/token"), false).is_none());
+        assert!(endpoint(Some("http://127.0.0.1:9/token"), true).is_some());
+    }
+
+    #[test]
+    fn the_metadata_must_be_for_the_server_obid_was_given() {
+        let mcp = reqwest::Url::parse("https://tetrix.example/mcp").unwrap();
+        assert!(resource_fits("https://tetrix.example/mcp", &mcp));
+        assert!(resource_fits("https://tetrix.example/mcp/", &mcp));
+        assert!(resource_fits("https://tetrix.example/", &mcp));
+        for other in [
+            "https://other.example/mcp",
+            "https://tetrix.example:8443/mcp",
+            "http://tetrix.example/mcp",
+            "https://tetrix.example/mc",
+            "https://tetrix.example/mcp/deeper",
+            "https://tetrix.example/mcp?x=1",
+            "not a url",
+        ] {
+            assert!(!resource_fits(other, &mcp), "{other}");
+        }
     }
 
     #[test]
