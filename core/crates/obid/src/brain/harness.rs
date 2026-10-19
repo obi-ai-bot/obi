@@ -1532,7 +1532,7 @@ async fn one(
                 }
                 steps.insert(id, line);
             }
-            Event::ToolDone { id, failed } => {
+            Event::ToolDone { id, failed, .. } => {
                 if let Some(line) = steps.get(&id) {
                     let state = if failed { State::Failed } else { State::Done };
                     let output = shell_keys.remove(&id).and_then(|key| {
@@ -1547,7 +1547,12 @@ async fn one(
                 watch.mark("session");
                 session.keep(Some(&id))
             }
-            Event::Step(_) | Event::Denied(_) | Event::Usage(_) | Event::Tokens(_) => {}
+            Event::Step(_)
+            | Event::Denied(_)
+            | Event::Said(_)
+            | Event::Plan(_)
+            | Event::Usage(_)
+            | Event::Tokens(_) => {}
         }
     };
     let decide = |tool: &str, input: &Value| {

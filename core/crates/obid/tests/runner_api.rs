@@ -191,12 +191,21 @@ fn jobs_have_iso_dates_and_every_key() {
         for key in SWIFT_JOB_KEYS {
             assert!(keys.contains_key(key), "{key} is missing: {body}");
         }
+        // The job page's facts (#739) are there only once obid knows them.
+        let page = [
+            "activity",
+            "checks",
+            "context",
+            "diff",
+            "estimate",
+            "scan",
+            "usage",
+            "windowShare",
+        ];
         let mut extra: Vec<&str> = keys
             .keys()
             .map(String::as_str)
-            .filter(|k| !SWIFT_JOB_KEYS.contains(k))
-            // Sent only once a turn reports it (#731).
-            .filter(|k| *k != "usage")
+            .filter(|k| !SWIFT_JOB_KEYS.contains(k) && !page.contains(k))
             .collect();
         extra.sort_unstable();
         assert_eq!(
@@ -214,7 +223,8 @@ fn jobs_have_iso_dates_and_every_key() {
             ],
             "{body}"
         );
-        assert_eq!(keys.len() - usize::from(keys.contains_key("usage")), 74);
+        let known = keys.keys().filter(|k| page.contains(&k.as_str())).count();
+        assert_eq!(keys.len(), 74 + known);
         // POST /v1/jobs: no turn of a conversation started it.
         assert!(body["turn"].is_null(), "{body}");
         // What obid never sets is there, as null.

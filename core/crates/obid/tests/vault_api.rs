@@ -822,3 +822,239 @@ fn an_unreadable_vault_carries_out_nothing() {
     assert_eq!(answer.status, 503, "{}", answer.text);
     chmod(&vault_file(&obid), 0o600);
 }
+
+/// A job's transcript (#381): one entry per tool call with its start, end, state and time, the
+/// agent's words and its to-do list, in order; `after` gives only what came since; the same
+/// entries reach the event stream; and neither the file, the endpoint nor the events carry a
+/// vault secret the agent said or ran, nor any tool's output.
+#[test]
+fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
+    let folder = Folder::new("vault-transcript");
+    let remote = fixture(&folder.0.join("fixture"));
+    let config = config(&folder.0, &remote, &agent());
+    let path = write_config(&folder.0, &config);
+    add(&path, "staging-api-key", &value());
+    let obid = start(&folder.0, &config, None);
+    let events = follow_events(&obid);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "TOOLS",
+               "check": "node --test"}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    // Its activity at a glance (#730): the counts, and the groups the agent's words split.
+    let activity = &job["activity"];
+    assert_eq!(
+        activity["counts"],
+        json!({"read": 5, "search": 0, "edit": 2, "command": 0, "test": 1, "tetrix": 0, "web": 0, "mcp": 0}),
+        "{job}"
+    );
+    let groups = activity["groups"].as_array().unwrap();
+    let titles: Vec<&str> = groups
+        .iter()
+        .map(|g| g["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        ["Looking for where a blocked scan ends the job", "Found it"]
+    );
+    assert_eq!(groups[0]["files"].as_array().unwrap().len(), 5);
+    assert_eq!(groups[0]["files"][0], "src/scan.rs");
+    assert_eq!(
+        groups.iter().map(|g| &g["by"]).collect::<Vec<_>>(),
+        [&json!("agent"); 2]
+    );
+    assert_eq!(groups[1]["state"], "failed");
+    assert_eq!(groups[1]["diff"], json!({"added": 4, "removed": 3}));
+    assert_eq!(job["contextBy"], "agent");
+    assert_eq!(
+        job["context"],
+        "Found it. Fixing it, with [redacted: vault staging-api-key] for staging ([redacted: vault staging-api-key], [redacted: vault staging-api-key])."
+    );
+    let stored = std::fs::read_to_string(obid.home.join(format!("jobs/{id}.json"))).unwrap();
+    holds_none(&stored, &value(), "the job's file");
+    let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript"), None);
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    assert_eq!(answer.body["next"], Value::Null, "{}", answer.text);
+    let entries = answer.body["entries"].as_array().unwrap().clone();
+    let kinds: Vec<&str> = entries
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "start", "said", "tool", "tool", "tool", "tool", "tool", "plan", "said", "tool",
+            "tool", "tool"
+        ],
+        "{}",
+        answer.text
+    );
+    let ns: Vec<u64> = entries.iter().map(|e| e["n"].as_u64().unwrap()).collect();
+    assert_eq!(ns, (1..=12).collect::<Vec<u64>>());
+    assert_eq!(entries[0]["summary"], "Started on Claude Code");
+    assert_eq!(
+        entries[1]["summary"],
+        "Looking for where a blocked scan ends the job."
+    );
+    assert_eq!(entries[2]["tool"], "Read");
+    assert_eq!(entries[2]["summary"], "Reading scan.rs");
+    assert_eq!(entries[7]["summary"], "1 of 2 done");
+    assert_eq!(
+        entries[7]["todos"][1],
+        json!({"text": "Fix it", "state": "running"})
+    );
+    assert_eq!(
+        entries[8]["summary"],
+        "Found it. Fixing it, with [redacted: vault staging-api-key] for staging ([redacted: vault staging-api-key], [redacted: vault staging-api-key])."
+    );
+    for tool in entries.iter().filter(|e| e["kind"] == "tool") {
+        assert!(
+            tool["at"].is_string() && tool["seconds"].is_number(),
+            "{tool}"
+        );
+    }
+    assert_eq!(
+        entries[2..7]
+            .iter()
+            .map(|e| &e["state"])
+            .collect::<Vec<_>>(),
+        [&json!("done"); 5]
+    );
+    assert_eq!(
+        (&entries[9]["added"], &entries[9]["removed"]),
+        (&json!(3), &json!(2))
+    );
+    assert_eq!(entries[11]["tool"], "Bash");
+    assert_eq!(entries[11]["state"], "failed");
+    assert_eq!(entries[11]["activity"], "test");
+    assert!(
+        entries[11]["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("Running export STAGING_KEY=[redacted"),
+        "{}",
+        entries[11]
+    );
+
+    // Only what came since entry 9.
+    let since = call(
+        &obid,
+        "GET",
+        &format!("/v1/jobs/{id}/transcript?after=9"),
+        None,
+    );
+    assert_eq!(
+        since.body,
+        json!({"entries": entries[9..], "next": null}),
+        "{}",
+        since.text
+    );
+    // In pages: at most `limit`, and where to go on from.
+    let page = call(
+        &obid,
+        "GET",
+        &format!("/v1/jobs/{id}/transcript?limit=5"),
+        None,
+    );
+    assert_eq!(
+        page.body,
+        json!({"entries": entries[..5], "next": 5}),
+        "{}",
+        page.text
+    );
+    let wrong = call(
+        &obid,
+        "GET",
+        &format!("/v1/jobs/{id}/transcript?after=x"),
+        None,
+    );
+    assert_eq!(wrong.status, 422);
+    let none = call(&obid, "GET", "/v1/jobs/nope/transcript", None);
+    assert_eq!(none.status, 404);
+
+    // The events carry the same entries in the same order, each as it changed.
+    let mut streamed: Vec<Value> = Vec::new();
+    while let Ok((name, data)) = events.recv_timeout(std::time::Duration::from_secs(1)) {
+        if name == "transcript" && data["job"] == json!(id) {
+            streamed.push(data["entry"].clone());
+        }
+    }
+    let mut last = std::collections::BTreeMap::new();
+    for entry in &streamed {
+        last.insert(entry["n"].as_u64().unwrap(), entry.clone());
+    }
+    assert_eq!(last.into_values().collect::<Vec<_>>(), entries);
+
+    let file =
+        std::fs::read_to_string(obid.home.join(format!("jobs/{id}/transcript.jsonl"))).unwrap();
+    for (what, text) in [
+        ("the file", file.as_str()),
+        ("the endpoint", answer.text.as_str()),
+        ("the events", &serde_json::to_string(&streamed).unwrap()),
+    ] {
+        holds_none(text, &value(), what);
+        assert!(!text.contains("raw output"), "{what}: {text}");
+    }
+}
+
+/// The job's own check is recorded step by step (#734): each part between its `&&`s with whether
+/// it passed, the tests `cargo test` counted, and the failing tests by name with their message,
+/// where a line holding a vault secret a test printed is hidden, on the job as kept and as served.
+#[test]
+fn a_check_run_names_its_failing_tests_and_masks_the_vault() {
+    let folder = Folder::new("vault-check");
+    let remote = fixture(&folder.0.join("fixture"));
+    let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-claude");
+    let config = config(&folder.0, &remote, &fake);
+    let path = write_config(&folder.0, &config);
+    let obid = start(&folder.0, &config, None);
+    let value = ["check-", "secret-", "7Q2m9x"].concat();
+    add(&path, "check-key", &value);
+    // A test prints the secret; the check's command line (one line, at most 200 characters)
+    // holds it only backwards.
+    let backwards: String = value.chars().rev().collect();
+    let check = format!(
+        "true && (printf '%s\\n' 'running 2 tests' 'test a ... FAILED' 'test b ... FAILED' '---- a stdout ----';echo '{backwards}'|rev;printf '%s\\n' '---- b stdout ----' boom;false)"
+    );
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt", "check": check}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}");
+    let checks = job["checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 1, "{job}");
+    let run = &checks[0];
+    assert_eq!(run["round"], 1);
+    let steps = run["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2, "{run}");
+    assert_eq!(steps[0]["command"], "true");
+    assert_eq!(steps[0]["passed"], true);
+    assert!(steps[0].get("tests").is_none(), "{run}");
+    assert_eq!(steps[1]["passed"], false);
+    assert_eq!(steps[1]["running"], false);
+    assert_eq!(
+        steps[1]["tests"],
+        json!({"passed": 0, "failed": 2, "total": 2})
+    );
+    assert_eq!(
+        run["failing"],
+        json!([
+            {"test": "a", "message": "[possible secret hidden]"},
+            {"test": "b", "message": "boom"}
+        ])
+    );
+    let kept = std::fs::read_to_string(obid.home.join(format!("jobs/{id}.json"))).unwrap();
+    let kept: Value = serde_json::from_str(&kept).unwrap();
+    holds_none(
+        &kept["checks"].to_string(),
+        &value,
+        "the job's checks as kept",
+    );
+    // The markers obid prints between steps never reach the check's output.
+    let log = std::fs::read_to_string(obid.home.join(format!("logs/{id}/check.log"))).unwrap();
+    assert!(!log.contains("obid-step-"), "{log}");
+    assert!(log.contains("---- b stdout ----"), "{log}");
+}

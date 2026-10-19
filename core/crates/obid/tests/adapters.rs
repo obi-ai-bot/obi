@@ -163,6 +163,77 @@ fn codex_commits_with_obids_approval() {
     assert_eq!(accounts, [("work", "codex"), ("cursor", "cursor")]);
 }
 
+/// A Codex job's transcript (#381) has the same entries a Claude Code job's has: each item's start
+/// and end as one entry, its reads as reads, its file changes with their lines, a failed command
+/// with its exit code, and its plan as a to-do list. No command's output is in it.
+#[test]
+fn a_codex_jobs_transcript_matches_claudes() {
+    let folder = Folder::new("codex-transcript");
+    let obid = obid(&folder, false);
+    let id = dispatch(
+        &obid,
+        json!({"agent": "codex", "task": "TOOLS", "check": "node --test"}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript"), None);
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    assert_eq!(answer.body["next"], Value::Null, "{}", answer.text);
+    let entries = answer.body["entries"].as_array().unwrap().clone();
+    let shape: Vec<(&str, &str, &str)> = entries
+        .iter()
+        .map(|e| {
+            (
+                e["kind"].as_str().unwrap(),
+                e["tool"].as_str().unwrap_or(""),
+                e["state"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    let read = ("tool", "Read", "done");
+    assert_eq!(
+        shape,
+        [
+            ("start", "", ""),
+            ("said", "", ""),
+            read,
+            read,
+            read,
+            read,
+            read,
+            ("plan", "", ""),
+            ("said", "", ""),
+            ("tool", "Edit", "done"),
+            ("tool", "Edit", "done"),
+            ("tool", "Bash", "failed"),
+        ],
+        "{}",
+        answer.text
+    );
+    assert_eq!(entries[0]["summary"], "Started on Codex");
+    assert_eq!(entries[2]["summary"], "Reading scan.rs");
+    assert_eq!(entries[7]["summary"], "1 of 2 done");
+    assert_eq!(
+        entries[7]["todos"][1],
+        json!({"text": "Fix it", "state": "running"})
+    );
+    assert_eq!(
+        (&entries[9]["added"], &entries[9]["removed"]),
+        (&json!(3), &json!(2))
+    );
+    assert_eq!(entries[11]["summary"], "Running node --test");
+    assert_eq!(entries[11]["exit"], 101);
+    assert!(!answer.text.contains("raw output"), "{}", answer.text);
+    // The same kinds in its activity (#730).
+    assert_eq!(
+        job["activity"]["counts"],
+        json!({"read": 5, "search": 0, "edit": 2, "command": 0, "test": 1, "tetrix": 0, "web": 0, "mcp": 0}),
+        "{job}"
+    );
+    assert_eq!(job["activity"]["groups"][1]["title"], "Found it");
+    assert_eq!(job["context"], "Found it. Fixing it.");
+}
+
 /// obid's fixed denials hold for Codex: a push is declined, and since the decision carries no
 /// words, the turn hears why; a change outside the worktree is declined and nothing is written.
 /// A request obid doesn't answer is refused, so Codex never waits on it; a command that's fine is
