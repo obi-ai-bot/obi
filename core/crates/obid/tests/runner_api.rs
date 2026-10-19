@@ -209,11 +209,14 @@ fn jobs_have_iso_dates_and_every_key() {
                 "conversation",
                 "followUpOf",
                 "obi",
+                "turn",
                 "worktree"
             ],
             "{body}"
         );
-        assert_eq!(keys.len() - usize::from(keys.contains_key("usage")), 73);
+        assert_eq!(keys.len() - usize::from(keys.contains_key("usage")), 74);
+        // POST /v1/jobs: no turn of a conversation started it.
+        assert!(body["turn"].is_null(), "{body}");
         // What obid never sets is there, as null.
         for key in [
             "published",
