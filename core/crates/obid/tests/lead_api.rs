@@ -184,7 +184,7 @@ fn the_roadmap_starts_its_workable_issues_once_and_claims_each() {
     let args = std::fs::read_to_string(calls(&obid)[0].join("args")).unwrap();
     assert!(args.contains("--model\nclaude-sonnet-5-5\n"), "{args}");
     assert!(
-        args.contains("--tools\nRead\n--allowedTools\nRead\n"),
+        args.contains("--tools\nRead\n--allowedTools\nRead(./work.md)\n"),
         "{args}"
     );
     let work = std::fs::read_to_string(calls(&obid)[0].join("work.md")).unwrap();
