@@ -1039,8 +1039,8 @@ nonisolated struct Runner: Sendable {
     func report(_ id: String) async throws -> ResearchDocument { try await call("GET", "v1/jobs/\(id)/report") }
 
     /// The job's raw session after line `after` (#381), oldest first: a list, or `{entries: […]}`.
-    func transcript(_ id: String, after: Int? = nil) async throws -> [TranscriptEntry] {
-        try TranscriptEntry.list(await send("GET", "v1/jobs/\(id)/transcript" + (after.map { "?after=\($0)" } ?? "")))
+    func transcript(_ id: String, after: Int? = nil) async throws -> TranscriptPage {
+        try TranscriptPage.read(await send("GET", "v1/jobs/\(id)/transcript" + (after.map { "?after=\($0)" } ?? "")))
     }
     func fileProposal(_ id: String, index: Int, start: Bool) async throws -> FileProposalResult {
         try await call("POST", "v1/jobs/\(id)/proposals/\(index)/file", body: FileProposalBody(start: start))

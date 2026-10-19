@@ -141,8 +141,29 @@ struct JobPageTests {
     /// A transcript line that can't be read is skipped, never the whole answer.
     @Test func aBadSessionLineIsSkipped() throws {
         let list = #"[{"n": 1, "kind": "said", "summary": "Builds."}, {"n": "two"}, {"n": 3, "kind": "tool", "tool": "Bash"}]"#
-        #expect(try TranscriptEntry.list(Data(list.utf8)).map(\.n) == [1, 3])
-        #expect(try TranscriptEntry.list(Data(#"{"entries": [{"n": 4, "kind": "you"}, 5]}"#.utf8)).map(\.n) == [4])
+        #expect(try TranscriptPage.read(Data(list.utf8)) == TranscriptPage(entries: [TranscriptEntry(n: 1, kind: "said", summary: "Builds."),
+                                                                                  TranscriptEntry(n: 3, kind: "tool", tool: "Bash")]))
+        let page = try TranscriptPage.read(Data(#"{"next": 9, "entries": [{"n": 4, "kind": "you"}, 5]}"#.utf8))
+        #expect(page.entries.map(\.n) == [4] && page.next == 9)
+    }
+
+    /// A long session comes in pages (#755): the log follows `next` until there's no more, then
+    /// keeps the latest `most` lines and says older ones were dropped.
+    @Test func theSessionLogReadsEveryPage() async throws {
+        let most = SessionLog.most
+        var asked: [Int?] = []
+        let (entries, trimmed) = try await SessionLog.read([]) { after in
+            asked.append(after)
+            let from = (after ?? 0) + 1
+            let to = min(from + 999, most + 500)
+            return TranscriptPage(entries: (from...to).map { TranscriptEntry(n: $0, kind: "tool") }, next: to < most + 500 ? to : nil)
+        }
+        #expect(asked == [nil, 1000, 2000])
+        #expect(trimmed && entries.count == most && entries.last?.n == most + 500 && entries.first?.n == 501)
+        // A runner that keeps answering the same `next` is asked once more, never forever.
+        var calls = 0
+        _ = try await SessionLog.read([TranscriptEntry(n: 1, kind: "said")]) { _ in calls += 1; return TranscriptPage(entries: [], next: 1) }
+        #expect(calls == 1)
     }
 
     /// The log keeps each line once, by its `n`, in order, and at most its latest `most` lines.

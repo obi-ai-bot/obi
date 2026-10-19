@@ -286,12 +286,6 @@ nonisolated struct TranscriptEntry: Codable, Equatable, Identifiable, Sendable {
 
     var id: Int { n }
 
-    /// The lines in an answer, a list or `{entries: […]}`; a line that can't be read is skipped.
-    static func list(_ data: Data) throws -> [TranscriptEntry] {
-        struct Wrapped: Decodable { var entries: [Lenient<TranscriptEntry>] }
-        if let lines = try? Runner.decoder.decode([Lenient<TranscriptEntry>].self, from: data) { return lines.compactMap(\.value) }
-        return try Runner.decoder.decode(Wrapped.self, from: data).entries.compactMap(\.value)
-    }
 
     /// Words rather than a tool: set in the reading font.
     var spoken: Bool { kind == "said" || kind == "you" }
@@ -323,6 +317,23 @@ nonisolated struct TranscriptEntry: Codable, Equatable, Identifiable, Sendable {
             case .web: return entry.kind == "tool" && tool.hasPrefix("web")
             }
         }
+    }
+}
+
+/// One answer of `GET /v1/jobs/{id}/transcript` (#755): its lines, and `next`, the `n` to ask
+/// `after` for the rest, or nil when there's no more.
+nonisolated struct TranscriptPage: Equatable, Sendable {
+    var entries: [TranscriptEntry]
+    var next: Int? = nil
+
+    /// From `{next, entries: […]}`, or a bare list (no more pages); a line that can't be read is skipped.
+    static func read(_ data: Data) throws -> TranscriptPage {
+        struct Wrapped: Decodable { var next: Int?; var entries: [Lenient<TranscriptEntry>] }
+        if let lines = try? Runner.decoder.decode([Lenient<TranscriptEntry>].self, from: data) {
+            return TranscriptPage(entries: lines.compactMap(\.value))
+        }
+        let page = try Runner.decoder.decode(Wrapped.self, from: data)
+        return TranscriptPage(entries: page.entries.compactMap(\.value), next: page.next)
     }
 }
 

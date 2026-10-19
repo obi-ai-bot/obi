@@ -31,7 +31,7 @@ struct JobPageScreens {
         }
         for job in picked {
             let actions = TaskActions(place: "This Mac", account: nil, extras: extras[job.id], accounts: [], stop: {}, message: { _ in },
-                                      dismiss: {}, permission: { _, _ in }, mode: { _ in }, transcript: { _ in [] })
+                                      dismiss: {}, permission: { _, _ in }, mode: { _ in }, transcript: { _ in TranscriptPage(entries: []) })
             try await save(TaskPage(job: job, actions: actions, tray: Tray()).frame(width: 700, height: 1480).background(Tokens.bg),
                            as: "live-\(job.status.rawValue)")
         }

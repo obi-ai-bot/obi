@@ -21,7 +21,7 @@ struct TaskActions {
     var readReport: (() async throws -> ResearchDocument)?
     var fileProposal: ((Int, Bool) async throws -> FileProposalResult)?
     /// The job's raw session after a line (#381); nil for this Mac's own jobs, which keep none.
-    var transcript: ((Int?) async throws -> [TranscriptEntry])? = nil
+    var transcript: ((Int?) async throws -> TranscriptPage)? = nil
 
     @MainActor static func of(_ job: Job, local: Bool, model: IslandModel) -> TaskActions {
         let desk = model.desk, feed = model.feed
@@ -665,7 +665,7 @@ struct TaskPagePreview: View {
                                        label: "Max", fiveHour: fixture.windows.fiveHour, sevenDay: fixture.windows.sevenDay)
             TaskPage(job: job, actions: TaskActions(place: "Studio", account: "Personal", extras: extras, accounts: [account], stop: {},
                                                     message: { _ in }, dismiss: {}, permission: { _, _ in }, mode: { _ in },
-                                                    transcript: { _ in [] }),
+                                                    transcript: { _ in TranscriptPage(entries: []) }),
                      tray: Tray())
                 .frame(width: 700, height: 1480).background(Tokens.bg)
         }

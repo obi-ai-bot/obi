@@ -491,7 +491,11 @@ struct JobTimeline: View {
         if compact && mark == .upcoming && job.isActive { return nil }
         var parts = [stage.detail ?? ""]
         // Work says its round (Sangam's design), when the runner's line doesn't already.
-        if stage.key == "work", !(stage.detail ?? "").hasPrefix("Round ") {
+        // Only with more than one round (Sangam's design): "Round 1 of 1" from the runner goes too.
+        if stage.key == "work", job.maxRounds <= 1, parts[0].hasPrefix("Round 1 of 1") {
+            parts[0] = String(parts[0].dropFirst("Round 1 of 1".count)).trimmingPrefix(" · ").description
+        }
+        if stage.key == "work", job.maxRounds > 1, !(stage.detail ?? "").hasPrefix("Round ") {
             parts.insert("Round \(job.currentRound) of \(max(job.currentRound, job.maxRounds))", at: 0)
         }
         let diff = stage.key == "work" && mark == .done ? facts?.diff : nil
@@ -683,7 +687,7 @@ nonisolated enum FailedChoice: String {
 /// It keeps the latest `most` lines, and follows the foot only while you're at it.
 struct SessionLog: View {
     let agent: String
-    let load: (Int?) async throws -> [TranscriptEntry]
+    let load: (Int?) async throws -> TranscriptPage
     /// The job is running or queued: new lines may come.
     var live = false
     var compact = false
@@ -714,7 +718,7 @@ struct SessionLog: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: compact ? 6 : 3) {
                         if trimmed {
-                            Text("The latest \(Self.most.formatted()) lines.").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                            Text("Older lines aren't shown: these are the latest \(Self.most.formatted()).").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
                         }
                         ForEach(shown) { entry in line(entry).id(entry.n) }
                         if let problem {
@@ -768,12 +772,12 @@ struct SessionLog: View {
         .font(Tokens.mono(12))
     }
 
-    /// New lines now, then every two seconds while the job runs. A runner without the session
-    /// (404) is asked no more.
+    /// New lines now, every page of them, then every two seconds while the job runs. A runner
+    /// without the session (404) is asked no more.
     private func follow() async {
         repeat {
             do {
-                take(try await load(entries.last?.n))
+                (entries, trimmed) = try await Self.read(entries, trimmed: trimmed, load: load)
                 problem = nil
             } catch let error as RunnerError where error.status == 404 {
                 problem = "\(agent)'s session isn't available from this runner yet."
@@ -788,10 +792,20 @@ struct SessionLog: View {
         } while !Task.isCancelled
     }
 
-    private func take(_ new: [TranscriptEntry]) {
-        let (kept, cut) = Self.kept(entries, adding: new)
-        entries = kept
-        trimmed = trimmed || cut
+    /// What came or changed since `kept`'s last line, following `next` page by page until there's
+    /// no more (or a page brings nothing new), kept as `kept(_:adding:)` keeps it.
+    static func read(_ kept: [TranscriptEntry], trimmed: Bool = false,
+                     load: (Int?) async throws -> TranscriptPage) async throws -> (entries: [TranscriptEntry], trimmed: Bool) {
+        var result = (entries: kept, trimmed: trimmed)
+        var after = kept.last?.n
+        while !Task.isCancelled {
+            let page = try await load(after)
+            let (entries, cut) = Self.kept(result.entries, adding: page.entries)
+            result = (entries, result.trimmed || cut)
+            guard let next = page.next, next != after, !page.entries.isEmpty else { break }
+            after = next
+        }
+        return result
     }
 
     /// What the log keeps once `new` comes: each entry by its `n`, a new one added and one obid sends
