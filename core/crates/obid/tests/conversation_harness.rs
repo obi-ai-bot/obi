@@ -590,7 +590,7 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
         &obid,
         "POST",
         &format!("/v1/jobs/{id}/messages"),
-        Some(&json!({"text": "PAUSE: 10000"})),
+        Some(&json!({"text": "PAUSE: 30000"})),
     );
     assert_eq!(pausing.status, 201, "{}", pausing.text);
     let follow = pausing.body["id"].as_str().unwrap().to_owned();
@@ -642,6 +642,45 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
         on_it.text
     );
     ended(&obid, &follow);
+
+    // A start item a later follow-up made needless is done by itself, saying why; it names the
+    // conversation it came from, so the apps show it only there.
+    let web = format!(r#"WEB OBY oby_tell_job {{"id": "{id}", "words": "AGENT-WORDS-4"}}"#);
+    said(&obid, json!({"said": web, "conversation": conversation}));
+    let stale = inbox(&obid)
+        .into_iter()
+        .find(|i| i["kind"] == "start")
+        .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
+    assert_eq!(stale["conversation"], conversation.as_str(), "{stale}");
+    // obid's clock counts seconds: the follow-up ends in a later one.
+    std::thread::sleep(Duration::from_millis(1100));
+    let other = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "and the docs"})),
+    );
+    assert_eq!(other.status, 201, "{}", other.text);
+    ended(&obid, other.body["id"].as_str().unwrap());
+    assert!(
+        !inbox(&obid).iter().any(|i| i["id"] == stale["id"]),
+        "{:?}",
+        inbox(&obid)
+    );
+    let done = call(&obid, "GET", "/v1/inbox?state=done", None).body;
+    let closed = done
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == stale["id"])
+        .unwrap_or_else(|| panic!("{done}"));
+    // A build that commits nothing ends failed; the item says how it ended.
+    assert_eq!(
+        closed["text"],
+        "Closed by Oby: Follow-up: Add a greeting followed it up already, and ended failed.",
+        "{closed}"
+    );
+    assert_eq!(closed["options"], json!([]));
 }
 
 /// One turn starts at most ten jobs and tells jobs at most ten times: past that a tool says why.

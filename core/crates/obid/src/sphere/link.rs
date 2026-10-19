@@ -2473,6 +2473,7 @@ impl Link {
     /// `GET /v1/inbox` (`done` false: open and put off, the longest-waiting first) or
     /// `?state=done` (the latest settled first, at most `limit`).
     pub fn inbox_json(&self, done: bool, limit: usize) -> Value {
+        self.settle_stale_starts();
         let state = self.lock();
         let mut items: Vec<&Item> = state
             .inbox
@@ -2658,6 +2659,71 @@ impl Link {
         }
     }
 
+    /// A `start` item for a follow-up no longer needed is done by itself, its text saying why, with
+    /// no options: a follow-up of the same job ended after it was proposed (that one took the
+    /// work; a later second, so one that ended as it was proposed doesn't count), or that job's
+    /// work merged. Checked whenever the inbox is read; nothing starts.
+    fn settle_stale_starts(&self) {
+        let open: Vec<Item> = self
+            .lock()
+            .inbox
+            .values()
+            .filter(|i| i.kind == "start" && i.done.is_none())
+            .cloned()
+            .collect();
+        if open.is_empty() {
+            return;
+        }
+        let jobs = self.jobs.list(usize::MAX);
+        let now = time::now();
+        let mut closed = Vec::new();
+        for mut item in open {
+            let Some(of) = item.start.as_ref().and_then(|s| s["follow_up_of"].as_str()) else {
+                continue;
+            };
+            let follow_ups = || {
+                jobs.iter()
+                    .filter(|j| j.follow_up_of.as_deref() == Some(of))
+            };
+            let first = jobs.iter().find(|j| j.id == of);
+            let why =
+                if let Some(merged) = first.into_iter().chain(follow_ups()).find(|j| j.merged()) {
+                    format!(
+                        "Closed by Oby: {}'s work merged already.",
+                        merged.short_title()
+                    )
+                } else if let Some(ended) =
+                    follow_ups().find(|j| j.finished.is_some_and(|at| at > item.created))
+                {
+                    format!(
+                        "Closed by Oby: {} followed it up already, and ended {}.",
+                        ended.short_title(),
+                        ended.status.as_str()
+                    )
+                } else {
+                    continue;
+                };
+            item.text = why;
+            item.options = vec![];
+            item.details = None;
+            item.recommended = None;
+            item.done = Some(now);
+            closed.push(item);
+        }
+        {
+            let mut state = self.lock();
+            for item in &closed {
+                // Answered meanwhile: the owner's answer stands.
+                if state.inbox.get(&item.id).is_some_and(|i| i.done.is_none()) {
+                    state.inbox.insert(item.id.clone(), item.clone());
+                }
+            }
+        }
+        for item in &closed {
+            self.save_item(item);
+        }
+    }
+
     /// Work the brain planned after looking things up waits for the owner's Start, as a `start`
     /// item (Engine/Inbox.swift, `Inbox.proposal`): nothing starts until they say so.
     pub fn propose(&self, new: &crate::jobs::NewJob, title: String, text: String) -> Item {
@@ -2775,6 +2841,7 @@ impl Link {
     /// The items waiting for the owner now (not done, and not put off past `now`), in the order
     /// they came: what the brain is told about the inbox (#546).
     pub fn waiting_items(&self, now: i64) -> Vec<Item> {
+        self.settle_stale_starts();
         let state = self.lock();
         let mut items: Vec<Item> = state
             .inbox
