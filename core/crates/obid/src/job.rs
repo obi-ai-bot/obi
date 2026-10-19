@@ -256,6 +256,9 @@ pub struct Job {
     /// for a follow-up of work that isn't merged. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_from: Option<String>,
+    /// Its change against `start_commit` after each round, oldest first (#736): `diff` in the API.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diffs: Vec<crate::facts::Diff>,
     /// What its turns used, in tokens and cost, as its tool reported them (#731).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::usage::Tokens>,
@@ -362,6 +365,7 @@ impl Job {
             follow_up_of: None,
             earlier: None,
             start_from: None,
+            diffs: Vec::new(),
             usage: None,
             usage_seen: None,
             window_share: None,
@@ -610,6 +614,21 @@ impl Job {
         }
         if let Some(share) = self.window_share.as_ref().and_then(|s| s.to_json()) {
             value["windowShare"] = share;
+        }
+        // The latest round's (#736); every round's is in `detail_json`. Absent before the first
+        // round ends.
+        if let Some(last) = self.diffs.last() {
+            value["diff"] = json!(last);
+        }
+        value
+    }
+
+    /// The job as `GET /v1/jobs/{id}` shows it: [`Self::to_json`] with what's too big to send on
+    /// every event, each round's diff stat (`diff.rounds`, #736).
+    pub fn detail_json(&self) -> Value {
+        let mut value = self.to_json();
+        if value.get("diff").is_some() {
+            value["diff"]["rounds"] = json!(self.diffs);
         }
         value
     }

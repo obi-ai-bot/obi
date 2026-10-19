@@ -529,13 +529,14 @@ fn a_build_job_commits_and_ends_done() {
         ]
     );
     assert_eq!(stages[3], ("publish".into(), "done".into()));
-    // The list, newest first, and the job by id, the same.
+    // The list, newest first, and the job by id, the same, but for each round's diff stat, only
+    // there (#736).
     let list = request(&obid, "GET", "/v1/jobs?limit=5", None).body;
     assert_eq!(list[0]["id"], id.as_str());
-    assert_eq!(
-        request(&obid, "GET", &format!("/v1/jobs/{id}"), None).body,
-        job
-    );
+    let mut by_id = request(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(by_id["diff"]["rounds"].as_array().map(Vec::len), Some(1));
+    by_id["diff"].as_object_mut().unwrap().remove("rounds");
+    assert_eq!(by_id, job);
 }
 
 /// A fix that commits nothing failed: `Nothing committed: ` and the agent's first line. Dismiss lets
@@ -762,6 +763,60 @@ fn a_job_stopped_at_a_limit_counts_its_commits_for_a_follow_up() {
     assert_eq!(follow["startCommit"], head.as_str(), "{follow}");
     let worktree = obid.home.join("worktrees").join(&next);
     assert!(worktree.join("a.txt").exists(), "{follow}");
+}
+
+/// Each round's change against the start commit is kept as that round's (#736): paths and the
+/// counts `git diff --numstat` gives, never what the files hold.
+#[test]
+fn each_round_keeps_its_diff_stat() {
+    let folder = Folder::new("diff");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "EDIT: src/greet.js COMMIT: a.txt", "check": "false", "rounds": 2}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}");
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let start = job["startCommit"].as_str().unwrap();
+    let numstat = git(
+        &clone,
+        &["diff", "--numstat", start, &format!("oby/build-{id}")],
+    );
+    let mut by_file: Vec<Value> = numstat
+        .lines()
+        .map(|line| {
+            let parts: Vec<&str> = line.split('\t').collect();
+            json!({"path": parts[2], "added": parts[0].parse::<u64>().unwrap(), "removed": parts[1].parse::<u64>().unwrap()})
+        })
+        .collect();
+    by_file.sort_by_key(|f| f["path"].as_str().unwrap().to_owned());
+    assert_eq!(by_file.len(), 2, "{numstat}");
+    let diff = &job["diff"];
+    assert_eq!(diff["files"], 2, "{job}");
+    assert_eq!(diff["added"], 2, "{job}");
+    assert_eq!(diff["removed"], 0, "{job}");
+    let mut served = diff["byFile"].as_array().unwrap().clone();
+    served.sort_by_key(|f| f["path"].as_str().unwrap().to_owned());
+    assert_eq!(served, by_file);
+    // Every round's only on the job itself, not on every event.
+    assert!(diff.get("rounds").is_none(), "{job}");
+    let detail = request(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(detail["diff"]["byFile"], diff["byFile"]);
+    let rounds = detail["diff"]["rounds"].as_array().unwrap();
+    assert_eq!(
+        rounds
+            .iter()
+            .map(|r| r["round"].clone())
+            .collect::<Vec<_>>(),
+        [json!(1), json!(2)]
+    );
+    assert_eq!(rounds[0]["byFile"].as_array().unwrap().len(), 2);
 }
 
 /// A check that fails the way the owner asked for (a test meant to fail): the fix round quotes the
