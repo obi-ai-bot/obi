@@ -43,7 +43,7 @@ const QUERY: &str = "query($assigned: String!, $reviews: String!, $mine: String!
 assigned: search(query: $assigned, type: ISSUE, first: 100) { issueCount nodes { ...work } } \
 reviews: search(query: $reviews, type: ISSUE, first: 100) { issueCount nodes { ...work } } \
 mine: search(query: $mine, type: ISSUE, first: 100) { issueCount nodes { ...work } } \
-rateLimit { remaining resetAt } } \
+rateLimit { remaining resetAt } viewer { login } } \
 fragment work on SearchResultItem { \
 ... on Issue { number title updatedAt state author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } } \
 ... on PullRequest { number title updatedAt state isDraft reviewDecision author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } \
@@ -116,10 +116,11 @@ fn cut(text: &str, most: usize) -> String {
     text.chars().take(most).collect()
 }
 
-/// The read's lists and GitHub's `rateLimit` (points left, when they reset), from what
-/// `gh api graphql` printed. Nodes that aren't an issue or a pull request of a repository are
-/// left out.
-pub fn parse(text: &str) -> Result<(Lists, Option<(i64, i64)>), String> {
+/// The read, from what `gh api graphql` printed: whose work it is (`viewer`), the lists, GitHub's
+/// `rateLimit` (points left, when they reset) and the first of its `errors`, when it answered
+/// some (a SAML-protected organization's work, say) besides `data`. Nodes that aren't an issue or
+/// a pull request of a repository are left out.
+pub fn parse(text: &str) -> Result<Got, String> {
     let value: Value =
         serde_json::from_str(text).map_err(|_| "GitHub's answer wasn't JSON".to_owned())?;
     let data = &value["data"];
@@ -148,8 +149,16 @@ pub fn parse(text: &str) -> Result<(Lists, Option<(i64, i64)>), String> {
             .as_str()
             .and_then(time::parse_lenient),
     );
-    Ok((
-        Lists {
+    let login = data["viewer"]["login"]
+        .as_str()
+        .filter(|l| is_login(l))
+        .ok_or("GitHub didn't say whose work it is")?;
+    let partial = value["errors"][0]["message"]
+        .as_str()
+        .map(|m| cut(m.lines().next().unwrap_or_default(), 300));
+    Ok(Got::Read {
+        login: login.into(),
+        lists: Lists {
             reviews,
             assigned,
             mine,
@@ -160,7 +169,8 @@ pub fn parse(text: &str) -> Result<(Lists, Option<(i64, i64)>), String> {
             },
         },
         rate,
-    ))
+        partial,
+    })
 }
 
 fn item(list: &str, node: &Value) -> Option<Item> {
@@ -229,6 +239,8 @@ pub enum Got {
         login: String,
         lists: Lists,
         rate: Option<(i64, i64)>,
+        /// What GitHub left out, when it answered errors besides the lists.
+        partial: Option<String>,
     },
 }
 
@@ -272,20 +284,12 @@ pub fn offers<'a>(before: &Lists, now: &'a Lists, known: &[String]) -> Vec<&'a I
     new
 }
 
-/// Reads GitHub once with `gh`, as `login` when it's known.
-async fn fetch(login: Option<String>) -> Got {
+/// Reads GitHub once with `gh`, as whoever it's signed in as now (`@me`).
+async fn fetch() -> Got {
     let Some(gh) = crate::github::gh() else {
         return Got::SignedOut("gh isn't installed".into());
     };
-    let login = match login {
-        Some(login) => login,
-        None => match crate::github::run(&gh, &["api", "user", "-q", ".login"]).await {
-            Ok(login) if is_login(&login) => login,
-            Ok(_) => return Got::Failed("gh didn't say which GitHub login it has".into()),
-            Err(said) => return failure(said),
-        },
-    };
-    let search = |what: &str| format!("is:open {what}:{login} archived:false sort:updated-desc");
+    let search = |what: &str| format!("is:open {what}:@me archived:false sort:updated-desc");
     let args = [
         "api".to_owned(),
         "graphql".into(),
@@ -299,12 +303,25 @@ async fn fetch(login: Option<String>) -> Got {
         format!("mine=is:pr {}", search("author")),
     ];
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match crate::github::run(&gh, &args).await {
-        Ok(text) => match parse(&text) {
-            Ok((lists, rate)) => Got::Read { login, lists, rate },
-            Err(why) => Got::Failed(why),
+    // gh fails an answer that has `errors` even when it has `data`: the data still counts.
+    let (text, said) = match crate::github::output(&gh, &args).await {
+        Ok(text) => (text, None),
+        Err((text, said)) => (text, Some(said)),
+    };
+    match parse(&text) {
+        Ok(Got::Read {
+            login,
+            lists,
+            rate,
+            partial,
+        }) => Got::Read {
+            login,
+            lists,
+            rate,
+            partial: partial.or(said),
         },
-        Err(said) => failure(said),
+        Ok(other) => other,
+        Err(why) => said.map(failure).unwrap_or(Got::Failed(why)),
     }
 }
 
@@ -326,6 +343,8 @@ struct Seen {
     waits: u32,
     /// No read before then.
     wait_until: i64,
+    /// When the last read began: a refresh within [`refresh_every`] of it doesn't read again.
+    read_at: i64,
     /// Whether obid read since it started: the first read sends no event (apps fetch the feed
     /// when they connect).
     read: bool,
@@ -393,15 +412,16 @@ impl Feed {
     pub async fn read(&self) -> Value {
         let _one = self.reading.lock().await;
         let now = time::now();
-        let (login, waiting) = {
-            let state = self.lock();
-            (state.kept.login.clone(), now < state.wait_until)
+        let waiting = {
+            let mut state = self.lock();
+            state.read_at = now;
+            now < state.wait_until
         };
         if waiting {
             return self.to_json();
         }
         let before = self.shown();
-        let got = fetch(login).await;
+        let got = fetch().await;
         let known = self.known();
         let mut offered = Vec::new();
         let mut present = None;
@@ -427,19 +447,29 @@ impl Feed {
                         time::format(state.wait_until)
                     ));
                 }
-                Got::Read { login, lists, rate } => {
-                    // The first read on record only notes what's there: no flood of offers.
-                    if state.kept.checked_at.is_some() {
+                Got::Read {
+                    login,
+                    lists,
+                    rate,
+                    partial,
+                } => {
+                    // The first read on record, or the first as another login (`gh auth
+                    // switch`), only notes what's there: no flood of offers.
+                    if state.kept.checked_at.is_some()
+                        && state.kept.login.as_deref() == Some(login.as_str())
+                    {
                         offered = offers(&state.kept.lists, &lists, &known)
                             .into_iter()
                             .cloned()
                             .collect();
                     }
-                    if !lists.cut() {
+                    // A list GitHub cut, or left some of out, isn't all there is.
+                    if !lists.cut() && partial.is_none() {
                         present = Some(lists.all().map(|i| i.id.clone()).collect::<HashSet<_>>());
                     }
                     state.waits = 0;
-                    state.error = None;
+                    state.error =
+                        partial.map(|e| format!("GitHub left some of your work out: {e}"));
                     if let Some((remaining, reset)) = rate
                         && remaining < LOW_POINTS
                     {
@@ -470,6 +500,15 @@ impl Feed {
         if let Err(e) = kept.and_then(|bytes| crate::store::write_private(&path, &bytes)) {
             tracing::warn!("can't keep the GitHub work feed: {e}");
         }
+    }
+
+    /// `POST /v1/github/work/refresh`: a read, unless one began within [`refresh_every`] (a
+    /// paired phone can't spend GitHub's points by refreshing).
+    pub async fn refresh(&self) -> Value {
+        if time::now() - self.lock().read_at < refresh_every() {
+            return self.to_json();
+        }
+        self.read().await
     }
 
     /// The feed without its clock: what an event is sent for.
@@ -557,6 +596,15 @@ impl Feed {
     }
 }
 
+/// The fewest seconds between two reads a refresh asks for: 15, or `OBID_GITHUB_REFRESH_SECONDS`
+/// (obid's tests set 0).
+fn refresh_every() -> i64 {
+    std::env::var("OBID_GITHUB_REFRESH_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(15)
+}
+
 /// The queued or running job on `repo` `number` that work from `list` would start, if any.
 pub fn active_job<'a>(jobs: &'a [Job], list: &str, repo: &str, number: u64) -> Option<&'a Job> {
     jobs.iter().find(|j| {
@@ -596,6 +644,11 @@ pub async fn start_work(
             format!("obid doesn't work in {repo} yet: add it to repos in obid's configuration."),
         ));
     }
+    // One start at a time, from the feed and the inbox alike: a second tap waits for the first
+    // and then finds its job (Mac and iPhone at once, or a card and the feed).
+    // ponytail: one lock for every start; per-item locks if starts ever queue up behind gh.
+    static STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _starting = STARTING.lock().await;
     if let Some(job) = active_job(&jobs.list(1000), list, repo, number) {
         return Ok((job.clone(), false));
     }
@@ -759,7 +812,7 @@ pub async fn get(State(shared): State<Arc<Shared>>) -> Response {
 
 /// `POST /v1/github/work/refresh`.
 pub async fn refresh(State(shared): State<Arc<Shared>>) -> Response {
-    answer(StatusCode::OK, shared.github.read().await)
+    answer(StatusCode::OK, shared.github.refresh().await)
 }
 
 /// `POST /v1/github/work/{id}/start`.
@@ -793,8 +846,17 @@ mod tests {
             "reviews": {"issueCount": reviews.len(), "nodes": reviews},
             "assigned": {"issueCount": count, "nodes": assigned},
             "mine": {"issueCount": 0, "nodes": []},
-            "rateLimit": {"remaining": 4990, "resetAt": "2026-10-18T10:00:00Z"}}})
+            "rateLimit": {"remaining": 4990, "resetAt": "2026-10-18T10:00:00Z"},
+            "viewer": {"login": "wellington"}}})
         .to_string()
+    }
+
+    /// The lists and rate limit of a read that parsed.
+    fn read(text: &str) -> (Lists, Option<(i64, i64)>) {
+        match parse(text).unwrap() {
+            Got::Read { lists, rate, .. } => (lists, rate),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -810,7 +872,7 @@ mod tests {
             vec![node("obi-ai-bot/obi", 640, "2026-10-17T08:00:00Z")],
             140,
         );
-        let (lists, rate) = parse(&text).unwrap();
+        let (lists, rate) = read(&text);
         assert_eq!(
             rate,
             Some((4990, time::parse("2026-10-18T10:00:00Z").unwrap()))
@@ -834,23 +896,38 @@ mod tests {
         assert!(lists.cut());
         assert!(parse("{}").is_err());
         assert!(parse("not json").is_err());
+        // Whose work it is comes with it, and what GitHub left out besides the data.
+        let mut partial: Value = serde_json::from_str(&text).unwrap();
+        partial["errors"] =
+            json!([{"message": "Resource protected by organization SAML enforcement.\nMore"}]);
+        match parse(&partial.to_string()).unwrap() {
+            Got::Read { login, partial, .. } => {
+                assert_eq!(login, "wellington");
+                assert_eq!(
+                    partial.as_deref(),
+                    Some("Resource protected by organization SAML enforcement.")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        partial["data"]["viewer"] = json!({"login": "me is:closed"});
+        assert!(parse(&partial.to_string()).is_err(), "a login is a login");
     }
 
     #[test]
     fn only_new_items_on_known_repositories_are_offered_newest_first_and_capped() {
         let known = vec!["obi-ai-bot/obi".to_owned()];
-        let (before, _) = parse(&answer(
+        let (before, _) = read(&answer(
             vec![node("obi-ai-bot/obi", 1, "2026-10-18T08:00:00Z")],
             vec![],
             0,
-        ))
-        .unwrap();
+        ));
         let mut reviews: Vec<Value> = (2..10)
             .map(|n| node("obi-ai-bot/obi", n, &format!("2026-10-18T08:0{n}:00Z")))
             .collect();
         reviews.push(node("obi-ai-bot/obi", 1, "2026-10-18T09:00:00Z"));
         reviews.push(node("someone/else", 3, "2026-10-18T09:30:00Z"));
-        let (now, _) = parse(&answer(reviews, vec![], 0)).unwrap();
+        let (now, _) = read(&answer(reviews, vec![], 0));
         let offered: Vec<u64> = offers(&before, &now, &known)
             .iter()
             .map(|i| i.number)

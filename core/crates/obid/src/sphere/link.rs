@@ -587,15 +587,22 @@ impl Link {
                 }
                 if *answer == start {
                     let work = item.github.as_deref().cloned().unwrap_or_default();
-                    let (job, _) = crate::github_work::start_work(
+                    let started = crate::github_work::start_work(
                         &self.jobs,
                         &self.config,
                         work["list"].as_str().unwrap_or_default(),
                         work["repo"].as_str().unwrap_or_default(),
                         work["number"].as_u64().unwrap_or_default(),
                     )
-                    .await?;
-                    item.job = job.id;
+                    .await;
+                    match started {
+                        Ok((job, _)) => item.job = job.id,
+                        // `answer` claimed it; what couldn't start leaves it open again.
+                        Err(why) => {
+                            self.lock().inbox.insert(item.id.clone(), item.clone());
+                            return Err(why);
+                        }
+                    }
                 }
             }
             item.done = Some(time::now());
@@ -2825,13 +2832,24 @@ impl Link {
                 Given::Later(_) => {}
             }
         }
-        // An offer of GitHub work: its start reads GitHub first, with no lock held.
-        let github = self
-            .lock()
-            .inbox
-            .get(id)
-            .filter(|i| i.done.is_none() && i.kind == "github")
-            .cloned();
+        // An offer of GitHub work: its start reads GitHub first, with no lock held, so its start
+        // answer claims the item under the lock (done), as Start does: nothing settles it
+        // meanwhile, and a second answer finds it done.
+        let github = {
+            let mut state = self.lock();
+            let item = state
+                .inbox
+                .get(id)
+                .filter(|i| i.done.is_none() && i.kind == "github")
+                .cloned();
+            if let Some(item) = &item
+                && matches!(&given, Given::Answer(a) if item.options.first() == Some(a))
+                && let Some(kept) = state.inbox.get_mut(id)
+            {
+                kept.done = Some(time::now());
+            }
+            item
+        };
         if let Some(item) = github {
             return match given {
                 Given::Answer(answer) => self.answer_github(item, Some(answer), None).await,

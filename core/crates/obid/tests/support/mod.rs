@@ -225,6 +225,8 @@ pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
         .env("HOME", folder.join("env-home"))
         .env("TMPDIR", folder.join("tmp"))
         .env("OBID_LOG", "info")
+        // Every refresh reads (crate::github_work): tests refresh more often than 15 seconds.
+        .env("OBID_GITHUB_REFRESH_SECONDS", "0")
         // Never the person's real Keychain: a stand-in `security` that finds nothing and says
         // it was asked (tests/agents/fake-security).
         .env(
