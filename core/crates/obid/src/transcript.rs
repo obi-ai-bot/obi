@@ -166,7 +166,11 @@ impl Transcripts {
             }
             Event::Said(words) => said(live, "said", words),
             Event::Plan(todos) => vec![plan(live, todos.clone())],
-            Event::Session(_) | Event::Step(_) | Event::Delta(_) => vec![],
+            Event::Session(_)
+            | Event::Step(_)
+            | Event::Delta(_)
+            | Event::Usage(_)
+            | Event::Tokens(_) => vec![],
         };
         self.write(job, live, entries)
     }

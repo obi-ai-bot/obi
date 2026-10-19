@@ -725,7 +725,12 @@ fn the_brain_reads_the_conversation_and_may_stop_one_job() {
     );
     let args = read(calls[0].join("args"));
     assert!(
-        args.contains("--tools\nRead\n--allowedTools\nRead\n--max-turns\n6\n"),
+        args.contains("--tools\nRead\n--allowedTools\nRead(./work.md)\n"),
+        "{args}"
+    );
+    assert!(args.contains("--max-turns\n6\n"), "{args}");
+    assert!(
+        args.contains("--disallowedTools\nRead(./login/**)\n"),
         "{args}"
     );
     assert!(args.contains("quoted in the file work.md"));
@@ -844,7 +849,7 @@ fn a_brain_that_may_read_is_boxed() {
     running(&obid, "Vault secrets");
     queue(&obid, &[peek]);
     assert_eq!(said(&obid, "anything to read?")["text"], "hidden");
-    assert!(read(calls(&obid)[1].join("args")).contains("--allowedTools\nRead\n"));
+    assert!(read(calls(&obid)[1].join("args")).contains("--allowedTools\nRead(./work.md)\n"));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2013,6 +2018,8 @@ fn telling_a_finished_job_something_starts_a_follow_up() {
         (job["status"] == "done").then_some(job)
     });
     assert_eq!(follow["followUpOf"], json!(id));
+    // Its parent isn't this conversation's (POST /v1/jobs), so neither is it: no turn here names it.
+    assert!(follow["turn"].is_null(), "{follow}");
     for key in [
         "kind",
         "agent",
@@ -2277,6 +2284,9 @@ fn a_plan_starts_its_jobs_and_links_them_to_the_turn() {
         turns.as_array().unwrap().last().unwrap()["jobs"],
         json!(ids)
     );
+    // Each names the words that started it, so its card shows under them as it starts.
+    let user = turn_of(&obid, "fix fixture-app #176 and review PR 33");
+    assert!(jobs.iter().all(|j| j["turn"] == user.as_str()), "{jobs:?}");
     assert_eq!(call(&obid, "GET", "/v1/inbox", None).body, json!([]));
     assert_eq!(ends(&obid), ["started_jobs"]);
 }
@@ -2680,6 +2690,8 @@ fn research_then_dispatch_waits_for_start() {
     assert_eq!(jobs.as_array().unwrap().len(), 1);
     assert_eq!(jobs[0]["title"], "Greeting fix");
     assert_eq!(started.body["job"], jobs[0]["id"]);
+    // Started by the Start, not by the words: no turn of the conversation started it.
+    assert!(jobs[0]["turn"].is_null(), "{jobs}");
 }
 
 /// A dispatch after research, with what the turn found (#540).
@@ -4189,12 +4201,14 @@ fn a_later_step_with_no_time_left_to_think_ends_budget_spent() {
         .unwrap()
         .to_owned();
     // Step 0's first try times out at half the budget; its retry plans with under a second left
-    // for step 1, which no adapter starts.
+    // for step 1, which no adapter starts. The retry sleeps half a second, so that with nothing
+    // else taking time a second would be left: starting processes on a busy machine only takes
+    // from it, and has the whole second before the plan comes after the budget.
     queue(
         &obid,
         &[
             format!("SLEEP 5 {}", reply("")),
-            format!("SLEEP 0.9 {}", set_mode(&id, "ask")),
+            format!("SLEEP 0.6 {}", set_mode(&id, "ask")),
         ],
     );
     let answer = said(&obid, "ask before anything on Vault secrets");

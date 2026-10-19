@@ -748,3 +748,66 @@ fn codex_cards_show_the_command_out_of_its_shell() {
     assert_eq!(summary(&ended(&obid, &simple)), "answer: accept");
     assert_eq!(summary(&ended(&obid, &chained)), "answer: accept");
 }
+
+/// Codex's usage reaches its Account: the `account/rateLimits/read` obid sends as the run starts,
+/// then an `account/rateLimits/updated` that changes one window and keeps the other.
+#[test]
+fn codex_reports_its_accounts_usage() {
+    let folder = Folder::new("codex-usage");
+    let obid = obid(&folder, false);
+    let reset = obi_protocol::time::now() + 86_400;
+    let read = json!({"limitId": "codex", "primary": {"windowDurationMins": 300, "usedPercent": 20, "resetsAt": reset - 3_600},
+        "secondary": {"windowDurationMins": 10080, "usedPercent": 40, "resetsAt": reset}});
+    let id = dispatch(
+        &obid,
+        json!({"agent": "codex", "task": format!("READ: {read}")}),
+    );
+    assert_eq!(ended(&obid, &id)["status"], "done");
+    let work = |obid: &Obid| call(obid, "GET", "/v1/status", None).body["accounts"][0].clone();
+    let account = work(&obid);
+    assert_eq!(account["id"], "work");
+    assert_eq!(account["fiveHour"], 0.2);
+    assert_eq!(account["sevenDay"], 0.4);
+    assert_eq!(
+        account["fiveHourResets"],
+        obi_protocol::time::format(reset - 3_600)
+    );
+    assert_eq!(account["sevenDayResets"], obi_protocol::time::format(reset));
+    assert_eq!(account["reserved"], false);
+
+    let update = json!({"primary": {"windowDurationMins": 300, "usedPercent": 100, "resetsAt": reset - 1_800}});
+    let id = dispatch(
+        &obid,
+        json!({"agent": "codex", "task": format!("LIMITS: {update}")}),
+    );
+    ended(&obid, &id);
+    let account = work(&obid);
+    assert_eq!(account["fiveHour"], 1.0);
+    assert_eq!(account["sevenDay"], 0.4);
+    assert_eq!(
+        account["fullUntil"],
+        obi_protocol::time::format(reset - 1_800)
+    );
+}
+
+/// A Codex job's tokens: each round's own, though its thread is resumed with the earlier round's
+/// total, and an update sent twice counts once; `account/read` says a plan pays (#731).
+#[test]
+fn codex_reports_a_jobs_tokens() {
+    let folder = Folder::new("codex-tokens");
+    let obid = obid(&folder, false);
+    let id = dispatch(
+        &obid,
+        json!({"agent": "codex", "kind": "build", "task": "TOKENS", "check": "false", "rounds": 2}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["round"], 2, "{job}");
+    assert_eq!(
+        job["usage"],
+        json!({"input": 800, "output": 200, "cacheRead": 1200, "priced": "plan"}),
+        "{job}"
+    );
+    // obid asks how the account pays once: a later job's answer, an API key's, isn't asked for.
+    let id = dispatch(&obid, json!({"agent": "codex", "task": "TOKENS APIKEY"}));
+    assert_eq!(ended(&obid, &id)["usage"]["priced"], "plan");
+}

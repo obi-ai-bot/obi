@@ -133,8 +133,9 @@ struct Warm {
     account: String,
     /// Where its account's login came from: a turn on the account's folder as it is now only.
     config_dir: Option<PathBuf>,
-    /// Its session's id.
-    session: String,
+    /// Its session's id; none for one started for the next new conversation, which hasn't had a
+    /// turn yet ([`prestart`]).
+    session: Option<String>,
     /// What it was started with ([`flags_key`]): a turn that would start it otherwise starts anew.
     key: u64,
     place: Place,
@@ -156,13 +157,23 @@ impl Sessions {
 
     /// A new token for `session`, good until [`Sessions::close`].
     fn open(&self, session: Arc<Session>) -> String {
-        let token = format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
+        let token = new_token();
         self.lock().insert(token.clone(), session);
         token
+    }
+
+    /// Whether `token` is the one of the Claude Code waiting in the conversation of `endpoint`
+    /// (`conversation-<id>`): it may connect to Oby's tools and list them, never call one, until a
+    /// turn of the conversation is under way (crate::brain::tools::handshake).
+    pub fn waiting_with(&self, endpoint: &str, token: &str) -> bool {
+        let Some(conversation) = endpoint.strip_prefix("conversation-") else {
+            return false;
+        };
+        !token.is_empty()
+            && self
+                .warm()
+                .get(conversation)
+                .is_some_and(|w| w.token == token)
     }
 
     fn close(&self, token: &str) {
@@ -221,7 +232,7 @@ impl Sessions {
         let warm = all.remove(conversation)?;
         if warm.account == account.id
             && warm.config_dir == account.config_dir
-            && session == Some(warm.session.as_str())
+            && session == warm.session.as_deref()
         {
             return Some(warm);
         }
@@ -229,16 +240,31 @@ impl Sessions {
         None
     }
 
-    /// Keeps `warm` for `conversation`'s next turn; the one waiting longest ends when
-    /// [`WARM_MOST`] already wait.
-    fn keep(&self, conversation: &str, warm: Warm) {
+    /// Keeps `warm` for `conversation`'s next turn when `admit` says it may wait, judged under
+    /// the same lock that [`Sessions::end_warm_on`] and [`Sessions::end_warm`] take, so an account
+    /// change or a deletion that comes after the look ends it: whether it was kept. The one
+    /// waiting longest ends when [`WARM_MOST`] conversations' already wait; the next new
+    /// conversation's (`next`, [`prestart`]) isn't one of them.
+    fn keep(
+        &self,
+        conversation: &str,
+        warm: Warm,
+        next: Option<&str>,
+        admit: impl FnOnce(&Warm) -> bool,
+    ) -> bool {
         let mut all = self.warm();
+        if !admit(&warm) {
+            warm.end();
+            return false;
+        }
         if let Some(old) = all.insert(conversation.to_owned(), warm) {
             old.end();
         }
-        while all.len() > WARM_MOST {
+        let counted = |c: &String| Some(c.as_str()) != next;
+        while all.keys().filter(|c| counted(c)).count() > WARM_MOST {
             let Some(oldest) = all
                 .iter()
+                .filter(|(c, _)| counted(c))
                 .min_by_key(|(_, w)| w.since)
                 .map(|(c, _)| c.clone())
             else {
@@ -246,6 +272,18 @@ impl Sessions {
             };
             if let Some(old) = all.remove(&oldest) {
                 old.end();
+            }
+        }
+        true
+    }
+
+    /// Ends every waiting Claude Code whose conversation `stays` doesn't name.
+    fn end_warm_unless(&self, stays: impl Fn(&str) -> bool) {
+        let mut all = self.warm();
+        let gone: Vec<String> = all.keys().filter(|c| !stays(c)).cloned().collect();
+        for conversation in gone {
+            if let Some(warm) = all.remove(&conversation) {
+                warm.end();
             }
         }
     }
@@ -300,22 +338,134 @@ impl Sessions {
 /// It isn't kept when the conversation went, or its account is being changed or isn't there
 /// with the same folder any more, while the turn ran.
 fn keep_warm(shared: &Arc<Shared>, conversation: &str, warm: Warm) {
-    let account_as_was = crate::accounts::find(&shared.config.agents.get(), &warm.account)
-        .is_some_and(|(_, a)| a.config_dir == warm.config_dir);
-    if !shared.conversations.exists(conversation)
-        || !account_as_was
-        || shared.jobs.being_changed(&warm.account)
-    {
-        warm.end();
+    let since = warm.since;
+    let next = shared.conversations.peek_next();
+    let kept = shared
+        .harness
+        .keep(conversation, warm, next.as_deref(), |warm| {
+            shared.conversations.exists(conversation) && may_wait(shared, warm)
+        });
+    if !kept {
         return;
     }
-    let since = warm.since;
-    shared.harness.keep(conversation, warm);
     let (shared, conversation) = (shared.clone(), conversation.to_owned());
     tokio::spawn(async move {
         tokio::time::sleep(WARM_FOR).await;
         shared.harness.expire(&conversation, since);
     });
+}
+
+/// Whether `warm`'s account is there with the same folder and isn't being changed (removed or
+/// signed in again).
+fn may_wait(shared: &Shared, warm: &Warm) -> bool {
+    !shared.jobs.being_changed(&warm.account)
+        && crate::accounts::find(&shared.config.agents.get(), &warm.account)
+            .is_some_and(|(_, a)| a.config_dir == warm.config_dir)
+}
+
+/// Starts the next new conversation's Claude Code now, so its first turn finds it waiting as a
+/// later turn does, connected to Oby's tools already (docs/fast-replies.md; the Agent SDK's
+/// `prewarm()`). obid names that conversation's id ahead ([`crate::conversation::Conversations::next_id`])
+/// and readies its place as a turn would: the room with its checkouts, the box, a login copy and
+/// its MCP configuration, under the conversation's lock. It waits like any other ([`WARM_FOR`], one
+/// of [`WARM_MOST`]), with no session until its first turn, and its token connects to Oby's tools
+/// but calls none before a turn is under way. Started after each of the owner's turns, so a
+/// Claude Code waits only while the owner is talking to Oby; one at a time.
+/// `OBID_PRESTART=off` (obid's tests set it, but in the tests of this) starts none.
+fn prestart(shared: &Arc<Shared>) {
+    static STARTING: AtomicBool = AtomicBool::new(false);
+    let config = &shared.config.conversation;
+    if !config.harness
+        || config.agent != Tool::Claude
+        || std::env::var_os("OBID_PRESTART").is_some_and(|v| v == "off")
+    {
+        return;
+    }
+    let id = shared.conversations.next_id();
+    if shared.harness.warm().contains_key(&id) || STARTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        if let Err(why) = start_next(&shared, &id).await {
+            let why = placed(&crate::secrets::known().redact(&why), &homes(&shared));
+            tracing::info!("the next conversation's Claude Code isn't started: {why}");
+        }
+        STARTING.store(false, Ordering::SeqCst);
+    });
+}
+
+async fn start_next(shared: &Arc<Shared>, id: &str) -> Result<(), String> {
+    let account = shared
+        .jobs
+        .signed_in_account(Tool::Claude)
+        .ok_or("no Claude Code account is signed in")?;
+    let busy = shared.harness.busy(id);
+    let _held = busy.lock().await;
+    // Taken by a new conversation whose turn ran first, or started already.
+    if !shared.conversations.is_next(id) || shared.harness.warm().contains_key(id) {
+        return Ok(());
+    }
+    let began = Instant::now();
+    let place = Place::of(&shared.config.home, id);
+    place.make()?;
+    checkouts(shared, &place, &|| true).await;
+    shared.jobs.claude_login_ready(Some(&account)).await?;
+    place.scrub();
+    let token = new_token();
+    let (mcp, url) = mcp_config(shared, &place, id);
+    write_mcp(&mcp, &url, &token)?;
+    let mut flags = claude_flags(shared);
+    let key = flags_key(&flags);
+    flags.extend(["--mcp-config".into(), mcp.into_os_string()]);
+    let launch = shared.jobs.conversation_launch(
+        Tool::Claude,
+        &account,
+        &place.room,
+        &place.temp,
+        place.login_for(&account),
+        vec![place.repos.clone()],
+        flags,
+        place.folder.join("agent.log"),
+    )?;
+    // Its stop signal is its turn's, given when the turn takes it ([`crate::conn::Conn::renew`]).
+    let (_signal, stop) = tokio::sync::watch::channel(crate::process::Signal::Run);
+    let conn = match crate::conn::Conn::spawn(&launch, WARM_FOR, stop, false).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            place.forget_login();
+            return Err(format!("Claude Code couldn't start: {e}"));
+        }
+    };
+    let warm = Warm {
+        conn,
+        token,
+        account: account.id.clone(),
+        config_dir: account.config_dir.clone(),
+        session: None,
+        key,
+        place,
+        since: Instant::now(),
+    };
+    // Not kept when its account changed while it started, or the conversation went.
+    let since = warm.since;
+    let kept = shared.harness.keep(id, warm, Some(id), |warm| {
+        (shared.conversations.is_next(id) || shared.conversations.exists(id))
+            && may_wait(shared, warm)
+    });
+    if !kept {
+        return Ok(());
+    }
+    tracing::info!(
+        "the next conversation's Claude Code is waiting ({} ms)",
+        began.elapsed().as_millis()
+    );
+    let (shared, id) = (shared.clone(), id.to_owned());
+    tokio::spawn(async move {
+        tokio::time::sleep(WARM_FOR).await;
+        shared.harness.expire(&id, since);
+    });
+    Ok(())
 }
 
 /// A conversation's deleted (`DELETE /v1/conversations/{id}`, or the oldest forgotten past the
@@ -330,11 +480,68 @@ pub fn end_warm_with_conversations(shared: Arc<Shared>) {
                         shared.harness.end_warm(id);
                     }
                 }
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                // Deletions it missed: every one waiting for a conversation that's gone ends.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    shared.harness.end_warm_unless(|c| {
+                        shared.conversations.exists(c) || shared.conversations.is_next(c)
+                    });
+                }
+                Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             }
         }
     });
+}
+
+/// A conversation's Claude Code's flags, before `--resume` and `--mcp-config`.
+fn claude_flags(shared: &Shared) -> Vec<OsString> {
+    [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--permission-prompt-tool",
+        "stdio",
+        "--permission-mode",
+        "default",
+        "--setting-sources",
+        "",
+        "--strict-mcp-config",
+        "--restricted",
+        "--tools",
+        TOOLS,
+        "--max-turns",
+        MAX_TURNS,
+        "--model",
+        shared.config.conversation.model.as_str(),
+        "--append-system-prompt",
+        orientation(shared).as_str(),
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect()
+}
+
+/// Where a conversation's MCP configuration is (a file in its `HOME`), and the URL of Oby's
+/// tools for it.
+fn mcp_config(shared: &Shared, place: &Place, conversation: &str) -> (PathBuf, String) {
+    let url = format!(
+        "{}/v1/agent/mcp/conversation-{conversation}",
+        shared.connections.api_url()
+    );
+    (place.temp.join(MCP_FILE), url)
+}
+
+/// Writes the MCP configuration that gives the agent Oby's tools with `token`. The agent writes
+/// in its HOME: never through a link it left there (O_NOFOLLOW, O_EXCL).
+fn write_mcp(mcp: &Path, url: &str, token: &str) -> Result<(), String> {
+    let servers = json!({"mcpServers": {"oby": {"type": "http", "url": url,
+                                                 "headers": {"Authorization": format!("Bearer {token}")}}}});
+    crate::jobs::write_login(mcp, servers.to_string().as_bytes())
+        .map_err(|e| format!("the session's MCP configuration couldn't be written: {e}"))
 }
 
 /// What a run's command line says, in one number: a waiting Claude Code started with other flags
@@ -344,6 +551,15 @@ fn flags_key(flags: &[OsString]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     flags.hash(&mut hasher);
     hasher.finish()
+}
+
+/// A token for a conversation's MCP endpoint.
+fn new_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 /// Runs one conversation turn: in its session when conversations are on the harness and a Claude
@@ -735,7 +951,7 @@ async fn session(
         return Err("the turn was cancelled before it started".into());
     }
     watch.mark("its turn");
-    checkouts(shared, &place, control).await;
+    checkouts(shared, &place, &|| control.live()).await;
     watch.mark("repositories");
     super::thinking(shared, control, 1, "Thinking", State::Running);
     let resumed = kept(&place, &account.id);
@@ -791,6 +1007,8 @@ async fn session(
     )
     .await;
     watch.mark("ended");
+    // The owner is talking to Oby: the next new conversation's Claude Code starts meanwhile.
+    prestart(shared);
     let state = if ran.is_ok() && control.live() {
         State::Done
     } else {
@@ -864,19 +1082,10 @@ async fn attempts(
     let said = &session.said;
     // The budget is the turn's, both runs together.
     let deadline = Instant::now() + config.budget;
-    let mcp = place.temp.join(MCP_FILE);
-    let url = format!(
-        "{}/v1/agent/mcp/conversation-{}",
-        shared.connections.api_url(),
-        control.conversation
-    );
-    let servers = json!({"mcpServers": {"oby": {"type": "http", "url": url,
-                                                 "headers": {"Authorization": format!("Bearer {token}")}}}});
-    // The agent writes in its HOME: never through a link it left there (O_NOFOLLOW, O_EXCL).
+    let (mcp, url) = mcp_config(shared, place, &control.conversation);
     // Codex is given the server in its arguments instead.
     if tool == Tool::Claude {
-        crate::jobs::write_login(&mcp, servers.to_string().as_bytes())
-            .map_err(|e| format!("the session's MCP configuration couldn't be written: {e}"))?;
+        write_mcp(&mcp, &url, token)?;
     }
     // What reaches the agent has the vault's secrets taken out; a vault that can't be read sends
     // nothing.
@@ -909,34 +1118,7 @@ async fn attempts(
             Some(_) => words.clone(),
             None => first.clone(),
         };
-        let mut flags: Vec<OsString> = [
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--permission-prompt-tool",
-            "stdio",
-            "--permission-mode",
-            "default",
-            "--setting-sources",
-            "",
-            "--strict-mcp-config",
-            "--restricted",
-            "--tools",
-            TOOLS,
-            "--max-turns",
-            MAX_TURNS,
-            "--model",
-            config.model.as_str(),
-            "--append-system-prompt",
-            orientation(shared).as_str(),
-        ]
-        .iter()
-        .map(OsString::from)
-        .collect();
+        let mut flags = claude_flags(shared);
         let key = flags_key(&flags);
         if let Some(session) = &resume {
             flags.extend(["--resume".into(), session.into()]);
@@ -1054,7 +1236,7 @@ async fn attempts(
                 token: token.to_owned(),
                 account: account.id.clone(),
                 config_dir: account.config_dir.clone(),
-                session: id.clone(),
+                session: Some(id.clone()),
                 key,
                 place: place.clone(),
                 since: Instant::now(),
@@ -1333,7 +1515,12 @@ async fn one(
                 watch.mark("session");
                 session.keep(Some(&id))
             }
-            Event::Step(_) | Event::Denied(_) | Event::Said(_) | Event::Plan(_) => {}
+            Event::Step(_)
+            | Event::Denied(_)
+            | Event::Said(_)
+            | Event::Plan(_)
+            | Event::Usage(_)
+            | Event::Tokens(_) => {}
         }
     };
     let decide = |tool: &str, input: &Value| {
@@ -1678,10 +1865,10 @@ fn step_text(name: &str, input: &Value) -> String {
 /// moved keeps its checkout while the new one is made beside it and swapped in. Only an empty room
 /// with no spare at its commit waits for one. A repository that can't be checked out is left out,
 /// and logged.
-async fn checkouts(shared: &Arc<Shared>, place: &Place, control: &Control) {
+async fn checkouts(shared: &Arc<Shared>, place: &Place, live: &(dyn Fn() -> bool + Sync)) {
     for repo in &shared.config.repos {
         // A cancelled turn doesn't keep extracting (a big tree takes time).
-        if !control.live() {
+        if !live() {
             break;
         }
         if let Err(why) = checkout(shared, place, repo).await {
@@ -1881,6 +2068,21 @@ pub(super) fn spare(shared: Arc<Shared>, repo: crate::config::Repo) {
     });
 }
 
+/// At obid's start, every conversation's login copy goes: no Claude Code of obid's is running yet,
+/// and one a crash left (the next new conversation's room holds one most of the time) is never
+/// left on disk.
+pub fn forget_logins_left(home: &Path) {
+    for entry in std::fs::read_dir(home.join("conversations"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            Place::of(home, &entry.file_name().to_string_lossy()).forget_login();
+        }
+    }
+}
+
 /// At obid's start: what a stop left in the spares' folders goes (all but the spares), and each
 /// repository's spare tree is made.
 pub fn prepare_rooms(shared: &Arc<Shared>) {
@@ -1960,7 +2162,7 @@ mod tests {
             token: "t".into(),
             account: account.into(),
             config_dir: config_dir.map(PathBuf::from),
-            session: session.into(),
+            session: Some(session.into()),
             key: 1,
             place: Place::of(&root, "c"),
             since: Instant::now(),
@@ -2008,7 +2210,7 @@ mod tests {
         ] {
             let warm = waiting("a", Some("/a"), "s1").await;
             let pid = warm.conn.pid();
-            sessions.keep("c", warm);
+            sessions.keep("c", warm, None, |_| true);
             assert!(
                 sessions
                     .take_warm("c", &account(who, folder), Some(session))
@@ -2016,7 +2218,7 @@ mod tests {
             );
             assert!(ends(pid).await, "{who} {folder:?} {session}");
         }
-        sessions.keep("c", waiting("a", Some("/a"), "s1").await);
+        sessions.keep("c", waiting("a", Some("/a"), "s1").await, None, |_| true);
         let mine = sessions.take_warm("c", &account("a", Some("/a")), Some("s1"));
         assert!(mine.is_some());
         mine.unwrap().end();
@@ -2031,7 +2233,7 @@ mod tests {
         for c in ["c1", "c2", "c3", "c4"] {
             let warm = waiting("a", None, "s").await;
             pids.push(warm.conn.pid());
-            sessions.keep(c, warm);
+            sessions.keep(c, warm, None, |_| true);
         }
         assert!(ends(pids[0]).await, "the oldest ends");
         assert_eq!(sessions.warm().len(), WARM_MOST);
@@ -2044,12 +2246,67 @@ mod tests {
         sessions.expire("c2", since);
         assert!(!sessions.warm().contains_key("c2"));
         assert!(ends(pids[1]).await);
-        sessions.keep("c5", waiting("b", None, "s").await);
+        sessions.keep("c5", waiting("b", None, "s").await, None, |_| true);
         sessions.end_warm_on("a");
         assert_eq!(sessions.warm().keys().collect::<Vec<_>>(), vec!["c5"]);
         assert!(ends(pids[2]).await && ends(pids[3]).await);
         sessions.end_all_warm();
         assert!(sessions.warm().is_empty());
+    }
+
+    /// The next new conversation's Claude Code isn't one of the WARM_MOST, and none is kept when
+    /// what's looked at under the lock says it may not wait.
+    #[tokio::test]
+    async fn the_next_conversations_claude_code_is_kept_beside_the_three() {
+        let sessions = Sessions::default();
+        let mut next = waiting("a", None, "s").await;
+        next.session = None;
+        let next_pid = next.conn.pid();
+        assert!(sessions.keep("next", next, Some("next"), |_| true));
+        // One with no session that isn't the next conversation's counts like any other.
+        let mut taken = waiting("a", None, "s").await;
+        taken.session = None;
+        let taken_pid = taken.conn.pid();
+        assert!(sessions.keep("c0", taken, Some("next"), |_| true));
+        let mut pids = vec![];
+        for c in ["c1", "c2", "c3", "c4"] {
+            let warm = waiting("a", None, "s").await;
+            pids.push(warm.conn.pid());
+            assert!(sessions.keep(c, warm, Some("next"), |_| true));
+        }
+        assert!(ends(taken_pid).await, "it was the oldest of the counted");
+        assert!(ends(pids[0]).await, "the oldest conversation's ends");
+        assert!(sessions.warm().contains_key("next"));
+        assert_eq!(sessions.warm().len(), WARM_MOST + 1);
+        let refused = waiting("a", None, "s").await;
+        let refused_pid = refused.conn.pid();
+        assert!(!sessions.keep("c5", refused, Some("next"), |_| false));
+        assert!(ends(refused_pid).await);
+        sessions.end_warm_unless(|c| c != "next" && c != "c2");
+        assert_eq!(
+            {
+                let mut left: Vec<String> = sessions.warm().keys().cloned().collect();
+                left.sort();
+                left
+            },
+            vec!["c3", "c4"]
+        );
+        assert!(ends(next_pid).await && ends(pids[1]).await);
+        sessions.end_all_warm();
+    }
+
+    /// Another model or other repositories in the orientation start a Claude Code anew.
+    #[test]
+    fn another_start_has_another_key() {
+        let flags = |model: &str, repos: &str| -> Vec<OsString> {
+            ["-p", "--model", model, "--append-system-prompt", repos]
+                .iter()
+                .map(OsString::from)
+                .collect()
+        };
+        assert_eq!(flags_key(&flags("m", "r")), flags_key(&flags("m", "r")));
+        assert_ne!(flags_key(&flags("m", "r")), flags_key(&flags("n", "r")));
+        assert_ne!(flags_key(&flags("m", "r")), flags_key(&flags("m", "r2")));
     }
 
     #[test]

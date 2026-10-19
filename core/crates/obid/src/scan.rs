@@ -19,6 +19,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use regex::Regex;
 
+use crate::secrets::Snapshot;
+
 /// Where the scan found something: the text's name, the line, the rule. Never the text itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Finding {
@@ -389,13 +391,13 @@ fn line_rules(text: &str) -> Vec<String> {
     names
 }
 
-/// Whether `text`, a split-out token, or the line read backwards holds a secret obid already knows.
-fn holds_known_secret(text: &str) -> bool {
-    let secrets = crate::secrets::known();
+/// Whether `text`, a split-out token, or the line read backwards holds a secret obid already knows,
+/// as `secrets` (one [`crate::secrets::Secrets::snapshot`] for a whole scan) holds them.
+fn holds_known_secret(secrets: &Snapshot, text: &str) -> bool {
     if secrets.is_empty() {
         return false;
     }
-    let hit = |form: &str| !form.is_empty() && secrets.redact(form) != form;
+    let hit = |form: &str| secrets.holds(form);
     if hit(text) {
         return true;
     }
@@ -455,7 +457,7 @@ struct Line<'a> {
 /// joined with the end of the line before, and found at the run's first line, by the built-in
 /// rules and for the secrets obid holds (a vault value through GNU base64, which wraps at 76, is
 /// on no line whole).
-fn wrapped(lines: &[Line<'_>]) -> Vec<Finding> {
+fn wrapped(secrets: &Snapshot, lines: &[Line<'_>]) -> Vec<Finding> {
     let mut found = Vec::new();
     for (name, number, joined) in wrapped_runs(lines) {
         found.extend(matches(&joined).into_iter().map(|rule| Finding {
@@ -463,7 +465,7 @@ fn wrapped(lines: &[Line<'_>]) -> Vec<Finding> {
             line: Some(number),
             rule,
         }));
-        if holds_known_secret(&joined) {
+        if holds_known_secret(secrets, &joined) {
             found.push(Finding {
                 name,
                 line: Some(number),
@@ -513,6 +515,7 @@ fn wrapped_runs(lines: &[Line<'_>]) -> Vec<(String, usize, String)> {
 
 /// What the built-in rules find in the texts, each place once.
 pub fn built_in(texts: &[(String, String)]) -> Vec<Finding> {
+    let secrets = crate::secrets::known().snapshot();
     let mut all = Vec::new();
     for (name, text) in texts {
         let lines: Vec<Line<'_>> = text
@@ -530,7 +533,7 @@ pub fn built_in(texts: &[(String, String)]) -> Vec<Finding> {
                 line: Some(line.number),
                 rule,
             }));
-            if holds_known_secret(line.text) {
+            if holds_known_secret(&secrets, line.text) {
                 all.push(Finding {
                     name: name.clone(),
                     line: Some(line.number),
@@ -538,7 +541,7 @@ pub fn built_in(texts: &[(String, String)]) -> Vec<Finding> {
                 });
             }
         }
-        all.extend(wrapped(&lines));
+        all.extend(wrapped(&secrets, &lines));
     }
     let mut seen = std::collections::HashSet::new();
     all.retain(|f| seen.insert(f.clone()));
@@ -683,6 +686,7 @@ pub fn secret_file(path: &str) -> Option<&'static str> {
 /// as [`shown_name`] shows it. The names themselves are [`in_names`]'.
 pub fn in_diff(diff: &str) -> Vec<Finding> {
     let (_, added) = parse_diff(diff);
+    let secrets = crate::secrets::known().snapshot();
     let mut all = Vec::new();
     let lines: Vec<Line<'_>> = added
         .iter()
@@ -698,7 +702,7 @@ pub fn in_diff(diff: &str) -> Vec<Finding> {
             line: Some(line.number),
             rule,
         }));
-        if holds_known_secret(line.text) {
+        if holds_known_secret(&secrets, line.text) {
             all.push(Finding {
                 name: line.name.to_owned(),
                 line: Some(line.number),
@@ -706,7 +710,7 @@ pub fn in_diff(diff: &str) -> Vec<Finding> {
             });
         }
     }
-    all.extend(wrapped(&lines));
+    all.extend(wrapped(&secrets, &lines));
     for finding in &mut all {
         finding.name = shown_name(&finding.name);
     }
@@ -730,7 +734,7 @@ pub const HIDDEN_NAME: &str = "a file whose name obid won't show";
 
 /// Whether a name holds what the rules or the secrets obid holds flag.
 pub fn risky_name(name: &str) -> bool {
-    !line_rules(name).is_empty() || holds_known_secret(name)
+    !line_rules(name).is_empty() || holds_known_secret(&crate::secrets::known().snapshot(), name)
 }
 
 /// A name a push adds: a file's (or a submodule's) own name, or a folder's.
@@ -745,6 +749,7 @@ pub struct Name {
 /// built-in rules on it as on a line, and the secrets obid holds. A finding is named by the entry,
 /// or [`HIDDEN_NAME`] when the name is the secret.
 pub fn in_names(names: &[Name]) -> Vec<Finding> {
+    let secrets = crate::secrets::known().snapshot();
     let mut all = Vec::new();
     for Name { name, folder } in names {
         let shown = shown_name(name);
@@ -755,7 +760,7 @@ pub fn in_names(names: &[Name]) -> Vec<Finding> {
                 rule: rule.into(),
             });
         }
-        if holds_known_secret(name) {
+        if holds_known_secret(&secrets, name) {
             all.push(Finding {
                 name: shown.clone(),
                 line: None,
@@ -777,14 +782,15 @@ pub fn in_names(names: &[Name]) -> Vec<Finding> {
 /// wrapped over lines, in every form [`holds_known_secret`] reads: what a push sends in a file even
 /// where no hunk of the diff shows it.
 pub fn known_secrets_in_file(text: &str, name: &str) -> Vec<Finding> {
-    if crate::secrets::known().is_empty() {
+    let secrets = crate::secrets::known().snapshot();
+    if secrets.is_empty() {
         return Vec::new();
     }
     let shown = shown_name(name);
     let mut found: Vec<Finding> = text
         .split('\n')
         .enumerate()
-        .filter(|(_, line)| holds_known_secret(line))
+        .filter(|(_, line)| holds_known_secret(&secrets, line))
         .map(|(i, _)| Finding {
             name: shown.clone(),
             line: Some(i + 1),
@@ -807,7 +813,7 @@ pub fn known_secrets_in_file(text: &str, name: &str) -> Vec<Finding> {
             line: Some(number),
             rule: "vault secret".into(),
         };
-        if holds_known_secret(&joined) && !found.contains(&finding) {
+        if holds_known_secret(&secrets, &joined) && !found.contains(&finding) {
             found.push(finding);
         }
     }
@@ -1459,6 +1465,50 @@ exit 99"#,
                 "{text}"
             );
         }
+    }
+
+    /// A big file of ordinary long lines, with a few vault values learned, is scanned in seconds,
+    /// not minutes (#749), and a value in it is still found.
+    #[test]
+    fn a_big_file_with_vault_values_is_scanned_quickly() {
+        struct Forget;
+        impl Drop for Forget {
+            fn drop(&mut self) {
+                for i in 0..3 {
+                    crate::secrets::known().forget(&format!("scan-speed-test-{i}"));
+                }
+            }
+        }
+        for i in 0..3 {
+            crate::secrets::known().learn(
+                &format!("scan-speed-test-{i}"),
+                format!("speed-vault-value-{i}/Qx7+k=9"),
+            );
+        }
+        let _forget = Forget;
+        let line = "let the_long_identifier = crate::module/path_to_somewhere(\"some ordinary words, \
+                    a URL https://example.com/a/b/c?x=1&y=2 and 0123456789abcdef0123 too\"); \
+                    // and a comment that goes on and on for a while";
+        let mut file = String::new();
+        while file.len() < 1_000_000 {
+            file.push_str(line);
+            file.push('\n');
+        }
+        file.push_str("x = speed-vault-value-1/Qx7+k=9\n");
+        let started = std::time::Instant::now();
+        let found = known_secrets_in_file(&file, "big.rs");
+        let took = started.elapsed();
+        // ponytail: a ceiling, not a benchmark. A debug build on a busy Mac took 6 s (19 s before
+        // #749), so a tight bound would flake; this one catches a scan going back to minutes.
+        assert!(
+            took < std::time::Duration::from_secs(60),
+            "a 1 MB file took {took:?}"
+        );
+        let last = file.split('\n').count() - 1;
+        assert_eq!(
+            found.iter().map(|f| f.line).collect::<Vec<_>>(),
+            vec![Some(last)]
+        );
     }
 
     /// A secret learned for one test, forgotten however the test ends.

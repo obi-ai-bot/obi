@@ -34,6 +34,12 @@ pub struct Options {
     pub instructions: Option<String>,
     /// A conversation's thread, whose shell is off: a command that runs anyway ends the turn.
     pub no_commands: bool,
+    /// A job's run: it asks Codex for the account's usage as it starts (crate::usage). The
+    /// brain's and conversations' runs don't: nothing keeps it there.
+    pub usage: bool,
+    /// How the job's account pays (`api` or `plan`), when obid knows it already: then the run
+    /// doesn't ask `account/read`.
+    pub priced: Option<String>,
 }
 
 /// The `command` line `codex app-server` runs as: the binary, then `app-server`. Oby's broker
@@ -83,6 +89,10 @@ pub async fn run_turn(
         files: HashMap::new(),
         calls: HashMap::new(),
         no_commands: options.no_commands,
+        limits_read: None,
+        account_read: None,
+        tokens_before: None,
+        priced: options.priced.clone(),
         fatal: None,
         thread: None,
         turn: None,
@@ -157,6 +167,13 @@ struct Run<D, E> {
     /// Codex asks names the tool only in its words.
     calls: HashMap<String, Vec<(String, Value)>>,
     no_commands: bool,
+    /// The `account/rateLimits/read` request not answered yet.
+    limits_read: Option<u64>,
+    /// The `account/read` request not answered yet, and what it said the account pays by.
+    account_read: Option<u64>,
+    priced: Option<String>,
+    /// What the thread had used before this turn (crate::usage::codex_turn).
+    tokens_before: Option<crate::usage::Tokens>,
     /// Why obid ended the turn for good.
     fatal: Option<String>,
     thread: Option<String>,
@@ -178,6 +195,24 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         .await?
         .map_err(|e| Stop::Failed(format!("Codex couldn't start: {}", e.message)))?;
         self.conn.notify("initialized", None).await;
+        // The account's usage, answered while the thread starts: reading it asks OpenAI, and the
+        // job doesn't wait for that (`handle`).
+        if options.usage {
+            self.limits_read = Some(
+                self.conn
+                    .request("account/rateLimits/read", json!({}))
+                    .await,
+            );
+            // How the account pays, once per account: obid keeps it (crate::usage), and the answer
+            // holds who is signed in, which obid never reads. Never a token refresh for it.
+            if options.priced.is_none() {
+                self.account_read = Some(
+                    self.conn
+                        .request("account/read", json!({"refreshToken": false}))
+                        .await,
+                );
+            }
+        }
 
         let cwd = self.worktree.to_string_lossy().into_owned();
         let mut params = thread_params(&cwd);
@@ -233,6 +268,38 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
     }
 
     async fn handle(&mut self, message: Value) {
+        if let Some(answer) = self
+            .limits_read
+            .and_then(|id| conn::answer_to(&message, id))
+        {
+            self.limits_read = None;
+            // An older server may not know the method: its notifications still report usage.
+            if let Some(usage) = answer.ok().and_then(|read| crate::usage::codex_read(&read)) {
+                (self.on_event)(Event::Usage(usage));
+            }
+            return;
+        }
+        if let Some(answer) = self
+            .account_read
+            .and_then(|id| conn::answer_to(&message, id))
+        {
+            self.account_read = None;
+            self.priced = answer
+                .ok()
+                .and_then(|read| crate::usage::codex_priced(&read));
+            if self.priced.is_some() {
+                (self.on_event)(Event::Usage(crate::usage::Usage {
+                    priced: self.priced.clone(),
+                    ..Default::default()
+                }));
+            }
+            return;
+        }
+        if message["method"] == "account/rateLimits/updated"
+            && let Some(usage) = crate::usage::codex(&message["params"]["rateLimits"])
+        {
+            (self.on_event)(Event::Usage(usage));
+        }
         if let Some(id) = conn::request_id(&message).cloned() {
             return self.answer(id, &message).await;
         }
@@ -252,6 +319,13 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             && other != thread
         {
             return;
+        }
+        if message["method"] == "thread/tokenUsage/updated"
+            && let Some(mut tokens) =
+                crate::usage::codex_turn(&params["tokenUsage"], &mut self.tokens_before)
+        {
+            tokens.priced.clone_from(&self.priced);
+            (self.on_event)(Event::Tokens(tokens));
         }
         let item = &params["item"];
         match message["method"].as_str() {

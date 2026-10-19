@@ -80,6 +80,13 @@ struct ConversationPage: View {
                 ($0.id, ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns))
             })
             let rows = ChatRuns.rows(turns)
+            // Every job a card may show, which words started each (obid's `turn`), and those shown where they started.
+            let all = desk.jobs + feed.jobs
+            let startedBy = { (job: Job) in
+                ThreadTaskLine.startedBy(turn: feed.extras[job.id]?.turn, in: feed.extras[job.id]?.conversation,
+                                         showing: feed.conversations.shown)
+            }
+            let shown = ThreadTaskLine.shown(in: turns, jobs: all, startedBy: startedBy, ended: conversation.endedTurn)
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
                     if feed.down { RunnerOfflineNotice(name: feed.name) }
@@ -110,7 +117,8 @@ struct ConversationPage: View {
                             }
                             ForEach(Array(rows.enumerated()), id: \.element.turn.id) { index, row in
                                 MessageRow(row: row, first: index == 0, now: context.date,
-                                           jobs: ConversationModel.jobs(of: row.turn, among: desk.jobs + feed.jobs),
+                                           jobs: ThreadTaskLine.cards(under: row.turn, in: turns, jobs: all, startedBy: startedBy),
+                                           followUps: { conversation.endedTurn(row.turn) ? [] : ThreadTaskLine.attached(to: $0, in: all, shown: shown) },
                                            account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
                                            isLocal: { id in desk.jobs.contains { $0.id == id } },
                                            steps: conversation.steps(under: row.turn, in: turns),
@@ -273,6 +281,8 @@ private struct MessageRow: View {
     let first: Bool
     let now: Date
     let jobs: [Job]
+    /// The follow-ups that go with a job's card, told somewhere the thread doesn't show.
+    let followUps: (Job) -> [Job]
     let account: (_ job: Job, _ local: Bool) -> String
     let isLocal: (_ id: String) -> Bool
     let steps: [TurnStep]
@@ -326,6 +336,14 @@ private struct MessageRow: View {
                 ThreadTask(job: job, account: account(job, local),
                            onOpen: { onOpenJob(job.id, local) }, onStop: { onStopJob(job.id, local) })
                 if !local { ForEach(feed.extras[job.id]?.artifacts ?? [], id: \.self) { artifact($0) } }
+                ForEach(followUps(job)) { next in
+                    let local = isLocal(next.id)
+                    Text(ThreadTaskLine.followUp(next, account: account(next, local))).font(Tokens.font(Tokens.textMd))
+                        .foregroundStyle(Tokens.muted).fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    ThreadTask(job: next, account: account(next, local),
+                               onOpen: { onOpenJob(next.id, local) }, onStop: { onStopJob(next.id, local) })
+                }
             }
             if row.endsRun {
                 Text(ChatRuns.clock(turn.date, now: now)).font(Tokens.font(11)).monospacedDigit().foregroundStyle(Tokens.muted)
