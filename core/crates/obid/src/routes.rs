@@ -68,6 +68,30 @@ pub async fn job(
     Ok(json(StatusCode::OK, job.to_json()))
 }
 
+#[derive(serde::Deserialize)]
+pub struct After {
+    after: Option<String>,
+}
+
+/// `GET /v1/jobs/{id}/transcript?after=<n>`: the entries that came or changed after entry `n`.
+pub async fn transcript(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    Query(query): Query<After>,
+) -> Result<Response, ApiError> {
+    let after = match query.after.as_deref() {
+        None => 0,
+        Some(text) => text
+            .parse::<u64>()
+            .map_err(|_| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "after is a number."))?,
+    };
+    let entries = shared
+        .jobs
+        .transcript(&id, after)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, NO_JOB))?;
+    Ok(json(StatusCode::OK, json!(entries)))
+}
+
 /// `POST /v1/jobs/{id}/stop`: a job that already ended comes back as it is.
 pub async fn stop(
     State(shared): State<Arc<Shared>>,

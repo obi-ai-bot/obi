@@ -46,6 +46,7 @@ pub mod sphere;
 pub mod store;
 pub mod tetrix;
 pub mod token;
+pub mod transcript;
 pub mod vault;
 pub mod web;
 

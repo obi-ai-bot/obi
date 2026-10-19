@@ -13,6 +13,8 @@
 //   FAIL             the turn fails with the API's error inside its message
 //   TWICE            round one says it isn't done; round two (a resumed thread) writes .obi/twice
 //   ENV              says its CODEX_HOME and HOME
+//   TOOLS            a session of items, each started and completed (tests/transcript_api.rs): its
+//                    words, 5 reads, a plan, 2 file changes and a failing test run
 //   a brain's prompt answers one plan: a reply "From Codex.", with work.md's first line
 //   anything else    "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable, or
@@ -136,6 +138,22 @@ async function runTurn(turnId, prompt) {
     mkdirSync(".obi", { recursive: true });
     writeFileSync(".obi/twice", "");
     return complete(turnId, `Round ${state.rounds} on thread ${thread}, which remembers: ${task}\nGOAL MET`);
+  }
+  if (task.includes("TOOLS")) {
+    const done = (fields) => {
+      const it = item(fields.type, fields);
+      send({ method: "item/started", params: { threadId: thread, turnId, item: { ...it, status: "inProgress" } } });
+      send({ method: "item/completed", params: { threadId: thread, turnId, item: { ...it, status: fields.status ?? "completed" } } });
+    };
+    send({ method: "item/completed", params: { threadId: thread, turnId, item: { type: "agentMessage", id: "m1", text: "Looking for where a blocked scan ends the job." } } });
+    for (const file of ["scan.rs", "jobs.rs", "publish.rs", "git.rs", "lib.rs"])
+      done({ type: "commandExecution", command: `/bin/zsh -lc 'cat src/${file}'`, commandActions: [{ type: "read", path: `src/${file}` }], exitCode: 0, aggregatedOutput: "raw output that never leaves obid" });
+    send({ method: "turn/plan/updated", params: { threadId: thread, turnId, plan: [{ step: "Find it", status: "completed" }, { step: "Fix it", status: "inProgress" }] } });
+    send({ method: "item/completed", params: { threadId: thread, turnId, item: { type: "agentMessage", id: "m2", text: "Found it. Fixing it." } } });
+    done({ type: "fileChange", changes: [{ path: resolve("src/scan.rs"), kind: { type: "update" }, diff: "@@ -1,2 +1,3 @@\n-a\n-b\n+c\n+d\n+e\n" }] });
+    done({ type: "fileChange", changes: [{ path: resolve("src/jobs.rs"), kind: { type: "update" }, diff: "@@ -1 +1 @@\n-x\n+y\n" }] });
+    done({ type: "commandExecution", command: "/bin/zsh -lc 'cargo test'", commandActions: [], exitCode: 101, status: "failed", aggregatedOutput: "raw output that never leaves obid" });
+    return complete(turnId, "Fixed it.");
   }
   if (task.includes("ENV")) return complete(turnId, `CODEX_HOME=${process.env.CODEX_HOME}\nHOME=${process.env.HOME}`);
   // Only `item/completed` carries the words: Codex's newer turns leave `items` empty.

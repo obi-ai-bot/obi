@@ -284,14 +284,38 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             Some("item/completed") if item["type"] == "agentMessage" => {
                 if let Some(said) = item["text"].as_str().filter(|s| !s.is_empty()) {
                     self.said = Some(said.to_owned());
+                    (self.on_event)(Event::Said(said.to_owned()));
                 }
             }
             Some("item/completed") if tool_call(item).is_some() => {
+                let diffs = item["changes"].as_array().map(|changes| {
+                    changes.iter().fold((0, 0), |(a, r), c| {
+                        let (added, removed) =
+                            crate::transcript::diff_lines(c["diff"].as_str().unwrap_or(""));
+                        (a + added, r + removed)
+                    })
+                });
                 (self.on_event)(Event::ToolDone {
                     id: item["id"].as_str().unwrap_or("").to_owned(),
                     failed: ["failed", "declined"].contains(&item["status"].as_str().unwrap_or(""))
                         || !item["error"].is_null(),
+                    exit: item["exitCode"].as_i64(),
+                    lines: diffs,
                 });
+            }
+            Some("turn/plan/updated") => {
+                let todos = params["plan"].as_array().into_iter().flatten();
+                (self.on_event)(Event::Plan(
+                    todos
+                        .map(|t| crate::transcript::Todo {
+                            text: t["step"].as_str().unwrap_or("").to_owned(),
+                            state: crate::transcript::todo_state(
+                                t["status"].as_str().unwrap_or(""),
+                            )
+                            .into(),
+                        })
+                        .collect(),
+                ));
             }
             Some("turn/completed") => {
                 self.ended = Some(finished(&params["turn"], self.said.as_deref()));
