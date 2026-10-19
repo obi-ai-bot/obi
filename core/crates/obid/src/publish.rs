@@ -746,6 +746,16 @@ fn git_said(error: &git::GitError, remote: &str) -> String {
     github::said(&said.replace(remote, "the remote"))
 }
 
+/// Runs a scan's own work off the runtime that serves the API: on a big change it takes minutes,
+/// and obid has to keep answering meanwhile (#749).
+async fn off_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Failure> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| could_not_run(&e.to_string()))
+}
+
 fn could_not_run(why: &str) -> Failure {
     Failure::Failed(format!(
         "Not published: the secret scan couldn't run ({why})."
@@ -851,10 +861,20 @@ async fn scan_changes(
     let mut diff_args = vec!["diff"];
     diff_args.extend_from_slice(DIFF);
     diff_args.push(&tip_range);
-    let at_tip = scan::in_diff(&git_in(clone, &diff_args).await.map_err(unreadable)?);
+    let tip = git_in(clone, &diff_args).await.map_err(unreadable)?;
+    let at_tip = off_runtime(move || scan::in_diff(&tip)).await?;
     for (commit, lines) in &commits {
         let diff = lines.join("\n");
-        for finding in scan::in_diff(&diff) {
+        let (in_commit, added) = off_runtime(move || {
+            let added: Vec<(String, usize, String)> = scan::parse_diff(&diff)
+                .1
+                .into_iter()
+                .map(|a| (a.file, a.number, a.text))
+                .collect();
+            (scan::in_diff(&diff), added)
+        })
+        .await?;
+        for finding in in_commit {
             let mut finding = Found::of(finding, Some(commit));
             finding.history_only = !at_tip
                 .iter()
@@ -864,11 +884,6 @@ async fn scan_changes(
             }
             found.push(finding);
         }
-        let added: Vec<(String, usize, String)> = scan::parse_diff(&diff)
-            .1
-            .into_iter()
-            .map(|a| (a.file, a.number, a.text))
-            .collect();
         if !added.is_empty() {
             let leaked = scan::gitleaks_lines(&added, scratch)
                 .await
@@ -879,15 +894,22 @@ async fn scan_changes(
             }));
         }
     }
-    for (path, bytes) in &pushed.files {
-        found.extend(
-            scan::known_secrets_in_file(&String::from_utf8_lossy(bytes), path)
-                .into_iter()
-                .map(|mut f| {
-                    f.name = shown(path);
-                    Found::of(f, None)
-                }),
-        );
+    let files = pushed.files;
+    let in_files = off_runtime(move || {
+        files
+            .iter()
+            .map(|(path, bytes)| {
+                let text = String::from_utf8_lossy(bytes);
+                (path.clone(), scan::known_secrets_in_file(&text, path))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await?;
+    for (path, findings) in in_files {
+        found.extend(findings.into_iter().map(|mut f| {
+            f.name = shown(&path);
+            Found::of(f, None)
+        }));
     }
     found.extend(pushed.too_big.iter().map(|path| {
         Found::of(

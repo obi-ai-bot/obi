@@ -337,6 +337,7 @@ struct TaskPage: View {
                                 }
                             }
                         }
+                        if let tetrix = actions.extras?.tetrix, !tetrix.isEmpty { section("Tetrix") { TetrixReportView(report: tetrix) } }
                         if !followUps.isEmpty { section("Follow-ups") { followUpList } }
                     }
                     .padding(.horizontal, 18)
@@ -364,6 +365,7 @@ struct TaskPage: View {
                 MessageBox(text: $note, focused: $typing, tray: tray, placeholder: placeholder, label: "Tell \(job.agentName) about \(job.heading)",
                            maximumHeight: height * 0.5, onSend: tell, onScreenshot: {}, onStop: { false }, onEscape: onBack, attachments: false)
                     .disabled(busy)
+                    .keepsDraft($note, as: Drafts.task(job.id))
                     .frame(maxWidth: Tokens.column).padding(.horizontal, Tokens.gutter).padding(.vertical, 12)
             }
         }

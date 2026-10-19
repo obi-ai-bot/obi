@@ -37,10 +37,11 @@ final class IslandModel {
 
     /// Both chat surfaces read and send through this model.
     var thread: [Turn] { feed.conversation.thread(with: localTurns) }
-    /// This Mac's own turns in the thread: with one runner thread, the history from before the runner
-    /// planned; with obid's conversations (#493) none, since each conversation is only its own turns.
-    var localTurns: [Turn] { Self.localTurns(desk.turns, conversations: feed.conversationsOn) }
-    nonisolated static func localTurns(_ turns: [Turn], conversations: Bool) -> [Turn] { conversations ? [] : turns }
+    /// This Mac's own turns in the thread: the words on their way to the runner (`RunnerFeed.echoes`),
+    /// and with one runner thread the history from before the runner planned; with obid's
+    /// conversations (#493) no history, since each conversation is only its own turns.
+    var localTurns: [Turn] { Self.localTurns(desk.turns, conversations: feed.conversationsOn, echoes: feed.shownEchoes) }
+    nonisolated static func localTurns(_ turns: [Turn], conversations: Bool, echoes: [Turn] = []) -> [Turn] { conversations ? echoes : turns + echoes }
     /// The accounts a plan's card offers: the runner's when the runner on this Mac plans (#283),
     /// else this Mac's.
     var planAccounts: [AccountState] { (feed.local ? feed.accounts : desk.accounts.accounts).filter(\.signedIn) }
@@ -52,7 +53,10 @@ final class IslandModel {
 
     func sendChat(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text, shown: text, attachments: tray.paths)
+        let said = tray.note.map { "\(text)\n\n\($0)" } ?? text
+        // Through the runner, the words show in the thread now, not once it lists them (`RunnerFeed.Echo`).
+        if desk.plansElsewhere() { feed.echo(said) }
+        desk.ask(said, shown: text, attachments: tray.paths)
         tray.clear()
     }
 

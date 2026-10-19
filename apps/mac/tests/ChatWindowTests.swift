@@ -192,7 +192,8 @@ struct ChatWindowTests {
     }
 
     /// A decision lives with its task (mac-design C3): a conversation of obid's shows only the
-    /// decisions of the jobs it started, and those with no job (nothing else shows them yet, C9).
+    /// decisions of the jobs it started, and one with no job only in the conversation it came
+    /// from: never another's plan opened out over your words.
     @Test func aConversationShowsOnlyItsOwnJobsDecisions() {
         let turns = [Turn(id: "start", date: now, who: .oby, text: "Starting", jobs: ["mine"])]
         let shows = { (job: String, of: String?, shown: String?) in
@@ -202,7 +203,11 @@ struct ChatWindowTests {
         #expect(shows("older", "c1", "c1"))
         #expect(!shows("other", "c2", "c1"))
         #expect(!shows("other", nil, "c1"))
-        #expect(shows("", nil, "c1"))
+        let jobless = { (from: String?, shown: String?) in
+            ConversationModel.shows(decisionOf: "", startedIn: nil, from: from, served: true, shown: shown, turns: turns)
+        }
+        #expect(jobless("c1", "c1"))
+        #expect(!jobless("c2", "c1") && !jobless(nil, "c1") && !jobless("c2", nil))
         // A new conversation, before its first words: none of another's.
         #expect(!shows("other", "c2", nil))
         // A runner with one thread shows every decision there, as before.

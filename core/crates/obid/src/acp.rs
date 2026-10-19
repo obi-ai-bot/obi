@@ -39,6 +39,9 @@ pub struct Options {
     /// The tool's mode ids for Plan and for everything else.
     pub plan_mode: String,
     pub agent_mode: String,
+    /// The MCP servers `session/new` (or `session/load`) gives it, when it takes HTTP ones: Oby's
+    /// Tetrix server only (crate::tetrix).
+    pub mcp: Vec<Value>,
 }
 
 /// Runs one turn: starts the agent, sends `prompt`, answers its requests with `decide`, reports with
@@ -456,13 +459,19 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         };
         let load = init["agentCapabilities"]["loadSession"] == json!(true);
         let cwd = self.cwd.clone();
-        // No MCP servers: obid gives agents none, as its Claude Code runs with --strict-mcp-config.
+        // Only the servers obid gives (as its Claude Code runs with --strict-mcp-config), and those
+        // only when the tool takes HTTP servers.
+        let servers = if init["agentCapabilities"]["mcpCapabilities"]["http"] == json!(true) {
+            json!(self.options.mcp)
+        } else {
+            json!([])
+        };
         let (method, params) = match &self.options.resume {
             Some(session) if load => (
                 "session/load",
-                json!({"sessionId": session, "cwd": cwd, "mcpServers": []}),
+                json!({"sessionId": session, "cwd": cwd, "mcpServers": servers}),
             ),
-            _ => ("session/new", json!({"cwd": cwd, "mcpServers": []})),
+            _ => ("session/new", json!({"cwd": cwd, "mcpServers": servers})),
         };
         let answer = match self.call(method, params).await? {
             Ok(answer) => answer,
@@ -821,18 +830,31 @@ pub mod cursor {
     /// allowlist). Cursor's own keys (`authInfo`, `version`, …) stay as they are.
     ///
     /// The folder is a job's own, which the job can write: obid never reads or writes through a
-    /// link it left there (the file is opened without following one, and the new one is made
-    /// with `O_EXCL`, then renamed over the old, which replaces a link rather than following it).
+    /// link it left there. The folder is opened once without following a link, and everything
+    /// after happens in that very folder (as [`crate::jobs::write_login`]; #645: another job on
+    /// the account could swap a link in after a check by name): the file is opened without
+    /// following one, and the new one is made with `O_EXCL`, then renamed over the old, which
+    /// replaces a link rather than following it.
     pub fn rewrite_config(home: &Path) -> std::io::Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
+        use nix::fcntl::{OFlag, open, openat, renameat};
+        use nix::sys::stat::Mode;
         std::fs::create_dir_all(home)?;
-        let file = home.join("cli-config.json");
+        let dir = open(
+            home,
+            OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_RDONLY | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+        let file = "cli-config.json";
         let read = || -> Option<Vec<u8>> {
-            let mut opened = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NOFOLLOW)
-                .open(&file)
-                .ok()?;
+            let opened = openat(
+                &dir,
+                file,
+                OFlag::O_NOFOLLOW | OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .ok()?;
+            let mut opened = std::fs::File::from(opened);
             opened.metadata().ok().filter(|m| m.is_file())?;
             let mut bytes = Vec::new();
             std::io::Read::read_to_end(&mut opened, &mut bytes).ok()?;
@@ -849,16 +871,21 @@ pub mod cursor {
         // must never take the other's file away.
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let temporary = home.join(format!(".cli-config.json.obid-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_file(&temporary);
-        let mut new = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(nix::libc::O_NOFOLLOW)
-            .open(&temporary)?;
-        std::io::Write::write_all(&mut new, &text)?;
-        std::fs::rename(&temporary, &file)
+        let temporary = format!(".cli-config.json.obid-{}-{n}", std::process::id());
+        let _ = nix::unistd::unlinkat(
+            &dir,
+            temporary.as_str(),
+            nix::unistd::UnlinkatFlags::NoRemoveDir,
+        );
+        let new = openat(
+            &dir,
+            temporary.as_str(),
+            OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_WRONLY | OFlag::O_CLOEXEC,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(std::io::Error::from)?;
+        std::io::Write::write_all(&mut std::fs::File::from(new), &text)?;
+        renameat(&dir, temporary.as_str(), &dir, file).map_err(std::io::Error::from)
     }
 
     /// What the worktree's `.cursor/cli.json` lets through without asking (`permissions.allow`).
@@ -1017,6 +1044,21 @@ mod tests {
             std::fs::read_to_string(&elsewhere).unwrap(),
             r#"{"secret": "not for the job"}"#
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A link put in place of the folder itself (#645: another job on the account swaps it in
+    /// after obid's check) is never written through: the rewrite fails, the other folder untouched.
+    #[test]
+    fn cursor_settings_never_follow_a_linked_folder() {
+        let root = std::env::temp_dir().join(format!("obid-cursor-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let home = root.join("home");
+        std::os::unix::fs::symlink(&elsewhere, &home).unwrap();
+        assert!(cursor::rewrite_config(&home).is_err());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 

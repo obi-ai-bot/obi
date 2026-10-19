@@ -267,6 +267,7 @@ struct TaskPage: View {
                             }
                         }
                         let followUps = ThreadTaskLine.followUps(of: job.id, in: phone.jobs)
+                        if let tetrix = job.tetrix, !tetrix.isEmpty { section("Tetrix") { TetrixReportView(report: tetrix) } }
                         if !followUps.isEmpty { section("Follow-ups") { followUpList(followUps) } }
                     }
                     .padding(.horizontal, 18)
@@ -309,6 +310,7 @@ struct TaskPage: View {
                     }
                     Composer(text: $note, prompt: job.isActive ? "Tell \(job.agentName)…" : "Ask for a follow-up…", typing: $typing) { _ in tell(job.id) }
                         .disabled(busy)
+                        .keepsDraft($note, as: Drafts.task(job.id))
                 }
             }
         }
