@@ -200,6 +200,16 @@ impl Usages {
         })
     }
 
+    /// Forgets a removed account's usage, so an account given its id later starts unknown.
+    pub fn forget(&self, id: &str) -> std::io::Result<()> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.remove(id).is_none() {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec_pretty(&*state).map_err(std::io::Error::other)?;
+        crate::store::write_private(&self.file, &bytes)
+    }
+
     /// "Use anyway" (#278): with `lift`, the account takes automatic work past its weekly reserve
     /// until its week resets (a week from now while the reset is unknown), then it's reserved
     /// again by itself; without, it's reserved again now.
@@ -536,6 +546,10 @@ mod tests {
         assert!(!Usages::open(&home.0).get("a").reserved(time::now()));
         assert_eq!(usages.lift("a", false).unwrap().reserve_lifted_until, None);
         assert!(usages.get("a").reserved(time::now()));
+        // A removed account's usage goes, kept or not.
+        usages.forget("a").unwrap();
+        assert_eq!(Usages::open(&home.0).get("a"), Usage::default());
+        usages.forget("nobody").unwrap();
         // Unknown reset: a week from now.
         let until = usages
             .lift("b", true)

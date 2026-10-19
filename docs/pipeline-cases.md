@@ -117,7 +117,7 @@ Before stage 1. People connect only what they have. That decides which model the
   - **Running jobs** only break ties: within 0.01/day of room, the fewer running jobs wins.
   - At 80% of its week an account is kept for jobs sent to it by name until its week resets, and a job named to an account skips routing.
   - The job's report says why, once: `On Claude Code · Deskree: most weekly room per day left (0.12/day), though 1.4× ahead of pace: none is on pace; Codex · Deskree is 2.3× ahead of pace.`
-- **Oby today:** Partial. Jobs are routed across Claude and Codex, and the brain is always Claude.
+- **Oby today:** Partial. Jobs are routed across Claude and Codex, and the brain is always Claude. obid (#450) doesn't yet prefer accounts under 80% of their 5-hour window or order them by weekly pace: of the accounts with room, it takes the first in its list.
 - **Decided 2026-10-10:** you pick the Lead's model at first launch, like the jobs' models. If you connect a new tool later, Oby asks in the conversation whether to change anything: no pop-ups.
 - **Approved 2026-10-10:** the Lead's own usage counts toward routing.
 
@@ -318,7 +318,7 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
 
 ### 2.4 Usage limit: the account runs out mid-job
 - **What happens:** the job pauses, then carries on with another account of the same tool (same worktree, a new session given the summary so far) or waits for the reset. Goes back to 2.
-- **Oby today:** Partial. Routing skips accounts at 95% of their 5-hour window or 80% of their week (kept for jobs sent to them by name, until the week resets) and sends new work to accounts on their weekly pace, with the most weekly room per remaining day (case 0.5). A job whose account hits its limit carries on with the next account with room, or fails when none has.
+- **Oby today:** Partial. Routing skips accounts at 95% of their 5-hour window or 80% of their week (kept for jobs sent to them by name, until the week resets) and sends new work to accounts on their weekly pace, with the most weekly room per remaining day (case 0.5). A job whose account hits its limit carries on with the next account with room, or fails when none has. On obid (#450), routing skips accounts marked full, at 95% of either window or in their weekly reserve, and takes the first other one with room: no weekly pace or 80% preference yet.
 - **Claude Code:** shows the reset time, and interactive sessions can continue at the reset. Headless auto-resume is undocumented. Project threads retry after the reset.
 - **Cursor:** not found.
 - **Codex:** 5-hour and weekly limits. What happens mid-task: not found.

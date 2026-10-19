@@ -3203,6 +3203,7 @@ impl Jobs {
                     plan,
                     instructions: None,
                     no_commands: false,
+                    usage: true,
                 };
                 codex::run_turn(
                     launch,

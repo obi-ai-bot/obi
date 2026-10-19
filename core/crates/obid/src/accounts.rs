@@ -702,6 +702,9 @@ pub async fn remove(
     // The tool's own login stays where the tool kept it (on macOS, Claude Code's Keychain item)
     // and with its provider.
     shared.sign_ins.forget(&id);
+    if let Err(e) = shared.jobs.usage.forget(&id) {
+        tracing::warn!("account {id}: its usage stayed in usage.json: {e}");
+    }
     tracing::info!("account {id}: removed");
     send_accounts(&shared).await;
     Ok(StatusCode::NO_CONTENT.into_response())

@@ -34,6 +34,9 @@ pub struct Options {
     pub instructions: Option<String>,
     /// A conversation's thread, whose shell is off: a command that runs anyway ends the turn.
     pub no_commands: bool,
+    /// A job's run: it asks Codex for the account's usage as it starts (crate::usage). The
+    /// brain's and conversations' runs don't: nothing keeps it there.
+    pub usage: bool,
 }
 
 /// The `command` line `codex app-server` runs as: the binary, then `app-server`. Oby's broker
@@ -183,11 +186,13 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         self.conn.notify("initialized", None).await;
         // The account's usage, answered while the thread starts: reading it asks OpenAI, and the
         // job doesn't wait for that (`handle`).
-        self.limits_read = Some(
-            self.conn
-                .request("account/rateLimits/read", json!({}))
-                .await,
-        );
+        if options.usage {
+            self.limits_read = Some(
+                self.conn
+                    .request("account/rateLimits/read", json!({}))
+                    .await,
+            );
+        }
 
         let cwd = self.worktree.to_string_lossy().into_owned();
         let mut params = thread_params(&cwd);
@@ -839,9 +844,8 @@ mod tests {
             r#"#!/bin/sh
 read l; echo '{"id":1,"result":{}}'
 read l
-read l
-read l; echo '{"id":3,"result":{"thread":{"id":"t1"}}}'
-read l; echo '{"id":4,"result":{"turn":{"id":"u1"}}}'
+read l; echo '{"id":2,"result":{"thread":{"id":"t1"}}}'
+read l; echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
 echo '{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"completed","items":[{"type":"agentMessage","text":"Done."}]}}}'
 exec sleep 30
 "#,
@@ -891,9 +895,8 @@ exec sleep 30
             r#"#!/bin/sh
 read l; echo '{"id":1,"result":{}}'
 read l
-read l
-read l; echo '{"id":3,"result":{"thread":{"id":"t1"}}}'
-read l; echo '{"id":4,"result":{"turn":{"id":"u1"}}}'
+read l; echo '{"id":2,"result":{"thread":{"id":"t1"}}}'
+read l; echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
 echo '{"method":"item/started","params":{"threadId":"t1","turnId":"u1","item":{"type":"commandExecution","id":"c1","command":"/bin/zsh -lc '"'"'cat x'"'"'"}}}'
 exec sleep 30
 "#,
