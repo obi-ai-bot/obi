@@ -248,7 +248,7 @@ struct JobView: View {
                     Label("\(commits) \(commits == 1 ? "commit" : "commits") on \(job.branch)", systemImage: "point.3.connected.trianglepath.dotted")
                         .font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
                 }
-                if let url = job.published.flatMap(URL.init(string:)) {
+                if let url = PublishedLink.url(job.published) {
                     Link(destination: url) {
                         Label("Open pull request", systemImage: "arrow.up.right.square").font(.system(size: 13, weight: .semibold))
                     }

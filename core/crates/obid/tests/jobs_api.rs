@@ -1537,6 +1537,10 @@ fn events_follow_every_change() {
         if let Some(name) = text.strip_prefix("event: ") {
             event = name.to_owned();
         } else if let Some(data) = text.strip_prefix("data: ") {
+            // A job's transcript comes as events of its own (`transcript`).
+            if event == "transcript" {
+                continue;
+            }
             assert_eq!(event, "job");
             let job: Value = serde_json::from_str(data).unwrap();
             assert_eq!(job["id"], id.as_str());
