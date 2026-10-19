@@ -139,6 +139,34 @@ impl std::fmt::Display for Found {
     }
 }
 
+/// The secret scan's result as the job keeps it (`scan`, #735): whether it ran, what it read, and
+/// where it found something, never what. `reason` says why it didn't run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Scanned {
+    pub ran: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<ScanFinding>,
+}
+
+/// Where the scan found something: the file (or `commit message`, `pull request title`…), the
+/// line when it has one, and the rule. Never the matched text.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScanFinding {
+    pub file: String,
+    pub line: Option<usize>,
+    pub rule: String,
+}
+
 /// Why nothing (more) went out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
@@ -449,6 +477,8 @@ pub trait Hooks: Send + Sync {
     fn proceed(&self) -> bool;
     /// Something just went out, for `outgoing` and the log.
     fn sent(&self, outgoing: Outgoing);
+    /// How the secret scan went, once it ended or couldn't run (#735).
+    fn scanned(&self, _scanned: Scanned) {}
 }
 
 /// Where a job publishes from and to.
@@ -636,7 +666,8 @@ pub async fn publish(
         .ok_or_else(|| Failure::Failed(format!("Not published: can't read {base}.")))?
     };
     let range = format!("{since}..{head}");
-    if git_in(clone, &["rev-list", "--count", &range]).await.ok() == Some("0".into()) {
+    let count = git_in(clone, &["rev-list", "--count", &range]).await.ok();
+    if count.as_deref() == Some("0") {
         return Err(Failure::Failed(format!(
             "Nothing to publish: {} has no commits that aren't on {base}.",
             job.branch
@@ -652,8 +683,46 @@ pub async fn publish(
         Some(0) => return Err(Failure::AlreadyOnBase(base.to_owned())),
         Some(_) => {}
     }
-    let found = scan_changes(clone, &since, &head, &target.scratch).await?;
+    // What the scan read and how it went, for the job (#735).
+    let started = std::time::Instant::now();
+    let files = git_in(
+        clone,
+        &["diff", "--name-only", "-z", "--no-renames", &since, &head],
+    )
+    .await
+    .ok()
+    .map(|names| names.split('\0').filter(|n| !n.is_empty()).count() as u64);
+    let scanned = |result: Result<&[Found], &Failure>| {
+        let (clean, reason, found) = match result {
+            Ok(found) => (Some(found.is_empty()), None, found),
+            Err(failure) => (None, Some(failure.line()), &[][..]),
+        };
+        let ran = reason.is_none();
+        hooks.scanned(Scanned {
+            ran,
+            clean,
+            commits: count
+                .as_deref()
+                .and_then(|n| n.parse().ok())
+                .filter(|_| ran),
+            files: files.filter(|_| ran),
+            seconds: ran.then(|| started.elapsed().as_secs()),
+            reason,
+            findings: found
+                .iter()
+                .map(|f| ScanFinding {
+                    file: f.file.clone(),
+                    line: f.line,
+                    rule: f.rule.clone(),
+                })
+                .collect(),
+        });
+    };
+    let found = scan_changes(clone, &since, &head, &target.scratch)
+        .await
+        .inspect_err(|failure| scanned(Err(failure)))?;
     if !found.is_empty() {
+        scanned(Ok(&found));
         return Err(Failure::Blocked(found));
     }
     // Everything else that goes out: every commit's message, and the pull request's title and
@@ -667,7 +736,8 @@ pub async fn publish(
         Failure::Failed(format!(
             "Not published: the secret scan couldn't read the commit messages ({e})."
         ))
-    })?;
+    })
+    .inspect_err(|failure| scanned(Err(failure)))?;
     let subjects: Vec<String> = subjects.lines().map(str::to_owned).collect();
     let title = title(job, &subjects);
     // Read once: the scan checks the very description the pull request gets.
@@ -688,9 +758,18 @@ pub async fn publish(
     let mut said: Vec<Found> = match scan::scan(&texts, &target.scratch).await {
         Verdict::Clean => Vec::new(),
         Verdict::Found(found) => found.into_iter().map(|f| Found::of(f, None)).collect(),
-        Verdict::CouldNotRun(why) => return Err(could_not_run(&why)),
+        Verdict::CouldNotRun(why) => {
+            let failure = could_not_run(&why);
+            scanned(Err(&failure));
+            return Err(failure);
+        }
     };
-    said.extend(scan_commits(clone, &range, &target.scratch).await?);
+    said.extend(
+        scan_commits(clone, &range, &target.scratch)
+            .await
+            .inspect_err(|failure| scanned(Err(failure)))?,
+    );
+    scanned(Ok(&said));
     if !said.is_empty() {
         return Err(Failure::Blocked(said));
     }

@@ -743,6 +743,11 @@ fn a_check_that_keeps_failing_stops_at_a_limit() {
         .map(|run| run["round"].clone())
         .collect();
     assert_eq!(rounds, [json!(1), json!(2)]);
+    // Nothing went out, so no scan ran (#735).
+    assert_eq!(
+        job["scan"],
+        json!({"ran": false, "reason": "checks failed"})
+    );
 }
 
 /// A job stopped at a limit after committing keeps its commits and counts them (#757): words told
