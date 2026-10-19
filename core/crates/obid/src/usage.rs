@@ -215,6 +215,17 @@ impl Usages {
         crate::store::write_private(&self.file, &bytes)
     }
 
+    /// Forgets how an account pays: a new sign-in may be another kind of login (an API key where a
+    /// plan was), so its next job asks again. Its windows stay until its tool reports again.
+    pub fn forget_priced(&self, id: &str) {
+        if self.get(id).priced.is_none() {
+            return;
+        }
+        if let Err(error) = self.change(id, false, |usage| usage.priced = None) {
+            tracing::warn!("account {id}: could not keep that it signed in again: {error}");
+        }
+    }
+
     /// "Use anyway" (#278): with `lift`, the account takes automatic work past its weekly reserve
     /// until its week resets (a week from now while the reset is unknown), then it's reserved
     /// again by itself; without, it's reserved again now.

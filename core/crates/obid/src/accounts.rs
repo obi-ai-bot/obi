@@ -1192,6 +1192,9 @@ async fn start(
                 running.remove(&account.id);
             }
         }
+        if signed {
+            shared.jobs.usage.forget_priced(&account.id);
+        }
         drop(changing);
         let _ = ended_tx.send(Some(signed));
         if signed {
