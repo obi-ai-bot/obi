@@ -19,7 +19,7 @@ enum SampleTasks {
         let list = [
             #"{"id": "sample-run", "request": "Make the login screen's empty state say what to do next", "agent": "claude", "account": "default", "repo": "deskree-inc/oby", "branch": "oby/fix-12", "base": "dev", "kind": "fix", "issue": 12, "title": "Login screen empty state", "task": "Fix #12", "status": "running", "step": "Running swift test", "summary": "", "created": "\#(at(12))", "started": "\#(at(12))", "rounds": 4, "round": 2, "check": "swift test", "pipeline": {"stages": [\#(stages(["done", "current", "upcoming", "upcoming", "upcoming"]))], "number": 2, "total": 5}}"#,
             #"{"id": "sample-needs", "request": "Review oby PR #33", "agent": "codex", "account": "default", "repo": "deskree-inc/oby", "branch": "oby/review-33", "base": "dev", "kind": "review", "pr": 33, "title": "Review oby #33", "task": "Review #33", "status": "running", "step": "Waiting for your OK", "summary": "", "created": "\#(at(40))", "started": "\#(at(40))", "permission": {"id": "p1", "tool": "Bash", "title": "Run swift test", "detail": "swift test --filter RunnerTests", "rule": "Bash(swift test:*)"}, "pipeline": {"stages": [\#(stages(["done", "current", "upcoming", "upcoming", "skipped"]))], "number": 2, "total": 5}}"#,
-            #"{"id": "sample-done", "request": "Add the About row to Settings", "agent": "claude", "account": "default", "repo": "deskree-inc/oby", "branch": "oby/about", "base": "dev", "kind": "build", "title": "Settings About row", "task": "Add About", "status": "done", "step": "", "summary": "Settings has an About section with the app's version and the runner it reaches.", "created": "\#(at(36))", "started": "\#(at(36))", "finished": "\#(at(2))", "commits": 2, "published": "https://github.com/deskree-inc/oby/pull/412", "pipeline": {"stages": [\#(stages(["done", "done", "done", "done", "done"]))], "number": 5, "total": 5}}"#,
+            #"{"id": "sample-done", "request": "Add the About row to Settings", "agent": "claude", "account": "default", "repo": "deskree-inc/oby", "branch": "oby/about", "base": "dev", "kind": "build", "title": "Settings About row", "task": "Add About", "status": "done", "step": "", "summary": "Settings has an About section with the app's version and the runner it reaches.", "created": "\#(at(36))", "started": "\#(at(36))", "finished": "\#(at(2))", "commits": 2, "published": "https://github.com/deskree-inc/oby/pull/412", "pipeline": {"stages": [\#(stages(["done", "done", "done", "done", "done"]))], "number": 5, "total": 5}, "tetrix": \#(tetrixReport)}"#,
         ]
         return list.compactMap { try? Runner.decoder.decode(Job.self, from: Data($0.utf8)) }
     }
@@ -27,10 +27,13 @@ enum SampleTasks {
     /// Two made-up accounts, one past 80% of its week, for the message box's usage gauge.
     static var accounts: [Account] {
         let resets = ISO8601DateFormatter().string(from: .now.addingTimeInterval(3 * 86_400))
-        return [#"{"id": "personal", "agent": "claude", "name": "Personal", "signedIn": true, "sevenDay": 0.84, "sevenDayResets": "\#(resets)", "running": 1}"#,
-                #"{"id": "deskree", "agent": "codex", "name": "Deskree", "signedIn": true, "sevenDay": 0.12, "sevenDayResets": "\#(resets)", "running": 0}"#]
+        return [#"{"id": "personal", "agent": "claude", "name": "Personal", "signedIn": true, "sevenDay": 0.84, "sevenDayResets": "\#(resets)", "running": 1, "tetrix": true, "tetrixJobs": 12, "tetrixUsed": 9}"#,
+                #"{"id": "deskree", "agent": "codex", "name": "Deskree", "signedIn": true, "sevenDay": 0.12, "sevenDayResets": "\#(resets)", "running": 0, "tetrix": true, "tetrixJobs": 4, "tetrixUsed": 4}"#]
             .compactMap { try? Runner.decoder.decode(Account.self, from: Data($0.utf8)) }
     }
+
+    /// What the finished sample job's agent did with Tetrix.
+    static let tetrixReport = #"{"connected": true, "calls": {"search_entities": 2, "get_entity": 1, "save_session": 1}, "context": true, "saved": ["ses_8f2a"], "gaps": {"noResults": ["deskree-inc/oby#412"], "missing": [], "unknownFiles": ["apps/ios/app/SettingsScreen.swift"], "failed": [], "sent": "2026-10-18T14:40:02Z", "session": "ses_c41d", "notSent": null}}"#
 
     /// Two made-up conversations, for Home's Recent.
     static var conversations: [RunnerConversation] {
@@ -44,6 +47,10 @@ enum SampleTasks {
     /// many seconds after launch Oby's answer comes, a word at a time, for a screenshot of it coming in.
     @MainActor static func talk(_ phone: Phone) {
         harness(phone)
+        // `-ObySampleRoute settings` or `task:<id>`: opens that page, for its screenshots.
+        if let route = UserDefaults.standard.string(forKey: "ObySampleRoute") {
+            phone.homePath = route == "settings" ? [.settings] : route.hasPrefix("task:") ? [.task(String(route.dropFirst(5)))] : []
+        }
         let delay = UserDefaults.standard.double(forKey: "ObySampleTalk")
         guard delay > 0 else { return }
         let model = phone.conversation

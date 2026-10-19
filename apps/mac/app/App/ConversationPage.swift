@@ -55,9 +55,11 @@ struct ConversationPage: View {
 
     // MARK: The thread
 
-    /// Whether a runner job's decision shows in this conversation: only its own jobs' (C3).
-    private func own(_ job: String, _ turns: [Turn]) -> Bool {
+    /// Whether a runner job's decision shows in this conversation: only its own jobs' (C3), and an
+    /// item with no job only in the conversation it came from (`InboxWords.conversation`).
+    private func own(_ job: String, _ turns: [Turn], item: String? = nil) -> Bool {
         ConversationModel.shows(decisionOf: job, startedIn: feed.extras[job]?.conversation,
+                                from: item.flatMap { feed.inboxWords[$0]?.conversation },
                                 served: feed.conversations.served, shown: feed.conversations.shown, turns: turns)
     }
 
@@ -68,7 +70,7 @@ struct ConversationPage: View {
             let entries = (desk.inbox.map { IslandInbox.Entry(item: $0, local: true) }
                 + (feed.inbox + feed.inboxHistory).map { IslandInbox.Entry(item: $0, local: false) })
                 .filter { $0.item.isDecision && ($0.item.later == nil || $0.item.later! <= context.date) }
-                .filter { $0.local || own($0.item.job, turns) }
+                .filter { $0.local || own($0.item.job, turns, item: $0.item.id) }
                 .sorted { $0.item.created < $1.item.created }
             let waiting = entries.filter { $0.item.isOpen }
             let permissions = feed.chatPermissions.filter { ($0.done != nil || $0.waits(at: context.date)) && own($0.job, turns) }
@@ -120,7 +122,9 @@ struct ConversationPage: View {
                                            arrived: conversation.arrived[row.turn.id],
                                            streamed: conversation.streamed(under: row.turn, in: turns),
                                            conversation: conversation, feed: feed,
-                                           onOpenJob: onOpenJob, onStopJob: { model.stopChatJob($0, local: $1) })
+                                           onOpenJob: onOpenJob, onStopJob: { model.stopChatJob($0, local: $1) },
+                                           onRetry: { feed.retryEcho(row.turn.id); desk.ask(row.turn.text) },
+                                           onEdit: { feed.dropEcho(row.turn.id); text = row.turn.text; typing = true })
                                     .task(id: row.turn.jobs ?? []) {
                                         // A runner's job older than its list: fetched, so its card shows.
                                         for id in ConversationModel.missing(of: row.turn, among: desk.jobs + feed.jobs) { try? await feed.fetch(id) }
@@ -220,6 +224,7 @@ struct ConversationPage: View {
                        voice: model.voice, talkKeyListening: model.listening,
                        onStopTurn: stop, working: thinking || conversation.working)
                 .disabled(sendingAnswer)
+                .keepsDraft($text, as: Drafts.conversation(feed.conversations.shown))
         }
     }
 
@@ -286,6 +291,10 @@ private struct MessageRow: View {
     let feed: RunnerFeed
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
     let onStopJob: (_ job: String, _ local: Bool) -> Void
+    /// On words that didn't reach the runner (`RunnerFeed.Echo`): send them again, or take them back
+    /// into the box.
+    let onRetry: () -> Void
+    let onEdit: () -> Void
 
     private var turn: Turn { row.turn }
     private var yours: Bool { turn.who == .user }
@@ -298,6 +307,15 @@ private struct MessageRow: View {
                     SaidText(text: turn.text, color: Tokens.ink, plain: true)
                         .padding(.horizontal, 14).padding(.vertical, 9)
                         .background(Tokens.bubble, in: RoundedRectangle(cornerRadius: Tokens.bubbleRadius, style: .continuous))
+                }
+                if let problem = feed.echoProblem(turn.id) {
+                    Text("Didn't reach Oby: \(problem)").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger)
+                        .multilineTextAlignment(.trailing).padding(.top, -9)
+                    HStack(spacing: 16) {
+                        Button("Try again", action: onRetry)
+                        Button("Edit", action: onEdit)
+                    }
+                    .buttonStyle(.plain).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.ink)
                 }
             } else {
                 if !turn.text.isEmpty { ArrivingSaid(text: turn.text, color: Tokens.item, since: arrived) }

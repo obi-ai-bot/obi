@@ -155,6 +155,38 @@ struct WindowScreens {
         try await shoot("mac-convo-starting", model: model, state: state, sidebar: false)
     }
 
+    /// Your GitHub work (`GET /v1/github/work`): Review PR with what waits for your review and your
+    /// own pull request, beside the jobs already on it.
+    @Test func gitHubReview() async throws {
+        let model = model()
+        model.feed.apply(gitHub())
+        let state = ChatState()
+        state.trail.start(.group(.review))
+        try await shoot("mac-github-review", model: model, state: state)
+    }
+
+    /// Issues while obid's gh isn't signed in: Connect GitHub first.
+    @Test func gitHubConnect() async throws {
+        let model = model()
+        model.feed.apply(GitHubWork(signedIn: false))
+        let state = ChatState()
+        state.trail.start(.group(.issues))
+        try await shoot("mac-github-connect", model: model, state: state)
+    }
+
+    func gitHub() -> GitHubWork {
+        GitHubWork(signedIn: true, login: "well-prado", items: [
+            .init(id: "a1", list: .reviews, repo: "deskree-inc/tetrix-ee", number: 389, title: "webhook fix", url: "https://github.com/deskree-inc/tetrix-ee/pull/389",
+                  author: "Ernesto", updated: now - 1500),
+            .init(id: "a2", list: .reviews, repo: "deskree-inc/tetrix-front-end", number: 405, title: "usage meters", url: "https://github.com/deskree-inc/tetrix-front-end/pull/405",
+                  author: "Daniel", updated: now - 7000, known: false),
+            .init(id: "a3", list: .mine, repo: "deskree-inc/oby", number: 700, title: "Pair a device sends you to Remote access",
+                  url: "https://github.com/deskree-inc/oby/pull/700", author: "well-prado", updated: now - 3000, reviewDecision: "CHANGES_REQUESTED", checks: "SUCCESS"),
+            .init(id: "a4", list: .assigned, repo: "deskree-inc/oby", number: 640, title: "Clear done keeps a merged job", url: "https://github.com/deskree-inc/oby/issues/640",
+                  author: "well-prado", updated: now - 4000),
+        ])
+    }
+
     @Test func task() async throws {
         let state = ChatState(defaults: .scratch)
         state.trail.start(.group(.review), .job(id: "r2", local: false))
@@ -293,6 +325,49 @@ struct WindowScreens {
         for _ in 0..<50 where !character.ready { try await Task.sleep(for: .milliseconds(100)) }
         try await Task.sleep(for: .milliseconds(1500))
         try await save("mac-obid-\(screen)", window: window)
+    }
+
+    /// Tetrix held by obid for every agent (Settings › Connectors, ready and connected; Accounts'
+    /// "used in" lines; a job's Tetrix section): staged on the feed, no runner asked.
+    @Test(arguments: ["connectors-ready", "connectors-on", "accounts", "task"])
+    func tetrix(_ screen: String) async throws {
+        let suite = try #require(UserDefaults(suiteName: "oby-screens-\(UUID().uuidString)"))
+        suite.set(true, forKey: "ObySidebarOpen")
+        suite.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
+        let dogfood = TetrixStatus.Server(preset: "dogfood", name: "Tetrix Dogfood", url: URL(string: "https://mcp.tetrix.dev/mcp")!)
+        func account(_ id: String, _ agent: String, _ name: String, week: Double, jobs: Int, used: Int) -> AccountState {
+            AccountState(account: Account(id: id, agent: agent, name: name, payer: "", home: nil), label: nil, sevenDay: week,
+                         sevenDayResets: now + 3 * 86_400, tetrix: true, tetrixJobs: jobs, tetrixUsed: used, runnerSignedIn: true)
+        }
+        let model = model()
+        model.feed.stage(accounts: [account("personal", "claude", "Personal", week: 0.36, jobs: 12, used: 9),
+                                    account("deskree", "codex", "Deskree", week: 0.62, jobs: 4, used: 4)],
+                         models: ModelSettings(claude: ModelChoice(model: "claude-opus-5-5", effort: "xhigh"), codex: ModelChoice(model: "gpt-6.1-sol", effort: "high"),
+                                               cursor: CursorModelChoice(model: "auto")),
+                         options: ModelOptions(claude: .init(models: [], efforts: []), codex: .init(models: []), cursor: .init(models: [])))
+        let on = screen != "connectors-ready"
+        var report = RunnerJobExtras(id: "r3")
+        report.tetrix = TetrixJobReport(connected: true, calls: ["search_entities": 2, "get_entity": 1, "save_session": 1], context: true,
+                                        saved: ["ses_8f2a"],
+                                        gaps: .init(noResults: ["deskree-inc/tetrix-ee#398"], unknownFiles: ["src/graph/fixtures.ts"],
+                                                    sent: now, session: "ses_c41d"))
+        model.feed.stage(tetrix: on ? TetrixStatus(connected: true, url: dogfood.url, preset: "dogfood", presets: [dogfood])
+                                    : TetrixStatus(presets: [dogfood]),
+                         lists: Connectors.Lists(plugins: [], connections: nil, gitHub: GitHubLogin(gh: true, signedIn: true, user: "you", signIn: nil)),
+                         extras: ["r3": report])
+        let state = ChatState()
+        if screen == "task" { state.trail.start(.group(.review), .job(id: "r3", local: false)) }
+        else { state.openSettings(screen == "accounts" ? .accounts : .connectors) }
+        let character = ObyCharacter(query: "embed&size=1.23")
+        let window = ChatWindow.make(ChatView(model: model, state: state, character: character).defaultAppStorage(suite),
+                                     size: NSSize(width: 994, height: 900))
+        window.setFrameOrigin(NSPoint(x: 40, y: 40))
+        window.orderFrontRegardless()
+        defer { window.close() }
+        ChatWindow.measureLights(window, into: state)
+        for _ in 0..<50 where !character.ready { try await Task.sleep(for: .milliseconds(100)) }
+        try await Task.sleep(for: .milliseconds(1500))
+        try await save("mac-tetrix-\(screen)", window: window)
     }
 
     @Test func taskNeedingYou() async throws {

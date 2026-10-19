@@ -359,10 +359,12 @@ final class ConversationModel {
 
     /// Whether the decision of `job` belongs in the conversation shown (Sangam: a decision lives
     /// with its task, mac-design C3): with obid's conversations (`served`), only one whose job a
-    /// turn here started or obid says `startedIn` this one, and one with no job, which nothing
-    /// else shows yet (C9). A runner with one thread shows every decision in it.
-    nonisolated static func shows(decisionOf job: String, startedIn: String?, served: Bool, shown: String?, turns: [Turn]) -> Bool {
-        guard served, !job.isEmpty else { return true }
+    /// turn here started or obid says `startedIn` this one. One with no job (a plan waiting for
+    /// Start, a confirm) only in the conversation it came `from`, never opened out in another;
+    /// one from no conversation waits in Needs you. A runner with one thread shows every decision.
+    nonisolated static func shows(decisionOf job: String, startedIn: String?, from: String? = nil, served: Bool, shown: String?, turns: [Turn]) -> Bool {
+        guard served else { return true }
+        guard !job.isEmpty else { return from != nil && from == shown }
         if turns.contains(where: { ($0.jobs ?? []).contains(job) }) { return true }
         return shown != nil && startedIn == shown
     }

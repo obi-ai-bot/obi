@@ -1175,7 +1175,7 @@ fn messages_reach_only_jobs_that_can_take_them() {
 /// A follow-up of a job whose commits aren't merged (here not published: this obid has no `gh`)
 /// starts from that job's branch head, on a branch of its own: its agent sees that work, and only
 /// its own commits count as its. A job takes one follow-up at a time: while one works, more words
-/// for the first job are refused, pointing at it.
+/// for the first job go to it, never a second.
 #[test]
 fn a_follow_up_starts_from_the_first_jobs_unmerged_work() {
     let folder = Folder::new("follow-up-work");
@@ -1225,16 +1225,17 @@ fn a_follow_up_starts_from_the_first_jobs_unmerged_work() {
     ended(&obid, &looked);
     let pausing = post(&looked, "PAUSE: 3000");
     assert_eq!(pausing.status, 201, "{}", pausing.text);
+    let follow = pausing.body["id"].as_str().unwrap().to_owned();
+    assert_eq!(pausing.body["title"], "Follow-up: Look around");
+    within(60, "its follow-up is at work", || {
+        let body = job(&obid, &follow);
+        (body["status"] == "running" && body["step"] == "Starting Claude Code").then_some(())
+    });
     let busy = post(&looked, "and one more");
-    assert_eq!(busy.status, 422, "{}", busy.text);
-    assert!(
-        busy.body["error"]
-            .as_str()
-            .unwrap()
-            .contains("is following it up already"),
-        "{}",
-        busy.text
-    );
+    assert_eq!(busy.status, 200, "{}", busy.text);
+    assert_eq!(busy.body["id"], follow.as_str());
+    assert_eq!(busy.body["step"], "You: and one more");
+    assert_eq!(ended(&obid, &follow)["status"], "done");
 }
 
 fn git_out(dir: &std::path::Path, args: &[&str]) -> String {

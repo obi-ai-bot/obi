@@ -98,8 +98,10 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     var turn: String?
     /// What it made to be looked at (obid only), or nil.
     var artifacts: [ArtifactRef]?
+    /// What its agent asked Tetrix, the session it saved and where the graph fell short, or nil.
+    var tetrix: TetrixJobReport?
 
-    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, turn, artifacts }
+    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, turn, artifacts, tetrix }
 
     init(id: String, mode: String? = nil, permission: RunnerPermission? = nil, question: Question? = nil, conversation: String? = nil,
          turn: String? = nil) {
@@ -120,6 +122,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
         conversation = try? keys.decodeIfPresent(String.self, forKey: .conversation)
         turn = try? keys.decodeIfPresent(String.self, forKey: .turn)
         artifacts = try? keys.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
+        tetrix = try? keys.decodeIfPresent(TetrixJobReport.self, forKey: .tetrix)
     }
 
     /// Each job's, by id; a list that can't be read gives none.
@@ -139,6 +142,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
                       RunnerPermission(id: $0.id, tool: $0.tool, title: $0.title, detail: $0.detail, rule: $0.rule, always: $0.always)
                   },
                   question: job.question.map { Question(text: $0.text, options: $0.options, recommended: $0.recommended, plan: $0.plan) })
+        tetrix = job.tetrix.map { TetrixJobReport(connected: $0.connected, calls: $0.calls, saved: $0.stamps?.sessions ?? []) }
     }
 }
 #endif
@@ -265,15 +269,20 @@ nonisolated struct InboxWords: Decodable, Equatable, Sendable {
     /// On a `confirm` item (obid only, #546), what its Confirm carries out. The Mac reads the
     /// item into Engine's InboxItem, which has no such kind: this says what it really is.
     var confirm: RunnerConfirm?
+    /// The conversation a plan waiting for Start (or a confirm to start a job) came from (obid
+    /// only): a conversation shows it opened out only there.
+    var conversation: String?
 
-    private enum Keys: String, CodingKey { case headline, happened, recommended, why, confirm }
+    private enum Keys: String, CodingKey { case headline, happened, recommended, why, confirm, conversation }
 
-    init(headline: String? = nil, happened: String? = nil, recommended: Int? = nil, why: String? = nil, confirm: RunnerConfirm? = nil) {
+    init(headline: String? = nil, happened: String? = nil, recommended: Int? = nil, why: String? = nil, confirm: RunnerConfirm? = nil,
+         conversation: String? = nil) {
         self.headline = headline
         self.happened = happened
         self.recommended = recommended
         self.why = why
         self.confirm = confirm
+        self.conversation = conversation
     }
 
     init(from decoder: any Decoder) throws {
@@ -283,6 +292,7 @@ nonisolated struct InboxWords: Decodable, Equatable, Sendable {
         recommended = try? keys.decodeIfPresent(Int.self, forKey: .recommended)
         why = try? keys.decodeIfPresent(String.self, forKey: .why)
         confirm = try? keys.decodeIfPresent(RunnerConfirm.self, forKey: .confirm)
+        conversation = try? keys.decodeIfPresent(String.self, forKey: .conversation)
     }
 
     /// The card's title: the headline, else the item's text, as before.

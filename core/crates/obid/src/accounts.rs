@@ -611,6 +611,8 @@ pub async fn change(
         }
         Ok((tool, account))
     })?;
+    // A conversation's Claude Code waiting on the account starts anew on it as it is now.
+    shared.harness.end_warm_on(&id);
     send_accounts(&shared).await;
     Ok(answer(
         StatusCode::OK,
@@ -644,6 +646,9 @@ pub async fn remove(
         .jobs
         .begin_change(&id)
         .ok_or_else(|| busy(&account))?;
+    // No conversation's Claude Code waits on its login copy any more (none keeps one meanwhile:
+    // [`Jobs::being_changed`]).
+    shared.harness.end_warm_on(&id);
     let made = shared.config.agents.change(|agents, saved| {
         find(agents, &id).ok_or_else(|| no_account(&id))?;
         let made = match saved.added.iter().position(|a| a.id == id) {
@@ -874,6 +879,8 @@ pub async fn sign_in(
         .jobs
         .begin_change(&id)
         .ok_or_else(|| busy(&account))?;
+    // A conversation's Claude Code waiting on the old login ends: the next turn copies the new one.
+    shared.harness.end_warm_on(&id);
     let sign_in = start(&shared, tool, &account, &bin, &dir, changing)
         .await
         .map_err(|why| ApiError::new(StatusCode::BAD_GATEWAY, why))?;

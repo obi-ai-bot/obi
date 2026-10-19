@@ -379,6 +379,7 @@ private struct HomeView: View {
                    maximumHeight: height * 0.5, focusRequest: state.homeFocusRequest,
                    onSend: ask, onScreenshot: screenshot, onStop: { false }, usage: model.usageRows,
                        voice: model.voice, talkKeyListening: model.listening)
+            .keepsDraft($text, as: Drafts.home)
             .frame(maxWidth: Tokens.homeBox - 2 * Tokens.gutter)
             .padding(.horizontal, Tokens.gutter).padding(.bottom, Tokens.gutter)
     }
@@ -412,7 +413,8 @@ private struct HomeView: View {
                     onOpenJob: { state.trail.push(.job(id: $0, local: local)) }).takesKeys()
         case .group(let kind):
             GroupPane(model: model, kind: kind, items: work.filter { $0.type == kind },
-                      onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })
+                      onOpenJob: { state.trail.push(.job(id: $0, local: $1)) },
+                      onConnectGitHub: { state.openSettings(.connectors) })
                 .takesKeys()
         case .settings(let page):
             SettingsPane(model: model, page: page)
