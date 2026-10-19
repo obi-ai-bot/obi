@@ -304,6 +304,20 @@ fn an_allowed_network_command_never_reaches_obid() {
     // obid's own address, the same port by every other name for this machine, and a server on
     // IPv6's loopback (#774's re-review, 1).
     let six = std::net::TcpListener::bind("[::1]:0").ok();
+    if let Some(six) = six.as_ref().and_then(|s| s.try_clone().ok()) {
+        // It answers, so a refused connection is the box's doing, never a server that doesn't.
+        std::thread::spawn(move || {
+            for stream in six.incoming().take(20).flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 1024];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                let _ = std::io::Write::write_all(
+                    &mut stream,
+                    b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n",
+                );
+            }
+        });
+    }
     let mut targets = vec![
         format!("127.0.0.1:{}", obid.port),
         format!("0.0.0.0:{}", obid.port),
@@ -312,7 +326,16 @@ fn an_allowed_network_command_never_reaches_obid() {
     if let Some(six) = &six {
         targets.push(format!("[::1]:{}", six.local_addr().unwrap().port()));
     }
-    let command = targets
+    // Positive controls: unboxed, each target answers; and when this machine reaches the web,
+    // the boxed command does too, so its network was really given (the final review).
+    for target in &targets {
+        assert!(
+            answers(&format!("http://{target}/")),
+            "{target} doesn't answer unboxed"
+        );
+    }
+    let online = answers("https://example.com/");
+    let mut command = targets
         .iter()
         .enumerate()
         .map(|(i, t)| {
@@ -322,6 +345,11 @@ fn an_allowed_network_command_never_reaches_obid() {
         })
         .collect::<Vec<_>>()
         .join("; ");
+    if online {
+        command.push_str(
+            "; curl -sS -m 10 -o /dev/null https://example.com/ && echo WEB-OK || echo WEB-NO",
+        );
+    }
     scope(|turns| {
         let waiting = turns.spawn(|| shell(&obid, None, json!({"command": command})));
         let first = within(30, "the conversation", || {
@@ -342,7 +370,20 @@ fn an_allowed_network_command_never_reaches_obid() {
             );
             assert!(!text.contains(&format!("REACHED-{i}")), "{target}: {text}");
         }
+        if online {
+            assert!(text.contains("WEB-OK"), "the network wasn't given: {text}");
+        } else {
+            eprintln!("this machine doesn't reach example.com: the web control is skipped");
+        }
     });
+}
+
+/// Whether `url` answers curl from the test itself, outside any box.
+fn answers(url: &str) -> bool {
+    std::process::Command::new("curl")
+        .args(["-sS", "-m", "5", "-o", "/dev/null", url])
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// A git setting that runs a program, planted in the room, never runs without the owner: git
