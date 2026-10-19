@@ -25,7 +25,7 @@ pub const KEPT_USES: usize = 500;
 const USES_LOG_MAX: u64 = 4 << 20;
 const ACTING: &str = "Acting as you needs your OK, which arrives with permission modes.";
 const LONGEST: usize = 256 * 1024;
-const MCP_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+pub(crate) const MCP_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 const MCP_SESSION_EXPIRED: &str = "The connected server forgot this MCP session.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,7 +112,8 @@ impl Connection {
         if !(url.scheme() == "https" || url.scheme() == "http" && loopback) {
             return Some("A connection's URL is HTTPS (HTTP only on 127.0.0.1): the secret never travels in the clear.".into());
         }
-        if !valid_secret_name(&self.secret) {
+        // `oby.` secrets are obid's own (Oby's Tetrix login, crate::tetrix): no connection's.
+        if !valid_secret_name(&self.secret) || self.secret.starts_with("oby.") {
             return Some(
                 "A secret's name is up to 64 letters, digits, dots, dashes or underscores.".into(),
             );
@@ -384,8 +385,25 @@ impl Connections {
         {
             return None;
         }
+        Some((
+            format!("{}/v1/agent/mcp/{id}", self.api_url),
+            self.job_token(id),
+        ))
+    }
+
+    /// Oby's Tetrix server for job `id` (crate::tetrix), with the job's token: the broker's, so it
+    /// dies with the job the same way.
+    pub fn open_tetrix(&self, id: &str) -> (String, String) {
+        (
+            format!("{}/v1/agent/tetrix/{id}", self.api_url),
+            self.job_token(id),
+        )
+    }
+
+    /// Job `id`'s token, made the first time it's asked for.
+    fn job_token(&self, id: &str) -> String {
         let mut tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
-        let token = tokens
+        tokens
             .iter()
             .find_map(|(token, job)| (job == id).then(|| token.clone()))
             .unwrap_or_else(|| {
@@ -396,8 +414,7 @@ impl Connections {
                 );
                 tokens.insert(token.clone(), id.to_owned());
                 token
-            });
-        Some((format!("{}/v1/agent/mcp/{id}", self.api_url), token))
+            })
     }
 
     pub async fn close_job(&self, id: &str) {
@@ -444,7 +461,7 @@ impl Connections {
             .collect()
     }
 
-    fn record(&self, use_record: ConnectionUse) {
+    pub(crate) fn record(&self, use_record: ConnectionUse) {
         if let Some(jobs) = self.jobs.upgrade() {
             jobs.connection_used(&use_record.job, use_record.clone());
         }
@@ -539,7 +556,7 @@ impl Connections {
         out
     }
 
-    async fn upstream_tools(
+    pub(crate) async fn upstream_tools(
         &self,
         job: &str,
         c: &Connection,
@@ -626,7 +643,7 @@ impl Connections {
         Ok(())
     }
 
-    async fn upstream_rpc(
+    pub(crate) async fn upstream_rpc(
         &self,
         job: &str,
         c: &Connection,
@@ -897,7 +914,7 @@ impl Connections {
         )
     }
 
-    fn clean(&self, value: Value) -> Value {
+    pub(crate) fn clean(&self, value: Value) -> Value {
         fn scrub(value: Value, secrets: &crate::secrets::Secrets) -> Value {
             match value {
                 Value::String(s) => Value::String(secrets.redact(&s)),

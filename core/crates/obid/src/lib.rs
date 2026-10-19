@@ -43,6 +43,7 @@ pub mod secrets;
 pub mod settings;
 pub mod sphere;
 pub mod store;
+pub mod tetrix;
 pub mod token;
 pub mod vault;
 pub mod web;
@@ -241,6 +242,12 @@ pub async fn serve(
     };
     let connections = connections::Connections::open(&config.home, &jobs, broker_host);
     jobs.use_connections(connections.clone());
+    let tetrix = tetrix::Tetrix::open(
+        &config.home,
+        vault::shared().expect("the vault is installed first"),
+        events.clone(),
+    );
+    jobs.use_tetrix(tetrix.clone());
     let conversations = conversation::Conversations::open(&config.home, events.clone());
     let artifacts = artifacts::Artifacts::open(&config.home, events.clone()).map_err(|source| {
         StartError::Jobs {
@@ -269,6 +276,7 @@ pub async fn serve(
         plugins: plugins.clone(),
         sign_ins: accounts::SignIns::default(),
         github: github_login::GitHubLogin::default(),
+        tetrix,
         pages: web::Sessions::default(),
         stopping: stopping_rx.clone(),
     });
