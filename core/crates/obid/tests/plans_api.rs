@@ -4187,20 +4187,21 @@ fn a_later_step_with_no_time_left_to_think_ends_budget_spent() {
     let folder = Folder::new("brain-no-time-left");
     let remote = fixture(&folder.0.join("fixture"));
     let mut config = config(&folder.0, &remote, &planner());
-    config["turnBudget"] = json!(3);
+    config["turnBudget"] = json!(20);
+    config["leastThink"] = json!(10);
     let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
     let id = running(&obid, "Vault secrets")["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    // Step 0's first try times out at half the budget; its retry plans with under a second left
-    // for step 1, which no adapter starts. The retry sleeps half a second, so that with nothing
-    // else taking time a second would be left: starting processes on a busy machine only takes
-    // from it, and has the whole second before the plan comes after the budget.
+    // Step 0's first try outlasts the budget, so its retry starts beside it at half the budget
+    // and plans with under 10 seconds left for step 1, which no adapter starts. Starting
+    // processes on a busy machine only takes from what's left, and has 9 seconds before the plan
+    // comes after the budget (#763).
     queue(
         &obid,
         &[
-            format!("SLEEP 5 {}", reply("")),
+            format!("SLEEP 25 {}", reply("")),
             format!("SLEEP 0.6 {}", set_mode(&id, "ask")),
         ],
     );
