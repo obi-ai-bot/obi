@@ -64,6 +64,100 @@ struct Thread {
     /// two conversations share one.
     sequence: u64,
     turns: Vec<Turn>,
+    /// The task list its agent keeps for itself (`oby_tasks`), in its order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tasks: Vec<Task>,
+    /// The list was written in a turn that read something untrusted: every turn it's fed back to
+    /// is treated as having read it too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    tasks_tainted: bool,
+}
+
+/// The most tasks a conversation's list holds.
+pub const TASKS: usize = 50;
+/// A task's statuses, as Gemini CLI's `write_todos` names them.
+pub const TASK_STATUSES: [&str; 5] = [
+    "pending",
+    "in_progress",
+    "completed",
+    "cancelled",
+    "blocked",
+];
+
+/// One task of a conversation's own list (docs/runner-api.md, "obid only: the conversation
+/// manages its own work").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Task {
+    #[serde(default)]
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    #[serde(default)]
+    pub job: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+impl Task {
+    /// Still to do: neither completed nor cancelled.
+    pub fn open(&self) -> bool {
+        self.status != "completed" && self.status != "cancelled"
+    }
+}
+
+/// `tasks` as a list may hold them, ids given to those without (`t1`, `t2`, …, never one taken),
+/// or why not.
+pub fn checked_tasks(mut tasks: Vec<Task>) -> Result<Vec<Task>, String> {
+    if tasks.len() > TASKS {
+        return Err(format!("A task list holds at most {TASKS} tasks."));
+    }
+    for task in &mut tasks {
+        task.title = task.title.trim().to_owned();
+        if task.title.is_empty()
+            || task.title.chars().count() > 200
+            || task.title.chars().any(|c| c.is_control() || breaks_line(c))
+        {
+            return Err("A task's title is one line of 1 to 200 characters.".into());
+        }
+        if !TASK_STATUSES.contains(&task.status.as_str()) {
+            return Err(format!(
+                "A task's status is {}, not {}.",
+                TASK_STATUSES.join(", "),
+                task.status
+            ));
+        }
+        if task.note.as_ref().is_some_and(|n| n.chars().count() > 500) {
+            return Err("A task's note is at most 500 characters.".into());
+        }
+        if task.id.chars().count() > 40 || task.id.chars().any(|c| c.is_control() || breaks_line(c))
+        {
+            return Err("A task's id is at most 40 characters, on one line.".into());
+        }
+        if task.job.as_ref().is_some_and(|j| {
+            j.is_empty()
+                || j.chars().count() > 40
+                || j.chars().any(|c| c.is_control() || breaks_line(c))
+        }) {
+            return Err("A task's job is a job's id: 1 to 40 characters, on one line.".into());
+        }
+    }
+    let mut next = 1;
+    let given: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
+    for task in &mut tasks {
+        while task.id.is_empty() {
+            let id = format!("t{next}");
+            next += 1;
+            if !given.contains(&id) {
+                task.id = id;
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    if let Some(twice) = tasks.iter().find(|t| !seen.insert(t.id.as_str())) {
+        return Err(format!("Two tasks have the id {}.", twice.id));
+    }
+    Ok(tasks)
 }
 
 impl Thread {
@@ -88,6 +182,7 @@ impl Thread {
             "created": self.created,
             "lastActivity": self.last_activity(),
             "cursor": self.key().to_string(),
+            "tasks": self.tasks,
         })
     }
 }
@@ -281,6 +376,8 @@ impl Conversations {
                     pinned: false,
                     id,
                     turns,
+                    tasks: vec![],
+                    tasks_tainted: false,
                 };
                 // The conversation's name in its folder must be on disk before the old file goes.
                 if let Err(e) = self.write(&thread).and_then(|()| sync_dir(&self.dir)) {
@@ -361,6 +458,8 @@ impl Conversations {
                 created: obi_protocol::time::format(obi_protocol::time::now()),
                 sequence: 0,
                 turns: vec![],
+                tasks: vec![],
+                tasks_tainted: false,
             });
             threads.len() - 1
         });
@@ -615,6 +714,37 @@ impl Conversations {
         let summary = thread.summary();
         self.events.send("conversation", summary.clone());
         Ok(summary)
+    }
+
+    /// The task list of the conversation `id`, and whether a turn that read something untrusted
+    /// wrote it.
+    pub fn tasks(&self, id: &str) -> Result<(Vec<Task>, bool), Error> {
+        let threads = self.lock();
+        let thread = threads
+            .iter()
+            .find(|t| t.id == id)
+            .ok_or(Error::NoConversation)?;
+        Ok((thread.tasks.clone(), thread.tasks_tainted))
+    }
+
+    /// Replaces the task list of the conversation `id` (`tainted`: written in a turn that read
+    /// something untrusted), kept, written and announced.
+    pub fn set_tasks(&self, id: &str, tasks: Vec<Task>, tainted: bool) -> Result<(), Error> {
+        let mut threads = self.lock();
+        let thread = threads
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or(Error::NoConversation)?;
+        let kept = (
+            std::mem::replace(&mut thread.tasks, tasks),
+            std::mem::replace(&mut thread.tasks_tainted, tainted),
+        );
+        if let Err(e) = self.write(thread) {
+            (thread.tasks, thread.tasks_tainted) = kept;
+            return Err(Error::Io(e));
+        }
+        self.events.send("conversation", thread.summary());
+        Ok(())
     }
 
     /// The id the next new conversation will get, named now and kept until one takes it.
@@ -1023,8 +1153,39 @@ pub async fn remove(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cursor, job_report, titled};
+    use super::{Cursor, Task, checked_tasks, job_report, titled};
     use serde_json::json;
+
+    /// A task list is at most 50 one-line tasks with a known status; ids are given to those left
+    /// without, never one another task has, and no two share one.
+    #[test]
+    fn a_task_list_is_checked_and_its_ids_given() {
+        let task = |id: &str, title: &str, status: &str| Task {
+            id: id.into(),
+            title: title.into(),
+            status: status.into(),
+            job: None,
+            note: None,
+        };
+        let checked = checked_tasks(vec![
+            task("", " Fix it ", "pending"),
+            task("t1", "Taken", "blocked"),
+            task("", "Next", "in_progress"),
+        ])
+        .unwrap();
+        let ids: Vec<&str> = checked.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["t2", "t1", "t3"]);
+        assert_eq!(checked[0].title, "Fix it");
+        assert!(checked_tasks(vec![task("", "a\nb", "pending")]).is_err());
+        assert!(checked_tasks(vec![task("", "", "pending")]).is_err());
+        assert!(checked_tasks(vec![task("", "x", "done")]).is_err());
+        assert!(checked_tasks(vec![task("a", "x", "pending"), task("a", "y", "pending")]).is_err());
+        assert!(checked_tasks(vec![task("", "x", "pending"); 51]).is_err());
+        let mut noted = task("", "x", "blocked");
+        noted.note = Some("n".repeat(501));
+        assert!(checked_tasks(vec![noted]).is_err());
+        assert!(!task("", "x", "cancelled").open() && task("", "x", "blocked").open());
+    }
 
     /// A job a conversation started says how it ended, in obid's words first: its title, the
     /// outcome, the pull request or why it wasn't published; its summary's first line, which its
