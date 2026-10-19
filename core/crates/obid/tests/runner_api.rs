@@ -207,6 +207,7 @@ fn jobs_have_iso_dates_and_every_key() {
                 "conversation",
                 "followUpOf",
                 "obi",
+                "stalled",
                 "worktree"
             ],
             "{body}"
