@@ -763,7 +763,11 @@ fn work_inside_the_sandbox_is_answered_without_the_owner() {
             ("Edit greet.js", "allowed"),
             ("Run cargo test", "allowed"),
             ("Run node --test && git status", "allowed"),
-            ("Run git commit -m \"$(cat <<'EOF'", "allowed"),
+            // A command with no rule is titled in full (#634).
+            (
+                "Run git commit -m \"$(cat <<'EOF'\nfix: don't curl; ~/.ssh stays\nEOF\n)\"",
+                "allowed",
+            ),
             ("Run git commit", "allowed"),
             ("Use Read", "allowed"),
             ("Use Grep", "allowed"),
