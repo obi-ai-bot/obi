@@ -2624,17 +2624,18 @@ impl Link {
                     .routines()
                     .ok_or_else(|| api(StatusCode::CONFLICT, "obid keeps no routines."))?;
                 let gone = || api(StatusCode::CONFLICT, "That routine is gone.");
-                // The card named its mode, tool and account: one changed since is a routine the
-                // owner didn't see.
+                // The card named its mode, tool, account and check: one changed since is a routine
+                // the owner didn't see.
                 let current = routines.get(target).ok_or_else(gone)?;
                 let payload = &confirmed.payload;
                 if payload["mode"] != serde_json::json!(current.mode)
                     || payload["agent"] != serde_json::json!(current.agent)
                     || payload["account"] != serde_json::json!(current.account)
+                    || payload["check"] != serde_json::json!(current.check)
                 {
                     return Err(api(
                         StatusCode::CONFLICT,
-                        "The routine's mode, tool or account changed since Oby asked: ask again.",
+                        "The routine's mode, tool, account or check changed since Oby asked: ask again.",
                     ));
                 }
                 let now = time::now();

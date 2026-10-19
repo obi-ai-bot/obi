@@ -625,12 +625,13 @@ fn change_routine(shared: &Shared, session: &Session, args: Value) -> Result<Str
             ));
         }
     };
-    // What the card said each run is: the Confirm refuses a routine whose mode, tool or account
-    // changed since, rather than act on one the owner didn't see.
+    // What the card said each run is: the Confirm refuses a routine whose mode, tool, account or
+    // check changed since, rather than act on one the owner didn't see.
     let mut payload = payload;
     payload["mode"] = json!(routine.mode);
     payload["agent"] = json!(routine.agent);
     payload["account"] = json!(routine.account);
+    payload["check"] = json!(routine.check);
     super::actions::confirm(
         shared,
         "",
