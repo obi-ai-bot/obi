@@ -68,6 +68,10 @@ struct MessageBox: View {
     var voice: Voice? = nil
     /// Whether the talk key is listening: the button waits for it.
     var talkKeyListening = false
+    /// Stops Oby's turn under way, from the box's end slot (Sangam, mac-design A14); nil: no turn here.
+    var onStopTurn: (() -> Void)? = nil
+    /// Whether a turn is under way: then the end slot is Stop.
+    var working = false
     @State private var width: CGFloat = 480
     @State private var hovering = false
     @State private var listening = false
@@ -185,8 +189,31 @@ struct MessageBox: View {
         if let usage { UsageGauge(rows: usage) }
     }
 
-    /// Voice while the box is empty: the talk key does it, so it says how. Send once there's text.
+    /// What the end slot holds: Stop while a turn is under way, the microphone while the box is
+    /// empty or listening, Send once there's text.
+    enum EndSlot: Equatable { case voice, send, stop }
+
+    static func endSlot(empty: Bool, listening: Bool, working: Bool) -> EndSlot {
+        if working && !listening { return .stop }
+        return empty || listening ? .voice : .send
+    }
+
+    private var slot: EndSlot { Self.endSlot(empty: empty, listening: listening, working: working && onStopTurn != nil) }
+
     @ViewBuilder private var end: some View {
+        if slot == .stop, let onStopTurn {
+            Button(action: onStopTurn) { BoxIcon(symbol: "stop.fill", color: Tokens.ink) }
+                .buttonStyle(.plain)
+                .help("Stop")
+                .accessibilityLabel("Stop")
+                .frame(width: BoxMetrics.button)
+        } else {
+            sendOrVoice
+        }
+    }
+
+    /// Voice while the box is empty: the talk key does it, so it says how. Send once there's text.
+    @ViewBuilder private var sendOrVoice: some View {
         ZStack {
             // The talk key speaks to Oby: where the box tells an agent, no voice.
             if attachments { voiceIcon }

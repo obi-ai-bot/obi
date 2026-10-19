@@ -163,6 +163,15 @@ struct ChatWindowTests {
         #expect(MessageBox.listenLimit == .seconds(60))
     }
 
+    /// While Oby works, the box's end slot is Stop (mac-design A14); listening keeps the microphone.
+    @Test func theBoxStopsATurnFromItsEndSlot() {
+        #expect(MessageBox.endSlot(empty: true, listening: false, working: false) == .voice)
+        #expect(MessageBox.endSlot(empty: false, listening: false, working: false) == .send)
+        #expect(MessageBox.endSlot(empty: true, listening: false, working: true) == .stop)
+        #expect(MessageBox.endSlot(empty: false, listening: false, working: true) == .stop)
+        #expect(MessageBox.endSlot(empty: true, listening: true, working: true) == .voice)
+    }
+
     /// A task stays new across launches until it's opened (mac-design C8): what was opened, and
     /// since when, are kept.
     @Test func newTasksStayNewAcrossLaunches() throws {
