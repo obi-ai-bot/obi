@@ -143,7 +143,7 @@ export default function TaskCard({ task, alone = false, onOpen, style }: {
             </Section>
           )}
 
-          <Section title="Details" aside={j.log && !log ? <button className="tc-link" onClick={() => setLog(true)}>Full session<ChevronRight size={12} strokeWidth={1.8} /></button> : undefined}>
+          <Section title="Details" aside={page && j.log && !log ? <button className="tc-link" onClick={() => setLog(true)}>Full session<ChevronRight size={12} strokeWidth={1.8} /></button> : undefined}>
             <dl className="tc-facts">
               {repo && <><dt>Repository</dt><dd>{j.repo}</dd></>}
               {j.branch !== '—' && <><dt>Branch</dt><dd className="is-mono">{j.branch}</dd></>}

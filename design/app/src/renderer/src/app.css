@@ -439,7 +439,7 @@ button.crumb:hover { color: var(--ink); background: var(--hover); }
 /* The job page's timeline (obi-ai-bot/obi#729, Alternative B): a section's
    aside on the right of its title; the time track; how the estimate was made;
    each stage's time; and what hangs under a stage, quieter than the stage. */
-.tc-section h3 { display: flex; align-items: baseline; gap: 8px; }
+.task-card.is-alone .tc-section h3 { display: flex; align-items: baseline; gap: 8px; }
 .tc-aside { margin-left: auto; color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
 .tc-link { display: inline-flex; align-items: center; gap: 2px; padding: 0; border: 0; background: none; color: var(--text); font: inherit; cursor: pointer; transition: color var(--fade); }
 .tc-link:hover { color: var(--ink); }
