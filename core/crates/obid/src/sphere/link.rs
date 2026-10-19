@@ -2793,52 +2793,39 @@ impl Link {
                         })?;
                     // A follow-up of a job whose follow-up is working already: that one hears
                     // it (the owner's own Start), and the item is done, never a second. Only
-                    // while it's at work: a permission or plan waiting would take the words
-                    // as its answer, so the item stays open until then.
+                    // while it's at work with nothing waiting, checked as the words are taken
+                    // (`hear_at_work`): a permission or plan would take them as its answer, so
+                    // the item stays open until then.
                     let following = new
                         .follow_up_of
                         .as_deref()
                         .and_then(|of| self.jobs.following(of));
-                    if let Some(next) = following.as_ref().filter(|n| !self.jobs.at_work(&n.id)) {
-                        return Err(open_again(api(
-                            StatusCode::CONFLICT,
-                            format!(
-                                "{} (job {}) is following it up already, and can't take this now: it's getting ready, waiting for your answer or wrapping up. Start it again once it's at work, or tell that job.",
-                                next.short_title(),
-                                next.id
-                            ),
-                        )));
-                    }
-                    let job =
-                        match following {
-                            Some(next) => match self.jobs.message(
-                                &next.id,
-                                &new.task,
-                                crate::jobs::Source::Owner,
-                            ) {
-                                Some(Ok(job)) => job,
-                                Some(Err(e)) => {
-                                    return Err(open_again(api(
-                                        StatusCode::UNPROCESSABLE_ENTITY,
-                                        format!(
-                                            "{} (job {}): {}",
-                                            next.short_title(),
-                                            next.id,
-                                            e.0
-                                        ),
-                                    )));
-                                }
-                                None => {
-                                    return Err(open_again(api(
-                                        StatusCode::CONFLICT,
-                                        "That job is gone.",
-                                    )));
-                                }
-                            },
-                            None => self.jobs.create(new).map_err(|e| {
-                                open_again(api(StatusCode::UNPROCESSABLE_ENTITY, e.0))
-                            })?,
-                        };
+                    let job = match following {
+                        Some(next) => match self.jobs.hear_at_work(&next.id, &new.task) {
+                            Some(Ok(job)) => job,
+                            Some(Err(e)) => {
+                                return Err(open_again(api(
+                                    StatusCode::CONFLICT,
+                                    format!(
+                                        "{} (job {}) is following it up already. {} Start it again once it's at work, or tell that job.",
+                                        next.short_title(),
+                                        next.id,
+                                        e.0
+                                    ),
+                                )));
+                            }
+                            None => {
+                                return Err(open_again(api(
+                                    StatusCode::CONFLICT,
+                                    "That job is gone.",
+                                )));
+                            }
+                        },
+                        None => self
+                            .jobs
+                            .create(new)
+                            .map_err(|e| open_again(api(StatusCode::UNPROCESSABLE_ENTITY, e.0)))?,
+                    };
                     item.job = job.id;
                 }
             }

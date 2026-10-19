@@ -166,6 +166,8 @@ pub enum Error {
     NoConversation,
     /// The turn isn't in the conversation (pruned since).
     NoTurn,
+    /// The words' id belongs to another turn: other words, or another conversation.
+    IdTaken,
     /// It couldn't be written.
     Io(std::io::Error),
 }
@@ -180,6 +182,10 @@ impl From<Error> for ApiError {
             Error::NoTurn => ApiError::new(
                 StatusCode::NOT_FOUND,
                 "That conversation turn isn't in the thread.",
+            ),
+            Error::IdTaken => ApiError::new(
+                StatusCode::CONFLICT,
+                "That id is another turn's: other words, or another conversation. Send these with an id of their own.",
             ),
             Error::Io(_) => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -294,15 +300,29 @@ impl Conversations {
     }
 
     /// The user's words join `target` (made first when it's new). `id`: the id the app gave the
-    /// words (a lower-case UUID); one any conversation has already is the same words sent again,
-    /// `repeated`, and nothing is added.
+    /// words (a lower-case UUID). The user's turn of that id with the same words, in `target` (the
+    /// conversation named, the latest, or for a new one the one those words started), is the same
+    /// words sent again: `repeated`, and nothing is added. Any other turn of that id is `IdTaken`.
     pub fn begin(&self, target: Target, said: String, id: Option<String>) -> Result<Begun, Error> {
         let mut threads = self.lock();
         if let Some(id) = id.as_deref()
-            && let Some(thread) = threads
+            && let Some(at) = threads
                 .iter()
-                .find(|t| t.turns.iter().any(|turn| turn.id == id))
+                .position(|t| t.turns.iter().any(|turn| turn.id == id))
         {
+            let thread = &threads[at];
+            let in_target = match &target {
+                Target::Id(named) => thread.id == *named,
+                Target::Latest => latest(&threads) == Some(at),
+                Target::New => thread.turns.first().is_some_and(|t| t.id == id),
+            };
+            let same = thread
+                .turns
+                .iter()
+                .any(|t| t.id == id && t.who == "user" && t.text == said);
+            if !(in_target && same) {
+                return Err(Error::IdTaken);
+            }
             return Ok(Begun {
                 conversation: thread.id.clone(),
                 turn: id.to_owned(),
