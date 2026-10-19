@@ -122,6 +122,8 @@ pub struct Tetrix {
 /// A sign-in under way: what its callback needs to finish it.
 struct SignIn {
     url: String,
+    /// The authorization server's issuer: where the person signs in.
+    server: String,
     expires: i64,
     state: String,
     verifier: String,
@@ -136,6 +138,13 @@ struct SignIn {
     preset: Option<String>,
     end: tokio::sync::Notify,
     taken: AtomicBool,
+}
+
+impl SignIn {
+    fn to_json(&self) -> Value {
+        json!({"url": self.url, "server": self.server,
+            "expiresAt": obi_protocol::time::format(self.expires)})
+    }
 }
 
 struct Tokens {
@@ -280,7 +289,7 @@ impl Tetrix {
             "presets": PRESETS.iter().map(|p| json!({"id": p.id, "name": p.name, "url": p.url})).collect::<Vec<_>>(),
             "scopes": saved.scopes.filter(|_| connected),
             "connectedAt": saved.connected_at,
-            "signIn": self.running().map(|s| json!({"url": s.url, "expiresAt": obi_protocol::time::format(s.expires)})),
+            "signIn": self.running().map(|s| s.to_json()),
             "error": saved.error,
         })
     }
@@ -419,6 +428,12 @@ impl Tetrix {
                 "Tetrix's sign-in server {issuer_text} names no endpoints Oby can use."
             )));
         };
+        // The page the person opens is on the issuer's own host, the one `signIn.server` names.
+        if authorize.host_str() != issuer.host_str() {
+            return Err(gateway(format!(
+                "Tetrix's sign-in server {issuer_text} sends people to a page on another host."
+            )));
+        }
         if server["code_challenge_methods_supported"]
             .as_array()
             .is_some_and(|m| !m.iter().any(|m| m == "S256"))
@@ -493,6 +508,7 @@ impl Tetrix {
             .append_pair("resource", &resource);
         let sign_in = Arc::new(SignIn {
             url: page.to_string(),
+            server: issuer_text.clone(),
             expires: obi_protocol::time::now() + SIGN_IN_LASTS.as_secs() as i64,
             state,
             verifier,
@@ -538,7 +554,7 @@ impl Tetrix {
             tetrix.ended(&running);
         });
         self.changed();
-        Ok(json!({"url": sign_in.url, "expiresAt": obi_protocol::time::format(sign_in.expires)}))
+        Ok(sign_in.to_json())
     }
 
     /// Where an unauthenticated call to the MCP server says its metadata is: its 401's

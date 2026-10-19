@@ -335,6 +335,8 @@ fn obid_signs_in_to_tetrix_once_and_agents_use_it_without_its_login() {
         page.as_str()
             .starts_with(&format!("{base}/auth/authorize?"))
     );
+    // Where the person signs in: the issuer the MCP server named.
+    assert_eq!(started.body["server"], format!("{base}/auth"));
     let query: std::collections::HashMap<String, String> = page
         .query_pairs()
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
@@ -349,8 +351,8 @@ fn obid_signs_in_to_tetrix_once_and_agents_use_it_without_its_login() {
     let redirect = query["redirect_uri"].clone();
     assert!(redirect.starts_with("http://127.0.0.1:") && redirect.ends_with("/callback"));
     assert_eq!(
-        call(&obid, "GET", "/v1/tetrix", None).body["signIn"]["url"],
-        started.body["url"]
+        call(&obid, "GET", "/v1/tetrix", None).body["signIn"],
+        started.body
     );
     // The registration asked for a public client with this redirect alone.
     let registered = seen
