@@ -1715,3 +1715,40 @@ fn a_jobs_turns_sum_into_its_usage() {
         "{job}"
     );
 }
+
+/// A job alone on its account gets the whole rise of each window between its account's reports,
+/// as an estimate (#732).
+#[test]
+fn a_job_alone_gets_the_whole_rise_of_its_accounts_windows() {
+    let folder = Folder::new("window-share");
+    let remote = fixture(&folder.0);
+    let account = folder.0.join("home/accounts/stub");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(account.join(".credentials.json"), "{}").unwrap();
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let at = obi_protocol::time::now() + 3_600;
+    let report = |five: f64, week: f64| {
+        json!({"status": "allowed", "unifiedWindows": {
+        "five_hour": {"utilization": five, "resetsAt": at}, "seven_day": {"utilization": week, "resetsAt": at + 86_400}}})
+    };
+    let usages = json!([report(0.1, 0.3), report(0.3, 0.35)]);
+    let job = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": format!("TOKENS USAGES: {usages}"), "check": "false", "rounds": 2}),
+    );
+    assert_eq!(job.status, 201, "{}", job.text);
+    let job = wait(&obid, job.body["id"].as_str().unwrap());
+    assert_eq!(job["round"], 2, "{job}");
+    assert_eq!(
+        job["windowShare"],
+        json!({"fiveHour": 20.0, "sevenDay": 5.0, "estimate": true}),
+        "{job}"
+    );
+    // A job whose account reported once has no share to show.
+    let one = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": format!("USAGE: {}", report(0.4, 0.4)), "check": "true"}),
+    );
+    let one = wait(&obid, one.body["id"].as_str().unwrap());
+    assert!(one.get("windowShare").is_none(), "{one}");
+}

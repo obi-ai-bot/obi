@@ -470,6 +470,99 @@ pub fn acp_tokens(answer: &Value) -> Option<Tokens> {
     .filter(|t| t != &Tokens::default())
 }
 
+impl Tokens {
+    /// Every token it counted, the cache's too: what a job's share of a window is weighed by.
+    // ponytail: cache reads weigh as much as fresh input; weigh them less if shares look off.
+    pub fn total(&self) -> u64 {
+        [self.input, self.output, self.cache_read, self.cache_write]
+            .into_iter()
+            .flatten()
+            .sum()
+    }
+}
+
+/// A job's estimated share of its account's 5-hour and weekly windows, in percentage points
+/// (#732), with the window (its reset) each sum belongs to, and the job's token total at its
+/// account's last report.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WindowShare {
+    pub five_hour: Option<f64>,
+    pub seven_day: Option<f64>,
+    pub five_hour_resets: Option<i64>,
+    pub seven_day_resets: Option<i64>,
+    pub mark: Option<u64>,
+}
+
+impl WindowShare {
+    /// What the API shows: `{fiveHour, sevenDay, estimate: true}`, or `None` before any share.
+    pub fn to_json(&self) -> Option<Value> {
+        let points = |p: Option<f64>| p.map(|p| (p * 100.0).round() / 100.0);
+        (self.five_hour.is_some() || self.seven_day.is_some()).then(|| {
+            serde_json::json!({"fiveHour": points(self.five_hour), "sevenDay": points(self.seven_day), "estimate": true})
+        })
+    }
+
+    /// Adds `part` points of the window that resets at `resets` (0 for the 5-hour window, 1 for
+    /// the week). A sum from an earlier window starts over.
+    pub fn add(&mut self, window: usize, part: f64, resets: Option<i64>) {
+        let (sum, kept) = match window {
+            0 => (&mut self.five_hour, &mut self.five_hour_resets),
+            _ => (&mut self.seven_day, &mut self.seven_day_resets),
+        };
+        if resets.is_some() && *kept != resets {
+            *sum = None;
+            *kept = resets;
+        }
+        *sum = Some(sum.unwrap_or(0.0) + part);
+    }
+}
+
+/// How many points each window (5-hour, week) rose from `before` to `after`, and its reset. A
+/// window whose reset passed, or moved more than a minute later, started over from 0. `None` for
+/// a window either report doesn't know.
+pub fn rises(before: &Usage, after: &Usage, now: i64) -> [Option<(f64, Option<i64>)>; 2] {
+    let rise = |was: Option<f64>, was_resets: Option<i64>, is: Option<f64>, resets: Option<i64>| {
+        let new_window = matches!((was_resets, resets), (Some(a), Some(b)) if b > a + 60);
+        let was = if new_window {
+            Some(0.0)
+        } else {
+            current(was, was_resets, now)
+        };
+        Some((((is? - was?) * 100.0).max(0.0), resets))
+    };
+    [
+        rise(
+            before.five_hour,
+            before.five_hour_resets,
+            after.five_hour,
+            after.five_hour_resets,
+        ),
+        rise(
+            before.seven_day,
+            before.seven_day_resets,
+            after.seven_day,
+            after.seven_day_resets,
+        ),
+    ]
+}
+
+/// `rise` divided by each running job's tokens since the last report (`weights`); evenly when
+/// none reported any.
+pub fn split(rise: f64, weights: &[u64]) -> Vec<f64> {
+    let total: u64 = weights.iter().sum();
+    weights
+        .iter()
+        .map(|w| {
+            if total == 0 {
+                rise / weights.len() as f64
+            } else {
+                rise * *w as f64 / total as f64
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,5 +849,50 @@ mod tests {
         let acp = json!({"stopReason": "end_turn", "usage": {"inputTokens": 7, "outputTokens": 3, "totalTokens": 10}});
         assert_eq!(acp_tokens(&acp).unwrap().input, Some(7));
         assert_eq!(acp_tokens(&json!({"stopReason": "end_turn"})), None);
+    }
+
+    #[test]
+    fn a_rise_is_split_by_tokens_and_a_new_window_starts_over() {
+        // One job used 3× the other's tokens: a 20-point rise splits 15/5; alone, it's all its.
+        assert_eq!(split(20.0, &[300, 100]), vec![15.0, 5.0]);
+        assert_eq!(split(20.0, &[500]), vec![20.0]);
+        assert_eq!(split(20.0, &[0, 0]), vec![10.0, 10.0]);
+
+        let report = |five: f64, resets: i64| Usage {
+            five_hour: Some(five),
+            five_hour_resets: Some(resets),
+            ..Usage::default()
+        };
+        let [five, week] = rises(&report(0.1, 1000), &report(0.3, 1000), 500);
+        let (points, resets) = five.unwrap();
+        assert!((points - 20.0).abs() < 1e-9);
+        assert_eq!((resets, week), (Some(1000), None));
+        // A new window: it rose from 0. Going down in the same one is no rise.
+        assert!(
+            (rises(&report(0.9, 1000), &report(0.05, 19000), 500)[0]
+                .unwrap()
+                .0
+                - 5.0)
+                .abs()
+                < 1e-9
+        );
+        assert_eq!(
+            rises(&report(0.3, 1000), &report(0.2, 1000), 500)[0]
+                .unwrap()
+                .0,
+            0.0
+        );
+        assert_eq!(rises(&Usage::default(), &report(0.2, 1000), 500)[0], None);
+
+        let mut share = WindowShare::default();
+        assert_eq!(share.to_json(), None);
+        share.add(0, 15.0, Some(1000));
+        share.add(0, 0.004, Some(1000));
+        assert_eq!(
+            share.to_json(),
+            Some(json!({"fiveHour": 15.0, "sevenDay": null, "estimate": true}))
+        );
+        share.add(0, 2.0, Some(19000));
+        assert_eq!(share.five_hour, Some(2.0));
     }
 }

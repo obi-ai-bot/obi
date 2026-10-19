@@ -254,6 +254,9 @@ pub struct Job {
     /// What its turns used, in tokens and cost, as its tool reported them (#731).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::usage::Tokens>,
+    /// Its estimated share of its account's windows (#732).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_share: Option<crate::usage::WindowShare>,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -350,6 +353,7 @@ impl Job {
             earlier: None,
             start_from: None,
             usage: None,
+            window_share: None,
         }
     }
 
@@ -591,6 +595,9 @@ impl Job {
         }
         if let Some(usage) = &self.usage {
             value["usage"] = json!(usage);
+        }
+        if let Some(share) = self.window_share.as_ref().and_then(|s| s.to_json()) {
+            value["windowShare"] = share;
         }
         value
     }
