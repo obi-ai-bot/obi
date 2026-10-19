@@ -345,6 +345,16 @@ impl Jobs {
         self.connections.get()?.open_job(id)
     }
 
+    /// The line that tells job `id`'s agent what the fences around its connected apps' results
+    /// mean, when `tool` gets the broker and its agent wasn't told yet.
+    fn connection_rule(&self, id: &str, tool: Tool) -> Option<String> {
+        if tool == Tool::Cursor {
+            return None;
+        }
+        self.connection_mcp(id)?;
+        self.connections.get()?.take_rule(id)
+    }
+
     /// The connections job `id` started with, kept on the job the first time its broker opens.
     pub fn connections_of(
         &self,
@@ -3643,6 +3653,10 @@ impl Jobs {
             }
             message
         };
+        // What the fences around connected apps' results mean, once (#575).
+        if let Some(rule) = self.connection_rule(id, tool) {
+            message = format!("{message}\n\n{rule}");
+        }
         // What the secret scan found the last time it blocked publishing: the same again stops.
         let mut blocked_before: Option<Vec<crate::publish::Found>> = None;
         // The turn only the owner's words started after the work's: its reply leaves the job's

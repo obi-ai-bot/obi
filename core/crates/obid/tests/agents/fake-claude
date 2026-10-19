@@ -28,7 +28,8 @@
 //                    (--allowedTools), what each http MCP server answered to `tools/list`, and
 //                    the files in .obi/context/; then ends the turn with "Reported." With
 //                    MCP_CALL, MCP_WRITE, MCP_API or MCP_PROBE it also calls the `oby` broker's
-//                    tools, and MCP_PROBE tries the broker's token on the runner's other routes
+//                    tools (MCP_CALL's search with its prompt as the query), and MCP_PROBE tries
+//                    the broker's token on the runner's other routes
 //   ON PURPOSE       in a fix round's quoted task: ends the turn with "FAILS AS ASKED: …"
 //   anything else    ends the turn with "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
@@ -224,7 +225,7 @@ async function report(prompt) {
           const called = await fetch(server.url, {
             method: "POST",
             headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(server.headers ?? {}) },
-            body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: first.name, arguments: {} } }),
+            body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: first.name, arguments: { query: prompt } } }),
           });
           toolCalls[name] = await called.json();
         }
