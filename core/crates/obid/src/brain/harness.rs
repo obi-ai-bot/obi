@@ -240,16 +240,24 @@ impl Sessions {
         None
     }
 
-    /// Keeps `warm` for `conversation`'s next turn; the one waiting longest ends when
-    /// [`WARM_MOST`] already wait.
-    fn keep(&self, conversation: &str, warm: Warm) {
+    /// Keeps `warm` for `conversation`'s next turn when `admit` says it may wait, judged under
+    /// the same lock that [`Sessions::end_warm_on`] and [`Sessions::end_warm`] take, so an account
+    /// change or a deletion that comes after the look ends it: whether it was kept. The one
+    /// waiting longest ends when [`WARM_MOST`] conversations' already wait; the next new
+    /// conversation's ([`prestart`]) isn't one of them.
+    fn keep(&self, conversation: &str, warm: Warm, admit: impl FnOnce(&Warm) -> bool) -> bool {
         let mut all = self.warm();
+        if !admit(&warm) {
+            warm.end();
+            return false;
+        }
         if let Some(old) = all.insert(conversation.to_owned(), warm) {
             old.end();
         }
-        while all.len() > WARM_MOST {
+        while all.values().filter(|w| w.session.is_some()).count() > WARM_MOST {
             let Some(oldest) = all
                 .iter()
+                .filter(|(_, w)| w.session.is_some())
                 .min_by_key(|(_, w)| w.since)
                 .map(|(c, _)| c.clone())
             else {
@@ -257,6 +265,18 @@ impl Sessions {
             };
             if let Some(old) = all.remove(&oldest) {
                 old.end();
+            }
+        }
+        true
+    }
+
+    /// Ends every waiting Claude Code whose conversation `stays` doesn't name.
+    fn end_warm_unless(&self, stays: impl Fn(&str) -> bool) {
+        let mut all = self.warm();
+        let gone: Vec<String> = all.keys().filter(|c| !stays(c)).cloned().collect();
+        for conversation in gone {
+            if let Some(warm) = all.remove(&conversation) {
+                warm.end();
             }
         }
     }
@@ -311,22 +331,26 @@ impl Sessions {
 /// It isn't kept when the conversation went, or its account is being changed or isn't there
 /// with the same folder any more, while the turn ran.
 fn keep_warm(shared: &Arc<Shared>, conversation: &str, warm: Warm) {
-    let account_as_was = crate::accounts::find(&shared.config.agents.get(), &warm.account)
-        .is_some_and(|(_, a)| a.config_dir == warm.config_dir);
-    if !shared.conversations.exists(conversation)
-        || !account_as_was
-        || shared.jobs.being_changed(&warm.account)
-    {
-        warm.end();
+    let since = warm.since;
+    let kept = shared.harness.keep(conversation, warm, |warm| {
+        shared.conversations.exists(conversation) && may_wait(shared, warm)
+    });
+    if !kept {
         return;
     }
-    let since = warm.since;
-    shared.harness.keep(conversation, warm);
     let (shared, conversation) = (shared.clone(), conversation.to_owned());
     tokio::spawn(async move {
         tokio::time::sleep(WARM_FOR).await;
         shared.harness.expire(&conversation, since);
     });
+}
+
+/// Whether `warm`'s account is there with the same folder and isn't being changed (removed or
+/// signed in again).
+fn may_wait(shared: &Shared, warm: &Warm) -> bool {
+    !shared.jobs.being_changed(&warm.account)
+        && crate::accounts::find(&shared.config.agents.get(), &warm.account)
+            .is_some_and(|(_, a)| a.config_dir == warm.config_dir)
 }
 
 /// Starts the next new conversation's Claude Code now, so its first turn finds it waiting as a
@@ -413,13 +437,15 @@ async fn start_next(shared: &Arc<Shared>, id: &str) -> Result<(), String> {
         place,
         since: Instant::now(),
     };
-    // Its account changed while it started: it isn't kept.
-    if shared.jobs.being_changed(&account.id) {
-        warm.end();
+    // Not kept when its account changed while it started, or the conversation went.
+    let since = warm.since;
+    let kept = shared.harness.keep(id, warm, |warm| {
+        (shared.conversations.is_next(id) || shared.conversations.exists(id))
+            && may_wait(shared, warm)
+    });
+    if !kept {
         return Ok(());
     }
-    let since = warm.since;
-    shared.harness.keep(id, warm);
     tracing::info!(
         "the next conversation's Claude Code is waiting ({} ms)",
         began.elapsed().as_millis()
@@ -444,7 +470,13 @@ pub fn end_warm_with_conversations(shared: Arc<Shared>) {
                         shared.harness.end_warm(id);
                     }
                 }
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                // Deletions it missed: every one waiting for a conversation that's gone ends.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    shared.harness.end_warm_unless(|c| {
+                        shared.conversations.exists(c) || shared.conversations.is_next(c)
+                    });
+                }
+                Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             }
         }
@@ -2021,6 +2053,21 @@ pub(super) fn spare(shared: Arc<Shared>, repo: crate::config::Repo) {
     });
 }
 
+/// At obid's start, every conversation's login copy goes: no Claude Code of obid's is running yet,
+/// and one a crash left (the next new conversation's room holds one most of the time) is never
+/// left on disk.
+pub fn forget_logins_left(home: &Path) {
+    for entry in std::fs::read_dir(home.join("conversations"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            Place::of(home, &entry.file_name().to_string_lossy()).forget_login();
+        }
+    }
+}
+
 /// At obid's start: what a stop left in the spares' folders goes (all but the spares), and each
 /// repository's spare tree is made.
 pub fn prepare_rooms(shared: &Arc<Shared>) {
@@ -2148,7 +2195,7 @@ mod tests {
         ] {
             let warm = waiting("a", Some("/a"), "s1").await;
             let pid = warm.conn.pid();
-            sessions.keep("c", warm);
+            sessions.keep("c", warm, |_| true);
             assert!(
                 sessions
                     .take_warm("c", &account(who, folder), Some(session))
@@ -2156,7 +2203,7 @@ mod tests {
             );
             assert!(ends(pid).await, "{who} {folder:?} {session}");
         }
-        sessions.keep("c", waiting("a", Some("/a"), "s1").await);
+        sessions.keep("c", waiting("a", Some("/a"), "s1").await, |_| true);
         let mine = sessions.take_warm("c", &account("a", Some("/a")), Some("s1"));
         assert!(mine.is_some());
         mine.unwrap().end();
@@ -2171,7 +2218,7 @@ mod tests {
         for c in ["c1", "c2", "c3", "c4"] {
             let warm = waiting("a", None, "s").await;
             pids.push(warm.conn.pid());
-            sessions.keep(c, warm);
+            sessions.keep(c, warm, |_| true);
         }
         assert!(ends(pids[0]).await, "the oldest ends");
         assert_eq!(sessions.warm().len(), WARM_MOST);
@@ -2184,12 +2231,61 @@ mod tests {
         sessions.expire("c2", since);
         assert!(!sessions.warm().contains_key("c2"));
         assert!(ends(pids[1]).await);
-        sessions.keep("c5", waiting("b", None, "s").await);
+        sessions.keep("c5", waiting("b", None, "s").await, |_| true);
         sessions.end_warm_on("a");
         assert_eq!(sessions.warm().keys().collect::<Vec<_>>(), vec!["c5"]);
         assert!(ends(pids[2]).await && ends(pids[3]).await);
         sessions.end_all_warm();
         assert!(sessions.warm().is_empty());
+    }
+
+    /// The next new conversation's Claude Code isn't one of the WARM_MOST, and none is kept when
+    /// what's looked at under the lock says it may not wait.
+    #[tokio::test]
+    async fn the_next_conversations_claude_code_is_kept_beside_the_three() {
+        let sessions = Sessions::default();
+        let mut next = waiting("a", None, "s").await;
+        next.session = None;
+        let next_pid = next.conn.pid();
+        assert!(sessions.keep("next", next, |_| true));
+        let mut pids = vec![];
+        for c in ["c1", "c2", "c3", "c4"] {
+            let warm = waiting("a", None, "s").await;
+            pids.push(warm.conn.pid());
+            assert!(sessions.keep(c, warm, |_| true));
+        }
+        assert!(ends(pids[0]).await, "the oldest conversation's ends");
+        assert!(sessions.warm().contains_key("next"));
+        assert_eq!(sessions.warm().len(), WARM_MOST + 1);
+        let refused = waiting("a", None, "s").await;
+        let refused_pid = refused.conn.pid();
+        assert!(!sessions.keep("c5", refused, |_| false));
+        assert!(ends(refused_pid).await);
+        sessions.end_warm_unless(|c| c != "next" && c != "c2");
+        assert_eq!(
+            {
+                let mut left: Vec<String> = sessions.warm().keys().cloned().collect();
+                left.sort();
+                left
+            },
+            vec!["c3", "c4"]
+        );
+        assert!(ends(next_pid).await && ends(pids[1]).await);
+        sessions.end_all_warm();
+    }
+
+    /// Another model or other repositories in the orientation start a Claude Code anew.
+    #[test]
+    fn another_start_has_another_key() {
+        let flags = |model: &str, repos: &str| -> Vec<OsString> {
+            ["-p", "--model", model, "--append-system-prompt", repos]
+                .iter()
+                .map(OsString::from)
+                .collect()
+        };
+        assert_eq!(flags_key(&flags("m", "r")), flags_key(&flags("m", "r")));
+        assert_ne!(flags_key(&flags("m", "r")), flags_key(&flags("n", "r")));
+        assert_ne!(flags_key(&flags("m", "r")), flags_key(&flags("m", "r2")));
     }
 
     #[test]
