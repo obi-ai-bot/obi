@@ -1418,6 +1418,68 @@ The owner signs obid's `gh` in to GitHub from the Mac (Settings › Connectors �
 
 **`DELETE /v1/github/sign-in`** ends the sign-in under way, if any: `204`.
 
+### obid only: Tetrix
+
+The owner connects Tetrix once, in Oby, and every agent on every account (Claude Code, Codex, Cursor) uses it with no sign-in of its own (the owner's decision of 2026-10-18, AGENTS.md). obid is Tetrix's OAuth client and holds the login; agents reach Tetrix only through obid, with a credential that works for their own job and dies with it. None of these endpoints is on the gateway's allowlist, and no other Oby can reach them: a paired phone never signs the Mac in to Tetrix (the iPhone shows the state through the accounts' `tetrix` and the jobs' `tetrix`).
+
+**`GET /v1/tetrix`** answers:
+
+```json
+{"connected": true, "url": "https://tetrix.example/mcp", "preset": "dogfood",
+ "presets": [{"id": "dogfood", "name": "Tetrix Dogfood", "url": "https://tetrix.example/mcp"}],
+ "scopes": ["graph:read", "sessions:write", "hitl:write", "offline_access"],
+ "connectedAt": "2026-10-18T14:02:11Z", "signIn": null, "error": null}
+```
+
+- `connected`: obid holds a login for `url` that it can use or refresh. `url` is the MCP server it signed in to (or last tried), `preset` the preset's id or null for a URL the owner typed. `presets`: what Settings offers before a URL field; today only `dogfood`, "Tetrix Dogfood".
+- `scopes`: what the authorization server granted, or null when signed out. `connectedAt`: when the sign-in finished, or null.
+- `signIn`: the sign-in under way, as `POST` answers it, or null. `error`: why the last sign-in or refresh failed, in a sentence (`Tetrix signed Oby out: sign in again.`), or null; it clears on the next sign-in.
+- No token, code, verifier or client secret is ever in an answer, an event, a log line, a report or `config.json`.
+
+**`POST /v1/tetrix/sign-in`** with `{"preset": "dogfood"}` or `{"url": "https://<host>/mcp"}` starts a sign-in and answers `{"url": "https://<authorization server>/…/authorize?…", "expiresAt": "…"}`. The app opens `url` in the person's browser; when they finish there, the browser lands on obid's loopback page, which says `Oby is signed in to Tetrix. You can close this tab.` The app follows it with `GET /v1/tetrix` (every 2 seconds while `signIn` isn't null) or the `tetrix` event.
+
+- The URL follows a connection's rules (Connection, above): HTTPS, with no login, query or fragment; plain HTTP only on 127.0.0.1 or localhost. Anything else, or an unknown preset, is `422` naming what's wrong.
+- How obid finds the authorization server (the MCP authorization spec): the server's protected-resource metadata (`/.well-known/oauth-protected-resource/<path>`, then at the root) gives `authorization_servers`, `resource` and `scopes_supported`; the server's metadata is RFC 8414's (`/.well-known/oauth-authorization-server/<path>`), else OpenID discovery (`<issuer>/.well-known/openid-configuration`, then `/.well-known/openid-configuration/<path>`), whose `issuer` must be the one asked for. Redirects aren't followed. When none answers JSON, `502` says so.
+- The client: a public client with PKCE (S256) and no secret. A preset may name its client id; otherwise obid registers one by dynamic client registration (`registration_endpoint`, `token_endpoint_auth_method` `none`, redirect `http://127.0.0.1/callback`) once per authorization server and keeps its id. Neither: `502`.
+- Scopes: the resource's `scopes_supported`, else `graph:read sessions:write hitl:write`; plus `offline_access`, so obid can refresh. The request carries `resource` (RFC 8707), the `state` and the PKCE challenge.
+- The redirect is `http://127.0.0.1:<port>/callback` on a port obid opens for this sign-in alone, on 127.0.0.1 only. It answers that one path, takes the first request whose `state` matches, and then closes; a request whose `state` doesn't match gets `400` and changes nothing.
+- One at a time: a second `POST` ends the one under way and starts another. A sign-in ends when the token exchange does, after 10 minutes, with `DELETE`, or when obid stops.
+- The login (access token, refresh token, expiry) goes into obid's vault as `tetrix-access` and `tetrix-refresh`, so it lives where the vault lives (the login Keychain on the Mac app's runner home, else `home/vault/secrets.json`) and is taken out of every answer, log line and push like every vault secret (obid only: the vault). Everything else (`url`, the client id, the endpoints, the expiry, the granted scopes) is in `home/tetrix.json` (0600).
+- obid refreshes the access token itself when it has less than a minute left, or when Tetrix answers `401`, and keeps the rotated refresh token. A refresh Tetrix refuses (`invalid_grant`) signs Oby out (`error` says so).
+
+**`DELETE /v1/tetrix/sign-in`** ends the sign-in under way, if any: `204`.
+
+**`DELETE /v1/tetrix`** signs Oby out: it asks the authorization server to revoke the refresh token when it offers `revocation_endpoint` (and goes on if that fails), removes both vault secrets, and keeps `url` and `preset`: `204`. Jobs that are running lose Tetrix at their next call (`Oby isn't signed in to Tetrix.`).
+
+**The `tetrix` event** comes on `/v1/events` with the same body as `GET /v1/tetrix` whenever any of its fields change.
+
+**What agents get.** While Oby is signed in, every owner's job's agent gets one MCP server named `tetrix` that is obid itself: `POST /v1/agent/tetrix/{job}` on obid's port (on Linux, through slirp4netns's 10.0.2.2, as for the broker), with the job's token (the broker's: Connection, above), which works for that job alone, only while it runs, and dies with it. Claude Code gets it in its `--mcp-config` file and one `--allowedTools` rule per tool (`mcp__tetrix__<tool>`); Codex as `mcp_servers.tetrix` with the token in its environment (`bearer_token_env_var`, as the broker); Cursor in `session/new`'s `mcpServers` when it says `mcpCapabilities.http`. The agent never sees Oby's Tetrix token, and Tetrix sees obid's token, never the job's.
+
+- `tools/list` lists only the tools agents may call (plugins/tetrix/README.md: the graph reads, the earlier sessions' digests and `save_session`); `tools/call` of any other (`resume_session`, admin, write and diagnostics tools) is refused before it leaves obid. Every result is scrubbed like a connection's.
+- Each call is recorded in the job's `connectionUses` as connection `tetrix`, secret `tetrix-access`, host Tetrix's (never a value), and counted in the job's `tetrix`.
+- The Tetrix plug-in (`agent-mcp`) stays for when Oby isn't signed in: then a Claude Code agent gets the plug-in's server at its URL and signs in with its tool's own login, as before. Signed in, obid's server replaces the plug-in's: the same name, the same tools.
+- Reviews another Obi asked for get no Tetrix.
+
+**Context first.** Before a job's agent starts (its first turn, and the first after obid restarted it), obid asks Tetrix with its own login about the job: `search_entities` for the issue or pull request (`<repo>#<n>`, else the job's title) and `repo_sessions` for the repository, 10 seconds at most each. What comes back is written to `.obi/context/tetrix.md` with the plug-ins' context (obid only: plug-ins), quoted as data, and the prompt says to start there, to ask Tetrix before reading many files, and to end with `save_session` and a `Tetrix-Session: <id>` trailer on every commit.
+
+**Jobs' `tetrix`** (Job, above) on obid is filled for jobs whose agent had Tetrix through Oby, and stays null otherwise (a plug-in's server signed in by the tool's own login is the tool's business):
+
+```json
+{"connected": true, "calls": {"search_entities": 2, "get_entity": 1, "save_session": 1}, "rounds": null,
+ "reminded": null, "stamps": {"commits": 2, "stamped": 2, "sessions": ["8f2a…"]}, "author": null,
+ "context": true, "saved": ["8f2a…"],
+ "gaps": {"noResults": ["acme/shop#12"], "missing": ["repo:acme/legacy"], "unknownFiles": ["src/new.rs"],
+          "failed": [{"tool": "code_impact", "error": "Tetrix said: …"}],
+          "sent": "2026-10-18T14:40:02Z", "session": "c41d…", "notSent": null}}
+```
+
+- `calls`: every call the agent made through obid, by tool, counted by obid itself (it is the server). `rounds` and `reminded` are null on obid. `stamps`: as above, read when the job's last round ends. `context`: whether `.obi/context/tetrix.md` was written. `saved`: the session ids Tetrix's `save_session` answered the agent.
+- `gaps`, the report back to Tetrix of where the graph fell short (null until the job ends): `noResults`, searches (`search_entities`, `query_graph`) that found nothing, by their query; `missing`, entities `get_entity` (or another lookup) didn't find, by what was asked; `unknownFiles`, files the job changed that no Tetrix answer named; `failed`, calls that failed, with the error's first 200 characters. At most 20 of each, each at most 200 characters.
+- When the job ends with any gap, obid sends them to Tetrix with its own login as a `save_session` of its own (`client` `oby`, `title` `Oby: graph gaps in <job title>`, `repo_hint` the repository, `summary` the counts, `state` `{"kind": "oby.graphGaps/1", "job": "<id>", …the four lists, "agentSessions": […]}`), after the secret scan passes on exactly what goes; a finding, or a scan that can't run, sends nothing (`notSent` says why). `sent` and `session` say when and as which Tetrix session; the send is listed in the job's `outgoing` as `{"action": "tetrixGaps", "repo", "id": "<session id>"}`.
+- The summary's last line (not on review jobs) reads as above, followed by `Graph gaps sent to Tetrix: 1 search with no result, 1 file it didn't know.` when there were some.
+
+**Accounts' `tetrix`** (Account, above) on obid is `true` for every Claude Code, Codex and Cursor account while Oby is signed in to Tetrix, else null; `tetrixJobs` and `tetrixUsed` count the account's latest 50 ended jobs with a `tetrix`, and those whose agent called it.
+
 ### obid only: the gateway
 
 obid serves the LAN gateway's pairing and forwarding (LAN gateway (#284), above) as the Swift runner does, with these differences (`core/crates/obid/src/gateway.rs`, #446):
