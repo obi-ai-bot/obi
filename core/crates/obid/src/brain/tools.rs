@@ -175,6 +175,10 @@ async fn call(
     if !session.control.live() {
         return Err("The turn was stopped: nothing more happens for it.".into());
     }
+    // A turn nobody watches reads only its own job, and archives nothing (super::supervisor).
+    if let Some(why) = super::supervisor::refused(session, name, &args) {
+        return Err(why.into());
+    }
     match name {
         "oby_jobs" => Ok(jobs(shared, session, args)?),
         "oby_job" => {
@@ -923,7 +927,7 @@ async fn tell(
         super::supervisor::allowed(shared, session, &job, super::supervisor::Kind::Restart)
     {
         allowed?;
-        let new = super::supervisor::follow_up(&job, added, title, &session.nonce)?;
+        let new = super::supervisor::follow_up(&job, added, None, &session.nonce)?;
         let outcome = actions::follow_up(shared, &job, new);
         if let Outcome::Started(_, next) = &outcome {
             let started = next["id"].as_str().map(str::to_owned).into_iter().collect();
@@ -993,7 +997,8 @@ async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Resul
         super::supervisor::allowed(shared, session, &job, super::supervisor::Kind::Split)
     {
         allowed?;
-        let mut new = super::supervisor::follow_up(&job, &start.task, start.title, &session.nonce)?;
+        let part = Some(super::supervisor::part(session));
+        let mut new = super::supervisor::follow_up(&job, &start.task, part, &session.nonce)?;
         new.split = true;
         let outcome = match shared.jobs.create(new) {
             Ok(part) => {

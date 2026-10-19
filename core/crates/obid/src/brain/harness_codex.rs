@@ -46,14 +46,12 @@ const OFF: &[&str] = &[
     "worktrees",
 ];
 
-/// Its other settings: the turn's token never reaches a command's environment; web search is on.
-const SETTINGS: &[&str] = &[
-    r#"shell_environment_policy.exclude=["OBY_MCP_TOKEN"]"#,
-    r#"web_search="live""#,
-];
+/// Its other settings: the turn's token never reaches a command's environment.
+const SETTINGS: &[&str] = &[r#"shell_environment_policy.exclude=["OBY_MCP_TOKEN"]"#];
 
 /// The `app-server` to run for one attempt of the turn, and what its thread is started with:
-/// `resume`'s thread when there is one, the conversation's orientation, the configured model.
+/// `resume`'s thread when there is one, the conversation's orientation, the configured model;
+/// `web` false for a turn nobody watches.
 /// Refuses, saying why, a Codex that keeps a feature of [`OFF`] on and a login copy near its end
 /// ([`crate::jobs::codex_copy_ready`]).
 pub(super) async fn launch(
@@ -63,6 +61,7 @@ pub(super) async fn launch(
     url: &str,
     token: &str,
     resume: &Option<String>,
+    web: bool,
 ) -> Result<(Launch, Option<crate::codex::Options>), String> {
     // Oby's server as a job's broker is given ([`crate::codex::argv`]: its `-c` settings).
     let argv = crate::codex::argv(Default::default(), Some((url, token)), None);
@@ -73,6 +72,9 @@ pub(super) async fn launch(
     for setting in SETTINGS {
         flags.extend(["-c".into(), (*setting).into()]);
     }
+    // Web search is on, but for a turn nobody watches (super::supervisor).
+    let search = if web { "live" } else { "disabled" };
+    flags.extend(["-c".into(), format!(r#"web_search="{search}""#).into()]);
     // Whatever repeats the turn's token (a tool's answer, the agent) is redacted.
     crate::secrets::known().learn(
         &format!("conversation {} MCP token", place.folder.display()),

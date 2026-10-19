@@ -17,11 +17,19 @@ fn harness() -> PathBuf {
 /// obid with the stand-in as Claude Code, conversations on the harness, a signed-in account and
 /// a job held after 2 quiet seconds.
 fn obid(name: &str) -> (Folder, Obid) {
+    obid_with(name, json!({}))
+}
+
+/// [`obid`], with `more` added to its configuration.
+fn obid_with(name: &str, more: Value) -> (Folder, Obid) {
     let folder = Folder::new(name);
     let remote = fixture(&folder.0.join("fixture"));
     let mut config = config(&folder.0, &remote, &harness());
     config["conversation"] = json!({"agent": "claude"});
     config["stallAfter"] = json!(2);
+    for (key, value) in more.as_object().unwrap() {
+        config[key] = value.clone();
+    }
     let account = folder.0.join("home/accounts/stub");
     std::fs::create_dir_all(&account).unwrap();
     std::fs::write(account.join(".credentials.json"), "{}").unwrap();
@@ -38,6 +46,11 @@ fn stalling(obid: &Obid, script: &str) -> (String, String) {
 /// A conversation whose supervisor turns do what `script` says, and the `kind` job it started on
 /// `task`.
 fn started(obid: &Obid, script: &str, kind: &str, task: &str) -> (String, String) {
+    started_in(obid, script, kind, task, "acceptEdits")
+}
+
+/// [`started`], the job in `mode`; one in Bypass starts once the owner confirms it.
+fn started_in(obid: &Obid, script: &str, kind: &str, task: &str, mode: &str) -> (String, String) {
     let started = call(
         obid,
         "POST",
@@ -54,7 +67,7 @@ fn started(obid: &Obid, script: &str, kind: &str, task: &str) -> (String, String
     .unwrap();
     let dispatch = format!(
         "OBY oby_dispatch {}",
-        json!({"repo": "obi-e2e/fixture-app", "task": task, "kind": kind, "mode": "acceptEdits",
+        json!({"repo": "obi-e2e/fixture-app", "task": task, "kind": kind, "mode": mode,
                "title": "Both halves"})
     );
     let answer = call(
@@ -64,6 +77,25 @@ fn started(obid: &Obid, script: &str, kind: &str, task: &str) -> (String, String
         Some(&json!({"said": dispatch, "conversation": conversation})),
     );
     assert_eq!(answer.status, 200, "{}", answer.text);
+    if mode == "bypass" {
+        let item = inbox(obid)
+            .into_iter()
+            .find(|i| i["kind"] == "confirm")
+            .unwrap_or_else(|| panic!("{}", answer.text));
+        let confirmed = call(
+            obid,
+            "POST",
+            &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
+            Some(&json!({"answer": "Confirm"})),
+        );
+        assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+        let job = within(30, "the Bypass job starts", || {
+            jobs(obid)
+                .first()
+                .map(|j| j["id"].as_str().unwrap().to_owned())
+        });
+        return (conversation, job);
+    }
     let job = answer.body["jobs"][0]["id"]
         .as_str()
         .unwrap_or_else(|| panic!("{}", answer.text))
@@ -73,6 +105,14 @@ fn started(obid: &Obid, script: &str, kind: &str, task: &str) -> (String, String
 
 fn job(obid: &Obid, id: &str) -> Value {
     call(obid, "GET", &format!("/v1/jobs/{id}"), None).body
+}
+
+fn inbox(obid: &Obid) -> Vec<Value> {
+    call(obid, "GET", "/v1/inbox", None)
+        .body
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn jobs(obid: &Obid) -> Vec<Value> {
@@ -171,7 +211,7 @@ fn a_stalled_job_is_continued_and_finishes() {
     });
     assert_eq!(
         said,
-        "Carried it on in its session. (Oby's first of 3 automatic steps for this job: continue.)"
+        "Carried it on in its session. (1 of 3 automatic steps taken for this job: continue.)"
     );
 }
 
@@ -198,7 +238,7 @@ fn a_stalled_job_is_split_in_two() {
     assert!(!stalled["stalled"].is_null(), "{stalled}");
     let step = &stalled["supervised"][0];
     assert_eq!(step["decision"], "split", "{stalled}");
-    assert_eq!(step["count"], 1);
+    assert_eq!(step["count"], 2);
     assert_eq!(step["of"], 3);
     let parts: Vec<String> = step["jobs"]
         .as_array()
@@ -207,8 +247,13 @@ fn a_stalled_job_is_split_in_two() {
         .map(|j| j.as_str().unwrap().to_owned())
         .collect();
     assert_eq!(parts.len(), 2, "{said}\n{stalled}");
-    for (part, words) in parts.iter().zip(["The first half", "The second half"]) {
+    for (n, part) in parts.iter().enumerate() {
         let part = job(&obid, part);
+        // obid's title, never the one the turn asked for.
+        assert_eq!(
+            part["title"],
+            format!("Follow-up: Both halves · part {}", n + 1)
+        );
         assert_eq!(part["followUpOf"], id.as_str(), "{part}");
         assert_eq!(part["conversation"], conversation.as_str());
         assert_eq!(part["mode"], "acceptEdits");
@@ -217,13 +262,12 @@ fn a_stalled_job_is_split_in_two() {
         // The part's words reach its agent quoted after the job's own request.
         assert_eq!(part["request"], stalled["request"], "{part}");
         assert!(part["request"].as_str().unwrap().contains("STALLS-ALWAYS"));
-        let _ = words;
     }
     // The third call, a second decision, was refused: no restart started.
     assert_eq!(jobs(&obid).len(), 3);
     assert!(said.contains("decided already (split)"), "{said}");
     assert!(
-        said.ends_with("(Oby's first of 3 automatic steps for this job: split.)"),
+        said.ends_with("(2 of 3 automatic steps taken for this job: split.)"),
         "{said}"
     );
 }
@@ -342,4 +386,111 @@ fn the_note_cant_trigger_a_gated_action() {
             .iter()
             .any(|t| t == "Did what the note said."),
     );
+}
+
+/// A job that stalled at its token budget gets no turn: going on past a safety limit is the
+/// owner's, so obid asks them at once.
+#[test]
+fn a_budget_stall_gets_no_turn() {
+    let (_folder, obid) = obid_with("supervisor-budget", json!({"jobTokenBudget": 1000}));
+    let (conversation, id) = started(
+        &obid,
+        "OBY oby_continue_job {\"id\": \"$JOB\"}\nSAY Carried it on.",
+        "investigate",
+        "Spend it all SPEND-TOKENS: 5000",
+    );
+    let stalled = supervised(&obid, &id, 1);
+    assert_eq!(stalled["stalled"]["why"], "budget", "{stalled}");
+    assert_eq!(stalled["supervised"][0]["decision"], "asked", "{stalled}");
+    assert!(
+        inbox(&obid).iter().any(|i| i["kind"] == "question"
+            && i["job"] == id.as_str()
+            && i["text"].as_str().unwrap().contains("safety limit")),
+        "{:?}",
+        inbox(&obid)
+    );
+    let prompts = std::fs::read_to_string(
+        obid.home
+            .join(format!("conversations/{conversation}/config/turns.jsonl")),
+    )
+    .unwrap();
+    assert!(!prompts.contains("Oby here, not the owner"), "{prompts}");
+    assert!(
+        !obys(&obid, &conversation)
+            .iter()
+            .any(|t| t == "Carried it on.")
+    );
+    assert!(!job(&obid, &id)["stalled"].is_null());
+}
+
+/// A stalled job in Bypass mode is never carried on by itself: the supervisor turn's continue
+/// waits for the owner's Confirm, and the stall is theirs.
+#[test]
+fn a_bypass_job_is_never_carried_on_by_itself() {
+    let (_folder, obid) = obid("supervisor-bypass");
+    let (_conversation, id) = started_in(
+        &obid,
+        "OBY oby_continue_job {\"id\": \"$JOB\"}\nSAY Asked to carry it on.",
+        "build",
+        "Build both halves STALLS-ALWAYS",
+        "bypass",
+    );
+    let job = supervised(&obid, &id, 1);
+    assert_eq!(job["mode"], "bypass", "{job}");
+    assert_eq!(job["supervised"][0]["decision"], "asked", "{job}");
+    assert!(!job["stalled"].is_null(), "{job}");
+    assert_eq!(job["round"], 1, "{job}");
+    let confirms: Vec<Value> = inbox(&obid)
+        .into_iter()
+        .filter(|i| i["kind"] == "confirm" && i["job"] == id.as_str())
+        .collect();
+    assert_eq!(
+        confirms.len(),
+        1,
+        "the continue waits for the owner: {confirms:?}"
+    );
+}
+
+/// The step cap holds across split generations: a split into two takes two steps, so a part's own
+/// split gets one part more, and every later stall in the tree asks the owner.
+#[test]
+fn the_step_cap_holds_across_split_generations() {
+    let (_folder, obid) = obid("supervisor-generations");
+    let (_conversation, id) = stalling(
+        &obid,
+        "OBY oby_dispatch {\"repo\": \"obi-e2e/fixture-app\", \"task\": \"One half\"}\n\
+         OBY oby_dispatch {\"repo\": \"obi-e2e/fixture-app\", \"task\": \"The other half\"}\n\
+         SAY Split it.",
+    );
+    // The first split takes both its parts: two steps.
+    within(90, "the first split's two parts", || {
+        let first = job(&obid, &id);
+        (first["supervised"][0]["jobs"]
+            .as_array()
+            .map_or(0, Vec::len)
+            == 2)
+            .then_some(first)
+    });
+    // The first job, its two parts and one part of a part: then every stall asks the owner.
+    let settled = within(180, "every stall is decided", || {
+        let all = jobs(&obid);
+        let asked = all
+            .iter()
+            .filter(|j| {
+                j["supervised"]
+                    .as_array()
+                    .is_some_and(|s| s.iter().any(|d| d["decision"] == "asked"))
+            })
+            .count();
+        (all.len() == 4 && asked == 2).then_some(all)
+    });
+    let splits: usize = settled
+        .iter()
+        .flat_map(|j| j["supervised"].as_array().cloned().unwrap_or_default())
+        .filter(|d| d["decision"] == "split")
+        .map(|d| d["jobs"].as_array().unwrap().len())
+        .sum();
+    assert_eq!(splits, 3, "{settled:?}");
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    assert_eq!(jobs(&obid).len(), 4);
 }

@@ -40,6 +40,13 @@ const MAX_TURNS: &str = "50";
 /// web, writes in the room, a to-do list and sub-agents. No Bash or other code-running tool, so
 /// nothing the session runs can read its login copy and send it out; running anything is a job.
 const TOOLS: &str = "Read,Grep,Glob,LS,NotebookRead,WebSearch,WebFetch,Write,Edit,MultiEdit,NotebookEdit,Task,TodoWrite";
+/// The built-in tools of a turn nobody watches (super::supervisor): no web and no helpers, so what
+/// an agent's note says can't send the conversation anywhere.
+const UNATTENDED_TOOLS: &str =
+    "Read,Grep,Glob,LS,NotebookRead,Write,Edit,MultiEdit,NotebookEdit,TodoWrite";
+/// Why a turn nobody watches is refused the web or a helper.
+const UNATTENDED: &str =
+    "A turn nobody watches doesn't reach the web or start helpers: say what you'd look up instead.";
 /// The file in the session's `HOME` that gives it Oby's MCP server.
 const MCP_FILE: &str = "oby-mcp.json";
 /// The line the plan loop's answer ends with when there was no Claude Code account to talk with.
@@ -1166,6 +1173,11 @@ async fn attempts(
             None => first.clone(),
         };
         let mut flags = claude_flags(shared);
+        if session.supervising.is_some()
+            && let Some(at) = flags.iter().position(|f| f == TOOLS)
+        {
+            flags[at] = UNATTENDED_TOOLS.into();
+        }
         let key = flags_key(&flags);
         if let Some(session) = &resume {
             flags.extend(["--resume".into(), session.into()]);
@@ -1207,9 +1219,16 @@ async fn attempts(
             }
             None => match tool {
                 Tool::Codex => {
-                    let (launch, codex) =
-                        super::harness_codex::launch(shared, account, place, &url, token, &resume)
-                            .await?;
+                    let (launch, codex) = super::harness_codex::launch(
+                        shared,
+                        account,
+                        place,
+                        &url,
+                        token,
+                        &resume,
+                        session.supervising.is_none(),
+                    )
+                    .await?;
                     (Run::Cold(launch), codex)
                 }
                 _ => {
@@ -1594,6 +1613,11 @@ async fn one(
         }
     };
     let decide = |tool: &str, input: &Value| {
+        if session.supervising.is_some()
+            && matches!(tool, "WebFetch" | "WebSearch" | "Task" | "Agent")
+        {
+            return Ruling::Now(Answer::Deny(UNATTENDED.into()));
+        }
         Ruling::Now(rule(tool, input, &bounds, &place.repos, &|| {
             session.taint()
         }))
@@ -2504,6 +2528,16 @@ mod tests {
     }
 
     /// The mark goes to `session.json` as soon as it's set, before the run ends (crash safety).
+    /// A turn nobody watches has no web and no helpers.
+    #[test]
+    fn an_unattended_turn_has_no_web_or_helpers() {
+        let tools: Vec<&str> = UNATTENDED_TOOLS.split(',').collect();
+        for gone in ["WebSearch", "WebFetch", "Task", "Agent", "Bash"] {
+            assert!(!tools.contains(&gone), "{gone}");
+        }
+        assert!(tools.iter().all(|t| TOOLS.split(',').any(|o| o == *t)));
+    }
+
     #[test]
     fn a_taint_is_kept_at_once() {
         let home = std::env::temp_dir().join(format!("obid-taint-kept-{}", std::process::id()));

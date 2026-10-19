@@ -2717,7 +2717,10 @@ impl Jobs {
                 .iter_mut()
                 .find(|s| s.turn == entry.turn && s.decision == entry.decision)
             {
-                Some(same) => same.jobs.extend(entry.jobs),
+                Some(same) => {
+                    same.jobs.extend(entry.jobs);
+                    same.count = entry.count;
+                }
                 None => job.supervised.push(entry),
             }
             job.clone()
