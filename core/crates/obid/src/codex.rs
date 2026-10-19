@@ -839,8 +839,9 @@ mod tests {
             r#"#!/bin/sh
 read l; echo '{"id":1,"result":{}}'
 read l
-read l; echo '{"id":2,"result":{"thread":{"id":"t1"}}}'
-read l; echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
+read l
+read l; echo '{"id":3,"result":{"thread":{"id":"t1"}}}'
+read l; echo '{"id":4,"result":{"turn":{"id":"u1"}}}'
 echo '{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"completed","items":[{"type":"agentMessage","text":"Done."}]}}}'
 exec sleep 30
 "#,
@@ -890,8 +891,9 @@ exec sleep 30
             r#"#!/bin/sh
 read l; echo '{"id":1,"result":{}}'
 read l
-read l; echo '{"id":2,"result":{"thread":{"id":"t1"}}}'
-read l; echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
+read l
+read l; echo '{"id":3,"result":{"thread":{"id":"t1"}}}'
+read l; echo '{"id":4,"result":{"turn":{"id":"u1"}}}'
 echo '{"method":"item/started","params":{"threadId":"t1","turnId":"u1","item":{"type":"commandExecution","id":"c1","command":"/bin/zsh -lc '"'"'cat x'"'"'"}}}'
 exec sleep 30
 "#,
