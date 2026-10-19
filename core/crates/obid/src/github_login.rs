@@ -259,6 +259,13 @@ async fn start(shared: &Arc<Shared>, gh: &Path) -> Result<Arc<SignIn>, String> {
             crate::process::signal_group(group, nix::sys::signal::Signal::SIGKILL);
         }
     };
+    // Until the sign-in's own task takes over, a request that ends while gh starts (the app gone,
+    // obid stopping) takes gh's group and its folder with it.
+    let mut pending = Pending {
+        group,
+        scratch: scratch.clone(),
+        armed: true,
+    };
     let (lines, mut said) = tokio::sync::mpsc::unbounded_channel::<String>();
     for out in [
         child
@@ -286,6 +293,8 @@ async fn start(shared: &Arc<Shared>, gh: &Path) -> Result<Arc<SignIn>, String> {
     };
     let Ok(Some(user_code)) = tokio::time::timeout(CODE_WITHIN, wanted).await else {
         kill();
+        // Reaped from here on: its group id may be someone else's, so the guard leaves it be.
+        pending.armed = false;
         let _ = child.wait().await;
         let _ = std::fs::remove_dir_all(&scratch);
         return Err("gh's sign-in didn't give a code to type.".into());
@@ -302,6 +311,8 @@ async fn start(shared: &Arc<Shared>, gh: &Path) -> Result<Arc<SignIn>, String> {
     });
     tracing::info!("GitHub sign-in started");
     let (shared, watched) = (shared.clone(), sign_in.clone());
+    // From here the sign-in's own task ends it.
+    pending.armed = false;
     tokio::spawn(async move {
         let exited = tokio::select! {
             status = child.wait() => status.ok(),
@@ -313,6 +324,9 @@ async fn start(shared: &Arc<Shared>, gh: &Path) -> Result<Arc<SignIn>, String> {
             kill();
             let _ = child.wait().await;
         }
+        // Ended as soon as gh is reaped, before anything else: obid's stop (kill) then never
+        // signals the group id, which may be someone else's by now.
+        let _ = ended_tx.send(true);
         let _ = std::fs::remove_dir_all(&scratch);
         shared.github.forget_status();
         {
@@ -330,9 +344,28 @@ async fn start(shared: &Arc<Shared>, gh: &Path) -> Result<Arc<SignIn>, String> {
                 "without signing in"
             }
         );
-        let _ = ended_tx.send(true);
     });
     Ok(sign_in)
+}
+
+/// gh started and its sign-in not yet handed to its own task: dropped armed (the request ended
+/// while gh started), gh's whole group is killed (not yet reaped, so the id is still its) and the
+/// sign-in's folder removed.
+struct Pending {
+    group: Option<u32>,
+    scratch: PathBuf,
+    armed: bool,
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Some(group) = self.group {
+                crate::process::signal_group(group, nix::sys::signal::Signal::SIGKILL);
+            }
+            let _ = std::fs::remove_dir_all(&self.scratch);
+        }
+    }
 }
 
 /// A folder of obid's own for the sign-in (its `TMPDIR`, working folder, and the git settings gh
@@ -406,6 +439,23 @@ fn user_code(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sign-in whose request ended while gh started leaves no folder behind; one handed to its
+    /// own task keeps it until that task ends it.
+    #[test]
+    fn a_dropped_start_removes_its_folder() {
+        let folder = std::env::temp_dir().join(format!("obid-gh-pending-{}", std::process::id()));
+        for armed in [true, false] {
+            std::fs::create_dir_all(&folder).unwrap();
+            drop(Pending {
+                group: None,
+                scratch: folder.clone(),
+                armed,
+            });
+            assert_eq!(folder.exists(), !armed);
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+    }
 
     /// An ended sign-in is never killed nor shown, even before its task cleared the slot: its group
     /// id may belong to another process by then.
