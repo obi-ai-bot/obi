@@ -112,7 +112,7 @@ pub struct Brief {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stalled {
-    /// `quiet`, `loop`, `turns` or `ceiling`.
+    /// `quiet`, `loop`, `turns`, `ceiling` or `budget`.
     pub why: String,
     /// The same as the job's `limit`.
     pub text: String,
@@ -289,6 +289,14 @@ pub struct Job {
     /// Its estimated share of its account's windows (#732).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_share: Option<crate::usage::WindowShare>,
+    /// How long its agent has run, in seconds, every run and restart included, since the owner
+    /// last let it past its ceiling: what `jobCeilingHours` holds (crate::jobs). Never in the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ran_secs: Option<u64>,
+    /// What it had spent (crate::jobs, `spent`) when the owner last let it past its token budget:
+    /// `jobTokenBudget` counts from there. Never in the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_from: Option<u64>,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -389,6 +397,8 @@ impl Job {
             usage: None,
             usage_seen: None,
             window_share: None,
+            ran_secs: None,
+            budget_from: None,
         }
     }
 

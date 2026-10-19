@@ -76,6 +76,9 @@ struct File {
     stall_after: Option<u64>,
     /// The safety ceiling of one run of a job, in hours: 1 to 168, 12 when left out.
     job_ceiling_hours: Option<u64>,
+    /// The safety budget of a job, in tokens (cache reads left out): 1 to 10^10, 50 million when
+    /// left out.
+    job_token_budget: Option<u64>,
     /// Where the vault is (crate::vault): `{"store": "file"}` or `{"store": "keychain", "service":
     /// "…"}`; left out, [`crate::vault::Location::default_for`].
     #[serde(default)]
@@ -226,6 +229,9 @@ pub struct Config {
     /// The safety ceiling of one run of a job, against runaway cost only: 12 hours unless
     /// `jobCeilingHours` says otherwise.
     pub job_ceiling: std::time::Duration,
+    /// The safety budget of a job, in tokens its tool counted, cache reads left out: 50 million
+    /// unless `jobTokenBudget` says otherwise.
+    pub job_token_budget: u64,
     /// Where paired phones reach obid (crate::gateway): `gateway`, an address on 127.0.0.1; none
     /// when it is left out.
     pub gateway: Option<SocketAddr>,
@@ -466,6 +472,13 @@ impl Config {
             ));
         }
 
+        let job_token_budget = file.job_token_budget.unwrap_or(50_000_000);
+        if !(1..=10_000_000_000).contains(&job_token_budget) {
+            return invalid(format!(
+                "jobTokenBudget is {job_token_budget}: it is 1 to 10000000000 tokens."
+            ));
+        }
+
         let setting = file.conversation.as_ref();
         use crate::agent::Tool;
         let (harness, agent) = match setting.and_then(|c| c.agent.as_deref()) {
@@ -518,6 +531,7 @@ impl Config {
             orchestrator_delay: std::time::Duration::from_secs(orchestrator_delay),
             stall_after: std::time::Duration::from_secs(stall_after),
             job_ceiling: std::time::Duration::from_secs(job_ceiling_hours * 3600),
+            job_token_budget,
             gateway,
             claude_keychain: file.claude_keychain,
             conversation: Conversation {
@@ -930,11 +944,13 @@ mod tests {
         .unwrap();
         assert_eq!(config.stall_after, std::time::Duration::from_secs(2));
         assert_eq!(config.job_ceiling, std::time::Duration::from_secs(3600));
+        assert_eq!(config.job_token_budget, 50_000_000);
         for (key, wrong) in [
             ("stallAfter", 0),
             ("stallAfter", 86_401),
             ("jobCeilingHours", 0),
             ("jobCeilingHours", 169),
+            ("jobTokenBudget", 0),
         ] {
             let text = with(serde_json::json!({key: wrong}));
             assert!(problem(&text).contains(key), "{key} {wrong}");

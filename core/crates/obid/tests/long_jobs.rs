@@ -14,17 +14,35 @@ const TRY_AGAIN: &str =
     "Try again, picking up where you left off. Finish with a short summary as asked.";
 
 fn obid(name: &str) -> (Folder, Obid) {
+    obid_with(name, json!({}), &[])
+}
+
+/// obid with `more` in its configuration and `jobs` kept in its home before it starts.
+fn obid_with(name: &str, more: Value, jobs: &[obid::job::Job]) -> (Folder, Obid) {
     let folder = Folder::new(name);
     let remote = fixture(&folder.0.join("fixture"));
     let agent = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-claude");
     let mut config = config(&folder.0, &remote, &agent);
     config["stallAfter"] = json!(3);
+    for (key, value) in more.as_object().unwrap() {
+        config[key] = value.clone();
+    }
+    let dir = folder.0.join("home/jobs");
+    std::fs::create_dir_all(&dir).unwrap();
+    for job in jobs {
+        let path = dir.join(format!("{}.json", job.id));
+        std::fs::write(path, serde_json::to_vec(job).unwrap()).unwrap();
+    }
     let obid = start(&folder.0, &config, None);
     (folder, obid)
 }
 
 fn post_job(obid: &Obid, task: &str) -> String {
-    let job = json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task});
+    post_kind(obid, "investigate", task)
+}
+
+fn post_kind(obid: &Obid, kind: &str, task: &str) -> String {
+    let job = json!({"repo": "obi-e2e/fixture-app", "kind": kind, "task": task});
     let answer = call(obid, "POST", "/v1/jobs", Some(&json!({ "job": job })));
     assert_eq!(answer.status, 201, "{}", answer.text);
     answer.body["id"].as_str().unwrap().to_owned()
@@ -37,7 +55,8 @@ fn wait(obid: &Obid, id: &str) -> Value {
 }
 
 /// Streaming words for 4 quiet windows, a job keeps running and ends done; one that only writes
-/// files in its worktree (a quiet build) keeps running too.
+/// files in its worktree (a quiet build) keeps running too, but not past 4 windows without a word
+/// (a loop touching a file isn't progress).
 #[test]
 fn a_job_making_progress_runs_past_its_quiet_window() {
     let (_folder, obid) = obid("long-progress");
@@ -52,10 +71,11 @@ fn a_job_making_progress_runs_past_its_quiet_window() {
         (call(&obid, "GET", &format!("/v1/jobs/{beating}"), None).body["status"] == "running")
             .then_some(())
     });
-    std::thread::sleep(std::time::Duration::from_secs(10));
+    std::thread::sleep(std::time::Duration::from_secs(8));
     let job = call(&obid, "GET", &format!("/v1/jobs/{beating}"), None).body;
     assert_eq!(job["status"], "running", "{job}");
-    call(&obid, "POST", &format!("/v1/jobs/{beating}/stop"), None);
+    let job = wait(&obid, &beating);
+    assert_eq!(job["stalled"]["why"], "quiet", "{job}");
 }
 
 /// A silent agent stalls after its quiet window: it writes its handoff note in one more turn of
@@ -134,7 +154,7 @@ fn a_looping_job_stalls() {
     let id = post_job(&obid, "LOOP");
     let job = wait(&obid, &id);
     assert_eq!(job["status"], "failed", "{job}");
-    assert_eq!(job["limit"], "the same failing call 5 times in a row");
+    assert_eq!(job["limit"], "the same failing call 5 times");
     assert_eq!(job["stalled"]["why"], "loop");
     assert_eq!(job["stalled"]["noteBy"], "agent");
 }
@@ -157,4 +177,108 @@ fn a_transient_error_is_retried() {
     let job = wait(&obid, &id);
     assert_eq!(job["status"], "done", "{job}");
     assert_eq!(job["summary"], "Nothing to do.");
+}
+
+/// A committing job that stalls keeps its commit on its branch and publishes nothing.
+#[test]
+fn a_committing_job_that_stalls_publishes_nothing() {
+    // A quiet window git's commit fits in on a busy machine (it took over 10 s at load 500).
+    let (_folder, obid) = obid_with("long-commit-quiet", json!({"stallAfter": 30}), &[]);
+    let id = post_kind(&obid, "build", "COMMIT: a.txt QUIET");
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["stalled"]["why"], "quiet", "{job}");
+    assert_eq!(job["stalled"]["commits"], 1, "{job}");
+    assert!(job["stalled"]["commit"].is_string(), "{job}");
+    assert_eq!(job["commits"], 1, "{job}");
+    assert!(
+        job["published"].is_null() && job["pushed"].is_null(),
+        "{job}"
+    );
+    assert!(job["outgoing"].as_array().unwrap().is_empty(), "{job}");
+}
+
+/// An error trying again won't mend fails the job at once, with no retry.
+#[test]
+fn a_permanent_error_is_not_retried() {
+    let (_folder, obid) = obid("long-permanent");
+    let events = follow_events(&obid);
+    let id = post_job(&obid, "FAIL");
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["summary"], "it broke");
+    assert!(job["stalled"].is_null(), "{job}");
+    let retried = std::iter::from_fn(|| events.try_recv().ok()).any(|(name, job)| {
+        name == "job"
+            && job["step"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("Retrying"))
+    });
+    assert!(!retried);
+}
+
+/// A transient error every time: three retries, then the job fails with it (not stalled).
+#[test]
+fn retries_run_out() {
+    let (_folder, obid) = obid("long-retries-out");
+    let events = follow_events(&obid);
+    let id = post_job(&obid, "TRANSIENT ALWAYS");
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}");
+    assert!(job["summary"].as_str().unwrap().contains("529"), "{job}");
+    assert!(job["stalled"].is_null(), "{job}");
+    let steps: Vec<String> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|(name, _)| name == "job")
+        .filter_map(|(_, job)| job["step"].as_str().map(str::to_owned))
+        .filter(|step| step.starts_with("Retrying after"))
+        .collect();
+    for n in 1..=3 {
+        assert!(
+            steps.iter().any(|s| s.ends_with(&format!("({n} of 3)"))),
+            "{steps:?}"
+        );
+    }
+}
+
+/// The token budget stalls a job; only the owner carries it on, with a new budget.
+#[test]
+fn the_token_budget_stalls_and_only_the_owner_carries_on() {
+    let (_folder, obid) = obid_with("long-budget", json!({"jobTokenBudget": 1000}), &[]);
+    let id = post_job(&obid, "SPEND: 5000");
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["limit"], "the job used 1000 tokens", "{job}");
+    assert_eq!(job["stalled"]["why"], "budget");
+    let answer = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": TRY_AGAIN})),
+    );
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert!(job["stalled"].is_null(), "{job}");
+}
+
+/// The ceiling counts the time of every run before (a restart, a Try again): a job that already
+/// ran its hour stalls at once, and obid writes its note.
+#[test]
+fn the_ceiling_counts_every_run() {
+    let mut job = obid::job::Job::new(
+        "ce111ng0".into(),
+        "obi-e2e/fixture-app".into(),
+        "investigate".into(),
+        "CHATTY: 600000".into(),
+        "claude".into(),
+        "stub".into(),
+    );
+    job.branch = "oby/investigate-ce111ng0".into();
+    job.ran_secs = Some(3600);
+    let (_folder, obid) = obid_with("long-ceiling", json!({"jobCeilingHours": 1}), &[job]);
+    let job = wait(&obid, "ce111ng0");
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["limit"], "the job ran 1 hour", "{job}");
+    assert_eq!(job["stalled"]["why"], "ceiling");
+    assert_eq!(job["stalled"]["noteBy"], "obid");
 }

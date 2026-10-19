@@ -127,6 +127,8 @@ pub struct Turn {
     pub quiet: bool,
     /// obid ended it for making the same failing call again and again (crate::jobs).
     pub looped: bool,
+    /// obid ended it at the job's token budget (crate::jobs).
+    pub over_budget: bool,
     /// obid was told to stop it.
     pub stopped: bool,
     /// What the agent should hear at the start of its next prompt: what obid declined this turn
