@@ -261,6 +261,10 @@ final class Phone {
     private(set) var host = ""
     /// The job list arrived at least once, so an empty list really is empty.
     private(set) var loaded = false
+    /// Your work on GitHub as the Mac's obid finds it (Review PR and Issues), nil from a runner that doesn't list it.
+    private(set) var gitHubWork: GitHubWork?
+    /// The GitHub items put off with Later, until Oby quits.
+    var gitHubLater: Set<String> = []
     private(set) var jobs: [Job] = [] {
         didSet {
             // Published, dismissed or running again, here or on the Mac: its alert goes.
@@ -350,6 +354,7 @@ final class Phone {
         offlineQueue.bindUnscopedEntries(to: offlineQueueTarget)
         restoreQueuedMessages(for: offlineQueueTarget)
         #if DEBUG
+        if let sample = GitHubWork.sample { gitHubWork = sample }
         if SampleTasks.on { jobs = SampleTasks.jobs; conversations = SampleTasks.conversations; accounts = SampleTasks.accounts; loaded = true; SampleTasks.talk(self) }
         // `-ObySampleUnreachable YES`: the Mac out of reach since 40 minutes ago, for the notice's screenshots.
         if UserDefaults.standard.bool(forKey: "ObySampleUnreachable") { self.connection = .offline(""); self.lastSeen = .now.addingTimeInterval(-2400) }
@@ -516,6 +521,7 @@ final class Phone {
         defaultMode = RunnerMode(status.permissions?.mode)
         await take(try await runner.jobs())
         inbox = try await runner.inbox()
+        gitHubWork = try? await runner.gitHubWork()
         do { conversations = try await runner.conversations() } catch {
             Logger.phone.error("listing conversations failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -552,10 +558,28 @@ final class Phone {
         do {
             await take(try await runner.jobs())
             inbox = try await runner.inbox()
+            gitHubWork = try? await runner.gitHubWork()
             loaded = true
         } catch {
             Logger.phone.error("reloading jobs failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Has the Mac's obid read GitHub again; the feed it answers replaces this one.
+    func refreshGitHubWork() async {
+        guard gitHubWork != nil else { return }
+        #if DEBUG
+        if GitHubWork.sample != nil { return }
+        #endif
+        do { gitHubWork = try await runner.refreshGitHubWork() } catch {
+            Logger.phone.error("refreshing GitHub work failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// One tap on a GitHub item: Oby's job on it (a review, or a fix), listed at once.
+    func startGitHubWork(_ id: String) async throws {
+        let job = try await runner.startGitHubWork(id)
+        if let index = jobs.firstIndex(where: { $0.id == job.id }) { jobs[index] = job } else { jobs.insert(job, at: 0) }
     }
 
     private func unfollow() {
@@ -601,6 +625,8 @@ final class Phone {
             else if startingNew, delta.conversation != nil { heldDeltas.append(delta) }
         case .artifact(let artifact):
             conversation.apply(artifact)
+        case .github(let work):
+            gitHubWork = work
         case .conversation(let changed):
             take(changed)
         }

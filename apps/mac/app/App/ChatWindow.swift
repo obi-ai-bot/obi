@@ -328,7 +328,9 @@ private struct HomeView: View {
     /// Oby, a little above the middle (as a face at eye level), what's going on under it, and the
     /// chips: every kind of work with something in it, whatever the side panel groups by.
     private var stage: some View {
-        let groups = WorkList.groups(work, by: .type)
+        let gitHub = model.feed.gitHubWork, later = model.feed.gitHubLater
+        let groups = GitHubWork.chips(WorkList.groups(work, by: .type), waiting: { gitHub?.waiting($0, later: later).count ?? 0 },
+                                      connect: .init(gitHub))
         let running = work.count { $0.status == .running }, needs = work.count { $0.status == .needs }
         return EyeLevel {
             VStack(spacing: 16) {
@@ -393,7 +395,8 @@ private struct HomeView: View {
                     onOpenJob: { state.trail.push(.job(id: $0, local: local)) }).takesKeys()
         case .group(let kind):
             GroupPane(model: model, kind: kind, items: work.filter { $0.type == kind },
-                      onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })
+                      onOpenJob: { state.trail.push(.job(id: $0, local: $1)) },
+                      onConnectGitHub: { state.openSettings(.connectors) })
                 .takesKeys()
         case .settings(let page):
             SettingsPane(model: model, page: page)
