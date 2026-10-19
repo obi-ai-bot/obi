@@ -47,6 +47,10 @@ enum SampleTasks {
     /// many seconds after launch Oby's answer comes, a word at a time, for a screenshot of it coming in.
     @MainActor static func talk(_ phone: Phone) {
         harness(phone)
+        // `-ObySampleRoute settings` or `task:<id>`: opens that page, for its screenshots.
+        if let route = UserDefaults.standard.string(forKey: "ObySampleRoute") {
+            phone.homePath = route == "settings" ? [.settings] : route.hasPrefix("task:") ? [.task(String(route.dropFirst(5)))] : []
+        }
         let delay = UserDefaults.standard.double(forKey: "ObySampleTalk")
         guard delay > 0 else { return }
         let model = phone.conversation
