@@ -74,7 +74,7 @@ pub async fn run_turn(
     launch: Launch,
     prompt: &str,
     options: &Options,
-    limit: Duration,
+    limit: impl Into<crate::conn::Limit>,
     stop: watch::Receiver<process::Signal>,
     decide: impl Fn(&str, &Value) -> Ruling,
     on_event: impl FnMut(Event),
@@ -128,6 +128,7 @@ pub async fn run_turn(
         run.conn.drain_within(agent::AFTER_RESULT).await;
     }
     turn.timed_out = run.conn.timed_out;
+    turn.quiet = run.conn.quiet_out;
     turn.stopped = run.conn.stopped;
     turn.exit = if turn.fatal.is_some() {
         // Ended for good: everything it started ends now, not after a grace.
