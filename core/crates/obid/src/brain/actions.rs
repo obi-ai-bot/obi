@@ -476,6 +476,11 @@ fn retry(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
             false,
         );
     }
+    // Past its safety ceiling or budget, only the owner's Confirm carries it on (docs/runner-api.md,
+    // `limit`): one item, however often it's asked.
+    if crate::jobs::past_safety(job) {
+        return (shared.jobs.confirm_past_safety(job, TRY_AGAIN).0, true);
+    }
     if theirs {
         confirm(
             shared,
@@ -596,9 +601,13 @@ fn message_job(
         {
             return already_on_it(shared, &job, &next, &words, source);
         }
+        // Past its safety limit, a follow-up would start its counters again: the owner confirms.
+        if source.owners() && crate::jobs::past_safety(&job) {
+            return Outcome::Done(shared.jobs.confirm_past_safety(&job, &words).0);
+        }
         let new = crate::jobs::follow_up(&job, &words);
         return match source {
-            Source::Owner => follow_up(
+            Source::Owner | Source::Confirmed => follow_up(
                 shared,
                 &job,
                 NewJob {

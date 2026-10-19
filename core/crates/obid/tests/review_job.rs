@@ -225,6 +225,10 @@ async fn the_stub_agent_reviews_the_fixture_in_the_sandbox() {
     // The apps heard every change, the last one the job as it ended.
     let mut last = None;
     while let Ok(event) = follow.try_recv() {
+        // A job's transcript comes as events of its own.
+        if event.name == "transcript" {
+            continue;
+        }
         assert_eq!(event.name, "job");
         last = Some(event.data);
     }

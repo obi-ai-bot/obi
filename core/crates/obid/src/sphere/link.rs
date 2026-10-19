@@ -334,6 +334,12 @@ impl Link {
             }
         }));
         let hook = Arc::downgrade(&link);
+        link.jobs.on_confirm(Arc::new(move |item| {
+            if let Some(link) = hook.upgrade() {
+                link.add_confirm_once(item);
+            }
+        }));
+        let hook = Arc::downgrade(&link);
         link.jobs.on_review_end(Arc::new(move |job, done| {
             let link = hook.upgrade();
             Box::pin(async move {
@@ -2494,12 +2500,51 @@ impl Link {
         Value::Array(items.into_iter().map(Item::to_json).collect())
     }
 
+    /// The open items of a job that's gone are done, with no answer.
+    pub fn settle_job(&self, job: &str) {
+        let now = time::now();
+        let settled: Vec<Item> = {
+            let mut state = self.lock();
+            state
+                .inbox
+                .values_mut()
+                .filter(|i| i.job == job && i.done.is_none())
+                .map(|i| {
+                    i.done = Some(now);
+                    i.clone()
+                })
+                .collect()
+        };
+        for item in &settled {
+            self.save_item(item);
+        }
+    }
+
     /// Something Oby's brain planned that persists or widens trust waits in the inbox for the
     /// owner's own `Confirm` (#546): the brain never carries it out itself.
     pub fn add_confirm(&self, item: Item) -> Item {
         self.lock().inbox.insert(item.id.clone(), item.clone());
         self.save_item(&item);
         item
+    }
+
+    /// [`Link::add_confirm`], unless a `confirm` item for the same job and action is still open:
+    /// that one stands, so a caller asking again and again adds nothing (crate::jobs,
+    /// `confirm_past_safety`).
+    pub fn add_confirm_once(&self, item: Item) -> Item {
+        let action = |i: &Item| i.confirm.as_ref().map(|c| c.action.clone());
+        {
+            let state = self.lock();
+            if let Some(open) = state.inbox.values().find(|i| {
+                i.kind == "confirm"
+                    && i.done.is_none()
+                    && i.job == item.job
+                    && action(i) == action(&item)
+            }) {
+                return open.clone();
+            }
+        }
+        self.add_confirm(item)
     }
 
     /// `POST /v1/inbox/{id}/answer` on a `confirm` item: `Confirm` carries out what its title
@@ -2593,7 +2638,10 @@ impl Link {
             // words for a job that ended do.
             inbox::action::MESSAGE_JOB => {
                 let words = confirmed.payload["words"].as_str().unwrap_or("");
-                match self.jobs.message(target, words, crate::jobs::Source::Owner) {
+                match self
+                    .jobs
+                    .message(target, words, crate::jobs::Source::Confirmed)
+                {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
                     None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
@@ -2611,12 +2659,68 @@ impl Link {
                 match self.jobs.message(
                     target,
                     crate::brain::actions::TRY_AGAIN,
-                    crate::jobs::Source::Owner,
+                    crate::jobs::Source::Confirmed,
                 ) {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
                     None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
                 }
+            }
+            // Proposed against the job as it was: after another round, a move or a new mode,
+            // the title no longer says what Confirm would do.
+            inbox::action::CONTINUE_JOB | inbox::action::DELETE_JOB | inbox::action::CHANGE_JOB
+                if self
+                    .jobs
+                    .get(target)
+                    .is_some_and(|j| j.snapshot() != confirmed.payload["snapshot"]) =>
+            {
+                Err(api(
+                    StatusCode::CONFLICT,
+                    "The job changed since Oby asked (another round, a move or a new mode): ask Oby again.",
+                ))
+            }
+            inbox::action::CONTINUE_JOB => {
+                let words = confirmed.payload["words"].as_str();
+                match self.jobs.continue_job(target, words, "on your Confirm") {
+                    Some(Ok(_)) => Ok(()),
+                    Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
+                    None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
+                }
+            }
+            inbox::action::DELETE_JOB => match self.jobs.delete(target).await {
+                Some(Ok(_)) => {
+                    self.settle_job(target);
+                    Ok(())
+                }
+                Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
+                None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
+            },
+            inbox::action::CHANGE_JOB => {
+                let text = |key: &str| confirmed.payload[key].as_str();
+                if let Some(mode) = text("mode") {
+                    let mode = crate::permissions::Mode::parse(mode)
+                        .ok_or_else(|| api(StatusCode::CONFLICT, "That mode isn't one."))?;
+                    self.jobs
+                        .set_mode(target, mode)
+                        .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone."))?;
+                    self.jobs.note_change(
+                        target,
+                        format!("Mode changed to {} on your Confirm", mode.title()),
+                    );
+                }
+                if text("agent").is_some() || text("account").is_some() {
+                    match self.jobs.change(
+                        target,
+                        text("agent"),
+                        text("account"),
+                        "on your Confirm",
+                    ) {
+                        Some(Ok(_)) => {}
+                        Some(Err(refused)) => return Err(api(StatusCode::CONFLICT, refused.0)),
+                        None => return Err(api(StatusCode::CONFLICT, "That job is gone.")),
+                    }
+                }
+                Ok(())
             }
             // The ones that answer an inbox item, as the owner would have.
             inbox::action::ACCEPT

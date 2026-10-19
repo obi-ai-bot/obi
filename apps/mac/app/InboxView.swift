@@ -86,8 +86,7 @@ struct IslandInbox: View {
                          busy: busy, wordsNote: kind == "permission" ? CardOption.denyWords : nil,
                          onChoose: { option in
                              if option.answer == "Open the PR",
-                                let published = (entry.local ? desk.jobs : feed.jobs).first(where: { $0.id == entry.item.job })?.published,
-                                let url = URL(string: published) { openURL(url) }
+                                let url = PublishedLink.url((entry.local ? desk.jobs : feed.jobs).first(where: { $0.id == entry.item.job })?.published) { openURL(url) }
                              else { settle(entry, answer: option.answer) }
                          },
                          onWords: answerWords)
