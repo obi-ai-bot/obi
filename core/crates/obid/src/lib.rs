@@ -347,6 +347,8 @@ pub async fn serve(
     // Each repository's spare tree for the conversations' rooms, so a new one
     // doesn't wait for one to be extracted (docs/fast-replies.md).
     brain::harness::prepare_rooms(&shared);
+    // What a conversation's shell left running when obid last stopped without ending it.
+    brain::shell::reap_leftovers(&shared.config.home);
     // A deleted conversation's waiting Claude Code ends with it.
     brain::harness::end_warm_with_conversations(shared.clone());
     // Routines run on their schedules (#395).
@@ -384,6 +386,7 @@ pub async fn serve(
             shared.sign_ins.kill_all();
             shared.github.kill();
             shared.harness.end_all_warm();
+            shared.harness.shell.end_all();
             tokio::join!(jobs.shutdown(JOBS_GRACE), plugins.shutdown());
         })
     };
