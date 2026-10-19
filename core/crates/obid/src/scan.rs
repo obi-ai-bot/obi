@@ -1461,6 +1461,48 @@ exit 99"#,
         }
     }
 
+    /// A big file of ordinary long lines, with a few vault values learned, is scanned in seconds,
+    /// not minutes (#749), and a value in it is still found.
+    #[test]
+    fn a_big_file_with_vault_values_is_scanned_quickly() {
+        struct Forget;
+        impl Drop for Forget {
+            fn drop(&mut self) {
+                for i in 0..3 {
+                    crate::secrets::known().forget(&format!("scan-speed-test-{i}"));
+                }
+            }
+        }
+        for i in 0..3 {
+            crate::secrets::known().learn(
+                &format!("scan-speed-test-{i}"),
+                format!("speed-vault-value-{i}/Qx7+k=9"),
+            );
+        }
+        let _forget = Forget;
+        let line = "let the_long_identifier = crate::module/path_to_somewhere(\"some ordinary words, \
+                    a URL https://example.com/a/b/c?x=1&y=2 and 0123456789abcdef0123 too\"); \
+                    // and a comment that goes on and on for a while";
+        let mut file = String::new();
+        while file.len() < 1_000_000 {
+            file.push_str(line);
+            file.push('\n');
+        }
+        file.push_str("x = speed-vault-value-1/Qx7+k=9\n");
+        let started = std::time::Instant::now();
+        let found = known_secrets_in_file(&file, "big.rs");
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "a 1 MB file took {took:?}"
+        );
+        let last = file.split('\n').count() - 1;
+        assert_eq!(
+            found.iter().map(|f| f.line).collect::<Vec<_>>(),
+            vec![Some(last)]
+        );
+    }
+
     /// A secret learned for one test, forgotten however the test ends.
     struct Learned;
 
