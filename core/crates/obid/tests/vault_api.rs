@@ -798,7 +798,7 @@ fn an_unreadable_vault_carries_out_nothing() {
 
 /// The job's own check is recorded step by step (#734): each part between its `&&`s with whether
 /// it passed, the tests `cargo test` counted, and the failing tests by name with their message,
-/// where a vault secret a test printed is masked, on the job as kept and as served.
+/// where a line holding a vault secret a test printed is hidden, on the job as kept and as served.
 #[test]
 fn a_check_run_names_its_failing_tests_and_masks_the_vault() {
     let folder = Folder::new("vault-check");
@@ -839,7 +839,7 @@ fn a_check_run_names_its_failing_tests_and_masks_the_vault() {
     assert_eq!(
         run["failing"],
         json!([
-            {"test": "a", "message": "[redacted: vault check-key]"},
+            {"test": "a", "message": "[possible secret hidden]"},
             {"test": "b", "message": "boom"}
         ])
     );

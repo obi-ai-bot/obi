@@ -722,6 +722,27 @@ fn a_check_that_keeps_failing_stops_at_a_limit() {
     );
     let log = std::fs::read_to_string(obid.home.join("logs").join(&id).join("check.log")).unwrap();
     assert!(log.contains("the check failed"), "{log}");
+    // The job carries its latest check run; every run is on the job by id (#734).
+    let checks = job["checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 1, "{job}");
+    assert_eq!(checks[0]["round"], 2);
+    let step = &checks[0]["steps"][0];
+    assert_eq!(
+        (&step["passed"], &step["running"]),
+        (&json!(false), &json!(false))
+    );
+    assert!(
+        step["started"].is_string() && step["seconds"].is_u64(),
+        "{step}"
+    );
+    let detail = request(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    let rounds: Vec<Value> = detail["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|run| run["round"].clone())
+        .collect();
+    assert_eq!(rounds, [json!(1), json!(2)]);
 }
 
 /// Each round's change against the start commit is kept as that round's (#736): paths and the

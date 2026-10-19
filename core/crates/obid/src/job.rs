@@ -598,18 +598,22 @@ impl Job {
         if let Some(last) = self.diffs.last() {
             value["diff"] = json!(last);
         }
-        if !self.checks.is_empty() {
-            value["checks"] = json!(self.checks);
+        // The latest run only, on every event (#734); every run's is in `detail_json`.
+        if let Some(last) = self.checks.last() {
+            value["checks"] = json!([last]);
         }
         value
     }
 
     /// The job as `GET /v1/jobs/{id}` shows it: [`Self::to_json`] with what's too big to send on
-    /// every event, each round's diff stat (`diff.rounds`, #736).
+    /// every event: each round's diff stat (`diff.rounds`, #736) and every check run (#734).
     pub fn detail_json(&self) -> Value {
         let mut value = self.to_json();
         if value.get("diff").is_some() {
             value["diff"]["rounds"] = json!(self.diffs);
+        }
+        if value.get("checks").is_some() {
+            value["checks"] = json!(self.checks);
         }
         value
     }

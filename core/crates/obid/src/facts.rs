@@ -59,6 +59,8 @@ pub fn numstat(text: &str) -> Diff {
 
 /// The most failing tests a check run lists.
 const FAILING_MAX: usize = 20;
+/// What a failing test's line the secret scan flags reads instead.
+const HIDDEN_LINE: &str = "[possible secret hidden]";
 /// The lines and characters a failing test's message keeps.
 const MESSAGE_LINES: usize = 3;
 const MESSAGE_MAX: usize = 300;
@@ -74,12 +76,16 @@ pub struct Tests {
 }
 
 /// One step of a check run: a part of its command line between top-level `&&`s. `passed` is
-/// none for a step that hasn't ended (`running`) or never ran.
+/// none for a step that hasn't ended (`running`) or never ran; `started` (RFC 3339) once it
+/// started, and `seconds` once it ended: a running one's would change every second.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckStep {
     pub command: String,
     pub passed: Option<bool>,
-    pub seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u64>,
     pub running: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tests: Option<Tests>,
@@ -101,10 +107,14 @@ pub struct CheckRecord {
 }
 
 /// The parts of a command line between top-level `&&`s, or the whole line as one part when it
-/// has any other top-level operator (`;`, `||`, `|`, `&`, a newline) or quotes and brackets that
-/// don't close.
+/// has any other top-level operator (`;`, `||`, `|`, `&`, a newline), quotes and brackets that
+/// don't close, or what this doesn't read: a `[[ … ]]` test (whose `&&` is its own), a comment or
+/// a heredoc.
 pub fn steps(command: &str) -> Vec<String> {
     let whole = vec![command.trim().to_owned()];
+    if ["[[", "#", "<<"].iter().any(|s| command.contains(s)) {
+        return whole;
+    }
     let mut parts = Vec::new();
     let (mut depth, mut quote, mut start) = (0i32, None::<char>, 0usize);
     let bytes: Vec<(usize, char)> = command.char_indices().collect();
@@ -191,6 +201,8 @@ pub struct CheckWatch {
     marker: String,
     commands: Vec<String>,
     started: Vec<Instant>,
+    /// When each started step started, in seconds since the epoch.
+    started_at: Vec<i64>,
     counters: Vec<Counter>,
     failing: Vec<Failing>,
     /// The failing test the next lines are the message of.
@@ -206,6 +218,7 @@ impl CheckWatch {
             counters: vec![Counter::default(); commands.len()],
             commands,
             started: vec![Instant::now()],
+            started_at: vec![obi_protocol::time::now()],
             failing: Vec::new(),
             message_of: None,
             partial: Vec::new(),
@@ -287,6 +300,7 @@ impl CheckWatch {
                 .is_ok_and(|n| n == self.started.len())
             {
                 self.started.push(Instant::now());
+                self.started_at.push(obi_protocol::time::now());
             }
             self.message_of = None;
             return;
@@ -443,6 +457,7 @@ impl CheckWatch {
             .map(|(i, command)| {
                 let started = self.started.get(i);
                 let until = self.started.get(i + 1).copied().unwrap_or(now);
+                let running = i == last && ended.is_none();
                 CheckStep {
                     command: command.clone(),
                     passed: match i.cmp(&last) {
@@ -450,19 +465,39 @@ impl CheckWatch {
                         std::cmp::Ordering::Equal => ended,
                         std::cmp::Ordering::Greater => None,
                     },
-                    seconds: started.map_or(0, |s| until.duration_since(*s).as_secs()),
-                    running: i == last && ended.is_none(),
+                    started: self
+                        .started_at
+                        .get(i)
+                        .map(|&at| obi_protocol::time::format(at)),
+                    seconds: started
+                        .filter(|_| !running)
+                        .map(|s| until.duration_since(*s).as_secs()),
+                    running,
                     tests: self.counters[i].tests(),
                 }
             })
             .collect();
         let known = crate::secrets::known();
+        // A line holding a vault secret or anything the secret scan's rules flag (in any form it
+        // reads) taken out whole; vault values masked in the rest.
+        let masked = |text: &str| -> String {
+            text.split('\n')
+                .map(|line| {
+                    if crate::scan::risky_name(line) {
+                        HIDDEN_LINE.to_owned()
+                    } else {
+                        known.redact(line)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         let failing = self
             .failing
             .iter()
             .map(|f| Failing {
-                test: known.redact(&f.test),
-                message: known.redact(&f.message).chars().take(MESSAGE_MAX).collect(),
+                test: masked(&f.test),
+                message: masked(&f.message).chars().take(MESSAGE_MAX).collect(),
             })
             .collect();
         CheckRecord {
@@ -505,6 +540,9 @@ mod tests {
             "echo \"a && b\"",
             "(a && b)",
             "a &&",
+            "[[ -f a && -f b ]] && cargo test",
+            "cargo test # && not a step",
+            "cat <<EOF && cargo test",
         ] {
             assert_eq!(steps(whole), [whole.trim()], "{whole}");
         }
@@ -535,6 +573,9 @@ mod tests {
                 total: Some(3)
             })
         );
+        // A running step has when it started, and no time of its own yet.
+        assert!(live.steps[1].started.is_some() && live.steps[1].seconds.is_none());
+        assert!(live.steps[0].seconds.is_some());
         w.feed(b"test a::three ... FAILED\n\nfailures:\n\n---- a::two stdout ----\nthread 'a::two' panicked at src/a.rs:9:5:\nassertion `left == right` failed\n  left: 1\n right: 2\nnote: run with `RUST_BACKTRACE=1`\n\n---- a::three stdout ----\nboom\n\ntest result: FAILED. 1 passed; 2 failed; 0 ignored\n");
         let ended = w.record(1, Some(false));
         assert_eq!(ended.steps[1].passed, Some(false));
@@ -611,6 +652,23 @@ mod tests {
                 test: "tests/t.py::test_x".into(),
                 message: "AssertionError: no".into()
             }
+        );
+    }
+
+    /// A failing test's line the secret scan's rules flag is taken out whole, even reversed.
+    #[test]
+    fn a_failing_tests_secret_never_reaches_the_record() {
+        let key = ["AK", "IA", "QWERTYUIOPASDFGH"].concat();
+        let backwards: String = key.chars().rev().collect();
+        let output = format!(
+            "running 1 test\ntest a ... FAILED\n---- a stdout ----\nkey was {key}\nand {backwards}\nexpected 2\n"
+        );
+        let failing = watch(&["cargo test"], &output)
+            .record(1, Some(false))
+            .failing;
+        assert_eq!(
+            failing[0].message,
+            "[possible secret hidden]\n[possible secret hidden]\nexpected 2"
         );
     }
 }

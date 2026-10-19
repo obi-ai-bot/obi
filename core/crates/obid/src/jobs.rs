@@ -3316,6 +3316,14 @@ impl Jobs {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .record(round, ended);
+            // Sent only when something changed: a running step's time isn't in it.
+            if ended.is_none()
+                && self
+                    .get(id)
+                    .is_some_and(|job| job.checks.last() == Some(&record))
+            {
+                return;
+            }
             self.update(id, |job| match job.checks.last_mut() {
                 Some(last) if ended.is_some() || last.steps.iter().any(|s| s.running) => {
                     *last = record
