@@ -81,6 +81,12 @@ fn stalled(job: &Job) -> Option<&crate::job::Stalled> {
         .filter(|_| !job.status.is_active() && job.dismissed.is_none())
 }
 
+/// Whether the stall is the owner's own to follow up: a safety limit on cost (`ceiling`, the
+/// job's hours; `budget`, its tokens), which only their own words carry past.
+fn owners_stall(stalled: &crate::job::Stalled) -> bool {
+    matches!(stalled.why.as_str(), "ceiling" | "budget")
+}
+
 /// The automatic steps the conversation took along `job` and the jobs it follows up.
 pub fn steps(shared: &Shared, job: &Job) -> usize {
     let mut taken = 0;
@@ -116,6 +122,7 @@ pub fn allowed(
         || stalled(job).is_none()
         || job.conversation.as_deref() != Some(session.conversation.as_str())
         || mode.is_none()
+        || stalled(job).is_some_and(owners_stall)
     {
         return None;
     }
@@ -316,6 +323,17 @@ async fn supervise(shared: &Arc<Shared>, job: &Job) -> bool {
     };
     let turn = uuid::Uuid::new_v4().to_string();
     let taken = steps(shared, job);
+    if stalled(job).is_some_and(owners_stall) {
+        ask_owner(
+            shared,
+            job,
+            Some(&conversation),
+            &turn,
+            taken,
+            "That's a safety limit on what it spends, so going on is yours to decide.",
+        );
+        return true;
+    }
     if taken >= MOST {
         ask_owner(
             shared,
@@ -487,6 +505,29 @@ fn ask_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stall at a limit on cost is the owner's; one that only went quiet or looped is Oby's.
+    #[test]
+    fn a_cost_limit_is_the_owners() {
+        let stall = |why: &str| crate::job::Stalled {
+            why: why.into(),
+            text: String::new(),
+            at: 0,
+            round: 1,
+            branch: String::new(),
+            commit: None,
+            commits: 0,
+            session: true,
+            note: String::new(),
+            note_by: "agent".into(),
+        };
+        for why in ["ceiling", "budget"] {
+            assert!(owners_stall(&stall(why)), "{why}");
+        }
+        for why in ["quiet", "loop", "turns"] {
+            assert!(!owners_stall(&stall(why)), "{why}");
+        }
+    }
 
     #[test]
     fn the_prompt_is_obids_words_and_names_the_count() {
