@@ -332,6 +332,7 @@ struct TaskPage: View {
                                 }
                             }
                         }
+                        if let tetrix = actions.extras?.tetrix, !tetrix.isEmpty { section("Tetrix") { TetrixReportView(report: tetrix) } }
                         if !followUps.isEmpty { section("Follow-ups") { followUpList } }
                     }
                     .padding(.horizontal, 18)

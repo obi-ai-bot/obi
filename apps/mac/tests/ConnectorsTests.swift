@@ -44,20 +44,33 @@ struct ConnectorsTests {
         #expect(signedOut.state == .available && signedOut.how == "Not signed in" && signedOut.way == .button("Sign In", .signIn(cursor.account)))
     }
 
-    /// Tetrix for each account once its tool has said: signed in is connected, with the tool's own
-    /// sign-out; not signed in is available, with the tool's own login. Not said yet: not listed.
-    /// Oby never reads Cursor's MCP list, so a Cursor account gets no Tetrix row at all.
-    @Test func tetrixPerAccount() throws {
-        var cursorWithTetrix = cursor
-        cursorWithTetrix.label = "Pro"
-        cursorWithTetrix.tetrix = true
-        let list = Connectors.list(mac: [personal, deskree, cursorWithTetrix], runner: nil)
-        let tetrix = list.filter { $0.name == "Tetrix" }
-        #expect(tetrix.map(\.id) == ["tetrix-This Mac-default", "tetrix-This Mac-c0de"])
-        let on = try #require(tetrix.first)
-        #expect(on.state == .connected && on.how == "Claude Code · Personal's agents, through Claude Code's own MCP login")
-        #expect(on.way == .button("Disconnect…", .signOutTetrix(personal.account)))
-        #expect(tetrix.last?.state == .available && tetrix.last?.way == .button("Sign In", .signInTetrix(deskree.account)))
+    let dogfood = TetrixStatus.Server(preset: "dogfood", name: "Tetrix Dogfood", url: URL(string: "https://mcp.tetrix.dev/mcp")!)
+
+    /// Tetrix is one row, held by obid for every agent: not connected, "Tetrix Dogfood" with Connect
+    /// and Another Tetrix…; signing in, not confirmed; connected, as whom, with Disconnect. No
+    /// per-account Tetrix rows, and obid's older tetrix plug-in isn't listed beside it.
+    @Test func tetrixOnceForEveryAgent() throws {
+        var runner = lab(plugins: [plugin("tetrix", enabled: false, state: "disabled")])
+        runner.tetrix = TetrixStatus(presets: [dogfood])
+        let list = Connectors.list(mac: [personal, deskree], runner: runner)
+        #expect(list.filter { $0.about == Connectors.tetrixAbout }.map(\.id) == ["tetrix"])
+        let ready = try #require(list.first { $0.id == "tetrix" })
+        #expect(ready.name == "Tetrix Dogfood" && ready.state == .available && ready.place == "tetrix-lab")
+        #expect(ready.way == .button("Connect", .connectTetrix(dogfood)) && ready.also == .button("Another Tetrix…", .connectOtherTetrix))
+
+        runner.tetrix = TetrixStatus(url: dogfood.url, preset: "dogfood", presets: [dogfood], signIn: TetrixSignIn(url: URL(string: "https://auth.tetrix.dev/authorize?x=1")!))
+        let signing = Connectors.tetrix(try #require(runner.tetrix), place: "tetrix-lab")
+        #expect(signing.state == .unconfirmed && signing.way == nil && signing.how == "Signing in to Tetrix Dogfood in your browser…")
+
+        runner.tetrix = TetrixStatus(connected: true, url: dogfood.url, preset: "dogfood", presets: [dogfood])
+        let on = Connectors.tetrix(try #require(runner.tetrix), place: "tetrix-lab")
+        #expect(on.state == .connected && on.name == "Tetrix" && on.how == "Signed in to Tetrix Dogfood. Every agent on every account uses it.")
+        #expect(on.way == .button("Disconnect…", .disconnectTetrix))
+
+        // A failed sign-in says why; a runner that knows no server asks for one.
+        let failed = Connectors.tetrix(TetrixStatus(presets: [dogfood], error: "Tetrix refused the sign-in."), place: "This Mac")
+        #expect(failed.state == .broken && failed.how == "Tetrix refused the sign-in.")
+        #expect(Connectors.tetrix(TetrixStatus(), place: "This Mac").way == .button("Connect…", .connectOtherTetrix))
     }
 
     /// The runner's accounts, Tetrix, GitHub, plug-ins and connections are listed under its name;
@@ -163,7 +176,6 @@ struct ConnectorsTests {
         let local = Connectors.RunnerState(name: "This Mac", local: true, accounts: [personal, deskree])
         let list = Connectors.list(mac: [personal, deskree], runner: local)
         #expect(list.filter { $0.name == "Claude Code · Personal" }.count == 1)
-        #expect(list.filter { $0.name == "Tetrix" }.count == 2)
         #expect(!list.contains { if case .steps = $0.way { true } else { false } })
     }
 
@@ -171,7 +183,7 @@ struct ConnectorsTests {
     /// runner has no plug-ins while obid lists no connections yet (#444).
     @Test func onlyWhatTheRunnerSays() {
         let list = Connectors.list(mac: [], runner: lab(github: nil))
-        #expect(list.map(\.id) == ["account-tetrix-lab-lab-1", "tetrix-tetrix-lab-lab-1"])
+        #expect(list.map(\.id) == ["account-tetrix-lab-lab-1"])
         #expect(Connectors.list(mac: [], runner: nil).isEmpty)
     }
 
@@ -192,39 +204,14 @@ struct ConnectorsTests {
         #expect(ids(Connectors.groups(list, query: "codex"), "Connected") == ["account-This Mac-c0de"])
         #expect(ids(Connectors.groups(list, query: "  PULL requests "), "Connected") == ["github"])
         let blast = Connectors.groups(list, query: "blast radius")
-        #expect(ids(blast, "Connected") == ["tetrix-This Mac-default", "tetrix-tetrix-lab-lab-1"])
-        #expect(ids(blast, "Available") == ["tetrix-This Mac-c0de"])
+        #expect(blast.isEmpty)
         #expect(ids(Connectors.groups(list, query: "runs jobs lab"), "Connected") == ["account-tetrix-lab-lab-1"])
         #expect(ids(Connectors.groups(list, query: "CLÁUDE"), "Connected").count == 2)
         let all = Connectors.groups(list, query: "")
         #expect(all.map(\.title) == ["Connected", "Available"])
         #expect(all.map(\.items.count).reduce(0, +) == list.count)
-        #expect(ids(all, "Available") == ["account-This Mac-c5r", "tetrix-This Mac-c0de"])
+        #expect(ids(all, "Available") == ["account-This Mac-c5r"])
         #expect(Connectors.groups(list, query: "zoom").isEmpty)
-    }
-
-    /// Tetrix's sign-out runs the tool's own command with the account's home, quoted; Cursor has none.
-    @Test func tetrixSignOutScripts() throws {
-        let claude = try #require(Connectors.tetrixSignOutScript(for: personal.account))
-        #expect(claude.contains("unset CLAUDE_CONFIG_DIR") && claude.contains("Clear authentication")
-                && claude.hasSuffix("\nclaude\necho\necho 'Done? Go back to Oby. You can close this window.'\n"))
-        let codex = try #require(Connectors.tetrixSignOutScript(for: deskree.account))
-        #expect(codex.contains("export CODEX_HOME='/tmp/oby/accounts/c0de'") && codex.contains("\ncodex mcp logout tetrix\n"))
-        #expect(codex.contains(#"echo 'Oby: sign Deskree'\''s agents out of Tetrix.'"#))
-        #expect(Connectors.tetrixSignOutScript(for: cursor.account) == nil)
-    }
-
-    /// Claude Code's sign-out starts with neither the Claude session nor the API credentials a
-    /// Terminal may inherit (AGENTS.md, "Spawning claude"), and keeps everything else.
-    @Test func claudeSignOutDropsInheritedSessionAndProviderVariables() async throws {
-        let script = try #require(Connectors.tetrixSignOutScript(for: personal.account)).replacingOccurrences(of: "\nclaude\n", with: """
-
-        test -z "${CLAUDECODE+x}" && test -z "${CLAUDE_CODE_TEST+x}" && test -z "${ANTHROPIC_API_KEY+x}" && test "$OBY_KEEP" = yes || exit 9
-
-        """)
-        let result = try await Shell.run(["/bin/sh"], input: Data(script.utf8),
-                                         env: ["CLAUDECODE": "nested", "CLAUDE_CODE_TEST": "test", "ANTHROPIC_API_KEY": "test", "OBY_KEEP": "yes"])
-        #expect(result.status == 0)
     }
 
     /// While the runner doesn't answer its rows are left out, and the page says why; the Tetrix
@@ -289,7 +276,8 @@ struct ConnectorsTests {
         let lists = await Connectors.lists(from: failing.runner, name: "tetrix-lab")
         #expect(lists.plugins == nil && lists.connections == nil)
         #expect(lists.problems == ["Couldn't read the plug-ins on tetrix-lab: The runner didn't let this device in.",
-                                   "Couldn't read the connections on tetrix-lab: The runner couldn't read connections.json."])
+                                   "Couldn't read the connections on tetrix-lab: The runner couldn't read connections.json.",
+                                   "Couldn't read Tetrix on tetrix-lab: The runner didn't let this device in."])
     }
 
     /// Disconnecting a runner's connection signs the runner's own sentence, under the connection

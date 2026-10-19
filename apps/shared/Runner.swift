@@ -86,6 +86,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The job this one follows up (obid only): the owner told that one something after it ended,
     /// and its page lists this one (Sangam's design). Nil otherwise.
     var followUpOf: String?
+    /// What its agent asked Tetrix, the session it saved and where the graph fell short, or nil.
+    var tetrix: TetrixJobReport?
 
     /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
     /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
@@ -115,7 +117,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
-             conversation, artifacts, followUpOf
+             conversation, artifacts, followUpOf, tetrix
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -1329,13 +1331,13 @@ nonisolated struct Runner: Sendable {
     private static func hex(_ token: Data) -> String { token.map { String(format: "%02x", $0) }.joined() }
     #endif
 
-    private func call<Answer: Decodable>(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Answer {
+    func call<Answer: Decodable>(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Answer {
         try Self.decoder.decode(Answer.self, from: try await send(method, path, body: body, timeout: timeout))
     }
 
     /// The answer's body, unread: for a call whose answer says nothing the app needs.
     @discardableResult
-    private func send(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Data {
+    func send(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Data {
         var request = URLRequest(url: URL(string: path, relativeTo: base.appending(path: "/"))!)
         request.httpMethod = method
         request.timeoutInterval = timeout

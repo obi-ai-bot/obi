@@ -61,6 +61,9 @@ final class RunnerFeed {
     var briefingInbox: [InboxItem] { inbox.filter { !isConfirm($0) } }
     /// The runner's accounts and their usage, as it last said: the brain tells them too.
     private(set) var accounts: [AccountState] = []
+    /// obid's Tetrix, held once for every agent, as it said on connecting; nil from a runner that
+    /// doesn't hold one. Settings › Connectors reads it again as it signs in.
+    private(set) var tetrix: TetrixStatus?
     /// What each job carries that Engine's Job doesn't read yet (its mode, the permission it waits
     /// on, its question's recommended option and plan), by job id.
     private(set) var extras: [String: RunnerJobExtras] = [:] {
@@ -200,6 +203,14 @@ final class RunnerFeed {
         stagedOptions = options
         connection = .live
     }
+
+    /// Settings › Connectors' lists and obid's Tetrix, and jobs' extras, for the pictures of them.
+    @ObservationIgnored var stagedLists: Connectors.Lists?
+    func stage(tetrix: TetrixStatus?, lists: Connectors.Lists = .init(), extras: [String: RunnerJobExtras] = [:]) {
+        self.tetrix = tetrix
+        stagedLists = lists
+        self.extras.merge(extras) { $1 }
+    }
     #endif
 
     func start() {
@@ -251,6 +262,7 @@ final class RunnerFeed {
         inboxHistory = []
         inboxWords = [:]
         accounts = []
+        tetrix = nil
         models = nil
         extras = [:]
         permissionHistory = []
@@ -289,12 +301,14 @@ final class RunnerFeed {
                         let (items, words) = try await runner.inboxWithWords()
                         // History is an enhancement: an older runner or failed history request must not take chat offline.
                         let history = try? await runner.inboxWithWords(state: "done")
+                        let tetrix = try? await runner.tetrix()
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
                         host = status.runner.host
                         version = status.runner.version
                         clearedAt = status.clearedAt
                         accounts = status.accounts
+                        self.tetrix = tetrix
                         models = status.models
                         cleanup = status.cleanup
                         github = status.github

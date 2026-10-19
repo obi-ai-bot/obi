@@ -393,8 +393,6 @@ struct AccountsSettingsView: View {
                 AccountUsageRow(state: state, payer: state.account.payer) { lift in _ = store.liftReserve(state.account.id, lift) } buttons: {
                     if !state.signedIn {
                         Button("Sign In") { attempt { try store.signIn(state.account) } }.buttonStyle(.set)
-                    } else if state.tetrix == false {
-                        Button("Sign In to Tetrix") { attempt { try store.signIn(state.account, tetrix: true) } }.buttonStyle(.set)
                     }
                     Button("Remove", role: .destructive) { removing = state.account }.buttonStyle(.set)
                 }
@@ -407,7 +405,7 @@ struct AccountsSettingsView: View {
             // in this row's `buttons`, and the add form after this list.
             AccountSections(feed.local ? "Accounts on this Mac" : "Accounts on \(feed.name)", items: feed.accounts, id: \.account.id,
                             usage: \.usage, place: both ? "on \(feed.name)" : nil) { state in
-                AccountUsageRow(state: state) { lift in
+                AccountUsageRow(state: state, tetrixHeld: feed.tetrix != nil) { lift in
                     // The runner's "accounts" event brings the change back.
                     guard let runner = feed.runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
                     _ = try await runner.liftReserve(state.account.id, lift)
@@ -469,6 +467,8 @@ struct AccountUsageRow<Buttons: View>: View {
     let state: AccountState
     /// Who pays for it: this Mac's accounts know; obid's don't say yet.
     var payer = ""
+    /// obid holds Tetrix for every agent: the line says how much its jobs used it, with no sign-in.
+    var tetrixHeld = false
     var lift: @MainActor @Sendable (Bool) async throws -> Void
     @ViewBuilder var buttons: Buttons
 
@@ -500,7 +500,10 @@ struct AccountUsageRow<Buttons: View>: View {
                         if state.isFull(at: now), let until = state.fullUntil {
                             SetAbout("Full until \(Limits.clock(until))", color: Tokens.needs)
                         }
-                        if state.signedIn {
+                        if tetrixHeld {
+                            SetAbout(TetrixJobReport.accountLine(connected: state.tetrix == true, jobs: state.tetrixJobs, used: state.tetrixUsed, there: "in Connectors"),
+                                     color: state.tetrix == true ? Tokens.muted : Tokens.needs)
+                        } else if state.signedIn {
                             SetAbout(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed),
                                      color: state.tetrix == false ? Tokens.needs : Tokens.muted)
                         }
@@ -529,6 +532,10 @@ struct ConnectorsSettingsView: View {
     @State private var confirming: Connector?
     /// The plug-in whose Connect asks for Tetrix's MCP URL, and the URL typed.
     @State private var asking: String?
+    /// "Another Tetrix…" asks for its MCP URL in the same field.
+    @State private var askingTetrix = false
+    /// The Tetrix obid is signing in to, while its sheet waits for Tetrix's page.
+    @State private var tetrixSignIn: TetrixStatus.Server?
     @State private var url = ""
     @State private var busy = false
     /// What went wrong with a row's button, by the row's id, shown under that row.
@@ -557,7 +564,7 @@ struct ConnectorsSettingsView: View {
             Text(typed.isEmpty ? "Nothing is set up yet." : "No connector matches “\(typed)”")
                 .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.horizontal, 16).padding(.bottom, 24)
         }
-        SetAbout("Each tool and Tetrix sign in through their own login: Oby never reads or shows it. Agents reach the runner's connections through Oby, never seeing their secrets.")
+        SetAbout("Each tool signs in through its own login, and Tetrix once for every agent: Oby never reads or shows a login, and Tetrix's stays with \(feed.local ? "obid on this Mac" : feed.name). Agents reach the runner's connections through Oby, never seeing their secrets.")
             .padding(.horizontal, 16)
         .task { await store.refresh() }
         // Back from signing in or out, in Terminal.
@@ -580,6 +587,21 @@ struct ConnectorsSettingsView: View {
             }
             .task { await waitForGitHub() }
         }
+        .sheet(item: $tetrixSignIn) { server in
+            TetrixSignInSheet(server: server, place: feed.name, again: { openTetrixPage(server) }) {
+                tetrixSignIn = nil
+                Task { try? await feed.runner?.cancelTetrixSignIn() }
+            }
+            .task { await waitForTetrix() }
+        }
+        .alert("Another Tetrix", isPresented: $askingTetrix) {
+            TextField("MCP URL", text: $url, prompt: Text("https://"))
+            Button("Connect") { if let server = TetrixStatus.custom(typedURL) { signInToTetrix(server, row: "tetrix") } }
+                .disabled(!TetrixStatus.isServerURL(typedURL))
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Its MCP server's address, starting with https://. You sign in on its own page, once, for every agent on \(feed.name).")
+        }
         .alert("Connect Tetrix", isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } })) {
             TextField("MCP URL", text: $url, prompt: Text("https://"))
             Button("Connect") {
@@ -594,9 +616,14 @@ struct ConnectorsSettingsView: View {
 
     /// This Mac's accounts, and what the runner said about itself while it answers.
     private var list: [Connector] {
-        let runner = feed.runner == nil || feed.connection != .live ? nil : Connectors.RunnerState(
+        #if DEBUG
+        let staged = feed.stagedLists != nil
+        #else
+        let staged = false
+        #endif
+        let runner = (feed.runner == nil && !staged) || feed.connection != .live ? nil : Connectors.RunnerState(
             name: feed.name, local: feed.local, accounts: feed.accounts, github: feed.github, checks: feed.checkRuns,
-            gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections)
+            gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: lists.tetrix ?? feed.tetrix)
         return Connectors.list(mac: store.accounts, runner: runner)
     }
 
@@ -634,7 +661,9 @@ struct ConnectorsSettingsView: View {
                 SetValue("Not confirmed")
             case .available: EmptyView()
             }
-            if case .button(let label, let action) = connector.way {
+            ForEach([connector.way, connector.also].compactMap { way -> (String, Connector.Action)? in
+                if case .button(let label, let action) = way { (label, action) } else { nil }
+            }, id: \.0) { label, action in
                 Button(label) { perform(action, connector) }
                     .buttonStyle(.set)
                     .disabled(busy)
@@ -646,6 +675,9 @@ struct ConnectorsSettingsView: View {
     /// What the runner lists besides its status: obid's plug-ins, the Swift runner's connections.
     /// A list it couldn't read says why; only a 404 means it has none.
     private func load() async {
+        #if DEBUG
+        if let staged = feed.stagedLists { lists = staged; return }
+        #endif
         guard feed.connection == .live, let runner = feed.runner else {
             lists = Connectors.Lists()
             return
@@ -656,10 +688,12 @@ struct ConnectorsSettingsView: View {
     /// A button: what takes something away asks first; signing in or out opens Terminal.
     private func perform(_ action: Connector.Action, _ connector: Connector) {
         switch action {
-        case .removeAccount, .disablePlugin, .disconnect: confirming = connector
+        case .removeAccount, .disablePlugin, .disconnect, .disconnectTetrix: confirming = connector
         case .signIn(let account): attempt(connector.id) { try store.signIn(account) }
-        case .signInTetrix(let account): attempt(connector.id) { try store.signIn(account, tetrix: true) }
-        case .signOutTetrix(let account): attempt(connector.id) { try store.signOutOfTetrix(account) }
+        case .connectTetrix(let server): signInToTetrix(server, row: connector.id)
+        case .connectOtherTetrix:
+            url = ""
+            askingTetrix = true
         case .signInGitHub: signInToGitHub(row: connector.id)
         case .enablePlugin(let id, let needsURL):
             if needsURL {
@@ -676,6 +710,19 @@ struct ConnectorsSettingsView: View {
         switch action {
         case .removeAccount(let account): attempt(connector.id) { try store.remove(account) }
         case .disablePlugin(let id): setPlugin(id, enabled: false, row: connector.id)
+        case .disconnectTetrix:
+            guard let runner = feed.runner else { return }
+            Task {
+                busy = true
+                defer { busy = false }
+                do {
+                    try await runner.disconnectTetrix()
+                    problems[connector.id] = nil
+                } catch {
+                    problems[connector.id] = error.localizedDescription
+                }
+                lists.tetrix = try? await runner.tetrix()
+            }
         case .disconnect(let name):
             guard let runner = feed.runner else { return }
             Task {
@@ -704,6 +751,8 @@ struct ConnectorsSettingsView: View {
             return "\(feed.name) stops it and everything it started, and agents no longer get its tools."
         case .disconnect:
             return "After Touch ID, \(feed.name) forgets it and its agents can't reach it any more. Its secret stays in the runner's vault."
+        case .disconnectTetrix:
+            return "\(feed.local ? "obid" : feed.name) forgets its Tetrix login, and agents on every account stop getting Tetrix's tools."
         default:
             return ""
         }
@@ -721,6 +770,52 @@ struct ConnectorsSettingsView: View {
                 problems[row] = nil
             } catch {
                 problems[row] = error.localizedDescription
+            }
+        }
+    }
+
+    /// obid's sign-in to `server`: Tetrix's own page opens in the browser, and the sheet waits for
+    /// obid to say it's connected. Only a page on that server's host, over https, is ever opened.
+    private func signInToTetrix(_ server: TetrixStatus.Server, row: String) {
+        guard let runner = feed.runner else { return }
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                let signIn = try await runner.startTetrixSignIn(server)
+                guard signIn.opens(for: server) else {
+                    problems[row] = "\(feed.name) answered with a page that isn't \(server.url.host() ?? server.name)'s own sign-in, so Oby opened nothing."
+                    try? await runner.cancelTetrixSignIn()
+                    return
+                }
+                problems[row] = nil
+                tetrixSignIn = server
+                NSWorkspace.shared.open(signIn.url)
+                lists.tetrix = try? await runner.tetrix()
+            } catch {
+                problems[row] = error.localizedDescription
+            }
+        }
+    }
+
+    /// The sheet's Open Again: the sign-in page obid holds now, checked again.
+    private func openTetrixPage(_ server: TetrixStatus.Server) {
+        Task {
+            guard let signIn = try? await feed.runner?.tetrix()?.signIn, signIn.opens(for: server) else { return }
+            NSWorkspace.shared.open(signIn.url)
+        }
+    }
+
+    /// While the sheet is up: asks every 2 seconds whether obid is connected, and closes it once it is
+    /// or the sign-in ended.
+    private func waitForTetrix() async {
+        while tetrixSignIn != nil, !Task.isCancelled, let runner = feed.runner {
+            try? await Task.sleep(for: .seconds(2))
+            guard let status = try? await runner.tetrix() else { continue }
+            if status.connected || status.signIn == nil {
+                lists.tetrix = status
+                if !status.connected { problems["tetrix"] = status.error ?? "Tetrix's sign-in ended without signing in." }
+                tetrixSignIn = nil
             }
         }
     }
@@ -771,6 +866,37 @@ struct ConnectorsSettingsView: View {
         } catch {
             problems[row] = error.localizedDescription
         }
+    }
+}
+
+/// obid signing in to Tetrix, waiting for the person on Tetrix's page: the page again; Cancel.
+/// Not in Sangam's design (his Knowledge modal says "Signing in…" on its button); kept as GitHub's sheet.
+private struct TetrixSignInSheet: View {
+    let server: TetrixStatus.Server
+    let place: String
+    let again: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Sign in to Tetrix").font(Tokens.font(17, .semibold)).foregroundStyle(Tokens.ink)
+            Text("\(server.name)'s page opened in your browser. Sign in there; every agent on every account uses it after that.")
+                .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).multilineTextAlignment(.center)
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Waiting for Tetrix").font(Tokens.font(13)).foregroundStyle(Tokens.muted)
+            }
+            HStack(spacing: 8) {
+                Button("Cancel", action: cancel).buttonStyle(.set).keyboardShortcut(.cancelAction)
+                Button("Open the Page Again", action: again).buttonStyle(.set)
+            }
+            .padding(.top, 6)
+            Text("\(place == Connectors.thisMac ? "obid on this Mac" : place) keeps the login. Oby only learns that it worked.")
+                .font(Tokens.font(12)).foregroundStyle(Tokens.muted).multilineTextAlignment(.center)
+        }
+        .padding(26)
+        .frame(width: 400)
+        .background(Tokens.surface)
     }
 }
 
@@ -1023,27 +1149,13 @@ extension AccountState {
 }
 
 extension AccountStore {
-    /// Opens Terminal on the tool's own login, with the account's home in the environment; with
-    /// `tetrix`, on the tool's own login to its Tetrix MCP server (Engine/TetrixUse.swift).
-    func signIn(_ account: Account, tetrix: Bool = false) throws {
-        let script = URL(filePath: account.home ?? homes.path).appending(path: "sign-in-\(tetrix ? "tetrix-" : "")\(account.id).command")
+    /// Opens Terminal on the tool's own login, with the account's home in the environment.
+    func signIn(_ account: Account) throws {
+        let script = URL(filePath: account.home ?? homes.path).appending(path: "sign-in-\(account.id).command")
         try FileManager.default.createDirectory(at: script.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try (tetrix ? TetrixUse.signInScript(for: account) : Self.signInScript(for: account)).write(to: script, atomically: true, encoding: .utf8)
+        try Self.signInScript(for: account).write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
         guard NSWorkspace.shared.open(script) else { throw Shell.Failure(message: "Couldn't open Terminal to sign in.") }
-    }
-
-    /// Opens Terminal on the tool's own sign-out from its Tetrix MCP server, with the account's
-    /// home in the environment (`Connectors.tetrixSignOutScript`).
-    func signOutOfTetrix(_ account: Account) throws {
-        let script = URL(filePath: account.home ?? homes.path).appending(path: "sign-out-tetrix-\(account.id).command")
-        try FileManager.default.createDirectory(at: script.deletingLastPathComponent(), withIntermediateDirectories: true)
-        guard let text = Connectors.tetrixSignOutScript(for: account) else {
-            throw Shell.Failure(message: "Oby can't sign \(Usage.tool(account.agent)) out of Tetrix.")
-        }
-        try text.write(to: script, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
-        guard NSWorkspace.shared.open(script) else { throw Shell.Failure(message: "Couldn't open Terminal to sign out.") }
     }
 }
 
