@@ -641,12 +641,21 @@ fn a_failure_the_task_asked_for_ends_the_rounds() {
         .unwrap()
         .to_owned();
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "done", "{job}");
+    // No other round, and nothing goes out: a check that fails isn't a pass, whatever the agent
+    // says (AGENTS.md: only checks that pass publish).
+    assert_eq!(job["status"], "failed", "{job}");
     assert_eq!(job["round"], 2);
     assert_eq!(job["limit"], Value::Null);
-    assert_eq!(job["commits"], 1);
+    assert_eq!(job["pushed"], Value::Null, "{job}");
+    assert_eq!(job["published"], Value::Null, "{job}");
+    let summary = job["summary"].as_str().unwrap();
+    assert!(summary.contains("nothing was pushed"), "{job}");
+    // The agent's own words stay with the round.
+    let rounds = job["summaries"].as_array().unwrap();
     assert!(
-        job["summary"]
+        rounds
+            .last()
+            .unwrap()
             .as_str()
             .unwrap()
             .starts_with("FAILS AS ASKED"),

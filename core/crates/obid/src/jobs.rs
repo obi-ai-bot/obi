@@ -3719,8 +3719,15 @@ impl Jobs {
                         return Ok(());
                     }
                     // A failure the agent says the task asked for (a test meant to fail) ends the
-                    // rounds as a pass would: another round would undo what the owner asked.
-                    if run.passed || said.trim_start().starts_with(FAILS_AS_ASKED) {
+                    // rounds: another round would undo what the owner asked. It isn't a pass, so
+                    // nothing goes out: only checks that pass publish (AGENTS.md), whatever the
+                    // agent says. The owner publishes it by hand if that's what they want.
+                    if !run.passed && said.trim_start().starts_with(FAILS_AS_ASKED) {
+                        return Err(format!(
+                            "`{command}` fails, as the agent says the task asked for, so nothing was pushed. The branch is kept: publish it by hand if that's right."
+                        ));
+                    }
+                    if run.passed {
                         // The last turn, unless the owner's words came meanwhile: those are the next.
                         let words = self.last_turn(id);
                         if words.is_empty() {
