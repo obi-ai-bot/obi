@@ -99,7 +99,7 @@ do {
             say("event inbox \(item.id)")
         case .accounts(let accounts):
             say("event accounts \(accounts.count)")
-        case .check, .turn, .step, .conversation, .delta, .artifact:
+        case .check, .turn, .step, .conversation, .delta, .artifact, .routine:
             say("event other")
         }
     }

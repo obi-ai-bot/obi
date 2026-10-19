@@ -243,7 +243,7 @@ fn oby_dispatch_starts_a_job_whose_card_is_on_the_turn() {
     let conversation = tools.body["conversation"].as_str().unwrap().to_owned();
     assert_eq!(
         tools.body["text"],
-        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_inbox,oby_answer,oby_conversations,oby_artifact,oby_read,oby_search,oby_list",
+        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_inbox,oby_answer,oby_routines,oby_routine,oby_change_routine,oby_conversations,oby_artifact,oby_read,oby_search,oby_list",
         "{}",
         tools.text
     );
@@ -349,6 +349,92 @@ fn owner_only_answers_become_confirm_items() {
             .any(|i| i["id"] == item && i["done"].is_null()),
         "{}",
         inbox.text
+    );
+}
+
+/// A routine said in chat (#395) is only proposed: a confirm item whose Confirm, the owner's own,
+/// saves it. Then the owner's words pause it; after the turn read the repositories, they don't.
+#[test]
+fn a_routine_said_in_chat_waits_for_the_owners_confirm() {
+    let (_folder, obid) = obid("harness-routine", true);
+    let routine = r#"OBY oby_routine {"name": "Readme check", "repo": "obi-e2e/fixture-app", "task": "Say what the README covers.", "kind": "investigate", "schedule": {"every": "weekdays", "at": "09:00"}, "zone": "America/Sao_Paulo"}"#;
+    let answer = said(&obid, json!({"said": routine, "new": true}));
+    let conversation = answer.body["conversation"].as_str().unwrap().to_owned();
+    assert!(
+        answer.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("waits for the owner's OK"),
+        "{}",
+        answer.text
+    );
+    let routines = call(&obid, "GET", "/v1/routines", None);
+    assert_eq!(
+        routines.body,
+        json!([]),
+        "nothing saved yet: {}",
+        routines.text
+    );
+    let item = inbox(&obid)
+        .into_iter()
+        .find(|i| i["kind"] == "confirm")
+        .expect("a confirm item");
+    assert_eq!(
+        item["title"],
+        "Make the routine Readme check (Weekdays at 9:00, investigate fixture-app)"
+    );
+    let confirmed = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
+        Some(&json!({"answer": "Confirm"})),
+    );
+    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    let routines = call(&obid, "GET", "/v1/routines", None).body;
+    let made = &routines[0];
+    assert_eq!(made["name"], "Readme check", "{routines}");
+    assert_eq!(made["createdBy"], "chat");
+    assert_eq!(made["conversation"], conversation.as_str());
+    let id = made["id"].as_str().unwrap().to_owned();
+
+    let listed = said(
+        &obid,
+        json!({"said": "OBY oby_routines {}", "conversation": conversation}),
+    );
+    assert!(
+        listed.body["text"].as_str().unwrap().contains(&id),
+        "{}",
+        listed.text
+    );
+    let pause = format!(r#"OBY oby_change_routine {{"id": "{id}", "action": "pause"}}"#);
+    let paused = said(&obid, json!({"said": pause, "conversation": conversation}));
+    assert!(
+        paused.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("Paused Readme check"),
+        "{}",
+        paused.text
+    );
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/routines/{id}"), None).body["enabled"],
+        false
+    );
+
+    // After reading what others wrote, the turn's words change no routine.
+    let resume = format!(r#"READREPO OBY oby_change_routine {{"id": "{id}", "action": "resume"}}"#);
+    let refused = said(&obid, json!({"said": resume, "new": true}));
+    assert!(
+        refused.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("only when the owner says it again"),
+        "{}",
+        refused.text
+    );
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/routines/{id}"), None).body["enabled"],
+        false
     );
 }
 
