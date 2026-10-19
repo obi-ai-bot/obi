@@ -261,23 +261,31 @@ pub fn has_login(remote: &str) -> bool {
 }
 
 /// The pull request's title in Conventional Commits form, ending with `(#issue)` when there is
-/// one: the first commit subject already in that form, else the job's kind and the agent's first
-/// line. At most 100 characters.
+/// one: the first commit subject already in that form that changes the code (`fix`, `feat`,
+/// `perf` or `refactor`, the job's own kind first), else the first in that form, else the job's
+/// kind and the agent's first line. At most 100 characters.
 pub fn title(job: &Job, subjects: &[String]) -> String {
     let conventional =
-        regex::Regex::new(r"^[a-z]+(\([^()]+\))?!?: \S.*$").expect("the title pattern compiles");
-    let mut title = subjects
+        regex::Regex::new(r"^([a-z]+)(\([^()]+\))?!?: \S.*$").expect("the title pattern compiles");
+    let kind = match job.kind.as_str() {
+        "build" => "feat",
+        "fix" => "fix",
+        "test" => "test",
+        _ => "chore",
+    };
+    let typed: Vec<(&str, &str)> = subjects
         .iter()
         .map(|s| s.trim())
-        .find(|s| conventional.is_match(s))
-        .map(str::to_owned);
+        .filter_map(|s| Some((conventional.captures(s)?.get(1)?.as_str(), s)))
+        .collect();
+    let changes = |t: &str| ["fix", "feat", "perf", "refactor"].contains(&t);
+    let mut title = typed
+        .iter()
+        .find(|(t, _)| *t == kind && changes(t))
+        .or_else(|| typed.iter().find(|(t, _)| changes(t)))
+        .or(typed.first())
+        .map(|(_, s)| (*s).to_owned());
     if title.is_none() {
-        let kind = match job.kind.as_str() {
-            "build" => "feat",
-            "fix" => "fix",
-            "test" => "test",
-            _ => "chore",
-        };
         let said = job
             .summaries
             .as_ref()
