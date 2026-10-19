@@ -145,12 +145,19 @@ struct JobPageTests {
         #expect(try TranscriptEntry.list(Data(#"{"entries": [{"n": 4, "kind": "you"}, 5]}"#.utf8)).map(\.n) == [4])
     }
 
-    /// The log keeps only what's after its last line, and at most its latest `most` lines.
+    /// The log keeps each line once, by its `n`, in order, and at most its latest `most` lines.
     @Test func theSessionLogKeepsTheLatestLines() {
         func lines(_ range: ClosedRange<Int>) -> [TranscriptEntry] { range.map { TranscriptEntry(n: $0, kind: "tool") } }
         let first = SessionLog.kept([], adding: lines(1...3))
         #expect(first.entries.map(\.n) == [1, 2, 3] && !first.trimmed)
         #expect(SessionLog.kept(first.entries, adding: lines(2...5)).entries.map(\.n) == [1, 2, 3, 4, 5])
+        // obid sends a call again under its `n` when it ends: it takes the running one's place.
+        let running = TranscriptEntry(n: 3, kind: "tool", tool: "Bash", summary: "cargo test", state: "running")
+        let ended = TranscriptEntry(n: 3, kind: "tool", tool: "Bash", summary: "cargo test", state: "done", seconds: 41, exit: 0)
+        let updated = SessionLog.kept(lines(1...2) + [running], adding: [ended, TranscriptEntry(n: 4, kind: "said")])
+        #expect(updated.entries.map(\.n) == [1, 2, 3, 4])
+        #expect(updated.entries[2] == ended)
+        #expect(SessionLog.kept(lines(1...2), adding: lines(4...4) + lines(3...3)).entries.map(\.n) == [1, 2, 3, 4])
         let many = SessionLog.kept(lines(1...SessionLog.most), adding: lines(SessionLog.most + 1...SessionLog.most + 10))
         #expect(many.trimmed && many.entries.count == SessionLog.most && many.entries.first?.n == 11)
     }

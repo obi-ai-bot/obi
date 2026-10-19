@@ -678,8 +678,8 @@ nonisolated enum FailedChoice: String {
 }
 
 /// The raw session (`.raw`): every step the agent took, as it sent them, newest at the foot, with
-/// tabs by kind. While the job runs it asks obid for what's new every two seconds, so the job keeps
-/// updating behind it; once the job ends, or if the runner has no session for it, it asks no more.
+/// tabs by kind. While the job runs it asks obid for what came or changed since its last line every
+/// two seconds, putting each in place by its `n`, so the job keeps updating behind it; once the job ends, or if the runner has no session for it, it asks no more.
 /// It keeps the latest `most` lines, and follows the foot only while you're at it.
 struct SessionLog: View {
     let agent: String
@@ -794,10 +794,15 @@ struct SessionLog: View {
         trimmed = trimmed || cut
     }
 
-    /// What the log keeps of `new` after `kept`: only lines after the last it has, at most `most`.
+    /// What the log keeps once `new` comes: each entry by its `n`, a new one added and one obid sends
+    /// again (a call that has ended since) put in its place, in `n` order, at most the latest `most`.
     static func kept(_ kept: [TranscriptEntry], adding new: [TranscriptEntry]) -> (entries: [TranscriptEntry], trimmed: Bool) {
-        let last = kept.last?.n ?? -1
-        let all = kept + new.filter { $0.n > last }
+        var all = kept
+        var at = Dictionary(kept.enumerated().map { ($1.n, $0) }, uniquingKeysWith: { $1 })
+        for entry in new {
+            if let index = at[entry.n] { all[index] = entry } else { at[entry.n] = all.count; all.append(entry) }
+        }
+        if !zip(all, all.dropFirst()).allSatisfy({ $0.n < $1.n }) { all.sort { $0.n < $1.n } }
         return all.count > most ? (Array(all.suffix(most)), true) : (all, false)
     }
 }
