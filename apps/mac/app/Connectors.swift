@@ -26,6 +26,10 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
         case connectTetrix(TetrixStatus.Server)
         /// Asks for another Tetrix's MCP address, then connects it as `connectTetrix` does.
         case connectOtherTetrix
+        /// The sign-in under way: its page again, after the same checks (`TetrixSignIn.opens`).
+        case reopenTetrixSignIn
+        /// `DELETE /v1/tetrix/sign-in`: ends the sign-in under way.
+        case cancelTetrixSignIn
         /// `DELETE /v1/tetrix`: obid forgets its Tetrix login.
         case disconnectTetrix
         /// `PUT /v1/obid/plugins/{id}` on; `needsURL` asks for Tetrix's MCP URL first.
@@ -149,7 +153,7 @@ nonisolated enum Connectors {
         // obid's own Tetrix replaces its older plug-in of the same name: one Tetrix row.
         let plugins = (runner?.plugins ?? []).filter { runner?.tetrix == nil || $0.id != "tetrix" }
         if let runner { list += plugins.map { plugin($0, place: runner.name) } }
-        if let runner, let status = runner.tetrix { list.append(tetrix(status, place: runner.name)) }
+        if let runner, let status = runner.tetrix { list.append(tetrix(status, place: runner.name, local: runner.local)) }
         if let runner, let login = runner.gitHubLogin { list.append(gitHub(login, place: runner.name)) }
         else if let runner, let github = runner.github { list.append(gitHub(github, checks: runner.checks, place: runner.name)) }
         if let runner { list += (runner.connections ?? []).map { connection($0, place: runner.name) } }
@@ -182,21 +186,24 @@ nonisolated enum Connectors {
 
     /// Tetrix, held by obid for every agent of every account: one sign-in, on Tetrix's own page.
     /// Not connected, it offers the first server obid knows ("Tetrix Dogfood") and another one.
-    static func tetrix(_ status: TetrixStatus, place: String) -> Connector {
-        let symbol = "point.3.connected.trianglepath.dotted"
+    /// Only obid on this Mac gets buttons: the sign-in comes back to 127.0.0.1 on obid's own machine,
+    /// so a remote runner's is done there.
+    static func tetrix(_ status: TetrixStatus, place: String, local: Bool) -> Connector {
+        let row = { (state: Connector.State, way: Connector.Way?, also: Connector.Way?) in
+            Connector(id: "tetrix", name: "Tetrix", about: tetrixAbout, place: place, how: status.how, state: state,
+                      way: way, also: also, symbol: "point.3.connected.trianglepath.dotted")
+        }
+        let there = local ? nil : Connector.Way.steps("Connect or disconnect it on \(place) itself, with Oby there: Tetrix's sign-in comes back to that machine.")
         switch status.state {
         case .connected:
-            return Connector(id: "tetrix", name: "Tetrix", about: tetrixAbout, place: place, how: status.how,
-                             state: .connected, way: .button("Disconnect…", .disconnectTetrix), symbol: symbol)
+            return row(.connected, there ?? .button("Disconnect…", .disconnectTetrix), nil)
         case .signingIn:
-            return Connector(id: "tetrix", name: "Tetrix", about: tetrixAbout, place: place, how: status.how,
-                             state: .unconfirmed, way: nil, symbol: symbol)
+            return row(.unconfirmed, there ?? .button("Open the Page Again", .reopenTetrixSignIn), local ? .button("Cancel", .cancelTetrixSignIn) : nil)
         case .available:
             let first = status.presets.first
-            return Connector(id: "tetrix", name: first?.name ?? "Tetrix", about: tetrixAbout, place: place, how: status.how,
-                             state: status.error == nil ? .available : .broken,
-                             way: first.map { .button("Connect", .connectTetrix($0)) } ?? .button("Connect…", .connectOtherTetrix),
-                             also: first == nil ? nil : .button("Another Tetrix…", .connectOtherTetrix), symbol: symbol)
+            return row(status.error == nil ? .available : .broken,
+                       there ?? first.map { .button("Connect", .connectTetrix($0)) } ?? .button("Connect…", .connectOtherTetrix),
+                       local && first != nil ? .button("Another Tetrix…", .connectOtherTetrix) : nil)
         }
     }
 

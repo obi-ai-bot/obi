@@ -77,7 +77,9 @@ nonisolated struct TetrixStatus: Decodable, Equatable, Sendable {
         switch state {
         case .connected(let server): "Signed in to \(server.name). Every agent on every account uses it."
         case .signingIn(let server): "Signing in to \(server.name) in your browser…"
-        case .available: error ?? "Every agent on every account uses it. You sign in once, on Tetrix's own page."
+        case .available:
+            error ?? (presets.first.map { "\($0.name): every agent on every account uses it. You sign in once, on Tetrix's own page." }
+                      ?? "Every agent on every account uses it. You sign in once, on Tetrix's own page.")
         }
     }
 
@@ -105,12 +107,13 @@ nonisolated struct TetrixSignIn: Codable, Equatable, Sendable {
     var expiresAt: Date?
     var server: URL?
 
-    /// Whether the Mac may open it: https with no login in it, on the host of the authorization
-    /// server obid names. Anything else is never opened; the sheet shows the person which host it is.
+    /// Whether the Mac may open it: https with no login in it, on the host and port of the
+    /// authorization server obid names. Anything else is never opened; the sheet shows the person
+    /// which host it is.
     var opens: Bool {
-        guard url.scheme?.lowercased() == "https", url.user() == nil, url.password() == nil, let host,
-              server?.scheme?.lowercased() == "https" else { return false }
-        return server?.host()?.lowercased() == host
+        guard url.scheme?.lowercased() == "https", url.user() == nil, url.password() == nil, let host, let server,
+              server.scheme?.lowercased() == "https" else { return false }
+        return server.host()?.lowercased() == host && server.port == url.port
     }
 
     /// The host the sign-in page is on, as the sheet shows it.
@@ -187,15 +190,17 @@ nonisolated struct TetrixJobReport: Codable, Equatable, Sendable {
         (self.connected, self.calls, self.context, self.saved, self.gaps) = (connected, calls, context, saved, gaps)
     }
 
+    /// Never fails: a `tetrix` that isn't an object reads as an empty report, so it can't take the
+    /// job, or the iPhone's whole list, down with it.
     init(from decoder: any Decoder) throws {
-        let keys = try decoder.container(keyedBy: Keys.self)
-        connected = try? keys.decodeIfPresent(Bool.self, forKey: .connected)
-        calls = (try? keys.decodeIfPresent([String: Int].self, forKey: .calls)) ?? [:]
-        context = try? keys.decodeIfPresent(Bool.self, forKey: .context)
-        gaps = try? keys.decodeIfPresent(Gaps.self, forKey: .gaps)
+        let keys = try? decoder.container(keyedBy: Keys.self)
+        connected = try? keys?.decodeIfPresent(Bool.self, forKey: .connected)
+        calls = (try? keys?.decodeIfPresent([String: Int].self, forKey: .calls)) ?? [:]
+        context = try? keys?.decodeIfPresent(Bool.self, forKey: .context)
+        gaps = try? keys?.decodeIfPresent(Gaps.self, forKey: .gaps)
         // A runner without `saved` still names the sessions its commits were stamped with.
-        saved = (try? keys.decodeIfPresent([String].self, forKey: .saved))
-            ?? (try? keys.decodeIfPresent(Stamps.self, forKey: .stamps))?.sessions ?? []
+        saved = (try? keys?.decodeIfPresent([String].self, forKey: .saved))
+            ?? (try? keys?.decodeIfPresent(Stamps.self, forKey: .stamps))?.sessions ?? []
     }
 
     func encode(to encoder: any Encoder) throws {

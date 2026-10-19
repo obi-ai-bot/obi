@@ -39,6 +39,10 @@ struct TetrixConnectTests {
         #expect(!page("https://evil.example.com/authorize", "https://auth.example.com"))
         #expect(!page("https://auth.example.com.evil.dev/authorize", "https://auth.example.com"))
         #expect(!page("https://auth.example.com/a", "http://auth.example.com"))
+        // The port too: both none, or the same.
+        #expect(page("https://auth.example.com:8443/a", "https://auth.example.com:8443/realm"))
+        #expect(!page("https://auth.example.com:8444/a", "https://auth.example.com:8443"))
+        #expect(!page("https://auth.example.com:8443/a", "https://auth.example.com"))
         #expect(!page("http://auth.example.com/authorize", nil))
         #expect(!page("https://user:pass@auth.example.com/authorize", nil))
         #expect(!page("file:///etc/passwd", nil) && !page("javascript:alert(1)", nil))
@@ -76,11 +80,21 @@ struct TetrixConnectTests {
                                        "code_impact failed: Tetrix said: timeout"])
         #expect(report.gaps?.sentLine == "Sent to Tetrix as session c41d")
         #expect(extras["j2"]?.tetrix?.saved == ["old"] && extras["j2"]?.tetrix?.callsLine == "Had Tetrix, but didn't ask it anything")
-        #expect(extras["j3"] != nil && extras["j3"]?.tetrix == nil)
+        #expect(extras["j3"]?.tetrix == TetrixJobReport() && extras["j3"]?.tetrix?.isEmpty == true)
         let notSent = try #require(extras["j4"]?.tetrix)
         #expect(notSent.callsLine == "Asked Tetrix once: get_entity 1" && notSent.gaps?.isEmpty == true)
         #expect(notSent.gaps?.sentLine == "Not sent to Tetrix: The secret scan found something.")
         #expect(TetrixJobReport().isEmpty && !report.isEmpty)
+    }
+
+    /// obid's `tetrix` event keeps the Mac's status current (a Disconnect elsewhere, a sign-in ending).
+    @Test func followsTheTetrixEvent() {
+        var parser = EventParser()
+        var events: [RunnerEvent] = []
+        for line in ["event: tetrix", #"data: {"connected": false, "url": "https://mcp.tetrix.dev/mcp", "preset": "dogfood", "presets": []}"#, ""] {
+            if let event = parser.feed(line) { events.append(event) }
+        }
+        #expect(events == [.tetrix(TetrixStatus(url: dogfood.url, preset: "dogfood"))])
     }
 
     /// Each account's line once obid holds Tetrix: how many of its jobs used it, or where to connect it.

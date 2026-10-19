@@ -14,6 +14,9 @@ struct TetrixConnectTests {
 
         let odd = #"{"id": "j", "request": "r", "agent": "claude", "account": "a", "repo": "o/r", "branch": "b", "kind": "fix", "task": "t", "status": "done", "step": "", "summary": "", "created": "2026-10-18T10:00:00Z", "tetrix": {"calls": "many", "gaps": 3}}"#
         #expect(try Runner.decoder.decode(Job.self, from: Data(odd.utf8)).tetrix == TetrixJobReport())
+        // Not an object at all: the job, and so the list, still decodes.
+        let text = odd.replacingOccurrences(of: #"{"calls": "many", "gaps": 3}"#, with: #""not an object""#)
+        #expect(try Runner.decoder.decode([Job].self, from: Data("[\(text)]".utf8)).first?.tetrix == TetrixJobReport())
         #expect(try Runner.decoder.decode(Job.self, from: Runner.encoder.encode(done)).tetrix == report)
     }
 

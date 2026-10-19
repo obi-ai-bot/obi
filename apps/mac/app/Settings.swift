@@ -405,7 +405,7 @@ struct AccountsSettingsView: View {
             // in this row's `buttons`, and the add form after this list.
             AccountSections(feed.local ? "Accounts on this Mac" : "Accounts on \(feed.name)", items: feed.accounts, id: \.account.id,
                             usage: \.usage, place: both ? "on \(feed.name)" : nil) { state in
-                AccountUsageRow(state: state, tetrixHeld: feed.tetrix != nil) { lift in
+                AccountUsageRow(state: state) { lift in
                     // The runner's "accounts" event brings the change back.
                     guard let runner = feed.runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
                     _ = try await runner.liftReserve(state.account.id, lift)
@@ -467,8 +467,6 @@ struct AccountUsageRow<Buttons: View>: View {
     let state: AccountState
     /// Who pays for it: this Mac's accounts know; obid's don't say yet.
     var payer = ""
-    /// obid holds Tetrix for every agent: the line says how much its jobs used it, with no sign-in.
-    var tetrixHeld = false
     var lift: @MainActor @Sendable (Bool) async throws -> Void
     @ViewBuilder var buttons: Buttons
 
@@ -500,12 +498,10 @@ struct AccountUsageRow<Buttons: View>: View {
                         if state.isFull(at: now), let until = state.fullUntil {
                             SetAbout("Full until \(Limits.clock(until))", color: Tokens.needs)
                         }
-                        if tetrixHeld {
+                        // One Tetrix for every agent (Connectors): how much its jobs used it, or where to connect it.
+                        if state.signedIn {
                             SetAbout(TetrixJobReport.accountLine(connected: state.tetrix == true, jobs: state.tetrixJobs, used: state.tetrixUsed, there: "in Connectors"),
                                      color: state.tetrix == true ? Tokens.muted : Tokens.needs)
-                        } else if state.signedIn {
-                            SetAbout(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed),
-                                     color: state.tetrix == false ? Tokens.needs : Tokens.muted)
                         }
                     }
                 }
@@ -623,7 +619,7 @@ struct ConnectorsSettingsView: View {
         #endif
         let runner = (feed.runner == nil && !staged) || feed.connection != .live ? nil : Connectors.RunnerState(
             name: feed.name, local: feed.local, accounts: feed.accounts, github: feed.github, checks: feed.checkRuns,
-            gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: lists.tetrix ?? feed.tetrix)
+            gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: feed.tetrix)
         return Connectors.list(mac: store.accounts, runner: runner)
     }
 
@@ -678,6 +674,7 @@ struct ConnectorsSettingsView: View {
         #if DEBUG
         if let staged = feed.stagedLists { lists = staged; return }
         #endif
+        defer { if let status = lists.tetrix { feed.tetrix = status } }
         guard feed.connection == .live, let runner = feed.runner else {
             lists = Connectors.Lists()
             return
@@ -694,6 +691,8 @@ struct ConnectorsSettingsView: View {
         case .connectOtherTetrix:
             url = ""
             askingTetrix = true
+        case .reopenTetrixSignIn: reopenTetrixSignIn(row: connector.id)
+        case .cancelTetrixSignIn: cancelTetrixSignIn(row: connector.id)
         case .signInGitHub: signInToGitHub(row: connector.id)
         case .enablePlugin(let id, let needsURL):
             if needsURL {
@@ -711,17 +710,19 @@ struct ConnectorsSettingsView: View {
         case .removeAccount(let account): attempt(connector.id) { try store.remove(account) }
         case .disablePlugin(let id): setPlugin(id, enabled: false, row: connector.id)
         case .disconnectTetrix:
-            guard let runner = feed.runner else { return }
+            guard feed.local, let runner = feed.runner else { return }
             Task {
                 busy = true
                 defer { busy = false }
                 do {
                     try await runner.disconnectTetrix()
                     problems[connector.id] = nil
+                    // Signed out (204): never left showing Connected when the status can't be read.
+                    feed.tetrix?.connected = false
                 } catch {
                     problems[connector.id] = error.localizedDescription
                 }
-                lists.tetrix = try? await runner.tetrix()
+                if let status = try? await runner.tetrix() { feed.tetrix = status }
             }
         case .disconnect(let name):
             guard let runner = feed.runner else { return }
@@ -777,7 +778,7 @@ struct ConnectorsSettingsView: View {
     /// obid's sign-in to `server`: Tetrix's own page opens in the browser, and the sheet waits for
     /// obid to say it's connected. Only a page on that server's host, over https, is ever opened.
     private func signInToTetrix(_ server: TetrixStatus.Server, row: String) {
-        guard let runner = feed.runner else { return }
+        guard feed.local, let runner = feed.runner else { return }
         Task {
             busy = true
             defer { busy = false }
@@ -791,7 +792,7 @@ struct ConnectorsSettingsView: View {
                 problems[row] = nil
                 tetrixSignIn = ShownTetrixSignIn(server: server, signIn: signIn)
                 NSWorkspace.shared.open(signIn.url)
-                lists.tetrix = try? await runner.tetrix()
+                if let status = try? await runner.tetrix() { feed.tetrix = status }
             } catch {
                 problems[row] = error.localizedDescription
             }
@@ -807,6 +808,40 @@ struct ConnectorsSettingsView: View {
         }
     }
 
+    /// The row's Open the Page Again, once the sheet is gone: obid's sign-in under way, after the
+    /// same checks, with its sheet again.
+    private func reopenTetrixSignIn(row: String) {
+        guard feed.local, let runner = feed.runner else { return }
+        Task {
+            guard let status = try? await runner.tetrix() else { return }
+            feed.tetrix = status
+            guard let signIn = status.signIn, let server = status.server else { return }
+            guard signIn.opens else {
+                problems[row] = "\(feed.name) answered with a sign-in page that isn't https on Tetrix's sign-in server, so Oby opened nothing."
+                return
+            }
+            problems[row] = nil
+            tetrixSignIn = ShownTetrixSignIn(server: server, signIn: signIn)
+            NSWorkspace.shared.open(signIn.url)
+        }
+    }
+
+    /// The row's Cancel: ends obid's sign-in under way.
+    private func cancelTetrixSignIn(row: String) {
+        guard feed.local, let runner = feed.runner else { return }
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                try await runner.cancelTetrixSignIn()
+                problems[row] = nil
+            } catch {
+                problems[row] = error.localizedDescription
+            }
+            if let status = try? await runner.tetrix() { feed.tetrix = status }
+        }
+    }
+
     /// While the sheet is up: asks every 2 seconds whether obid is connected, and closes it once it is
     /// or the sign-in ended.
     private func waitForTetrix() async {
@@ -814,7 +849,7 @@ struct ConnectorsSettingsView: View {
             try? await Task.sleep(for: .seconds(2))
             guard let status = try? await runner.tetrix() else { continue }
             if status.connected || status.signIn == nil {
-                lists.tetrix = status
+                feed.tetrix = status
                 if !status.connected { problems["tetrix"] = status.error ?? "Tetrix's sign-in ended without signing in." }
                 tetrixSignIn = nil
             }

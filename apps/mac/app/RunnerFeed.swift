@@ -61,9 +61,9 @@ final class RunnerFeed {
     var briefingInbox: [InboxItem] { inbox.filter { !isConfirm($0) } }
     /// The runner's accounts and their usage, as it last said: the brain tells them too.
     private(set) var accounts: [AccountState] = []
-    /// obid's Tetrix, held once for every agent, as it said on connecting; nil from a runner that
-    /// doesn't hold one. Settings › Connectors reads it again as it signs in.
-    private(set) var tetrix: TetrixStatus?
+    /// obid's Tetrix, held once for every agent: read on connecting, then kept by its `tetrix`
+    /// event and by Settings › Connectors' own reads; nil from a runner that doesn't hold one.
+    var tetrix: TetrixStatus?
     /// What each job carries that Engine's Job doesn't read yet (its mode, the permission it waits
     /// on, its question's recommended option and plan), by job id.
     private(set) var extras: [String: RunnerJobExtras] = [:] {
@@ -342,6 +342,7 @@ final class RunnerFeed {
                         apply(item, words: words)
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
+                    case .tetrix(let status): tetrix = status
                     // obid names each turn's, step's and word's conversation: the window shows one (#493).
                     case .turn(let turn, let extras): if conversations.shows(turn.conversation) { conversation.apply(turn, extras) }
                     case .step(let step): if conversations.shows(step.conversation) { conversation.apply(step) }
