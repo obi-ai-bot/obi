@@ -97,7 +97,8 @@ fn fake_tetrix() -> (String, Arc<Mutex<Seen>>) {
                 .push((method.clone(), target.clone(), auth.clone(), body.clone()));
             let issuer = format!("{origin}/auth");
             match (method.as_str(), path.as_str()) {
-                ("GET", "/.well-known/oauth-protected-resource/mcp") => reply(
+                // Only where its 401 says: obid must read the challenge.
+                ("GET", "/meta/tetrix-resource") => reply(
                     &mut stream,
                     "200 OK",
                     "application/json",
@@ -175,7 +176,12 @@ fn fake_tetrix() -> (String, Arc<Mutex<Seen>>) {
                 ("POST", "/auth/revoke") => reply(&mut stream, "200 OK", "application/json", "{}"),
                 ("POST", "/mcp") => {
                     if seen.access.is_empty() || auth != format!("Bearer {}", seen.access) {
-                        reply(&mut stream, "401 Unauthorized", "application/json", "{}");
+                        reply(
+                            &mut stream,
+                            &format!("401 Unauthorized\r\nWWW-Authenticate: Bearer error=\"invalid_token\", resource_metadata=\"{origin}/meta/tetrix-resource\""),
+                            "application/json",
+                            "{}",
+                        );
                         continue;
                     }
                     let message: Value = serde_json::from_str(&body).unwrap_or(Value::Null);

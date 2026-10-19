@@ -73,7 +73,8 @@ pub struct Preset {
     pub client: Option<&'static str>,
 }
 
-// ponytail: the URL from #28; the owner confirms it (and a registered client, if any) later.
+// Dogfood, checked live on 2026-10-18: its 401 names its metadata, Keycloak (`/auth/realms/tetrix`)
+// signs in, and it offers dynamic registration, S256 and `offline_access`.
 pub const PRESETS: &[Preset] = &[Preset {
     id: "dogfood",
     name: "Tetrix Dogfood",
@@ -330,15 +331,20 @@ impl Tetrix {
         }
         let mcp = reqwest::Url::parse(&url).expect("checked");
         let host = mcp.host_str().unwrap_or("").to_owned();
-        // RFC 9728: where the server says to sign in.
+        // RFC 9728, as MCP's authorization spec finds it: the `resource_metadata` of the server's
+        // own 401, else the well-known places (the path's first).
         let path = mcp.path().trim_end_matches('/').to_owned();
-        let mut places = vec![format!("/.well-known/oauth-protected-resource{path}")];
+        let mut places: Vec<reqwest::Url> = self.challenged(&mcp).await.into_iter().collect();
+        places.push(well_known(
+            &mcp,
+            &format!("/.well-known/oauth-protected-resource{path}"),
+        ));
         if !path.is_empty() {
-            places.push("/.well-known/oauth-protected-resource".into());
+            places.push(well_known(&mcp, "/.well-known/oauth-protected-resource"));
         }
         let mut resource_metadata = None;
         for place in places {
-            if let Some(found) = self.json_at(&well_known(&mcp, &place)).await {
+            if let Some(found) = self.json_at(&place).await {
                 resource_metadata = Some(found);
                 break;
             }
@@ -533,6 +539,33 @@ impl Tetrix {
         });
         self.changed();
         Ok(json!({"url": sign_in.url, "expiresAt": obi_protocol::time::format(sign_in.expires)}))
+    }
+
+    /// Where an unauthenticated call to the MCP server says its metadata is: its 401's
+    /// `WWW-Authenticate: Bearer … resource_metadata="…"`, when obid may fetch that URL.
+    async fn challenged(&self, mcp: &reqwest::Url) -> Option<reqwest::Url> {
+        let response = self
+            .http
+            .post(mcp.clone())
+            .header(header::ACCEPT, "application/json, text/event-stream")
+            .json(
+                &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": crate::connections::MCP_VERSIONS[0], "capabilities": {},
+                "clientInfo": {"name": "oby", "version": crate::api::API_VERSION}}}),
+            )
+            .send()
+            .await
+            .ok()?;
+        if response.status() != StatusCode::UNAUTHORIZED {
+            return None;
+        }
+        let challenge = response
+            .headers()
+            .get(header::WWW_AUTHENTICATE)?
+            .to_str()
+            .ok()?;
+        let (_, rest) = challenge.split_once("resource_metadata=\"")?;
+        endpoint(rest.split('"').next())
     }
 
     /// Dynamic client registration (RFC 7591): a public client with this redirect alone.
