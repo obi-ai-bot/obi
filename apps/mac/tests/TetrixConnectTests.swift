@@ -28,13 +28,14 @@ struct TetrixConnectTests {
         #expect(try Runner.decoder.decode(TetrixStatus.self, from: Data("{}".utf8)) == TetrixStatus())
     }
 
-    /// The Mac opens a sign-in page only over https with no login in it, and, when obid names the
-    /// authorization server (its issuer, which can be on another domain), only on that server's host.
+    /// The Mac opens a sign-in page only over https with no login in it, on the host of the
+    /// authorization server obid names (its issuer, which can be on another domain); none named, none opened.
     @Test func opensOnlyTheSignInServersPage() {
         let page = { (text: String, server: String?) in TetrixSignIn(url: URL(string: text)!, server: server.flatMap(URL.init(string:))).opens }
         #expect(page("https://auth.example.com/oidc/auth?client_id=obid", "https://auth.example.com/oidc"))
         #expect(page("https://AUTH.example.com/a", "https://auth.example.com"))
-        #expect(page("https://tetrix.34-45-0-97.sslip.io/auth/realms/tetrix/protocol/openid-connect/auth", nil))
+        #expect(page("https://tetrix.34-45-0-97.sslip.io/auth/realms/tetrix/protocol/openid-connect/auth", "https://tetrix.34-45-0-97.sslip.io/auth/realms/tetrix"))
+        #expect(!page("https://tetrix.34-45-0-97.sslip.io/auth", nil))
         #expect(!page("https://evil.example.com/authorize", "https://auth.example.com"))
         #expect(!page("https://auth.example.com.evil.dev/authorize", "https://auth.example.com"))
         #expect(!page("https://auth.example.com/a", "http://auth.example.com"))

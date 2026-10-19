@@ -98,20 +98,19 @@ nonisolated struct TetrixStatus: Decodable, Equatable, Sendable {
 
 /// Tetrix's sign-in under way on obid (`POST /v1/tetrix/sign-in`): the authorization server's page
 /// to open in the browser, which hands the login back to obid's loopback page, never to the app.
-/// `server` is the authorization server's issuer, as obid found it in the MCP server's metadata
-/// (it can be on another domain: Logto, Keycloak), when obid says it.
+/// `server` is the authorization server's issuer, as obid found it in the MCP server's metadata (it
+/// can be on another domain: Logto, Keycloak); obid answers only pages on its host.
 nonisolated struct TetrixSignIn: Codable, Equatable, Sendable {
     var url: URL
     var expiresAt: Date?
     var server: URL?
 
-    /// Whether the Mac may open it: https with no login in it and, when obid names its
-    /// authorization server, on that server's host. Anything else is never opened; the sheet shows
-    /// the person which host it is (`host`).
+    /// Whether the Mac may open it: https with no login in it, on the host of the authorization
+    /// server obid names. Anything else is never opened; the sheet shows the person which host it is.
     var opens: Bool {
-        guard url.scheme?.lowercased() == "https", url.user() == nil, url.password() == nil, let host else { return false }
-        guard let server else { return true }
-        return server.scheme?.lowercased() == "https" && server.host()?.lowercased() == host
+        guard url.scheme?.lowercased() == "https", url.user() == nil, url.password() == nil, let host,
+              server?.scheme?.lowercased() == "https" else { return false }
+        return server?.host()?.lowercased() == host
     }
 
     /// The host the sign-in page is on, as the sheet shows it.
