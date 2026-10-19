@@ -52,7 +52,7 @@ struct InboxDecision: View {
     }
 
     private func choose(_ option: CardOption) {
-        if option.answer == "Open the PR", let url = job?.published.flatMap(URL.init(string:)) { openURL(url); return }
+        if option.answer == "Open the PR", let url = PublishedLink.url(job?.published) { openURL(url); return }
         settle(answer: option.answer)
     }
 
