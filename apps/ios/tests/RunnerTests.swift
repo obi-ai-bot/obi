@@ -84,6 +84,20 @@ struct RunnerTests {
         #expect(ThreadTaskLine.followUps(of: first.id, in: [first, follow]).map(\.id) == ["f1"])
     }
 
+    /// obid names the words that started a job (`turn`), so its card shows under them as it
+    /// starts; older runners leave it out, and the card waits for Oby's answer.
+    @Test func aJobShowsUnderTheWordsThatStartedIt() throws {
+        let older = try Runner.decoder.decode(Job.self, from: Data(job.utf8))
+        #expect(older.turn == nil)
+        let named = job.replacingOccurrences(of: #""published": null}"#, with: #""published": null, "turn": "u1"}"#)
+        let started = try Runner.decoder.decode(Job.self, from: Data(named.utf8))
+        #expect(started.turn == "u1")
+        let words = Turn(id: "u1", who: .user, text: "fix it")
+        #expect(ThreadTaskLine.cards(under: words, in: [words], jobs: [older, started], startedBy: \.turn).map(\.turn) == ["u1"])
+        let answer = Turn(id: "o1", who: .oby, text: "On it.", jobs: [started.id])
+        #expect(ThreadTaskLine.cards(under: words, in: [words, answer], jobs: [started], startedBy: \.turn).isEmpty)
+    }
+
     @Test func eventsAndPings() throws {
         var parser = EventParser()
         let account = #"[{"id": "default", "agent": "claude", "name": "Deskree", "label": "Team · w@deskree.com", "signedIn": true, "fiveHour": 0.1, "sevenDay": null, "running": 1}]"#

@@ -5,7 +5,7 @@
 // (fake-planner), for the fallback. Each turn is recorded as one line of turns.jsonl in its
 // account's folder ($CLAUDE_CONFIG_DIR): argv, cwd, HOME, that folder, the prompt, the session it
 // resumed, its pid. It answers one message after another until its stdin closes, as Claude Code
-// does with stream-json input. What it does comes from the last line of its prompt:
+// does with stream-json input; when it starts, it records its pid and cwd in started.jsonl there. What it does comes from the last line of its prompt:
 //   HELLO          streams "Hello there." in three deltas, reads notes.md in its room, says it
 //   REMEMBER       says "resume=<the session it resumed or goes on with, or none>"
 //   OBY <tool> <json>  calls the oby tool with the json and says "oby: <what it answered>"
@@ -20,6 +20,7 @@
 //   PERMS          asks obid's permission for writes inside, outside and in repos/, the web, a
 //                  secret, a command that sends a file from outside the room, another MCP tool
 //   SAY <words>    streams <words> in three deltas and says them
+//   SAYLATE <w>    says <w>, then writes one more line 300 ms after its result, while it waits
 //   READREPO <w>   reads a file under repos/ (taints the turn), then does <w>
 //   MAKEPAGE <w>   writes page/index.html in its room (a list of functions), then does <w>
 //   GREP <w>       searches the room with no path (repos/ in it, taints the turn), then does <w>
@@ -44,6 +45,9 @@ if (argv.includes("--json-schema")) {
 }
 
 const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
+if (process.env.CLAUDE_CONFIG_DIR && !argv.includes("--json-schema")) {
+  appendFileSync(join(process.env.CLAUDE_CONFIG_DIR, "started.jsonl"), JSON.stringify({ pid: process.pid, cwd: process.cwd(), at: Date.now() }) + "\n");
+}
 const flag = (name) => (argv.indexOf(name) >= 0 ? argv[argv.indexOf(name) + 1] : null);
 const resumed = flag("--resume");
 // Its session, once a turn ran in it: the one a later message goes on with.
@@ -144,6 +148,9 @@ async function act(words, prompt = "", before = resumed) {
     const quoted = prompt.slice(prompt.indexOf("<<<quoted-"));
     const named = found.length > 0 && prompt.includes("<<<quoted-") && found.every((f) => quoted.includes(f));
     say(`files: ${found.sort().join(",")} named=${named}`);
+  } else if (words.startsWith("SAYLATE ")) {
+    say(words.slice(8));
+    setTimeout(() => emit({ type: "system", subtype: "stray", session_id: session }), 300);
   } else if (words.startsWith("SAY ")) {
     say(words.slice(4));
   } else if (words.startsWith("READREPO ")) {
@@ -170,7 +177,10 @@ async function act(words, prompt = "", before = resumed) {
   } else if (words.startsWith("WEB ")) {
     use("w1", "WebSearch", { query: "fixture app greeting" });
     used("w1", "results");
-    // A real search takes a moment, so its step reaches obid before the next call does.
+    // Claude Code makes a model call between a tool's result and its next tool call, so obid has
+    // read the search's step (and tainted the turn) long before a call the search could steer
+    // reaches Oby's tools; a call made in the same message as the search can't be steered by it.
+    // The stand-in calls at once, so it waits a model call's moment.
     await new Promise((done) => setTimeout(done, 200));
     await act(words.slice(4), prompt);
   } else if (words.startsWith("CURL ")) {

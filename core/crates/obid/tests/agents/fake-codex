@@ -13,6 +13,13 @@
 //   FAIL             the turn fails with the API's error inside its message
 //   TWICE            round one says it isn't done; round two (a resumed thread) writes .obi/twice
 //   ENV              says its CODEX_HOME and HOME
+//   READ: <json>     answers the `account/rateLimits/read` obid sent at start with the JSON (a
+//                    snapshot); without it, that request is answered as unknown when the turn starts
+//   LIMITS: <json>   sends the JSON as an `account/rateLimits/updated` snapshot
+//   TOKENS           its thread uses 1000 input tokens (600 of them cached) and 100 output tokens
+//                    more, reported in `thread/tokenUsage/updated` twice
+// It answers `account/read` (once the turn starts) as a ChatGPT (plan) login, or an API key's when
+// the task says APIKEY.
 //   a brain's prompt answers one plan: a reply "From Codex.", with work.md's first line
 //   anything else    "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable, or
@@ -137,12 +144,23 @@ async function runTurn(turnId, prompt) {
     writeFileSync(".obi/twice", "");
     return complete(turnId, `Round ${state.rounds} on thread ${thread}, which remembers: ${task}\nGOAL MET`);
   }
+  if (task.includes("TOKENS")) {
+    const last = { inputTokens: 1000, cachedInputTokens: 600, outputTokens: 100 };
+    const was = state.tokens ?? { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+    state.tokens = Object.fromEntries(Object.entries(was).map(([k, v]) => [k, v + last[k]]));
+    save();
+    for (let i = 0; i < 2; i++) send({ method: "thread/tokenUsage/updated", params: { threadId: thread, turnId, tokenUsage: { total: state.tokens, last } } });
+  }
+  const limits = task.match(/LIMITS: (\{.*\})/);
+  if (limits) send({ method: "account/rateLimits/updated", params: { rateLimits: JSON.parse(limits[1]) } });
   if (task.includes("ENV")) return complete(turnId, `CODEX_HOME=${process.env.CODEX_HOME}\nHOME=${process.env.HOME}`);
   // Only `item/completed` carries the words: Codex's newer turns leave `items` empty.
   send({ method: "item/completed", params: { threadId: thread, turnId, item: { type: "agentMessage", id: "m0", text: "Nothing to do." } } });
   return complete(turnId, null);
 }
 
+let limitsRead = null;
+let accountRead = null;
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", (line) => {
   let message;
@@ -162,6 +180,12 @@ rl.on("line", (line) => {
     case "initialize":
       return send({ id, result: { userAgent: "fake-codex/0.0.0" } });
     case "initialized":
+      return;
+    case "account/read":
+      accountRead = id;
+      return;
+    case "account/rateLimits/read":
+      limitsRead = id;
       return;
     case "thread/start":
     case "thread/resume": {
@@ -184,6 +208,18 @@ rl.on("line", (line) => {
       const turnId = randomUUID();
       const text = params.input.map((i) => i.text).join("\n");
       if (state.task === null) state.task = text;
+      if (accountRead !== null) {
+        const account = text.includes("APIKEY") ? { type: "apiKey" } : { type: "chatgpt", email: "owner@example.com", planType: "plus" };
+        send({ id: accountRead, result: { account, requiresOpenaiAuth: true } });
+        accountRead = null;
+      }
+      // The usage read obid sent at start, answered now that the task says what to answer.
+      if (limitsRead !== null) {
+        const read = text.match(/READ: (\{.*\})/);
+        send(read ? { id: limitsRead, result: { rateLimits: JSON.parse(read[1]) } }
+          : { id: limitsRead, error: { code: -32601, message: "fake-codex doesn't know account/rateLimits/read" } });
+        limitsRead = null;
+      }
       state.model = params.model ?? null;
       save();
       send({ id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });

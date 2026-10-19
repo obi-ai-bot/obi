@@ -1350,10 +1350,17 @@ async fn agent_mcp(
         .unwrap_or("");
     // A conversation's session: Oby's own tools (crate::brain::tools), with its turn's token.
     if job.starts_with("conversation-") {
+        let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
         let Some(session) = shared.harness.session(&job, token) else {
+            // Its Claude Code waiting for a turn connects and lists Oby's tools, and calls none.
+            if shared.harness.waiting_with(&job, token) {
+                return match crate::brain::tools::handshake(&value) {
+                    Some(answer) => (StatusCode::OK, Json(answer)).into_response(),
+                    None => StatusCode::ACCEPTED.into_response(),
+                };
+            }
             return ApiError::new(StatusCode::UNAUTHORIZED, crate::api::NO_TOKEN).into_response();
         };
-        let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
         return match crate::brain::tools::handle(&shared, &session, value).await {
             Some(answer) => (StatusCode::OK, Json(answer)).into_response(),
             None => StatusCode::ACCEPTED.into_response(),

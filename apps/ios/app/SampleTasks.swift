@@ -83,6 +83,7 @@ enum SampleTasks {
         func job(_ step: String) {
             guard var job = phone.jobs.first(where: { $0.id == "sample-run" }) else { return }
             job.step = step
+            job.status = .running
             phone.sample(.job(job))
         }
         let answer = """
@@ -100,17 +101,25 @@ enum SampleTasks {
             try? await Task.sleep(for: .seconds(1.5))
             step(3, "web_search", "Reading the web", "empty state copy guidelines", .done)
             step(4, "bash", "Running ls apps/ios/app", "ls apps/ios/app", .done)
-            step(5, "write", "Editing index.html", "empty-state/index.html", .running)
+            step(5, "write", "Editing index.html", "empty-state/index.html", .done)
+            // The job it starts shows at once, under the words (obid's `turn`), before the answer lists it.
+            step(6, "oby_dispatch", "Starting a job", "deskree-inc/oby", .running)
+            if var started = phone.jobs.first(where: { $0.id == "sample-run" }) {
+                started.turn = "sample-harness"
+                started.status = .queued
+                started.step = "Getting ready"
+                phone.sample(.job(started))
+            }
+            step(6, "oby_dispatch", "Starting a job", "deskree-inc/oby", .done)
             // `-ObySampleHold <seconds>`: it stays a while at work, then halfway through its words, for screenshots.
             let hold = UserDefaults.standard.double(forKey: "ObySampleHold")
             try? await Task.sleep(for: .seconds(4 + hold))
+            job("Reading LoginView.swift")
             for (index, word) in WordReveal.words(answer).enumerated() {
                 if index == 20 { try? await Task.sleep(for: .seconds(hold)) }
                 phone.sample(.delta(TurnDelta(conversation: nil, turn: "sample-harness", text: String(word))))
                 try? await Task.sleep(for: .seconds(0.3))
             }
-            step(5, "write", "Editing index.html", "empty-state/index.html", .done)
-            step(6, "oby_dispatch", "Starting a job", "deskree-inc/oby", .done)
             phone.sample(.artifact(ArtifactEvent(id: ArtifactFixture.sample.id, version: 1, title: ArtifactFixture.sample.title, kind: "html")))
             phone.sample(.turn(Turn(id: "sample-harness-answer", who: .oby, text: answer, jobs: ["sample-run"]),
                                TurnExtras(artifacts: [ArtifactRef(id: ArtifactFixture.sample.id, version: 1)])))
