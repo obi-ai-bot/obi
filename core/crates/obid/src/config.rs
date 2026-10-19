@@ -444,9 +444,14 @@ impl Config {
 
         let least_think = match file.least_think {
             None => crate::brain::planner::LEAST,
-            Some(least) if (1..=110).contains(&least) => std::time::Duration::from_secs(least),
+            // Less than the whole budget: a turn no brain may ever think in is no turn.
+            Some(least) if (1..turn_budget).contains(&least) => {
+                std::time::Duration::from_secs(least)
+            }
             Some(least) => {
-                return invalid(format!("leastThink is {least}: it is 1 to 110 seconds."));
+                return invalid(format!(
+                    "leastThink is {least}: it is 1 second to less than turnBudget ({turn_budget})."
+                ));
             }
         };
 
@@ -923,7 +928,7 @@ mod tests {
 
     /// #763: tests may give a brain more than a second as the least it thinks in.
     #[test]
-    fn the_least_think_time_is_1_to_110_seconds() {
+    fn the_least_think_time_is_1_second_to_under_the_budget() {
         let config = Config::parse(&with(serde_json::json!({}))).unwrap();
         assert_eq!(config.least_think, std::time::Duration::from_secs(1));
         let config = Config::parse(&with(serde_json::json!({"leastThink": 10}))).unwrap();
@@ -932,6 +937,18 @@ mod tests {
             let text = with(serde_json::json!({"leastThink": wrong}));
             assert!(problem(&text).contains("leastThink"), "{wrong}");
         }
+        let text = with(serde_json::json!({"turnBudget": 10, "leastThink": 10}));
+        assert!(
+            problem(&text).contains("less than turnBudget (10)"),
+            "{text}"
+        );
+        let config = Config::parse(&with(
+            serde_json::json!({"turnBudget": 10, "leastThink": 9}),
+        ));
+        assert_eq!(
+            config.unwrap().least_think,
+            std::time::Duration::from_secs(9)
+        );
     }
 
     #[test]
