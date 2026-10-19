@@ -259,6 +259,9 @@ pub struct Job {
     /// Its change against `start_commit` after each round, oldest first (#736): `diff` in the API.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diffs: Vec<crate::facts::Diff>,
+    /// Each run of its own check, oldest first, the running one live (#734).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<crate::facts::CheckRecord>,
     /// What its turns used, in tokens and cost, as its tool reported them (#731).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::usage::Tokens>,
@@ -366,6 +369,7 @@ impl Job {
             earlier: None,
             start_from: None,
             diffs: Vec::new(),
+            checks: Vec::new(),
             usage: None,
             usage_seen: None,
             window_share: None,
@@ -620,15 +624,22 @@ impl Job {
         if let Some(last) = self.diffs.last() {
             value["diff"] = json!(last);
         }
+        // The latest run only, on every event (#734); every run's is in `detail_json`.
+        if let Some(last) = self.checks.last() {
+            value["checks"] = json!([last]);
+        }
         value
     }
 
     /// The job as `GET /v1/jobs/{id}` shows it: [`Self::to_json`] with what's too big to send on
-    /// every event, each round's diff stat (`diff.rounds`, #736).
+    /// every event: each round's diff stat (`diff.rounds`, #736) and every check run (#734).
     pub fn detail_json(&self) -> Value {
         let mut value = self.to_json();
         if value.get("diff").is_some() {
             value["diff"]["rounds"] = json!(self.diffs);
+        }
+        if value.get("checks").is_some() {
+            value["checks"] = json!(self.checks);
         }
         value
     }
