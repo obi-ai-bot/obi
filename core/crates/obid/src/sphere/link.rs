@@ -334,6 +334,12 @@ impl Link {
             }
         }));
         let hook = Arc::downgrade(&link);
+        link.jobs.on_confirm(Arc::new(move |item| {
+            if let Some(link) = hook.upgrade() {
+                link.add_confirm(item);
+            }
+        }));
+        let hook = Arc::downgrade(&link);
         link.jobs.on_review_end(Arc::new(move |job, done| {
             let link = hook.upgrade();
             Box::pin(async move {
@@ -2593,7 +2599,10 @@ impl Link {
             // words for a job that ended do.
             inbox::action::MESSAGE_JOB => {
                 let words = confirmed.payload["words"].as_str().unwrap_or("");
-                match self.jobs.message(target, words, crate::jobs::Source::Owner) {
+                match self
+                    .jobs
+                    .message(target, words, crate::jobs::Source::Confirmed)
+                {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
                     None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
@@ -2611,7 +2620,7 @@ impl Link {
                 match self.jobs.message(
                     target,
                     crate::brain::actions::TRY_AGAIN,
-                    crate::jobs::Source::Owner,
+                    crate::jobs::Source::Confirmed,
                 ) {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),

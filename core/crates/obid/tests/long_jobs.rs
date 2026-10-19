@@ -240,20 +240,60 @@ fn retries_run_out() {
     }
 }
 
-/// The token budget stalls a job; only the owner carries it on, with a new budget.
+/// The token budget stalls a job. Past it, Try again or other words through the API (what oby-mcp
+/// and other sessions call) do nothing but ask the owner in the inbox; their Confirm carries it on
+/// with a new budget.
 #[test]
-fn the_token_budget_stalls_and_only_the_owner_carries_on() {
+fn the_token_budget_stalls_and_only_the_owners_confirm_carries_on() {
     let (_folder, obid) = obid_with("long-budget", json!({"jobTokenBudget": 1000}), &[]);
     let id = post_job(&obid, "SPEND: 5000");
     let job = wait(&obid, &id);
     assert_eq!(job["status"], "failed", "{job}");
     assert_eq!(job["limit"], "the job used 1000 tokens", "{job}");
     assert_eq!(job["stalled"]["why"], "budget");
+    let confirms = || -> Vec<Value> {
+        let inbox = call(&obid, "GET", "/v1/inbox", None).body;
+        inbox
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["kind"] == "confirm" && i["job"] == id.as_str())
+            .cloned()
+            .collect()
+    };
+    for words in [TRY_AGAIN, "start it again from scratch"] {
+        let answer = call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/messages"),
+            Some(&json!({"text": words})),
+        );
+        assert_eq!(answer.status, 422, "{}", answer.text);
+        assert!(
+            answer.text.contains("waits for your Confirm"),
+            "{}",
+            answer.text
+        );
+    }
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["status"], "failed", "{job}");
+    assert!(job["followUpOf"].is_null());
+    let items = confirms();
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert!(
+        items
+            .iter()
+            .all(|i| i["text"].as_str().unwrap().contains("safety limit"))
+    );
+    let retry = items
+        .iter()
+        .find(|i| i["title"].as_str().unwrap().starts_with("Try "))
+        .expect("Try again's item");
     let answer = call(
         &obid,
         "POST",
-        &format!("/v1/jobs/{id}/messages"),
-        Some(&json!({"text": TRY_AGAIN})),
+        &format!("/v1/inbox/{}/answer", retry["id"].as_str().unwrap()),
+        Some(&json!({"answer": "Confirm"})),
     );
     assert_eq!(answer.status, 200, "{}", answer.text);
     let job = wait(&obid, &id);

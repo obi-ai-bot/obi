@@ -69,14 +69,23 @@ const EDITS: [&str; 4] = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
 
 /// The same call (its tool and input, numbers and spacing aside) failing again and again with no
 /// edit in between: a loop (as OpenHands and OpenCode detect one). That call succeeding, or any
-/// edit, starts it over; reads and other calls in between don't.
+/// edit (an edit tool, or a command that changed the `worktree`, like `sed -i`), starts it over;
+/// reads and other calls in between don't.
 #[derive(Default)]
 struct Looping {
-    calls: HashMap<String, String>,
+    worktree: Option<PathBuf>,
+    calls: HashMap<String, (String, std::time::SystemTime)>,
     failures: HashMap<String, u32>,
 }
 
 impl Looping {
+    fn in_worktree(worktree: PathBuf) -> Looping {
+        Looping {
+            worktree: Some(worktree),
+            ..Looping::default()
+        }
+    }
+
     fn called(&mut self, id: String, name: String, input: Value) {
         if EDITS.contains(&name.as_str()) {
             self.failures.clear();
@@ -88,16 +97,26 @@ impl Looping {
                 key.push(if c.is_whitespace() { ' ' } else { c });
             }
         }
-        self.calls.insert(id, key);
+        self.calls.insert(id, (key, std::time::SystemTime::now()));
     }
 
     /// The call `id` ended: true once the same call failed [`LOOP_REPEATS`] times.
     fn done(&mut self, id: &str, failed: bool) -> bool {
-        let Some(key) = self.calls.remove(id) else {
+        let Some((key, began)) = self.calls.remove(id) else {
             return false;
         };
         if !failed {
             self.failures.remove(&key);
+            // ponytail: a walk of the worktree after a passing call, only while a failure is
+            // counted; keep it off the worker thread if worktrees grow too big for that.
+            if !self.failures.is_empty()
+                && self
+                    .worktree
+                    .as_deref()
+                    .is_some_and(|dir| crate::conn::changed_since(dir, began))
+            {
+                self.failures.clear();
+            }
             return false;
         }
         let failures = self.failures.entry(key).or_default();
@@ -307,7 +326,20 @@ pub enum Source {
     Owner,
     Untrusted,
     Event,
+    /// The owner's Confirm of an inbox item (crate::sphere::link): their words as surely as
+    /// [`Source::Owner`], and the only ones that carry a job on past its safety limit.
+    Confirmed,
 }
+
+impl Source {
+    /// The owner's own words.
+    pub fn owners(self) -> bool {
+        matches!(self, Source::Owner | Source::Confirmed)
+    }
+}
+
+/// Who adds the inbox's Confirm items (crate::sphere::link).
+pub type ConfirmHook = Arc<dyn Fn(crate::sphere::inbox::Item) + Send + Sync>;
 
 /// A review another Obi asked for, once the owner or a remembered decision accepted it.
 #[derive(Debug, Clone)]
@@ -428,6 +460,7 @@ pub struct Jobs {
     review_hook: std::sync::OnceLock<ReviewHook>,
     /// Told when a permission waits for the owner, and when it stops waiting.
     permission_hook: std::sync::OnceLock<PermissionHook>,
+    confirm_hook: std::sync::OnceLock<ConfirmHook>,
     /// Settings › Permissions' default mode and the saved rules (`home/permissions.json`).
     permissions: Mutex<permissions::Kept>,
     /// The plug-in host: context for the agent, and `agent-mcp` plug-ins' servers.
@@ -499,6 +532,7 @@ impl Jobs {
             preparing: Mutex::new(HashMap::new()),
             review_hook: std::sync::OnceLock::new(),
             permission_hook: std::sync::OnceLock::new(),
+            confirm_hook: std::sync::OnceLock::new(),
             permissions: Mutex::new(kept),
             plugins: std::sync::OnceLock::new(),
             connections: std::sync::OnceLock::new(),
@@ -2000,7 +2034,9 @@ impl Jobs {
                 }));
             }
             return Some(match source {
-                Source::Owner => self.create(follow_up(&job, text)),
+                // Past its safety limit, a follow-up would start its counters again.
+                Source::Owner if past_safety(&job) => Err(self.confirm_past_safety(&job, text)),
+                Source::Owner | Source::Confirmed => self.create(follow_up(&job, text)),
                 Source::Untrusted | Source::Event => Err(Refused(
                     "It ended, so these words would start a follow-up: only the owner's own words start one, where Oby read nothing untrusted.".into(),
                 )),
@@ -2022,7 +2058,7 @@ impl Jobs {
             .get(id)
             .and_then(|asks| asks.front().map(|a| a.permission.clone()));
         // A plan goes back only on the owner's own words (#609).
-        if waiting.as_ref().is_some_and(Permission::is_plan) && source != Source::Owner {
+        if waiting.as_ref().is_some_and(Permission::is_plan) && !source.owners() {
             return Some(Err(Refused(
                 "It waits for the owner to approve its plan or send it back, in their inbox."
                     .into(),
@@ -2084,13 +2120,17 @@ impl Jobs {
                 "This job never started, so there's no session to pick up.".into(),
             )));
         }
-        // Past its safety ceiling or budget, only the owner's own Try again carries it on, and
-        // gives it a new one.
-        if past_safety(&job) && source != Source::Owner {
-            return Some(Err(Refused(format!(
-                "It stopped at its safety limit ({}): only the owner carries it on past that.",
-                job.limit.as_deref().unwrap_or("")
-            ))));
+        // Past its safety ceiling or budget, only the owner's Confirm carries it on, and gives it
+        // a new one: the owner's words anywhere else ask for that Confirm.
+        if past_safety(&job) && source != Source::Confirmed {
+            return Some(Err(if source == Source::Owner {
+                self.confirm_past_safety(&job, text)
+            } else {
+                Refused(format!(
+                    "It stopped at its safety limit ({}): only the owner carries it on past that.",
+                    job.limit.as_deref().unwrap_or("")
+                ))
+            }));
         }
         // Checked and changed under one lock: a job being published by hand takes no words, and
         // one that took them can't be published by hand until it ends again.
@@ -2161,6 +2201,52 @@ impl Jobs {
     /// Who is told about permissions (once; a second call changes nothing).
     pub fn on_permission(&self, hook: PermissionHook) {
         let _ = self.permission_hook.set(hook);
+    }
+
+    /// Who adds Confirm items to the inbox (once; a second call changes nothing).
+    pub fn on_confirm(&self, hook: ConfirmHook) {
+        let _ = self.confirm_hook.set(hook);
+    }
+
+    /// Words for a job stopped at its safety limit (its ceiling or budget) carry it on only once
+    /// the owner confirms them in the inbox (docs/runner-api.md, `limit`), wherever they came
+    /// from: the API, oby-mcp, a conversation. Its Confirm item, and why nothing happened yet.
+    pub fn confirm_past_safety(&self, job: &Job, words: &str) -> Refused {
+        use crate::sphere::inbox::{Confirmed, action};
+        let limit = job.limit.as_deref().unwrap_or("");
+        let name = job.short_title();
+        let again = words == crate::brain::actions::TRY_AGAIN;
+        let confirmed = if again {
+            Confirmed {
+                action: action::RETRY_JOB.into(),
+                target: job.id.clone(),
+                payload: Value::Null,
+            }
+        } else {
+            Confirmed {
+                action: action::MESSAGE_JOB.into(),
+                target: job.id.clone(),
+                payload: json!({"words": words}),
+            }
+        };
+        if let Some(hook) = self.confirm_hook.get() {
+            hook(crate::sphere::inbox::confirm_item(
+                &job.id,
+                if again {
+                    format!("Try {name} again")
+                } else {
+                    format!("Start a follow-up of {name}")
+                },
+                format!(
+                    "{name} stopped at its safety limit ({limit}). Carrying it on past that waits for your OK."
+                ),
+                confirmed,
+                obi_protocol::time::now(),
+            ));
+        }
+        Refused(format!(
+            "It stopped at its safety limit ({limit}): carrying it on waits for your Confirm in the inbox."
+        ))
     }
 
     fn note(&self, note: PermissionNote) {
@@ -3418,6 +3504,7 @@ impl Jobs {
         signal: &watch::Receiver<Signal>,
         gate: Gate<'_>,
         limit: crate::conn::Limit,
+        ran: Option<&(dyn Fn() -> u64 + Sync)>,
     ) -> Result<agent::Turn, String> {
         let prompt = &crate::vault::for_agent(prompt)?;
         let (obi_review, mcp_rules) = match gate {
@@ -3458,7 +3545,7 @@ impl Jobs {
             }
         });
         let signal = &signal;
-        let mut looping = Looping::default();
+        let mut looping = Looping::in_worktree(worktree.clone());
         let mut looped = false;
         // An owner's job's token budget (`jobTokenBudget`), counted from where the owner last let
         // it past: a turn that reaches it is ended, and comes back `over_budget`.
@@ -3484,6 +3571,9 @@ impl Jobs {
                         tokens
                     };
                     job.usage = Some(before.plus(&own));
+                    if let Some(ran) = ran {
+                        job.ran_secs = Some(ran());
+                    }
                     if budget.is_some_and(|budget| spent(job) >= budget) && !over_budget {
                         over_budget = true;
                         let _ = cut.send(Signal::Stop);
@@ -3499,7 +3589,13 @@ impl Jobs {
                 jobs.update(id, |job| job.session = Some(session));
             }
             AgentEvent::Step(step) | AgentEvent::Denied(step) => {
-                jobs.update(id, |job| job.step = step);
+                jobs.update(id, |job| {
+                    job.step = step;
+                    // The run's time so far, kept as it goes: a crash loses little of it.
+                    if let Some(ran) = ran {
+                        job.ran_secs = Some(ran());
+                    }
+                });
             }
             AgentEvent::Tool {
                 id: call,
@@ -3636,6 +3732,7 @@ impl Jobs {
                             watch: None,
                             waiting: None,
                         },
+                        None,
                     )
                     .await
                 && turn.succeeded()
@@ -3955,6 +4052,7 @@ impl Jobs {
                 signal,
                 Gate::ObiReview,
                 ROUND_LIMIT.into(),
+                None,
             )
             .await?;
         if *signal.borrow() != Signal::Run {
@@ -4444,6 +4542,7 @@ impl Jobs {
                             watch: Some(worktree.clone()),
                             waiting: Some(waiting.clone()),
                         },
+                        Some(&ran),
                     )
                     .await?;
                 self.update(id, |job| job.ran_secs = Some(ran()));
@@ -7084,6 +7183,42 @@ mod tests {
             assert!(!call(&mut looping, "Bash", "npm test", true));
         }
         assert!(call(&mut looping, "Bash", "npm test", true));
+    }
+
+    /// A command that changed the worktree (`sed -i`) is an edit too: the failures start over.
+    #[test]
+    fn a_command_that_edits_starts_the_loop_count_over() {
+        use super::Looping;
+        let dir = std::env::temp_dir().join(format!("obid-loop-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut looping = Looping::in_worktree(dir.clone());
+        let mut n = 0;
+        let mut call = |l: &mut Looping, command: &str, failed: bool, edit: bool| {
+            n += 1;
+            let id = format!("c{n}");
+            l.called(
+                id.clone(),
+                "Bash".into(),
+                serde_json::json!({"command": command}),
+            );
+            if edit {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                std::fs::write(dir.join("a.js"), format!("{n}")).unwrap();
+            }
+            l.done(&id, failed)
+        };
+        for _ in 0..4 {
+            assert!(!call(&mut looping, "npm test", true, false));
+        }
+        // A passing command that changes nothing isn't an edit.
+        assert!(!call(&mut looping, "ls", false, false));
+        assert!(!call(&mut looping, "sed -i s/a/b/ a.js", false, true));
+        for _ in 0..4 {
+            assert!(!call(&mut looping, "npm test", true, false));
+        }
+        assert!(call(&mut looping, "npm test", true, false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Overloaded, failing or dropped APIs are retried; an account's usage limit, an auth error,
