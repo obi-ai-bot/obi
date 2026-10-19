@@ -260,15 +260,20 @@ nonisolated struct InboxWords: Decodable, Equatable, Sendable {
     /// On a `confirm` item (obid only, #546), what its Confirm carries out. The Mac reads the
     /// item into Engine's InboxItem, which has no such kind: this says what it really is.
     var confirm: RunnerConfirm?
+    /// The conversation a plan waiting for Start (or a confirm to start a job) came from (obid
+    /// only): a conversation shows it opened out only there.
+    var conversation: String?
 
-    private enum Keys: String, CodingKey { case headline, happened, recommended, why, confirm }
+    private enum Keys: String, CodingKey { case headline, happened, recommended, why, confirm, conversation }
 
-    init(headline: String? = nil, happened: String? = nil, recommended: Int? = nil, why: String? = nil, confirm: RunnerConfirm? = nil) {
+    init(headline: String? = nil, happened: String? = nil, recommended: Int? = nil, why: String? = nil, confirm: RunnerConfirm? = nil,
+         conversation: String? = nil) {
         self.headline = headline
         self.happened = happened
         self.recommended = recommended
         self.why = why
         self.confirm = confirm
+        self.conversation = conversation
     }
 
     init(from decoder: any Decoder) throws {
@@ -278,6 +283,7 @@ nonisolated struct InboxWords: Decodable, Equatable, Sendable {
         recommended = try? keys.decodeIfPresent(Int.self, forKey: .recommended)
         why = try? keys.decodeIfPresent(String.self, forKey: .why)
         confirm = try? keys.decodeIfPresent(RunnerConfirm.self, forKey: .confirm)
+        conversation = try? keys.decodeIfPresent(String.self, forKey: .conversation)
     }
 
     /// The card's title: the headline, else the item's text, as before.

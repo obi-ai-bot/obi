@@ -1039,12 +1039,14 @@ nonisolated struct Runner: Sendable {
     /// The same, in one of obid's conversations (#493): `conversation` names the one the words
     /// join, `new` starts one; neither, the latest. The answer says which they joined (nil from a
     /// runner with one thread).
+    /// `id`: the id the app gave the words (its echo's, a lower-case UUID), which obid's turn of them
+    /// takes; sent again with it (Try again after a lost answer), obid adds nothing (obid only).
     func planned(_ said: String, answer: (question: String, option: String)? = nil, attachments: [String] = [],
-                 conversation: String? = nil, new: Bool = false) async throws -> PlannedTurn {
+                 conversation: String? = nil, new: Bool = false, id: String? = nil) async throws -> PlannedTurn {
         struct Answer: Encodable { var question: String; var option: String }
-        struct Body: Encodable { var said: String; var answer: Answer?; var attachments: [String]; var conversation: String?; var new: Bool? }
+        struct Body: Encodable { var said: String; var answer: Answer?; var attachments: [String]; var conversation: String?; var new: Bool?; var id: String? }
         let body = Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }, attachments: attachments,
-                        conversation: conversation, new: new ? true : nil)
+                        conversation: conversation, new: new ? true : nil, id: id)
         return try await call("POST", "v1/plans", body: body, timeout: Self.planTimeout)
     }
 
