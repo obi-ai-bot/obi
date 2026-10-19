@@ -170,7 +170,10 @@ fn codex_commits_with_obids_approval() {
 fn a_codex_jobs_transcript_matches_claudes() {
     let folder = Folder::new("codex-transcript");
     let obid = obid(&folder, false);
-    let id = dispatch(&obid, json!({"agent": "codex", "task": "TOOLS"}));
+    let id = dispatch(
+        &obid,
+        json!({"agent": "codex", "task": "TOOLS", "check": "node --test"}),
+    );
     let job = ended(&obid, &id);
     assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
     let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript"), None);
@@ -218,7 +221,7 @@ fn a_codex_jobs_transcript_matches_claudes() {
         (&entries[9]["added"], &entries[9]["removed"]),
         (&json!(3), &json!(2))
     );
-    assert_eq!(entries[11]["summary"], "Running cargo test");
+    assert_eq!(entries[11]["summary"], "Running node --test");
     assert_eq!(entries[11]["exit"], 101);
     assert!(!answer.text.contains("raw output"), "{}", answer.text);
     // The same kinds in its activity (#730).

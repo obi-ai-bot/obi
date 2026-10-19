@@ -595,6 +595,8 @@ impl Job {
         }
         if let Some(context) = &self.context {
             value["context"] = json!(context);
+            // The agent's own words, quoted: never obid's.
+            value["contextBy"] = json!("agent");
         }
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());

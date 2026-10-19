@@ -29,6 +29,8 @@ use crate::sandbox::{self, Sandbox, Spec};
 use crate::store::{self, Store};
 use crate::{acp, codex, git, policy, review};
 
+/// How often, at most, a working job's `activity` and `context` are saved and sent.
+const ACTIVITY_EVERY: Duration = Duration::from_secs(1);
 /// How long one round's turn may take (docs/runner-api.md, "limit").
 pub const ROUND_LIMIT: Duration = Duration::from_secs(45 * 60);
 /// How long one run of the check may take.
@@ -3186,86 +3188,96 @@ impl Jobs {
             }
         };
         let plan = Self::mode_of(&job) == Mode::Plan;
-        let ran = match tool {
-            Tool::Claude => {
-                agent::run_turn(
-                    launch,
-                    prompt,
-                    ROUND_LIMIT,
-                    signal.clone(),
-                    decide,
-                    on_event,
-                )
-                .await
+        // The job's activity and context follow the transcript, saved and sent at most once a
+        // second while the agent works (each call's start and end would be a `job` event).
+        let run = async {
+            match tool {
+                Tool::Claude => {
+                    agent::run_turn(
+                        launch,
+                        prompt,
+                        ROUND_LIMIT,
+                        signal.clone(),
+                        decide,
+                        on_event,
+                    )
+                    .await
+                }
+                Tool::Codex => {
+                    let options = codex::Options {
+                        resume: job.session.clone(),
+                        model: job.model.clone(),
+                        plan,
+                        instructions: None,
+                        no_commands: false,
+                    };
+                    codex::run_turn(
+                        launch,
+                        prompt,
+                        &options,
+                        ROUND_LIMIT,
+                        signal.clone(),
+                        decide,
+                        on_event,
+                    )
+                    .await
+                }
+                Tool::Cursor => {
+                    let account = self
+                        .job_account(&job)
+                        .map(|(_, a)| a.name)
+                        .unwrap_or_default();
+                    let options = acp::Options {
+                        tool: tool.name().into(),
+                        account,
+                        resume: job.session.clone(),
+                        model: job.model.clone(),
+                        plan,
+                        plan_mode: "plan".into(),
+                        agent_mode: "agent".into(),
+                        // Oby's Tetrix server, the only one Cursor gets (crate::tetrix).
+                        mcp: self
+                            .tetrix_mcp(&job)
+                            .map(|(url, token)| vec![json!({"type": "http", "name": "tetrix", "url": url,
+                                "headers": [{"name": "Authorization", "value": format!("Bearer {token}")}]})])
+                            .unwrap_or_default(),
+                    };
+                    acp::run_turn(
+                        launch,
+                        prompt,
+                        &options,
+                        ROUND_LIMIT,
+                        signal.clone(),
+                        decide,
+                        on_event,
+                    )
+                    .await
+                }
             }
-            Tool::Codex => {
-                let options = codex::Options {
-                    resume: job.session.clone(),
-                    model: job.model.clone(),
-                    plan,
-                    instructions: None,
-                    no_commands: false,
-                };
-                codex::run_turn(
-                    launch,
-                    prompt,
-                    &options,
-                    ROUND_LIMIT,
-                    signal.clone(),
-                    decide,
-                    on_event,
-                )
-                .await
-            }
-            Tool::Cursor => {
-                let account = self
-                    .job_account(&job)
-                    .map(|(_, a)| a.name)
-                    .unwrap_or_default();
-                let options = acp::Options {
-                    tool: tool.name().into(),
-                    account,
-                    resume: job.session.clone(),
-                    model: job.model.clone(),
-                    plan,
-                    plan_mode: "plan".into(),
-                    agent_mode: "agent".into(),
-                    // Oby's Tetrix server, the only one Cursor gets (crate::tetrix).
-                    mcp: self
-                        .tetrix_mcp(&job)
-                        .map(|(url, token)| vec![json!({"type": "http", "name": "tetrix", "url": url,
-                            "headers": [{"name": "Authorization", "value": format!("Bearer {token}")}]})])
-                        .unwrap_or_default(),
-                };
-                acp::run_turn(
-                    launch,
-                    prompt,
-                    &options,
-                    ROUND_LIMIT,
-                    signal.clone(),
-                    decide,
-                    on_event,
-                )
-                .await
+        };
+        tokio::pin!(run);
+        let ran = loop {
+            tokio::select! {
+                ran = &mut run => break ran,
+                () = tokio::time::sleep(ACTIVITY_EVERY) => self.glanced(id),
             }
         };
         self.transcribed(id, self.transcripts.end_turn(id));
+        self.glanced(id);
         self.transcripts.forget(id);
         ran.map_err(|e| format!("obid couldn't start {}: {e}", tool.name()))
     }
 
-    /// Tells the apps about transcript entries that came or changed (`transcript` events), and
-    /// keeps the job's `activity` and `context` up to date with them.
+    /// Tells the apps about transcript entries that came or changed (`transcript` events).
     fn transcribed(&self, id: &str, entries: Vec<crate::transcript::Entry>) {
-        if entries.is_empty() {
-            return;
-        }
         for entry in entries {
             self.events
                 .send("transcript", json!({"job": id, "entry": entry}));
         }
-        // ponytail: a `job` event per change in the activity (a call's start and end); throttle
-        // here if that's ever too many.
+    }
+
+    /// Keeps the job's `activity` and `context` up to date with its transcript, when they changed.
+    fn glanced(&self, id: &str) {
         let (activity, context) = self.transcripts.glance(id);
         let job = self.get(id);
         if job.is_some_and(|j| j.activity != activity || j.context != context) {

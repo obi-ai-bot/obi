@@ -811,7 +811,8 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
     let events = follow_events(&obid);
     let id = dispatch(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "TOOLS"}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "TOOLS",
+               "check": "node --test"}),
     );
     let job = ended(&obid, &id);
     assert_eq!(job["status"], "done", "{job}");
@@ -833,8 +834,13 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
     );
     assert_eq!(groups[0]["files"].as_array().unwrap().len(), 5);
     assert_eq!(groups[0]["files"][0], "src/scan.rs");
+    assert_eq!(
+        groups.iter().map(|g| &g["by"]).collect::<Vec<_>>(),
+        [&json!("agent"); 2]
+    );
     assert_eq!(groups[1]["state"], "failed");
     assert_eq!(groups[1]["diff"], json!({"added": 4, "removed": 3}));
+    assert_eq!(job["contextBy"], "agent");
     assert_eq!(
         job["context"],
         "Found it. Fixing it, with [redacted: vault staging-api-key] for staging ([redacted: vault staging-api-key], [redacted: vault staging-api-key])."
@@ -895,11 +901,12 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
     );
     assert_eq!(entries[11]["tool"], "Bash");
     assert_eq!(entries[11]["state"], "failed");
+    assert_eq!(entries[11]["activity"], "test");
     assert!(
         entries[11]["summary"]
             .as_str()
             .unwrap()
-            .starts_with("Running STAGING_KEY=[redacted: vault staging-api-key]"),
+            .starts_with("Running export STAGING_KEY=[redacted"),
         "{}",
         entries[11]
     );

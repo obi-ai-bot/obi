@@ -1,8 +1,12 @@
 //! A job's activity at a glance (#730; docs/runner-api.md, "activity"): its transcript (#381)
-//! summed up as counts of what the agent did by kind, and its session cut into a few groups with
-//! plain titles. A group starts at each of the agent's own words between tool calls and is titled
-//! by them; tool calls with no words before them group by kind ("Read 14 files"). No model writes
-//! a title. Also the job's `context`: the agent's latest words, shortened.
+//! summed up as counts of what the agent did by kind, and its session cut into a few groups. A
+//! group starts at each of the agent's own words between tool calls and is titled by them (marked
+//! as the agent's: `by: "agent"`); tool calls with no words before them group by kind under obid's
+//! own fixed title ("Read 14 files", `by: "obid"`). No model writes a title. Also the job's
+//! `context`: the agent's latest words, shortened. Built one entry at a time, and bounded: it goes
+//! into every `job` event and the saved job.
+
+use std::collections::{HashMap, VecDeque};
 
 use serde_json::{Value, json};
 
@@ -13,16 +17,24 @@ pub const KINDS: [&str; 8] = [
     "read", "search", "edit", "command", "test", "tetrix", "web", "mcp",
 ];
 
-/// How many of a finished group's calls it lists, its last ones; a running group lists them all.
-const LAST: usize = 3;
+/// How many calls a group takes: past it, the next call starts a group of its own.
+const CALLS: usize = 50;
+/// How many of its calls a group lists: its last ones.
+const SHOWN_RUNNING: usize = 10;
+const SHOWN_DONE: usize = 3;
+/// How many groups are kept: the latest ones (the counts are the whole job's).
+const GROUPS: usize = 20;
 /// How many files a group lists.
-const FILES: usize = 50;
+const FILES: usize = 20;
+/// How large the activity may be as JSON: past it, the oldest groups are left out.
+const MOST_BYTES: usize = 32 * 1024;
 /// How long a title or the context may be.
 const TITLE: usize = 80;
 const CONTEXT: usize = 200;
 
-/// What a tool call does, by its tool's name and input: `test` when a command runs the job's
-/// `check` or a known test runner. `other` is counted nowhere.
+/// What a tool call does, by what the tool reports (Claude Code's tool name, Codex's item type,
+/// Cursor's call kind), never by words the agent writes: `test` only for a command that is the
+/// job's `check` (alone, or the last step of a `&&` chain). `other` is counted nowhere.
 pub fn kind(tool: &str, input: &Value, check: Option<&str>) -> &'static str {
     match tool {
         "Read" | "NotebookRead" | "Glob" | "LS" => "read",
@@ -31,11 +43,11 @@ pub fn kind(tool: &str, input: &Value, check: Option<&str>) -> &'static str {
         "WebSearch" | "WebFetch" => "web",
         "Bash" => {
             let command = input["command"].as_str().unwrap_or("");
-            if is_test(command, check) {
-                "test"
-            } else {
-                "command"
-            }
+            let check = check.map(str::trim).filter(|c| !c.is_empty());
+            let runs_check = check.is_some_and(|c| {
+                command.trim() == c || command.rsplit("&&").next().map(str::trim) == Some(c)
+            });
+            if runs_check { "test" } else { "command" }
         }
         _ => match tool.strip_prefix("mcp__") {
             Some(rest)
@@ -52,88 +64,20 @@ pub fn kind(tool: &str, input: &Value, check: Option<&str>) -> &'static str {
     }
 }
 
-/// Whether `command` runs the job's check or a known test runner.
-fn is_test(command: &str, check: Option<&str>) -> bool {
-    // ponytail: a fixed list of runners; a repository's own test script that isn't its `check`
-    // counts as a command.
-    const RUNNERS: [&str; 22] = [
-        "cargo test",
-        "cargo nextest",
-        "swift test",
-        "xcodebuild test",
-        "go test",
-        "pytest",
-        "npm test",
-        "npm run test",
-        "pnpm test",
-        "pnpm run test",
-        "yarn test",
-        "bun test",
-        "node --test",
-        "vitest",
-        "jest",
-        "rspec",
-        "mix test",
-        "gradle test",
-        "gradlew test",
-        "make test",
-        "dotnet test",
-        "oby-check",
-    ];
-    let check = check.map(str::trim).filter(|c| !c.is_empty());
-    check.is_some_and(|c| command.contains(c)) || RUNNERS.iter().any(|r| command.contains(r))
-}
-
-/// The job's `activity`, from its transcript as it is now.
-pub fn of(entries: &[Entry]) -> Value {
-    let mut groups: Vec<Group> = Vec::new();
-    // The words that open the next group, and whether the group now open takes more calls.
-    let mut words: Option<&Entry> = None;
-    let mut open = false;
-    for entry in entries {
-        match entry.kind.as_str() {
-            "said" => {
-                words = Some(entry);
-                open = false;
-            }
-            // A round's start or the owner's words close the group: what follows is new work.
-            "start" | "you" => {
-                words = None;
-                open = false;
-            }
-            "tool" => {
-                let kind = entry.activity.as_deref().unwrap_or("other");
-                let joins = open && groups.last().is_some_and(|g| g.titled || g.kind == kind);
-                if !joins {
-                    groups.push(Group {
-                        first: words.unwrap_or(entry).clone(),
-                        titled: words.is_some(),
-                        kind: kind.to_owned(),
-                        tools: vec![],
-                    });
-                    words = None;
-                    open = true;
-                }
-                groups
-                    .last_mut()
-                    .expect("a group")
-                    .tools
-                    .push(entry.clone());
-            }
-            _ => {}
-        }
-    }
-    let counts = count(entries.iter());
-    json!({
-        "counts": counts,
-        "groups": groups.iter().map(Group::to_json).collect::<Vec<_>>(),
-    })
-}
-
-/// The job's `context`: the agent's latest words, shortened to their first sentences.
-pub fn context(entries: &[Entry]) -> Option<String> {
-    let said = entries.iter().rev().find(|e| e.kind == "said")?;
-    Some(crate::brain::briefing::line(&said.summary, CONTEXT))
+/// A job's activity, taken in one transcript entry (new or changed) at a time.
+#[derive(Default)]
+pub struct Activity {
+    counts: HashMap<&'static str, u64>,
+    /// The latest groups, the oldest first; `dropped` came before them.
+    groups: VecDeque<Group>,
+    dropped: usize,
+    /// Where each call is: its group (by its place among all groups) and its place in it.
+    calls: HashMap<u64, (usize, usize)>,
+    /// The agent's words that open the next group.
+    words: Option<Entry>,
+    /// The last group takes more calls.
+    open: bool,
+    context: Option<String>,
 }
 
 struct Group {
@@ -141,19 +85,99 @@ struct Group {
     first: Entry,
     titled: bool,
     kind: String,
-    tools: Vec<Entry>,
+    calls: Vec<Entry>,
+}
+
+impl Activity {
+    /// Takes in an entry that came or changed.
+    pub fn take(&mut self, entry: &Entry) {
+        match entry.kind.as_str() {
+            "said" => {
+                self.words = Some(entry.clone());
+                self.open = false;
+                self.context = Some(crate::brain::briefing::line(&entry.summary, CONTEXT));
+            }
+            // A round's start or the owner's words close the group: what follows is new work.
+            "start" | "you" => {
+                self.words = None;
+                self.open = false;
+            }
+            "tool" => self.call(entry),
+            _ => {}
+        }
+    }
+
+    fn call(&mut self, entry: &Entry) {
+        if let Some(&(group, place)) = self.calls.get(&entry.n) {
+            if let Some(call) = group
+                .checked_sub(self.dropped)
+                .and_then(|g| self.groups.get_mut(g))
+                .and_then(|g| g.calls.get_mut(place))
+            {
+                *call = entry.clone();
+            }
+            return;
+        }
+        let kind = entry.activity.as_deref().unwrap_or("other");
+        if let Some(kind) = KINDS.iter().find(|k| **k == kind) {
+            *self.counts.entry(kind).or_default() += 1;
+        }
+        let joins = self.open
+            && self
+                .groups
+                .back()
+                .is_some_and(|g| (g.titled || g.kind == kind) && g.calls.len() < CALLS);
+        if !joins {
+            self.groups.push_back(Group {
+                first: self.words.take().unwrap_or_else(|| entry.clone()),
+                titled: false,
+                kind: kind.to_owned(),
+                calls: vec![],
+            });
+            let group = self.groups.back_mut().expect("a group");
+            group.titled = group.first.kind == "said";
+            self.open = true;
+            if self.groups.len() > GROUPS {
+                self.groups.pop_front();
+                self.dropped += 1;
+            }
+        }
+        let index = self.dropped + self.groups.len() - 1;
+        let group = self.groups.back_mut().expect("a group");
+        group.calls.push(entry.clone());
+        let place = (index, group.calls.len() - 1);
+        self.calls.insert(entry.n, place);
+    }
+
+    /// The job's `activity`: none before its first tool call.
+    pub fn to_json(&self) -> Option<Value> {
+        if self.groups.is_empty() {
+            return None;
+        }
+        let mut groups: VecDeque<Value> = self.groups.iter().map(Group::to_json).collect();
+        let mut size: usize = groups.iter().map(|g| g.to_string().len()).sum();
+        while size > MOST_BYTES && groups.len() > 1 {
+            size -= groups.pop_front().map_or(0, |g| g.to_string().len());
+        }
+        Some(json!({"counts": counts(self.counts.iter().map(|(k, n)| (*k, *n))), "groups": groups}))
+    }
+
+    /// The job's `context`: the agent's latest words, shortened.
+    pub fn context(&self) -> Option<String> {
+        self.context.clone()
+    }
 }
 
 impl Group {
     fn to_json(&self) -> Value {
         let running = self
-            .tools
+            .calls
             .iter()
             .any(|t| t.state.as_deref() == Some("running"));
         let failed = self
-            .tools
+            .calls
             .last()
-            .is_some_and(|t| matches!(t.state.as_deref(), Some("failed")));
+            .is_some_and(|t| t.state.as_deref() == Some("failed"));
         let state = if running {
             "running"
         } else if failed {
@@ -162,31 +186,28 @@ impl Group {
             "done"
         };
         let mut files: Vec<&str> = Vec::new();
-        for file in self.tools.iter().filter_map(|t| t.file.as_deref()) {
+        for file in self.calls.iter().filter_map(|t| t.file.as_deref()) {
             if !files.contains(&file) && files.len() < FILES {
                 files.push(file);
             }
         }
-        let edits: Vec<&Entry> = self.tools.iter().filter(|t| t.added.is_some()).collect();
-        let shown = if running {
-            &self.tools[..]
-        } else {
-            &self.tools[self.tools.len().saturating_sub(LAST)..]
-        };
+        let edits: Vec<&Entry> = self.calls.iter().filter(|t| t.added.is_some()).collect();
+        let shown = if running { SHOWN_RUNNING } else { SHOWN_DONE };
         let mut group = json!({
             "id": format!("g{}", self.first.n),
             "title": self.title(),
+            "by": if self.titled { "agent" } else { "obid" },
             "state": state,
             "started": self.first.at,
-            "counts": count(self.tools.iter()),
+            "counts": counts(self.calls.iter().filter_map(|t| t.activity.as_deref()).map(|k| (k, 1))),
             "files": files,
-            "tools": shown.iter().map(|t| json!({
+            "tools": self.calls[self.calls.len().saturating_sub(shown)..].iter().map(|t| json!({
                 "tool": t.tool, "kind": t.activity, "summary": t.summary, "state": t.state,
                 "started": t.at, "seconds": t.seconds,
             })).collect::<Vec<_>>(),
         });
         if !running {
-            group["finished"] = json!(self.tools.iter().filter_map(ended).max());
+            group["finished"] = json!(self.calls.iter().filter_map(ended).max());
         }
         if !edits.is_empty() {
             group["diff"] = json!({
@@ -201,10 +222,10 @@ impl Group {
         if self.titled {
             return title(&self.first.summary);
         }
-        let n = self.tools.len();
+        let n = self.calls.len();
         let files = {
             let mut seen: Vec<&str> = self
-                .tools
+                .calls
                 .iter()
                 .filter_map(|t| t.file.as_deref())
                 .collect();
@@ -254,13 +275,14 @@ fn ended(tool: &Entry) -> Option<String> {
     ))
 }
 
-fn count<'a>(entries: impl Iterator<Item = &'a Entry>) -> Value {
+/// Every kind with its count, 0 for those not seen.
+fn counts<'a>(seen: impl Iterator<Item = (&'a str, u64)>) -> Value {
     let mut counts: serde_json::Map<String, Value> =
         KINDS.iter().map(|k| ((*k).to_owned(), json!(0))).collect();
-    for kind in entries.filter_map(|e| e.activity.as_deref()) {
-        if let Some(Value::Number(n)) = counts.get(kind) {
-            let n = n.as_u64().unwrap_or(0) + 1;
-            counts.insert(kind.to_owned(), json!(n));
+    for (kind, n) in seen {
+        if let Some(Value::Number(was)) = counts.get(kind) {
+            let now = was.as_u64().unwrap_or(0) + n;
+            counts.insert(kind.to_owned(), json!(now));
         }
     }
     Value::Object(counts)
@@ -295,24 +317,34 @@ mod tests {
         }
     }
 
+    fn of(entries: &[Entry]) -> Activity {
+        let mut activity = Activity::default();
+        for entry in entries {
+            activity.take(entry);
+        }
+        activity
+    }
+
     #[test]
     fn kinds_by_tool() {
         let none = Value::Null;
+        let bash =
+            |command: &str, check: Option<&str>| kind("Bash", &json!({"command": command}), check);
         assert_eq!(kind("Glob", &none, None), "read");
         assert_eq!(kind("Grep", &none, None), "search");
         assert_eq!(kind("MultiEdit", &none, None), "edit");
-        assert_eq!(kind("Bash", &json!({"command": "ls"}), None), "command");
+        assert_eq!(bash("ls", None), "command");
+        // Only the job's check is a test run, never a command that looks like one.
+        assert_eq!(bash("cargo test", None), "command");
+        assert_eq!(bash("cargo test", Some("node --test")), "command");
+        assert_eq!(bash("node --test", Some("node --test")), "test");
         assert_eq!(
-            kind("Bash", &json!({"command": "cd x && cargo test -q"}), None),
+            bash("export A=1 && node --test", Some("node --test")),
             "test"
         );
         assert_eq!(
-            kind(
-                "Bash",
-                &json!({"command": "./check.sh"}),
-                Some("./check.sh")
-            ),
-            "test"
+            bash("node --test && rm -rf x", Some("node --test")),
+            "command"
         );
         assert_eq!(
             kind("mcp__tetrix-baseline__get_entity", &none, None),
@@ -320,7 +352,7 @@ mod tests {
         );
         assert_eq!(kind("mcp__linear__list", &none, None), "mcp");
         assert_eq!(kind("WebFetch", &none, None), "web");
-        assert_eq!(kind("Agent", &none, None), "other");
+        assert_eq!(kind("Tool", &none, None), "other");
     }
 
     #[test]
@@ -337,16 +369,18 @@ mod tests {
         entries.push(edit);
         entries.push(tool(10, "Bash", "test", None, "running"));
         let activity = of(&entries);
+        let json = activity.to_json().unwrap();
         assert_eq!(
-            activity["counts"],
+            json["counts"],
             json!({"read": 5, "search": 0, "edit": 2, "command": 0, "test": 1, "tetrix": 0, "web": 0, "mcp": 0})
         );
-        let groups = activity["groups"].as_array().unwrap();
+        let groups = json["groups"].as_array().unwrap();
         assert_eq!(groups.len(), 2);
         assert_eq!(
             groups[0]["title"],
             "Looking for where a blocked scan ends the job"
         );
+        assert_eq!(groups[0]["by"], "agent");
         assert_eq!(groups[0]["state"], "done");
         assert_eq!(groups[0]["files"], json!(["src/a.rs"]));
         assert_eq!(groups[0]["tools"].as_array().unwrap().len(), 3);
@@ -356,7 +390,18 @@ mod tests {
         assert_eq!(groups[1]["tools"].as_array().unwrap().len(), 3);
         assert!(groups[1].get("finished").is_none());
         assert_eq!(groups[1]["diff"], json!({"added": 3, "removed": 1}));
-        assert_eq!(context(&entries).as_deref(), Some("Found it: fixing it."));
+        assert_eq!(activity.context().as_deref(), Some("Found it: fixing it."));
+    }
+
+    #[test]
+    fn a_call_that_ends_changes_its_group() {
+        let mut activity = of(&[tool(1, "Bash", "test", None, "running")]);
+        assert_eq!(activity.to_json().unwrap()["groups"][0]["state"], "running");
+        activity.take(&tool(1, "Bash", "test", None, "failed"));
+        let json = activity.to_json().unwrap();
+        assert_eq!(json["groups"][0]["state"], "failed");
+        // An end isn't a second call.
+        assert_eq!(json["counts"]["test"], 1);
     }
 
     #[test]
@@ -366,13 +411,64 @@ mod tests {
             .collect();
         entries.push(tool(15, "Grep", "search", None, "done"));
         entries.push(tool(16, "Grep", "search", None, "failed"));
-        let groups = of(&entries)["groups"].as_array().unwrap().clone();
+        let activity = of(&entries);
+        let json = activity.to_json().unwrap();
+        let groups = json["groups"].as_array().unwrap();
         let titles: Vec<&str> = groups
             .iter()
             .map(|g| g["title"].as_str().unwrap())
             .collect();
         assert_eq!(titles, ["Read 14 files", "Searched the code 2 times"]);
+        assert_eq!(groups[0]["by"], "obid");
         assert_eq!(groups[1]["state"], "failed");
-        assert_eq!(context(&entries), None);
+        assert_eq!(activity.context(), None);
+        assert_eq!(Activity::default().to_json(), None);
+    }
+
+    #[test]
+    fn it_stays_small_however_long_the_job() {
+        let mut activity = Activity::default();
+        let long = "w".repeat(300);
+        let mut n = 0;
+        for round in 0..200 {
+            n += 1;
+            activity.take(&said(n, &format!("Step {round}. {long}")));
+            for _ in 0..120 {
+                n += 1;
+                let mut call = tool(
+                    n,
+                    "Read",
+                    "read",
+                    Some(&format!("src/{n}/{long}.rs")),
+                    "running",
+                );
+                call.summary = long.clone();
+                activity.take(&call);
+            }
+        }
+        let json = activity.to_json().unwrap();
+        assert!(
+            json.to_string().len() <= MOST_BYTES + 1024,
+            "{}",
+            json.to_string().len()
+        );
+        let groups = json["groups"].as_array().unwrap();
+        assert!(groups.len() <= GROUPS);
+        for group in groups {
+            assert!(group["tools"].as_array().unwrap().len() <= SHOWN_RUNNING);
+            assert!(group["files"].as_array().unwrap().len() <= FILES);
+            assert!(group["counts"]["read"].as_u64().unwrap() <= CALLS as u64);
+        }
+        // The counts are the whole job's.
+        assert_eq!(json["counts"]["read"], 200 * 120);
+        // A long run without words is cut into groups of at most CALLS.
+        let mut quiet = Activity::default();
+        for n in 1..=120 {
+            quiet.take(&tool(n, "Read", "read", None, "done"));
+        }
+        assert_eq!(
+            quiet.to_json().unwrap()["groups"].as_array().unwrap().len(),
+            3
+        );
     }
 }

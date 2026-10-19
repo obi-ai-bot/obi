@@ -87,6 +87,8 @@ struct Live {
     first: Vec<usize>,
     /// The file's size.
     bytes: u64,
+    /// The job's activity, built as entries come.
+    activity: crate::activity::Activity,
     /// The file is full ([`MOST_ENTRIES`], [`MOST_BYTES`]): said in the log once.
     full: bool,
     open: HashMap<String, (Entry, Instant)>,
@@ -342,14 +344,7 @@ impl Transcripts {
 }
 
 fn glance(live: &Live) -> (Option<Value>, Option<String>) {
-    let entries: Vec<Entry> = live.now.values().cloned().collect();
-    (
-        entries
-            .iter()
-            .any(|e| e.kind == "tool")
-            .then(|| crate::activity::of(&entries)),
-        crate::activity::context(&entries),
-    )
+    (live.activity.to_json(), live.activity.context())
 }
 
 /// [`Transcripts::read`]'s page of `live`: the earlier entries that changed (calls that were
@@ -386,6 +381,7 @@ impl Live {
             self.first.resize(n as usize, self.log.len());
         }
         self.log.push(n);
+        self.activity.take(&entry);
         self.now.insert(n, entry);
     }
 }
@@ -513,17 +509,29 @@ pub fn todo_state(status: &str) -> &'static str {
     }
 }
 
-/// The file a call is about (`file_path`, `notebook_path` or `path`), from the worktree, masked.
+/// The file a call is about (`file_path`, `notebook_path` or `path`), masked: from the worktree
+/// when it's in it, else only its name (never the home folder or another place on the Mac).
 fn file_of(input: &Value, worktree: &Path) -> Option<String> {
     let path = ["file_path", "notebook_path", "path"]
         .iter()
         .find_map(|k| input[k].as_str().filter(|p| !p.is_empty()))?;
+    let path = Path::new(path);
     let real = crate::policy::real_path(worktree).unwrap_or_else(|| worktree.to_path_buf());
-    let relative = Path::new(path)
+    let inside = path
         .strip_prefix(worktree)
-        .or_else(|_| Path::new(path).strip_prefix(&real))
-        .map_or(path.to_owned(), |p| p.display().to_string());
-    Some(crate::brain::briefing::line(&mask(&relative), SUMMARY))
+        .or_else(|_| path.strip_prefix(&real))
+        .ok()
+        .or_else(|| {
+            path.is_relative().then_some(path).filter(|p| {
+                p.components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+            })
+        });
+    let shown = match inside {
+        Some(relative) => relative.display().to_string(),
+        None => path.file_name()?.to_string_lossy().into_owned(),
+    };
+    Some(crate::brain::briefing::line(&mask(&shown), SUMMARY))
 }
 
 /// The lines a Claude Code edit adds and removes, from its input.
@@ -907,5 +915,15 @@ mod tests {
         t.sweep(|id| id == "new");
         assert!(!t.path("old").exists());
         assert!(t.path("new").exists());
+    }
+
+    #[test]
+    fn files_outside_the_worktree_show_only_their_name() {
+        let w = Path::new("/w");
+        let file = |path: &str| file_of(&json!({"file_path": path}), w);
+        assert_eq!(file("/w/src/a.rs").as_deref(), Some("src/a.rs"));
+        assert_eq!(file("src/a.rs").as_deref(), Some("src/a.rs"));
+        assert_eq!(file("/Users/me/.ssh/config").as_deref(), Some("config"));
+        assert_eq!(file("../../etc/hosts").as_deref(), Some("hosts"));
     }
 }
