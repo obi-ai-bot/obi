@@ -1408,6 +1408,29 @@ mod tests {
         assert!(long.ends_with("… (#75)"));
     }
 
+    /// A test-first fix goes out titled by its fix, not by the test that came first (#765).
+    #[test]
+    fn titles_prefer_the_change_over_its_test() {
+        let mut job = job();
+        job.issue = Some(7);
+        let subjects = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            title(
+                &job,
+                &subjects(&["test(obid): x fails", "fix(obid): x works", "docs: x"])
+            ),
+            "fix(obid): x works (#7)"
+        );
+        assert_eq!(
+            title(&job, &subjects(&["feat: y", "fix: x"])),
+            "fix: x (#7)"
+        );
+        assert_eq!(
+            title(&job, &subjects(&["test(obid): x fails", "test: y"])),
+            "test(obid): x fails (#7)"
+        );
+    }
+
     #[test]
     fn descriptions_quote_the_agent_and_never_promise_a_merge() {
         let mut job = job();
