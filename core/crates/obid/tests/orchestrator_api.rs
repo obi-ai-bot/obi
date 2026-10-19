@@ -134,7 +134,7 @@ fn an_event_it_cant_match_escalates_and_changes_nothing() {
     );
     assert_eq!(planned(&obid), ["read_job"]);
     let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
-    assert_eq!(job["status"], "failed");
+    assert_eq!(job["status"], "interrupted");
     assert_eq!(job["round"], 1);
     // The owner settles it, and it goes (#710: it answered "settled already" and stayed).
     assert_eq!(item["options"], serde_json::json!(["Done"]));
@@ -175,7 +175,7 @@ fn an_event_turn_never_starts_a_follow_up() {
     let jobs = call(&obid, "GET", "/v1/jobs", None).body;
     assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
     let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
-    assert_eq!(job["status"], "failed");
+    assert_eq!(job["status"], "interrupted");
     assert_eq!(job["round"], 1);
 }
 

@@ -183,6 +183,11 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The job this one follows up (obid): the owner told that one something after it ended, and
     /// its thread shows this one's card (Sangam's design). Nil otherwise.
     var followUpOf: String?
+    /// Why it stopped without ending done, apart from its agent's summary (obid only), or nil.
+    var reason: String?
+    /// Interrupted on obid: its one next step, as its button says it ("One more round", "Try
+    /// again"), or nil.
+    var nextStep: String?
 
     /// What a queued job waits for, in the words every app shows after "Waiting": "a slot opens",
     /// "runner update". `job` is the job it waits behind, for `job` and `files`.
@@ -333,7 +338,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
                 : summary.hasPrefix("Nothing committed:") ? "Nothing committed: \(heading)"
                 : summary.hasPrefix("Not published:") ? "Not published: \(heading)" : "Couldn't finish: \(heading)"
         case .stopped: "Stopped: \(heading)"
-        case .interrupted: "Interrupted: \(heading)"
+        case .interrupted: "Needs you: \(heading)"
         case .queued, .running: step
         }
     }

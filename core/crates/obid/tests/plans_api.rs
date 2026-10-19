@@ -1771,8 +1771,8 @@ fn get_job(obid: &Obid, id: &str) -> serde_json::Value {
 fn one_message_tries_a_failed_job_again_and_dismisses_the_old_one() {
     let folder = Folder::new("brain-try-again");
     let obid = started(&folder);
-    let notch = job_that(&obid, "Notch three screens", "FAIL", None, "failed");
-    let old = job_that(&obid, "Old PR job", "FAIL", None, "failed");
+    let notch = job_that(&obid, "Notch three screens", "FAIL", None, "interrupted");
+    let old = job_that(&obid, "Old PR job", "FAIL", None, "interrupted");
     let (notch, old) = (notch["id"].as_str().unwrap(), old["id"].as_str().unwrap());
     let events = follow_events(&obid);
     queue(
@@ -1851,8 +1851,8 @@ fn work_a_failed_job_left_goes_on_in_it_unless_the_user_starts_over() {
         answer.text
     );
     let vault = answer.body["id"].as_str().unwrap().to_owned();
-    within(30, "the vault job failed", || {
-        (get_job(&obid, &vault)["status"] == "failed").then_some(())
+    within(30, "the vault job needs you", || {
+        (get_job(&obid, &vault)["status"] == "interrupted").then_some(())
     });
     queue(
         &obid,
@@ -1959,7 +1959,7 @@ fn the_user_tells_a_running_job_something() {
 fn a_dismissed_job_gets_a_follow_up_too() {
     let folder = Folder::new("brain-message-dismissed");
     let obid = started(&folder);
-    let job = job_that(&obid, "Docs line", "FAIL", None, "failed");
+    let job = job_that(&obid, "Docs line", "FAIL", None, "interrupted");
     let id = job["id"].as_str().unwrap().to_owned();
     let dismissed = call(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None);
     assert_eq!(dismissed.status, 200, "{}", dismissed.text);
@@ -1971,7 +1971,7 @@ fn a_dismissed_job_gets_a_follow_up_too() {
     assert_eq!(next["followUpOf"], json!(id));
     assert_eq!(next["request"], "Tell the docs job to add one more line");
     let first = get_job(&obid, &id);
-    assert_eq!(first["status"], "failed");
+    assert_eq!(first["status"], "interrupted");
     assert!(first["dismissed"].is_string(), "{first}");
     assert!(items_of(&obid, "confirm").is_empty());
 }

@@ -37,6 +37,8 @@ pub const CHECK_LIMIT: Duration = Duration::from_secs(20 * 60);
 pub const CHECK_TOO_LONG: &str = "obid stopped it after 20 minutes, the most a test run may take.";
 /// How much of a check's output obid keeps: its end.
 const CHECK_OUTPUT_MAX: usize = 64 * 1024;
+/// Why a job that commits ended done with nothing to publish.
+const NOTHING_COMMITTED: &str = "Nothing committed, so nothing was published.";
 /// What a round's summary starts with when the check's failure is what the task asked for.
 const FAILS_AS_ASKED: &str = "FAILS AS ASKED";
 /// Claude Code's own turn limit for a round.
@@ -46,8 +48,44 @@ const TIDY_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The agent's MCP configuration (`--mcp-config`), in the job's own folder (its `HOME`), written
 /// before each turn: the `agent-mcp` plug-ins' servers.
 pub const MCP_CONFIG_FILE: &str = "obi-mcp.json";
-/// The kinds whose work is commits: one that ends with none committed failed.
+/// The kinds whose work is commits: one that ends with none committed says so.
 const COMMITTING: [&str; 3] = ["build", "fix", "test"];
+
+/// How an owner's job that didn't end done ends. Like Claude Code, which ends only at a limit, a
+/// crash or a stop, obid calls few things failed: a job stopped part way with a session to pick up
+/// needs its owner (`interrupted`), its work kept on its branch.
+#[derive(Debug)]
+enum End {
+    /// A dead end: nothing ran, or there's no session to pick up.
+    Failed(String),
+    /// It needs the owner: why, and the one next step (`job::ONE_MORE_ROUND`, `job::TRY_AGAIN`),
+    /// or none when only their words or Dismiss take it on.
+    NeedsYou {
+        reason: String,
+        next: Option<&'static str>,
+    },
+}
+
+impl From<String> for End {
+    fn from(why: String) -> End {
+        End::Failed(why)
+    }
+}
+
+impl From<&str> for End {
+    fn from(why: &str) -> End {
+        End::Failed(why.to_owned())
+    }
+}
+
+impl End {
+    fn needs_you(reason: impl Into<String>, next: Option<&'static str>) -> End {
+        End::NeedsYou {
+            reason: reason.into(),
+            next,
+        }
+    }
+}
 
 /// Which of obid's rules a turn's permission prompts meet.
 #[derive(Clone, Copy)]
@@ -1732,6 +1770,8 @@ impl Jobs {
             job.finished = None;
             job.dismissed = None;
             job.limit = None;
+            job.reason = None;
+            job.next_step = None;
             job.waiting = None;
             job.asked = true;
             job.clone()
@@ -2440,8 +2480,12 @@ impl Jobs {
         let outcome = match prepare_folder(&temp).and_then(|()| {
             prepare_folder(self.log_path(id, "x").parent().expect("a log has a folder"))
         }) {
-            Err(e) => Err(format!("obid couldn't make the job's folders: {e}")),
-            Ok(()) if job.obi.is_some() => self.run_obi_review(id, &signal).await,
+            Err(e) => Err(End::Failed(format!(
+                "obid couldn't make the job's folders: {e}"
+            ))),
+            Ok(()) if job.obi.is_some() => {
+                self.run_obi_review(id, &signal).await.map_err(End::Failed)
+            }
             Ok(()) => {
                 let outcome = self.run_owner_job(id, &signal).await;
                 // A job that ends any other way than done (failed, stopped) shows what it made
@@ -2469,7 +2513,7 @@ impl Jobs {
                 }
             }
             Ok(()) => {}
-            Err(why) => {
+            Err(end) => {
                 let review = self.get(id).and_then(|j| {
                     let body: ReviewRequest =
                         serde_json::from_value(j.obi_request?.get("body")?.clone()).ok()?;
@@ -2480,11 +2524,29 @@ impl Jobs {
                     self.review_ended(id, false).await;
                 }
                 self.update(id, |job| {
-                    job.status = Status::Failed;
+                    let (reason, next) = match &end {
+                        End::Failed(why) => (why.clone(), None),
+                        End::NeedsYou { reason, next } => (reason.clone(), *next),
+                    };
+                    // Needing the owner, with a session to pick up: the agent's own summary stays
+                    // (`summaries` has every round's), and why it stopped is said apart. A dead end,
+                    // or one with no session, failed, its summary why.
+                    let needs_you = matches!(end, End::NeedsYou { .. }) && job.session.is_some();
+                    if needs_you {
+                        job.status = Status::Interrupted;
+                        if job.summary.trim().is_empty() {
+                            job.summary = reason.clone();
+                        }
+                        job.next_step = next.map(str::to_owned);
+                    } else {
+                        job.status = Status::Failed;
+                        job.summary = reason.clone();
+                        job.next_step = None;
+                    }
+                    job.reason = Some(reason);
                     job.asked = false;
                     job.publish_step = None;
                     job.step = String::new();
-                    job.summary = why;
                     job.finished = Some(obi_protocol::time::now());
                     if job.obi.is_some() {
                         job.review_result = review;
@@ -3354,12 +3416,12 @@ impl Jobs {
         self: &Arc<Self>,
         id: &str,
         signal: &watch::Receiver<Signal>,
-    ) -> Result<(), String> {
+    ) -> Result<(), End> {
         let job = self.get(id).ok_or("the job is gone")?;
         if let Err(why) = &self.sandbox {
-            return Err(format!(
+            return Err(End::Failed(format!(
                 "obid can't make the job sandbox on this machine, so it ran nothing: {why}"
-            ));
+            )));
         }
         let repo = self
             .repo(&job.repo)
@@ -3471,7 +3533,7 @@ impl Jobs {
                             .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("attachment")
-                    ));
+                    ).into());
                 }
                 let data = std::fs::read(&resolved)
                     .map_err(|e| format!("obid couldn't read attachment: {e}"))?;
@@ -3488,7 +3550,7 @@ impl Jobs {
                     if crate::secrets::known().redact(&lossy) != lossy {
                         return Err(format!(
                             "The attachment {name} holds a vault secret: it isn't handed to the agent."
-                        ));
+                        ).into());
                     }
                     crate::obi_dir::write_new(&inputs, name, &data)
                         .map_err(|e| format!("obid couldn't copy attachment: {e}"))?;
@@ -3526,7 +3588,7 @@ impl Jobs {
                 return Err(format!(
                     "Cursor didn't start: this repository's .cursor/cli.json lets it run {} without asking obid, and obid can't ask you about that yet.",
                     allowed.join(", ")
-                ));
+                ).into());
             }
         }
 
@@ -3662,21 +3724,29 @@ impl Jobs {
                     self.update(id, |job| {
                         job.limit = Some("the round ran past 45 minutes".into())
                     });
-                    return Err("Stopped at a limit: the round ran past 45 minutes. The branch is kept and nothing was pushed; one more round is possible.".into());
+                    return Err(End::needs_you(
+                        "Stopped at a limit: the round ran past 45 minutes. The branch is kept and nothing was pushed.",
+                        Some(crate::job::ONE_MORE_ROUND),
+                    ));
                 }
                 let said = turn.text();
                 if !turn.succeeded() {
                     let first = said.lines().next().unwrap_or("").trim().to_owned();
-                    return Err(if first.is_empty() {
-                        format!(
-                            "{} stopped without finishing ({}).{}",
-                            tool.name(),
-                            turn.exit,
-                            self.agent_note(id)
-                        )
-                    } else {
-                        first
-                    });
+                    // A usage limit, a login, a crash: what's done is kept, and Try again picks the
+                    // session up (after the reset, the sign-in).
+                    return Err(End::needs_you(
+                        if first.is_empty() {
+                            format!(
+                                "{} stopped without finishing ({}).{}",
+                                tool.name(),
+                                turn.exit,
+                                self.agent_note(id)
+                            )
+                        } else {
+                            first
+                        },
+                        Some(crate::job::TRY_AGAIN),
+                    ));
                 }
                 self.update(id, |job| {
                     if !noted || job.summary.is_empty() {
@@ -3710,10 +3780,13 @@ impl Jobs {
                     // A failure the agent says the task asked for (a test meant to fail) ends the
                     // rounds: another round would undo what the owner asked. It isn't a pass, so
                     // nothing goes out: only checks that pass publish (AGENTS.md), whatever the
-                    // agent says. The owner publishes it by hand if that's what they want.
+                    // agent says, and nothing publishes it by hand either: the owner's words decide.
                     if !run.passed && said.trim_start().starts_with(FAILS_AS_ASKED) {
-                        return Err(format!(
-                            "`{command}` fails, as the agent says the task asked for, so nothing was pushed. The branch is kept: publish it by hand if that's right."
+                        return Err(End::needs_you(
+                            format!(
+                                "`{command}` fails, as the agent says the task asked for, so nothing was pushed. The branch is kept: tell it what you want."
+                            ),
+                            None,
                         ));
                     }
                     if run.passed {
@@ -3729,8 +3802,11 @@ impl Jobs {
                     if !more_rounds {
                         let limit = format!("`{command}` still fails after {round} round(s)");
                         self.update(id, |job| job.limit = Some(limit.clone()));
-                        return Err(format!(
-                            "Stopped at a limit: {limit}. The branch is kept and nothing was pushed; one more round is possible."
+                        return Err(End::needs_you(
+                            format!(
+                                "Stopped at a limit: {limit}. The branch is kept and nothing was pushed."
+                            ),
+                            Some(crate::job::ONE_MORE_ROUND),
                         ));
                     }
                     let quoted: String = job.task.lines().map(|l| format!("> {l}\n")).collect();
@@ -3791,15 +3867,21 @@ impl Jobs {
                 .unwrap_or(0)
             };
             let job = self.get(id).ok_or("the job is gone")?;
-            let first_line = job.summary.lines().next().unwrap_or("").trim().to_owned();
-            // A round the owner asked for may end with nothing committed: their words decide.
+            // Nothing committed: done, as Claude Code is when its model stops, and the agent's
+            // summary says why. A round the owner asked for says nothing of it: their words decide.
             if COMMITTING.contains(&job.kind.as_str()) && commits == 0 && !job.asked {
-                return Err(format!("Nothing committed: {first_line}"));
+                self.end_done(id, 0, job.pushed, |job| {
+                    job.reason = Some(NOTHING_COMMITTED.into());
+                });
+                return Ok(());
             }
-            // A review publishes nothing: one that committed fails, its commits counted.
+            // A review publishes nothing: one that committed is done, its review standing, its
+            // commits counted and kept on its branch, never published.
             if job.kind == "review" && commits > 0 {
-                self.update(id, |job| job.commits = Some(commits));
-                return Err(crate::publish::REVIEW_COMMITTED.into());
+                self.end_done(id, commits, job.pushed, |job| {
+                    job.reason = Some(crate::publish::REVIEW_COMMITTED.into());
+                });
+                return Ok(());
             }
             let pushed = self.still_pushed(&job, &head, commits).await;
             // The job as it would end, which is what gets published.
@@ -3876,10 +3958,12 @@ impl Jobs {
                         });
                         continue 'rounds;
                     }
-                    return Err(format!(
-                        "{}\n\n{}",
+                    // Its fix round couldn't clear it: the commits stay unpublished on the branch. Try
+                    // again rewrites them once more; a finding no round can fix is for a person.
+                    let fixable = found.iter().all(crate::publish::Found::fixable);
+                    return Err(End::needs_you(
                         crate::publish::blocked(&found),
-                        job.summary
+                        fixable.then_some(crate::job::TRY_AGAIN),
                     ));
                 }
                 Err(Failure::Stopped) => return Ok(()),

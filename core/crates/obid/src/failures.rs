@@ -131,11 +131,30 @@ pub fn found(job: &Job, now: i64) -> Option<(String, Trigger, String)> {
             ),
             None => (Trigger::Failed, "It failed.".to_owned()),
         },
+        // Needing the owner isn't a failure to them, but it is news to Oby's post-mortem: kept
+        // as the Swift runner keeps an interrupted job.
+        Status::Interrupted => match &job.limit {
+            Some(limit) => (Trigger::Limit, format!("Stopped at a limit: {limit}")),
+            None if job
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with("Not published:")) =>
+            {
+                (
+                    Trigger::PublishError,
+                    "It needs you, not published.".to_owned(),
+                )
+            }
+            None => (
+                Trigger::Failed,
+                "It stopped part way and needs you.".to_owned(),
+            ),
+        },
         Status::Done if job.publish_error.is_some() => (
             Trigger::PublishError,
             "Its publish failed; Publish by hand is offered.".to_owned(),
         ),
-        // A job the owner stopped isn't a failure, and obid leaves none interrupted.
+        // A job the owner stopped isn't a failure.
         _ => return None,
     };
     Some((
@@ -397,6 +416,14 @@ mod tests {
             found(&by_hand, 1_001).unwrap().0,
             "ab12cd34-publishError-1000"
         );
+
+        // Needing the owner is kept too, its reason read where a failed job's summary is.
+        let mut needs_you = job(Status::Interrupted);
+        assert_eq!(found(&needs_you, 1_001).unwrap().1, Trigger::Failed);
+        needs_you.reason = Some("Not published: possible secret in keys.txt:1".into());
+        assert_eq!(found(&needs_you, 1_001).unwrap().1, Trigger::PublishError);
+        needs_you.limit = Some("the round ran past 45 minutes".into());
+        assert_eq!(found(&needs_you, 1_001).unwrap().1, Trigger::Limit);
 
         for quiet in [
             Status::Done,

@@ -51,6 +51,9 @@ struct TaskCard: View {
                         InboxDecision(item: item, inset: false)
                     } else if (job.permission != nil && job.isActive) || job.waitsForAnswer {
                         JobDecision(job: job, inset: false)
+                    } else if let next = job.nextStepOffered {
+                        AskCard(kind: job.needsYouKind, title: job.line, options: CardOption.of([next], recommended: 0), busy: busy,
+                                onChoose: { _ in tryAgain(job.id) })
                     } else {
                         Text(job.badge.text).font(Tokens.font(Tokens.textSm, .medium))
                             .foregroundStyle(job.badge.tone == .red ? Tokens.danger : Tokens.needs)
@@ -88,6 +91,15 @@ struct TaskCard: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(job.heading), \(item.mark.rawValue)")
         .accessibilityAction(named: "Open") { push(.task(job.id)) }
+    }
+
+    /// One more round or Try again: the agent's session picks up where it stopped.
+    private func tryAgain(_ id: String) {
+        busy = true
+        Task {
+            defer { busy = false }
+            do { try await phone.tell(id, Job.tryAgainWords); problem = nil } catch { problem = error.localizedDescription }
+        }
     }
 }
 

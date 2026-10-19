@@ -86,6 +86,11 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The job this one follows up (obid only): the owner told that one something after it ended,
     /// and its page lists this one (Sangam's design). Nil otherwise.
     var followUpOf: String?
+    /// Why it stopped without ending done, apart from its agent's summary (obid only), or nil.
+    var reason: String?
+    /// Interrupted on obid: its one next step, as its button says it ("One more round", "Try
+    /// again"), or nil.
+    var nextStep: String?
 
     /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
     /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
@@ -115,7 +120,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
-             conversation, artifacts, followUpOf
+             conversation, artifacts, followUpOf, reason, nextStep
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -165,7 +170,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         return switch status {
         case .queued, .running: step
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
-        case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
+        case .interrupted: reason ?? summary.split(separator: "\n").first.map(String.init) ?? "Needs you"
+        case .failed, .stopped: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
         }
     }
 
@@ -801,10 +807,24 @@ extension Job {
         return switch status {
         case .queued, .running: step
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
-        case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
+        case .interrupted: reason ?? summary.split(separator: "\n").first.map(String.init) ?? "Needs you"
+        case .failed, .stopped: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
         }
     }
     #endif
+
+    /// What One more round and Try again send (docs/runner-api.md, `POST /v1/jobs/{id}/messages`):
+    /// the agent's session picks up where it stopped, in the same worktree and branch.
+    nonisolated static let tryAgainWords = "Try again, picking up where you left off. Finish with a short summary as asked."
+
+    /// The one next step of a job that stopped part way and needs you (obid's `interrupted`), or nil.
+    nonisolated var nextStepOffered: String? { status == .interrupted && dismissed == nil ? nextStep : nil }
+
+    /// Its decision card's kind (Sangam's labels): Out of usage when its agent hit a usage limit.
+    nonisolated var needsYouKind: String {
+        (reason ?? "").range(of: #"(?i)\b(usage|rate)[ -]?limit|hit your limit|limit (reached|exceeded)\b"#, options: .regularExpression) == nil
+            ? "Needs you" : "Out of usage"
+    }
 
     /// A finished job can run again for the user's words: it has a session to pick up, or it was
     /// moved since its last round and starts a new one where it went (docs/runner-api.md).
@@ -862,7 +882,7 @@ extension Job {
         case .done: return JobBadge(text: "Ready", tone: .green)
         case .failed: return JobBadge(text: "Failed", tone: .red)
         case .stopped: return JobBadge(text: "Stopped", tone: .gray)
-        case .interrupted: return JobBadge(text: "Blocked", tone: .gray)
+        case .interrupted: return JobBadge(text: "Needs you", tone: .orange)
         }
     }
 
@@ -885,7 +905,7 @@ nonisolated enum NeedsYou {
         let parts = [
             count(needing.count(where: \.canPublish), "is ready to publish", "are ready to publish"),
             count(needing.count { $0.status == .failed }, "failed", "failed"),
-            count(needing.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
+            count(needing.count { $0.status == .interrupted }, "needs you", "need you"),
             count(needing.count(where: \.reviewNeedsYou), "needs your review", "need your review"),
             count(needing.count(where: \.stranded), "wasn't published", "weren't published"),
             count(needing.count(where: \.mergeNeedsYou), "wasn't merged", "weren't merged"),

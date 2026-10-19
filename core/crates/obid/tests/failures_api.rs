@@ -32,8 +32,9 @@ fn failures(obid: &Obid, query: &str) -> Vec<Value> {
     answer.body.as_array().expect("a list").clone()
 }
 
-/// FailureTests.theAPIListsFailuresAndFixesThem: a job that failed and one stopped at a limit are
-/// recorded, newest first, kept across a restart; one that ended done or was stopped isn't (that
+/// FailureTests.theAPIListsFailuresAndFixesThem: a job that needs you and one stopped at a limit are
+/// recorded, newest first, kept across a restart; one that ended done (nothing committed too) or
+/// was stopped isn't (that
 /// each is recorded once is src/failures.rs `a_failure_is_recorded_once_whatever_the_job_says_later`). A record is read by its id, the limit is capped, and Fix it refuses a record that
 /// isn't studied (obid makes no post-mortem yet). The evidence holds no secret obid knows.
 #[test]
@@ -60,12 +61,19 @@ fn the_api_lists_failures_and_fixes_them() {
     let answer = call(&obid, "POST", &format!("/v1/jobs/{stopped}/stop"), None);
     assert_eq!(answer.body["status"], "stopped", "{}", answer.text);
 
-    // The older: a fix that commits nothing fails.
-    let older = post_job(
+    // A fix that commits nothing is done, not a failure: never recorded.
+    let nothing = post_job(
         &obid,
         json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "Look around"}),
     );
-    assert_eq!(wait(&obid, &older)["status"], "failed");
+    assert_eq!(wait(&obid, &nothing)["status"], "done");
+    // The older: a check that fails as the task asked needs you, and is recorded.
+    let older = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt, a test that fails ON PURPOSE",
+               "check": "echo the check failed; false", "rounds": 3}),
+    );
+    assert_eq!(wait(&obid, &older)["status"], "interrupted");
     // Records are dated to the second: the newer ends in a later one.
     std::thread::sleep(Duration::from_millis(1100));
     // The newer: a check that keeps failing, and prints obid's API token, stops at a limit.
@@ -75,7 +83,7 @@ fn the_api_lists_failures_and_fixes_them() {
                "check": format!("echo the check failed {TOKEN}; false"), "rounds": 1}),
     );
     let job = wait(&obid, &newer);
-    assert_eq!(job["status"], "failed");
+    assert_eq!(job["status"], "interrupted");
     assert!(job["limit"].is_string(), "{job}");
 
     let list = failures(&obid, "");
@@ -97,16 +105,20 @@ fn the_api_lists_failures_and_fixes_them() {
     assert!(!first.to_string().contains(TOKEN), "a secret in {first}");
     assert!(check.contains("[redacted: api-token]"), "{check}");
     assert_eq!(list[1]["trigger"], "failed");
-    assert_eq!(list[1]["what"], "It failed.");
-    // Its repository's check ran, and passed, before it failed with nothing committed.
+    assert_eq!(list[1]["what"], "It stopped part way and needs you.");
     let check = list[1]["evidence"]["check"].as_str().unwrap();
     assert!(
-        check.starts_with("`node --test` printed (its end):\n"),
+        check.starts_with("`echo the check failed; false` printed (its end):\n"),
         "{check}"
     );
-    assert_eq!(
-        list[1]["evidence"]["summary"],
-        "Nothing committed: Nothing to do."
+    // The agent's own summary, kept.
+    assert!(
+        list[1]["evidence"]["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("FAILS AS ASKED"),
+        "{}",
+        list[1]
     );
     // Every key the API promises, sent: null, empty or none where obid has nothing (a key left
     // out would read as null too, so each is looked up as itself).

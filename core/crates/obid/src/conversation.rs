@@ -613,11 +613,17 @@ pub fn job_report(job: &Value) -> Option<(String, String)> {
         "done" => match (job["published"].as_str(), first_line("publishError")) {
             (Some(url), _) => format!("{title} is done: {url}"),
             (None, Some(why)) => format!("{title} is done, but it wasn't published: {why}"),
-            (None, None) => format!("{title} is done."),
+            (None, None) => match first_line("reason") {
+                Some(why) => format!("{title} is done. {why}"),
+                None => format!("{title} is done."),
+            },
         },
         "failed" => format!("{title} failed."),
         "stopped" => format!("{title} was stopped."),
-        "interrupted" => format!("{title} was interrupted."),
+        "interrupted" => match first_line("reason") {
+            Some(why) => format!("{title} needs you: {why}"),
+            None => format!("{title} needs you."),
+        },
         _ => return None,
     };
     let text = match first_line("summary") {
@@ -966,7 +972,19 @@ mod tests {
         );
         assert_eq!(
             job_report(&job("interrupted")).unwrap().1,
-            "Fix oby #351 was interrupted."
+            "Fix oby #351 needs you."
+        );
+        let mut needs_you = job("interrupted");
+        needs_you["reason"] = json!("Stopped at a limit: the round ran past 45 minutes.");
+        assert_eq!(
+            job_report(&needs_you).unwrap().1,
+            "Fix oby #351 needs you: Stopped at a limit: the round ran past 45 minutes."
+        );
+        let mut nothing = job("done");
+        nothing["reason"] = json!("Nothing committed, so nothing was published.");
+        assert_eq!(
+            job_report(&nothing).unwrap().1,
+            "Fix oby #351 is done. Nothing committed, so nothing was published."
         );
         // Nothing for a job still under way, one no conversation started, or one let go.
         assert_eq!(job_report(&job("running")), None);

@@ -5,7 +5,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// `queued`, `running`, `done`, `failed`, `stopped` or `interrupted`.
+/// `queued`, `running`, `done`, `failed`, `stopped` or `interrupted`. On obid, `interrupted` is a
+/// job that needs the owner: it stopped part way, its work kept on its branch (`reason`, `nextStep`);
+/// `failed` is a dead end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Status {
@@ -34,6 +36,11 @@ impl Status {
         matches!(self, Status::Queued | Status::Running)
     }
 }
+
+/// A next step: another round of a job that stopped at one of obid's limits.
+pub const ONE_MORE_ROUND: &str = "One more round";
+/// A next step: the agent's session picked up again where it stopped.
+pub const TRY_AGAIN: &str = "Try again";
 
 /// The kinds of work.
 pub const KINDS: [&str; 6] = ["review", "fix", "build", "test", "investigate", "research"];
@@ -241,6 +248,15 @@ pub struct Job {
     /// design, the owner's decision of 2026-10-18).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up_of: Option<String>,
+    /// Why it stopped without ending done, in obid's words, apart from the agent's own summary;
+    /// or, ended done, what it didn't do (nothing committed). None while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The one next step of a job that needs the owner (`interrupted`), as its button says it:
+    /// [`ONE_MORE_ROUND`] or [`TRY_AGAIN`]; both send Try again's words. None when only the owner's
+    /// own words, or Dismiss, can take it on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
     /// What the job it follows up did, for its first prompt, quoted there. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub earlier: Option<String>,
@@ -340,6 +356,8 @@ impl Job {
             artifacts: Vec::new(),
             artifact_problems: Vec::new(),
             follow_up_of: None,
+            reason: None,
+            next_step: None,
             earlier: None,
             start_from: None,
         }
@@ -567,6 +585,8 @@ impl Job {
             "artifacts": self.artifacts.iter().map(|a| json!({"id": a.id, "version": a.version})).collect::<Vec<_>>(),
             "artifactProblems": self.artifact_problems,
             "followUpOf": self.follow_up_of,
+            "reason": self.reason,
+            "nextStep": self.next_step,
         });
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
@@ -669,6 +689,10 @@ impl Job {
                     .map_or("Secret scan", crate::publish::Step::detail);
                 set(&mut stages, "publish", "current", Some(detail), None);
             }
+        } else if self.status == Status::Interrupted && self.dismissed.is_none() {
+            // It needs the owner where it stopped: the rest is still to come.
+            let reason = self.reason.as_deref().unwrap_or(&failure);
+            set(&mut stages, phase_id, "current", None, Some(reason));
         } else if stopped {
             set(&mut stages, phase_id, "failed", None, Some(&failure));
             for stage in stages.iter_mut().skip(phase_index + 1) {
@@ -890,11 +914,13 @@ mod tests {
             "permission",
             "conversation",
             "followUpOf",
+            "reason",
+            "nextStep",
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's eight.
-        assert_eq!(object.len(), 73);
+        // The Swift runner's 65 keys, and obid's ten.
+        assert_eq!(object.len(), 75);
         assert_eq!(value["artifacts"], json!([]));
         assert_eq!(value["artifactProblems"], json!([]));
         assert_eq!(value["answered"], json!([]));
@@ -959,6 +985,19 @@ mod tests {
         assert_eq!(failed["stages"][2]["state"], "failed");
         assert_eq!(failed["stages"][2]["reason"], "the check failed");
         assert_eq!(failed["number"], 3);
+        // Needing the owner, it waits where it stopped: why, and the rest still to come.
+        job.status = Status::Interrupted;
+        job.reason = Some("`node --test` still fails after 1 round(s)".into());
+        job.next_step = Some(ONE_MORE_ROUND.into());
+        let needs = job.pipeline();
+        assert_eq!(needs["stages"][2]["state"], "current");
+        assert_eq!(
+            needs["stages"][2]["reason"],
+            "`node --test` still fails after 1 round(s)"
+        );
+        assert_eq!(needs["stages"][3]["state"], "upcoming");
+        assert_eq!(job.to_json()["nextStep"], ONE_MORE_ROUND);
+        assert!(job.needs_you());
     }
 
     /// Engine/Pipeline.swift for a published job, with obid's own rule: the Merged stage is done

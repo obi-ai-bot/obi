@@ -381,15 +381,24 @@ fn a_possible_secret_sends_nothing() {
         json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "LEAK: keys.txt STUBBORN"}),
     );
     let job = ended(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     // It had its one fix round, and a second block of the same is the end.
     assert_eq!(job["round"], 2, "{job}");
-    let summary = job["summary"].as_str().unwrap();
+    let summary = job["reason"].as_str().unwrap();
     assert!(
         summary.starts_with("Not published: possible secret in keys.txt:1 (AWS access key"),
         "{summary}"
     );
     assert!(!summary.contains(&leaked_key()), "{summary}");
+    // It needs you, nothing lost: one more try at rewriting it, and the agent's own summary.
+    assert_eq!(job["nextStep"], "Try again", "{job}");
+    assert!(
+        !job["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("Not published:"),
+        "{job}"
+    );
     assert!(!obid.log().contains(&leaked_key()));
     assert_eq!(job["published"], Value::Null);
     assert_eq!(job["outgoing"], json!([]));
@@ -732,14 +741,16 @@ fn a_commits_author_and_headers_are_scanned_too() {
         json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "AUTHOR: a.txt", "rounds": 2}),
     );
     let job = ended(&obid, &author);
-    assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
-    let summary = job["summary"].as_str().unwrap();
+    assert_eq!(job["status"], "interrupted", "{job}\n{}", obid.log());
+    let summary = job["reason"].as_str().unwrap();
     assert!(
         summary.starts_with("Not published: possible secret in commit author:1 (GitHub token"),
         "{summary}"
     );
-    // Who made a commit isn't the agent's to rewrite with a fixup: no fix round.
+    // Who made a commit isn't the agent's to rewrite with a fixup: no fix round, and no next
+    // step but a person's.
     assert_eq!(job["round"], 1);
+    assert_eq!(job["nextStep"], Value::Null, "{job}");
     assert_eq!(remote_branch(&remote, &format!("oby/build-{author}")), None);
     let header = dispatch(
         &obid,
@@ -866,8 +877,8 @@ fn a_token_in_a_folders_name_is_found_and_never_repeated() {
         json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "FOLDER"}),
     );
     let job = ended(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
-    let summary = job["summary"].as_str().unwrap();
+    assert_eq!(job["status"], "interrupted", "{job}\n{}", obid.log());
+    let summary = job["reason"].as_str().unwrap();
     assert!(
         summary.starts_with("Not published: possible secret in a file whose name obid won't show"),
         "{summary}"
@@ -905,8 +916,8 @@ fn the_owners_git_configuration_cant_hide_a_root_commit() {
         json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "ORPHAN STUBBORN"}),
     );
     let job = ended(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
-    let summary = job["summary"].as_str().unwrap();
+    assert_eq!(job["status"], "interrupted", "{job}\n{}", obid.log());
+    let summary = job["reason"].as_str().unwrap();
     assert!(
         summary.starts_with("Not published: possible secret in root.txt:1 (AWS access key"),
         "{summary}"
@@ -1091,9 +1102,9 @@ fn names_already_on_the_base_are_the_bases() {
         json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: cfg/.env"}),
     );
     let job = ended(&obid, &env);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert!(
-        job["summary"]
+        job["reason"]
             .as_str()
             .unwrap()
             .starts_with("Not published: possible secret in .env (.env file)"),
@@ -1137,8 +1148,8 @@ fn a_name_finding_gitleaks_cant_place_still_counts() {
             json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": format!("EMPTY: {file}")}),
         );
         let job = ended(&obid, &id);
-        assert_eq!(job["status"], "failed", "{file}: {job}");
-        let summary = job["summary"].as_str().unwrap();
+        assert_eq!(job["status"], "interrupted", "{file}: {job}");
+        let summary = job["reason"].as_str().unwrap();
         assert!(summary.contains("(gitleaks"), "{file}: {summary}");
         assert!(summary.contains("in a name)"), "{file}: {summary}");
         assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
@@ -1167,9 +1178,9 @@ fn the_clones_settings_cant_hide_a_merge_or_a_submodule() {
         json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "EVIL: .env.local"}),
     );
     let job = ended(&obid, &evil);
-    assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
+    assert_eq!(job["status"], "interrupted", "{job}\n{}", obid.log());
     assert!(
-        job["summary"]
+        job["reason"]
             .as_str()
             .unwrap()
             .starts_with("Not published: possible secret in .env.local (.env file)"),
@@ -1181,8 +1192,8 @@ fn the_clones_settings_cant_hide_a_merge_or_a_submodule() {
         json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "GITLINK"}),
     );
     let job = ended(&obid, &link);
-    assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
-    let summary = job["summary"].as_str().unwrap();
+    assert_eq!(job["status"], "interrupted", "{job}\n{}", obid.log());
+    let summary = job["reason"].as_str().unwrap();
     assert!(summary.contains("GitHub token in a name"), "{summary}");
     assert!(!summary.contains(&made_up_token()), "{summary}");
     assert_eq!(remote_branch(&remote, &format!("oby/build-{link}")), None);
@@ -1234,9 +1245,14 @@ fn a_moved_env_and_a_key_from_a_side_branch_are_found() {
             json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": task}),
         );
         let job = ended(&obid, &id);
-        assert_eq!(job["status"], "failed", "{task}: {job}\n{}", obid.log());
+        assert_eq!(
+            job["status"],
+            "interrupted",
+            "{task}: {job}\n{}",
+            obid.log()
+        );
         assert!(
-            job["summary"]
+            job["reason"]
                 .as_str()
                 .unwrap()
                 .starts_with(&format!("Not published: possible secret in {place}")),

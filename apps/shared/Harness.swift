@@ -252,7 +252,9 @@ extension Job {
         switch status {
         case .queued, .running: return nil
         case .stopped: return JobOutcome(text: "Stopped", link: nil, failed: false)
-        case .failed, .interrupted: return JobOutcome(text: first ?? status.rawValue.capitalized, link: nil, failed: true)
+        case .failed: return JobOutcome(text: first ?? status.rawValue.capitalized, link: nil, failed: true)
+        // Needs you, nothing lost: why it stopped, not a failure.
+        case .interrupted: return JobOutcome(text: reason ?? first ?? "Needs you", link: nil, failed: false)
         case .done:
             if let published, let url = URL(string: published) {
                 let number = url.lastPathComponent

@@ -379,8 +379,13 @@ fn a_vault_secret_in_a_file_is_refused_in_every_form() {
             json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": format!("FILE: {form}")}),
         );
         let job = ended(&obid, &id);
-        assert_eq!(job["status"], "failed", "{form}: {job}\n{}", obid.log());
-        let summary = job["summary"].as_str().unwrap();
+        assert_eq!(
+            job["status"],
+            "interrupted",
+            "{form}: {job}\n{}",
+            obid.log()
+        );
+        let summary = job["reason"].as_str().unwrap();
         assert!(
             summary.starts_with("Not published: possible secret in config.txt:1 (vault secret"),
             "{form}: {summary}"
@@ -405,7 +410,7 @@ fn a_vault_secret_in_a_commit_message_is_refused() {
             json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": format!("MESSAGE: {form}")}),
         );
         let job = ended(&obid, &id);
-        let said = format!("{} {}", job["summary"], job["publishError"]);
+        let said = format!("{} {}", job["reason"], job["publishError"]);
         assert!(
             said.contains("commit message") && said.contains("vault secret"),
             "{form}: {job}\n{}",
@@ -574,8 +579,8 @@ fn a_wrapped_vault_secret_is_refused_and_taken_out() {
         json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "WRAPPED"}),
     );
     let job = ended(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
-    let summary = job["summary"].as_str().unwrap();
+    assert_eq!(job["status"], "interrupted", "{job}\n{}", obid.log());
+    let summary = job["reason"].as_str().unwrap();
     assert!(
         summary.starts_with("Not published: possible secret in config.b64:1 (vault secret"),
         "{summary}"
