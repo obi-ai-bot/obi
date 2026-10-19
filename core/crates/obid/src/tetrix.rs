@@ -110,6 +110,9 @@ struct Registered {
 
 pub struct Tetrix {
     file: PathBuf,
+    /// Where the secret scan works: obid's own `home/tmp`, never a job's folder (an agent can
+    /// write its own `home/tmp/<job>`, gitleaks' settings and report included).
+    scratch: PathBuf,
     saved: Mutex<Saved>,
     vault: Arc<crate::vault::Vault>,
     events: crate::events::Events,
@@ -230,6 +233,8 @@ async fn small_json(mut response: reqwest::Response) -> Value {
 /// Why `what` can't go to Tetrix, or none: the secret scan runs first on everything obid sends
 /// it, and a finding or a scan that can't run sends nothing.
 async fn scanned(what: &Value, scratch: &Path) -> Result<(), String> {
+    crate::store::make_private_dir(scratch)
+        .map_err(|e| format!("the secret scan couldn't run (its folder: {e})"))?;
     match crate::scan::scan(&[("tetrix.json".into(), what.to_string())], scratch).await {
         crate::scan::Verdict::Clean => Ok(()),
         crate::scan::Verdict::Found(_) => Err("the secret scan found something in it".into()),
@@ -294,6 +299,7 @@ impl Tetrix {
             .expect("reqwest client");
         Arc::new(Tetrix {
             file,
+            scratch: home.join("tmp"),
             saved: Mutex::new(saved),
             vault,
             events,
@@ -1027,7 +1033,7 @@ impl Tetrix {
                 let refused = if !TOOLS.contains(&tool) {
                     Some(format!("Oby doesn't let agents call Tetrix's {short}."))
                 } else {
-                    scanned(&arguments, &shared.jobs.temp_path(job))
+                    scanned(&arguments, &self.scratch)
                         .await
                         .err()
                         .map(|why| format!("Oby didn't send this to Tetrix: {why}."))
@@ -1083,7 +1089,6 @@ impl Tetrix {
         &self,
         connections: &Connections,
         job: &crate::job::Job,
-        scratch: &Path,
     ) -> (Vec<obi_plugin_api::ContextItem>, Use) {
         let mut seen = Use::default();
         let query = match job.issue.or(job.pr) {
@@ -1097,7 +1102,7 @@ impl Tetrix {
         let mut items = Vec::new();
         for (tool, arguments) in asks {
             // The query holds the job's title: through the secret scan, like every call.
-            if let Err(why) = scanned(&arguments, scratch).await {
+            if let Err(why) = scanned(&arguments, &self.scratch).await {
                 tracing::info!("job {}: Tetrix wasn't asked {tool}: {why}", job.id);
                 continue;
             }
@@ -1139,7 +1144,6 @@ impl Tetrix {
         seen: &Use,
         worktree: &Path,
         start: &str,
-        scratch: &Path,
     ) -> (Use, Option<crate::publish::Outgoing>) {
         let mut seen = seen.clone();
         let range = format!("{start}..HEAD");
@@ -1169,7 +1173,7 @@ impl Tetrix {
         seen.ended = true;
         let mut outgoing = None;
         if seen.gaps.any() {
-            match self.send_gaps(connections, job, &seen, scratch).await {
+            match self.send_gaps(connections, job, &seen).await {
                 Ok(session) => {
                     seen.gaps.sent = Some(obi_protocol::time::format(obi_protocol::time::now()));
                     outgoing = Some(crate::publish::Outgoing::new(
@@ -1191,7 +1195,6 @@ impl Tetrix {
         connections: &Connections,
         job: &crate::job::Job,
         seen: &Use,
-        scratch: &Path,
     ) -> Result<String, String> {
         let gaps = &seen.gaps;
         let arguments = json!({
@@ -1204,7 +1207,7 @@ impl Tetrix {
                 "agentSessions": seen.saved},
             "status": "saved",
         });
-        scanned(&arguments, scratch)
+        scanned(&arguments, &self.scratch)
             .await
             .map_err(|why| format!("Not sent: {why}."))?;
         let answer = self
@@ -1735,6 +1738,41 @@ mod tests {
         // Plain HTTP on this machine only for a Tetrix on this machine.
         assert!(endpoint(Some("http://127.0.0.1:9/token"), false).is_none());
         assert!(endpoint(Some("http://127.0.0.1:9/token"), true).is_some());
+    }
+
+    /// The scan of what goes to Tetrix works in obid's own `home/tmp`, never in a job's folder
+    /// (the agent's `TMPDIR`, `home/tmp/<job>`), and leaves nothing there.
+    #[tokio::test]
+    async fn the_scan_works_outside_every_jobs_folder() {
+        let home = std::env::temp_dir().join(format!("obid-tetrix-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let vault = Arc::new(crate::vault::Vault::file(
+            home.join("vault"),
+            Arc::new(crate::secrets::Secrets::default()),
+        ));
+        let tetrix = Tetrix::open(&home, vault, crate::events::Events::new());
+        assert_eq!(tetrix.scratch, home.join("tmp"));
+        let job = home.join("tmp").join("job1");
+        assert!(!tetrix.scratch.starts_with(&job));
+        let key = format!("AKIA{}", "QWERTYUIOPASDFGH");
+        assert!(
+            scanned(&json!({"key": key}), &tetrix.scratch)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            scanned(&json!({"query": "acme/shop#12"}), &tetrix.scratch).await,
+            Ok(())
+        );
+        use std::os::unix::fs::PermissionsExt;
+        let folder = std::fs::metadata(&tetrix.scratch).unwrap();
+        assert_eq!(folder.permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::read_dir(&tetrix.scratch).unwrap().count(),
+            0,
+            "nothing left"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

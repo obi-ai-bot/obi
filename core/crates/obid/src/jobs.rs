@@ -2366,7 +2366,7 @@ impl Jobs {
         crate::api::worktrees(&self.config.home).join(id)
     }
 
-    pub(crate) fn temp_path(&self, id: &str) -> PathBuf {
+    fn temp_path(&self, id: &str) -> PathBuf {
         self.config.home.join("tmp").join(id)
     }
 
@@ -3622,7 +3622,7 @@ impl Jobs {
             if let (Some(tetrix), Some(connections)) =
                 (self.tetrix_for(&job), self.connections.get())
             {
-                let (items, seen) = tetrix.context(connections, &job, &temp).await;
+                let (items, seen) = tetrix.context(connections, &job).await;
                 self.tetrix_used(id, |used| used.absorb(seen));
                 if !items.is_empty() {
                     more.push((
@@ -4078,14 +4078,7 @@ impl Jobs {
             return;
         }
         let (ended, outgoing) = tetrix
-            .job_ended(
-                connections,
-                &job,
-                &seen,
-                worktree,
-                start,
-                &self.temp_path(id),
-            )
+            .job_ended(connections, &job, &seen, worktree, start)
             .await;
         self.update(id, |job| {
             if job.kind != "review" {
