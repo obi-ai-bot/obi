@@ -671,7 +671,7 @@ pub fn job_report(job: &Value) -> Option<(String, String)> {
         // A stall says why in obid's words (`stalled.text`), and its conversation decides next.
         "failed" => match job["stalled"]["text"].as_str() {
             Some(why) => format!(
-                "{title} stalled: {}.",
+                "{title} stalled: {}. Its branch is kept and nothing was pushed.",
                 crate::brain::briefing::line(why, 120)
             ),
             None => format!("{title} failed."),
@@ -680,7 +680,8 @@ pub fn job_report(job: &Value) -> Option<(String, String)> {
         "interrupted" => format!("{title} was interrupted."),
         _ => return None,
     };
-    let text = match first_line("summary") {
+    // A stalled job's summary starts with the same stall in other words: obid says it once.
+    let text = match first_line("summary").filter(|_| job["stalled"].is_null()) {
         Some(summary) => format!("{said}\n{summary}"),
         None => said,
     };
@@ -1047,7 +1048,7 @@ mod tests {
         stalled["stalled"] = json!({"text": "no progress for 15 minutes", "note": "Left: tests"});
         assert_eq!(
             job_report(&stalled).unwrap().1,
-            "Fix oby #351 stalled: no progress for 15 minutes."
+            "Fix oby #351 stalled: no progress for 15 minutes. Its branch is kept and nothing was pushed."
         );
         // Nothing for a job still under way, one no conversation started, or one let go.
         assert_eq!(job_report(&job("running")), None);

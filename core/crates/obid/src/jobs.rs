@@ -258,6 +258,10 @@ pub struct NewJob {
     pub earlier: Option<String>,
     #[serde(default)]
     pub start_from: Option<String>,
+    /// One part of a stalled job's split (crate::brain::supervisor): its parts follow it up side
+    /// by side, each on a branch of its own. Never from the API, never kept.
+    #[serde(skip)]
+    pub split: bool,
 }
 
 /// Who tells a job something, which decides what words for one that ended do (the owner's
@@ -1670,7 +1674,10 @@ impl Jobs {
                 .values()
                 .filter(|j| j.status.is_active())
                 .collect();
-            if let Some(other) = active.iter().find(|j| j.follow_up_of == job.follow_up_of) {
+            if let Some(other) = active
+                .iter()
+                .find(|j| !new.split && j.follow_up_of == job.follow_up_of)
+            {
                 return Err(Refused(format!(
                     "{} (job {}) is following it up already: tell that one instead.",
                     other.short_title(),
@@ -6494,7 +6501,14 @@ fn hear(job: &mut Job, text: &str) {
 /// request is open (publishing updates it), else on a branch of its own.
 pub fn follow_up(job: &Job, words: &str) -> NewJob {
     let unmerged = job.commits.unwrap_or(0) > 0 && !job.merged();
-    let title = crate::brain::briefing::line(&format!("Follow-up: {}", job.short_title()), 60);
+    // A follow-up of a follow-up keeps one "Follow-up: ".
+    let title = crate::brain::briefing::line(
+        &format!(
+            "Follow-up: {}",
+            job.short_title().trim_start_matches("Follow-up: ")
+        ),
+        60,
+    );
     let commits = job.commits.unwrap_or(0);
     let mut did = vec![
         format!(

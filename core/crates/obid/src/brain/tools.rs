@@ -549,7 +549,8 @@ async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Resul
         super::supervisor::allowed(shared, session, &job, super::supervisor::Kind::Split)
     {
         allowed?;
-        let new = super::supervisor::follow_up(&job, &start.task, start.title, &session.nonce)?;
+        let mut new = super::supervisor::follow_up(&job, &start.task, start.title, &session.nonce)?;
+        new.split = true;
         let outcome = match shared.jobs.create(new) {
             Ok(part) => {
                 super::supervisor::record(

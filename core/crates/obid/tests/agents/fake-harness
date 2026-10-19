@@ -136,7 +136,7 @@ rl.on("line", (line) => {
   emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Read", "Bash"], mcp_servers: [{ name: "oby", status: "connected" }], model: flag("--model") ?? "fake" });
   const before = going;
   going = session;
-  if (!conversation && /handoff note/i.test(prompt)) return say(NOTE);
+  if (!conversation && prompt.includes("write a handoff note")) return say(NOTE);
   if (!conversation && (prompt.includes("STALLS-ALWAYS") || existsSync(stalls))) {
     writeFileSync(stalls, "");
     setTimeout(() => say("woke"), 120000);

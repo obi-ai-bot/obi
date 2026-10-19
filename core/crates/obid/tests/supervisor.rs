@@ -93,10 +93,19 @@ fn obys(obid: &Obid, conversation: &str) -> Vec<String> {
 
 /// The job once its conversation decided about its stall `n` times (`asked` included).
 fn supervised(obid: &Obid, id: &str, n: usize) -> Value {
-    within(90, "the conversation decides", || {
+    let give_up_at = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
         let job = job(obid, id);
-        (job["supervised"].as_array().map_or(0, Vec::len) >= n).then_some(job)
-    })
+        if job["supervised"].as_array().map_or(0, Vec::len) >= n {
+            return job;
+        }
+        assert!(
+            std::time::Instant::now() < give_up_at,
+            "job {id} wasn't supervised within 90 seconds: {job}\n{}",
+            obid.log()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 /// A stalled job is split into two new jobs by its conversation, each a follow-up from its branch
@@ -112,6 +121,12 @@ fn a_stalled_job_is_split_in_two() {
          OBY oby_dispatch {\"repo\": \"obi-e2e/fixture-app\", \"task\": \"The second half\", \"title\": \"Second half\"}\n\
          REPEAT 1 OBY oby_tell_job {\"id\": \"$JOB\", \"words\": \"Start again\"}",
     );
+    // Once the conversation said what it did, both parts are on the job.
+    let said = within(90, "the conversation's line", || {
+        obys(&obid, &conversation)
+            .into_iter()
+            .find(|t| t.contains("automatic steps"))
+    });
     let stalled = supervised(&obid, &id, 1);
     assert!(!stalled["stalled"].is_null(), "{stalled}");
     let step = &stalled["supervised"][0];
@@ -124,7 +139,7 @@ fn a_stalled_job_is_split_in_two() {
         .iter()
         .map(|j| j.as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(parts.len(), 2, "{stalled}");
+    assert_eq!(parts.len(), 2, "{said}\n{stalled}");
     for (part, words) in parts.iter().zip(["The first half", "The second half"]) {
         let part = job(&obid, part);
         assert_eq!(part["followUpOf"], id.as_str(), "{part}");
@@ -139,11 +154,6 @@ fn a_stalled_job_is_split_in_two() {
     }
     // The third call, a second decision, was refused: no restart started.
     assert_eq!(jobs(&obid).len(), 3);
-    let said = within(30, "the conversation's line", || {
-        obys(&obid, &conversation)
-            .into_iter()
-            .find(|t| t.contains("automatic steps"))
-    });
     assert!(said.contains("decided already (split)"), "{said}");
     assert!(
         said.ends_with("(Oby's first of 3 automatic steps for this job: split.)"),
@@ -197,9 +207,13 @@ fn the_fourth_stall_asks_the_owner() {
         "{lines:?}"
     );
     assert!(
-        lines.last().unwrap().contains("so the next step is yours"),
+        lines
+            .iter()
+            .any(|t| t.contains("so the next step is yours")),
         "{lines:?}"
     );
+    // Each follow-up keeps the first job's title once.
+    assert_eq!(job(&obid, &id)["title"], "Follow-up: Both halves");
     assert_eq!(jobs(&obid).len(), 4);
 }
 

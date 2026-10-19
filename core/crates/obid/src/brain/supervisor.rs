@@ -74,10 +74,11 @@ impl Watch {
     }
 }
 
-/// The job's `stalled`, as the runner API sends it: null unless it stalled and hasn't run on.
-fn stalled(job: &Job) -> Option<serde_json::Value> {
-    let stalled = job.to_json()["stalled"].clone();
-    (!stalled.is_null() && !job.status.is_active() && job.dismissed.is_none()).then_some(stalled)
+/// The job's `stalled`, while it hasn't run on or been let go.
+fn stalled(job: &Job) -> Option<&crate::job::Stalled> {
+    job.stalled
+        .as_ref()
+        .filter(|_| !job.status.is_active() && job.dismissed.is_none())
 }
 
 /// The automatic steps the conversation took along `job` and the jobs it follows up.
@@ -227,8 +228,8 @@ fn prompt(job: &Job, taken: usize) -> String {
 
 /// "stalled: no progress for 15 minutes", from obid's own `limit`.
 fn stall_words(job: &Job) -> String {
-    match stalled(job).as_ref().and_then(|s| s["text"].as_str()) {
-        Some(text) => format!("stalled: {}", super::briefing::line(text, 120)),
+    match stalled(job) {
+        Some(stalled) => format!("stalled: {}", super::briefing::line(&stalled.text, 120)),
         None => "stalled".into(),
     }
 }
