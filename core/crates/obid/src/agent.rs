@@ -102,8 +102,19 @@ pub enum Event {
         name: String,
         input: Value,
     },
-    /// The answer to the tool call `id` came back; `failed` when it was an error.
-    ToolDone { id: String, failed: bool },
+    /// The answer to the tool call `id` came back; `failed` when it was an error. `exit` is a
+    /// command's exit code, `lines` the lines a file change added and removed, when the tool says.
+    ToolDone {
+        id: String,
+        failed: bool,
+        exit: Option<i64>,
+        lines: Option<(u64, u64)>,
+    },
+    /// The agent's words between tool calls, whole (a job's transcript).
+    Said(String),
+    /// Its to-do list, whole, each time it changes (Codex's and Cursor's; Claude Code's are tool
+    /// calls).
+    Plan(Vec<crate::transcript::Todo>),
     /// The account's usage, as the tool just reported it (crate::usage).
     Usage(crate::usage::Usage),
     /// What this turn used so far, in tokens and cost (crate::usage::Tokens): each one replaces
@@ -268,12 +279,12 @@ pub async fn turn_on(
                     .into_iter()
                     .flatten()
                 {
-                    if own
-                        && block.get("type").and_then(Value::as_str) == Some("text")
-                        && let Some(text) = block.get("text").and_then(Value::as_str)
-                        && !text.trim().is_empty()
-                    {
-                        turn.last_words = text.to_owned();
+                    if block.get("type").and_then(Value::as_str) == Some("text") {
+                        let text = text_of(block, "text");
+                        if own && !text.trim().is_empty() {
+                            turn.last_words = text.clone();
+                        }
+                        on_event(Event::Said(text));
                     }
                     if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                         let name = block.get("name").and_then(Value::as_str).unwrap_or("");
@@ -298,6 +309,8 @@ pub async fn turn_on(
                     on_event(Event::ToolDone {
                         id: text_of(block, "tool_use_id"),
                         failed: block.get("is_error").and_then(Value::as_bool) == Some(true),
+                        exit: None,
+                        lines: None,
                     });
                 }
             }
