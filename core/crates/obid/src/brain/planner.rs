@@ -227,16 +227,7 @@ impl ClaudeBrain {
             std::fs::write(folder.0.join(QUOTED_FILE), secrets.redact(quoted)).map_err(|e| {
                 Failure::Failed(format!("the quoted file couldn't be written: {e}"))
             })?;
-            for flag in [
-                "--tools",
-                "Read",
-                "--allowedTools",
-                "Read",
-                "--max-turns",
-                READ_TURNS,
-            ] {
-                flags.push(flag.into());
-            }
+            flags.extend(read_flags().into_iter().map(OsString::from));
         } else {
             flags.extend(["--tools".into(), "".into()]);
         }
@@ -430,6 +421,25 @@ impl ClaudeBrain {
             format!("claude returned no answer: {}", failures.join("; "))
         }))
     }
+}
+
+/// Claude's brain's tools when it has a quoted file (#642): Read, allowed on that file alone, and
+/// denied on its box's login and home ([`crate::jobs::Jobs::brain_launch`] copies the login into
+/// its working folder, where Claude Code reads without asking) and on any login file, so text
+/// quoted in the file can't have it read the login into a plan. A deny rule wins over any allow.
+fn read_flags() -> Vec<String> {
+    vec![
+        "--tools".into(),
+        "Read".into(),
+        "--allowedTools".into(),
+        format!("Read(./{QUOTED_FILE})"),
+        "--disallowedTools".into(),
+        "Read(./login/**)".into(),
+        "Read(./home/**)".into(),
+        "Read(//**/.credentials.json)".into(),
+        "--max-turns".into(),
+        READ_TURNS.into(),
+    ]
 }
 
 /// The brain's environment when it runs unboxed, from `get` (obid's own environment): what a job
@@ -1303,6 +1313,35 @@ pub mod tests {
         ] {
             assert!(!reads_only_quoted(other), "{other}");
         }
+    }
+
+    /// #642: a quoted file asking Claude's brain to read its login gets nothing from it. Its Read
+    /// is allowed on work.md alone, and denied on the box's login and home, where obid copies
+    /// the login, and on any login file anywhere: a deny rule wins over Claude Code's own reads
+    /// in its working folder.
+    #[test]
+    fn the_claude_brain_may_read_its_quoted_file_and_never_the_login() {
+        let flags = read_flags();
+        let after = |flag: &str| -> Vec<String> {
+            flags
+                .iter()
+                .skip_while(|f| *f != flag)
+                .skip(1)
+                .take_while(|f| !f.starts_with("--"))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(after("--tools"), ["Read"]);
+        assert_eq!(after("--allowedTools"), [format!("Read(./{QUOTED_FILE})")]);
+        let denied = after("--disallowedTools");
+        for rule in [
+            "Read(./login/**)",
+            "Read(./home/**)",
+            "Read(//**/.credentials.json)",
+        ] {
+            assert!(denied.iter().any(|d| d == rule), "{rule} in {denied:?}");
+        }
+        assert!(!denied.iter().any(|rule| rule.contains(QUOTED_FILE)));
     }
 
     /// A model-aware adapter that answers one plan, noting the model it was asked with; it can

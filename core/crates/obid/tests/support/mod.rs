@@ -702,6 +702,33 @@ impl TestObi {
         got
     }
 
+    /// Waits for deliveries until the reply to `request` comes, acknowledging each: that reply.
+    /// Whatever else comes first is passed over.
+    pub async fn receive_reply_to(&self, request: &Value, seconds: u64) -> Value {
+        let give_up_at = Instant::now() + Duration::from_secs(seconds);
+        let mut passed = Vec::new();
+        loop {
+            assert!(
+                Instant::now() < give_up_at,
+                "{} got no reply to {} within {seconds} seconds, only: {passed:?}",
+                self.id,
+                request["id"]
+            );
+            let list = self.client.deliveries(&self.token, 50, 1).await.unwrap();
+            if list.is_empty() {
+                continue;
+            }
+            let ids: Vec<String> = list.iter().map(|d| d.delivery_id.clone()).collect();
+            self.client.ack(&self.token, &ids).await.unwrap();
+            for envelope in list.into_iter().map(|d| d.envelope) {
+                if envelope["in_reply_to"] == request["id"] {
+                    return envelope;
+                }
+                passed.push(envelope);
+            }
+        }
+    }
+
     /// Whatever is waiting now, after `seconds`, acknowledged.
     pub async fn waiting_after(&self, seconds: u64) -> Vec<Value> {
         tokio::time::sleep(Duration::from_secs(seconds)).await;
