@@ -626,7 +626,13 @@ fn uncommitted_work_is_kept_as_a_wip_commit() {
     let worktree = obid.home.join("worktrees").join(&id);
     assert_eq!(git(&worktree, &["status", "--porcelain"]), "");
     assert_eq!(job["published"], Value::Null);
-    assert!(!folder.0.join("gh-calls").exists());
+    // Nothing tried to publish (the GitHub feed's own `api graphql` calls aside).
+    assert!(
+        !std::fs::read_to_string(folder.0.join("gh-calls"))
+            .unwrap_or_default()
+            .lines()
+            .any(|call| call.starts_with("pr "))
+    );
 
     // Tried again: the agent finds its work uncommitted, as it left it, and ends with nothing
     // committed of its own, so nothing is published, and the work is kept again.
@@ -646,7 +652,13 @@ fn uncommitted_work_is_kept_as_a_wip_commit() {
     assert_eq!(job["status"], "done", "{job}");
     assert_eq!(job["commits"], 0, "{job}");
     assert_eq!(job["published"], Value::Null, "{job}");
-    assert!(!folder.0.join("gh-calls").exists());
+    // Nothing tried to publish (the GitHub feed's own `api graphql` calls aside).
+    assert!(
+        !std::fs::read_to_string(folder.0.join("gh-calls"))
+            .unwrap_or_default()
+            .lines()
+            .any(|call| call.starts_with("pr "))
+    );
     // The job ends before its worker keeps the work.
     until(&obid, &id, |_| {
         git(&clone, &["log", "-1", "--format=%s", &branch])
