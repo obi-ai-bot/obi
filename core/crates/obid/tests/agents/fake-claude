@@ -34,9 +34,9 @@
 //                    resume_session, and commits tetrix.txt with a Tetrix-Session trailer naming
 //                    the session save_session answered
 //   ON PURPOSE       in a fix round's quoted task: ends the turn with "FAILS AS ASKED: …"
-//   AGAIN: <words>   keeps the words in .obi/again, then goes on with the rest of the prompt; a
-//                    later "Try again, …" that finds them writes .obi/tried and ends the turn with
-//                    them
+//   AGAIN: <words>   keeps the words (maybe none) in .obi/again, then goes on with the rest of the
+//                    prompt; a later "Try again, …" that finds them writes .obi/tried and ends the
+//                    turn with them
 //   anything else    ends the turn with "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
 
@@ -103,10 +103,10 @@ rl.on("line", (line) => {
   const plant = prompt.match(/PLANT: (\S+)/);
   const draft = prompt.match(/DRAFT: (\S+)/);
   if (draft) writeFileSync(draft[1], "draft\n");
-  const again = prompt.match(/AGAIN: (.+)/);
+  const again = prompt.match(/AGAIN:(.*)/);
   if (again) {
     mkdirSync(".obi", { recursive: true });
-    writeFileSync(".obi/again", again[1]);
+    writeFileSync(".obi/again", again[1].trim());
   }
   if (prompt.startsWith("Try again") && existsSync(".obi/again")) {
     writeFileSync(".obi/tried", "");

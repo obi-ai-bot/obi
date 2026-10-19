@@ -765,40 +765,48 @@ fn a_job_stopped_at_a_limit_counts_its_commits_for_a_follow_up() {
 }
 
 /// A job stopped at a limit, tried again: the round's final words are its summary and its last
-/// round's, never "" (#764).
+/// round's; an agent that says nothing keeps the earlier round's, never "" (#764).
 #[test]
 fn try_again_after_a_limit_keeps_the_rounds_summary() {
     let folder = Folder::new("limit-again");
     let remote = fixture(&folder.0.join("fixture"));
     let obid = start(&folder.0, &config(&folder.0, &remote));
-    let id = post_job(
-        &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt AGAIN: Done.", "check": "test -e .obi/tried", "rounds": 1}),
-    )
-    .body["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
-    assert!(job["limit"].is_string(), "{job}");
+    let tried = |file: &str, words: &str| {
+        let id = post_job(
+            &obid,
+            json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": format!("COMMIT: {file} AGAIN:{words}"), "check": "test -e .obi/tried", "rounds": 1}),
+        )
+        .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let job = wait(&obid, &id);
+        assert_eq!(job["status"], "failed", "{job}");
+        assert!(job["limit"].is_string(), "{job}");
+        let more = request(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/messages"),
+            Some(
+                &json!({"text": "Try again, picking up where you left off. Finish with a short summary as asked."})
+                    .to_string(),
+            ),
+        );
+        assert_eq!(more.status, 200, "{}", more.text);
+        let job = until(&obid, &id, |j| {
+            j["round"] == 2 && j["status"] != "queued" && j["status"] != "running"
+        });
+        assert_eq!(job["status"], "done", "{job}");
+        job
+    };
 
-    let more = request(
-        &obid,
-        "POST",
-        &format!("/v1/jobs/{id}/messages"),
-        Some(
-            &json!({"text": "Try again, picking up where you left off. Finish with a short summary as asked."})
-                .to_string(),
-        ),
-    );
-    assert_eq!(more.status, 200, "{}", more.text);
-    let job = until(&obid, &id, |j| {
-        j["round"] == 2 && j["status"] != "queued" && j["status"] != "running"
-    });
-    assert_eq!(job["status"], "done", "{job}");
+    let job = tried("a.txt", " Done.");
     assert_eq!(job["summary"], "Done.", "{job}");
     assert_eq!(job["summaries"], json!(["Added a.txt.", "Done."]), "{job}");
+
+    let job = tried("b.txt", "");
+    assert_eq!(job["summary"], "Added b.txt.", "{job}");
+    assert_eq!(job["summaries"], json!(["Added b.txt."]), "{job}");
 }
 
 /// A check that fails the way the owner asked for (a test meant to fail): the fix round quotes the
