@@ -92,7 +92,8 @@ struct OfflineTests {
         phone.retry(echo: retried)
         let restored = OfflineQueue(defaults: defaults)
         #expect(restored.messages.count == 1)
-        #expect(restored.messages[0].id != retried)
+        // The same words go again with their id: obid keeps them once if the first did reach it.
+        #expect(restored.messages[0].id == retried)
     }
 
     /// docs/oby-ux.md row 18: an answer given offline keeps its decision on screen, marked "Sends

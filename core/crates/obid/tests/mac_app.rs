@@ -34,6 +34,7 @@ const APP_SOURCES: &[&str] = &[
     "apps/shared/JobList.swift",
     "apps/shared/Elapsed.swift",
     "apps/shared/DeviceKey.swift",
+    "apps/shared/TetrixStatus.swift",
     "apps/shared/GitHubWorkModel.swift",
 ];
 

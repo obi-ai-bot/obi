@@ -207,6 +207,9 @@ pub struct Job {
     pub answered: Vec<crate::permissions::Answered>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub answered_count: u32,
+    /// What obid saw of the agent and Tetrix, through obid's own Tetrix server (crate::tetrix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tetrix: Option<crate::tetrix::Use>,
     /// Calls an agent made through the user's connected apps; names only, never secret values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connection_uses: Vec<crate::connections::ConnectionUse>,
@@ -332,6 +335,7 @@ impl Job {
             answered: Vec::new(),
             answered_count: 0,
             connection_uses: Vec::new(),
+            tetrix: None,
             connections: None,
             heard: Vec::new(),
             offers: Vec::new(),
@@ -554,7 +558,7 @@ impl Job {
             "mergeError": null,
             "appleCheck": mac_check_json(self.apple_check.clone(), "apple"),
             "appleRan": mac_check_json(self.apple_ran.clone(), "apple"),
-            "tetrix": null,
+            "tetrix": self.tetrix.as_ref().map(crate::tetrix::Use::to_json),
             "moves": [],
             "xcodeCloud": null,
             "xcodeCloudError": null,

@@ -340,7 +340,7 @@ pub fn fixed_denial(tool: &str, input: &Value, worktree: &Path, mcp: &[String]) 
         _ => false,
     };
     if background {
-        return Some("Run it in the foreground: obid ends the session when your turn ends, and background work can't ask for permissions.".into());
+        return Some("Run it in the foreground: obid ends what you start in the background when your turn ends, and background work can't ask for permissions.".into());
     }
     if tool == "Bash"
         && let Some(command) = input.get("command").and_then(Value::as_str)

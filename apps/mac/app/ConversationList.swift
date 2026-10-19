@@ -18,11 +18,11 @@ nonisolated enum PlanTarget: Equatable, Sendable {
 extension Runner {
     /// `POST /v1/plans` with the words going where `target` says.
     func planned(_ said: String, answer: (question: String, option: String)? = nil, attachments: [String] = [],
-                 in target: PlanTarget) async throws -> PlannedTurn {
+                 in target: PlanTarget, id: String? = nil) async throws -> PlannedTurn {
         switch target {
-        case .latest: try await planned(said, answer: answer, attachments: attachments)
-        case .conversation(let id): try await planned(said, answer: answer, attachments: attachments, conversation: id)
-        case .new: try await planned(said, answer: answer, attachments: attachments, new: true)
+        case .latest: try await planned(said, answer: answer, attachments: attachments, id: id)
+        case .conversation(let conversation): try await planned(said, answer: answer, attachments: attachments, conversation: conversation, id: id)
+        case .new: try await planned(said, answer: answer, attachments: attachments, new: true, id: id)
         }
     }
 }
@@ -92,6 +92,7 @@ final class ConversationList {
         guard served else { return }
         let new = !items.contains { $0.id == conversation.id }
         items = ConversationOrder.placed(conversation, in: items)
+        if conversation.deleted { Drafts.keep("", as: Drafts.conversation(conversation.id)) }
         if conversation.deleted {
             guard conversation.id == shown else { return }
             // Deleted where it was open: its next words start a new one.

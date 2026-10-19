@@ -252,6 +252,8 @@ pub struct Jobs {
     plugins: std::sync::OnceLock<Arc<crate::plugins::Plugins>>,
     /// The connected-app broker: job-scoped MCP config and use records.
     connections: std::sync::OnceLock<Arc<crate::connections::Connections>>,
+    /// Oby's Tetrix login: every owner's job's agent gets Tetrix through obid (crate::tetrix).
+    tetrix: std::sync::OnceLock<Arc<crate::tetrix::Tetrix>>,
     /// Where a job's `.obi/artifacts/` is published when it ends.
     artifacts: std::sync::OnceLock<Arc<crate::artifacts::Artifacts>>,
     /// Loopback endpoint given to agents for `oby-check apple`.
@@ -313,6 +315,7 @@ impl Jobs {
             permissions: Mutex::new(kept),
             plugins: std::sync::OnceLock::new(),
             connections: std::sync::OnceLock::new(),
+            tetrix: std::sync::OnceLock::new(),
             artifacts: std::sync::OnceLock::new(),
             api_url: Mutex::new(api_url),
             approvals,
@@ -332,6 +335,64 @@ impl Jobs {
 
     pub fn use_connections(&self, connections: Arc<crate::connections::Connections>) {
         let _ = self.connections.set(connections);
+    }
+
+    pub fn use_tetrix(&self, tetrix: Arc<crate::tetrix::Tetrix>) {
+        let _ = self.tetrix.set(tetrix);
+    }
+
+    /// Oby's Tetrix, when `job` is the owner's own and Oby is signed in to Tetrix.
+    fn tetrix_for(&self, job: &Job) -> Option<&Arc<crate::tetrix::Tetrix>> {
+        self.tetrix
+            .get()
+            .filter(|t| job.obi.is_none() && t.connected())
+    }
+
+    /// Oby's Tetrix server for `job`'s agent (URL and the job's token), when it gets one.
+    fn tetrix_mcp(&self, job: &Job) -> Option<(String, String)> {
+        self.tetrix_for(job)?;
+        Some(self.connections.get()?.open_tetrix(&job.id))
+    }
+
+    /// Notes what the agent of job `id` got from Tetrix through obid.
+    pub fn tetrix_used(&self, id: &str, change: impl FnOnce(&mut crate::tetrix::Use)) {
+        self.update(id, |job| {
+            change(job.tetrix.get_or_insert_with(Default::default))
+        });
+    }
+
+    /// The session job `id`'s agent saved in Tetrix, in its outgoing actions.
+    pub fn sent_to_tetrix(&self, id: &str, session: &str) {
+        self.update(id, |job| {
+            let sent = crate::publish::Outgoing::new("tetrixSession", &job.repo, session, None);
+            if !job
+                .outgoing
+                .iter()
+                .any(|o| o.action == sent.action && o.id == sent.id)
+            {
+                job.outgoing.push(sent);
+            }
+        });
+    }
+
+    /// Of `account`'s latest 50 ended jobs that had Tetrix through obid: how many, and how many
+    /// of them called it.
+    pub fn tetrix_counts(&self, account: &str) -> (u32, u32) {
+        let state = self.lock();
+        let mut ended: Vec<&Job> = state
+            .jobs
+            .values()
+            .filter(|j| j.account == account && j.tetrix.as_ref().is_some_and(|t| t.ended))
+            .collect();
+        ended.sort_by_key(|j| std::cmp::Reverse(j.finished));
+        let recent = &ended[..ended.len().min(50)];
+        (
+            recent.len() as u32,
+            recent
+                .iter()
+                .filter(|j| j.tetrix.as_ref().is_some_and(crate::tetrix::Use::used))
+                .count() as u32,
+        )
     }
 
     /// Where jobs' artifacts go (once; without it, a job publishes none).
@@ -395,9 +456,15 @@ impl Jobs {
         purpose: obi_plugin_api::Purpose,
         job: obi_plugin_api::ContextJob,
         worktree: &Path,
+        more: Vec<(obi_plugin_api::PluginId, Vec<obi_plugin_api::ContextItem>)>,
     ) -> Option<String> {
-        let plugins = self.plugins.get()?;
-        let answers = plugins.context(purpose, job).await;
+        let mut answers = match self.plugins.get() {
+            Some(plugins) => plugins.context(purpose, job).await,
+            None => Vec::new(),
+        };
+        // obid's own (Tetrix's) in place of a plug-in's of the same name.
+        answers.retain(|(plugin, _)| !more.iter().any(|(own, _)| own == plugin));
+        answers.extend(more);
         match crate::plugins::write_context(worktree, &answers) {
             Ok(files) => crate::plugins::context_note(&files),
             Err(e) => {
@@ -495,6 +562,52 @@ impl Jobs {
         self.lock().jobs.get(id).cloned()
     }
 
+    /// The follow-up of `id` that's queued or running, if any: a job has one at a time, and words
+    /// for `id` once it ended go to it.
+    pub fn following(&self, id: &str) -> Option<Job> {
+        self.lock()
+            .jobs
+            .values()
+            .find(|j| j.status.is_active() && j.follow_up_of.as_deref() == Some(id))
+            .cloned()
+    }
+
+    /// Words for job `id` as words, never as an answer: taken only while it's at work in a turn
+    /// with no permission or plan waiting, all checked under the one lock that takes them (a
+    /// proposal's Start, link.rs: its words must never become the "no" of something the job asks
+    /// meanwhile). Otherwise refused, and nothing changes.
+    pub fn hear_at_work(&self, id: &str, text: &str) -> Option<Result<Job, Refused>> {
+        let text = text.trim();
+        if text.is_empty() || text.chars().count() > 2000 {
+            return Some(Err(Refused(
+                "Tell the agent something of 1 to 2,000 characters.".into(),
+            )));
+        }
+        let taken = {
+            let mut state = self.lock();
+            let free = state.workers.contains_key(id)
+                && !state.wrapping.contains(id)
+                && state.asks.get(id).is_none_or(VecDeque::is_empty);
+            let job = state.jobs.get_mut(id)?;
+            (free && job.status == Status::Running && job.phase == Some(Phase::Work)).then(|| {
+                hear(job, text);
+                job.clone()
+            })
+        };
+        let Some(job) = taken else {
+            return Some(Err(Refused(
+                "It can't take words now: it's getting ready, waiting for your answer or wrapping up."
+                    .into(),
+            )));
+        };
+        if let Err(e) = self.store.save(&job) {
+            tracing::error!("can't keep job {id}: {e}");
+        }
+        self.events.send("job", job.to_json());
+        self.changed.notify_waiters();
+        Some(Ok(job))
+    }
+
     /// The latest `limit` jobs, newest first.
     pub fn list(&self, limit: usize) -> Vec<Job> {
         let mut jobs: Vec<Job> = self.lock().jobs.values().cloned().collect();
@@ -547,7 +660,7 @@ impl Jobs {
         })
     }
 
-    fn being_changed(&self, account: &str) -> bool {
+    pub(crate) fn being_changed(&self, account: &str) -> bool {
         self.lock().changing.contains(account)
     }
 
@@ -1415,8 +1528,9 @@ impl Jobs {
                 .collect();
             if let Some(other) = active.iter().find(|j| j.follow_up_of == job.follow_up_of) {
                 return Err(Refused(format!(
-                    "{} is following it up already: tell that one instead.",
-                    other.short_title()
+                    "{} (job {}) is following it up already: tell that one instead.",
+                    other.short_title(),
+                    other.id
                 )));
             }
             if let Some(other) = active
@@ -1635,6 +1749,14 @@ impl Jobs {
             )));
         }
         if !job.status.is_active() && text != crate::brain::actions::TRY_AGAIN {
+            // Its follow-up is working already: the words go to that one, never a second.
+            if source != Source::Event
+                && let Some(next) = self.following(id)
+            {
+                return Some(self.message(&next.id, text, source)?.map_err(|why| {
+                    Refused(format!("{} ({}): {}", next.short_title(), next.id, why.0))
+                }));
+            }
             return Some(match source {
                 Source::Owner => self.create(follow_up(&job, text)),
                 Source::Untrusted | Source::Event => Err(Refused(
@@ -1675,11 +1797,7 @@ impl Jobs {
                     }),
             );
         }
-        let heard = |job: &mut Job| {
-            job.notes.get_or_insert_with(Vec::new).push(text.to_owned());
-            job.heard.push(text.to_owned());
-            job.step = format!("You: {text}");
-        };
+        let heard = |job: &mut Job| hear(job, text);
         if job.status.is_active() {
             // Checked and changed under one lock: a worker wrapping up takes no more words.
             let taken = {
@@ -2671,8 +2789,9 @@ impl Jobs {
             ));
             extra.push(("OBY_CHECK_TOKEN", token.into()));
         }
+        let tetrix = self.tetrix_mcp(job);
         if tool == Tool::Codex
-            && let Some((_, token)) = broker
+            && let Some((_, token)) = broker.or(tetrix.as_ref())
         {
             extra.push(("OBY_MCP_TOKEN", token.into()));
         }
@@ -2754,6 +2873,7 @@ impl Jobs {
             Tool::Codex => codex::argv(
                 bin,
                 broker.map(|(url, token)| (url.as_str(), token.as_str())),
+                tetrix.as_ref().map(|(url, _)| url.as_str()),
             ),
             Tool::Cursor => acp::cursor::argv(bin),
         };
@@ -3083,6 +3203,12 @@ impl Jobs {
                     plan,
                     plan_mode: "plan".into(),
                     agent_mode: "agent".into(),
+                    // Oby's Tetrix server, the only one Cursor gets (crate::tetrix).
+                    mcp: self
+                        .tetrix_mcp(&job)
+                        .map(|(url, token)| vec![json!({"type": "http", "name": "tetrix", "url": url,
+                            "headers": [{"name": "Authorization", "value": format!("Bearer {token}")}]})])
+                        .unwrap_or_default(),
                 };
                 acp::run_turn(
                     launch,
@@ -3304,6 +3430,7 @@ impl Jobs {
                     files: Vec::new(),
                 },
                 &worktree,
+                Vec::new(),
             )
             .await;
         let mut prompt = review::prompt(&request);
@@ -3637,11 +3764,34 @@ impl Jobs {
             } else {
                 obi_plugin_api::Purpose::Dispatch
             };
+            // What Tetrix knows about the job, asked with Oby's login (crate::tetrix).
+            let mut more = Vec::new();
+            if let (Some(tetrix), Some(connections)) =
+                (self.tetrix_for(&job), self.connections.get())
+            {
+                let (items, seen) = tetrix.context(connections, &job).await;
+                self.tetrix_used(id, |used| used.absorb(seen));
+                if !items.is_empty() {
+                    more.push((
+                        obi_plugin_api::PluginId::new("tetrix").expect("a plug-in id"),
+                        items,
+                    ));
+                }
+            }
             if let Some(note) = self
-                .plugin_context(id, purpose, crate::plugins::context_job(&job), &worktree)
+                .plugin_context(
+                    id,
+                    purpose,
+                    crate::plugins::context_job(&job),
+                    &worktree,
+                    more,
+                )
                 .await
             {
                 message = format!("{message}\n\n{note}");
+            }
+            if self.tetrix_for(&job).is_some() {
+                message = format!("{message}\n\n{}", crate::tetrix::PROMPT);
             }
             if job.session.is_some() {
                 message = format!(
@@ -3699,7 +3849,14 @@ impl Jobs {
                 // The ready agent-mcp plug-ins' servers, from a file in the job's own folder, and
                 // one permission rule per tool each allows, each its own argument (last, since
                 // --allowedTools takes every argument after it).
-                let servers = self.agent_mcp(tool);
+                // Signed in to Tetrix, obid's own Tetrix server replaces the plug-in's: the same
+                // name, the same tools, Oby's login (crate::tetrix).
+                let tetrix = self.tetrix_mcp(&job);
+                let servers: Vec<_> = self
+                    .agent_mcp(tool)
+                    .into_iter()
+                    .filter(|s| tetrix.is_none() || s.plugin.as_str() != "tetrix")
+                    .collect();
                 let broker = if tool == Tool::Cursor {
                     None
                 } else {
@@ -3709,11 +3866,24 @@ impl Jobs {
                 if broker.is_some() && tool != Tool::Cursor {
                     mcp_rules.push(crate::connections::BROKER_RULE.into());
                 }
-                if !servers.is_empty() || broker.is_some() && tool == Tool::Claude {
+                if tetrix.is_some() {
+                    self.tetrix_used(id, |_| {});
+                    mcp_rules.extend(
+                        crate::tetrix::TOOLS
+                            .iter()
+                            .map(|tool| format!("mcp__tetrix__{tool}")),
+                    );
+                }
+                if !servers.is_empty()
+                    || (broker.is_some() || tetrix.is_some()) && tool == Tool::Claude
+                {
                     let file = spec.temp.join(MCP_CONFIG_FILE);
                     let mut config = crate::plugins::claude_mcp_config(&servers);
                     if let Some((url, token)) = broker.as_ref().filter(|_| tool == Tool::Claude) {
                         config["mcpServers"]["oby"] = json!({"type":"http","url":url,"headers":{"Authorization":format!("Bearer {token}")}});
+                    }
+                    if let Some((url, token)) = tetrix.as_ref().filter(|_| tool == Tool::Claude) {
+                        config["mcpServers"]["tetrix"] = json!({"type":"http","url":url,"headers":{"Authorization":format!("Bearer {token}")}});
                     }
                     let text = serde_json::to_vec(&config).map_err(|e| e.to_string())?;
                     let _ = std::fs::remove_file(&file);
@@ -3876,6 +4046,7 @@ impl Jobs {
             self.publish_artifacts(id).await;
             stages.begin("keep commits");
             let head = self.keep_commits(id).await?;
+            self.tetrix_ended(id, &worktree, &start_commit).await;
             let commits = if start_commit.is_empty() || head == start_commit {
                 0
             } else {
@@ -4073,6 +4244,40 @@ impl Jobs {
                 job.artifact_problems = problems;
             });
         }
+    }
+
+    /// Job `id`'s Tetrix as it ends (crate::tetrix): its commits' stamps, its graph gaps sent to
+    /// Tetrix, and the summary's last line.
+    async fn tetrix_ended(&self, id: &str, worktree: &Path, start: &str) {
+        let Some(job) = self.get(id) else { return };
+        let (Some(seen), Some(tetrix), Some(connections)) = (
+            job.tetrix.clone(),
+            self.tetrix.get(),
+            self.connections.get(),
+        ) else {
+            return;
+        };
+        // Ended already, and a round came after (a push the secret scan blocked gets one): its
+        // gaps went once, and its summary gets the line again.
+        if seen.ended {
+            let line = seen.line();
+            self.update(id, |job| {
+                if job.kind != "review" && !job.summary.contains(&line) {
+                    job.summary = format!("{}\n\n{line}", job.summary.trim_end());
+                }
+            });
+            return;
+        }
+        let (ended, outgoing) = tetrix
+            .job_ended(connections, &job, &seen, worktree, start)
+            .await;
+        self.update(id, |job| {
+            if job.kind != "review" {
+                job.summary = format!("{}\n\n{}", job.summary.trim_end(), ended.line());
+            }
+            job.tetrix = Some(ended);
+            job.outgoing.extend(outgoing);
+        });
     }
 
     /// Ends the job `id` done with `commits` (and `pushed` of them on its pull request), then
@@ -4981,6 +5186,27 @@ fn folder_login_ok(login: Option<&[u8]>, now: u64) -> bool {
     login.is_none_or(|login| far_from_end(expires_at(login), now))
 }
 
+/// Whether the login copy a run was given in `login` (its `.credentials.json`, or its
+/// `.claude/.credentials.json`) is good for one more turn: there is none (none was copied), or its
+/// token doesn't end within 5 minutes ([`file_login_ok`]). A conversation's Claude Code kept
+/// running between turns reads it.
+pub(crate) fn login_copy_lasts(login: &Path) -> bool {
+    match [".credentials.json", ".claude/.credentials.json"]
+        .iter()
+        .map(|name| login.join(name))
+        .find(|file| std::fs::symlink_metadata(file).is_ok())
+    {
+        None => true,
+        // A link in its place is never followed: the turn starts a Claude Code with a new copy.
+        Some(file) => {
+            std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file())
+                && std::fs::read(file)
+                    .ok()
+                    .is_some_and(|login| file_login_ok(Some(&login), now_ms()))
+        }
+    }
+}
+
 /// The issue for the Mac app's Swift engine still running agents unboxed on an account's folder,
 /// after which obid can refresh an account's own login too.
 const SHARED_FOLDER_ISSUE: &str = "#655";
@@ -5836,25 +6062,26 @@ fn tail(text: &str, max: usize) -> &str {
     &text[start..]
 }
 
+/// `job` hears `text`: its notes, what it heard, and its step.
+fn hear(job: &mut Job, text: &str) {
+    job.notes.get_or_insert_with(Vec::new).push(text.to_owned());
+    job.heard.push(text.to_owned());
+    // What the owner said; the agent's words quoted after it aren't theirs to show.
+    job.step = format!("You: {}", crate::sphere::inbox::owners_part(text));
+}
+
 /// The first prompt of the owner's job (Engine/Jobs.swift, `Prompts.agent`, for what obid does).
 /// A follow-up of `job`, which ended, with the owner's `words` (Sangam's design, the owner's
 /// decision of 2026-10-18): the same kind, agent, account, repository, pull request or issue,
-/// base, check, model, mode and conversation, the words its request and task, titled by their
-/// first line, and what `job` did for its first prompt. Bypass isn't carried: only the owner's own
+/// base, check, model, mode and conversation, the words its request and task, titled
+/// `Follow-up: <job's title>` (never the words themselves, which may be long; the conversation
+/// may name it better, `oby_tell_job`'s `title`), and what `job` did for its first prompt. Bypass isn't carried: only the owner's own
 /// Confirm starts a job that never asks. When `job` has commits that aren't merged, the follow-up
 /// starts from its branch head, so its agent has that work: on that very branch while its pull
 /// request is open (publishing updates it), else on a branch of its own.
 pub fn follow_up(job: &Job, words: &str) -> NewJob {
     let unmerged = job.commits.unwrap_or(0) > 0 && !job.merged();
-    let line = words.trim().lines().next().unwrap_or("").trim();
-    let mut title: String = if line.chars().count() > 60 {
-        format!("{}…", line.chars().take(59).collect::<String>().trim_end())
-    } else {
-        line.to_owned()
-    };
-    if let Some(first) = title.get_mut(0..1) {
-        first.make_ascii_uppercase();
-    }
+    let title = crate::brain::briefing::line(&format!("Follow-up: {}", job.short_title()), 60);
     let commits = job.commits.unwrap_or(0);
     let mut did = vec![
         format!(
@@ -5880,7 +6107,7 @@ pub fn follow_up(job: &Job, words: &str) -> NewJob {
         repo: job.repo.clone(),
         kind: job.kind.clone(),
         task: words.to_owned(),
-        title: (!title.is_empty()).then_some(title),
+        title: Some(title),
         request: Some(words.to_owned()),
         pr: job.pr,
         issue: job.issue,
@@ -6503,6 +6730,24 @@ mod tests {
                 || jobs.get("j").is_some_and(|j| j.status != Status::Queued)
         });
         assert!(started, "the job never started once the change ended");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_waiting_claude_code_runs_a_turn_only_on_a_copy_that_lasts() {
+        let root = std::env::temp_dir().join(format!("obid-lasts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        assert!(login_copy_lasts(&root), "no copy: nothing ends");
+        let ends = |ms: u64| format!(r#"{{"claudeAiOauth": {{"expiresAt": {ms}}}}}"#);
+        let file = root.join(".claude/.credentials.json");
+        std::fs::write(&file, ends(now_ms() + 60 * 60_000)).unwrap();
+        assert!(login_copy_lasts(&root));
+        std::fs::write(&file, ends(now_ms() + 60_000)).unwrap();
+        assert!(!login_copy_lasts(&root), "it ends within 5 minutes");
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), &file).unwrap();
+        assert!(!login_copy_lasts(&root), "a link isn't followed");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7325,7 +7570,7 @@ mod tests {
         let next = follow_up(&job, "and the docs");
         assert_eq!((next.branch, next.start_from), (None, None));
         assert_eq!(next.mode, None);
-        assert_eq!(next.title.as_deref(), Some("And the docs"));
+        assert_eq!(next.title.as_deref(), Some("Follow-up: Fix it"));
         job.commits = Some(2);
         let next = follow_up(&job, "and the docs");
         assert_eq!(
@@ -7395,6 +7640,59 @@ mod tests {
             );
         }
         assert_eq!(jobs.list(10).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A proposal's Start reaches a running follow-up only as words, never as the answer to what it
+    /// asks: taken while it's at work, refused once a plan (or permission) waits, even one that
+    /// arrived after it was free, and the plan stays unanswered.
+    #[tokio::test]
+    async fn words_at_work_never_answer_what_the_job_asks() {
+        let root = std::env::temp_dir().join(format!("obid-hear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let mut job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        job.status = Status::Running;
+        job.phase = Some(Phase::Work);
+        job.mode = Some("plan".into());
+        let (worker, _signals) = watch::channel(Signal::Run);
+        {
+            let mut state = jobs.lock();
+            state.jobs.insert("j".into(), job);
+            state.workers.insert("j".into(), worker);
+        }
+        let heard = jobs.hear_at_work("j", "and the docs").unwrap().unwrap();
+        assert_eq!(heard.step, "You: and the docs");
+        // A plan arrives: the next Start's words are refused, and the plan still waits.
+        let worktree = root.join("worktree");
+        let Ruling::Ask(_waiting) =
+            jobs.rule_on("j", "ExitPlanMode", &json!({"plan": "1. Fix"}), &worktree)
+        else {
+            panic!("the plan went through by itself");
+        };
+        let refused = jobs.hear_at_work("j", "from the web").unwrap();
+        assert!(refused.unwrap_err().0.contains("can't take words now"));
+        let job = jobs.get("j").unwrap();
+        assert!(job.permission.is_some(), "still waiting");
+        assert_eq!(job.heard, ["and the docs"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

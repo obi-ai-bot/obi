@@ -29,7 +29,10 @@
 //                    the files in .obi/context/; then ends the turn with "Reported." With
 //                    MCP_CALL, MCP_WRITE, MCP_API or MCP_PROBE it also calls the `oby` broker's
 //                    tools (MCP_CALL's search with its prompt as the query), and MCP_PROBE tries
-//                    the broker's token on the runner's other routes
+//                    the broker's token on the runner's other routes. With TETRIX_CALL it calls
+//                    the `tetrix` server's search_entities, get_entity, save_session and
+//                    resume_session, and commits tetrix.txt with a Tetrix-Session trailer naming
+//                    the session save_session answered
 //   ON PURPOSE       in a fix round's quoted task: ends the turn with "FAILS AS ASKED: …"
 //   anything else    ends the turn with "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
@@ -252,6 +255,22 @@ async function report(prompt) {
           toolCalls[`${name}_api`] = await read.json();
         }
       }
+      if (prompt.includes("TETRIX_CALL") && name === "tetrix") {
+        const call = async (id, tool, args) => {
+          const answer = await fetch(server.url, {
+            method: "POST",
+            headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(server.headers ?? {}) },
+            body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: tool, arguments: args } }),
+          });
+          return answer.json();
+        };
+        toolCalls.search = await call(21, "search_entities", { query: "where is the nothing" });
+        toolCalls.entity = await call(22, "get_entity", { id: "repo:acme/legacy" });
+        toolCalls.saved = await call(23, "save_session", { client: "claude-code", state: { did: "tetrix.txt" } });
+        toolCalls.resume = await call(24, "resume_session", { session_id: "someone-elses" });
+        // Put together here, so this file holds no key a scanner flags.
+        toolCalls.leak = await call(25, "save_session", { client: "claude-code", state: { key: "AKIA" + "QWERTYUIOPASDFGH" } });
+      }
       if (prompt.includes("MCP_PROBE") && name === "oby") {
         // More broker calls, then the broker token everywhere else on the runner.
         const call = async (id, tool, args) => {
@@ -285,6 +304,12 @@ async function report(prompt) {
     } catch (e) {
       answers[name] = { error: String(e) };
     }
+  }
+  if (prompt.includes("TETRIX_CALL")) {
+    const session = JSON.parse(toolCalls.saved?.result?.content?.[0]?.text ?? "{}").session_id ?? "none";
+    writeFileSync("tetrix.txt", "made with Tetrix\n");
+    execFileSync("git", ["add", "tetrix.txt"]);
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add tetrix.txt\n\nTetrix-Session: ${session}`]);
   }
   const context = existsSync(".obi/context") ? readdirSync(".obi/context").sort() : [];
   mkdirSync(".obi", { recursive: true });

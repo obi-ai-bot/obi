@@ -39,6 +39,9 @@ pub struct Options {
     /// The tool's mode ids for Plan and for everything else.
     pub plan_mode: String,
     pub agent_mode: String,
+    /// The MCP servers `session/new` (or `session/load`) gives it, when it takes HTTP ones: Oby's
+    /// Tetrix server only (crate::tetrix).
+    pub mcp: Vec<Value>,
 }
 
 /// Runs one turn: starts the agent, sends `prompt`, answers its requests with `decide`, reports with
@@ -456,13 +459,19 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         };
         let load = init["agentCapabilities"]["loadSession"] == json!(true);
         let cwd = self.cwd.clone();
-        // No MCP servers: obid gives agents none, as its Claude Code runs with --strict-mcp-config.
+        // Only the servers obid gives (as its Claude Code runs with --strict-mcp-config), and those
+        // only when the tool takes HTTP servers.
+        let servers = if init["agentCapabilities"]["mcpCapabilities"]["http"] == json!(true) {
+            json!(self.options.mcp)
+        } else {
+            json!([])
+        };
         let (method, params) = match &self.options.resume {
             Some(session) if load => (
                 "session/load",
-                json!({"sessionId": session, "cwd": cwd, "mcpServers": []}),
+                json!({"sessionId": session, "cwd": cwd, "mcpServers": servers}),
             ),
-            _ => ("session/new", json!({"cwd": cwd, "mcpServers": []})),
+            _ => ("session/new", json!({"cwd": cwd, "mcpServers": servers})),
         };
         let answer = match self.call(method, params).await? {
             Ok(answer) => answer,

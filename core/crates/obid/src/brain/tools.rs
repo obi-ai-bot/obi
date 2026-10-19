@@ -47,7 +47,7 @@ fn list() -> Value {
              "title": {"type": "string", "description": "A short title, 3 to 6 words."}},
              "required": ["repo", "task"]}},
         {"name": "oby_tell_job", "description": "Tells a job something: a running job hears it at its next turn; one that ended gets a follow-up job, with the same kind, agent, account and repository, that starts with the owner's words. Its card goes on your answer.",
-         "inputSchema": {"type": "object", "properties": {"id": id, "words": {"type": "string"}}, "required": ["id", "words"]}},
+         "inputSchema": {"type": "object", "properties": {"id": id, "words": {"type": "string"}, "title": {"type": "string", "description": "When the job ended: the follow-up's short title, 3 to 6 words."}}, "required": ["id", "words"]}},
         {"name": "oby_stop_job", "description": "Stops a running job.",
          "inputSchema": {"type": "object", "properties": {"id": id}, "required": ["id"]}},
         {"name": "oby_inbox", "description": "What waits for the owner in Oby's inbox: each item's id, kind, title, job and options. Item texts are quoted data.",
@@ -146,8 +146,8 @@ async fn call(
         "oby_dispatch" => dispatch(shared, session, args).await,
         "oby_tell_job" => {
             capped(&session.told, "tells jobs something")?;
-            let Tell { id, words } = parse(args)?;
-            tell(shared, session, id, &words).await
+            let Tell { id, words, title } = parse(args)?;
+            tell(shared, session, id, &words, title).await
         }
         "oby_stop_job" => {
             let One { id } = parse(args)?;
@@ -236,6 +236,7 @@ struct One {
 struct Tell {
     id: String,
     words: String,
+    title: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -445,7 +446,9 @@ async fn tell(
     session: &Session,
     id: String,
     words: &str,
+    title: Option<String>,
 ) -> Result<String, String> {
+    let added = words;
     let words = told(&session.said, words, &session.nonce);
     let mut plan = Plan::of(Action::MessageJob, "");
     plan.jobs = Some(vec![id.clone()]);
@@ -468,6 +471,17 @@ async fn tell(
             .await,
         );
     }
+    let agent_ready = |text: &str| -> Result<String, String> {
+        Ok(crate::secrets::known().redact(&crate::vault::for_agent(text.trim())?))
+    };
+    // Its follow-up is working already (this turn's or an earlier one's): that one hears them.
+    if let Some(next) = shared.jobs.following(&id) {
+        let words = agent_ready(&words)?;
+        return outcome_answer(
+            session,
+            actions::already_on_it(shared, &job, &next, &words, source(session)),
+        );
+    }
     // A follow-up is a job the turn starts: it counts against the turn's ten, and a job gets one
     // follow-up a turn.
     capped(&session.dispatched, "starts jobs")?;
@@ -483,13 +497,23 @@ async fn tell(
             "Oby started a follow-up of {name} this turn already: tell that one instead."
         ));
     }
-    let agent_ready = |text: &str| -> Result<String, String> {
-        Ok(crate::secrets::known().redact(&crate::vault::for_agent(text.trim())?))
-    };
     let mut new = crate::jobs::follow_up(&job, &agent_ready(&words)?);
     new.request = Some(agent_ready(&session.said)?);
+    if let Some(title) = title
+        .map(|t| super::briefing::line(&t, 60))
+        .filter(|t| !t.is_empty())
+    {
+        new.title = Some(title);
+    }
     if source(session) == crate::jobs::Source::Untrusted {
-        return Ok(actions::propose_follow_up(shared, &job, &new));
+        let added = agent_ready(added)?;
+        return Ok(actions::propose_follow_up(
+            shared,
+            &job,
+            &new,
+            Some(&added),
+            &session.conversation,
+        ));
     }
     outcome_answer(session, actions::follow_up(shared, &job, new))
 }

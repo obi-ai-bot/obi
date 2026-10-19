@@ -82,6 +82,7 @@ struct HomeView: View {
             .safeAreaInset(edge: .bottom) {
                 Composer(text: $text, prompt: HomeLine.placeholder(fullName: HomeLine.owner(ofMac: phone.link?.name) ?? ""),
                          typing: $typing, onSend: send)
+                    .keepsDraft($text, as: Drafts.home)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
