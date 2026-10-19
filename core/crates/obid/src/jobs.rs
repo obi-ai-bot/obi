@@ -5787,7 +5787,7 @@ fn owner_prompt(job: &Job) -> String {
         ),
     }];
     if let Some(issue) = job.issue {
-        lines.push(format!("The work is about issue #{issue}."));
+        lines.push(format!("The work is about issue #{issue}. Work from what this prompt says of it: there's no GitHub login here, so don't fetch the issue (gh, curl or the web)."));
     }
     if let Some(paths) = job.attachments.as_ref().filter(|paths| !paths.is_empty()) {
         let names = paths
@@ -7139,6 +7139,10 @@ mod tests {
         );
         assert!(prompt.contains("without cd"), "{prompt}");
         assert!(prompt.contains("never /tmp"), "{prompt}");
+        // Seen live: both jobs of a round ran `gh issue view` for the issue they were about.
+        let mut about = job.clone();
+        about.issue = Some(627);
+        assert!(owner_prompt(&about).contains("don't fetch the issue"));
     }
 
     /// A follow-up starts from the first job's unmerged work: on its branch while its pull request
