@@ -1102,9 +1102,25 @@ async fn attempts(
     if !session.attachments.is_empty() {
         session.taint();
     }
-    let with = |prompt: String| match &attached {
-        Some(names) => format!("{names}\n\n{prompt}"),
-        None => prompt,
+    // Its own task list while something on it is still to do, so a summarized session keeps it.
+    let (listed, tainted) = shared
+        .conversations
+        .tasks(&control.conversation)
+        .unwrap_or_default();
+    let tasks = tasks_line(&listed, &session.nonce);
+    // A list written after something untrusted was read carries that in: so does this turn.
+    if tasks.is_some() && tainted {
+        session.taint();
+    }
+    let with = |prompt: String| {
+        let prompt = match &attached {
+            Some(names) => format!("{names}\n\n{prompt}"),
+            None => prompt,
+        };
+        match &tasks {
+            Some(tasks) => format!("{tasks}\n\n{prompt}"),
+            None => prompt,
+        }
     };
     let words = crate::vault::for_agent(&with(said.trim().to_owned()))?;
     let first = crate::vault::for_agent(&with(first_prompt(said.trim(), given)))?;
@@ -1391,6 +1407,34 @@ fn clean(name: &str) -> String {
     } else {
         cleaned
     }
+}
+
+/// The conversation's task list, quoted, while one of its tasks is still to do.
+fn tasks_line(tasks: &[crate::conversation::Task], nonce: &str) -> Option<String> {
+    if !tasks.iter().any(crate::conversation::Task::open) {
+        return None;
+    }
+    let lines: Vec<String> = tasks
+        .iter()
+        .map(|t| {
+            let job = t
+                .job
+                .as_ref()
+                .map(|j| format!(" (job {j})"))
+                .unwrap_or_default();
+            let note = t
+                .note
+                .as_ref()
+                .map(|n| format!(": {}", super::briefing::line(n, 500)))
+                .unwrap_or_default();
+            format!("- {} [{}] {}{job}{note}", t.id, t.status, t.title)
+        })
+        .collect();
+    Some(format!(
+        "Your task list for this conversation, as you left it with oby_tasks (keep it current):\n{}\n{}",
+        super::briefing::fence_rule(nonce, "your task list"),
+        super::briefing::fence(nonce, &lines.join("\n"))
+    ))
 }
 
 /// The first prompt of a session: the conversation so far, quoted, before the owner's words.

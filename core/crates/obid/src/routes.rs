@@ -139,6 +139,53 @@ pub async fn dismiss(
     }
 }
 
+/// `POST /v1/jobs/{id}/archive`: `{"archived": true}` (or no body) archives a job that ended and
+/// needs nothing; `false` unarchives it.
+pub async fn archive(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let archived = if body.iter().all(u8::is_ascii_whitespace) {
+        true
+    } else {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Archive {
+            archived: bool,
+        }
+        serde_json::from_slice::<Archive>(&body)
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "The body is {\"archived\": true} or {\"archived\": false}.",
+                )
+            })?
+            .archived
+    };
+    match shared.jobs.archive(&id, archived, "by you") {
+        None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+        Some(Err(refused)) => Err(ApiError::new(StatusCode::CONFLICT, refused.0)),
+        Some(Ok(job)) => Ok(json(StatusCode::OK, job.to_json())),
+    }
+}
+
+/// `DELETE /v1/jobs/{id}`: a job that ended goes for good, its worktree and local branch with it;
+/// nothing pushed is touched.
+pub async fn delete(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    match shared.jobs.delete(&id).await {
+        None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+        Some(Err(refused)) => Err(ApiError::new(StatusCode::CONFLICT, refused.0)),
+        Some(Ok(_)) => {
+            shared.link.settle_job(&id);
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+    }
+}
+
 /// `GET /v1/jobs/{id}/wait`: the job once it has ended; a space every 15 seconds until then.
 pub async fn wait(
     State(shared): State<Arc<Shared>>,

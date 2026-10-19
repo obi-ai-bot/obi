@@ -85,6 +85,14 @@ pub mod action {
     /// Change a routine the brain named (#395): `target` the routine, `payload`
     /// `{"action": "resume" | "delete" | "run" | "reschedule", "schedule", "zone"}`.
     pub const CHANGE_ROUTINE: &str = "change_routine";
+    /// Continue a job in its own session (`oby_continue_job`): `target` the job, `payload`
+    /// `{"words": "…"}` or null.
+    pub const CONTINUE_JOB: &str = "continue_job";
+    /// Delete a job that ended, its worktree and local branch (`oby_delete_job`): `target` the job.
+    pub const DELETE_JOB: &str = "delete_job";
+    /// Change a job's mode, tool or account (`oby_change_job`): `target` the job, `payload`
+    /// `{"mode": "…"}`, `{"agent": "…", "account": "…"}` or both.
+    pub const CHANGE_JOB: &str = "change_job";
 }
 
 /// A `confirm` item: `title` says exactly what `Confirm` does, `confirmed` is what obid carries
