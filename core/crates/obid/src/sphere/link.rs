@@ -2624,6 +2624,19 @@ impl Link {
                     .routines()
                     .ok_or_else(|| api(StatusCode::CONFLICT, "obid keeps no routines."))?;
                 let gone = || api(StatusCode::CONFLICT, "That routine is gone.");
+                // The card named its mode, tool and account: one changed since is a routine the
+                // owner didn't see.
+                let current = routines.get(target).ok_or_else(gone)?;
+                let payload = &confirmed.payload;
+                if payload["mode"] != serde_json::json!(current.mode)
+                    || payload["agent"] != serde_json::json!(current.agent)
+                    || payload["account"] != serde_json::json!(current.account)
+                {
+                    return Err(api(
+                        StatusCode::CONFLICT,
+                        "The routine's mode, tool or account changed since Oby asked: ask again.",
+                    ));
+                }
                 let now = time::now();
                 let change = |change: Change| match routines.change(&self.jobs, target, change, now)
                 {
@@ -2643,17 +2656,26 @@ impl Link {
                         ..Default::default()
                     }),
                     Some("delete") => routines.delete(target).then_some(()).ok_or_else(gone),
-                    Some("run") => match routines.run(target, now) {
-                        Ok(_) => Ok(()),
-                        Err(NotRun::NoRoutine) => Err(gone()),
-                        Err(NotRun::Busy) => Err(api(
-                            StatusCode::CONFLICT,
-                            "Its previous run is still going.",
-                        )),
-                        Err(NotRun::Refused(why)) => {
-                            Err(api(StatusCode::UNPROCESSABLE_ENTITY, why))
+                    Some("run") => {
+                        // Off the async threads: a run takes the routines' firing lock.
+                        let (routines, target) = (routines.clone(), target.to_owned());
+                        let ran = tokio::task::spawn_blocking(move || routines.run(&target, now))
+                            .await
+                            .map_err(|_| {
+                                api(StatusCode::INTERNAL_SERVER_ERROR, "The run stopped.")
+                            })?;
+                        match ran {
+                            Ok(_) => Ok(()),
+                            Err(NotRun::NoRoutine) => Err(gone()),
+                            Err(NotRun::Busy) => Err(api(
+                                StatusCode::CONFLICT,
+                                "Its previous run is still going.",
+                            )),
+                            Err(NotRun::Refused(why)) => {
+                                Err(api(StatusCode::UNPROCESSABLE_ENTITY, why))
+                            }
                         }
-                    },
+                    }
                     _ => Err(api(StatusCode::CONFLICT, "That change was lost.")),
                 }
             }

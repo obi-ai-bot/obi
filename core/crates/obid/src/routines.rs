@@ -1053,7 +1053,11 @@ pub async fn run(
     State(shared): State<Arc<Shared>>,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Response, ApiError> {
-    match run_now(&shared, &id, obi_protocol::time::now()) {
+    // Off the async threads: a run takes the firing lock and starts its job.
+    let ran = tokio::task::spawn_blocking(move || run_now(&shared, &id, obi_protocol::time::now()))
+        .await
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "The run stopped."))?;
+    match ran {
         Ok((routine, job)) => Ok(answer(
             StatusCode::CREATED,
             json!({"routine": routine.to_json(), "job": job.to_json()}),

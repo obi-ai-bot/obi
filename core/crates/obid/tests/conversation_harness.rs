@@ -677,6 +677,36 @@ fn a_routine_said_in_chat_waits_for_the_owners_confirm() {
         resumed.text
     );
     assert_eq!(routine_now()["enabled"], false);
+    // The card named Bypass: once the mode changed, its Confirm does nothing, and says why.
+    let set_mode = |mode: &str| {
+        let changed = call(
+            &obid,
+            "PATCH",
+            &format!("/v1/routines/{id}"),
+            Some(&json!({ "mode": mode })),
+        );
+        assert_eq!(changed.status, 200, "{}", changed.text);
+    };
+    set_mode("ask");
+    let stale = inbox(&obid)
+        .into_iter()
+        .find(|i| i["kind"] == "confirm" && i["done"].is_null())
+        .expect("the resume card");
+    let refused = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{}/answer", stale["id"].as_str().unwrap()),
+        Some(&json!({"answer": "Confirm"})),
+    );
+    assert_eq!(refused.status, 409, "{}", refused.text);
+    assert!(
+        refused.text.contains("changed since Oby asked"),
+        "{}",
+        refused.text
+    );
+    assert_eq!(routine_now()["enabled"], false);
+    set_mode("bypass");
+    change("resume");
     confirm("Resume the routine Readme check");
     assert_eq!(routine_now()["enabled"], true);
 
