@@ -326,6 +326,7 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
                 || agent_mcp.is_some_and(|id| {
                     shared.connections.allows(id, token)
                         || shared.harness.session(id, token).is_some()
+                        || shared.harness.waiting_with(id, token)
                 })
         }) {
             Ok(())
