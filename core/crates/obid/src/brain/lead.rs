@@ -1157,6 +1157,8 @@ async fn start(
                 check: Some(brief.check.clone()),
                 files: Some(brief.files.clone()),
                 conversation: Some(asked.conversation.to_owned()),
+                // Started by these words: its card shows under them as it starts.
+                turn: (!asked.turn.is_empty()).then(|| asked.turn.to_owned()),
                 ..NewJob::default()
             };
             match shared.jobs.create(new) {

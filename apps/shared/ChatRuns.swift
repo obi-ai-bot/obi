@@ -148,6 +148,41 @@ nonisolated enum ThreadTaskLine {
         jobs.filter { $0.followUpOf == id }.sorted { $0.created < $1.created }
     }
 
+    /// The user's turn that started a job (obid's `turn`), when the job is in the conversation on
+    /// screen (`conversation` is the job's, `showing` the screen's); another conversation's job
+    /// never counts, whatever its turn.
+    static func startedBy(turn: String?, in conversation: String?, showing: String?) -> String? {
+        conversation == showing ? turn : nil
+    }
+
+    /// The jobs whose cards go under `turn`: those it lists, then, under the user's words, the
+    /// jobs those words started (`startedBy`) that no turn of the thread lists yet,
+    /// oldest first: a card shows the moment its job starts, not when Oby's answer is in.
+    static func cards(under turn: Turn, in thread: [Turn], jobs: [Job], startedBy: (Job) -> String?) -> [Job] {
+        let listed = ConversationModel.jobs(of: turn, among: jobs)
+        guard turn.who == .user else { return listed }
+        let answered = Set(thread.flatMap { $0.jobs ?? [] })
+        return listed + jobs.filter { startedBy($0) == turn.id && !answered.contains($0.id) }.sorted { $0.created < $1.created }
+    }
+
+    /// The jobs the thread shows where they started: on Oby's answers (not the turns a job adds
+    /// when it ends, `ended`), and under the words that started them.
+    static func shown(in thread: [Turn], jobs: [Job], startedBy: (Job) -> String?, ended: (Turn) -> Bool) -> Set<String> {
+        let words = Set(thread.filter { $0.who == .user }.map(\.id))
+        return Set(thread.filter { !ended($0) }.flatMap { $0.jobs ?? [] })
+            .union(jobs.filter { startedBy($0).map(words.contains) ?? false }.map(\.id))
+    }
+
+    /// The follow-ups that go with `job`'s card, oldest first, each followed by its own: those the
+    /// thread doesn't show where they started (`shown`), like one told from the task's page. Each
+    /// goes under Sangam's line (`followUp`), as on the task's page. A job is never under itself
+    /// (`seen`), so a `followUpOf` loop ends.
+    static func attached(to job: Job, in jobs: [Job], shown: Set<String>, seen: Set<String> = []) -> [Job] {
+        let seen = seen.union([job.id])
+        return followUps(of: job.id, in: jobs).filter { !shown.contains($0.id) && !seen.contains($0.id) }
+            .flatMap { [$0] + attached(to: $0, in: jobs, shown: shown, seen: seen) }
+    }
+
     /// A job's mark in the thread, as in the side panel but never "new": you're looking at it.
     static func mark(_ job: Job) -> WorkMark {
         if job.needsYou || job.waitsForAnswer || job.waitsForPermission { return .needs }
