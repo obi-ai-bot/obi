@@ -620,6 +620,33 @@ pub async fn change(
     ))
 }
 
+/// `POST /v1/accounts/{id}/reserve` `{"lift": true | false}`: lifts the account's weekly reserve
+/// until its week resets, or puts it back now (crate::usage). The Account.
+pub async fn reserve(
+    State(shared): State<Arc<Shared>>,
+    UrlPath(id): UrlPath<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shape = "{\"lift\": true | false}";
+    let map = object(&body, &["lift"], shape)?;
+    let Some(lift) = map.get("lift").and_then(Value::as_bool) else {
+        return Err(unprocessable(format!(
+            "lift is true or false: the body is {shape}."
+        )));
+    };
+    let (tool, account) = find(&shared.config.agents.get(), &id).ok_or_else(|| no_account(&id))?;
+    shared
+        .jobs
+        .usage
+        .lift(&id, lift)
+        .map_err(|e| unkept(Path::new("usage.json"), e))?;
+    send_accounts(&shared).await;
+    Ok(answer(
+        StatusCode::OK,
+        json_now(&shared, tool, account).await,
+    ))
+}
+
 /// `DELETE /v1/accounts/{id}`: `204`. A sign-in under way ends first; then `409` while a job of
 /// the account is queued or running. Its folder goes too when obid made it.
 pub async fn remove(

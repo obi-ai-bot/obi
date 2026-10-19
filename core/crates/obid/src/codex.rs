@@ -83,6 +83,7 @@ pub async fn run_turn(
         files: HashMap::new(),
         calls: HashMap::new(),
         no_commands: options.no_commands,
+        limits_read: None,
         fatal: None,
         thread: None,
         turn: None,
@@ -157,6 +158,8 @@ struct Run<D, E> {
     /// Codex asks names the tool only in its words.
     calls: HashMap<String, Vec<(String, Value)>>,
     no_commands: bool,
+    /// The `account/rateLimits/read` request not answered yet.
+    limits_read: Option<u64>,
     /// Why obid ended the turn for good.
     fatal: Option<String>,
     thread: Option<String>,
@@ -178,6 +181,13 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         .await?
         .map_err(|e| Stop::Failed(format!("Codex couldn't start: {}", e.message)))?;
         self.conn.notify("initialized", None).await;
+        // The account's usage, answered while the thread starts: reading it asks OpenAI, and the
+        // job doesn't wait for that (`handle`).
+        self.limits_read = Some(
+            self.conn
+                .request("account/rateLimits/read", json!({}))
+                .await,
+        );
 
         let cwd = self.worktree.to_string_lossy().into_owned();
         let mut params = thread_params(&cwd);
@@ -233,6 +243,22 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
     }
 
     async fn handle(&mut self, message: Value) {
+        if let Some(answer) = self
+            .limits_read
+            .and_then(|id| conn::answer_to(&message, id))
+        {
+            self.limits_read = None;
+            // An older server may not know the method: its notifications still report usage.
+            if let Some(usage) = answer.ok().and_then(|read| crate::usage::codex_read(&read)) {
+                (self.on_event)(Event::Usage(usage));
+            }
+            return;
+        }
+        if message["method"] == "account/rateLimits/updated"
+            && let Some(usage) = crate::usage::codex(&message["params"]["rateLimits"])
+        {
+            (self.on_event)(Event::Usage(usage));
+        }
         if let Some(id) = conn::request_id(&message).cloned() {
             return self.answer(id, &message).await;
         }

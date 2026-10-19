@@ -1333,7 +1333,7 @@ async fn one(
                 watch.mark("session");
                 session.keep(Some(&id))
             }
-            Event::Step(_) | Event::Denied(_) => {}
+            Event::Step(_) | Event::Denied(_) | Event::Usage(_) => {}
         }
     };
     let decide = |tool: &str, input: &Value| {

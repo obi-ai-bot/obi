@@ -104,6 +104,8 @@ pub enum Event {
     },
     /// The answer to the tool call `id` came back; `failed` when it was an error.
     ToolDone { id: String, failed: bool },
+    /// The account's usage, as the tool just reported it (crate::usage).
+    Usage(crate::usage::Usage),
 }
 
 /// How a turn ended, for every adapter.
@@ -201,6 +203,9 @@ pub async fn turn_on(
             Ok(message) => message,
             Err(_) => break,
         };
+        if message["type"] == "rate_limit_event" {
+            on_event(Event::Usage(crate::usage::claude(&message)));
+        }
         match message.get("type").and_then(Value::as_str) {
             Some("control_request") => {
                 let request = &message["request"];

@@ -736,6 +736,8 @@ Lifts an account's weekly reserve, or puts it back (#278):
 
 With `true`, the account takes automatic work past 80% of its week until `sevenDayResets` (a week from now while that's unknown or past), then it's reserved again by itself; `false` puts the reserve back now. Saved with the account's usage, so a restart keeps it. Jobs waiting for room (Start when) and reviews waiting for an account look again at once. Returns the Account, and every app following `GET /v1/events` gets `accounts`. `404` for an unknown account.
 
+obid (#450): it keeps each account's usage as its tool reports it (Claude Code's `rate_limit_event` during a job; Codex's answer to the `account/rateLimits/read` it sends as each run starts, and its `account/rateLimits/updated`) in `home/usage.json` (0600), so a restart keeps the windows, their resets, `fullUntil` and a lift. A report that names one window keeps the other. Each report sends `accounts`. A window past its reset reads 0. Routing a job that names no account skips one marked full, at 95% of either window, or in its weekly reserve, and when that leaves none, dispatch is refused (`422`) saying why (`No account has room: Personal is in its weekly reserve (82% of its week used) until …; use it anyway from Settings › Accounts.`); obid has no waiting for room yet (#455). A job sent to an account by name runs there, and its tool says when it's full. `400` for a body that isn't a JSON object, `422` for one without a boolean `lift` or with another key.
+
 ### `POST /v1/jobs/{id}/messages`
 
 Tells the job's agent something:
