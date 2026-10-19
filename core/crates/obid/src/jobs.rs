@@ -1954,7 +1954,7 @@ impl Jobs {
     }
 
     /// Saves an allow rule for a repository, once; the prompts waiting now, in every job, follow it.
-    fn save_rule(&self, rule: &str, repo: &str) {
+    pub(crate) fn save_rule(&self, rule: &str, repo: &str) {
         {
             let mut kept = self.kept();
             if kept
@@ -2998,6 +2998,55 @@ impl Jobs {
             flags,
             stderr,
             confined: true,
+        })
+    }
+
+    /// A command of a conversation's shell (docs/runner-api.md, "obid only: the conversation's
+    /// shell"): `bash -c` in the room, confined as the conversation's agent is, but with no account
+    /// and no login, its own temporary folder as `HOME` and `TMPDIR`, `frozen` read-only, and the
+    /// network only when the owner gave it to this command.
+    pub(crate) fn shell_launch(
+        &self,
+        room: &Path,
+        temp: &Path,
+        frozen: Vec<PathBuf>,
+        network: bool,
+        command: &str,
+    ) -> Result<Launch, String> {
+        let sandbox = self
+            .sandbox
+            .as_ref()
+            .map_err(|why| format!("obid can't box the command: {why}"))?;
+        let mut hidden = vec![self.config.home.clone()];
+        hidden.extend(person_homes());
+        hidden.extend(self.config.agents.hidden_folders(&self.config.home));
+        let mut read_only = sandbox::tool_roots(
+            &process::tools_path(),
+            &hidden,
+            std::slice::from_ref(&self.config.home),
+        );
+        read_only.extend(sandbox::path_software(&process::tools_path(), &hidden));
+        let spec = Spec {
+            worktree: room.to_path_buf(),
+            git_admin: None,
+            git_common: None,
+            commits: false,
+            temp: temp.to_path_buf(),
+            accounts: Vec::new(),
+            read_only,
+            hidden,
+            network,
+            frozen,
+        };
+        let argv: Vec<OsString> = ["/bin/bash", "--noprofile", "--norc", "-c", command]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        Ok(Launch {
+            argv: sandbox.wrap_reading_only_its_own(&spec, &argv),
+            env: process::sandbox_env(&process::tools_path(), temp, &[]),
+            cwd: room.to_path_buf(),
+            stderr: temp.join("stderr.log"),
         })
     }
 

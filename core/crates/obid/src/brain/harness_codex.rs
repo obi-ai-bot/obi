@@ -50,6 +50,8 @@ const OFF: &[&str] = &[
 const SETTINGS: &[&str] = &[
     r#"shell_environment_policy.exclude=["OBY_MCP_TOKEN"]"#,
     r#"web_search="live""#,
+    // Its own default is a minute: a shell command, or one waiting for the owner, takes longer.
+    "mcp_servers.oby.tool_timeout_sec=3600",
 ];
 
 /// The `app-server` to run for one attempt of the turn, and what its thread is started with:

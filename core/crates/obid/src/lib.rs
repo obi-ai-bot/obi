@@ -358,6 +358,7 @@ pub async fn serve(
             shared.sign_ins.kill_all();
             shared.github.kill();
             shared.harness.end_all_warm();
+            shared.harness.shell.end_all();
             tokio::join!(jobs.shutdown(JOBS_GRACE), plugins.shutdown());
         })
     };
