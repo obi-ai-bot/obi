@@ -18,7 +18,8 @@
 //   LIMITS: <json>   sends the JSON as an `account/rateLimits/updated` snapshot
 //   TOKENS           its thread uses 1000 input tokens (600 of them cached) and 100 output tokens
 //                    more, reported in `thread/tokenUsage/updated` twice
-// It answers `account/read` as a ChatGPT (plan) login.
+// It answers `account/read` (once the turn starts) as a ChatGPT (plan) login, or an API key's when
+// the task says APIKEY.
 //   a brain's prompt answers one plan: a reply "From Codex.", with work.md's first line
 //   anything else    "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable, or
@@ -159,6 +160,7 @@ async function runTurn(turnId, prompt) {
 }
 
 let limitsRead = null;
+let accountRead = null;
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", (line) => {
   let message;
@@ -180,7 +182,8 @@ rl.on("line", (line) => {
     case "initialized":
       return;
     case "account/read":
-      return send({ id, result: { account: { type: "chatgpt", email: "owner@example.com", planType: "plus" }, requiresOpenaiAuth: true } });
+      accountRead = id;
+      return;
     case "account/rateLimits/read":
       limitsRead = id;
       return;
@@ -205,6 +208,11 @@ rl.on("line", (line) => {
       const turnId = randomUUID();
       const text = params.input.map((i) => i.text).join("\n");
       if (state.task === null) state.task = text;
+      if (accountRead !== null) {
+        const account = text.includes("APIKEY") ? { type: "apiKey" } : { type: "chatgpt", email: "owner@example.com", planType: "plus" };
+        send({ id: accountRead, result: { account, requiresOpenaiAuth: true } });
+        accountRead = null;
+      }
       // The usage read obid sent at start, answered now that the task says what to answer.
       if (limitsRead !== null) {
         const read = text.match(/READ: (\{.*\})/);

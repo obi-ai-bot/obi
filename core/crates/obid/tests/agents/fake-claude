@@ -7,7 +7,9 @@
 //   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is ended
 //   FAIL             ends the turn with an error result
 //   USAGE: <json>    first sends a rate_limit_event whose rate_limit_info is the JSON
-//   TOKENS           its result line reports usage, modelUsage (two models) and a cost
+//   TOKENS           its result line reports usage, modelUsage (two models) and a cost; like
+//                    Claude Code's after --resume, modelUsage and the cost are the session's so
+//                    far (its turns counted in .obi/tokens-turn), usage the turn's own
 //   USAGES: <json>   a list: like USAGE with its first entry on the first turn, the next on the
 //                    next (counted in .obi/usage-turn)
 //   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
@@ -52,12 +54,12 @@ if (process.argv[2] === "auth" && process.argv[3] === "login") {
 
 const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
 const session = "00000000-0000-4000-8000-000000000001";
-let tokens = false;
+let tokens = 0;
 const result = (text, error = false) =>
-  emit({ type: "result", subtype: error ? "error_during_execution" : "success", is_error: error, num_turns: 1, result: text, session_id: session, total_cost_usd: tokens ? 0.25 : 0,
+  emit({ type: "result", subtype: error ? "error_during_execution" : "success", is_error: error, num_turns: 1, result: text, session_id: session, total_cost_usd: 0.25 * tokens,
     ...(tokens && { usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 1000, cache_creation_input_tokens: 50 },
-      modelUsage: { "fake-opus": { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 1000, cacheCreationInputTokens: 50, costUSD: 0.2 },
-        "fake-haiku": { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.05 } } }) });
+      modelUsage: { "fake-opus": { inputTokens: 100 * tokens, outputTokens: 20 * tokens, cacheReadInputTokens: 1000 * tokens, cacheCreationInputTokens: 50 * tokens, costUSD: 0.2 * tokens },
+        "fake-haiku": { inputTokens: 10 * tokens, outputTokens: 5 * tokens, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.05 * tokens } } }) });
 
 const leaked = Object.keys(process.env).filter((name) =>
   name === "CLAUDECODE" || (name.startsWith("CLAUDE_CODE_") && name !== "CLAUDE_CODE_TMPDIR") || name.startsWith("ANTHROPIC_") || name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN");
@@ -94,7 +96,11 @@ rl.on("line", (line) => {
   let prompt = typeof message.message.content === "string" ? message.message.content : "";
   emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Bash", "Read", "Edit"], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
   if (leaked.length) return result(`leaked: ${leaked.join(", ")}`, true);
-  tokens = prompt.includes("TOKENS");
+  if (prompt.includes("TOKENS")) {
+    mkdirSync(".obi", { recursive: true });
+    tokens = (existsSync(".obi/tokens-turn") ? Number(readFileSync(".obi/tokens-turn", "utf8")) : 0) + 1;
+    writeFileSync(".obi/tokens-turn", String(tokens));
+  }
   const usage = prompt.match(/USAGE: (\{.*\})/);
   if (usage) emit({ type: "rate_limit_event", session_id: session, rate_limit_info: JSON.parse(usage[1]) });
   const usages = prompt.match(/USAGES: (\[.*\])/);

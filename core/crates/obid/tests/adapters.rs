@@ -736,4 +736,7 @@ fn codex_reports_a_jobs_tokens() {
         json!({"input": 800, "output": 200, "cacheRead": 1200, "priced": "plan"}),
         "{job}"
     );
+    // obid asks how the account pays once: a later job's answer, an API key's, isn't asked for.
+    let id = dispatch(&obid, json!({"agent": "codex", "task": "TOKENS APIKEY"}));
+    assert_eq!(ended(&obid, &id)["usage"]["priced"], "plan");
 }
