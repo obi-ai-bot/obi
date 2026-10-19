@@ -244,8 +244,14 @@ impl Sessions {
     /// the same lock that [`Sessions::end_warm_on`] and [`Sessions::end_warm`] take, so an account
     /// change or a deletion that comes after the look ends it: whether it was kept. The one
     /// waiting longest ends when [`WARM_MOST`] conversations' already wait; the next new
-    /// conversation's ([`prestart`]) isn't one of them.
-    fn keep(&self, conversation: &str, warm: Warm, admit: impl FnOnce(&Warm) -> bool) -> bool {
+    /// conversation's (`next`, [`prestart`]) isn't one of them.
+    fn keep(
+        &self,
+        conversation: &str,
+        warm: Warm,
+        next: Option<&str>,
+        admit: impl FnOnce(&Warm) -> bool,
+    ) -> bool {
         let mut all = self.warm();
         if !admit(&warm) {
             warm.end();
@@ -254,10 +260,11 @@ impl Sessions {
         if let Some(old) = all.insert(conversation.to_owned(), warm) {
             old.end();
         }
-        while all.values().filter(|w| w.session.is_some()).count() > WARM_MOST {
+        let counted = |c: &String| Some(c.as_str()) != next;
+        while all.keys().filter(|c| counted(c)).count() > WARM_MOST {
             let Some(oldest) = all
                 .iter()
-                .filter(|(_, w)| w.session.is_some())
+                .filter(|(c, _)| counted(c))
                 .min_by_key(|(_, w)| w.since)
                 .map(|(c, _)| c.clone())
             else {
@@ -332,9 +339,12 @@ impl Sessions {
 /// with the same folder any more, while the turn ran.
 fn keep_warm(shared: &Arc<Shared>, conversation: &str, warm: Warm) {
     let since = warm.since;
-    let kept = shared.harness.keep(conversation, warm, |warm| {
-        shared.conversations.exists(conversation) && may_wait(shared, warm)
-    });
+    let next = shared.conversations.peek_next();
+    let kept = shared
+        .harness
+        .keep(conversation, warm, next.as_deref(), |warm| {
+            shared.conversations.exists(conversation) && may_wait(shared, warm)
+        });
     if !kept {
         return;
     }
@@ -439,7 +449,7 @@ async fn start_next(shared: &Arc<Shared>, id: &str) -> Result<(), String> {
     };
     // Not kept when its account changed while it started, or the conversation went.
     let since = warm.since;
-    let kept = shared.harness.keep(id, warm, |warm| {
+    let kept = shared.harness.keep(id, warm, Some(id), |warm| {
         (shared.conversations.is_next(id) || shared.conversations.exists(id))
             && may_wait(shared, warm)
     });
@@ -2195,7 +2205,7 @@ mod tests {
         ] {
             let warm = waiting("a", Some("/a"), "s1").await;
             let pid = warm.conn.pid();
-            sessions.keep("c", warm, |_| true);
+            sessions.keep("c", warm, None, |_| true);
             assert!(
                 sessions
                     .take_warm("c", &account(who, folder), Some(session))
@@ -2203,7 +2213,7 @@ mod tests {
             );
             assert!(ends(pid).await, "{who} {folder:?} {session}");
         }
-        sessions.keep("c", waiting("a", Some("/a"), "s1").await, |_| true);
+        sessions.keep("c", waiting("a", Some("/a"), "s1").await, None, |_| true);
         let mine = sessions.take_warm("c", &account("a", Some("/a")), Some("s1"));
         assert!(mine.is_some());
         mine.unwrap().end();
@@ -2218,7 +2228,7 @@ mod tests {
         for c in ["c1", "c2", "c3", "c4"] {
             let warm = waiting("a", None, "s").await;
             pids.push(warm.conn.pid());
-            sessions.keep(c, warm, |_| true);
+            sessions.keep(c, warm, None, |_| true);
         }
         assert!(ends(pids[0]).await, "the oldest ends");
         assert_eq!(sessions.warm().len(), WARM_MOST);
@@ -2231,7 +2241,7 @@ mod tests {
         sessions.expire("c2", since);
         assert!(!sessions.warm().contains_key("c2"));
         assert!(ends(pids[1]).await);
-        sessions.keep("c5", waiting("b", None, "s").await, |_| true);
+        sessions.keep("c5", waiting("b", None, "s").await, None, |_| true);
         sessions.end_warm_on("a");
         assert_eq!(sessions.warm().keys().collect::<Vec<_>>(), vec!["c5"]);
         assert!(ends(pids[2]).await && ends(pids[3]).await);
@@ -2247,19 +2257,25 @@ mod tests {
         let mut next = waiting("a", None, "s").await;
         next.session = None;
         let next_pid = next.conn.pid();
-        assert!(sessions.keep("next", next, |_| true));
+        assert!(sessions.keep("next", next, Some("next"), |_| true));
+        // One with no session that isn't the next conversation's counts like any other.
+        let mut taken = waiting("a", None, "s").await;
+        taken.session = None;
+        let taken_pid = taken.conn.pid();
+        assert!(sessions.keep("c0", taken, Some("next"), |_| true));
         let mut pids = vec![];
         for c in ["c1", "c2", "c3", "c4"] {
             let warm = waiting("a", None, "s").await;
             pids.push(warm.conn.pid());
-            assert!(sessions.keep(c, warm, |_| true));
+            assert!(sessions.keep(c, warm, Some("next"), |_| true));
         }
+        assert!(ends(taken_pid).await, "it was the oldest of the counted");
         assert!(ends(pids[0]).await, "the oldest conversation's ends");
         assert!(sessions.warm().contains_key("next"));
         assert_eq!(sessions.warm().len(), WARM_MOST + 1);
         let refused = waiting("a", None, "s").await;
         let refused_pid = refused.conn.pid();
-        assert!(!sessions.keep("c5", refused, |_| false));
+        assert!(!sessions.keep("c5", refused, Some("next"), |_| false));
         assert!(ends(refused_pid).await);
         sessions.end_warm_unless(|c| c != "next" && c != "c2");
         assert_eq!(
