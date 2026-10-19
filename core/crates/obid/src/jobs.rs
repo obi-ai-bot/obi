@@ -4885,9 +4885,9 @@ pub(crate) fn folder_login(config_dir: &Path) -> Option<Vec<u8>> {
 
 /// At obid's start, each configured account's folder looked at once: what a box of an older obid
 /// could have planted there for the next unboxed run (#655), said in obid's log
-/// ([`planted`]); and, with the Keychain in use, a `.credentials.json` an older obid copied there
-/// (it has no refresh token) taken out, since it would make the account look signed in after its
-/// Keychain item is gone.
+/// ([`planted`]); and, where the Keychain holds the account's login, a `.credentials.json` an older
+/// obid copied there (it has no refresh token) taken out, `claudeKeychain` on or off, since it
+/// would make the account look signed in after its Keychain item is gone (#646).
 pub fn check_account_folders(agents: &crate::config::Agents) {
     for (tool, agent) in [
         (Tool::Claude, &agents.claude),
@@ -4907,11 +4907,11 @@ pub fn check_account_folders(agents: &crate::config::Agents) {
                 );
             }
             // Only where the Keychain holds that login: the file is then a copy, never the login
-            // itself.
+            // itself. Whether or not `claudeKeychain` is on now (#646): a copy left by an obid
+            // that had it on would make the account look signed in, and be copied for runs.
             if tool == Tool::Claude
                 && cfg!(target_os = "macos")
-                && keychain_on()
-                && remove_older_copy(dir, keychain_has(Some(dir)))
+                && remove_older_copy(dir, keychain_item(Some(dir), false).is_some())
             {
                 tracing::info!(
                     "account {}: took out an older obid's copy of its login from its folder",
