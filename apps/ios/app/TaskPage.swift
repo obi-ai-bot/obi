@@ -52,7 +52,7 @@ struct TaskCard: View {
                     } else if (job.permission != nil && job.isActive) || job.waitsForAnswer {
                         JobDecision(job: job, inset: false)
                     } else if let next = job.nextStepOffered {
-                        AskCard(kind: job.needsYouKind, title: job.line, options: CardOption.of([next], recommended: 0), busy: busy,
+                        AskCard(kind: job.needsYouKind, title: job.line, happened: job.resumesLine, options: CardOption.of([next], recommended: 0), busy: busy,
                                 onChoose: { _ in tryAgain(job.id) })
                     } else {
                         Text(job.badge.text).font(Tokens.font(Tokens.textSm, .medium))

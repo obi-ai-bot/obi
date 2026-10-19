@@ -29,6 +29,7 @@ pub mod github_login;
 pub mod github_work;
 pub mod job;
 pub mod jobs;
+pub mod limits;
 pub mod logs;
 pub mod obi_dir;
 pub mod permissions;

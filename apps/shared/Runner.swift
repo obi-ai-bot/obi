@@ -91,6 +91,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Interrupted on obid: its one next step, as its button says it ("One more round", "Try
     /// again"), or nil.
     var nextStep: String?
+    /// When obid tries it again by itself, after its account's usage limit resets, or nil.
+    var resumesAt: Date?
 
     /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
     /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
@@ -120,7 +122,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
-             conversation, artifacts, followUpOf, reason, nextStep
+             conversation, artifacts, followUpOf, reason, nextStep, resumesAt
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -819,6 +821,13 @@ extension Job {
 
     /// The one next step of a job that stopped part way and needs you (obid's `interrupted`), or nil.
     nonisolated var nextStepOffered: String? { status == .interrupted && dismissed == nil ? nextStep : nil }
+
+    /// When obid tries it again by itself, as its decision card says it: "At 3:04 PM, or now with
+    /// Try again.", or nil.
+    nonisolated var resumesLine: String? {
+        guard nextStepOffered != nil, let resumesAt else { return nil }
+        return "At \(resumesAt.formatted(date: .omitted, time: .shortened)), or now with \(nextStep ?? "Try again")."
+    }
 
     /// Its decision card's kind (Sangam's labels): Out of usage when its agent hit a usage limit.
     nonisolated var needsYouKind: String {

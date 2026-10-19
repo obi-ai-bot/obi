@@ -209,11 +209,12 @@ fn jobs_have_iso_dates_and_every_key() {
                 "nextStep",
                 "obi",
                 "reason",
+                "resumesAt",
                 "worktree"
             ],
             "{body}"
         );
-        assert_eq!(keys.len(), 75);
+        assert_eq!(keys.len(), 76);
         // What obid never sets is there, as null.
         for key in [
             "published",

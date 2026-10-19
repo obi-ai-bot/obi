@@ -6,6 +6,8 @@
 //                    the rest of the prompt
 //   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is ended
 //   FAIL             ends the turn with an error result
+//   LIMITED: <s>     says the account is full (a rate_limit_event whose 5-hour window resets <s>
+//                    seconds from now), then ends the turn with Claude Code's usage-limit error
 //   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
 //   ASKS: <json>     asks for each of a list of {"tool", "input"} in turn, then ends the turn with
 //                    "answers: allow, deny: <why>, …"
@@ -178,6 +180,11 @@ rl.on("line", (line) => {
     let beats = 0;
     writeFileSync(".obi/beat", String(beats));
     setInterval(() => writeFileSync(".obi/beat", String(++beats)), 50);
+  } else if (prompt.match(/LIMITED: (-?\d+)/)) {
+    const resetsAt = Math.floor(Date.now() / 1000) + Number(prompt.match(/LIMITED: (-?\d+)/)[1]);
+    emit({ type: "rate_limit_event", session_id: session, rate_limit_info: { status: "rejected", resetsAt,
+      unifiedWindows: { five_hour: { utilization: 1.0, resetsAt }, seven_day: { utilization: 0.5, resetsAt: resetsAt + 86400 } } } });
+    result("Claude AI usage limit reached.", true);
   } else if (prompt.includes("FAIL")) {
     result("it broke", true);
   } else if (asks) {

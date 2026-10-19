@@ -78,6 +78,7 @@ pub async fn run_turn(
         turn: None,
         said: None,
         ended: None,
+        resets: None,
     };
     let mut turn = Turn::default();
     match run.turn(prompt, options).await {
@@ -97,6 +98,7 @@ pub async fn run_turn(
     }
     turn.session = run.thread.clone();
     turn.fatal = run.fatal.take();
+    turn.resets = run.resets;
     if let Some((text, failed)) = &run.ended {
         turn.result = Some(agent::result(text, *failed, run.thread.as_deref()));
     }
@@ -156,6 +158,8 @@ struct Run<D, E> {
     said: Option<String>,
     /// The turn's end: what it said, and whether it failed.
     ended: Option<(String, bool)>,
+    /// When Codex's own limit resets, once it said it's full (crate::limits).
+    resets: Option<i64>,
 }
 
 impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
@@ -245,6 +249,11 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         }
         let item = &params["item"];
         match message["method"].as_str() {
+            Some("account/rateLimits/updated") => {
+                if let Some(at) = crate::limits::codex_full_until(&params["rateLimits"]) {
+                    self.resets = Some(at);
+                }
+            }
             Some("item/started") => {
                 if let Some(step) = step(item) {
                     (self.on_event)(Event::Step(step));
