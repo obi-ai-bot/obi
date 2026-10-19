@@ -153,6 +153,8 @@ pub enum Failure {
     /// The job may not be published now (nothing to publish, or not what was approved): nothing
     /// ran, and nothing changes.
     Refused(String),
+    /// The push went out, then the pull request failed: why, worded to follow "Pushed, but " (#627).
+    PullRequest(String),
     /// Anything else, as one line a person can read.
     Failed(String),
 }
@@ -168,10 +170,14 @@ impl Failure {
             Failure::Stopped => "Not published: the job was stopped.".into(),
             Failure::Busy => "obid is publishing it already.".into(),
             Failure::Refused(why) => why.clone(),
+            Failure::PullRequest(why) => format!("{PUSHED_BUT}{why}"),
             Failure::Failed(why) => why.clone(),
         }
     }
 }
+
+/// How a `publishError` starts when the push went out and only the pull request failed.
+pub const PUSHED_BUT: &str = "Pushed, but ";
 
 /// "Not published: possible secret in a.txt:3 (AWS access key), … and 2 more."
 pub fn blocked(found: &[Found]) -> String {
@@ -446,6 +452,8 @@ pub struct Target {
     pub scratch: PathBuf,
     /// The owner's GitHub CLI, or none when it isn't installed.
     pub gh: Option<PathBuf>,
+    /// Whether the push gets a pull request: the remote is GitHub's (`Repo::pull_requests`).
+    pub pull_requests: bool,
     /// Held while the base is fetched into the clone: one fetch at a time per clone.
     pub fetching: Arc<tokio::sync::Mutex<()>>,
 }
@@ -504,6 +512,20 @@ fn credentials(remote: &str, gh: Option<&Path>, unset: &[String]) -> Vec<String>
     args
 }
 
+/// The `-c` settings for a clone or fetch of an `https` remote ([`crate::git::ensure_clone`]):
+/// git's own credential helpers reset, then the owner's `gh` login, exactly as a push signs in
+/// ([`credentials`]). So a private repository clones with nothing set up but gh's own sign-in (no
+/// `gh auth setup-git`), and gh's token never reaches another helper: after a successful clone git
+/// sends `store` to every helper, and Apple's git turns `osxkeychain` on system-wide, which would
+/// copy the token into the login Keychain, where it outlived `gh auth logout`. None for another
+/// remote, or without a gh: then git's own settings, as before.
+pub(crate) fn fetch_credentials(remote: &str, gh: Option<&Path>) -> Vec<String> {
+    if gh.is_none() || !remote.starts_with("https://") {
+        return Vec::new();
+    }
+    credentials(remote, gh, &forbidden_names())
+}
+
 /// The variables in obid's environment that never reach gh (`crate::process::is_forbidden`),
 /// `GH_TOKEN` and `GITHUB_TOKEN` always among them: names only, never their values.
 fn forbidden_names() -> Vec<String> {
@@ -518,13 +540,13 @@ fn forbidden_names() -> Vec<String> {
 }
 
 /// Publishes `job` from `target`: the gate, then the push of one pinned commit, then the pull
-/// request into `base`. Answers the pull request's URL.
+/// request into `base`. Answers the pull request's URL, or none for a remote that gets none.
 pub async fn publish(
     job: &Job,
     base: &str,
     target: &Target,
     hooks: &dyn Hooks,
-) -> Result<String, Failure> {
+) -> Result<Option<String>, Failure> {
     hooks.progress(Step::Scan);
     if let Some(why) = refusal(job, base, &target.default_branch) {
         return Err(Failure::Failed(why));
@@ -573,15 +595,10 @@ pub async fn publish(
     // nothing. A fetch the remote sent too little to is tried once more (#628).
     let since = {
         let _fetching = target.fetching.lock().await;
-        let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
-        let fetch = [
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "origin",
-            &refspec,
-        ];
+        // Signed in with gh's login alone, as a clone is (fetch_credentials).
+        let refspecs = [format!("+refs/heads/{base}:refs/remotes/origin/{base}")];
+        let signed = fetch_credentials(&target.remote, target.gh.as_deref());
+        let fetch = git::fetch_args(&signed, &refspecs);
         let mut fetched = git::git(clone, &fetch).await;
         if fetched
             .as_ref()
@@ -645,9 +662,11 @@ pub async fn publish(
     let title = title(job, &subjects);
     // Read once: the scan checks the very description the pull request gets.
     let closes = match (job.issue, &target.gh) {
-        (Some(number), Some(gh)) => github::issue_body(gh, &job.repo, number)
-            .await
-            .is_some_and(|issue| closes(&issue)),
+        (Some(number), Some(gh)) if target.pull_requests => {
+            github::issue_body(gh, &job.repo, number)
+                .await
+                .is_some_and(|issue| closes(&issue))
+        }
         _ => false,
     };
     let description = body(job, closes);
@@ -681,18 +700,24 @@ pub async fn publish(
         &head,
         Some(job.branch.as_str()),
     ));
+    // Not GitHub (a `file://` remote): the push is all there is, and gh is never asked (#627).
+    if !target.pull_requests {
+        return Ok(None);
+    }
     if !hooks.proceed() {
         return Err(Failure::Stopped);
     }
     hooks.progress(Step::PullRequest);
     let gh = target.gh.as_deref().ok_or_else(|| {
-        Failure::Failed("Couldn't open the pull request: GitHub's CLI (gh) isn't installed.".into())
+        Failure::PullRequest(
+            "couldn't open the pull request: GitHub's CLI (gh) isn't installed.".into(),
+        )
     })?;
     let file = target.scratch.join("pull-request.md");
     let _ = std::fs::remove_file(&file);
     crate::store::write_private(&file, description.as_bytes()).map_err(|e| {
-        Failure::Failed(format!(
-            "Couldn't open the pull request: obid couldn't write its description ({e})."
+        Failure::PullRequest(format!(
+            "couldn't open the pull request: obid couldn't write its description ({e})."
         ))
     })?;
     let opened = {
@@ -702,13 +727,13 @@ pub async fn publish(
         github::open_pull_request(gh, &job.repo, base, &job.branch, &heads, &title, &file).await
     };
     let _ = std::fs::remove_file(&file);
-    let (url, sent) = opened.map_err(Failure::Failed)?;
+    let (url, sent) = opened.map_err(Failure::PullRequest)?;
     match sent {
         github::Sent::Opened => hooks.sent(Outgoing::new("pullRequest", &job.repo, &url, None)),
         github::Sent::Edited => hooks.sent(Outgoing::new("pullRequestEdit", &job.repo, &url, None)),
         github::Sent::Nothing => {}
     }
-    Ok(url)
+    Ok(Some(url))
 }
 
 /// What git said when a command of publishing failed: its last line on stderr, never the command
@@ -1252,6 +1277,26 @@ async fn push(head: &str, job: &Job, target: &Target, lease: Option<&str>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clone or fetch of an https remote resets git's own helpers before gh's, as a push does, so
+    /// no other helper (Apple git's system-wide osxkeychain) is asked to `store` gh's token; nothing
+    /// for another remote or without a gh.
+    #[test]
+    fn fetches_reset_gits_own_helpers_before_ghs() {
+        let gh = Path::new("/opt/gh");
+        let https = fetch_credentials("https://github.com/o/r.git", Some(gh));
+        assert_eq!(https.len(), 4, "{https:?}");
+        assert_eq!(&https[..2], ["-c", "credential.helper="], "{https:?}");
+        assert_eq!(https[2], "-c");
+        assert!(https[3].starts_with("credential.helper=!env "), "{https:?}");
+        assert!(
+            https[3].ends_with("'/opt/gh' auth git-credential"),
+            "{https:?}"
+        );
+        assert!(fetch_credentials("https://github.com/o/r.git", None).is_empty());
+        assert!(fetch_credentials("git@github.com:o/r.git", Some(gh)).is_empty());
+        assert!(fetch_credentials("file:///tmp/r.git", Some(gh)).is_empty());
+    }
 
     fn job() -> Job {
         let mut job = Job::new(

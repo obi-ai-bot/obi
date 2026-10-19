@@ -91,7 +91,7 @@ fn config(folder: &Path, remote: &Path) -> Value {
         "owner": "wellington",
         "agents": {"claude": {"bin": Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-claude"),
                               "accounts": [{"id": "stub", "name": "Stub", "configDir": folder.join("home/accounts/stub")}]}},
-        "repos": [{"repo": "obi-e2e/fixture-app", "remote": format!("file://{}", remote.display()), "defaultBranch": "main"}],
+        "repos": [{"repo": "obi-e2e/fixture-app", "remote": format!("file://{}", remote.display()), "defaultBranch": "main", "pullRequests": true}],
         "allowFileRemotes": true,
         "telemetry": false
     })
@@ -711,6 +711,46 @@ fn a_check_that_keeps_failing_stops_at_a_limit() {
     assert!(log.contains("the check failed"), "{log}");
 }
 
+/// A check that fails the way the owner asked for (a test meant to fail): the fix round quotes the
+/// task, the agent says the failure is intended, and the job ends with that round instead of
+/// another one that would undo it.
+#[test]
+fn a_failure_the_task_asked_for_ends_the_rounds() {
+    let folder = Folder::new("intended");
+    let remote = fixture(&folder.0.join("fixture"));
+    let bin = fake_gh(&folder.0);
+    let obid = start_with(&folder.0, &config(&folder.0, &remote), Some(&bin));
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt, a test that fails ON PURPOSE", "check": "echo the check failed; false", "rounds": 3}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    // No other round, and nothing goes out: a check that fails isn't a pass, whatever the agent
+    // says (AGENTS.md: only checks that pass publish).
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["round"], 2);
+    assert_eq!(job["limit"], Value::Null);
+    assert_eq!(job["pushed"], Value::Null, "{job}");
+    assert_eq!(job["published"], Value::Null, "{job}");
+    let summary = job["summary"].as_str().unwrap();
+    assert!(summary.contains("nothing was pushed"), "{job}");
+    // The agent's own words stay with the round.
+    let rounds = job["summaries"].as_array().unwrap();
+    assert!(
+        rounds
+            .last()
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .starts_with("FAILS AS ASKED"),
+        "{job}"
+    );
+}
+
 /// obid answers the agent's permission prompts: publishing and leaving the worktree are refused,
 /// the rest of a bypass job's work is allowed; and none of obid's own secrets reach the agent.
 #[test]
@@ -851,7 +891,11 @@ fn work_inside_the_sandbox_is_answered_without_the_owner() {
             ("Edit greet.js", "allowed"),
             ("Run cargo test", "allowed"),
             ("Run node --test && git status", "allowed"),
-            ("Run git commit -m \"$(cat <<'EOF'", "allowed"),
+            // A command with no rule is titled in full (#634).
+            (
+                "Run git commit -m \"$(cat <<'EOF'\nfix: don't curl; ~/.ssh stays\nEOF\n)\"",
+                "allowed",
+            ),
             ("Run git commit", "allowed"),
             ("Use Read", "allowed"),
             ("Use Grep", "allowed"),

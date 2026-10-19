@@ -114,6 +114,7 @@ pub fn confirm_item(
         arrived: Some(arrival()),
         confirm: Some(Box::new(confirmed)),
         start: None,
+        github: None,
     }
 }
 
@@ -153,6 +154,10 @@ pub struct Item {
     /// on the owner's Start (#546). Kept, never shown; boxed like `confirm`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<Box<Value>>,
+    /// On a `github` item: the GitHub work it offers to do, typed fields, and GitHub's title
+    /// quoted (crate::github_work).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<Box<Value>>,
 }
 
 /// Now in nanoseconds since the epoch, strictly later than any earlier answer in this process:
@@ -218,6 +223,9 @@ impl Item {
         });
         if let Some(plugin) = &self.plugin {
             shown["plugin"] = plugin.clone();
+        }
+        if let Some(github) = &self.github {
+            shown["github"] = (**github).clone();
         }
         if let Some(confirmed) = &self.confirm {
             shown["confirm"] = serde_json::to_value(confirmed).unwrap_or_default();
@@ -350,6 +358,7 @@ pub fn review_request_item(
         arrived: None,
         confirm: None,
         start: None,
+        github: None,
     }
 }
 
@@ -444,6 +453,7 @@ pub fn question_item(
         arrived: Some(arrival()),
         confirm: None,
         start: None,
+        github: None,
     }
 }
 
@@ -491,6 +501,7 @@ pub fn permission_item(
         arrived: None,
         confirm: None,
         start: None,
+        github: None,
     }
 }
 
@@ -562,6 +573,67 @@ pub fn plugin_event_item(event: &obi_plugin_api::PluginEvent, now: i64) -> Item 
         arrived: Some(arrival()),
         confirm: None,
         start: None,
+        github: None,
+    }
+}
+
+/// The answers that start a `github` item's work.
+pub const REVIEW_IT: &str = "Review it";
+pub const FIX_IT: &str = "Fix it";
+
+/// A `github` item's id: `github-` and the feed item's.
+pub fn github_item_id(work: &str) -> String {
+    format!("github-{work}")
+}
+
+/// The `github` item offering to do `work`: obid's own words from its typed fields, GitHub's
+/// title quoted under `github.quoted`.
+pub fn github_item(work: &crate::github_work::Item, now: i64) -> Item {
+    let name = work.repo.rsplit('/').next().unwrap_or(&work.repo);
+    let n = work.number;
+    let (title, text, start, detail) = if work.list == "reviews" {
+        (
+            format!("Review requested: {name} #{n}"),
+            format!(
+                "Your review is requested on pull request #{n} in {}.",
+                work.repo
+            ),
+            REVIEW_IT,
+            "Starts Oby's review of it. Nothing is posted on GitHub.",
+        )
+    } else {
+        (
+            format!("Assigned to you: {name} #{n}"),
+            format!("Issue #{n} in {} is assigned to you.", work.repo),
+            FIX_IT,
+            "Starts a fix job on it, which opens a pull request when its check passes.",
+        )
+    };
+    Item {
+        id: github_item_id(&work.id),
+        kind: "github".into(),
+        job: String::new(),
+        title,
+        text,
+        options: vec![start.into(), DISMISS.into()],
+        details: Some(vec![
+            detail.into(),
+            "Leaves it for now. It stays in your GitHub work.".into(),
+        ]),
+        recommended: None,
+        created: now,
+        done: None,
+        later: None,
+        answer: None,
+        obi: None,
+        plugin: None,
+        arrived: Some(arrival()),
+        confirm: None,
+        start: None,
+        github: Some(Box::new(json!({
+            "id": work.id, "list": work.list, "repo": work.repo, "number": work.number,
+            "url": work.url, "quoted": {"title": work.title},
+        }))),
     }
 }
 

@@ -131,7 +131,23 @@ final class RunnerLoginItem {
             stop.arguments = ["bootout", "gui/\(getuid())/\(Self.scriptLabel)"]
             try stop.run()
             stop.waitUntilExit()
-            // Status 3 (no such process) or 36 (not loaded): already stopped.
+            // Its agent goes only once it's stopped: else both would want the same ports. Still
+            // stopping (EINPROGRESS): asked for a few seconds whether launchd still has it.
+            var stopped = Self.bootout(stop.terminationStatus)
+            if stopped == .stopping {
+                for _ in 0..<25 where Self.loaded(Self.scriptLabel) {
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+                stopped = Self.loaded(Self.scriptLabel) ? .failed : .stopped
+            }
+            guard stopped == .stopped else {
+                problem = "install.sh's obid didn't stop (launchctl bootout said \(stop.terminationStatus)), so it keeps running. Try again in a moment."
+                refresh()
+                return
+            }
+            if let program = (plist?["ProgramArguments"] as? [String])?.first {
+                dropScriptFolders(program: program)
+            }
             try FileManager.default.removeItem(at: scriptAgent)
             Logger.feed.notice("moved install.sh's obid into Oby (launchctl bootout said \(stop.terminationStatus))")
         } catch {
@@ -141,6 +157,80 @@ final class RunnerLoginItem {
         }
         refresh()
         register()
+    }
+
+    /// What `launchctl bootout` left install.sh's obid as.
+    enum Bootout: Equatable { case stopped, stopping, failed }
+
+    /// Stopped: it stopped it (0), or it wasn't loaded (3, ESRCH; 113, could not find the service).
+    /// Stopping: 36, EINPROGRESS, it's still being stopped. Anything else failed.
+    static func bootout(_ status: Int32) -> Bootout {
+        switch status {
+        case 0, 3, 113: .stopped
+        case 36: .stopping
+        default: .failed
+        }
+    }
+
+    /// Whether launchd still has `label` in this user's GUI domain (`launchctl print` finds it).
+    static func loaded(_ label: String) -> Bool {
+        let print = Process()
+        print.executableURL = URL(filePath: "/bin/launchctl")
+        print.arguments = ["print", "gui/\(getuid())/\(label)"]
+        print.standardOutput = FileHandle.nullDevice
+        print.standardError = FileHandle.nullDevice
+        guard (try? print.run()) != nil else { return true }
+        print.waitUntilExit()
+        return print.terminationStatus == 0
+    }
+
+    /// The configuration without the keys that point into install.sh's own folder (`prefix`,
+    /// where it put obid, its plug-ins and web app), so the app's obid takes its own signed copies
+    /// (Contents/Resources/obid); nil when nothing points there.
+    static func withoutScriptFolders(_ config: [String: Any], prefix: String) -> [String: Any]? {
+        let root = URL(filePath: prefix).standardizedFileURL.path
+        var kept = config
+        for key in ["bundledPlugins", "web"] {
+            guard let path = config[key] as? String else { continue }
+            let standard = URL(filePath: path).standardizedFileURL.path
+            if standard == root || standard.hasPrefix(root + "/") { kept.removeValue(forKey: key) }
+        }
+        return kept.count == config.count ? nil : kept
+    }
+
+    /// Drops install.sh's plug-in and web folders from the configuration the app's obid reads,
+    /// keeping everything else; install.sh's obid is `program`, `<prefix>/bin/obid`.
+    private func dropScriptFolders(program: String) {
+        let prefix = URL(filePath: program).deletingLastPathComponent().deletingLastPathComponent().path
+        let file = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: "Library/Application Support/Oby/obid/config.json")
+        guard let data = try? Data(contentsOf: file),
+              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let kept = Self.withoutScriptFolders(config, prefix: prefix) else { return }
+        do {
+            let text = try JSONSerialization.data(withJSONObject: kept, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            try Self.writePrivately(text, to: file)
+        } catch {
+            Logger.feed.error("couldn't take install.sh's folders out of obid's configuration: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Writes `data` to `file` as a new file made 0600 from the start (never readable by others
+    /// for a moment), then moved into place.
+    static func writePrivately(_ data: Data, to file: URL) throws {
+        let temporary = file.deletingLastPathComponent().appending(path: ".\(file.lastPathComponent).\(UUID().uuidString)")
+        let fd = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        do {
+            try handle.write(contentsOf: data)
+            try handle.synchronize()
+            try handle.close()
+            guard rename(temporary.path, file.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        } catch {
+            unlink(temporary.path)
+            throw error
+        }
     }
 
     func refresh() {
