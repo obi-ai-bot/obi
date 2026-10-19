@@ -179,6 +179,11 @@ pub struct Job {
     /// conversation is deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
+    /// The user's turn of `conversation` whose words started it, so the conversation shows its
+    /// card under them the moment it starts, before Oby's answer lists it. None for a job no turn
+    /// started directly (a follow-up told from its page, a Start, an event turn's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<String>,
     /// What an Obi-to-Obi review job made: the result body for its exchange
     /// (runner-api.md, "obid only: Obi-to-Obi review jobs", step 7). Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -251,6 +256,16 @@ pub struct Job {
     /// for a follow-up of work that isn't merged. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_from: Option<String>,
+    /// What its turns used, in tokens and cost, as its tool reported them (#731).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::usage::Tokens>,
+    /// Claude Code's session and its counts at its last result, which the next turn's resumed
+    /// counts include (crate::jobs). Never in the API's job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_seen: Option<(String, crate::usage::Tokens)>,
+    /// Its estimated share of its account's windows (#732).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_share: Option<crate::usage::WindowShare>,
     /// When it was archived (`POST /v1/jobs/{id}/archive`, `oby_archive_job`), or none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<i64>,
@@ -350,6 +365,7 @@ impl Job {
             worktree: None,
             obi: None,
             conversation: None,
+            turn: None,
             review_result: None,
             obi_request: None,
             permission: None,
@@ -374,6 +390,9 @@ impl Job {
             archived: None,
             changes: Vec::new(),
             moves: Vec::new(),
+            usage: None,
+            usage_seen: None,
+            window_share: None,
         }
     }
 
@@ -616,12 +635,19 @@ impl Job {
             "obi": self.obi,
             "worktree": self.worktree,
             "conversation": self.conversation,
+            "turn": self.turn,
             "artifacts": self.artifacts.iter().map(|a| json!({"id": a.id, "version": a.version})).collect::<Vec<_>>(),
             "artifactProblems": self.artifact_problems,
             "followUpOf": self.follow_up_of,
         });
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
+        }
+        if let Some(usage) = &self.usage {
+            value["usage"] = json!(usage);
+        }
+        if let Some(share) = self.window_share.as_ref().and_then(|s| s.to_json()) {
+            value["windowShare"] = share;
         }
         value
     }
@@ -952,12 +978,13 @@ mod tests {
             "waiting",
             "permission",
             "conversation",
+            "turn",
             "followUpOf",
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's ten.
-        assert_eq!(object.len(), 75);
+        // The Swift runner's 65 keys, and obid's eleven.
+        assert_eq!(object.len(), 76);
         assert_eq!(value["archived"], Value::Null);
         assert_eq!(value["changes"], json!([]));
         assert_eq!(value["artifacts"], json!([]));

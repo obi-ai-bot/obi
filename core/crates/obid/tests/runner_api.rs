@@ -195,6 +195,8 @@ fn jobs_have_iso_dates_and_every_key() {
             .keys()
             .map(String::as_str)
             .filter(|k| !SWIFT_JOB_KEYS.contains(k))
+            // Sent only once a turn reports it (#731).
+            .filter(|k| *k != "usage")
             .collect();
         extra.sort_unstable();
         assert_eq!(
@@ -209,11 +211,14 @@ fn jobs_have_iso_dates_and_every_key() {
                 "conversation",
                 "followUpOf",
                 "obi",
+                "turn",
                 "worktree"
             ],
             "{body}"
         );
-        assert_eq!(keys.len(), 75);
+        assert_eq!(keys.len() - usize::from(keys.contains_key("usage")), 76);
+        // POST /v1/jobs: no turn of a conversation started it.
+        assert!(body["turn"].is_null(), "{body}");
         // What obid never sets is there, as null.
         for key in [
             "published",
