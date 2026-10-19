@@ -3143,35 +3143,17 @@ impl Jobs {
             "+refs/heads/{0}:refs/remotes/origin/{0}",
             request.base_branch
         );
-        if let Err(e) = git::git(
-            &clone,
-            &[
-                "fetch",
-                "--quiet",
-                "--no-tags",
-                "--no-write-fetch-head",
-                "origin",
-                &base_ref,
-            ],
-        )
-        .await
-        {
+        if let Err(e) = git::fetch(&clone, &repo.remote, &[base_ref]).await {
             tracing::info!(
                 "job {id}: the base {} didn't fetch: {e}",
                 request.base_branch
             );
         }
         if !git::has_commit(&clone, &request.head_sha).await {
-            let _ = git::git(
+            let _ = git::fetch(
                 &clone,
-                &[
-                    "fetch",
-                    "--quiet",
-                    "--no-tags",
-                    "--no-write-fetch-head",
-                    "origin",
-                    &request.head_sha,
-                ],
+                &repo.remote,
+                std::slice::from_ref(&request.head_sha),
             )
             .await;
         }

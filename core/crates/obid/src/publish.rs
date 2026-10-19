@@ -587,15 +587,10 @@ pub async fn publish(
     // nothing. A fetch the remote sent too little to is tried once more (#628).
     let since = {
         let _fetching = target.fetching.lock().await;
-        let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
-        let fetch = [
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "origin",
-            &refspec,
-        ];
+        // Signed in with gh's login alone, as a clone is (fetch_credentials).
+        let refspecs = [format!("+refs/heads/{base}:refs/remotes/origin/{base}")];
+        let signed = fetch_credentials(&target.remote, target.gh.as_deref());
+        let fetch = git::fetch_args(&signed, &refspecs);
         let mut fetched = git::git(clone, &fetch).await;
         if fetched
             .as_ref()
