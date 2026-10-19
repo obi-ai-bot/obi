@@ -1845,7 +1845,8 @@ impl Jobs {
                 "This is a review another Oby asked for: its answer goes back to that Oby, so it takes no words of yours.".into(),
             )));
         }
-        if !job.status.is_active() && text != crate::brain::actions::TRY_AGAIN {
+        // Try again's words, and more after them (oby_continue_job's), pick its session up.
+        if !job.status.is_active() && !text.starts_with(crate::brain::actions::TRY_AGAIN) {
             // Its follow-up is working already: the words go to that one, never a second.
             if source != Source::Event
                 && let Some(next) = self.following(id)
@@ -1937,11 +1938,20 @@ impl Jobs {
                 next.short_title()
             ))));
         }
-        if job.session.is_none() {
+        // A job moved since its last round starts a new session on its new choice.
+        if job.session.is_none() && job.moves.is_empty() {
             return Some(Err(Refused(
                 "This job never started, so there's no session to pick up.".into(),
             )));
         }
+        let moved = match job.moves.last() {
+            Some(last) if job.session.is_none() => format!(
+                "{text}\n\nThe owner moved this job to you from {}: what was done so far is on this branch.",
+                last.from
+            ),
+            _ => text.to_owned(),
+        };
+        let heard = |job: &mut Job| hear(job, &moved);
         // Checked and changed under one lock: a job being published by hand takes no words, and
         // one that took them can't be published by hand until it ends again.
         let resumed = {
@@ -1961,6 +1971,7 @@ impl Jobs {
             }
             job.finished = None;
             job.dismissed = None;
+            job.archived = None;
             job.limit = None;
             job.waiting = None;
             job.asked = true;
@@ -2100,7 +2111,7 @@ impl Jobs {
     /// The job's mode, as it names it. A job from before modes is in Bypass; a mode this obid
     /// can't read (one a newer obid wrote) asks rather than allow. A review job is
     /// in Plan, whatever it says.
-    fn mode_of(job: &Job) -> Mode {
+    pub fn mode_of(job: &Job) -> Mode {
         if job.read_only() {
             return Mode::Plan;
         }
@@ -2448,6 +2459,194 @@ impl Jobs {
         self.events.send("job", dismissed.to_json());
         self.changed.notify_waiters();
         Some(Ok(dismissed))
+    }
+
+    /// Archives a job that ended and needs nothing, or unarchives it (`archived` false), adding
+    /// `by` ("by you", "by Oby, in a conversation") to its changes. `Err` when it can't be.
+    pub fn archive(&self, id: &str, archived: bool, by: &str) -> Option<Result<Job, Refused>> {
+        let job = self.get(id)?;
+        if job.archived.is_some() == archived {
+            return Some(Ok(job));
+        }
+        if archived {
+            if job.status.is_active() {
+                return Some(Err(Refused(
+                    "It's still running: stop it first, or archive it once it ends.".into(),
+                )));
+            }
+            if job.needs_you() {
+                return Some(Err(Refused(
+                    "It still needs you: dismiss it first, or publish it.".into(),
+                )));
+            }
+        }
+        let (what, at) = if archived {
+            ("Archived", Some(obi_protocol::time::now()))
+        } else {
+            ("Unarchived", None)
+        };
+        Some(Ok(self.update(id, |job| {
+            job.archived = at;
+            job.changed(format!("{what} {by}"));
+        })?))
+    }
+
+    /// Why the job `id` can't be deleted now, when it can't (see [`undeletable_in`]).
+    pub fn undeletable(&self, id: &str) -> Option<Refused> {
+        let state = self.lock();
+        undeletable_in(&state.jobs, state.publishing.contains(id), id)
+            .map(|why| Refused(why.into()))
+    }
+
+    /// Whether deleting the job `id` would leave its branch, as another job uses it.
+    pub fn branch_stays(&self, id: &str) -> bool {
+        let state = self.lock();
+        state.jobs.get(id).is_some_and(|job| {
+            branch_shared(&state.jobs, job, self.default_branch(&job.repo).as_deref())
+        })
+    }
+
+    /// Deletes a job that ended, for good: its record, its worktree and its folders, and its
+    /// local branch in obid's clone unless another job uses it (then `Ok(true)`: it stays).
+    /// Nothing pushed is touched. `Err` with why when it can't be.
+    pub async fn delete(&self, id: &str) -> Option<Result<bool, Refused>> {
+        // Checked and taken out under one lock: nothing starts it, publishes it or takes up its
+        // branch meanwhile.
+        let (job, branch_stays) = {
+            let mut state = self.lock();
+            let job = state.jobs.get(id)?.clone();
+            if let Some(why) = undeletable_in(&state.jobs, state.publishing.contains(id), id) {
+                return Some(Err(Refused(why.into())));
+            }
+            let stays = branch_shared(&state.jobs, &job, self.default_branch(&job.repo).as_deref());
+            state.jobs.remove(id);
+            state.asks.remove(id);
+            state.followed.remove(id);
+            (job, stays)
+        };
+        if let Err(e) = self.store.remove(id) {
+            tracing::error!("can't forget job {id}: {e}");
+        }
+        let clone = git::clone_path(&self.config.home, &job.repo);
+        let worktree = self.worktree_path(id);
+        if worktree.exists() {
+            let _ = git::run(
+                &clone,
+                &[
+                    "worktree".as_ref(),
+                    "remove".as_ref(),
+                    "--force".as_ref(),
+                    worktree.as_os_str(),
+                ],
+                &[],
+            )
+            .await;
+            let _ = std::fs::remove_dir_all(&worktree);
+            let _ = git::git(&clone, &["worktree", "prune"]).await;
+        }
+        let _ = std::fs::remove_dir_all(self.temp_path(id));
+        let _ = std::fs::remove_dir_all(self.login_path(id));
+        // Only a branch no other job uses, and only the clone's: what was pushed stays on the
+        // remote.
+        if !branch_stays && git::is_branch_name(&job.branch) {
+            let _ = git::git(&clone, &["branch", "-D", "--", &job.branch]).await;
+        }
+        self.events.send("job", json!({"id": id, "deleted": true}));
+        self.changed.notify_waiters();
+        Some(Ok(branch_stays))
+    }
+
+    /// Moves a job that ended to another tool or account (each "auto" or left out to keep or pick
+    /// as a new job's), adding the move and `by` to it: its next round starts a new session there.
+    pub fn change(
+        &self,
+        id: &str,
+        agent: Option<&str>,
+        account: Option<&str>,
+        by: &str,
+    ) -> Option<Result<Job, Refused>> {
+        let job = self.get(id)?;
+        if job.status.is_active() {
+            return Some(Err(Refused(
+                "It's still running: stop it first, then change it and continue it.".into(),
+            )));
+        }
+        if job.obi.is_some() || job.read_only() {
+            return Some(Err(Refused(
+                "A review picks its own tool and account: it can't be moved.".into(),
+            )));
+        }
+        if agent.is_none() && account.is_none() {
+            return Some(Err(Refused("Say which tool or account.".into())));
+        }
+        let agent = agent.or(Some(job.agent.as_str()));
+        let (tool, chosen) = match self.pick(agent, account) {
+            Ok(picked) => picked,
+            Err(refused) => return Some(Err(refused)),
+        };
+        if tool.id() == job.agent && chosen.id == job.account {
+            return Some(Err(Refused(format!(
+                "It's on {} · {} already.",
+                tool.name(),
+                chosen.name
+            ))));
+        }
+        let place = |agent: &str, account: &str| {
+            let tool = Tool::from_id(agent).map_or(agent.to_owned(), |t| t.name().to_owned());
+            let account = self
+                .accounts(Tool::from_id(agent).unwrap_or(Tool::Claude))
+                .into_iter()
+                .find(|a| a.id == account)
+                .map_or(account.to_owned(), |a| a.name);
+            format!("{tool} · {account}")
+        };
+        let from = place(&job.agent, &job.account);
+        let to = format!("{} · {}", tool.name(), chosen.name);
+        let tool_changed = tool.id() != job.agent;
+        Some(Ok(self.update(id, |job| {
+            job.agent = tool.id().to_owned();
+            job.account = chosen.id.clone();
+            // A new session on the new choice; another tool runs its own model.
+            job.session = None;
+            if tool_changed {
+                job.model = None;
+            }
+            job.moves.push(crate::job::Move {
+                from: from.clone(),
+                to: to.clone(),
+                why: None,
+                date: obi_protocol::time::now(),
+            });
+            job.changed(format!("Moved from {from} to {to} {by}"));
+        })?))
+    }
+
+    /// Continues a job that failed, was stopped or was cut off in its own session, as Try again
+    /// does, with `words` after Try again's (`oby_continue_job`), adding `by` to its changes.
+    pub fn continue_job(
+        self: &Arc<Self>,
+        id: &str,
+        words: Option<&str>,
+        by: &str,
+    ) -> Option<Result<Job, Refused>> {
+        let job = self.get(id)?;
+        if let Some(why) = not_continuable(&job) {
+            return Some(Err(Refused(why.into())));
+        }
+        let text = match words.map(str::trim).filter(|w| !w.is_empty()) {
+            Some(words) => format!("{}\n\n{words}", crate::brain::actions::TRY_AGAIN),
+            None => crate::brain::actions::TRY_AGAIN.to_owned(),
+        };
+        let continued = self.message(id, &text, Source::Owner)?;
+        Some(continued.map(|job| {
+            self.note_change(id, format!("Continued {by}"))
+                .unwrap_or(job)
+        }))
+    }
+
+    /// Adds `what` to the job's changes.
+    pub fn note_change(&self, id: &str, what: String) -> Option<Job> {
+        self.update(id, |job| job.changed(what))
     }
 
     /// The job once it has ended (done, failed, stopped or interrupted), or `None` for one obid
@@ -6453,6 +6652,59 @@ fn hear(job: &mut Job, text: &str) {
     job.step = format!("You: {}", crate::sphere::inbox::owners_part(text));
 }
 
+/// Why the job `id` can't be deleted, when it can't, from every job obid has (`publishing`:
+/// whether it's being published): queued or running, being published, its pull request open as
+/// obid last read it (or published and never read), or a follow-up carries its branch on.
+fn undeletable_in(jobs: &HashMap<String, Job>, publishing: bool, id: &str) -> Option<&'static str> {
+    let Some(job) = jobs.get(id) else {
+        return Some("There's no such job.");
+    };
+    if job.status.is_active() {
+        Some("It's still running: stop it first.")
+    } else if publishing {
+        Some("obid is publishing it: delete it once that's done.")
+    } else if job.published.is_some()
+        && job
+            .pull_request
+            .as_ref()
+            .is_none_or(|pr| pr.state != "MERGED" && pr.state != "CLOSED")
+    {
+        Some("Its pull request is open: merge or close it first, or archive the job.")
+    } else if jobs
+        .values()
+        .any(|j| j.id != job.id && j.follow_up_of.as_deref() == Some(id) && j.branch == job.branch)
+    {
+        Some("Its follow-up carries its branch on: delete that one first.")
+    } else {
+        None
+    }
+}
+
+/// Whether `job`'s branch must stay when it's deleted: obid didn't make it (only `oby/…` are
+/// obid's; a pull request's head a review fetched is someone else's), another job of any status
+/// on its repository names it (a follow-up on its parent's branch, repeat jobs on one issue or
+/// pull request), or it's the base or the default branch.
+fn branch_shared(jobs: &HashMap<String, Job>, job: &Job, default: Option<&str>) -> bool {
+    !job.branch.starts_with("oby/")
+        || job.base.as_deref() == Some(job.branch.as_str())
+        || default == Some(job.branch.as_str())
+        || jobs
+            .values()
+            .any(|j| j.id != job.id && j.repo == job.repo && j.branch == job.branch)
+}
+
+/// Why `job` can't be continued in its session, when it can't: only one that failed, was
+/// stopped or was cut off can.
+pub fn not_continuable(job: &Job) -> Option<&'static str> {
+    match job.status {
+        Status::Failed | Status::Stopped | Status::Interrupted => None,
+        Status::Queued | Status::Running => {
+            Some("It's still running: tell it something with oby_tell_job.")
+        }
+        Status::Done => Some("It's done: oby_tell_job starts a follow-up of it."),
+    }
+}
+
 /// The first prompt of the owner's job (Engine/Jobs.swift, `Prompts.agent`, for what obid does).
 /// A follow-up of `job`, which ended, with the owner's `words` (Sangam's design, the owner's
 /// decision of 2026-10-18): the same kind, agent, account, repository, pull request or issue,
@@ -6866,6 +7118,140 @@ fn tail_chars(text: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    fn job_on(id: &str, repo: &str, branch: &str) -> Job {
+        let mut job = Job::new(
+            id.into(),
+            repo.into(),
+            "fix".into(),
+            "x".into(),
+            "claude".into(),
+            "stub".into(),
+        );
+        job.branch = branch.into();
+        job.status = Status::Failed;
+        job
+    }
+
+    fn map(jobs: &[Job]) -> HashMap<String, Job> {
+        jobs.iter().map(|j| (j.id.clone(), j.clone())).collect()
+    }
+
+    /// A job is deleted only once it ended, isn't being published, has no open pull request and
+    /// no follow-up carries its branch on.
+    #[test]
+    fn what_keeps_a_job_from_being_deleted() {
+        let alone = job_on("a", "acme/app", "oby/fix-a");
+        assert_eq!(
+            undeletable_in(&map(std::slice::from_ref(&alone)), false, "a"),
+            None
+        );
+        assert!(
+            undeletable_in(&map(std::slice::from_ref(&alone)), true, "a")
+                .unwrap()
+                .contains("publishing")
+        );
+        assert!(
+            undeletable_in(&map(&[]), false, "a")
+                .unwrap()
+                .contains("no such job")
+        );
+        let mut running = alone.clone();
+        running.status = Status::Running;
+        assert!(
+            undeletable_in(&map(&[running]), false, "a")
+                .unwrap()
+                .contains("still running")
+        );
+        let mut published = alone.clone();
+        published.published = Some("https://github.com/acme/app/pull/1".into());
+        assert!(
+            undeletable_in(&map(&[published.clone()]), false, "a")
+                .unwrap()
+                .contains("pull request is open")
+        );
+        published.pull_request = Some(crate::github::PullRequest {
+            state: "MERGED".into(),
+            review_decision: None,
+            base: "main".into(),
+            merged_at: Some(1),
+            checked_at: 1,
+            head: None,
+        });
+        assert_eq!(undeletable_in(&map(&[published]), false, "a"), None);
+        let mut follow = job_on("b", "acme/app", "oby/fix-a");
+        follow.follow_up_of = Some("a".into());
+        assert!(
+            undeletable_in(&map(&[alone, follow]), false, "a")
+                .unwrap()
+                .contains("follow-up carries")
+        );
+    }
+
+    /// A deleted job's branch stays when another job on its repository names it, whatever its
+    /// status, or it's the base or default branch; another repository's same name doesn't count.
+    #[test]
+    fn a_shared_branch_stays() {
+        let job = job_on("a", "acme/app", "oby/fix-7");
+        assert!(!branch_shared(
+            &map(std::slice::from_ref(&job)),
+            &job,
+            Some("main")
+        ));
+        let mut done = job_on("b", "acme/app", "oby/fix-7");
+        done.status = Status::Done;
+        assert!(branch_shared(
+            &map(&[job.clone(), done]),
+            &job,
+            Some("main")
+        ));
+        let elsewhere = job_on("c", "acme/other", "oby/fix-7");
+        assert!(!branch_shared(
+            &map(&[job.clone(), elsewhere]),
+            &job,
+            Some("main")
+        ));
+        // A pull request's head a review fetched isn't obid's to remove, alone or not.
+        let head = job_on("f", "acme/app", "feature/login");
+        assert!(branch_shared(
+            &map(std::slice::from_ref(&head)),
+            &head,
+            Some("main")
+        ));
+        let on_main = job_on("d", "acme/app", "main");
+        assert!(branch_shared(
+            &map(std::slice::from_ref(&on_main)),
+            &on_main,
+            Some("main")
+        ));
+        let mut on_base = job_on("e", "acme/app", "dev");
+        on_base.base = Some("dev".into());
+        assert!(branch_shared(
+            &map(std::slice::from_ref(&on_base)),
+            &on_base,
+            Some("main")
+        ));
+    }
+
+    /// A Confirm's snapshot changes with another round, a commit, a new mode, tool or account.
+    #[test]
+    fn a_snapshot_changes_with_the_job() {
+        let job = job_on("a", "acme/app", "oby/fix-a");
+        let before = job.snapshot();
+        for change in [
+            (|j: &mut Job| j.round = Some(2)) as fn(&mut Job),
+            |j| j.commits = Some(1),
+            |j| j.mode = Some("bypass".into()),
+            |j| j.agent = "codex".into(),
+            |j| j.account = "other".into(),
+            |j| j.status = Status::Done,
+        ] {
+            let mut changed = job.clone();
+            change(&mut changed);
+            assert_ne!(changed.snapshot(), before, "{changed:?}");
+        }
+        assert_eq!(job.clone().snapshot(), before);
+    }
 
     /// N5: a copied `~/.claude.json` keeps only the keys a boxed run needs to stay signed in, never
     /// the person's projects, history or MCP state.
