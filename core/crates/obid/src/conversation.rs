@@ -357,7 +357,17 @@ impl Conversations {
             threads.len() - 1
         });
         let before = threads[index].turns.clone();
-        let added = self.add(&mut threads, index, "user", said, vec![], false, vec![], id, None);
+        let added = self.add(
+            &mut threads,
+            index,
+            "user",
+            said,
+            vec![],
+            false,
+            vec![],
+            id,
+            None,
+        );
         let turn = match added {
             Ok(turn) => turn.id,
             Err(e) => {
@@ -466,7 +476,17 @@ impl Conversations {
             .iter()
             .position(|t| t.id == id)
             .ok_or(Error::NoConversation)?;
-        self.add(&mut threads, index, who, text, jobs, ended, artifacts, None, routine)
+        self.add(
+            &mut threads,
+            index,
+            who,
+            text,
+            jobs,
+            ended,
+            artifacts,
+            None,
+            routine,
+        )
     }
 
     /// The turn, kept, written and announced: the conversation as it is now, then the turn.
