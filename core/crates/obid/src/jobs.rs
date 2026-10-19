@@ -39,6 +39,16 @@ pub const CHECK_LIMIT: Duration = Duration::from_secs(20 * 60);
 pub const CHECK_TOO_LONG: &str = "obid stopped it after 20 minutes, the most a test run may take.";
 /// How much of a check's output obid keeps: its end.
 const CHECK_OUTPUT_MAX: usize = 64 * 1024;
+/// How long git in a job's sandbox may take.
+const SANDBOXED_GIT_LIMIT: Duration = Duration::from_secs(600);
+/// How much of what git in a job's sandbox says on stderr obid keeps: its end.
+const SANDBOXED_GIT_STDERR_MAX: usize = 64 * 1024;
+/// How long reading a round's diff stat may take, and how much it may print (#736): a round goes
+/// on without its stat rather than wait on it.
+const DIFF_LIMIT: Duration = Duration::from_secs(60);
+const DIFF_OUTPUT_MAX: usize = 2 * 1024 * 1024;
+/// How often a running check's record is brought up to date on its job (#734).
+const CHECK_TICK: Duration = Duration::from_secs(2);
 /// The commit obid keeps a job's uncommitted work in when it ends without commits to publish.
 const WIP_MESSAGE: &str = "wip: work left uncommitted when the job ended\n\nobid committed what the agent left uncommitted, to keep it on the job's branch. It is never published by itself, and the job's next run takes it back out.";
 /// What a round's summary starts with when the check's failure is what the task asked for.
@@ -744,7 +754,18 @@ impl Jobs {
             let mut state = self.lock();
             let job = state.jobs.get_mut(id)?;
             change(job);
-            job.clone()
+            // Its stages' times, and its estimate again when a stage started or ended (#733).
+            // ponytail: reads every job kept; an index by repository if that ever shows.
+            if job.stamp(obi_protocol::time::now()) && job.status.is_active() {
+                let job = state.jobs.get(id)?;
+                let estimate =
+                    crate::facts::estimate(job, state.jobs.values(), job.estimate.as_ref());
+                let job = state.jobs.get_mut(id)?;
+                if estimate.is_some() {
+                    job.estimate = estimate;
+                }
+            }
+            state.jobs.get(id)?.clone()
         };
         if let Err(e) = self.store.save(&job) {
             tracing::error!("can't keep job {id}: {e}");
@@ -2596,6 +2617,20 @@ impl Jobs {
         args: &[&str],
         input: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, String> {
+        self.sandboxed_git_within(id, args, input, SANDBOXED_GIT_LIMIT, usize::MAX)
+            .await
+    }
+
+    /// [`Self::sandboxed_git`], ended after `limit`, and refused when it prints more than `max`
+    /// bytes.
+    async fn sandboxed_git_within(
+        &self,
+        id: &str,
+        args: &[&str],
+        input: Option<Vec<u8>>,
+        limit: Duration,
+        max: usize,
+    ) -> Result<Vec<u8>, String> {
         let sandbox = self.sandbox.as_ref().map_err(String::clone)?;
         let worktree = self.worktree_path(id);
         let (admin, common) = git::worktree_dirs(&worktree)
@@ -2615,7 +2650,15 @@ impl Jobs {
         ];
         argv.extend(args.iter().map(OsString::from));
         let env = process::sandbox_env(&process::tools_path(), &temp, &spec.git_env());
-        sandboxed_output(&sandbox.wrap(&spec, &argv), &env, &worktree, input).await
+        sandboxed_output(
+            &sandbox.wrap(&spec, &argv),
+            &env,
+            &worktree,
+            input,
+            limit,
+            max,
+        )
+        .await
     }
 
     /// What the agent left uncommitted when its job ended without commits to publish (stopped, at
@@ -2654,6 +2697,38 @@ impl Jobs {
         )
         .await?;
         Ok(())
+    }
+
+    /// The job's change against `start_commit` after `round`, kept as that round's (#736): paths
+    /// and counts only, read in its sandbox as git shows it with nothing the repository set up.
+    /// ponytail: tracked files only; a new file counts once the agent commits it (it's told to).
+    async fn note_diff(&self, id: &str, start_commit: &str, round: u32) {
+        if !git::is_sha(start_commit) {
+            return;
+        }
+        let args = [
+            "--no-replace-objects",
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            start_commit,
+            "--",
+        ];
+        let Ok(out) = self
+            .sandboxed_git_within(id, &args, None, DIFF_LIMIT, DIFF_OUTPUT_MAX)
+            .await
+        else {
+            return;
+        };
+        let mut diff = crate::facts::numstat(&String::from_utf8_lossy(&out));
+        diff.round = Some(round);
+        self.update(id, |job| {
+            job.diffs.retain(|d| d.round != Some(round));
+            job.diffs.push(diff);
+        });
     }
 
     /// Takes obid's own `wip:` commit back out as the job runs again: what it held is uncommitted,
@@ -3426,12 +3501,60 @@ impl Jobs {
         let mut spec = spec.clone();
         spec.network = false;
         spec.accounts.clear();
-        let argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), command.into()];
+        // Each step between its top-level `&&`s timed, its tests counted, live (#734).
+        let round = self.get(id).map_or(1, |job| job.current_round());
+        let marker = format!("obid-step-{}", random_check_id()?);
+        let watch = Arc::new(Mutex::new(crate::facts::CheckWatch::new(
+            marker,
+            crate::facts::steps(command),
+        )));
+        let record = |ended| {
+            let record = watch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record(round, ended);
+            // Sent only when something changed: a running step's time isn't in it.
+            if ended.is_none()
+                && self
+                    .get(id)
+                    .is_some_and(|job| job.checks.last() == Some(&record))
+            {
+                return;
+            }
+            self.update(id, |job| match job.checks.last_mut() {
+                Some(last) if ended.is_some() || last.steps.iter().any(|s| s.running) => {
+                    *last = record
+                }
+                _ => job.checks.push(record),
+            });
+        };
+        record(None);
+        let script = watch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .script();
+        let argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), script.into()];
         let argv = sandbox.wrap(&spec, &argv);
         let env = process::sandbox_env(&process::tools_path(), &spec.temp, &spec.git_env());
-        let run = run_check(&argv, &env, &spec.worktree, CHECK_LIMIT, signal.clone())
-            .await
-            .map_err(|e| format!("obid couldn't run the check: {e}"))?;
+        let running = run_check(
+            &argv,
+            &env,
+            &spec.worktree,
+            CHECK_LIMIT,
+            signal.clone(),
+            Some(watch.clone()),
+        );
+        tokio::pin!(running);
+        let mut tick = tokio::time::interval(CHECK_TICK);
+        tick.tick().await;
+        let run = loop {
+            tokio::select! {
+                run = &mut running => break run,
+                _ = tick.tick() => record(None),
+            }
+        };
+        record(Some(run.as_ref().is_ok_and(|run| run.passed)));
+        let run = run.map_err(|e| format!("obid couldn't run the check: {e}"))?;
         let _ = std::fs::write(self.log_path(id, "check.log"), &run.output);
         Ok(run)
     }
@@ -4151,6 +4274,7 @@ impl Jobs {
                         .push(said.clone());
                 });
                 noted = false;
+                self.note_diff(id, &start_commit, round).await;
                 // Words the owner sent while it worked: the agent hears them now, in another turn of
                 // this round, before the check.
                 let words = self.take_heard(id);
@@ -4804,8 +4928,17 @@ struct PublishHooks {
 impl crate::publish::Hooks for PublishHooks {
     fn progress(&self, step: crate::publish::Step) {
         self.stages.begin(step.as_str());
-        self.jobs
-            .update(&self.id, |job| job.publish_step = Some(step));
+        self.jobs.update(&self.id, |job| {
+            job.publish_step = Some(step);
+            // A new publish: the last one's scan no longer says how this one went.
+            if step == crate::publish::Step::Scan {
+                job.scan = None;
+            }
+        });
+    }
+
+    fn scanned(&self, scanned: crate::publish::Scanned) {
+        self.jobs.update(&self.id, |job| job.scan = Some(scanned));
     }
 
     fn proceed(&self) -> bool {
@@ -4912,9 +5045,11 @@ async fn sandboxed_output(
     env: &[(OsString, OsString)],
     dir: &Path,
     input: Option<Vec<u8>>,
+    limit: Duration,
+    max: usize,
 ) -> Result<Vec<u8>, String> {
     clear_recorded_exit(env);
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut child = tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
         .env_clear()
@@ -4935,12 +5070,56 @@ async fn sandboxed_output(
             let _ = stdin.write_all(&input).await;
         });
     }
-    let output = tokio::time::timeout(Duration::from_secs(600), child.wait_with_output())
+    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err("git in the job's sandbox has no output".into());
+    };
+    // Its output up to `max`, read alongside what it says on stderr; more than that ends it (the
+    // child is killed when dropped).
+    let run = async {
+        let (out, err) = tokio::try_join!(
+            async {
+                let mut out = Vec::new();
+                (&mut stdout)
+                    .take((max as u64).saturating_add(1))
+                    .read_to_end(&mut out)
+                    .await?;
+                if out.len() > max {
+                    return Err(std::io::Error::other(format!(
+                        "it printed more than {max} bytes"
+                    )));
+                }
+                Ok(out)
+            },
+            // Its end only, all of it read so git never waits on it: the last line is what's said.
+            async {
+                let mut err = Vec::new();
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let n = stderr.read(&mut buffer).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    err.extend_from_slice(&buffer[..n]);
+                    if err.len() > 2 * SANDBOXED_GIT_STDERR_MAX {
+                        err.drain(..err.len() - SANDBOXED_GIT_STDERR_MAX);
+                    }
+                }
+                Ok(err)
+            },
+        )?;
+        Ok::<_, std::io::Error>((child.wait().await?, out, err))
+    };
+    let (status, stdout, stderr) = tokio::time::timeout(limit, run)
         .await
-        .map_err(|_| "git in the job's sandbox took more than 600 seconds".to_owned())?
+        .map_err(|_| {
+            format!(
+                "git in the job's sandbox took more than {} seconds",
+                limit.as_secs()
+            )
+        })?
         .map_err(|e| format!("git in the job's sandbox failed: {e}"))?;
-    if !sandbox_succeeded(&output.status, env) {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !sandbox_succeeded(&status, env) {
+        let stderr = String::from_utf8_lossy(&stderr);
         let line = stderr
             .lines()
             .rfind(|l| !l.trim().is_empty())
@@ -4951,7 +5130,7 @@ async fn sandboxed_output(
             .unwrap_or_else(|| "it was killed".into());
         return Err(format!("git in the job's sandbox failed: {line}"));
     }
-    Ok(output.stdout)
+    Ok(stdout)
 }
 
 /// The macOS watcher writes the program's exit code, then kills the sandbox, itself included.
@@ -6448,6 +6627,7 @@ pub async fn run_check(
     cwd: &Path,
     limit: Duration,
     mut signal: watch::Receiver<Signal>,
+    watch: Option<Arc<Mutex<crate::facts::CheckWatch>>>,
 ) -> std::io::Result<CheckRun> {
     let (reader, writer) = std::io::pipe()?;
     clear_recorded_exit(env);
@@ -6470,14 +6650,24 @@ pub async fn run_check(
     // The writing ends live in the child now: the reader ends when it (and what it started) does.
     drop(command);
     let pgid = child.id().unwrap_or(0);
+    let fed = watch.clone();
     let reading = tokio::task::spawn_blocking(move || {
         let mut reader = reader;
+        let feed = |bytes: &[u8]| {
+            if let Some(watch) = &fed {
+                watch
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .feed(bytes);
+            }
+        };
         let mut kept: Vec<u8> = Vec::new();
         let mut buffer = [0u8; 8192];
         loop {
             match std::io::Read::read(&mut reader, &mut buffer) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    feed(&buffer[..n]);
                     kept.extend_from_slice(&buffer[..n]);
                     if kept.len() > 2 * CHECK_OUTPUT_MAX {
                         kept.drain(..kept.len() - CHECK_OUTPUT_MAX);
@@ -6485,6 +6675,8 @@ pub async fn run_check(
                 }
             }
         }
+        // The last line, when it has no newline of its own.
+        feed(b"\n");
         kept
     });
     let mut timed_out = false;
@@ -6508,6 +6700,15 @@ pub async fn run_check(
         .and_then(Result::ok)
         .unwrap_or_default();
     let mut output = String::from_utf8_lossy(&kept).into_owned();
+    if let Some(watch) = &watch {
+        let watch = watch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        output = output
+            .split_inclusive('\n')
+            .filter(|line| !watch.is_marker(line))
+            .collect();
+    }
     if output.len() > CHECK_OUTPUT_MAX {
         output = tail(&output, CHECK_OUTPUT_MAX).to_owned();
     }
@@ -6898,6 +7099,38 @@ mod tests {
     /// (its file removed) is forgotten, never made again.
     /// A job queued while its account is signed in or removed waits (its account's change is
     /// under way), and starts once the change ends, instead of failing.
+    /// Git in a job's sandbox is held to its time and its output's size (#736).
+    #[tokio::test]
+    async fn sandboxed_output_is_held_to_its_limits() {
+        let sh =
+            |script: &str| -> Vec<OsString> { vec!["/bin/sh".into(), "-c".into(), script.into()] };
+        let dir = std::env::temp_dir();
+        let run = |script: &'static str, limit: u64, max: usize| {
+            let argv = sh(script);
+            let dir = dir.clone();
+            async move {
+                sandboxed_output(&argv, &[], &dir, None, Duration::from_secs(limit), max).await
+            }
+        };
+        assert_eq!(run("printf hello", 10, 5).await.unwrap(), b"hello");
+        let too_much = run("yes | head -c 100000", 10, 100).await.unwrap_err();
+        assert!(
+            too_much.contains("printed more than 100 bytes"),
+            "{too_much}"
+        );
+        // A failure's last line is said, however much came before it on stderr.
+        let said = run(
+            "yes noise | head -n 200000 >&2; echo the last line >&2; false",
+            10,
+            100,
+        )
+        .await
+        .unwrap_err();
+        assert!(said.ends_with("failed: the last line"), "{said}");
+        let too_long = run("sleep 30", 1, 100).await.unwrap_err();
+        assert!(too_long.contains("took more than 1 seconds"), "{too_long}");
+    }
+
     #[tokio::test]
     async fn a_job_queued_during_an_accounts_change_waits_for_it() {
         let root = std::env::temp_dir().join(format!("obid-changing-{}", std::process::id()));

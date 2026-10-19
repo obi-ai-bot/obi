@@ -998,3 +998,63 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
         assert!(!text.contains("raw output"), "{what}: {text}");
     }
 }
+
+/// The job's own check is recorded step by step (#734): each part between its `&&`s with whether
+/// it passed, the tests `cargo test` counted, and the failing tests by name with their message,
+/// where a line holding a vault secret a test printed is hidden, on the job as kept and as served.
+#[test]
+fn a_check_run_names_its_failing_tests_and_masks_the_vault() {
+    let folder = Folder::new("vault-check");
+    let remote = fixture(&folder.0.join("fixture"));
+    let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-claude");
+    let config = config(&folder.0, &remote, &fake);
+    let path = write_config(&folder.0, &config);
+    let obid = start(&folder.0, &config, None);
+    let value = ["check-", "secret-", "7Q2m9x"].concat();
+    add(&path, "check-key", &value);
+    // A test prints the secret; the check's command line (one line, at most 200 characters)
+    // holds it only backwards.
+    let backwards: String = value.chars().rev().collect();
+    let check = format!(
+        "true && (printf '%s\\n' 'running 2 tests' 'test a ... FAILED' 'test b ... FAILED' '---- a stdout ----';echo '{backwards}'|rev;printf '%s\\n' '---- b stdout ----' boom;false)"
+    );
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt", "check": check}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}");
+    let checks = job["checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 1, "{job}");
+    let run = &checks[0];
+    assert_eq!(run["round"], 1);
+    let steps = run["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2, "{run}");
+    assert_eq!(steps[0]["command"], "true");
+    assert_eq!(steps[0]["passed"], true);
+    assert!(steps[0].get("tests").is_none(), "{run}");
+    assert_eq!(steps[1]["passed"], false);
+    assert_eq!(steps[1]["running"], false);
+    assert_eq!(
+        steps[1]["tests"],
+        json!({"passed": 0, "failed": 2, "total": 2})
+    );
+    assert_eq!(
+        run["failing"],
+        json!([
+            {"test": "a", "message": "[possible secret hidden]"},
+            {"test": "b", "message": "boom"}
+        ])
+    );
+    let kept = std::fs::read_to_string(obid.home.join(format!("jobs/{id}.json"))).unwrap();
+    let kept: Value = serde_json::from_str(&kept).unwrap();
+    holds_none(
+        &kept["checks"].to_string(),
+        &value,
+        "the job's checks as kept",
+    );
+    // The markers obid prints between steps never reach the check's output.
+    let log = std::fs::read_to_string(obid.home.join(format!("logs/{id}/check.log"))).unwrap();
+    assert!(!log.contains("obid-step-"), "{log}");
+    assert!(log.contains("---- b stdout ----"), "{log}");
+}

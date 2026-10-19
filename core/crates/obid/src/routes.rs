@@ -65,7 +65,7 @@ pub async fn job(
         .jobs
         .get(&id)
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, NO_JOB))?;
-    Ok(json(StatusCode::OK, job.to_json()))
+    Ok(json(StatusCode::OK, job.detail_json()))
 }
 
 #[derive(serde::Deserialize)]
