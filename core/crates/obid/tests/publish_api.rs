@@ -369,8 +369,8 @@ fn calls_now(folder: &Path) -> String {
     kept(folder, "calls")
 }
 
-/// A possible secret in a commit: nothing goes out (no push, no pull request), the job fails
-/// naming the file, the line and the rule, and never the secret.
+/// A possible secret in a commit that the fix round leaves there: nothing goes out (no push, no
+/// pull request), the job fails naming the file, the line and the rule, and never the secret.
 #[test]
 fn a_possible_secret_sends_nothing() {
     let folder = Folder::new("publish-secret");
@@ -378,10 +378,12 @@ fn a_possible_secret_sends_nothing() {
     let (obid, remote, _) = obid_with(&folder, &bin);
     let id = dispatch(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "LEAK: keys.txt"}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "LEAK: keys.txt STUBBORN"}),
     );
     let job = ended(&obid, &id);
     assert_eq!(job["status"], "failed", "{job}");
+    // It had its one fix round, and a second block of the same is the end.
+    assert_eq!(job["round"], 2, "{job}");
     let summary = job["summary"].as_str().unwrap();
     assert!(
         summary.starts_with("Not published: possible secret in keys.txt:1 (AWS access key"),
@@ -393,6 +395,26 @@ fn a_possible_secret_sends_nothing() {
     assert_eq!(job["outgoing"], json!([]));
     assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
     assert!(!calls_now(&folder.0).contains("pr create"));
+}
+
+/// A job with one round still gets one to rewrite what the scan found (seen live 2026-10-18: a
+/// chat job's test token failed it outright, and Claude Code would just fix and commit again).
+#[test]
+fn a_one_round_job_still_gets_its_fix_round() {
+    let folder = Folder::new("publish-fix-one");
+    let bin = fake_gh(&folder.0);
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "LEAK: keys.txt"}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    assert_eq!(job["round"], 2);
+    assert_eq!(job["published"], PULL);
+    let pushed = remote_branch(&remote, &format!("oby/build-{id}")).unwrap();
+    let history = git(&remote, &["log", "-p", &format!("main..{pushed}")]);
+    assert!(!history.contains(&leaked_key()), "{history}");
 }
 
 /// With a round left, the agent gets one to rewrite the commit that holds the secret (a fixup,
@@ -880,7 +902,7 @@ fn the_owners_git_configuration_cant_hide_a_root_commit() {
     let (obid, remote, _) = obid_with(&folder, &bin);
     let id = dispatch(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "ORPHAN"}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "ORPHAN STUBBORN"}),
     );
     let job = ended(&obid, &id);
     assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());

@@ -30,6 +30,7 @@
 //                    With TETRIX_CALL it calls the `tetrix` server's search_entities, get_entity,
 //                    save_session and resume_session, and commits tetrix.txt with a
 //                    Tetrix-Session trailer naming the session save_session answered
+//   ON PURPOSE       in a fix round's quoted task: ends the turn with "FAILS AS ASKED: …"
 //   anything else    ends the turn with "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
 
@@ -79,9 +80,16 @@ rl.on("line", (line) => {
     return;
   }
   if (message.type !== "user") return;
-  const prompt = typeof message.message.content === "string" ? message.message.content : "";
+  let prompt = typeof message.message.content === "string" ? message.message.content : "";
   emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Bash", "Read", "Edit"], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
   if (leaked.length) return result(`leaked: ${leaked.join(", ")}`, true);
+  // A fix round quotes the task after the check's output: it says the failure is intended when the
+  // task asked for one (ON PURPOSE), and otherwise reads only the part before the quote.
+  const quote = prompt.indexOf("\n\nThe task, as the owner wrote it:");
+  if (prompt.includes("failed after your last round") && quote >= 0) {
+    if (prompt.slice(quote).includes("ON PURPOSE")) return result("FAILS AS ASKED: the test fails on purpose, as the task says.");
+    prompt = prompt.slice(0, quote);
+  }
   const commit = prompt.match(/COMMIT: (\S+)/);
   const ask = prompt.match(/ASK: (\{.*\})/);
   const asks = prompt.match(/ASKS: (\[.*\])/);
