@@ -82,12 +82,23 @@ fn list() -> Value {
     ])
 }
 
-/// One JSON-RPC message to the server; none for a notification.
-pub async fn handle(shared: &Arc<Shared>, session: &Session, body: Value) -> Option<Value> {
+/// One JSON-RPC message from a conversation's Claude Code waiting for a turn
+/// (crate::brain::harness::Sessions::waiting_with): it connects and lists the tools, and calls
+/// none, since no turn is under way for a call to act for. None for a notification.
+pub fn handshake(body: &Value) -> Option<Value> {
     let method = body.get("method")?.as_str()?;
     let id = body.get("id").cloned().filter(|id| !id.is_null())?;
     let params = body.get("params").cloned().unwrap_or_else(|| json!({}));
-    let result = match method {
+    Some(match plain(method, &params) {
+        Some(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+        None => json!({"jsonrpc": "2.0", "id": id,
+            "error": {"code": -32600, "message": "No turn of Oby's is under way: tools are called only in one."}}),
+    })
+}
+
+/// The answer to a message that isn't a tool call: `initialize`, `ping`, `tools/list`.
+fn plain(method: &str, params: &Value) -> Option<Value> {
+    Some(match method {
         "initialize" => {
             let asked = params["protocolVersion"].as_str().unwrap_or("");
             json!({"protocolVersion": if VERSIONS.contains(&asked) { asked } else { VERSIONS[0] },
@@ -97,6 +108,16 @@ pub async fn handle(shared: &Arc<Shared>, session: &Session, body: Value) -> Opt
         }
         "ping" => json!({}),
         "tools/list" => json!({"tools": list()}),
+        _ => return None,
+    })
+}
+
+/// One JSON-RPC message to the server; none for a notification.
+pub async fn handle(shared: &Arc<Shared>, session: &Session, body: Value) -> Option<Value> {
+    let method = body.get("method")?.as_str()?;
+    let id = body.get("id").cloned().filter(|id| !id.is_null())?;
+    let params = body.get("params").cloned().unwrap_or_else(|| json!({}));
+    let result = match method {
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = params
@@ -105,10 +126,13 @@ pub async fn handle(shared: &Arc<Shared>, session: &Session, body: Value) -> Opt
                 .unwrap_or_else(|| json!({}));
             answered(call(shared, session, name, args).await)
         }
-        _ => {
-            return Some(json!({"jsonrpc": "2.0", "id": id,
-                "error": {"code": -32601, "message": format!("Oby's tools don't answer {method}.")}}));
-        }
+        other => match plain(other, &params) {
+            Some(result) => result,
+            None => {
+                return Some(json!({"jsonrpc": "2.0", "id": id,
+                    "error": {"code": -32601, "message": format!("Oby's tools don't answer {method}.")}}));
+            }
+        },
     };
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
@@ -362,7 +386,15 @@ async fn act(
     problems(shared, session, &plan)?;
     outcome_answer(
         session,
-        actions::act(shared, &plan, words, source(session), &session.conversation).await,
+        actions::act(
+            shared,
+            &plan,
+            words,
+            source(session),
+            &session.conversation,
+            &session.control.turn,
+        )
+        .await,
     )
 }
 
@@ -467,6 +499,7 @@ async fn tell(
                 &words,
                 source(session),
                 &session.conversation,
+                &session.control.turn,
             )
             .await,
         );
@@ -515,6 +548,7 @@ async fn tell(
             &session.conversation,
         ));
     }
+    new.turn = actions::started_by(&job, &session.conversation, &session.control.turn);
     outcome_answer(session, actions::follow_up(shared, &job, new))
 }
 
@@ -564,6 +598,7 @@ async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Resul
         said: &session.said,
         attachments: &session.attachments,
         conversation: &session.conversation,
+        turn: &session.control.turn,
     };
     let control = session.control.clone();
     let live = move || control.live();

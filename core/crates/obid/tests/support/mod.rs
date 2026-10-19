@@ -192,6 +192,16 @@ pub fn stub_agent() -> PathBuf {
 
 /// Starts obid with `config`, `PATH` the test's own with `path_first` before it.
 pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
+    start_with(folder, config, path_first, &[])
+}
+
+/// [`start`], with `env` set over what a test's obid is given.
+pub fn start_with(
+    folder: &Path,
+    config: &Value,
+    path_first: Option<&Path>,
+    env: &[(&str, &str)],
+) -> Obid {
     let path = folder.join("config.json");
     put_token(config, TOKEN);
     std::fs::write(&path, config.to_string()).unwrap();
@@ -234,6 +244,10 @@ pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
             "OBID_SECURITY_BIN",
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-security"),
         )
+        // No conversation's Claude Code started ahead (crate::brain::harness::prestart), but in the
+        // tests of it: its processes would weigh on every other test's time.
+        .env("OBID_PRESTART", "off")
+        .envs(env.iter().copied())
         .stdout(Stdio::piped())
         .stderr(
             std::fs::OpenOptions::new()

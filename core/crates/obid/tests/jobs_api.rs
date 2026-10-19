@@ -1682,3 +1682,160 @@ fn routing_skips_an_account_that_isnt_signed_in() {
     std::fs::remove_file(accounts.join("file/.credentials.json")).unwrap();
     assert_eq!(job(json!("auto")), (json!("codex"), json!("codex")));
 }
+
+/// Ports ReserveTests.theAPILiftsAndRestoresTheReserve: the usage Claude Code reports during a job
+/// fills its Account, and the reserve it puts the account in is lifted and put back, across a
+/// restart.
+#[test]
+fn the_api_lifts_and_restores_the_reserve() {
+    let folder = Folder::new("reserve");
+    let remote = fixture(&folder.0);
+    let config = config(&folder.0, &remote);
+    let account = folder.0.join("home/accounts/stub");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(account.join(".credentials.json"), "{}").unwrap();
+    let mut obid = start(&folder.0, &config);
+    let status = |obid: &Obid| request(obid, "GET", "/v1/status", None).body["accounts"][0].clone();
+    assert!(status(&obid)["sevenDay"].is_null());
+
+    let reset = obi_protocol::time::now() + 2 * 86_400;
+    let usage = json!({"status": "allowed_warning", "unifiedWindows": {
+        "five_hour": {"utilization": 0.1, "resetsAt": reset - 86_400},
+        "seven_day": {"utilization": 0.82, "resetsAt": reset}}});
+    let job = |task: String| json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task, "check": "true"});
+    let first = post_job(&obid, job(format!("USAGE: {usage}")));
+    assert_eq!(first.status, 201, "{}", first.text);
+    wait(&obid, first.body["id"].as_str().unwrap());
+    let stub = status(&obid);
+    assert_eq!(stub["fiveHour"], 0.1);
+    assert_eq!(stub["sevenDay"], 0.82);
+    assert_eq!(
+        stub["fiveHourResets"],
+        obi_protocol::time::format(reset - 86_400)
+    );
+    assert_eq!(stub["sevenDayResets"], obi_protocol::time::format(reset));
+    assert_eq!(stub["reserved"], true);
+    assert!(stub["fullUntil"].is_null());
+
+    // In its reserve, it takes only a job sent to it by name.
+    let refused = post_job(&obid, job("Nothing to do".into()));
+    assert_eq!(refused.status, 422, "{}", refused.text);
+    assert!(
+        refused
+            .text
+            .contains("Stub is in its weekly reserve (82% of its week used)"),
+        "{}",
+        refused.text
+    );
+    let mut named = job("Nothing to do".into());
+    named["account"] = json!("stub");
+    assert_eq!(post_job(&obid, named.clone()).status, 201);
+
+    let lift =
+        |obid: &Obid, body: &str| request(obid, "POST", "/v1/accounts/stub/reserve", Some(body));
+    let lifted = lift(&obid, r#"{"lift": true}"#);
+    assert_eq!(lifted.status, 200, "{}", lifted.text);
+    assert_eq!(lifted.body["reserved"], false);
+    assert_eq!(
+        lifted.body["reserveLiftedUntil"],
+        obi_protocol::time::format(reset)
+    );
+    assert_eq!(post_job(&obid, job("Nothing to do".into())).status, 201);
+
+    // A restart keeps the usage and the lift.
+    obid.child.kill().unwrap();
+    obid.child.wait().unwrap();
+    drop(obid);
+    let obid = start(&folder.0, &config);
+    assert_eq!(status(&obid)["sevenDay"], 0.82);
+    assert_eq!(status(&obid)["reserved"], false);
+    let restored = lift(&obid, r#"{"lift": false}"#);
+    assert_eq!(restored.status, 200, "{}", restored.text);
+    assert_eq!(restored.body["reserved"], true);
+    assert!(restored.body["reserveLiftedUntil"].is_null());
+    assert_eq!(post_job(&obid, job("Nothing to do".into())).status, 422);
+
+    let nobody = request(
+        &obid,
+        "POST",
+        "/v1/accounts/nobody/reserve",
+        Some(r#"{"lift": true}"#),
+    );
+    assert_eq!(nobody.status, 404);
+    for (body, status) in [
+        ("false", 400),
+        ("{", 400),
+        ("{}", 422),
+        (r#"{"lift": "true"}"#, 422),
+        (r#"{"lift": true, "x": 1}"#, 422),
+    ] {
+        assert_eq!(lift(&obid, body).status, status, "{body}");
+    }
+}
+
+/// A Claude Code job's turns sum into its `usage` as their result lines report them, and it
+/// stays once the job ended (#731).
+#[test]
+fn a_jobs_turns_sum_into_its_usage() {
+    let folder = Folder::new("job-usage");
+    let remote = fixture(&folder.0);
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let plain = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Nothing to do", "check": "true"}),
+    );
+    let plain = wait(&obid, plain.body["id"].as_str().unwrap());
+    // The stand-in's plain result reports a cost of 0 and no tokens.
+    assert_eq!(plain["usage"], json!({"costUsd": 0.0, "priced": "plan"}));
+
+    let job = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "TOKENS", "check": "false", "rounds": 2}),
+    );
+    assert_eq!(job.status, 201, "{}", job.text);
+    let job = wait(&obid, job.body["id"].as_str().unwrap());
+    assert_eq!(job["round"], 2, "{job}");
+    // Two turns, each 110 in, 25 out, 1000 read from the cache, 50 written to it, $0.25.
+    assert_eq!(
+        job["usage"],
+        json!({"input": 220, "output": 50, "cacheRead": 2000, "cacheWrite": 100, "costUsd": 0.5, "priced": "plan"}),
+        "{job}"
+    );
+}
+
+/// A job alone on its account gets the whole rise of each window between its account's reports,
+/// as an estimate (#732).
+#[test]
+fn a_job_alone_gets_the_whole_rise_of_its_accounts_windows() {
+    let folder = Folder::new("window-share");
+    let remote = fixture(&folder.0);
+    let account = folder.0.join("home/accounts/stub");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(account.join(".credentials.json"), "{}").unwrap();
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let at = obi_protocol::time::now() + 3_600;
+    let report = |five: f64, week: f64| {
+        json!({"status": "allowed", "unifiedWindows": {
+        "five_hour": {"utilization": five, "resetsAt": at}, "seven_day": {"utilization": week, "resetsAt": at + 86_400}}})
+    };
+    let usages = json!([report(0.1, 0.3), report(0.3, 0.35)]);
+    let job = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": format!("TOKENS USAGES: {usages}"), "check": "false", "rounds": 2}),
+    );
+    assert_eq!(job.status, 201, "{}", job.text);
+    let job = wait(&obid, job.body["id"].as_str().unwrap());
+    assert_eq!(job["round"], 2, "{job}");
+    assert_eq!(
+        job["windowShare"],
+        json!({"fiveHour": 20.0, "sevenDay": 5.0, "estimate": true}),
+        "{job}"
+    );
+    // A job whose account reported once has no share to show.
+    let one = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": format!("USAGE: {}", report(0.4, 0.4)), "check": "true"}),
+    );
+    let one = wait(&obid, one.body["id"].as_str().unwrap());
+    assert!(one.get("windowShare").is_none(), "{one}");
+}
