@@ -2891,6 +2891,24 @@ impl Link {
                     Given::Later(at) => self.answer_start(item, None, Some(at)),
                 };
             }
+            // Oby's own question about a job event (the event orchestrator's escalation): the
+            // owner's answer, or Done, settles it, and nothing else is carried out (#710). It isn't
+            // another Obi's request, whose exchange it would look for.
+            if item.obi.is_none() && item.id.starts_with("orchestrator-") {
+                let mut item = item;
+                match &given {
+                    Given::Later(at) => item.later = Some(*at),
+                    Given::Answer(answer) => {
+                        item.answer = Some(answer.clone());
+                        item.done = Some(now);
+                    }
+                    Given::Done => item.done = Some(now),
+                }
+                state.inbox.insert(item.id.clone(), item.clone());
+                drop(state);
+                self.save_item(&item);
+                return Ok(item.to_json());
+            }
             if item.kind == "pluginEvent" {
                 drop(state);
                 return match given {
