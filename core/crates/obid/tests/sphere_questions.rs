@@ -603,11 +603,7 @@ async fn a_decline_remembered_during_a_run_stops_its_answer() {
     assert_eq!(answered.status, 200, "{}", answered.text);
     let decision =
         tokio::task::block_in_place(|| get(&obid, "/v1/obid/decisions"))[0]["id"].clone();
-    let replies = ernesto.receive(2, 60).await;
-    let to_slow = replies
-        .iter()
-        .find(|r| r["in_reply_to"] == slow["id"])
-        .expect("a reply to the slow question");
+    let to_slow = ernesto.receive_reply_to(&slow, 60).await;
     assert_eq!(to_slow["type"], "decline", "{to_slow}");
     assert_eq!(
         to_slow["body"],

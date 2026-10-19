@@ -104,6 +104,11 @@ pub enum Event {
     },
     /// The answer to the tool call `id` came back; `failed` when it was an error.
     ToolDone { id: String, failed: bool },
+    /// The account's usage, as the tool just reported it (crate::usage).
+    Usage(crate::usage::Usage),
+    /// What this turn used so far, in tokens and cost (crate::usage::Tokens): each one replaces
+    /// the turn's last.
+    Tokens(crate::usage::Tokens),
 }
 
 /// How a turn ended, for every adapter.
@@ -179,17 +184,35 @@ pub async fn run_turn(
     limit: Duration,
     stop: watch::Receiver<process::Signal>,
     decide: impl Fn(&str, &Value) -> Ruling,
-    mut on_event: impl FnMut(Event),
+    on_event: impl FnMut(Event),
 ) -> std::io::Result<Turn> {
-    let mut conn = Conn::spawn(&launch, limit, stop, false).await?;
+    let conn = Conn::spawn(&launch, limit, stop, false).await?;
+    Ok(turn_on(conn, prompt, decide, on_event, false).await.0)
+}
+
+/// [`run_turn`] on a Claude Code already running (`conn`). With `keep`, a turn that ends with its
+/// `result` leaves the agent running, waiting on its stdin for the next message (stream-json
+/// input takes one turn after another; `--max-turns` counts each on its own), and it comes back
+/// with the turn: a conversation's next turn skips starting it (docs/fast-replies.md).
+pub async fn turn_on(
+    mut conn: Conn,
+    prompt: &str,
+    decide: impl Fn(&str, &Value) -> Ruling,
+    mut on_event: impl FnMut(Event),
+    keep: bool,
+) -> (Turn, Option<Conn>) {
     conn.send(&user_message(prompt)).await;
 
     let mut turn = Turn::default();
+    let mut api_key_source = None;
     loop {
         let message = match conn.next().await {
             Ok(message) => message,
             Err(_) => break,
         };
+        if message["type"] == "rate_limit_event" {
+            on_event(Event::Usage(crate::usage::claude(&message)));
+        }
         match message.get("type").and_then(Value::as_str) {
             Some("control_request") => {
                 let request = &message["request"];
@@ -222,6 +245,7 @@ pub async fn run_turn(
                     turn.session = Some(session.to_owned());
                     on_event(Event::Session(session.to_owned()));
                 }
+                api_key_source = message["apiKeySource"].as_str().map(str::to_owned);
             }
             Some("assistant") => {
                 for block in message["message"]["content"]
@@ -273,9 +297,15 @@ pub async fn run_turn(
                 if let Some(session) = message.get("session_id").and_then(Value::as_str) {
                     turn.session.get_or_insert_with(|| session.to_owned());
                 }
+                on_event(Event::Tokens(crate::usage::claude_tokens(
+                    &message,
+                    api_key_source.as_deref(),
+                )));
                 turn.result = Some(message);
-                // The turn is over: no more input, and nothing more to read.
-                conn.close_input();
+                // The turn is over: no more input (unless it's kept), and nothing more to read.
+                if !keep {
+                    conn.close_input();
+                }
                 break;
             }
             _ => {}
@@ -283,6 +313,11 @@ pub async fn run_turn(
     }
     turn.timed_out = conn.timed_out;
     turn.stopped = conn.stopped;
+    if keep && turn.result.is_some() && !turn.timed_out && !turn.stopped {
+        turn.exit = "still running".into();
+        return (turn, Some(conn));
+    }
+    conn.close_input();
     // After its result the agent closes its output and exits by itself, within AFTER_RESULT.
     turn.exit = if turn.result.is_some() {
         let until = std::time::Instant::now() + AFTER_RESULT;
@@ -292,7 +327,7 @@ pub async fn run_turn(
     } else {
         conn.finish().await
     };
-    Ok(turn)
+    (turn, None)
 }
 
 fn text_of(value: &Value, key: &str) -> String {

@@ -65,7 +65,7 @@ pub(super) async fn launch(
     resume: &Option<String>,
 ) -> Result<(Launch, Option<crate::codex::Options>), String> {
     // Oby's server as a job's broker is given ([`crate::codex::argv`]: its `-c` settings).
-    let argv = crate::codex::argv(Default::default(), Some((url, token)));
+    let argv = crate::codex::argv(Default::default(), Some((url, token)), None);
     let mut flags: Vec<OsString> = argv[1..argv.len() - 1].to_vec();
     for feature in OFF {
         flags.extend(["-c".into(), format!("features.{feature}=false").into()]);
@@ -98,6 +98,8 @@ pub(super) async fn launch(
         plan: false,
         instructions: Some(orientation(shared)),
         no_commands: true,
+        usage: false,
+        priced: None,
     };
     Ok((launch, Some(options)))
 }

@@ -155,6 +155,9 @@ pub struct Begun {
     pub before: Vec<Turn>,
     /// True when the words started it.
     pub started: bool,
+    /// The turn's id was there already: the same words sent again (an app's Try again after an
+    /// answer it lost), and nothing was added.
+    pub repeated: bool,
 }
 
 #[derive(Debug)]
@@ -163,6 +166,8 @@ pub enum Error {
     NoConversation,
     /// The turn isn't in the conversation (pruned since).
     NoTurn,
+    /// The words' id belongs to another turn: other words, or another conversation.
+    IdTaken,
     /// It couldn't be written.
     Io(std::io::Error),
 }
@@ -178,6 +183,10 @@ impl From<Error> for ApiError {
                 StatusCode::NOT_FOUND,
                 "That conversation turn isn't in the thread.",
             ),
+            Error::IdTaken => ApiError::new(
+                StatusCode::CONFLICT,
+                "That id is another turn's: other words, or another conversation. Send these with an id of their own.",
+            ),
             Error::Io(_) => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "The conversation couldn't be kept.",
@@ -190,7 +199,14 @@ pub struct Conversations {
     dir: PathBuf,
     threads: Mutex<Vec<Thread>>,
     events: Events,
+    /// The id the next new conversation gets once obid named it ([`Conversations::next_id`]):
+    /// its folder may hold a Claude Code started for it already (crate::brain::harness). Kept in
+    /// `next-id`, so the folder is found again after obid restarts.
+    next: Mutex<Option<String>>,
 }
+
+/// Where the next new conversation's id is kept.
+const NEXT: &str = "next-id";
 
 impl Conversations {
     /// The conversations in `home/conversations`, after moving the single thread of obid before
@@ -214,10 +230,15 @@ impl Conversations {
                 named
             })
             .collect();
+        let next = std::fs::read_to_string(dir.join(NEXT))
+            .ok()
+            .map(|id| id.trim().to_owned())
+            .filter(|id| is_id(id) && !threads.iter().any(|t| &t.id == id));
         let conversations = Conversations {
             dir,
             threads: Mutex::new(threads),
             events,
+            next: Mutex::new(next),
         };
         conversations.migrate(home);
         conversations.prune(&mut conversations.lock());
@@ -290,9 +311,38 @@ impl Conversations {
         )
     }
 
-    /// The user's words join `target` (made first when it's new).
-    pub fn begin(&self, target: Target, said: String) -> Result<Begun, Error> {
+    /// The user's words join `target` (made first when it's new). `id`: the id the app gave the
+    /// words (a lower-case UUID). The user's turn of that id with the same words, in `target` (the
+    /// conversation named, the latest, or for a new one the one those words started), is the same
+    /// words sent again: `repeated`, and nothing is added. Any other turn of that id is `IdTaken`.
+    pub fn begin(&self, target: Target, said: String, id: Option<String>) -> Result<Begun, Error> {
         let mut threads = self.lock();
+        if let Some(id) = id.as_deref()
+            && let Some(at) = threads
+                .iter()
+                .position(|t| t.turns.iter().any(|turn| turn.id == id))
+        {
+            let thread = &threads[at];
+            let in_target = match &target {
+                Target::Id(named) => thread.id == *named,
+                Target::Latest => latest(&threads) == Some(at),
+                Target::New => thread.turns.first().is_some_and(|t| t.id == id),
+            };
+            let same = thread
+                .turns
+                .iter()
+                .any(|t| t.id == id && t.who == "user" && t.text == said);
+            if !(in_target && same) {
+                return Err(Error::IdTaken);
+            }
+            return Ok(Begun {
+                conversation: thread.id.clone(),
+                turn: id.to_owned(),
+                before: vec![],
+                started: false,
+                repeated: true,
+            });
+        }
         let found = match target {
             Target::Id(id) => Some(
                 threads
@@ -305,7 +355,7 @@ impl Conversations {
         };
         let index = found.unwrap_or_else(|| {
             threads.push(Thread {
-                id: new_id(),
+                id: self.take_next().unwrap_or_else(new_id),
                 title: titled(&said),
                 pinned: false,
                 created: obi_protocol::time::format(obi_protocol::time::now()),
@@ -315,7 +365,8 @@ impl Conversations {
             threads.len() - 1
         });
         let before = threads[index].turns.clone();
-        let turn = match self.add(&mut threads, index, "user", said, vec![], false, vec![]) {
+        let added = self.add(&mut threads, index, "user", said, vec![], false, vec![], id);
+        let turn = match added {
             Ok(turn) => turn.id,
             Err(e) => {
                 if found.is_none() {
@@ -333,6 +384,7 @@ impl Conversations {
             turn,
             before,
             started: found.is_none(),
+            repeated: false,
         })
     }
 
@@ -383,7 +435,7 @@ impl Conversations {
             .iter()
             .position(|t| t.id == id)
             .ok_or(Error::NoConversation)?;
-        self.add(&mut threads, index, who, text, jobs, ended, artifacts)
+        self.add(&mut threads, index, who, text, jobs, ended, artifacts, None)
     }
 
     /// The turn, kept, written and announced: the conversation as it is now, then the turn.
@@ -397,12 +449,13 @@ impl Conversations {
         jobs: Vec<String>,
         ended: bool,
         artifacts: Vec<Value>,
+        id: Option<String>,
     ) -> Result<Turn, Error> {
         let sequence = next_sequence(threads);
         let thread = &mut threads[index];
         let kept = thread.clone();
         let turn = Turn {
-            id: new_id(),
+            id: id.unwrap_or_else(new_id),
             who: who.into(),
             text,
             at: obi_protocol::time::format(obi_protocol::time::now()),
@@ -562,6 +615,46 @@ impl Conversations {
         let summary = thread.summary();
         self.events.send("conversation", summary.clone());
         Ok(summary)
+    }
+
+    /// The id the next new conversation will get, named now and kept until one takes it.
+    pub fn next_id(&self) -> String {
+        let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(id) = &*next {
+            return id.clone();
+        }
+        let id = new_id();
+        if let Err(e) = crate::store::write_private(&self.dir.join(NEXT), id.as_bytes()) {
+            tracing::warn!("the next conversation's id isn't kept: {e}");
+        }
+        *next = Some(id.clone());
+        id
+    }
+
+    /// The next new conversation's id, when obid named one and none took it yet.
+    pub fn peek_next(&self) -> Option<String> {
+        self.next.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Whether `id` is the next new conversation's, not taken yet.
+    pub fn is_next(&self, id: &str) -> bool {
+        self.next
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+            == Some(id)
+    }
+
+    /// The next new conversation's id, taken by the conversation beginning now.
+    fn take_next(&self) -> Option<String> {
+        let id = self.next.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+        let _ = std::fs::remove_file(self.dir.join(NEXT));
+        Some(id)
+    }
+
+    /// Whether the conversation `id` is there.
+    pub fn exists(&self, id: &str) -> bool {
+        self.lock().iter().any(|t| t.id == id)
     }
 
     /// Forgets the conversation `id` and its turns. The jobs it started stay, with its id.
@@ -753,7 +846,7 @@ fn new_id() -> String {
 }
 
 /// An id obid made (a lower-case UUID), so a file name of its own.
-fn is_id(id: &str) -> bool {
+pub fn is_id(id: &str) -> bool {
     id.len() == 36
         && id
             .bytes()
@@ -1053,7 +1146,7 @@ mod tests {
         let events = crate::events::Events::new();
         let conversations = super::Conversations::open(&home, events.clone());
         let id = conversations
-            .begin(super::Target::New, "first".into())
+            .begin(super::Target::New, "first".into(), None)
             .unwrap()
             .conversation;
         {

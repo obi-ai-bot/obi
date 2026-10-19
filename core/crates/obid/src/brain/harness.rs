@@ -112,6 +112,42 @@ pub struct Sessions {
     made: Mutex<HashMap<String, Vec<Value>>>,
     /// One lock per conversation, so its turns run one at a time (N9).
     busy: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Each conversation's Claude Code still running after its turn, waiting for the next one.
+    warm: Mutex<HashMap<String, Warm>>,
+}
+
+/// How long a conversation's Claude Code waits for its next turn before it ends: half the hour a
+/// Claude subscription keeps a prompt cached.
+const WARM_FOR: Duration = Duration::from_secs(30 * 60);
+/// The most conversations whose Claude Code waits at once: each holds a few hundred MB.
+const WARM_MOST: usize = 3;
+
+/// A conversation's Claude Code, running after its turn and waiting on its stdin for the next one,
+/// which writes to it instead of starting another (docs/fast-replies.md): no start, no MCP
+/// connection, no reading its session again. It runs in the same box, with the same login copy
+/// (kept fresh by obid's keeper while it lives, taken out when it ends) and the same MCP token,
+/// which is good again only while a turn of the conversation is under way.
+struct Warm {
+    conn: crate::conn::Conn,
+    token: String,
+    account: String,
+    /// Where its account's login came from: a turn on the account's folder as it is now only.
+    config_dir: Option<PathBuf>,
+    /// Its session's id; none for one started for the next new conversation, which hasn't had a
+    /// turn yet ([`prestart`]).
+    session: Option<String>,
+    /// What it was started with ([`flags_key`]): a turn that would start it otherwise starts anew.
+    key: u64,
+    place: Place,
+    since: Instant,
+}
+
+impl Warm {
+    /// Its login copy goes now, and it ends (its stdin closed, it exits) in the background.
+    fn end(self) {
+        self.place.forget_login();
+        tokio::spawn(self.conn.finish());
+    }
 }
 
 impl Sessions {
@@ -121,17 +157,146 @@ impl Sessions {
 
     /// A new token for `session`, good until [`Sessions::close`].
     fn open(&self, session: Arc<Session>) -> String {
-        let token = format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
+        let token = new_token();
         self.lock().insert(token.clone(), session);
         token
     }
 
+    /// Whether `token` is the one of the Claude Code waiting in the conversation of `endpoint`
+    /// (`conversation-<id>`): it may connect to Oby's tools and list them, never call one, until a
+    /// turn of the conversation is under way (crate::brain::tools::handshake).
+    pub fn waiting_with(&self, endpoint: &str, token: &str) -> bool {
+        let Some(conversation) = endpoint.strip_prefix("conversation-") else {
+            return false;
+        };
+        !token.is_empty()
+            && self
+                .warm()
+                .get(conversation)
+                .is_some_and(|w| w.token == token)
+    }
+
     fn close(&self, token: &str) {
         self.lock().remove(token);
+    }
+
+    /// `token` good again, for `session`: a waiting Claude Code's next turn.
+    fn reopen(&self, token: &str, session: Arc<Session>) -> String {
+        self.lock().insert(token.to_owned(), session);
+        token.to_owned()
+    }
+
+    fn warm(&self) -> std::sync::MutexGuard<'_, HashMap<String, Warm>> {
+        self.warm.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Ends the Claude Code waiting on `account`'s login, if any: the account is being removed,
+    /// signed in again or changed.
+    pub fn end_warm_on(&self, account: &str) {
+        let mut all = self.warm();
+        let on: Vec<String> = all
+            .iter()
+            .filter(|(_, w)| w.account == account)
+            .map(|(c, _)| c.clone())
+            .collect();
+        for conversation in on {
+            if let Some(warm) = all.remove(&conversation) {
+                warm.end();
+            }
+        }
+    }
+
+    /// Ends `conversation`'s waiting Claude Code, if one waits: the conversation went.
+    pub fn end_warm(&self, conversation: &str) {
+        if let Some(warm) = self.warm().remove(conversation) {
+            warm.end();
+        }
+    }
+
+    /// Ends every waiting Claude Code, their login copies taken out at once: obid is stopping.
+    pub fn end_all_warm(&self) {
+        for (_, warm) in self.warm().drain() {
+            warm.end();
+        }
+    }
+
+    /// `conversation`'s waiting Claude Code, when it runs `session` on `account`'s login as it is
+    /// now; one that runs another ends.
+    fn take_warm(
+        &self,
+        conversation: &str,
+        account: &crate::config::Account,
+        session: Option<&str>,
+    ) -> Option<Warm> {
+        let mut all = self.warm();
+        let warm = all.remove(conversation)?;
+        if warm.account == account.id
+            && warm.config_dir == account.config_dir
+            && session == warm.session.as_deref()
+        {
+            return Some(warm);
+        }
+        warm.end();
+        None
+    }
+
+    /// Keeps `warm` for `conversation`'s next turn when `admit` says it may wait, judged under
+    /// the same lock that [`Sessions::end_warm_on`] and [`Sessions::end_warm`] take, so an account
+    /// change or a deletion that comes after the look ends it: whether it was kept. The one
+    /// waiting longest ends when [`WARM_MOST`] conversations' already wait; the next new
+    /// conversation's (`next`, [`prestart`]) isn't one of them.
+    fn keep(
+        &self,
+        conversation: &str,
+        warm: Warm,
+        next: Option<&str>,
+        admit: impl FnOnce(&Warm) -> bool,
+    ) -> bool {
+        let mut all = self.warm();
+        if !admit(&warm) {
+            warm.end();
+            return false;
+        }
+        if let Some(old) = all.insert(conversation.to_owned(), warm) {
+            old.end();
+        }
+        let counted = |c: &String| Some(c.as_str()) != next;
+        while all.keys().filter(|c| counted(c)).count() > WARM_MOST {
+            let Some(oldest) = all
+                .iter()
+                .filter(|(c, _)| counted(c))
+                .min_by_key(|(_, w)| w.since)
+                .map(|(c, _)| c.clone())
+            else {
+                break;
+            };
+            if let Some(old) = all.remove(&oldest) {
+                old.end();
+            }
+        }
+        true
+    }
+
+    /// Ends every waiting Claude Code whose conversation `stays` doesn't name.
+    fn end_warm_unless(&self, stays: impl Fn(&str) -> bool) {
+        let mut all = self.warm();
+        let gone: Vec<String> = all.keys().filter(|c| !stays(c)).cloned().collect();
+        for conversation in gone {
+            if let Some(warm) = all.remove(&conversation) {
+                warm.end();
+            }
+        }
+    }
+
+    /// Ends `conversation`'s waiting Claude Code when it's still the one kept at `since`: its
+    /// [`WARM_FOR`] is up.
+    fn expire(&self, conversation: &str, since: Instant) {
+        let mut all = self.warm();
+        if all.get(conversation).is_some_and(|w| w.since == since)
+            && let Some(warm) = all.remove(conversation)
+        {
+            warm.end();
+        }
     }
 
     /// The artifacts the turn `turn` published (`{id, version}` each), taken once: its answer and
@@ -166,6 +331,235 @@ impl Sessions {
             .filter(|s| s.conversation == conversation)
             .cloned()
     }
+}
+
+/// Keeps `warm` for `conversation`'s next turn, [`WARM_FOR`] at most; the one waiting longest ends
+/// when [`WARM_MOST`] already wait.
+/// It isn't kept when the conversation went, or its account is being changed or isn't there
+/// with the same folder any more, while the turn ran.
+fn keep_warm(shared: &Arc<Shared>, conversation: &str, warm: Warm) {
+    let since = warm.since;
+    let next = shared.conversations.peek_next();
+    let kept = shared
+        .harness
+        .keep(conversation, warm, next.as_deref(), |warm| {
+            shared.conversations.exists(conversation) && may_wait(shared, warm)
+        });
+    if !kept {
+        return;
+    }
+    let (shared, conversation) = (shared.clone(), conversation.to_owned());
+    tokio::spawn(async move {
+        tokio::time::sleep(WARM_FOR).await;
+        shared.harness.expire(&conversation, since);
+    });
+}
+
+/// Whether `warm`'s account is there with the same folder and isn't being changed (removed or
+/// signed in again).
+fn may_wait(shared: &Shared, warm: &Warm) -> bool {
+    !shared.jobs.being_changed(&warm.account)
+        && crate::accounts::find(&shared.config.agents.get(), &warm.account)
+            .is_some_and(|(_, a)| a.config_dir == warm.config_dir)
+}
+
+/// Starts the next new conversation's Claude Code now, so its first turn finds it waiting as a
+/// later turn does, connected to Oby's tools already (docs/fast-replies.md; the Agent SDK's
+/// `prewarm()`). obid names that conversation's id ahead ([`crate::conversation::Conversations::next_id`])
+/// and readies its place as a turn would: the room with its checkouts, the box, a login copy and
+/// its MCP configuration, under the conversation's lock. It waits like any other ([`WARM_FOR`], one
+/// of [`WARM_MOST`]), with no session until its first turn, and its token connects to Oby's tools
+/// but calls none before a turn is under way. Started after each of the owner's turns, so a
+/// Claude Code waits only while the owner is talking to Oby; one at a time.
+/// `OBID_PRESTART=off` (obid's tests set it, but in the tests of this) starts none.
+fn prestart(shared: &Arc<Shared>) {
+    static STARTING: AtomicBool = AtomicBool::new(false);
+    let config = &shared.config.conversation;
+    if !config.harness
+        || config.agent != Tool::Claude
+        || std::env::var_os("OBID_PRESTART").is_some_and(|v| v == "off")
+    {
+        return;
+    }
+    let id = shared.conversations.next_id();
+    if shared.harness.warm().contains_key(&id) || STARTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        if let Err(why) = start_next(&shared, &id).await {
+            let why = placed(&crate::secrets::known().redact(&why), &homes(&shared));
+            tracing::info!("the next conversation's Claude Code isn't started: {why}");
+        }
+        STARTING.store(false, Ordering::SeqCst);
+    });
+}
+
+async fn start_next(shared: &Arc<Shared>, id: &str) -> Result<(), String> {
+    let account = shared
+        .jobs
+        .signed_in_account(Tool::Claude)
+        .ok_or("no Claude Code account is signed in")?;
+    let busy = shared.harness.busy(id);
+    let _held = busy.lock().await;
+    // Taken by a new conversation whose turn ran first, or started already.
+    if !shared.conversations.is_next(id) || shared.harness.warm().contains_key(id) {
+        return Ok(());
+    }
+    let began = Instant::now();
+    let place = Place::of(&shared.config.home, id);
+    place.make()?;
+    checkouts(shared, &place, &|| true).await;
+    shared.jobs.claude_login_ready(Some(&account)).await?;
+    place.scrub();
+    let token = new_token();
+    let (mcp, url) = mcp_config(shared, &place, id);
+    write_mcp(&mcp, &url, &token)?;
+    let mut flags = claude_flags(shared);
+    let key = flags_key(&flags);
+    flags.extend(["--mcp-config".into(), mcp.into_os_string()]);
+    let launch = shared.jobs.conversation_launch(
+        Tool::Claude,
+        &account,
+        &place.room,
+        &place.temp,
+        place.login_for(&account),
+        vec![place.repos.clone()],
+        flags,
+        place.folder.join("agent.log"),
+    )?;
+    // Its stop signal is its turn's, given when the turn takes it ([`crate::conn::Conn::renew`]).
+    let (_signal, stop) = tokio::sync::watch::channel(crate::process::Signal::Run);
+    let conn = match crate::conn::Conn::spawn(&launch, WARM_FOR, stop, false).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            place.forget_login();
+            return Err(format!("Claude Code couldn't start: {e}"));
+        }
+    };
+    let warm = Warm {
+        conn,
+        token,
+        account: account.id.clone(),
+        config_dir: account.config_dir.clone(),
+        session: None,
+        key,
+        place,
+        since: Instant::now(),
+    };
+    // Not kept when its account changed while it started, or the conversation went.
+    let since = warm.since;
+    let kept = shared.harness.keep(id, warm, Some(id), |warm| {
+        (shared.conversations.is_next(id) || shared.conversations.exists(id))
+            && may_wait(shared, warm)
+    });
+    if !kept {
+        return Ok(());
+    }
+    tracing::info!(
+        "the next conversation's Claude Code is waiting ({} ms)",
+        began.elapsed().as_millis()
+    );
+    let (shared, id) = (shared.clone(), id.to_owned());
+    tokio::spawn(async move {
+        tokio::time::sleep(WARM_FOR).await;
+        shared.harness.expire(&id, since);
+    });
+    Ok(())
+}
+
+/// A conversation's deleted (`DELETE /v1/conversations/{id}`, or the oldest forgotten past the
+/// most kept): its waiting Claude Code ends. Started once, by obid's start.
+pub fn end_warm_with_conversations(shared: Arc<Shared>) {
+    let mut events = shared.events.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) if event.name == "conversation" && event.data["deleted"] == true => {
+                    if let Some(id) = event.data["id"].as_str() {
+                        shared.harness.end_warm(id);
+                    }
+                }
+                // Deletions it missed: every one waiting for a conversation that's gone ends.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    shared.harness.end_warm_unless(|c| {
+                        shared.conversations.exists(c) || shared.conversations.is_next(c)
+                    });
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+}
+
+/// A conversation's Claude Code's flags, before `--resume` and `--mcp-config`.
+fn claude_flags(shared: &Shared) -> Vec<OsString> {
+    [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--permission-prompt-tool",
+        "stdio",
+        "--permission-mode",
+        "default",
+        "--setting-sources",
+        "",
+        "--strict-mcp-config",
+        "--restricted",
+        "--tools",
+        TOOLS,
+        "--max-turns",
+        MAX_TURNS,
+        "--model",
+        shared.config.conversation.model.as_str(),
+        "--append-system-prompt",
+        orientation(shared).as_str(),
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect()
+}
+
+/// Where a conversation's MCP configuration is (a file in its `HOME`), and the URL of Oby's
+/// tools for it.
+fn mcp_config(shared: &Shared, place: &Place, conversation: &str) -> (PathBuf, String) {
+    let url = format!(
+        "{}/v1/agent/mcp/conversation-{conversation}",
+        shared.connections.api_url()
+    );
+    (place.temp.join(MCP_FILE), url)
+}
+
+/// Writes the MCP configuration that gives the agent Oby's tools with `token`. The agent writes
+/// in its HOME: never through a link it left there (O_NOFOLLOW, O_EXCL).
+fn write_mcp(mcp: &Path, url: &str, token: &str) -> Result<(), String> {
+    let servers = json!({"mcpServers": {"oby": {"type": "http", "url": url,
+                                                 "headers": {"Authorization": format!("Bearer {token}")}}}});
+    crate::jobs::write_login(mcp, servers.to_string().as_bytes())
+        .map_err(|e| format!("the session's MCP configuration couldn't be written: {e}"))
+}
+
+/// What a run's command line says, in one number: a waiting Claude Code started with other flags
+/// (another model, other repositories in its orientation) isn't given the turn.
+fn flags_key(flags: &[OsString]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    flags.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A token for a conversation's MCP endpoint.
+fn new_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 /// Runs one conversation turn: in its session when conversations are on the harness and a Claude
@@ -225,6 +619,7 @@ fn said_why(talk: Talk, why: &str) -> Talk {
 }
 
 /// Where a conversation's session lives: `home/conversations/<id>/`.
+#[derive(Clone)]
 pub(super) struct Place {
     pub(super) folder: PathBuf,
     /// The agent's working folder, written.
@@ -457,12 +852,16 @@ struct TurnEnd<'a> {
     harness: &'a Sessions,
     token: &'a str,
     place: &'a Place,
+    conversation: &'a str,
 }
 
 impl Drop for TurnEnd<'_> {
     fn drop(&mut self) {
         self.harness.close(self.token);
-        self.place.forget_login();
+        // A Claude Code kept for the next turn keeps its login copy until it ends ([`Warm::end`]).
+        if !self.harness.warm().contains_key(self.conversation) {
+            self.place.forget_login();
+        }
     }
 }
 
@@ -498,6 +897,39 @@ fn kept(place: &Place, account: &str) -> Option<Kept> {
     .then_some(kept)
 }
 
+/// When each stage of a turn came, from its start: one line in obid's log per turn, so where the
+/// seconds go before Oby's first words is never guessed (docs/fast-replies.md).
+struct Stopwatch {
+    began: Instant,
+    marks: Mutex<Vec<(&'static str, u128)>>,
+}
+
+impl Stopwatch {
+    fn new() -> Stopwatch {
+        Stopwatch {
+            began: Instant::now(),
+            marks: Mutex::new(vec![]),
+        }
+    }
+
+    /// Notes `what` the first time it happens.
+    fn mark(&self, what: &'static str) {
+        let mut marks = self.marks.lock().unwrap_or_else(|e| e.into_inner());
+        if !marks.iter().any(|(w, _)| *w == what) {
+            marks.push((what, self.began.elapsed().as_millis()));
+        }
+    }
+
+    fn line(&self) -> String {
+        let marks = self.marks.lock().unwrap_or_else(|e| e.into_inner());
+        marks
+            .iter()
+            .map(|(what, ms)| format!("{what} {ms} ms"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// One turn in the conversation's session, tried twice. Why it couldn't answer, when it couldn't.
 async fn session(
     shared: &Arc<Shared>,
@@ -507,6 +939,7 @@ async fn session(
     asked: &Asked<'_>,
     control: &Arc<Control>,
 ) -> Result<Answered, String> {
+    let watch = Stopwatch::new();
     let place = Place::of(&shared.config.home, &control.conversation);
     place.make()?;
     // One turn per conversation at a time: a new turn waits for a cancelled run to exit before it
@@ -517,7 +950,9 @@ async fn session(
     if !control.live() {
         return Err("the turn was cancelled before it started".into());
     }
-    checkouts(shared, &place, control).await;
+    watch.mark("its turn");
+    checkouts(shared, &place, &|| control.live()).await;
+    watch.mark("repositories");
     super::thinking(shared, control, 1, "Thinking", State::Running);
     let resumed = kept(&place, &account.id);
     let session = Arc::new(Session {
@@ -537,12 +972,26 @@ async fn session(
         room: place.room.clone(),
         artifacts: Mutex::new(vec![]),
     });
-    let token = shared.harness.open(session.clone());
+    // Its Claude Code still running from the turn before, on the same session and account.
+    let warm = (shared.config.conversation.agent == Tool::Claude)
+        .then(|| {
+            shared.harness.take_warm(
+                &control.conversation,
+                account,
+                resumed.as_ref().map(|k| k.session.as_str()),
+            )
+        })
+        .flatten();
+    let token = match &warm {
+        Some(warm) => shared.harness.reopen(&warm.token, session.clone()),
+        None => shared.harness.open(session.clone()),
+    };
     // Even on a panic, the token stops being valid and the login copy is taken out.
     let _guard = TurnEnd {
         harness: &shared.harness,
         token: &token,
         place: &place,
+        conversation: &control.conversation,
     };
     let ran = attempts(
         shared,
@@ -551,10 +1000,15 @@ async fn session(
         &session,
         &token,
         resumed.map(|k| k.session),
+        warm,
         given,
         control,
+        &watch,
     )
     .await;
+    watch.mark("ended");
+    // The owner is talking to Oby: the next new conversation's Claude Code starts meanwhile.
+    prestart(shared);
     let state = if ran.is_ok() && control.live() {
         State::Done
     } else {
@@ -592,9 +1046,10 @@ async fn session(
         other => other,
     };
     tracing::info!(
-        "turn {} ended in its session: {}",
+        "turn {} ended in its session: {} ({})",
         control.turn,
-        end.as_str()
+        end.as_str(),
+        watch.line()
     );
     Ok(Answered {
         talk: if text.is_empty() && jobs.is_empty() && !published {
@@ -617,27 +1072,20 @@ async fn attempts(
     session: &Arc<Session>,
     token: &str,
     mut resume: Option<String>,
+    mut warm: Option<Warm>,
     given: &[Turn],
     control: &Arc<Control>,
+    watch: &Stopwatch,
 ) -> Result<(String, End), String> {
     let config = &shared.config.conversation;
     let tool = config.agent;
     let said = &session.said;
     // The budget is the turn's, both runs together.
     let deadline = Instant::now() + config.budget;
-    let mcp = place.temp.join(MCP_FILE);
-    let url = format!(
-        "{}/v1/agent/mcp/conversation-{}",
-        shared.connections.api_url(),
-        control.conversation
-    );
-    let servers = json!({"mcpServers": {"oby": {"type": "http", "url": url,
-                                                 "headers": {"Authorization": format!("Bearer {token}")}}}});
-    // The agent writes in its HOME: never through a link it left there (O_NOFOLLOW, O_EXCL).
+    let (mcp, url) = mcp_config(shared, place, &control.conversation);
     // Codex is given the server in its arguments instead.
     if tool == Tool::Claude {
-        crate::jobs::write_login(&mcp, servers.to_string().as_bytes())
-            .map_err(|e| format!("the session's MCP configuration couldn't be written: {e}"))?;
+        write_mcp(&mcp, &url, token)?;
     }
     // What reaches the agent has the vault's secrets taken out; a vault that can't be read sends
     // nothing.
@@ -670,69 +1118,78 @@ async fn attempts(
             Some(_) => words.clone(),
             None => first.clone(),
         };
-        let mut flags: Vec<OsString> = [
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--permission-prompt-tool",
-            "stdio",
-            "--permission-mode",
-            "default",
-            "--setting-sources",
-            "",
-            "--strict-mcp-config",
-            "--restricted",
-            "--tools",
-            TOOLS,
-            "--max-turns",
-            MAX_TURNS,
-            "--model",
-            config.model.as_str(),
-            "--append-system-prompt",
-            orientation(shared).as_str(),
-        ]
-        .iter()
-        .map(OsString::from)
-        .collect();
+        let mut flags = claude_flags(shared);
+        let key = flags_key(&flags);
         if let Some(session) = &resume {
             flags.extend(["--resume".into(), session.into()]);
         }
         flags.extend(["--mcp-config".into(), mcp.clone().into_os_string()]);
+        // As before a job's run (#651): the Keychain's default login refreshed when it's due and
+        // kept fresh while the turn runs; an account with a folder of its own refused near its end.
+        if tool == Tool::Claude {
+            shared.jobs.claude_login_ready(Some(account)).await?;
+        }
+        // What the agent planted for the next Claude Code goes before every turn, a waiting one's
+        // too (it loads nothing again, but the rule is the turn's).
         place.scrub();
-        let (launch, codex) = match tool {
-            Tool::Codex => {
-                super::harness_codex::launch(shared, account, place, &url, token, &resume).await?
+        let was_warm = warm.is_some();
+        // Its Claude Code is given the turn when it was started as this run would be, its login
+        // copy is good for the turn, and it wrote nothing while it waited (a line read now would be
+        // taken for this turn's); else it ends, and the turn starts one.
+        let warm = match warm.take() {
+            Some(mut warm)
+                if warm.key == key && crate::jobs::login_copy_lasts(place.login_for(account)) =>
+            {
+                if warm.conn.quiet().await {
+                    Some(warm)
+                } else {
+                    warm.end();
+                    None
+                }
             }
-            _ => {
-                // As before a job's run (#651): the Keychain's default login refreshed when it's
-                // due and kept fresh while the turn runs; an account with a folder of its own
-                // refused near its end.
-                shared.jobs.claude_login_ready(Some(account)).await?;
-                let launch = shared.jobs.conversation_launch(
-                    Tool::Claude,
-                    account,
-                    &place.room,
-                    &place.temp,
-                    place.login_for(account),
-                    vec![place.repos.clone()],
-                    flags,
-                    place.folder.join("agent.log"),
-                )?;
-                (launch, None)
+            Some(stale) => {
+                stale.end();
+                None
             }
+            None => None,
         };
+        let (run, codex) = match warm {
+            Some(warm) => {
+                watch.mark("its Claude Code was running");
+                (Run::Warm(Box::new(warm.conn)), None)
+            }
+            None => match tool {
+                Tool::Codex => {
+                    let (launch, codex) =
+                        super::harness_codex::launch(shared, account, place, &url, token, &resume)
+                            .await?;
+                    (Run::Cold(launch), codex)
+                }
+                _ => {
+                    let launch = shared.jobs.conversation_launch(
+                        Tool::Claude,
+                        account,
+                        &place.room,
+                        &place.temp,
+                        place.login_for(account),
+                        vec![place.repos.clone()],
+                        flags,
+                        place.folder.join("agent.log"),
+                    )?;
+                    (Run::Cold(launch), None)
+                }
+            },
+        };
+        watch.mark("starting");
         let turn = one(
             shared,
             place,
             session,
-            launch,
+            run,
             &prompt,
             limit,
             codex.as_ref(),
+            watch,
         )
         .await;
         let turn = match turn {
@@ -745,9 +1202,10 @@ async fn attempts(
                 continue;
             }
         };
+        let (turn, streamed, running) = turn;
         // Ended for good (Codex ran a command): not tried again, and its session never picked up,
         // but what ran taints the conversation, and the mark is kept (finding 5).
-        if let Some(why) = turn.0.fatal.clone() {
+        if let Some(why) = turn.fatal.clone() {
             session.web.store(true, Ordering::SeqCst);
             let kept = Kept {
                 session: String::new(),
@@ -760,7 +1218,7 @@ async fn attempts(
             );
             return Err(why);
         }
-        if let Some(id) = &turn.0.session {
+        if let Some(id) = &turn.session {
             let kept = Kept {
                 session: id.clone(),
                 account: account.id.clone(),
@@ -771,7 +1229,32 @@ async fn attempts(
                 &serde_json::to_vec(&kept).unwrap_or_default(),
             );
         }
-        let (turn, streamed) = turn;
+        // Kept for the conversation's next turn when this one answered; else it ends.
+        let kept_for = match (running, &turn.session) {
+            (Some(conn), Some(id)) if turn.succeeded() && control.live() => Some(Warm {
+                conn,
+                token: token.to_owned(),
+                account: account.id.clone(),
+                config_dir: account.config_dir.clone(),
+                session: Some(id.clone()),
+                key,
+                place: place.clone(),
+                since: Instant::now(),
+            }),
+            // As before: it may take a few seconds to finish the session file a `--resume` reads.
+            (Some(mut conn), _) => {
+                let until = Instant::now() + agent::AFTER_RESULT;
+                conn.close_input();
+                conn.drain_within(agent::AFTER_RESULT).await;
+                conn.finish_within(until.saturating_duration_since(Instant::now()))
+                    .await;
+                None
+            }
+            _ => None,
+        };
+        if let Some(warm) = kept_for {
+            keep_warm(shared, &control.conversation, warm);
+        }
         let text = match turn.text() {
             text if !text.is_empty() => text,
             _ => streamed,
@@ -788,8 +1271,11 @@ async fn attempts(
         }
         let why = turn.text().lines().next().unwrap_or("").trim().to_owned();
         failures.push(format!("attempt {attempt}: {} ({why})", turn.exit));
-        // A session that can't be picked up (another account's, or gone): a new one.
-        resume = None;
+        // A session that can't be picked up (another account's, or gone): a new one. A waiting
+        // Claude Code that had ended is started again on its session.
+        if !was_warm {
+            resume = None;
+        }
     }
     tracing::warn!(
         "conversation {}: its session failed twice: {}",
@@ -953,15 +1439,17 @@ pub(super) fn orientation(shared: &Shared) -> String {
 
 /// One run of the agent for the turn (Codex's `app-server` with `codex`'s options, else Claude
 /// Code), for at most `limit`, its events sent as they come. The turn, and the words it streamed.
+#[allow(clippy::too_many_arguments)]
 async fn one(
     shared: &Arc<Shared>,
     place: &Place,
     session: &Arc<Session>,
-    launch: agent::Launch,
+    run: Run,
     prompt: &str,
     limit: Duration,
     codex: Option<&crate::codex::Options>,
-) -> std::io::Result<(agent::Turn, String)> {
+    watch: &Stopwatch,
+) -> std::io::Result<(agent::Turn, String, Option<crate::conn::Conn>)> {
     let control = &session.control;
     let bounds = place.bounds();
     // Stop and cancel reach the agent: it ends with everything it started.
@@ -992,11 +1480,15 @@ async fn one(
             return;
         }
         match event {
-            Event::Delta(text) => delta(streamed.push(&text, &secrets)),
+            Event::Delta(text) => {
+                watch.mark("first words");
+                delta(streamed.push(&text, &secrets))
+            }
             // ToolSearch loads a deferred tool's schema before an MCP call: Oby's own bookkeeping,
             // not a step the owner sees (N, live e2e).
             Event::Tool { name, .. } if name == "ToolSearch" => {}
             Event::Tool { id, name, input } => {
+                watch.mark("first step");
                 // Untrusted content read this turn (the web, repo code) taints it: work it
                 // dispatches then waits for the owner (N1).
                 if taints(&name, &input, &bounds, &place.repos) {
@@ -1019,8 +1511,11 @@ async fn one(
                 }
             }
             // The session's id, kept as soon as it's named (crash safety, with the mark).
-            Event::Session(id) => session.keep(Some(&id)),
-            Event::Step(_) | Event::Denied(_) => {}
+            Event::Session(id) => {
+                watch.mark("session");
+                session.keep(Some(&id))
+            }
+            Event::Step(_) | Event::Denied(_) | Event::Usage(_) | Event::Tokens(_) => {}
         }
     };
     let decide = |tool: &str, input: &Value| {
@@ -1028,15 +1523,32 @@ async fn one(
             session.taint()
         }))
     };
-    let ran = match codex {
-        Some(options) => {
-            crate::codex::run_turn(launch, prompt, options, limit, stop, decide, on_event).await
+    let ran = match (run, codex) {
+        (Run::Cold(launch), Some(options)) => {
+            crate::codex::run_turn(launch, prompt, options, limit, stop, decide, on_event)
+                .await
+                .map(|turn| (turn, None))
         }
-        None => agent::run_turn(launch, prompt, limit, stop, decide, on_event).await,
+        (Run::Cold(launch), None) => {
+            match crate::conn::Conn::spawn(&launch, limit, stop, false).await {
+                Ok(conn) => Ok(agent::turn_on(conn, prompt, decide, on_event, true).await),
+                Err(e) => Err(e),
+            }
+        }
+        (Run::Warm(mut conn), _) => {
+            conn.renew(limit, stop);
+            Ok(agent::turn_on(*conn, prompt, decide, on_event, true).await)
+        }
     };
     watching.abort();
     delta(streamed.finish(&secrets));
-    ran.map(|turn| (turn, streamed.raw))
+    ran.map(|(turn, running)| (turn, streamed.raw, running))
+}
+
+/// What a turn's attempt runs on: an agent it starts, or its conversation's waiting Claude Code.
+enum Run {
+    Cold(agent::Launch),
+    Warm(Box<crate::conn::Conn>),
 }
 
 /// A turn's words as they stream, sent out with every secret obid knows taken out: what could
@@ -1342,66 +1854,247 @@ fn step_text(name: &str, input: &Value) -> String {
 }
 
 /// The room's read-only checkouts, each configured repository at its default branch as obid's
-/// clone has it (`refs/remotes/origin/<branch>`; fetched once when there's no clone yet), made
-/// again when the branch moved. A repository that can't be checked out is left out, and logged.
-async fn checkouts(shared: &Shared, place: &Place, control: &Control) {
-    let marks = place.folder.join("repos.json");
-    let mut kept: BTreeMap<String, String> = std::fs::read(&marks)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
+/// clone has it (`refs/remotes/origin/<branch>`; fetched once when there's no clone yet). The turn
+/// never waits for a tree to be extracted when it can help it (docs/fast-replies.md): an empty
+/// room takes the spare tree obid keeps ready at that commit (a rename), and a room whose branch
+/// moved keeps its checkout while the new one is made beside it and swapped in. Only an empty room
+/// with no spare at its commit waits for one. A repository that can't be checked out is left out,
+/// and logged.
+async fn checkouts(shared: &Arc<Shared>, place: &Place, live: &(dyn Fn() -> bool + Sync)) {
     for repo in &shared.config.repos {
         // A cancelled turn doesn't keep extracting (a big tree takes time).
-        if !control.live() {
+        if !live() {
             break;
         }
-        if let Err(why) = checkout(shared, place, repo, &mut kept).await {
+        if let Err(why) = checkout(shared, place, repo).await {
             tracing::warn!("conversation room: {} isn't checked out: {why}", repo.repo);
         }
     }
-    let _ = crate::store::write_private(&marks, &serde_json::to_vec(&kept).unwrap_or_default());
 }
 
-async fn checkout(
-    shared: &Shared,
-    place: &Place,
-    repo: &crate::config::Repo,
-    kept: &mut BTreeMap<String, String>,
-) -> Result<(), String> {
+/// The commit `repo`'s default branch is at in obid's clone, cloning it first when there's none.
+async fn default_head(shared: &Shared, repo: &crate::config::Repo) -> Result<String, String> {
     let clone = crate::git::clone_path(&shared.config.home, &repo.repo);
     let reference = format!("refs/remotes/origin/{}^{{commit}}", repo.default_branch);
-    let head = |clone: PathBuf, reference: String| async move {
+    let head = || async {
         crate::git::git(&clone, &["rev-parse", "--verify", "--quiet", &reference])
             .await
             .ok()
             .filter(|sha| crate::git::is_sha(sha))
     };
-    let sha = match head(clone.clone(), reference.clone()).await {
-        Some(sha) => sha,
+    match head().await {
+        Some(sha) => Ok(sha),
         None => {
             shared.jobs.research_clone(&repo.repo).await?;
-            head(clone.clone(), reference)
+            head()
                 .await
-                .ok_or("its default branch isn't in obid's clone")?
+                .ok_or_else(|| "its default branch isn't in obid's clone".to_owned())
         }
-    };
+    }
+}
+
+/// The rooms whose checkout of a repository is being made again, so a turn starts one at most.
+static SWAPPING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+async fn checkout(
+    shared: &Arc<Shared>,
+    place: &Place,
+    repo: &crate::config::Repo,
+) -> Result<(), String> {
+    let sha = default_head(shared, repo).await?;
     let (owner, name) = repo.repo.split_once('/').ok_or("it isn't owner/name")?;
-    let owners = place.repos.join(owner);
-    let dest = owners.join(name);
-    if kept.get(&repo.repo) == Some(&sha) && dest.is_dir() {
+    let dest = place.repos.join(owner).join(name);
+    if marks(place).get(&repo.repo) == Some(&sha) && dest.is_dir() {
         return Ok(());
     }
-    kept.remove(&repo.repo);
+    if !dest.is_dir() {
+        return swap(shared, place, repo, &sha).await;
+    }
+    // The room keeps the checkout it has while the new one is made; it's swapped in when ready.
+    {
+        let mut swapping = SWAPPING.lock().unwrap_or_else(|e| e.into_inner());
+        if swapping.contains(&dest) {
+            return Ok(());
+        }
+        swapping.push(dest.clone());
+    }
+    let (shared, place, repo) = (shared.clone(), place.clone(), repo.clone());
+    tokio::spawn(async move {
+        if let Err(why) = swap(&shared, &place, &repo, &sha).await {
+            tracing::warn!(
+                "conversation room: {} isn't checked out again: {why}",
+                repo.repo
+            );
+        }
+        SWAPPING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|d| d != &dest);
+    });
+    Ok(())
+}
+
+/// Puts a tree of `repo` at `sha` in the room, in place of the one there: the old one leaves the
+/// room and the new one comes in by renames (never through a link left in their place), so a run
+/// reading it sees one whole tree or the other.
+async fn swap(
+    shared: &Arc<Shared>,
+    place: &Place,
+    repo: &crate::config::Repo,
+    sha: &str,
+) -> Result<(), String> {
+    let (owner, name) = repo.repo.split_once('/').ok_or("it isn't owner/name")?;
+    let tree = tree_at(shared, repo, sha).await?;
+    // The conversation went while the tree was made: nothing of it is made again.
+    if !place.repos.is_dir() {
+        let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(tree)).await;
+        return Err("its conversation went".into());
+    }
+    let owners = place.repos.join(owner);
+    let dest = owners.join(name);
     for dir in [&owners, &dest] {
         crate::jobs::not_a_link(dir)?;
     }
-    match std::fs::remove_dir_all(&dest) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("the old checkout couldn't go: {e}")),
+    crate::store::make_private_dir(&owners).map_err(|e| e.to_string())?;
+    if std::fs::symlink_metadata(&dest).is_ok() {
+        let old = place
+            .folder
+            .join(format!("old-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::rename(&dest, &old).map_err(|e| format!("the old checkout couldn't go: {e}"))?;
+        tokio::task::spawn_blocking(move || std::fs::remove_dir_all(old));
     }
-    crate::store::make_private_dir(&dest).map_err(|e| e.to_string())?;
-    // ponytail: the whole tree again when the branch moved; incremental when big repos make it slow.
+    std::fs::rename(&tree, &dest)
+        .map_err(|e| format!("the checkout couldn't come into the room: {e}"))?;
+    mark(place, &repo.repo, sha);
+    Ok(())
+}
+
+/// Which commit each repository of the room is checked out at (`repos.json`).
+fn marks(place: &Place) -> BTreeMap<String, String> {
+    std::fs::read(place.folder.join("repos.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn mark(place: &Place, repo: &str, sha: &str) {
+    static WRITING: Mutex<()> = Mutex::new(());
+    let _held = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut kept = marks(place);
+    kept.insert(repo.to_owned(), sha.to_owned());
+    let _ = crate::store::write_private(
+        &place.folder.join("repos.json"),
+        &serde_json::to_vec(&kept).unwrap_or_default(),
+    );
+}
+
+/// Where obid keeps `repo`'s spare tree, next to the rooms (the same disk, so a rename moves it).
+fn spares(shared: &Shared, repo: &str) -> PathBuf {
+    shared.config.home.join("checkouts").join(repo)
+}
+
+/// A whole tree of `repo` at `sha`, all obid's, for a room to take by a rename: the spare kept
+/// ready at that commit when there is one, else extracted now. Another spare is made after.
+async fn tree_at(
+    shared: &Arc<Shared>,
+    repo: &crate::config::Repo,
+    sha: &str,
+) -> Result<PathBuf, String> {
+    let root = spares(shared, &repo.repo);
+    crate::store::make_private_dir(&root).map_err(|e| e.to_string())?;
+    let taken = root.join(format!("taken-{}", uuid::Uuid::new_v4().simple()));
+    if std::fs::rename(root.join(format!("spare-{sha}")), &taken).is_err() {
+        extract(shared, &repo.repo, sha, &taken).await?;
+    }
+    spare(shared.clone(), repo.clone());
+    Ok(taken)
+}
+
+/// Makes `repo`'s spare tree at its default branch, in the background, unless it's there or being
+/// made, or obid has no clone of it yet (the first room's turn clones it); older spares go. ponytail: one spare per repository, so two new rooms at once extract
+/// once; a pool when the owner opens many at a time.
+pub(super) fn spare(shared: Arc<Shared>, repo: crate::config::Repo) {
+    if !crate::git::clone_path(&shared.config.home, &repo.repo).is_dir() {
+        return;
+    }
+    static MAKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    {
+        let mut making = MAKING.lock().unwrap_or_else(|e| e.into_inner());
+        if making.contains(&repo.repo) {
+            return;
+        }
+        making.push(repo.repo.clone());
+    }
+    tokio::spawn(async move {
+        let root = spares(&shared, &repo.repo);
+        let made = async {
+            let sha = default_head(&shared, &repo).await?;
+            let ready = root.join(format!("spare-{sha}"));
+            // An older spare is renamed before it's removed: a room taking it at that moment gets
+            // all of it or none.
+            for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+                let path = entry.path();
+                let gone = root.join(format!("gone-{}", uuid::Uuid::new_v4().simple()));
+                let old =
+                    entry.file_name().to_string_lossy().starts_with("spare-") && path != ready;
+                if old && std::fs::rename(&path, &gone).is_ok() {
+                    let _ =
+                        tokio::task::spawn_blocking(move || std::fs::remove_dir_all(gone)).await;
+                }
+            }
+            if ready.is_dir() {
+                return Ok(());
+            }
+            let next = root.join(format!("next-{}", uuid::Uuid::new_v4().simple()));
+            crate::store::make_private_dir(&root).map_err(|e| e.to_string())?;
+            extract(&shared, &repo.repo, &sha, &next).await?;
+            if std::fs::rename(&next, &ready).is_err() {
+                let _ = std::fs::remove_dir_all(&next);
+            }
+            Ok::<(), String>(())
+        };
+        if let Err(why) = made.await {
+            tracing::warn!("{}'s spare checkout isn't made: {why}", repo.repo);
+        }
+        MAKING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|r| r != &repo.repo);
+    });
+}
+
+/// At obid's start, every conversation's login copy goes: no Claude Code of obid's is running yet,
+/// and one a crash left (the next new conversation's room holds one most of the time) is never
+/// left on disk.
+pub fn forget_logins_left(home: &Path) {
+    for entry in std::fs::read_dir(home.join("conversations"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            Place::of(home, &entry.file_name().to_string_lossy()).forget_login();
+        }
+    }
+}
+
+/// At obid's start: what a stop left in the spares' folders goes (all but the spares), and each
+/// repository's spare tree is made.
+pub fn prepare_rooms(shared: &Arc<Shared>) {
+    for repo in &shared.config.repos {
+        let root = spares(shared, &repo.repo);
+        for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+            if !entry.file_name().to_string_lossy().starts_with("spare-") {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+        spare(shared.clone(), repo.clone());
+    }
+}
+
+/// Extracts `repo` at `sha` from obid's clone into `dest`, a folder made for it.
+async fn extract(shared: &Shared, repo: &str, sha: &str, dest: &Path) -> Result<(), String> {
+    let clone = crate::git::clone_path(&shared.config.home, repo);
     let tar = crate::git::run_bytes(
         &clone,
         &["archive".as_ref(), "--format=tar".as_ref(), sha.as_ref()],
@@ -1410,9 +2103,10 @@ async fn checkout(
     )
     .await
     .map_err(|e| e.to_string())?;
+    crate::store::make_private_dir(dest).map_err(|e| e.to_string())?;
     let mut untar = tokio::process::Command::new("tar")
         .args(["-x", "-f", "-", "-C"])
-        .arg(&dest)
+        .arg(dest)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -1430,18 +2124,185 @@ async fn checkout(
         .map_err(|_| "tar took more than 5 minutes".to_owned())?
         .map_err(|e| e.to_string())?;
     if !done.status.success() {
+        let _ = std::fs::remove_dir_all(dest);
         return Err(format!(
             "tar failed: {}",
             String::from_utf8_lossy(&done.stderr).trim()
         ));
     }
-    kept.insert(repo.repo.clone(), sha);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in for a waiting Claude Code (`cat`, which waits on its stdin), kept for `account`
+    /// on `config_dir` with `session`.
+    async fn waiting(account: &str, config_dir: Option<&str>, session: &str) -> Warm {
+        let root = std::env::temp_dir().join(format!("obid-warm-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let launch = agent::Launch {
+            argv: vec!["/bin/cat".into()],
+            env: vec![],
+            cwd: root.clone(),
+            stderr: root.join("agent.log"),
+        };
+        let (_signal, stop) = tokio::sync::watch::channel(crate::process::Signal::Run);
+        let conn = crate::conn::Conn::spawn(&launch, Duration::from_secs(600), stop, false)
+            .await
+            .unwrap();
+        Warm {
+            conn,
+            token: "t".into(),
+            account: account.into(),
+            config_dir: config_dir.map(PathBuf::from),
+            session: Some(session.into()),
+            key: 1,
+            place: Place::of(&root, "c"),
+            since: Instant::now(),
+        }
+    }
+
+    fn account(id: &str, config_dir: Option<&str>) -> crate::config::Account {
+        crate::config::Account {
+            id: id.into(),
+            name: id.into(),
+            config_dir: config_dir.map(PathBuf::from),
+            payer: None,
+        }
+    }
+
+    /// Whether `pid` ends within 10 seconds.
+    async fn ends(pid: u32) -> bool {
+        let give_up_at = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < give_up_at {
+            let alive =
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok();
+            // An ended child stays a zombie until it's reaped: ask its state.
+            let zombie = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().starts_with('Z'))
+                .unwrap_or(false);
+            if !alive || zombie {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// A waiting Claude Code is given a turn only on the same session and the same account's login
+    /// as it is now; one on another ends.
+    #[tokio::test]
+    async fn a_waiting_claude_code_runs_only_its_own_session_on_its_own_login() {
+        let sessions = Sessions::default();
+        for (who, folder, session) in [
+            ("b", Some("/a"), "s1"),
+            ("a", Some("/elsewhere"), "s1"),
+            ("a", Some("/a"), "s2"),
+        ] {
+            let warm = waiting("a", Some("/a"), "s1").await;
+            let pid = warm.conn.pid();
+            sessions.keep("c", warm, None, |_| true);
+            assert!(
+                sessions
+                    .take_warm("c", &account(who, folder), Some(session))
+                    .is_none()
+            );
+            assert!(ends(pid).await, "{who} {folder:?} {session}");
+        }
+        sessions.keep("c", waiting("a", Some("/a"), "s1").await, None, |_| true);
+        let mine = sessions.take_warm("c", &account("a", Some("/a")), Some("s1"));
+        assert!(mine.is_some());
+        mine.unwrap().end();
+    }
+
+    /// At most WARM_MOST wait: the one kept longest ago ends. One ends when its time is up, and
+    /// they end with their account's change.
+    #[tokio::test]
+    async fn at_most_three_wait_each_for_its_time() {
+        let sessions = Sessions::default();
+        let mut pids = vec![];
+        for c in ["c1", "c2", "c3", "c4"] {
+            let warm = waiting("a", None, "s").await;
+            pids.push(warm.conn.pid());
+            sessions.keep(c, warm, None, |_| true);
+        }
+        assert!(ends(pids[0]).await, "the oldest ends");
+        assert_eq!(sessions.warm().len(), WARM_MOST);
+        let since = sessions.warm()["c2"].since;
+        sessions.expire("c2", Instant::now());
+        assert!(
+            sessions.warm().contains_key("c2"),
+            "a newer one's time isn't up"
+        );
+        sessions.expire("c2", since);
+        assert!(!sessions.warm().contains_key("c2"));
+        assert!(ends(pids[1]).await);
+        sessions.keep("c5", waiting("b", None, "s").await, None, |_| true);
+        sessions.end_warm_on("a");
+        assert_eq!(sessions.warm().keys().collect::<Vec<_>>(), vec!["c5"]);
+        assert!(ends(pids[2]).await && ends(pids[3]).await);
+        sessions.end_all_warm();
+        assert!(sessions.warm().is_empty());
+    }
+
+    /// The next new conversation's Claude Code isn't one of the WARM_MOST, and none is kept when
+    /// what's looked at under the lock says it may not wait.
+    #[tokio::test]
+    async fn the_next_conversations_claude_code_is_kept_beside_the_three() {
+        let sessions = Sessions::default();
+        let mut next = waiting("a", None, "s").await;
+        next.session = None;
+        let next_pid = next.conn.pid();
+        assert!(sessions.keep("next", next, Some("next"), |_| true));
+        // One with no session that isn't the next conversation's counts like any other.
+        let mut taken = waiting("a", None, "s").await;
+        taken.session = None;
+        let taken_pid = taken.conn.pid();
+        assert!(sessions.keep("c0", taken, Some("next"), |_| true));
+        let mut pids = vec![];
+        for c in ["c1", "c2", "c3", "c4"] {
+            let warm = waiting("a", None, "s").await;
+            pids.push(warm.conn.pid());
+            assert!(sessions.keep(c, warm, Some("next"), |_| true));
+        }
+        assert!(ends(taken_pid).await, "it was the oldest of the counted");
+        assert!(ends(pids[0]).await, "the oldest conversation's ends");
+        assert!(sessions.warm().contains_key("next"));
+        assert_eq!(sessions.warm().len(), WARM_MOST + 1);
+        let refused = waiting("a", None, "s").await;
+        let refused_pid = refused.conn.pid();
+        assert!(!sessions.keep("c5", refused, Some("next"), |_| false));
+        assert!(ends(refused_pid).await);
+        sessions.end_warm_unless(|c| c != "next" && c != "c2");
+        assert_eq!(
+            {
+                let mut left: Vec<String> = sessions.warm().keys().cloned().collect();
+                left.sort();
+                left
+            },
+            vec!["c3", "c4"]
+        );
+        assert!(ends(next_pid).await && ends(pids[1]).await);
+        sessions.end_all_warm();
+    }
+
+    /// Another model or other repositories in the orientation start a Claude Code anew.
+    #[test]
+    fn another_start_has_another_key() {
+        let flags = |model: &str, repos: &str| -> Vec<OsString> {
+            ["-p", "--model", model, "--append-system-prompt", repos]
+                .iter()
+                .map(OsString::from)
+                .collect()
+        };
+        assert_eq!(flags_key(&flags("m", "r")), flags_key(&flags("m", "r")));
+        assert_ne!(flags_key(&flags("m", "r")), flags_key(&flags("n", "r")));
+        assert_ne!(flags_key(&flags("m", "r")), flags_key(&flags("m", "r2")));
+    }
 
     #[test]
     fn steps_name_the_tool_and_what_it_is_about() {

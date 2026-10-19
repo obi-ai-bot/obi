@@ -400,6 +400,33 @@ fn a_vault_secret_in_a_file_is_refused_in_every_form() {
     holds_none(&obid.log(), &value(), "obid's log");
 }
 
+/// obid keeps answering while the vault scan reads big files whole (#749): it runs off the
+/// runtime that serves the API.
+#[test]
+fn obid_answers_while_the_vault_scan_reads_a_big_file() {
+    let (_folder, obid, _remote) = publishing("vault-big");
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "BIG"}),
+    );
+    let mut slowest = std::time::Duration::ZERO;
+    loop {
+        let asked = std::time::Instant::now();
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        slowest = slowest.max(asked.elapsed());
+        if ["done", "failed", "stopped"].contains(&job["status"].as_str().unwrap_or("")) {
+            assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(
+        slowest.as_secs() < 5,
+        "an answer took {slowest:?}\n{}",
+        obid.log()
+    );
+}
+
 /// A vault secret in a commit's message, in any form, sends nothing.
 #[test]
 fn a_vault_secret_in_a_commit_message_is_refused() {

@@ -65,6 +65,9 @@ pub struct Asked<'a> {
     pub said: &'a str,
     pub attachments: &'a [String],
     pub conversation: &'a str,
+    /// The user's turn the words are, which the jobs started now name (`Job::turn`); empty for an
+    /// event turn's, which no turn of the conversation holds.
+    pub turn: &'a str,
 }
 
 /// A plan that answers rather than acts: a reply, a question, or jobs it starts (#269). `live` is
@@ -166,16 +169,15 @@ async fn dispatch(
                 .clone()
                 .unwrap_or_else(|| super::briefing::line(&d.task, 60));
             // obid's own words for the job it keeps: mode, tool, account and check (N1); then the
-            // task it planned, quoted as data, so the owner sees what would run before they Start
-            // (the task is the agent's own words in a conversation; N9).
-            let nonce = super::briefing::nonce();
+            // task it planned, under its own line, so the owner sees what would run before they
+            // Start (the task is the agent's own words in a conversation; N9). The card shows it
+            // as written: the brain reads an item's text only quoted (briefing.rs).
             let text = format!(
-                "Oby looked into it first. Start {}?\n\n{}\n{}",
+                "Oby looked into it first. Start {}?\n\nThe task Oby planned:\n{}",
                 describe(&new),
-                super::briefing::fence_rule(&nonce, "the task Oby planned"),
-                super::briefing::fence(&nonce, &crate::secrets::known().redact(&d.task)),
+                crate::secrets::known().redact(d.task.trim()),
             );
-            shared.link.propose(&new, title, text);
+            shared.link.propose(&new, title, text, asked.conversation);
             continue;
         }
         // A job that would never ask the owner anything widens trust: only their own Confirm
@@ -198,6 +200,11 @@ async fn dispatch(
             waiting.push(what);
             continue;
         }
+        // Started now, by these words: its card shows under them before the answer lists it.
+        let new = NewJob {
+            turn: (!asked.turn.is_empty()).then(|| asked.turn.to_owned()),
+            ..new
+        };
         match shared.jobs.create(new) {
             Ok(job) => {
                 jobs.push(job.to_json());
@@ -358,13 +365,14 @@ pub const TRY_AGAIN: &str =
 /// own words this turn, which message_job passes on; `source` is whose they are and whether the
 /// turn read something untrusted, which decides what they do to a job that ended. `conversation`
 /// is the turn's: another conversation's job is tried again or dismissed only on the owner's
-/// Confirm (#631).
+/// Confirm (#631). `turn` is the user's turn the words are, which a follow-up they start names.
 pub async fn act(
     shared: &Arc<Shared>,
     plan: &Plan,
     said: &str,
     source: Source,
     conversation: &str,
+    turn: &str,
 ) -> Outcome {
     match plan.action {
         Action::StopAgent => stop(shared, plan),
@@ -375,7 +383,7 @@ pub async fn act(
         }
         Action::AnswerInbox => answer_inbox(shared, plan).await,
         Action::SetSetting => set_setting(shared, plan),
-        Action::MessageJob => message_job(shared, plan, said, source),
+        Action::MessageJob => message_job(shared, plan, said, source, conversation, turn),
         Action::MoveJob => {
             let names: Vec<String> = plan
                 .named()
@@ -561,7 +569,14 @@ fn dismiss(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
 /// one that ended gets a follow-up that starts with them (Sangam's design, the owner's decision of
 /// 2026-10-18), and stays as it ended. After research the follow-up waits for the owner's Start;
 /// an event turn's words never start one.
-fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str, source: Source) -> Outcome {
+fn message_job(
+    shared: &Arc<Shared>,
+    plan: &Plan,
+    said: &str,
+    source: Source,
+    conversation: &str,
+    turn: &str,
+) -> Outcome {
     let Some(id) = plan.named().first() else {
         return Outcome::Failed("Say which job to tell.".into());
     };
@@ -574,10 +589,26 @@ fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str, source: Source) ->
         Err(why) => return Outcome::Failed(format!("Couldn't tell {name}: {why}")),
     };
     if !job.status.is_active() {
+        if let Some(next) = shared
+            .jobs
+            .following(&job.id)
+            .filter(|_| source != Source::Event)
+        {
+            return already_on_it(shared, &job, &next, &words, source);
+        }
         let new = crate::jobs::follow_up(&job, &words);
         return match source {
-            Source::Owner => follow_up(shared, &job, new),
-            Source::Untrusted => Outcome::Done(propose_follow_up(shared, &job, &new)),
+            Source::Owner => follow_up(
+                shared,
+                &job,
+                NewJob {
+                    turn: started_by(&job, conversation, turn),
+                    ..new
+                },
+            ),
+            Source::Untrusted => {
+                Outcome::Done(propose_follow_up(shared, &job, &new, None, conversation))
+            }
             Source::Event => Outcome::Failed(format!(
                 "Couldn't tell {name}: it ended, so that starts a follow-up, which only your own words start."
             )),
@@ -588,6 +619,12 @@ fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str, source: Source) ->
         Some(Err(refused)) => Outcome::Failed(format!("Couldn't tell {name}: {}", refused.0)),
         None => Outcome::Failed("That job isn't here any more.".into()),
     }
+}
+
+/// The turn whose words start a follow-up of `job` now, for `Job::turn`: only in `job`'s own
+/// conversation, the one the follow-up joins, whose thread shows its card under them.
+pub(super) fn started_by(job: &Job, conversation: &str, turn: &str) -> Option<String> {
+    (job.conversation.as_deref() == Some(conversation) && !turn.is_empty()).then(|| turn.to_owned())
 }
 
 /// Starts `new`, the follow-up of `job`, and says so as Sangam's design does, its card on the
@@ -612,22 +649,55 @@ pub(super) fn follow_up(shared: &Arc<Shared>, job: &Job, new: NewJob) -> Outcome
     }
 }
 
+/// Words for `job`, which ended, while `next` follows it up already: `next` hears them, never a
+/// second follow-up, and its card goes on the answer, so the owner can open it.
+pub(super) fn already_on_it(
+    shared: &Arc<Shared>,
+    job: &Job,
+    next: &Job,
+    words: &str,
+    source: Source,
+) -> Outcome {
+    let (name, follow) = (job.short_title(), next.short_title());
+    match shared.jobs.message(&next.id, words, source) {
+        Some(Ok(heard)) => Outcome::Started(
+            format!("Already on it in {follow}, the follow-up of {name}: I told it what you said."),
+            heard.to_json(),
+        ),
+        Some(Err(refused)) => Outcome::Failed(format!(
+            "Couldn't tell {follow} (job {}), which is following up {name}: {}",
+            next.id, refused.0
+        )),
+        None => Outcome::Failed("That job isn't here any more.".into()),
+    }
+}
+
 /// Proposes `new`, the follow-up of `job`, after the turn read something untrusted: a `start` item
-/// in obid's own words, the task it would hear quoted, for the owner's Start (#374).
-pub(super) fn propose_follow_up(shared: &Arc<Shared>, job: &Job, new: &NewJob) -> String {
+/// for the owner's Start (#374), in obid's own words, then what the follow-up would hear as the
+/// owner reads it: their own words (`request`), and what the conversation's agent adds (`added`).
+/// The quoting fences are the agent's (its task keeps them), never the card's: the brain reads an
+/// item's text only quoted ([`super::briefing`]).
+pub(super) fn propose_follow_up(
+    shared: &Arc<Shared>,
+    job: &Job,
+    new: &NewJob,
+    added: Option<&str>,
+    conversation: &str,
+) -> String {
     let name = job.short_title();
-    let nonce = super::briefing::nonce();
-    let text = format!(
-        "Oby looked into it first. Start {}, a follow-up of {name}?\n\n{}\n{}",
+    let mut text = format!(
+        "Oby looked into it first. Start {}, a follow-up of {name}?\n\nYour words:\n{}",
         describe(new),
-        super::briefing::fence_rule(&nonce, "what the follow-up would hear"),
-        super::briefing::fence(&nonce, &new.task),
+        new.request.as_deref().unwrap_or(&new.task).trim(),
     );
+    if let Some(added) = added.map(str::trim).filter(|a| !a.is_empty()) {
+        text.push_str(&format!("\n\nWhat Oby adds for its agent:\n{added}"));
+    }
     let title = new
         .title
         .clone()
         .unwrap_or_else(|| format!("Follow-up of {name}"));
-    shared.link.propose(new, title, text);
+    shared.link.propose(new, title, text, conversation);
     format!(
         "{name} is finished, and this turn looked something up, so its follow-up waits for your Start in your inbox."
     )

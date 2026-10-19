@@ -4,9 +4,10 @@
 // obid's `oby` MCP server from its --mcp-config. Run with --json-schema it is the plan loop's brain
 // (fake-planner), for the fallback. Each turn is recorded as one line of turns.jsonl in its
 // account's folder ($CLAUDE_CONFIG_DIR): argv, cwd, HOME, that folder, the prompt, the session it
-// resumed. What it does comes from the last line of its prompt:
+// resumed, its pid. It answers one message after another until its stdin closes, as Claude Code
+// does with stream-json input; when it starts, it records its pid and cwd in started.jsonl there. What it does comes from the last line of its prompt:
 //   HELLO          streams "Hello there." in three deltas, reads notes.md in its room, says it
-//   REMEMBER       says "resume=<the session it resumed, or none>"
+//   REMEMBER       says "resume=<the session it resumed or goes on with, or none>"
 //   OBY <tool> <json>  calls the oby tool with the json and says "oby: <what it answered>"
 //   REPEAT <n> OBY <tool> <json>  calls it n times and says what the last call answered; with
 //                  " THEN <words>" after the json, does <words> next instead of saying it
@@ -19,6 +20,7 @@
 //   PERMS          asks obid's permission for writes inside, outside and in repos/, the web, a
 //                  secret, a command that sends a file from outside the room, another MCP tool
 //   SAY <words>    streams <words> in three deltas and says them
+//   SAYLATE <w>    says <w>, then writes one more line 300 ms after its result, while it waits
 //   READREPO <w>   reads a file under repos/ (taints the turn), then does <w>
 //   MAKEPAGE <w>   writes page/index.html in its room (a list of functions), then does <w>
 //   GREP <w>       searches the room with no path (repos/ in it, taints the turn), then does <w>
@@ -43,8 +45,13 @@ if (argv.includes("--json-schema")) {
 }
 
 const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
+if (process.env.CLAUDE_CONFIG_DIR && !argv.includes("--json-schema")) {
+  appendFileSync(join(process.env.CLAUDE_CONFIG_DIR, "started.jsonl"), JSON.stringify({ pid: process.pid, cwd: process.cwd(), at: Date.now() }) + "\n");
+}
 const flag = (name) => (argv.indexOf(name) >= 0 ? argv[argv.indexOf(name) + 1] : null);
 const resumed = flag("--resume");
+// Its session, once a turn ran in it: the one a later message goes on with.
+let going = resumed;
 const session = resumed ?? "c0000000-0000-4000-8000-00000000000" + (Date.now() % 10);
 const partial = argv.includes("--include-partial-messages");
 const result = (text, error = false) =>
@@ -118,13 +125,15 @@ rl.on("line", (line) => {
   const prompt = typeof message.message.content === "string" ? message.message.content : "";
   appendFileSync(
     join(process.env.CLAUDE_CONFIG_DIR, "turns.jsonl"),
-    JSON.stringify({ at: Date.now(), argv, cwd: process.cwd(), home: process.env.HOME, config: process.env.CLAUDE_CONFIG_DIR, prompt, resumed }) + "\n",
+    JSON.stringify({ at: Date.now(), argv, cwd: process.cwd(), home: process.env.HOME, config: process.env.CLAUDE_CONFIG_DIR, prompt, resumed, pid: process.pid }) + "\n",
   );
   emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Read", "Bash"], mcp_servers: [{ name: "oby", status: "connected" }], model: flag("--model") ?? "fake" });
-  act(prompt.split("\n").pop(), prompt).catch(failed);
+  const before = going;
+  going = session;
+  act(prompt.split("\n").pop(), prompt, before).catch(failed);
 });
 
-async function act(words, prompt = "") {
+async function act(words, prompt = "", before = resumed) {
   const room = process.cwd();
   if (words.startsWith("HELLO")) {
     writeFileSync("notes.md", "notes\n");
@@ -132,13 +141,16 @@ async function act(words, prompt = "") {
     used("t1", "notes");
     say("Hello there.");
   } else if (words.startsWith("REMEMBER")) {
-    say(`resume=${resumed ?? "none"}`);
+    say(`resume=${before ?? "none"}`);
   } else if (words.startsWith("FILES")) {
     const base = join(room, "attachments");
     const found = existsSync(base) ? readdirSync(base).flatMap((turn) => readdirSync(join(base, turn)).map((name) => `attachments/${turn}/${name}`)) : [];
     const quoted = prompt.slice(prompt.indexOf("<<<quoted-"));
     const named = found.length > 0 && prompt.includes("<<<quoted-") && found.every((f) => quoted.includes(f));
     say(`files: ${found.sort().join(",")} named=${named}`);
+  } else if (words.startsWith("SAYLATE ")) {
+    say(words.slice(8));
+    setTimeout(() => emit({ type: "system", subtype: "stray", session_id: session }), 300);
   } else if (words.startsWith("SAY ")) {
     say(words.slice(4));
   } else if (words.startsWith("READREPO ")) {
@@ -165,6 +177,11 @@ async function act(words, prompt = "") {
   } else if (words.startsWith("WEB ")) {
     use("w1", "WebSearch", { query: "fixture app greeting" });
     used("w1", "results");
+    // Claude Code makes a model call between a tool's result and its next tool call, so obid has
+    // read the search's step (and tainted the turn) long before a call the search could steer
+    // reaches Oby's tools; a call made in the same message as the search can't be steered by it.
+    // The stand-in calls at once, so it waits a model call's moment.
+    await new Promise((done) => setTimeout(done, 200));
     await act(words.slice(4), prompt);
   } else if (words.startsWith("CURL ")) {
     emit({ type: "control_request", request_id: "c1", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "curl -s https://example.com" } } });

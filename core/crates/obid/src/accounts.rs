@@ -611,6 +611,35 @@ pub async fn change(
         }
         Ok((tool, account))
     })?;
+    // A conversation's Claude Code waiting on the account starts anew on it as it is now.
+    shared.harness.end_warm_on(&id);
+    send_accounts(&shared).await;
+    Ok(answer(
+        StatusCode::OK,
+        json_now(&shared, tool, account).await,
+    ))
+}
+
+/// `POST /v1/accounts/{id}/reserve` `{"lift": true | false}`: lifts the account's weekly reserve
+/// until its week resets, or puts it back now (crate::usage). The Account.
+pub async fn reserve(
+    State(shared): State<Arc<Shared>>,
+    UrlPath(id): UrlPath<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let shape = "{\"lift\": true | false}";
+    let map = object(&body, &["lift"], shape)?;
+    let Some(lift) = map.get("lift").and_then(Value::as_bool) else {
+        return Err(unprocessable(format!(
+            "lift is true or false: the body is {shape}."
+        )));
+    };
+    let (tool, account) = find(&shared.config.agents.get(), &id).ok_or_else(|| no_account(&id))?;
+    shared
+        .jobs
+        .usage
+        .lift(&id, lift)
+        .map_err(|e| unkept(Path::new("usage.json"), e))?;
     send_accounts(&shared).await;
     Ok(answer(
         StatusCode::OK,
@@ -644,6 +673,9 @@ pub async fn remove(
         .jobs
         .begin_change(&id)
         .ok_or_else(|| busy(&account))?;
+    // No conversation's Claude Code waits on its login copy any more (none keeps one meanwhile:
+    // [`Jobs::being_changed`]).
+    shared.harness.end_warm_on(&id);
     let made = shared.config.agents.change(|agents, saved| {
         find(agents, &id).ok_or_else(|| no_account(&id))?;
         let made = match saved.added.iter().position(|a| a.id == id) {
@@ -670,6 +702,9 @@ pub async fn remove(
     // The tool's own login stays where the tool kept it (on macOS, Claude Code's Keychain item)
     // and with its provider.
     shared.sign_ins.forget(&id);
+    if let Err(e) = shared.jobs.usage.forget(&id) {
+        tracing::warn!("account {id}: its usage stayed in usage.json: {e}");
+    }
     tracing::info!("account {id}: removed");
     send_accounts(&shared).await;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -874,6 +909,8 @@ pub async fn sign_in(
         .jobs
         .begin_change(&id)
         .ok_or_else(|| busy(&account))?;
+    // A conversation's Claude Code waiting on the old login ends: the next turn copies the new one.
+    shared.harness.end_warm_on(&id);
     let sign_in = start(&shared, tool, &account, &bin, &dir, changing)
         .await
         .map_err(|why| ApiError::new(StatusCode::BAD_GATEWAY, why))?;
@@ -1154,6 +1191,9 @@ async fn start(
             {
                 running.remove(&account.id);
             }
+        }
+        if signed {
+            shared.jobs.usage.forget_priced(&account.id);
         }
         drop(changing);
         let _ = ended_tx.send(Some(signed));

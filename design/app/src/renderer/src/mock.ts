@@ -19,7 +19,36 @@ export type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'stopped' | '
 // JobStage (Engine/Pipeline.swift): prepare → work → check → publish → review → merged
 export type StageId = 'prepare' | 'work' | 'check' | 'publish' | 'review' | 'merged';
 export type StageState = 'done' | 'current' | 'upcoming' | 'failed' | 'skipped';
-export type Stage = { id: StageId; title: string; detail?: string; state: StageState };
+// On the task's page, a stage also says how long it took ("3m 19s") or should
+// take ("≈ 3m"), what it's doing in a plain sentence (sub), and what hangs
+// under it on the timeline: the job's activity (under Work) or its checks.
+export type Stage = {
+  id: StageId; title: string; detail?: string; state: StageState;
+  took?: string; sub?: string; activity?: boolean; checks?: CheckRow[];
+};
+
+// The job page's own data (obid's job fields, obi-ai-bot/obi#739); every part
+// is optional, and a part with nothing to show isn't drawn.
+// A tool call: the verb and what it touched ("Running" `xcodebuild test`).
+export type ToolCall = { verb: string; path?: string; text?: string; took?: string; running?: boolean };
+// A few plain groups of the agent's work; only the running one opens.
+export type ToolGroup = { title: string; state: 'done' | 'running' | 'failed'; took?: string; meta?: string; tools?: ToolCall[] };
+// A check (or the secret scan, or the push) under its stage.
+export type CheckRow = {
+  name: string; mono?: boolean; state: 'done' | 'running' | 'upcoming' | 'failed' | 'skipped';
+  result?: string; took?: string; progress?: number;
+};
+export type Page = {
+  mode?: string;  // Ask, Accept edits, Plan, Bypass
+  // the time track: how far in (done), when it should be done (from–to), as
+  // % of the track; paused while it waits on you; basis: what the range is from
+  time?: { aside: string; done?: number; from?: number; to?: number; paused?: boolean; basis?: string };
+  counts?: [number, string][];   // tools by kind: [23, 'read']
+  groups?: ToolGroup[];
+  // this job's tokens and value, and its share of the account's windows
+  usage?: { tokens: string; cost: string; fiveHour: number; job5: string; week: number; jobWeek: string };
+  outgoing?: { text: string; at: string }[];  // what went out, every outgoing action
+};
 
 // What the job needs from you (InboxItem + Question + Permission). Buttons
 // per kind follow Inbox.swift; every ask also has Later.
@@ -63,6 +92,7 @@ export type Job = {
   commits?: number;
   published?: string;  // the pull request it opened
   log?: LogLine[];
+  page?: Page;         // the job page's extra data, once obid serves it
   created: number;     // minutes ago
   finished?: number;   // minutes ago
 };
@@ -87,6 +117,8 @@ function stages(at: StageId, state: StageState = 'current', ids: StageId[] = ['p
 }
 // a stage it didn't need
 const skip = (list: Stage[], id: StageId): Stage[] => list.map((s) => (s.id === id ? { ...s, state: 'skipped' } : s));
+// the job page's extras on some of the stages
+const more = (list: Stage[], add: Partial<Record<StageId, Partial<Stage>>>): Stage[] => list.map((s) => ({ ...s, ...add[s.id] }));
 // a review of someone else's PR: read it, post it
 const REVIEW: StageId[] = ['prepare', 'work', 'publish'];
 
@@ -139,7 +171,28 @@ export const JOBS: Job[] = [
   {
     id: 'i1', type: 'issues', title: '#251 Attention queue', from: github, request: 'fix oby #251',
     agent: 'cursor', account: 'Deskree', model: 'Sonnet 5.5', repo: 'deskree-inc/oby', branch: 'oby/fix-251', base: 'dev', check: 'xcodebuild test -scheme Oby',
-    status: 'running', step: 'Editing Mac/App/LivePanel.swift', round: [2, 3], stages: stages('work', 'current', undefined, 'xcodebuild test -scheme Oby'), created: 64,
+    status: 'running', step: 'Editing Mac/App/LivePanel.swift', round: [2, 3], created: 64,
+    stages: more(stages('work', 'current', undefined, 'xcodebuild test -scheme Oby'), {
+      prepare: { took: '22s' },
+      work: { took: '1h 1m so far', sub: 'Round 1 sorted the queue by created date, but the test wants the oldest first. It’s changing the sort, then runs the tests again.', activity: true },
+      check: { took: '≈ 6m', checks: [{ name: 'xcodebuild test -scheme Oby', mono: true, state: 'upcoming', result: 'has to pass' }] },
+      publish: { took: '≈ 40s' },
+    }),
+    page: {
+      mode: 'Accept edits',
+      time: { aside: '1h 4m in · done in about 8–16m', done: 78, from: 86, to: 97, basis: 'From the last 9 jobs like this in oby on Cursor (1h 10m in the middle). A third round usually needs one more test run.' },
+      counts: [[31, 'read'], [12, 'searches'], [6, 'edits'], [5, 'commands'], [2, 'test runs'], [2, 'Tetrix']],
+      groups: [
+        { title: 'Read how the attention queue is built', state: 'done', took: '9m' },
+        { title: 'Round 1: sorted the queue by created date', state: 'done', took: '14m' },
+        { title: 'Ran the tests: 2 failed', state: 'failed', took: '6m' },
+        { title: 'Changing the sort to oldest first', state: 'running', took: '2m', meta: 'LivePanel.swift · +12 −5', tools: [
+          { verb: 'Edited', path: 'Mac/App/LivePanel.swift', took: '2m' },
+          { verb: 'Reading', path: 'Engine/Inbox.swift', running: true },
+        ] },
+      ],
+      usage: { tokens: '3.1M', cost: '$4.20', fiveHour: 52, job5: '14%', week: 38, jobWeek: '3%' },
+    },
     log: [
       { tool: 'Read', text: 'Engine/Inbox.swift', ago: 60 },
       { tool: 'Read', text: 'Mac/App/LivePanel.swift', ago: 58 },
@@ -205,6 +258,58 @@ export const JOBS: Job[] = [
 
   // Tasks (asked in Oby)
   {
+    id: 's1', type: 'tasks', title: 'Give the scan’s first block a fix round', request: 'when the secret scan blocks the first push, give the job a round to fix it instead of failing',
+    agent: 'claude', account: 'Personal', model: 'Opus 5.5', repo: 'obi-ai-bot/obi', branch: 'oby/scan-fix-round', base: 'dev', check: 'cargo test -p obid',
+    status: 'running', step: 'Running the obid tests: 412 of 793 passed', round: [1, 2], created: 14,
+    stages: more(stages('check', 'current', undefined, 'cargo test -p obid'), {
+      prepare: { took: '18s' },
+      work: { took: '11m', detail: '2 commits · 3 files +41 −11', activity: true },
+      check: { took: '1m 53s so far', sub: 'Nothing goes out until every check passes and the secret scan is clean.', checks: [
+        { name: 'cargo fmt --check', mono: true, state: 'done', result: 'passed', took: '3s' },
+        { name: 'cargo clippy -- -D warnings', mono: true, state: 'done', result: 'no warnings', took: '38s' },
+        { name: 'cargo test -p obid', mono: true, state: 'running', result: '412 of 793', took: '1m 12s', progress: 52 },
+      ] },
+      publish: { took: '≈ 30s', detail: undefined, checks: [
+        { name: 'Secret scan', state: 'upcoming', result: 'on the commits, before the push', took: '≈ 5s' },
+        { name: 'Push and pull request', state: 'upcoming' },
+      ] },
+    }),
+    page: {
+      mode: 'Accept edits',
+      time: { aside: '14m in · done in about 1–3m', done: 78, from: 84, to: 95, basis: 'The last full run of these tests in obi took 2m 40s, and this one is on the same pace.' },
+      counts: [[26, 'read'], [9, 'searches'], [5, 'edits'], [7, 'commands'], [2, 'test runs'], [3, 'Tetrix'], [1, 'web']],
+      usage: { tokens: '2.4M', cost: '$3.30', fiveHour: 49, job5: '13%', week: 32, jobWeek: '3%' },
+    },
+  },
+  {
+    id: 's2', type: 'tasks', title: 'Codex keeps its sandbox roots on resume', request: 'codex jobs lose writable_roots after a resume, keep them',
+    agent: 'codex', account: 'Deskree', model: 'GPT-6-Astra', repo: 'obi-ai-bot/obi', branch: 'oby/codex-roots', base: 'dev', check: 'cargo test -p obid',
+    status: 'failed', step: 'Failed at Check', round: [2, 2], created: 25,
+    stages: more(stages('check', 'failed', undefined, 'cargo test -p obid'), {
+      prepare: { took: '20s' },
+      work: { took: '16m', detail: '3 commits', activity: true },
+      check: { took: '5m', detail: '2 of 793 tests failed in round 2, out of rounds', sub: 'Stopped here. Nothing went out: the 3 commits stay on this Mac.', checks: [
+        { name: 'cargo fmt --check', mono: true, state: 'done', result: 'passed', took: '3s' },
+        { name: 'cargo clippy -- -D warnings', mono: true, state: 'done', result: 'no warnings', took: '36s' },
+        { name: 'cargo test -p obid', mono: true, state: 'failed', result: '791 passed, 2 failed', took: '2m 51s' },
+      ] },
+      publish: { state: 'skipped', detail: 'Nothing went out · the secret scan didn’t run, since checks come first' },
+      review: { state: 'skipped', detail: 'No pull request to review' },
+    }),
+    ask: {
+      kind: 'failed', headline: 'Two sandbox tests still fail after 2 rounds',
+      text: 'They expect a resumed thread to start with no writable roots, the old behaviour this task changes. Codex rewrote one test in round 2, but not these two.',
+      options: ['Give it another round', 'Open the session', 'Stop here'], recommended: 0,
+      detail: 'codex::resume_keeps_writable_roots\n  expected ["/w/.git"], got []\ncodex::resume_after_reset\n  left: 0  right: 1',
+    },
+    page: {
+      mode: 'Accept edits',
+      time: { aside: 'Ran 22m · jobs like this: 12–20m', basis: 'It ran past the usual range because round 1 failed its checks and round 2 ran them again.' },
+      counts: [[31, 'read'], [7, 'edits'], [9, 'commands'], [4, 'test runs'], [3, 'Tetrix']],
+      usage: { tokens: '3.6M', cost: '$4.90', fiveHour: 58, job5: '19%', week: 34, jobWeek: '4%' },
+    },
+  },
+  {
     id: 't1', type: 'tasks', title: 'Fix failing CI on oberon', request: 'CI on oberon is red since this morning, fix it',
     agent: 'claude', account: 'Deskree', model: 'Opus 5.5', repo: 'deskree-inc/oberon', branch: 'oby/fix-ci', base: 'main', check: 'pnpm test',
     status: 'running', step: 'Catching up with main', round: [1, 3], stages: stages('prepare'), created: 6,
@@ -212,13 +317,49 @@ export const JOBS: Job[] = [
   {
     id: 't2', type: 'tasks', title: 'Settings in three groups', request: 'split settings into General, Agents and Privacy',
     agent: 'cursor', account: 'Deskree', model: 'Sonnet 5.5', repo: 'deskree-inc/oby', branch: 'oby/settings-groups', base: 'dev', check: 'xcodebuild test -scheme Oby',
-    status: 'done', step: 'Done', stages: stages('review', 'current', undefined, 'xcodebuild test -scheme Oby'), commits: 2, published: 'deskree-inc/oby#375',
+    status: 'done', step: 'Done', commits: 2, published: 'deskree-inc/oby#375',
+    stages: more(stages('review', 'current', undefined, 'xcodebuild test -scheme Oby'), {
+      prepare: { took: '25s' },
+      work: { took: '21m', detail: '2 commits · 9 files +184 −97', activity: true },
+      check: { took: '6m 10s', detail: 'All passed on 4f1c2a9', checks: [{ name: 'xcodebuild test -scheme Oby', mono: true, state: 'done', result: '212 passed', took: '5m 48s' }] },
+      publish: { took: '19s', detail: undefined, checks: [
+        { name: 'Secret scan', state: 'done', result: 'clean · 2 commits, 9 files', took: '4s' },
+        { name: 'Pushed and opened oby#375', state: 'done' },
+      ] },
+      review: { took: '10m so far' },
+    }),
+    page: {
+      time: { aside: 'Took 29m · estimated 20–35m' },
+      counts: [[40, 'read'], [14, 'edits'], [6, 'commands'], [2, 'test runs']],
+      usage: { tokens: '2.9M', cost: '$3.90', fiveHour: 44, job5: '12%', week: 30, jobWeek: '3%' },
+      outgoing: [
+        { text: 'Pushed oby/settings-groups to deskree-inc/oby', at: '10:31 AM' },
+        { text: 'Opened pull request oby#375, ready for review', at: '10:31 AM' },
+      ],
+    },
     summary: 'Settings has General, Agents and Privacy now, each its own pane.', created: 39, finished: 10,
   },
   {
     id: 't3', type: 'tasks', title: 'Blast radius of the jobs refactor', request: 'what breaks if we split Engine/Jobs.swift in three?',
     agent: 'codex', account: 'Deskree', model: 'GPT-6-Astra', repo: 'deskree-inc/oby', branch: 'oby/investigate-jobs-split', base: 'dev',
-    status: 'running', step: 'Asking Tetrix for callers of Job.line', stages: stages('work', 'current', ['prepare', 'work']), created: 15,
+    status: 'running', step: 'Asking Tetrix for callers of Job.line', created: 15,
+    stages: more(stages('work', 'current', ['prepare', 'work']), {
+      prepare: { took: '31s' },
+      work: { took: '14m so far', sub: 'It reads and asks Tetrix, changes nothing, and answers with what would break.', activity: true },
+    }),
+    page: {
+      mode: 'Plan',
+      time: { aside: '15m in · questions like this take 12–25m', done: 40, from: 48, to: 100, basis: 'Too early to be sure: the last 6 questions like this in oby took 12–25m.' },
+      counts: [[18, 'read'], [7, 'searches'], [9, 'Tetrix']],
+      groups: [
+        { title: 'Found the three parts of Jobs.swift', state: 'done', took: '6m' },
+        { title: 'Asking Tetrix what calls each part', state: 'running', took: '8m', meta: '9 Tetrix questions · 41 callers so far', tools: [
+          { verb: 'Asked Tetrix for callers of', path: 'Job.round', took: '3s' },
+          { verb: 'Asking Tetrix for callers of', path: 'Job.line', running: true },
+        ] },
+      ],
+      usage: { tokens: '640k', cost: '$1.10', fiveHour: 31, job5: '3%', week: 27, jobWeek: '<1%' },
+    },
   },
   {
     id: 't4', type: 'tasks', title: 'Inspection for Avenga', request: 'run the security inspection for Avenga before Thursday',
@@ -233,7 +374,22 @@ export const JOBS: Job[] = [
   {
     id: 't5', type: 'tasks', title: 'Draft the release notes', request: 'draft release notes for oby 0.9 from the merged PRs',
     agent: 'claude', account: 'Personal', model: 'Sonnet 5.5', repo: 'deskree-inc/oby', branch: 'oby/release-notes-0.9', base: 'dev',
-    status: 'running', step: 'Plan ready', stages: stages('work', 'current', ['prepare', 'work', 'publish']), created: 70,
+    status: 'running', step: 'Plan ready', created: 70,
+    stages: more(stages('work', 'current', ['prepare', 'work', 'publish']), {
+      prepare: { took: '14s' },
+      work: { took: '6m · paused', sub: 'It read the 23 merged PRs and wrote a plan for the notes.', activity: true },
+      publish: { took: '≈ 20s' },
+    }),
+    page: {
+      mode: 'Plan',
+      time: { aside: '6m in · paused · then about 4–7m', done: 45, from: 75, to: 98, paused: true, basis: 'Release notes in oby took 4–7m after the plan. Waiting on you isn’t counted.' },
+      counts: [[23, 'read'], [2, 'commands']],
+      groups: [
+        { title: 'Read the 23 merged PRs', state: 'done', took: '4m' },
+        { title: 'Wrote the plan', state: 'done', took: '1m' },
+      ],
+      usage: { tokens: '420k', cost: '$0.70', fiveHour: 41, job5: '2%', week: 33, jobWeek: '<1%' },
+    },
     ask: {
       kind: 'question', headline: 'Go with this plan?',
       text: 'Group the 23 merged PRs into New, Better and Fixed, one line each, and leave out the 6 CI-only ones.',

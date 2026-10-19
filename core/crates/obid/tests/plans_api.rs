@@ -725,7 +725,12 @@ fn the_brain_reads_the_conversation_and_may_stop_one_job() {
     );
     let args = read(calls[0].join("args"));
     assert!(
-        args.contains("--tools\nRead\n--allowedTools\nRead\n--max-turns\n6\n"),
+        args.contains("--tools\nRead\n--allowedTools\nRead(./work.md)\n"),
+        "{args}"
+    );
+    assert!(args.contains("--max-turns\n6\n"), "{args}");
+    assert!(
+        args.contains("--disallowedTools\nRead(./login/**)\n"),
         "{args}"
     );
     assert!(args.contains("quoted in the file work.md"));
@@ -844,7 +849,7 @@ fn a_brain_that_may_read_is_boxed() {
     running(&obid, "Vault secrets");
     queue(&obid, &[peek]);
     assert_eq!(said(&obid, "anything to read?")["text"], "hidden");
-    assert!(read(calls(&obid)[1].join("args")).contains("--allowedTools\nRead\n"));
+    assert!(read(calls(&obid)[1].join("args")).contains("--allowedTools\nRead(./work.md)\n"));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1997,12 +2002,9 @@ fn telling_a_finished_job_something_starts_a_follow_up() {
     assert_eq!(cards.len(), 1, "{answer}");
     let next = cards[0]["id"].as_str().unwrap().to_owned();
     assert_ne!(next, id);
+    // Titled as a follow-up, never with the words themselves.
     let title = cards[0]["title"].as_str().unwrap();
-    assert!(
-        title.starts_with("One more thing for the vault job: REPORT, and [redacted: ")
-            && !title.contains(token),
-        "{title}"
-    );
+    assert_eq!(title, "Follow-up: Vault secrets");
     assert_eq!(
         answer["text"],
         format!(
@@ -2016,6 +2018,8 @@ fn telling_a_finished_job_something_starts_a_follow_up() {
         (job["status"] == "done").then_some(job)
     });
     assert_eq!(follow["followUpOf"], json!(id));
+    // Its parent isn't this conversation's (POST /v1/jobs), so neither is it: no turn here names it.
+    assert!(follow["turn"].is_null(), "{follow}");
     for key in [
         "kind",
         "agent",
@@ -2280,6 +2284,9 @@ fn a_plan_starts_its_jobs_and_links_them_to_the_turn() {
         turns.as_array().unwrap().last().unwrap()["jobs"],
         json!(ids)
     );
+    // Each names the words that started it, so its card shows under them as it starts.
+    let user = turn_of(&obid, "fix fixture-app #176 and review PR 33");
+    assert!(jobs.iter().all(|j| j["turn"] == user.as_str()), "{jobs:?}");
     assert_eq!(call(&obid, "GET", "/v1/inbox", None).body, json!([]));
     assert_eq!(ends(&obid), ["started_jobs"]);
 }
@@ -2683,6 +2690,8 @@ fn research_then_dispatch_waits_for_start() {
     assert_eq!(jobs.as_array().unwrap().len(), 1);
     assert_eq!(jobs[0]["title"], "Greeting fix");
     assert_eq!(started.body["job"], jobs[0]["id"]);
+    // Started by the Start, not by the words: no turn of the conversation started it.
+    assert!(jobs[0]["turn"].is_null(), "{jobs}");
 }
 
 /// A dispatch after research, with what the turn found (#540).
@@ -4192,12 +4201,14 @@ fn a_later_step_with_no_time_left_to_think_ends_budget_spent() {
         .unwrap()
         .to_owned();
     // Step 0's first try times out at half the budget; its retry plans with under a second left
-    // for step 1, which no adapter starts.
+    // for step 1, which no adapter starts. The retry sleeps half a second, so that with nothing
+    // else taking time a second would be left: starting processes on a busy machine only takes
+    // from it, and has the whole second before the plan comes after the budget.
     queue(
         &obid,
         &[
             format!("SLEEP 5 {}", reply("")),
-            format!("SLEEP 0.9 {}", set_mode(&id, "ask")),
+            format!("SLEEP 0.6 {}", set_mode(&id, "ask")),
         ],
     );
     let answer = said(&obid, "ask before anything on Vault secrets");
@@ -4328,4 +4339,163 @@ fn reading_the_same_job_again_and_again_ends_the_turn() {
     );
     assert_eq!(calls(&obid).len(), 3);
     assert_eq!(ends(&obid), ["repeated"]);
+}
+
+/// An app's Try again, after an answer it lost, sends the same words with the same `id`: obid has
+/// them, adds nothing and starts nothing, wherever the app sends them. The user's turn takes the
+/// id the app gave it, so the app's own copy of the words gives way to it; an id that isn't a
+/// lower-case UUID is refused.
+#[test]
+fn the_same_words_sent_again_with_their_id_are_kept_once() {
+    let folder = Folder::new("brain-repeat-id");
+    let obid = started(&folder);
+    queue(&obid, &[reply("Ready"), reply("Again")]);
+    let id = "0b1e0c0a-0000-4000-8000-000000000001";
+    let first = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "hello", "id": id})),
+    );
+    assert_eq!(first.status, 200, "{}", first.text);
+    assert_eq!(first.body["text"], "Ready");
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    let again = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "hello", "id": id, "new": true})),
+    );
+    assert_eq!(again.status, 200, "{}", again.text);
+    assert_eq!(
+        (
+            &again.body["kind"],
+            &again.body["repeated"],
+            &again.body["conversation"]
+        ),
+        (&json!("none"), &json!(true), &json!(conversation)),
+        "{}",
+        again.text
+    );
+    assert_eq!(calls(&obid).len(), 1, "the brain ran once");
+    let page = call(
+        &obid,
+        "GET",
+        &format!("/v1/conversation?id={conversation}"),
+        None,
+    )
+    .body;
+    let users: Vec<&serde_json::Value> = page
+        .as_array()
+        .unwrap_or_else(|| panic!("{page}"))
+        .iter()
+        .filter(|t| t["who"] == "user")
+        .collect();
+    assert_eq!(users.len(), 1, "{page}");
+    assert_eq!(users[0]["id"], id);
+    let bad = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "hello", "id": "not-a-uuid"})),
+    );
+    assert_eq!(bad.status, 422, "{}", bad.text);
+    // The id with other words, or in another conversation, isn't these words again: refused.
+    let other = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "goodbye", "id": id, "conversation": conversation})),
+    );
+    assert_eq!(other.status, 409, "{}", other.text);
+    let elsewhere = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "elsewhere", "new": true})),
+    );
+    assert_eq!(elsewhere.status, 200, "{}", elsewhere.text);
+    let elsewhere = elsewhere.body["conversation"].as_str().unwrap().to_owned();
+    let moved = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "hello", "id": id, "conversation": elsewhere})),
+    );
+    assert_eq!(moved.status, 409, "{}", moved.text);
+    assert_eq!(
+        calls(&obid).len(),
+        2,
+        "only the new conversation's words ran"
+    );
+}
+
+/// A follow-up's proposal closes by itself once that work merged after it was proposed: the
+/// reason above the owner's words, no options, nothing started.
+#[test]
+fn a_follow_ups_proposal_closes_once_its_work_merged() {
+    let folder = Folder::new("brain-proposal-merged");
+    let mut done = ended(
+        "a7e4a6e1",
+        "Average helper empty lists",
+        obid::job::Status::Done,
+        1,
+        None,
+    );
+    // Its pull request merged an hour from now: after any proposal made in this test.
+    let later = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 3600;
+    done.published = Some("https://github.com/obi-e2e/fixture-app/pull/9".into());
+    done.pull_request = Some(obid::github::PullRequest {
+        state: "MERGED".into(),
+        review_decision: None,
+        base: "main".into(),
+        merged_at: Some(later),
+        checked_at: later,
+        head: None,
+    });
+    let obid = started_with(&folder, &[done]);
+    queue(
+        &obid,
+        &[
+            research(vec![lookup(
+                "list_files",
+                json!({"repo": "obi-e2e/fixture-app"}),
+            )]),
+            message_plan("a7e4a6e1"),
+            reply(""),
+        ],
+    );
+    said(&obid, "and skip the Watch target there");
+    let done_items = call(&obid, "GET", "/v1/inbox?state=done", None).body;
+    let closed = done_items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "start")
+        .unwrap_or_else(|| {
+            panic!(
+                "{done_items} / {}",
+                call(&obid, "GET", "/v1/inbox", None).text
+            )
+        });
+    let text = closed["text"].as_str().unwrap();
+    assert!(
+        text.starts_with(
+            "Closed by Oby: Average helper empty lists's work merged after this was proposed.\n\nOby looked into it first."
+        ) && text.contains("Your words:\nand skip the Watch target there"),
+        "{closed}"
+    );
+    assert_eq!(closed["options"], json!([]));
+    assert_eq!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }

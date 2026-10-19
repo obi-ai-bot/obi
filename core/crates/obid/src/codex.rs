@@ -34,17 +34,33 @@ pub struct Options {
     pub instructions: Option<String>,
     /// A conversation's thread, whose shell is off: a command that runs anyway ends the turn.
     pub no_commands: bool,
+    /// A job's run: it asks Codex for the account's usage as it starts (crate::usage). The
+    /// brain's and conversations' runs don't: nothing keeps it there.
+    pub usage: bool,
+    /// How the job's account pays (`api` or `plan`), when obid knows it already: then the run
+    /// doesn't ask `account/read`.
+    pub priced: Option<String>,
 }
 
-/// The `command` line `codex app-server` runs as: the binary, then `app-server`.
-pub fn argv(bin: PathBuf, mcp: Option<(&str, &str)>) -> Vec<std::ffi::OsString> {
+/// The `command` line `codex app-server` runs as: the binary, then `app-server`. Oby's broker
+/// (`mcp`) and Oby's Tetrix server (`tetrix`, crate::tetrix) take the job's token from the
+/// environment, never an argument.
+pub fn argv(
+    bin: PathBuf,
+    mcp: Option<(&str, &str)>,
+    tetrix: Option<&str>,
+) -> Vec<std::ffi::OsString> {
     let mut argv = vec![bin.into_os_string()];
-    if let Some((url, _)) = mcp {
+    let servers = mcp
+        .map(|(url, _)| ("oby", url))
+        .into_iter()
+        .chain(tetrix.map(|url| ("tetrix", url)));
+    for (name, url) in servers {
         argv.extend([
             "-c".into(),
-            format!("mcp_servers.oby.url=\"{url}\"").into(),
+            format!("mcp_servers.{name}.url=\"{url}\"").into(),
             "-c".into(),
-            "mcp_servers.oby.bearer_token_env_var=\"OBY_MCP_TOKEN\"".into(),
+            format!("mcp_servers.{name}.bearer_token_env_var=\"OBY_MCP_TOKEN\"").into(),
         ]);
     }
     argv.push("app-server".into());
@@ -73,6 +89,10 @@ pub async fn run_turn(
         files: HashMap::new(),
         calls: HashMap::new(),
         no_commands: options.no_commands,
+        limits_read: None,
+        account_read: None,
+        tokens_before: None,
+        priced: options.priced.clone(),
         fatal: None,
         thread: None,
         turn: None,
@@ -149,6 +169,13 @@ struct Run<D, E> {
     /// Codex asks names the tool only in its words.
     calls: HashMap<String, Vec<(String, Value)>>,
     no_commands: bool,
+    /// The `account/rateLimits/read` request not answered yet.
+    limits_read: Option<u64>,
+    /// The `account/read` request not answered yet, and what it said the account pays by.
+    account_read: Option<u64>,
+    priced: Option<String>,
+    /// What the thread had used before this turn (crate::usage::codex_turn).
+    tokens_before: Option<crate::usage::Tokens>,
     /// Why obid ended the turn for good.
     fatal: Option<String>,
     thread: Option<String>,
@@ -172,6 +199,24 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         .await?
         .map_err(|e| Stop::Failed(format!("Codex couldn't start: {}", e.message)))?;
         self.conn.notify("initialized", None).await;
+        // The account's usage, answered while the thread starts: reading it asks OpenAI, and the
+        // job doesn't wait for that (`handle`).
+        if options.usage {
+            self.limits_read = Some(
+                self.conn
+                    .request("account/rateLimits/read", json!({}))
+                    .await,
+            );
+            // How the account pays, once per account: obid keeps it (crate::usage), and the answer
+            // holds who is signed in, which obid never reads. Never a token refresh for it.
+            if options.priced.is_none() {
+                self.account_read = Some(
+                    self.conn
+                        .request("account/read", json!({"refreshToken": false}))
+                        .await,
+                );
+            }
+        }
 
         let cwd = self.worktree.to_string_lossy().into_owned();
         let mut params = thread_params(&cwd);
@@ -227,6 +272,38 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
     }
 
     async fn handle(&mut self, message: Value) {
+        if let Some(answer) = self
+            .limits_read
+            .and_then(|id| conn::answer_to(&message, id))
+        {
+            self.limits_read = None;
+            // An older server may not know the method: its notifications still report usage.
+            if let Some(usage) = answer.ok().and_then(|read| crate::usage::codex_read(&read)) {
+                (self.on_event)(Event::Usage(usage));
+            }
+            return;
+        }
+        if let Some(answer) = self
+            .account_read
+            .and_then(|id| conn::answer_to(&message, id))
+        {
+            self.account_read = None;
+            self.priced = answer
+                .ok()
+                .and_then(|read| crate::usage::codex_priced(&read));
+            if self.priced.is_some() {
+                (self.on_event)(Event::Usage(crate::usage::Usage {
+                    priced: self.priced.clone(),
+                    ..Default::default()
+                }));
+            }
+            return;
+        }
+        if message["method"] == "account/rateLimits/updated"
+            && let Some(usage) = crate::usage::codex(&message["params"]["rateLimits"])
+        {
+            (self.on_event)(Event::Usage(usage));
+        }
         if let Some(id) = conn::request_id(&message).cloned() {
             return self.answer(id, &message).await;
         }
@@ -246,6 +323,13 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             && other != thread
         {
             return;
+        }
+        if message["method"] == "thread/tokenUsage/updated"
+            && let Some(mut tokens) =
+                crate::usage::codex_turn(&params["tokenUsage"], &mut self.tokens_before)
+        {
+            tokens.priced.clone_from(&self.priced);
+            (self.on_event)(Event::Tokens(tokens));
         }
         let item = &params["item"];
         match message["method"].as_str() {
@@ -373,7 +457,7 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                 let answer = match call.cloned() {
                     // Only Oby's own server: another's (ChatGPT's apps, the person's) is never
                     // run, as before Codex asked.
-                    Some(_) if server != "oby" => {
+                    Some(_) if server != "oby" && server != "tetrix" => {
                         Answer::Deny(format!("Only Oby's own tools run here, not {server}'s."))
                     }
                     Some((tool, arguments)) => {
@@ -760,7 +844,7 @@ mod tests {
     fn codex_reaches_the_broker_with_the_token_out_of_its_arguments() {
         let url = "http://127.0.0.1:7777/v1/agent/mcp/job1";
         let token = "job-token-0123456789abcdef";
-        let args: Vec<String> = argv(PathBuf::from("/bin/codex"), Some((url, token)))
+        let args: Vec<String> = argv(PathBuf::from("/bin/codex"), Some((url, token)), None)
             .into_iter()
             .map(|a| a.into_string().unwrap())
             .collect();
@@ -777,8 +861,24 @@ mod tests {
         );
         assert!(!args.iter().any(|a| a.contains(token)));
         assert_eq!(
-            argv(PathBuf::from("/bin/codex"), None),
+            argv(PathBuf::from("/bin/codex"), None, None),
             ["/bin/codex", "app-server"]
+        );
+        // Oby's Tetrix server (crate::tetrix) takes the same token from the environment.
+        assert_eq!(
+            argv(
+                PathBuf::from("/bin/codex"),
+                None,
+                Some("http://127.0.0.1:7777/v1/agent/tetrix/job1")
+            ),
+            [
+                "/bin/codex",
+                "-c",
+                r#"mcp_servers.tetrix.url="http://127.0.0.1:7777/v1/agent/tetrix/job1""#,
+                "-c",
+                r#"mcp_servers.tetrix.bearer_token_env_var="OBY_MCP_TOKEN""#,
+                "app-server"
+            ]
         );
     }
 

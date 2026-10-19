@@ -186,6 +186,11 @@ pub struct Job {
     /// conversation is deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
+    /// The user's turn of `conversation` whose words started it, so the conversation shows its
+    /// card under them the moment it starts, before Oby's answer lists it. None for a job no turn
+    /// started directly (a follow-up told from its page, a Start, an event turn's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<String>,
     /// What an Obi-to-Obi review job made: the result body for its exchange
     /// (runner-api.md, "obid only: Obi-to-Obi review jobs", step 7). Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,6 +219,9 @@ pub struct Job {
     pub answered: Vec<crate::permissions::Answered>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub answered_count: u32,
+    /// What obid saw of the agent and Tetrix, through obid's own Tetrix server (crate::tetrix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tetrix: Option<crate::tetrix::Use>,
     /// Calls an agent made through the user's connected apps; names only, never secret values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connection_uses: Vec<crate::connections::ConnectionUse>,
@@ -268,6 +276,16 @@ pub struct Job {
     /// for a follow-up of work that isn't merged. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_from: Option<String>,
+    /// What its turns used, in tokens and cost, as its tool reported them (#731).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::usage::Tokens>,
+    /// Claude Code's session and its counts at its last result, which the next turn's resumed
+    /// counts include (crate::jobs). Never in the API's job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_seen: Option<(String, crate::usage::Tokens)>,
+    /// Its estimated share of its account's windows (#732).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_share: Option<crate::usage::WindowShare>,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -342,6 +360,7 @@ impl Job {
             worktree: None,
             obi: None,
             conversation: None,
+            turn: None,
             review_result: None,
             obi_request: None,
             permission: None,
@@ -352,6 +371,7 @@ impl Job {
             answered: Vec::new(),
             answered_count: 0,
             connection_uses: Vec::new(),
+            tetrix: None,
             connections: None,
             heard: Vec::new(),
             offers: Vec::new(),
@@ -365,6 +385,9 @@ impl Job {
             resumes_at: None,
             earlier: None,
             start_from: None,
+            usage: None,
+            usage_seen: None,
+            window_share: None,
         }
     }
 
@@ -577,7 +600,7 @@ impl Job {
             "mergeError": null,
             "appleCheck": mac_check_json(self.apple_check.clone(), "apple"),
             "appleRan": mac_check_json(self.apple_ran.clone(), "apple"),
-            "tetrix": null,
+            "tetrix": self.tetrix.as_ref().map(crate::tetrix::Use::to_json),
             "moves": [],
             "xcodeCloud": null,
             "xcodeCloudError": null,
@@ -597,6 +620,7 @@ impl Job {
             "obi": self.obi,
             "worktree": self.worktree,
             "conversation": self.conversation,
+            "turn": self.turn,
             "artifacts": self.artifacts.iter().map(|a| json!({"id": a.id, "version": a.version})).collect::<Vec<_>>(),
             "artifactProblems": self.artifact_problems,
             "followUpOf": self.follow_up_of,
@@ -606,6 +630,12 @@ impl Job {
         });
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
+        }
+        if let Some(usage) = &self.usage {
+            value["usage"] = json!(usage);
+        }
+        if let Some(share) = self.window_share.as_ref().and_then(|s| s.to_json()) {
+            value["windowShare"] = share;
         }
         value
     }
@@ -940,6 +970,7 @@ mod tests {
             "waiting",
             "permission",
             "conversation",
+            "turn",
             "followUpOf",
             "reason",
             "nextStep",
@@ -947,8 +978,8 @@ mod tests {
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's eleven.
-        assert_eq!(object.len(), 76);
+        // The Swift runner's 65 keys, and obid's twelve.
+        assert_eq!(object.len(), 77);
         assert_eq!(value["artifacts"], json!([]));
         assert_eq!(value["artifactProblems"], json!([]));
         assert_eq!(value["answered"], json!([]));
