@@ -545,6 +545,8 @@ impl Conversations {
             created: obi_protocol::time::format(obi_protocol::time::now()),
             sequence: next_sequence(&threads),
             turns: vec![],
+            tasks: vec![],
+            tasks_tainted: false,
         };
         self.write(&thread).map_err(Error::Io)?;
         self.events.send("conversation", thread.summary());
