@@ -220,7 +220,7 @@ struct ConversationPage: View {
             let turns = phone.thread
             let rows = ChatRuns.rows(turns)
             // The jobs shown where they started: a follow-up told elsewhere goes with its parent's card.
-            let startedBy = { (job: Job) in ThreadTaskLine.startedBy(job, in: job.conversation, showing: shown) }
+            let startedBy = { (job: Job) in ThreadTaskLine.startedBy(turn: job.turn, in: job.conversation, showing: shown) }
             let placed = ThreadTaskLine.shown(in: turns, jobs: phone.jobs, startedBy: startedBy, ended: phone.conversation.endedTurn)
             let decisions = InboxItem.waiting(phone.inbox, now: context.date)
             ScrollViewReader { proxy in

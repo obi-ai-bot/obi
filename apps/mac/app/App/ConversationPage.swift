@@ -83,7 +83,8 @@ struct ConversationPage: View {
             // Every job a card may show, which words started each (obid's `turn`), and those shown where they started.
             let all = desk.jobs + feed.jobs
             let startedBy = { (job: Job) in
-                ThreadTaskLine.startedBy(job, in: feed.extras[job.id]?.conversation, showing: feed.conversations.shown)
+                ThreadTaskLine.startedBy(turn: feed.extras[job.id]?.turn, in: feed.extras[job.id]?.conversation,
+                                         showing: feed.conversations.shown)
             }
             let shown = ThreadTaskLine.shown(in: turns, jobs: all, startedBy: startedBy, ended: conversation.endedTurn)
             ScrollViewReader { proxy in

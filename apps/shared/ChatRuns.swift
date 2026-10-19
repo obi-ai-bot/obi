@@ -148,11 +148,11 @@ nonisolated enum ThreadTaskLine {
         jobs.filter { $0.followUpOf == id }.sorted { $0.created < $1.created }
     }
 
-    /// The user's turn that started `job` (obid's `turn`), when `job` is in the conversation on
-    /// screen (`conversation` is the job's, `showing` the screen's); another conversation's
-    /// job never counts, whatever its turn.
-    static func startedBy(_ job: Job, in conversation: String?, showing: String?) -> String? {
-        conversation == showing ? job.turn : nil
+    /// The user's turn that started a job (obid's `turn`), when the job is in the conversation on
+    /// screen (`conversation` is the job's, `showing` the screen's); another conversation's job
+    /// never counts, whatever its turn.
+    static func startedBy(turn: String?, in conversation: String?, showing: String?) -> String? {
+        conversation == showing ? turn : nil
     }
 
     /// The jobs whose cards go under `turn`: those it lists, then, under the user's words, the

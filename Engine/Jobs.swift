@@ -183,8 +183,6 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The job this one follows up (obid): the owner told that one something after it ended, and
     /// its thread shows this one's card (Sangam's design). Nil otherwise.
     var followUpOf: String?
-    /// The user's turn whose words started it (obid only): its card shows under them as it starts.
-    var turn: String?
 
     /// What a queued job waits for, in the words every app shows after "Waiting": "a slot opens",
     /// "runner update". `job` is the job it waits behind, for `job` and `files`.
