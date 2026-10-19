@@ -108,6 +108,27 @@ pub struct Brief {
     pub done: Option<String>,
 }
 
+/// Why and where a stalled job stopped, with its handoff note (docs/runner-api.md, `stalled`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stalled {
+    /// `quiet`, `loop`, `turns`, `ceiling` or `budget`.
+    pub why: String,
+    /// The same as the job's `limit`.
+    pub text: String,
+    pub at: i64,
+    pub round: u32,
+    pub branch: String,
+    /// The branch's head when it stalled, and the job's own commits.
+    pub commit: Option<String>,
+    pub commits: u64,
+    /// A session is kept to carry on in (its id stays obid's).
+    pub session: bool,
+    /// The handoff note, quoted as data, secrets taken out; `agent` or `obid` wrote it.
+    pub note: String,
+    pub note_by: String,
+}
+
 /// A job as obid keeps it (`home/jobs/<id>.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,6 +188,8 @@ pub struct Job {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<String>>,
     pub limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled: Option<Stalled>,
     pub start_commit: Option<String>,
     pub mode: Option<String>,
     pub waiting: Option<Waiting>,
@@ -288,6 +311,14 @@ pub struct Job {
     /// Its estimated share of its account's windows (#732).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_share: Option<crate::usage::WindowShare>,
+    /// How long its agent has run, in seconds, every run and restart included, since the owner
+    /// last let it past its ceiling: what `jobCeilingHours` holds (crate::jobs). Never in the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ran_secs: Option<u64>,
+    /// What it had spent (crate::jobs, `spent`) when the owner last let it past its token budget:
+    /// `jobTokenBudget` counts from there. Never in the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_from: Option<u64>,
     /// When it was archived (`POST /v1/jobs/{id}/archive`, `oby_archive_job`), or none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<i64>,
@@ -379,6 +410,7 @@ impl Job {
             files: None,
             attachments: None,
             limit: None,
+            stalled: None,
             start_commit: None,
             mode: None,
             waiting: None,
@@ -422,6 +454,8 @@ impl Job {
             usage: None,
             usage_seen: None,
             window_share: None,
+            ran_secs: None,
+            budget_from: None,
         }
     }
 
@@ -643,6 +677,11 @@ impl Job {
             "outgoing": self.outgoing.iter().map(crate::publish::Outgoing::to_json).collect::<Vec<_>>(),
             "question": null,
             "limit": self.limit,
+            "stalled": self.stalled.as_ref().map(|s| json!({
+                "why": s.why, "text": s.text, "at": date(Some(s.at)), "round": s.round,
+                "branch": s.branch, "commit": s.commit, "commits": s.commits,
+                "session": s.session, "note": s.note, "noteBy": s.note_by,
+            })),
             "startCommit": self.start_commit,
             "firstSwiftBuildSeconds": null,
             "macCheck": mac_check_json(self.mac_check.clone(), "merge"),
@@ -1106,6 +1145,7 @@ mod tests {
             "claim",
             "question",
             "limit",
+            "stalled",
             "startCommit",
             "firstSwiftBuildSeconds",
             "macCheck",
@@ -1124,8 +1164,8 @@ mod tests {
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's eleven.
-        assert_eq!(object.len(), 76);
+        // The Swift runner's 65 keys, and obid's twelve.
+        assert_eq!(object.len(), 77);
         assert_eq!(value["archived"], Value::Null);
         assert_eq!(value["changes"], json!([]));
         assert_eq!(value["artifacts"], json!([]));

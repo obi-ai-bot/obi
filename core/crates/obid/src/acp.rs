@@ -14,7 +14,6 @@
 //! `notes`, which the next prompt starts with.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -51,7 +50,7 @@ pub async fn run_turn(
     launch: Launch,
     prompt: &str,
     options: &Options,
-    limit: Duration,
+    limit: impl Into<crate::conn::Limit>,
     stop: watch::Receiver<process::Signal>,
     decide: impl Fn(&str, &Value) -> Ruling,
     on_event: impl FnMut(Event),
@@ -97,6 +96,7 @@ pub async fn run_turn(
         run.conn.drain().await;
     }
     turn.timed_out = run.conn.timed_out;
+    turn.quiet = run.conn.quiet_out;
     turn.stopped = run.conn.stopped;
     turn.exit = run.conn.finish().await;
     Ok(turn)
