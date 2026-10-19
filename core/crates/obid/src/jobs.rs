@@ -2650,12 +2650,12 @@ impl Jobs {
                 let keeps_none = self.get(id).is_some_and(|j| {
                     j.kind == "review" || j.status == Status::Done && j.commits.unwrap_or(0) > 0
                 });
-                // What it committed itself, before obid's `wip:` commit, which never counts.
-                let start_commit = self
-                    .get(id)
-                    .and_then(|j| j.start_commit)
+                // What it committed itself ends here, before obid's `wip:` commit, which never
+                // counts: counted once keep_commits has its objects in the clone.
+                let worktree = self.worktree_path(id);
+                let own_head = git::git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
+                    .await
                     .unwrap_or_default();
-                let made = count_commits(&self.worktree_path(id), &start_commit).await;
                 if *signal.borrow() != Signal::Shutdown
                     && !keeps_none
                     && let Err(e) = self.keep_wip(id).await
@@ -2666,14 +2666,20 @@ impl Jobs {
                 // branch, and counted, so a follow-up starts from them and Dismiss warns (#757).
                 // Done counted its own.
                 match self.keep_commits(id).await {
-                    Ok(_) if made > 0 => {
-                        self.update(id, |job| {
-                            if job.status != Status::Done {
-                                job.commits = Some(made);
-                            }
-                        });
+                    Ok(_) => {
+                        let start_commit = self
+                            .get(id)
+                            .and_then(|j| j.start_commit)
+                            .unwrap_or_default();
+                        let made = count_commits(&worktree, &start_commit, &own_head).await;
+                        if made > 0 {
+                            self.update(id, |job| {
+                                if job.status != Status::Done {
+                                    job.commits = Some(made);
+                                }
+                            });
+                        }
                     }
-                    Ok(_) => {}
                     Err(e) => tracing::info!("job {id}: its commits stay in its worktree: {e}"),
                 }
                 outcome
@@ -4065,7 +4071,7 @@ impl Jobs {
             let commits = if head == start_commit {
                 0
             } else {
-                count_commits(&worktree, &start_commit).await
+                count_commits(&worktree, &start_commit, "HEAD").await
             };
             let job = self.get(id).ok_or("the job is gone")?;
             let first_line = job.summary.lines().next().unwrap_or("").trim().to_owned();
@@ -6070,14 +6076,14 @@ fn tail(text: &str, max: usize) -> &str {
     &text[start..]
 }
 
-/// The commits in `worktree` since `start_commit`: none without one.
-async fn count_commits(worktree: &Path, start_commit: &str) -> u64 {
-    if start_commit.is_empty() {
+/// The commits in `worktree` from `start_commit` to `head`: none without either.
+async fn count_commits(worktree: &Path, start_commit: &str, head: &str) -> u64 {
+    if start_commit.is_empty() || head.is_empty() {
         return 0;
     }
     git::git(
         worktree,
-        &["rev-list", "--count", &format!("{start_commit}..HEAD")],
+        &["rev-list", "--count", &format!("{start_commit}..{head}")],
     )
     .await
     .ok()
