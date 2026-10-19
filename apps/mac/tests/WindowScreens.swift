@@ -90,15 +90,15 @@ struct WindowScreens {
     }
 
     @Test func home() async throws {
-        try await shoot("mac-home", model: model(), state: ChatState())
+        try await shoot("mac-home", model: model(), state: ChatState(defaults: .scratch))
     }
 
     @Test func homeWithThePanelClosed() async throws {
-        try await shoot("mac-home-closed", model: model(), state: ChatState(), sidebar: false)
+        try await shoot("mac-home-closed", model: model(), state: ChatState(defaults: .scratch), sidebar: false)
     }
 
     @Test func group() async throws {
-        let state = ChatState()
+        let state = ChatState(defaults: .scratch)
         state.trail.start(.group(.review))
         try await shoot("mac-group", model: model(), state: state)
     }
@@ -116,7 +116,7 @@ struct WindowScreens {
                             text: "Should a job that commits nothing end as failed, or get a new status?", options: ["Failed", "A new status"], created: now - 300)
         ask.details = ["It ends as failed and shows under Needs you.", "A new status: Empty, which needs nothing from you."]
         model.feed.apply(ask)
-        let state = ChatState()
+        let state = ChatState(defaults: .scratch)
         state.trail.start(.talk)
         try await shoot("mac-convo", model: model, state: state)
     }
@@ -128,13 +128,13 @@ struct WindowScreens {
         model.feed.conversation.apply(Turn(id: "w1", date: now - 20, who: .user, text: "Why does the iOS build fail?"))
         model.feed.conversation.apply(TurnStep(turn: "w1", index: 0, action: "tool", text: "Reading the log", state: .running,
                                                tool: "read", detail: ".github/workflows/ios.yml"))
-        let state = ChatState()
+        let state = ChatState(defaults: .scratch)
         state.trail.start(.talk)
         try await shoot("mac-convo-working", model: model, state: state, sidebar: false)
     }
 
     @Test func task() async throws {
-        let state = ChatState()
+        let state = ChatState(defaults: .scratch)
         state.trail.start(.group(.review), .job(id: "r2", local: false))
         try await shoot("mac-task", model: model(), state: state)
     }
@@ -221,7 +221,7 @@ struct WindowScreens {
         let model = model()
         model.remote = RemoteAccess(secrets: FileVault(folder: secrets), defaults: suite)
         model.vault = vault
-        let state = ChatState()
+        let state = ChatState(defaults: .scratch)
         state.openSettings(page)
         let character = ObyCharacter(query: "embed&size=1.23")
         let window = ChatWindow.make(ChatView(model: model, state: state, character: character).defaultAppStorage(suite),
@@ -259,7 +259,7 @@ struct WindowScreens {
             options: ModelOptions(claude: .init(models: [.init(id: "claude-opus-5-5", name: "Opus 5.5"), .init(id: "claude-sonnet-5-5", name: "Sonnet 5.5")], efforts: efforts),
                                   codex: .init(models: [.init(id: "gpt-6.1-sol", name: "gpt-6.1-sol", efforts: ["low", "medium", "high", "xhigh"])]),
                                   cursor: .init(models: [.init(id: "claude-opus-5-5", name: "Opus 5.5")])))
-        let state = ChatState()
+        let state = ChatState(defaults: .scratch)
         if let page = SettingsPage(rawValue: screen) { state.openSettings(page) }
         let character = ObyCharacter(query: "embed&size=1.23")
         let window = ChatWindow.make(ChatView(model: model, state: state, character: character).defaultAppStorage(suite),
@@ -274,7 +274,7 @@ struct WindowScreens {
     }
 
     @Test func taskNeedingYou() async throws {
-        let state = ChatState()
+        let state = ChatState(defaults: .scratch)
         state.trail.start(.group(.review), .job(id: "r1", local: false))
         try await shoot("mac-task-needs", model: model(), state: state)
     }

@@ -1183,6 +1183,7 @@ mod tests {
             arrived: None,
             confirm: None,
             start: None,
+            github: None,
         };
         let briefing = briefing(vec![old, done, failed, running], vec![permission]);
         let text = briefing.text();

@@ -79,6 +79,9 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/jobs/*/publish"),
     ("POST", "/v1/jobs/*/publish"),
     ("POST", "/v1/clear"),
+    ("GET", "/v1/github/work"),
+    ("POST", "/v1/github/work/refresh"),
+    ("POST", "/v1/github/work/*/start"),
     ("GET", "/v1/inbox"),
     ("POST", "/v1/inbox/*/answer"),
     ("GET", "/v1/failures"),
@@ -688,6 +691,13 @@ mod tests {
         assert!(allows(&Method::GET, "/v1/jobs/abc"));
         assert!(allows(&Method::POST, "/v1/jobs/abc/messages"));
         assert!(!allows(&Method::DELETE, "/v1/jobs/abc"));
+        // The GitHub work feed: read it, refresh it, start an item's work (docs/runner-api.md,
+        // "obid only: GitHub work"); nothing else under it.
+        assert!(allows(&Method::GET, "/v1/github/work"));
+        assert!(allows(&Method::POST, "/v1/github/work/refresh"));
+        assert!(allows(&Method::POST, "/v1/github/work/abc/start"));
+        assert!(!allows(&Method::POST, "/v1/github/work"));
+        assert!(!allows(&Method::GET, "/v1/github/work/abc"));
         // Accounts are added, changed, removed and signed in on the machine itself: a paired
         // phone's token could otherwise sign obid into someone else's account (docs/runner-api.md,
         // "POST /v1/accounts").

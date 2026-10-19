@@ -9,6 +9,7 @@ pub mod accounts;
 pub mod acp;
 pub mod agent;
 pub mod api;
+pub mod app;
 pub mod approval;
 pub mod artifacts;
 pub mod brain;
@@ -24,6 +25,8 @@ pub mod failures;
 pub mod gateway;
 pub mod git;
 pub mod github;
+pub mod github_login;
+pub mod github_work;
 pub mod job;
 pub mod jobs;
 pub mod logs;
@@ -181,8 +184,16 @@ pub async fn serve(
     };
     // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
     secrets::known().learn("api-token", &token);
-    jobs::use_keychain(config.claude_keychain);
-    if config.claude_keychain {
+    // claudeKeychain as the owner set it; left out, on by itself on macOS when Claude Code's default
+    // login is only in the Keychain (the owner's decision of 2026-10-18).
+    let keychain = config.claude_keychain.unwrap_or_else(jobs::keychain_wanted);
+    jobs::use_keychain(keychain, config.claude_keychain.is_none());
+    if keychain {
+        if config.claude_keychain.is_none() {
+            tracing::info!(
+                "claudeKeychain on by itself: Claude Code's login is only in the Keychain"
+            );
+        }
         jobs::keep_keychain_logins();
     }
     vault::install(&config.home, &config.vault);
@@ -190,6 +201,7 @@ pub async fn serve(
     // and what sign-ins cut short by the last stop left behind.
     config.agents.open(&config.home);
     accounts::sweep(&config.home);
+    github_login::sweep(&config.home);
     // What an older obid's boxes could have left in the accounts' folders (#655), said once.
     jobs::check_account_folders(&config.agents.get());
     let events = events::Events::new();
@@ -239,6 +251,8 @@ pub async fn serve(
         }
     })?;
     jobs.use_artifacts(artifacts.clone());
+    let github =
+        github_work::Feed::open(config.clone(), jobs.clone(), link.clone(), events.clone());
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -258,7 +272,9 @@ pub async fn serve(
         link: link.clone(),
         plugins: plugins.clone(),
         sign_ins: accounts::SignIns::default(),
+        github: github_login::GitHubLogin::default(),
         pages: web::Sessions::default(),
+        github_work: github.clone(),
         stopping: stopping_rx.clone(),
     });
     let app = api::router(shared.clone());
@@ -294,6 +310,7 @@ pub async fn serve(
     // Jobs that were queued or running when obid last stopped carry on, and so does its Sphere.
     jobs.resume();
     link.start();
+    github.spawn(stopping_rx.clone());
     // A job a conversation started tells it how it ended (#351).
     conversation::report_job_ends(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
@@ -326,6 +343,7 @@ pub async fn serve(
             }
             let _ = stopped_at.set(tokio::time::Instant::now());
             shared.sign_ins.kill_all();
+            shared.github.kill();
             tokio::join!(jobs.shutdown(JOBS_GRACE), plugins.shutdown());
         })
     };

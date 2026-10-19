@@ -109,6 +109,9 @@
 				Info.plist,
 				Oby.entitlements,
 				Tools/bundle-cloudflared.sh,
+				Tools/bundle-gh.sh,
+				Tools/bundle-obid.sh,
+				Tools/com.deskree.oby.obid.plist,
 			);
 			target = FB61F80A30795FDE00A9523D /* Oby */;
 		};
@@ -350,7 +353,8 @@
 				FB61F80930795FDE00A9523D /* Resources */,
 				0B1E0C0A00000000000000F1 /* Bundle the character */,
 				0B1E0C0A00000000000000F2 /* Bundle cloudflared */,
-				0B1E0C0A00000000000000F3 /* Bundle the runner */,
+				0B1E0C0A00000000000000F4 /* Bundle gh */,
+				0B1E0C0A00000000000000F3 /* Bundle obid */,
 			);
 			buildRules = (
 			);
@@ -626,6 +630,27 @@
 			shellPath = /bin/zsh;
 			shellScript = "set -e\n# Download (once, into the cache), bundle and sign cloudflared (#285): apps/mac/app/Tools/bundle-cloudflared.sh.\nzsh \"$SRCROOT/mac/app/Tools/bundle-cloudflared.sh\"\n";
 		};
+		0B1E0C0A00000000000000F4 /* Bundle gh */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/mac/app/Tools/bundle-gh.sh",
+			);
+			name = "Bundle gh";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/gh",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/zsh;
+			shellScript = "set -e\n# Download (once, into the cache), bundle and sign GitHub's CLI: apps/mac/app/Tools/bundle-gh.sh.\nzsh \"$SRCROOT/mac/app/Tools/bundle-gh.sh\"\n";
+		};
 		0B1E0C0A00000000000000F1 /* Bundle the character */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -645,7 +670,7 @@
 			shellPath = /bin/zsh;
 			shellScript = "set -e\n# Build the clean copy of the character (no playground) and bundle it as Resources/Character.\nzsh \"$SRCROOT/../character/package/build.sh\" > /dev/null\ndest=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/Character\"\nrm -rf \"$dest\"\nmkdir -p \"$dest/vendor\"\ncp \"$SRCROOT/../dist/oby/oby.html\" \"$dest/\"\ncp \"$SRCROOT/../dist/oby/vendor/three.module.js\" \"$dest/vendor/\"\n";
 		};
-		0B1E0C0A00000000000000F3 /* Bundle the runner */ = {
+		0B1E0C0A00000000000000F3 /* Bundle obid */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -654,15 +679,17 @@
 			inputFileListPaths = (
 			);
 			inputPaths = (
+				"$(SRCROOT)/mac/app/Tools/bundle-obid.sh",
 			);
-			name = "Bundle the runner";
+			name = "Bundle obid";
 			outputFileListPaths = (
 			);
 			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/obid",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
-			shellScript = "set -e\n# The runner on this Mac (#283): build oby-runner (Package.swift) and bundle it as the login item's program,\n# Contents/Helpers/oby-runner, with its launchd plist at Contents/Library/LaunchAgents (apps/mac/app/LoginItem.swift).\n# Xcode's build variables would point SwiftPM at the wrong SDK, so it builds in a clean environment.\nswift=(env -i HOME=\"$HOME\" PATH=\"/usr/bin:/bin:/usr/sbin:/sbin\" /usr/bin/xcrun swift build -c release --product oby-runner --package-path \"$SRCROOT/..\")\n\"${swift[@]}\" > /dev/null\nbin=\"$(\"${swift[@]}\" --show-bin-path)\"\nhelpers=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers\"\nagents=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchAgents\"\nmkdir -p \"$helpers\" \"$agents\"\ncp \"$bin/oby-runner\" \"$helpers/oby-runner\"\nchmod 755 \"$helpers/oby-runner\"\ncp \"$SRCROOT/../Runner/com.deskree.oby.runner.plist\" \"$agents/com.deskree.oby.runner.plist\"\n# Signed as the app is: Xcode signs only the app itself after this phase.\nif [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ]; then\n  /usr/bin/codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --options runtime \"$helpers/oby-runner\"\nfi\n";
+			shellScript = "set -e\n# obid, Oby's engine, as the app's login item: apps/mac/app/Tools/bundle-obid.sh.\nzsh \"$SRCROOT/mac/app/Tools/bundle-obid.sh\"\n";
 		};
 		0B1E0C0A000000000000C9 /* Bundle the character */ = {
 			isa = PBXShellScriptBuildPhase;

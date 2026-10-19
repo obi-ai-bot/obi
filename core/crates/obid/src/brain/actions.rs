@@ -1168,6 +1168,7 @@ mod tests {
             arrived: None,
             confirm: None,
             start: None,
+            github: None,
         }
     }
 

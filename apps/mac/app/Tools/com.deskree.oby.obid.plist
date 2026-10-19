@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- obid, Oby's engine, as Oby.app's login item (the owner's decision of 2026-10-18): the app
+     registers it with SMAppService (apps/mac/app/LoginItem.swift), and launchd starts
+     Contents/Helpers/obid at login and keeps it running while the window is closed. `obid serve`
+     with no `--config` uses ~/Library/Application Support/Oby/obid/config.json, written the first
+     time, and logs to ~/Library/Logs/obid.log (core/crates/obid/src/app.rs). The "Bundle obid"
+     phase of the Oby target puts this file at Contents/Library/LaunchAgents. Its label isn't install.sh's
+     com.deskree.obid: macOS's background-task records keep a label tied to the file that first
+     used it, and the app's agent under the same label then never starts (seen 2026-10-18). -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.deskree.oby.obid</string>
+	<key>BundleProgram</key>
+	<string>Contents/Helpers/obid</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>obid</string>
+		<string>serve</string>
+	</array>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.deskree.oby</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+</dict>
+</plist>

@@ -454,15 +454,50 @@ fn command_of(value: &Value) -> Option<String> {
     }
 }
 
-/// The command without the shell Codex wraps it in: `/bin/zsh -lc 'git status'` is `git status`.
+/// The command without the shell Codex wraps it in: `/bin/zsh -lc 'git status'` and
+/// `/bin/zsh -lc "git status"` are `git status`.
 pub fn unwrap_shell(command: &str) -> String {
     static WRAPPED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let wrapped =
-        WRAPPED.get_or_init(|| regex::Regex::new(r"(?s)^/\S+ -l?c '(.*)'$").expect("a regex"));
-    match wrapped.captures(command) {
-        Some(inner) => inner[1].replace("'\\''", "'"),
-        None => command.to_owned(),
+    let wrapped = WRAPPED.get_or_init(|| {
+        regex::Regex::new(r"(?s)^/\S*/(?:ba|z|da|k)?sh -l?c (.+)$").expect("a regex")
+    });
+    wrapped
+        .captures(command)
+        .and_then(|inner| one_word(&inner[1]))
+        .unwrap_or_else(|| command.to_owned())
+}
+
+/// One shell word with its quotes taken out (`'…'`, `"…"` and bare characters, run together), or
+/// none when it's more than one word or holds what the shell would expand.
+fn one_word(text: &str) -> Option<String> {
+    let mut word = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => loop {
+                match chars.next()? {
+                    '\'' => break,
+                    c => word.push(c),
+                }
+            },
+            '"' => loop {
+                match chars.next()? {
+                    '"' => break,
+                    '\\' => match chars.next()? {
+                        c @ ('"' | '\\' | '$' | '`') => word.push(c),
+                        '\n' => {}
+                        c => word.extend(['\\', c]),
+                    },
+                    '$' | '`' => return None,
+                    c => word.push(c),
+                }
+            },
+            '\\' => word.push(chars.next()?),
+            c if c.is_whitespace() || "|&;<>()$`*?[~#".contains(c) => return None,
+            c => word.push(c),
+        }
     }
+    Some(word)
 }
 
 /// The files a change writes: each change's `path`, and where a move goes.
@@ -952,6 +987,20 @@ exec sleep 30
             "echo 'hi'"
         );
         assert_eq!(unwrap_shell("node --test"), "node --test");
+        // Codex's newer commands are double-quoted (#634).
+        assert_eq!(
+            unwrap_shell(r#"/bin/zsh -lc "git commit -m \"fix: it\" && echo \$HOME""#),
+            r#"git commit -m "fix: it" && echo $HOME"#
+        );
+        assert_eq!(unwrap_shell("/bin/bash -lc ls"), "ls");
+        // What the outer shell would expand, or more than one word, stays as it is.
+        for kept in [
+            r#"/bin/zsh -lc "echo $(whoami)""#,
+            "/bin/zsh -lc 'ls' extra",
+            "/usr/bin/python3 -c 'print(1)'",
+        ] {
+            assert_eq!(unwrap_shell(kept), kept);
+        }
         assert_eq!(
             command_of(&json!(["git", "push", "origin"])).as_deref(),
             Some("git push origin")

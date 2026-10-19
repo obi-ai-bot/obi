@@ -1763,7 +1763,8 @@ pub fn card(call: &Call, id: &str, repo: &str, bounds: &Bounds) -> Permission {
                     Some(format!("Bash({prefix}:*)")),
                     Some(prefix),
                 ),
-                None => (format!("Run {}", line(&command, 60)), detail, None, None),
+                // Allowed only once at a time, so the owner reads all of it (#634).
+                None => (format!("Run {detail}"), detail, None, None),
             }
         }
         "Edit" => {
@@ -2164,6 +2165,13 @@ mod tests {
         assert_eq!(
             (chained.rule, chained.title.as_str()),
             (None, "Run swift build && swift test")
+        );
+        // Without a rule the title is the whole command, however long (#634).
+        let long =
+            "git add src/permissions.rs src/codex.rs && git commit -m 'fix(obid): show it all'";
+        assert_eq!(
+            card(&bash(long), "p2", "deskree-inc/oby", worktree).title,
+            format!("Run {long}")
         );
         let edit = card(
             &tool("Edit", &["/tmp/oby/jobs/abc/Engine/Jobs.swift"]),

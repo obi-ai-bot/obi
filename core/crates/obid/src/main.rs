@@ -8,11 +8,12 @@ use std::process::ExitCode;
 
 use obid::config::Config;
 
-const USAGE: &str = "usage: obid serve --config /path/to/config.json\n       obid vault --config /path/to/config.json list | add NAME (the value on stdin) | remove NAME\n       obid --version";
+const USAGE: &str = "usage: obid serve --config /path/to/config.json\n       obid serve   (macOS, as Oby.app starts it: ~/Library/Application Support/Oby/obid/config.json)\n       obid vault --config /path/to/config.json list | add NAME (the value on stdin) | remove NAME\n       obid --version";
 
 enum Command {
+    /// `config` none: as Oby.app starts it (obid::app), on macOS only.
     Serve {
-        config: PathBuf,
+        config: Option<PathBuf>,
     },
     Vault {
         config: PathBuf,
@@ -26,11 +27,14 @@ fn parse(args: &[String]) -> Result<Command, String> {
     match args {
         [flag] if flag == "--version" || flag == "-V" => Ok(Command::Version),
         [flag] if flag == "--help" || flag == "-h" => Ok(Command::Help),
+        [serve] if serve == "serve" && cfg!(target_os = "macos") => {
+            Ok(Command::Serve { config: None })
+        }
         [serve, flag, path] if serve == "serve" && flag == "--config" => Ok(Command::Serve {
-            config: PathBuf::from(path),
+            config: Some(PathBuf::from(path)),
         }),
         [serve, flag] if serve == "serve" && flag.starts_with("--config=") => Ok(Command::Serve {
-            config: PathBuf::from(&flag["--config=".len()..]),
+            config: Some(PathBuf::from(&flag["--config=".len()..])),
         }),
         [vault, flag, path, rest @ ..] if vault == "vault" && flag == "--config" => {
             Ok(Command::Vault {
@@ -80,7 +84,30 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
         }
-        Command::Serve { config } => config,
+        Command::Serve {
+            config: Some(config),
+        } => config,
+        // As Oby.app starts it: install.sh's file, written the first time, and its log.
+        Command::Serve { config: None } => {
+            let Some(home) = nix::unistd::User::from_uid(nix::unistd::getuid())
+                .ok()
+                .flatten()
+                .map(|user| user.dir)
+                .filter(|dir| dir.is_absolute())
+            else {
+                eprintln!("obid: can't find the person's home folder");
+                return ExitCode::FAILURE;
+            };
+            if let Err(e) = obid::app::log_to_file(&home) {
+                eprintln!("obid: {e}");
+            }
+            let path = obid::app::config_path(&home);
+            if let Err(e) = obid::app::ensure_config(&path, &home) {
+                eprintln!("obid: {e}");
+                return ExitCode::FAILURE;
+            }
+            path
+        }
         Command::Vault { config, action } => return vault(&config, &action),
     };
 
@@ -192,10 +219,10 @@ mod tests {
     #[test]
     fn commands() {
         assert!(
-            matches!(parse(&args(&["serve", "--config", "/c.json"])), Ok(Command::Serve { config }) if config.as_path() == Path::new("/c.json"))
+            matches!(parse(&args(&["serve", "--config", "/c.json"])), Ok(Command::Serve { config: Some(config) }) if config.as_path() == Path::new("/c.json"))
         );
         assert!(
-            matches!(parse(&args(&["serve", "--config=/c.json"])), Ok(Command::Serve { config }) if config.as_path() == Path::new("/c.json"))
+            matches!(parse(&args(&["serve", "--config=/c.json"])), Ok(Command::Serve { config: Some(config) }) if config.as_path() == Path::new("/c.json"))
         );
         assert!(matches!(parse(&args(&["--version"])), Ok(Command::Version)));
         assert!(
@@ -208,9 +235,16 @@ mod tests {
                 ..
             })
         ));
+        // `obid serve` alone is how Oby.app starts it, on macOS only.
+        assert_eq!(
+            matches!(
+                parse(&args(&["serve"])),
+                Ok(Command::Serve { config: None })
+            ),
+            cfg!(target_os = "macos")
+        );
         for wrong in [
             &[][..],
-            &["serve"],
             &["serve", "--config"],
             &["serve", "/c.json"],
             &["run", "--config", "/c.json"],

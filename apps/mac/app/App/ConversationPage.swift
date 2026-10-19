@@ -126,7 +126,7 @@ struct ConversationPage: View {
                                 }
                             }
                             if thinking || conversation.working {
-                                ObyAtWork(working: conversation.working, problem: feed.stopProblem, face: conversation.streamed.isEmpty, onStop: stop)
+                                ObyAtWork(working: conversation.working, problem: feed.stopProblem, face: conversation.streamed.isEmpty)
                                     .padding(.top, rows.last?.turn.who == .oby ? 12 : 16)
                             }
                             if model.speaker.speaking {
@@ -210,9 +210,10 @@ struct ConversationPage: View {
                        placeholder: replyTarget == nil ? "Reply to Oby…" : "Your answer…", label: "Reply to Oby",
                        maximumHeight: height * 0.5, focusRequest: composerFocusRequest,
                        onSend: send, onScreenshot: screenshot,
-                       onStop: { if thinking { desk.cancel(); return true }; return false },
+                       onStop: { guard thinking || conversation.working else { return false }; stop(); return true },
                        onEscape: onBack, usage: model.usageRows,
-                       voice: model.voice, talkKeyListening: model.listening)
+                       voice: model.voice, talkKeyListening: model.listening,
+                       onStopTurn: stop, working: thinking || conversation.working)
                 .disabled(sendingAnswer)
         }
     }
@@ -339,10 +340,9 @@ struct ThreadTask: View {
 
     var body: some View {
         let mark = ThreadTaskLine.mark(job)
+        // No Stop on hover (Sangam's ThreadTask has none, and it covered the mark): the menu and the
+        // task's page stop it.
         card(mark)
-            .overlay(alignment: .topTrailing) {
-                if hovering && job.isActive, let onStop { StopButton(action: onStop).padding(.top, 8).padding(.trailing, 38) }
-            }
             .onHover { hovering = $0 }
     }
 
@@ -381,9 +381,8 @@ struct ThreadTask: View {
 private struct ObyAtWork: View {
     let working: Bool
     let problem: String?
-    /// Its face, unless its words already show it under way.
+    /// Its face, unless its words already show it under way. Stop is in the box (A14).
     var face = true
-    let onStop: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -391,7 +390,6 @@ private struct ObyAtWork: View {
             if face { ObyFaceLive(live: true) }
             HStack(spacing: 10) {
                 Sheen(text: working ? "Working" : "Thinking")
-                StopButton(action: onStop)
                 if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needs) }
             }
         }

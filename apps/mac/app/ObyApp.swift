@@ -109,6 +109,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         island.windowShowsTalk = { [weak self] in self.map { $0.chat.showsTalk || $0.firstLaunch.isOpen } ?? false }
         island.windowShowsConversation = { [weak self] in self?.chat.showsConversation ?? false }
         island.start()
+        // obid as This Mac's engine: the Swift runner an older build registered goes, and the
+        // engine is registered when nothing else serves this Mac (apps/mac/app/LoginItem.swift).
+        RunnerLoginItem().reconcile(onThisMac: UserDefaults.standard.bool(forKey: RunnerFeed.thisMacKey))
         // Scheduled update checks (apps/mac/app/Updater.swift), in the build that ships. A Debug build from
         // Xcode checks only when asked, so a release never replaces it quietly.
         #if !DEBUG
