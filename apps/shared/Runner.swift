@@ -86,6 +86,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The job this one follows up (obid only): the owner told that one something after it ended,
     /// and its page lists this one (Sangam's design). Nil otherwise.
     var followUpOf: String?
+    /// What its agent asked Tetrix, the session it saved and where the graph fell short, or nil.
+    var tetrix: TetrixJobReport?
 
     /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
     /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
@@ -115,7 +117,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
-             conversation, artifacts, followUpOf
+             conversation, artifacts, followUpOf, tetrix
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -640,6 +642,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     #if os(macOS)
     /// A merge check was queued, taken or ended (Engine/Checks.swift): a Mac that runs them asks for one.
     case check(MacCheck)
+    /// obid's Tetrix changed: connected, signed out, a sign-in started or ended (obid only).
+    case tetrix(TetrixStatus)
     #endif
     /// A turn of the conversation was added, from any app, or changed (a job dispatched from it):
     /// the Mac window's and the iPhone's thread replace it by id, or add it by time (#11).
@@ -654,6 +658,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     case delta(TurnDelta)
     /// An artifact was made, got a version, or was deleted (obid only).
     case artifact(ArtifactEvent)
+    /// Your work on GitHub changed, or obid's gh signed in or out (obid only): the whole list.
+    case github(GitHubWork)
 }
 
 #if os(iOS) || os(watchOS)
@@ -982,6 +988,25 @@ nonisolated struct Runner: Sendable {
 
     /// One job, however old: the list has only the latest 50.
     func job(_ id: String) async throws -> Job { try await call("GET", "v1/jobs/\(id)") }
+
+    /// Your work on GitHub as obid's gh finds it (docs/runner-api.md, "obid only: GitHub work"),
+    /// or nil from a runner that doesn't list it.
+    func gitHubWork() async throws -> GitHubWork? {
+        do {
+            return try await call("GET", "v1/github/work")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// Has obid read GitHub now; answers the feed once the read ends (up to 2 minutes).
+    func refreshGitHubWork() async throws -> GitHubWork { try await call("POST", "v1/github/work/refresh", timeout: 150) }
+
+    /// Starts Oby's job on a GitHub item, a review or a fix: the new job, or the one already on it.
+    @discardableResult
+    func startGitHubWork(_ id: String) async throws -> Job {
+        try await call("POST", "v1/github/work/\(id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id)/start")
+    }
     func report(_ id: String) async throws -> ResearchDocument { try await call("GET", "v1/jobs/\(id)/report") }
     func fileProposal(_ id: String, index: Int, start: Bool) async throws -> FileProposalResult {
         try await call("POST", "v1/jobs/\(id)/proposals/\(index)/file", body: FileProposalBody(start: start))
@@ -1331,13 +1356,13 @@ nonisolated struct Runner: Sendable {
     private static func hex(_ token: Data) -> String { token.map { String(format: "%02x", $0) }.joined() }
     #endif
 
-    private func call<Answer: Decodable>(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Answer {
+    func call<Answer: Decodable>(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Answer {
         try Self.decoder.decode(Answer.self, from: try await send(method, path, body: body, timeout: timeout))
     }
 
     /// The answer's body, unread: for a call whose answer says nothing the app needs.
     @discardableResult
-    private func send(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Data {
+    func send(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Data {
         var request = URLRequest(url: URL(string: path, relativeTo: base.appending(path: "/"))!)
         request.httpMethod = method
         request.timeoutInterval = timeout
@@ -1583,12 +1608,14 @@ nonisolated struct EventParser {
             #endif
             #if os(macOS)
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
+            case "tetrix": return (try? Runner.decoder.decode(TetrixStatus.self, from: json)).map(RunnerEvent.tetrix)
             #endif
             case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn, $0.extras) }
             case "step": return (try? Runner.decoder.decode(TurnStep.self, from: json)).map(RunnerEvent.step)
             case "conversation": return (try? Runner.decoder.decode(RunnerConversation.self, from: json)).map(RunnerEvent.conversation)
             case "delta": return (try? Runner.decoder.decode(TurnDelta.self, from: json)).map(RunnerEvent.delta)
             case "artifact": return (try? Runner.decoder.decode(ArtifactEvent.self, from: json)).map(RunnerEvent.artifact)
+            case "github": return (try? Runner.decoder.decode(GitHubWork.self, from: json)).map(RunnerEvent.github)
             default: return nil
             }
         }

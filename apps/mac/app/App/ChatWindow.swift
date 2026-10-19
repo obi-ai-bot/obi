@@ -413,7 +413,8 @@ private struct HomeView: View {
                     onOpenJob: { state.trail.push(.job(id: $0, local: local)) }).takesKeys()
         case .group(let kind):
             GroupPane(model: model, kind: kind, items: work.filter { $0.type == kind },
-                      onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })
+                      onOpenJob: { state.trail.push(.job(id: $0, local: $1)) },
+                      onConnectGitHub: { state.openSettings(.connectors) })
                 .takesKeys()
         case .settings(let page):
             SettingsPane(model: model, page: page)

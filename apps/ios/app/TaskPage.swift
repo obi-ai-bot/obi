@@ -255,6 +255,7 @@ struct TaskPage: View {
                             }
                         }
                         let followUps = ThreadTaskLine.followUps(of: job.id, in: phone.jobs)
+                        if let tetrix = job.tetrix, !tetrix.isEmpty { section("Tetrix") { TetrixReportView(report: tetrix) } }
                         if !followUps.isEmpty { section("Follow-ups") { followUpList(followUps) } }
                     }
                     .padding(.horizontal, 18)

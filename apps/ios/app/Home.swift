@@ -297,20 +297,42 @@ struct KindPage: View {
     /// The tab picked, or nil for the one it opens on.
     @State private var picked: WorkList.Tab?
 
+    /// GitHub's part of the page: only Review PR and Issues have one.
+    private var gitHub: Bool { kind == .review || kind == .issues }
+    private var connect: GitHubWork.Connect { gitHub ? .init(phone.gitHubWork) : .unknown }
+    private var waiting: [GitHubWork.Item] { gitHub ? phone.gitHubWork?.waiting(kind, later: phone.gitHubLater) ?? [] : [] }
+
+    /// GitHub's sign-in is the Mac's alone: a paired phone never signs the Mac in to someone's GitHub.
+    static let connectLine = "See the pull requests waiting for your review and the issues assigned to you here, and hand any of them to Oby in one tap. Connect GitHub on your Mac, in Settings › Connectors."
+
     var body: some View {
         let items = WorkList.ranked(phone.work.filter { $0.type == kind })
-        let tab = picked ?? WorkList.firstTab(items)
+        let tab = picked ?? (waiting.isEmpty ? WorkList.firstTab(items) : .running)
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
                 Text(kind.label).font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink)
                     .padding(.bottom, 12).accessibilityAddTraits(.isHeader)
-                LineTabs(tab: tab, counts: Dictionary(uniqueKeysWithValues: WorkList.Tab.allCases.map { ($0, WorkList.items(items, in: $0).count) })) {
+                LineTabs(tab: tab, counts: Dictionary(uniqueKeysWithValues: WorkList.Tab.allCases.map {
+                    ($0, WorkList.items(items, in: $0).count + ($0 == .running ? waiting.count : 0))
+                })) {
                     picked = $0
                 }
                 .padding(.bottom, 12)
                 let cards = WorkList.items(items, in: tab)
+                if tab == .running {
+                    if connect == .signedOut { ConnectGitHubCard(line: Self.connectLine, connect: nil) }
+                    ForEach(waiting) { item in
+                        GitHubCard(item: item, start: { try await phone.startGitHubWork(item.id) }, later: { phone.gitHubLater.insert(item.id) })
+                    }
+                    ForEach(phone.gitHubWork?.cut(kind) ?? [], id: \.self) { line in
+                        Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.horizontal, 4)
+                    }
+                    if let problem = phone.gitHubWork?.error {
+                        Text(verbatim: GitHubWork.plain(problem)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.horizontal, 4)
+                    }
+                }
                 ForEach(cards) { TaskCard(item: $0) }
-                if cards.isEmpty {
+                if cards.isEmpty && (tab == .done || waiting.isEmpty && connect != .signedOut) {
                     Text(tab == .done ? "Nothing completed yet" : "Nothing running")
                         .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
                 }
@@ -325,8 +347,10 @@ struct KindPage: View {
         .obyPage()
         .navigationBarTitleDisplayMode(.inline)
         // The tab it opens on stays put while you're on it, so a task arriving doesn't switch it.
-        .onAppear { picked = picked ?? WorkList.firstTab(items) }
+        .onAppear { picked = picked ?? (waiting.isEmpty ? WorkList.firstTab(items) : .running) }
         .refreshable { await phone.reload() }
+        // Opening Review PR or Issues looks at GitHub again; the list arrives as an event.
+        .task { if gitHub { await phone.refreshGitHubWork() } }
     }
 }
 
