@@ -289,23 +289,33 @@ pub fn has_login(remote: &str) -> bool {
 }
 
 /// The pull request's title in Conventional Commits form, ending with `(#issue)` when there is
-/// one: the first commit subject already in that form, else the job's kind and the agent's first
-/// line. At most 100 characters.
+/// one: the first commit subject already in that form that changes the code (`fix`, `feat`,
+/// `perf` or `refactor`, the job's own kind first), else the first in that form, else the job's
+/// kind and the agent's first line. At most 100 characters.
 pub fn title(job: &Job, subjects: &[String]) -> String {
     let conventional =
-        regex::Regex::new(r"^[a-z]+(\([^()]+\))?!?: \S.*$").expect("the title pattern compiles");
-    let mut title = subjects
+        regex::Regex::new(r"^([a-z]+)(\([^()]+\))?!?: \S.*$").expect("the title pattern compiles");
+    let kind = match job.kind.as_str() {
+        "build" => "feat",
+        "fix" => "fix",
+        "test" => "test",
+        _ => "chore",
+    };
+    let typed: Vec<(&str, &str)> = subjects
         .iter()
         .map(|s| s.trim())
-        .find(|s| conventional.is_match(s))
-        .map(str::to_owned);
+        // A subject with a control character (an escape, a carriage return) never titles one.
+        .filter(|s| !s.chars().any(char::is_control))
+        .filter_map(|s| Some((conventional.captures(s)?.get(1)?.as_str(), s)))
+        .collect();
+    let changes = |t: &str| ["fix", "feat", "perf", "refactor"].contains(&t);
+    let mut title = typed
+        .iter()
+        .find(|(t, _)| *t == kind && changes(t))
+        .or_else(|| typed.iter().find(|(t, _)| changes(t)))
+        .or(typed.first())
+        .map(|(_, s)| (*s).to_owned());
     if title.is_none() {
-        let kind = match job.kind.as_str() {
-            "build" => "feat",
-            "fix" => "fix",
-            "test" => "test",
-            _ => "chore",
-        };
         let said = job
             .summaries
             .as_ref()
@@ -1485,6 +1495,36 @@ mod tests {
         let long = title(&job, &[]);
         assert_eq!(long.chars().count(), 100);
         assert!(long.ends_with("… (#75)"));
+    }
+
+    /// A test-first fix goes out titled by its fix, not by the test that came first (#765).
+    #[test]
+    fn titles_prefer_the_change_over_its_test() {
+        let mut job = job();
+        job.issue = Some(7);
+        let subjects = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            title(
+                &job,
+                &subjects(&["test(obid): x fails", "fix(obid): x works", "docs: x"])
+            ),
+            "fix(obid): x works (#7)"
+        );
+        assert_eq!(
+            title(&job, &subjects(&["feat: y", "fix: x"])),
+            "fix: x (#7)"
+        );
+        assert_eq!(
+            title(&job, &subjects(&["test(obid): x fails", "test: y"])),
+            "test(obid): x fails (#7)"
+        );
+        assert_eq!(
+            title(
+                &job,
+                &subjects(&["fix: \u{1b}[2Jlooks fine", "fix(obid): x works"])
+            ),
+            "fix(obid): x works (#7)"
+        );
     }
 
     #[test]
