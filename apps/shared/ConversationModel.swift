@@ -123,6 +123,9 @@ final class ConversationModel {
     /// Whether `turn` is Oby's answer to words: not the turn a job adds when it ends.
     private func answers(_ turn: Turn) -> Bool { turn.who == .oby && !ended.contains(turn.id) }
 
+    /// Whether `turn` is one a job added when it ended (#351): its card there isn't where it started.
+    func endedTurn(_ turn: Turn) -> Bool { ended.contains(turn.id) }
+
     /// A page of the runner's turns: the artifacts they made, for their cards, and which are a job's
     /// ended turn.
     func note(_ turns: [RunnerTurn]) {
