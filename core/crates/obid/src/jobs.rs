@@ -129,9 +129,9 @@ impl Stall {
 /// "15 minutes", "12 hours", "1 minute", "90 seconds".
 fn spell(time: Duration) -> String {
     let secs = time.as_secs();
-    let (n, unit) = if secs >= 3600 && secs % 3600 == 0 {
+    let (n, unit) = if secs >= 3600 && secs.is_multiple_of(3600) {
         (secs / 3600, "hour")
-    } else if secs >= 60 && secs % 60 == 0 {
+    } else if secs >= 60 && secs.is_multiple_of(60) {
         (secs / 60, "minute")
     } else {
         (secs, "second")
