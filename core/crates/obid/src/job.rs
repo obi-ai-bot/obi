@@ -956,8 +956,10 @@ mod tests {
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's eight.
-        assert_eq!(object.len(), 73);
+        // The Swift runner's 65 keys, and obid's ten.
+        assert_eq!(object.len(), 75);
+        assert_eq!(value["archived"], Value::Null);
+        assert_eq!(value["changes"], json!([]));
         assert_eq!(value["artifacts"], json!([]));
         assert_eq!(value["artifactProblems"], json!([]));
         assert_eq!(value["answered"], json!([]));
