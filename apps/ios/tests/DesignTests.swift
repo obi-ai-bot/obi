@@ -235,6 +235,23 @@ struct DesignTests {
         #expect(TaskFacts.facts(done).map(\.name) == ["Repository", "Branch", "Base", "Model"])
         let running = try job("r", "running", extra: #", "rounds": 4, "round": 2"#)
         #expect(running.maxRounds == 4 && running.currentRound == 2)
-        #expect(TaskFacts.box(running) == "Tell Claude Code…")
+        #expect(TaskFacts.box(running) == "Tell Oby about this task…")
+    }
+
+    /// The job page's facts (#739) read into the phone's Job from each of the canvas's states, the
+    /// stages' times with them, and a job from today's obid, without them, still reads.
+    @Test func theJobPagesFactsRead() throws {
+        let now = Date(timeIntervalSince1970: 1_791_582_173)
+        for fixture in JobPageFixture.allCases {
+            let job = try Runner.decoder.decode(Job.self, from: fixture.json(now: now))
+            #expect(job.facts.estimate != nil && job.facts.usage?.tokens != nil, "\(fixture)")
+            #expect(job.facts.stages["prepare"]?.finished != nil, "\(fixture)")
+            #expect(try Runner.decoder.decode(Job.self, from: Runner.encoder.encode(job)) == job, "\(fixture)")
+            let bare = try Runner.decoder.decode(Job.self, from: fixture.json(now: now, bare: true))
+            #expect(bare.facts == JobFacts(), "\(fixture)")
+        }
+        let needs = try Runner.decoder.decode(Job.self, from: JobPageFixture.needs.json(now: now))
+        #expect(needs.facts.waited == 120)
+        #expect(JobClock.of(needs, facts: needs.facts, mode: needs.mode, needs: true, now: now).aside(compact: true) == "Paused · then 9–13m")
     }
 }

@@ -658,14 +658,15 @@ final class RunnerFeed {
         guard !jobs.contains(where: { $0.id == id }) else { return }
         guard let runner = runner ?? self.runner else { throw RunnerError(message: "Set the runner's URL in Settings to open it.") }
         let asked = runnerChanges
-        let job: Job
-        do { job = try await runner.job(id) } catch let error as RunnerError {
+        let job: Job, more: RunnerJobExtras?
+        do { (job, more) = try await runner.jobWithExtras(id) } catch let error as RunnerError {
             if runnerChanges == asked { gone(id, error.status) }
             throw error
         }
         // Settings › Runner changed while it was on its way: it's the other runner's job.
         guard runnerChanges == asked, !jobs.contains(where: { $0.id == id }) else { return }
         jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
+        if let more { extras[id] = more }
         noticeChanges()
     }
 
@@ -676,11 +677,14 @@ final class RunnerFeed {
         jobs = list
         let asked = runnerChanges
         for id in refetch {
-            let job: Job?
-            do { job = try await runner.job(id) } catch { job = nil; if runnerChanges == asked { gone(id, (error as? RunnerError)?.status) } }
+            let fetched: (Job, RunnerJobExtras?)?
+            do { fetched = try await runner.jobWithExtras(id) } catch { fetched = nil; if runnerChanges == asked { gone(id, (error as? RunnerError)?.status) } }
             // Settings › Runner changed meanwhile: these are the other runner's.
             guard runnerChanges == asked, !Task.isCancelled else { return }
-            if let job { jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created) }
+            if let (job, more) = fetched {
+                jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
+                if let more { extras[id] = more }
+            }
         }
         noticeChanges()
         // Alerts left in Notification Center, from before a drop or a restart, whose job needs nothing now.

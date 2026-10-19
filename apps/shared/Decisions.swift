@@ -98,6 +98,8 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     var artifacts: [ArtifactRef]?
     /// What its agent asked Tetrix, the session it saved and where the graph fell short, or nil.
     var tetrix: TetrixJobReport?
+    /// The job page's facts (#739), read from the same JSON; nil for this Mac's own jobs.
+    var facts: JobFacts?
 
     private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, artifacts, tetrix }
 
@@ -118,6 +120,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
         conversation = try? keys.decodeIfPresent(String.self, forKey: .conversation)
         artifacts = try? keys.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
         tetrix = try? keys.decodeIfPresent(TetrixJobReport.self, forKey: .tetrix)
+        facts = (try? JobFacts(from: decoder)).flatMap { $0 == JobFacts() ? nil : $0 }
     }
 
     /// Each job's, by id; a list that can't be read gives none.

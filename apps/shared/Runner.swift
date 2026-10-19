@@ -88,6 +88,28 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var followUpOf: String?
     /// What its agent asked Tetrix, the session it saved and where the graph fell short, or nil.
     var tetrix: TetrixJobReport?
+    /// The job page's facts (#739), each nil until obid serves it: its tools, tokens, share of the
+    /// limit windows, the estimate, the check's commands, the secret scan, the diff and what the
+    /// current stage is doing (`JobFacts`).
+    var activity: JobActivity?
+    var usage: JobUsage?
+    var windowShare: WindowShare?
+    var estimate: JobEstimate?
+    var checks: [CheckRound]?
+    var scan: JobScan?
+    var diff: JobDiff?
+    var context: String?
+
+    /// The same facts as the Mac reads them, with each stage's times.
+    var facts: JobFacts {
+        var stages: [String: StageTiming] = [:]
+        for stage in pipeline?.stages ?? [] {
+            let timing = StageTiming(started: stage.started, finished: stage.finished, waited: stage.waited, estimate: stage.estimate)
+            if timing != StageTiming() { stages[stage.id] = timing }
+        }
+        return JobFacts(activity: activity, usage: usage, windowShare: windowShare, estimate: estimate, checks: checks,
+                        scan: scan, diff: diff, context: context, stages: stages)
+    }
 
     /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
     /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
@@ -117,7 +139,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
-             conversation, artifacts, followUpOf, tetrix
+             conversation, artifacts, followUpOf, tetrix, activity, usage, windowShare, estimate, checks, scan, diff, context
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -214,6 +236,11 @@ nonisolated struct JobStage: Codable, Equatable, Identifiable, Sendable {
     var state: State
     var detail: String?
     var reason: String?
+    /// Its times (#733), nil until obid serves them.
+    var started: Date?
+    var finished: Date?
+    var waited: Double?
+    var estimate: Span?
 }
 
 nonisolated struct JobPipeline: Codable, Equatable, Sendable {
@@ -987,6 +1014,14 @@ nonisolated struct Runner: Sendable {
     /// One job, however old: the list has only the latest 50.
     func job(_ id: String) async throws -> Job { try await call("GET", "v1/jobs/\(id)") }
     func report(_ id: String) async throws -> ResearchDocument { try await call("GET", "v1/jobs/\(id)/report") }
+
+    /// The job's raw session after line `after` (#381), oldest first: a list, or `{entries: […]}`.
+    func transcript(_ id: String, after: Int? = nil) async throws -> [TranscriptEntry] {
+        struct Wrapped: Decodable { var entries: [TranscriptEntry] }
+        let data = try await send("GET", "v1/jobs/\(id)/transcript" + (after.map { "?after=\($0)" } ?? ""))
+        if let list = try? Self.decoder.decode([TranscriptEntry].self, from: data) { return list }
+        return try Self.decoder.decode(Wrapped.self, from: data).entries
+    }
     func fileProposal(_ id: String, index: Int, start: Bool) async throws -> FileProposalResult {
         try await call("POST", "v1/jobs/\(id)/proposals/\(index)/file", body: FileProposalBody(start: start))
     }
@@ -1370,6 +1405,12 @@ nonisolated struct Runner: Sendable {
     func jobsWithExtras() async throws -> ([Job], [String: RunnerJobExtras]) {
         let data = try await send("GET", "v1/jobs?limit=50")
         return (try Self.decoder.decode([Job].self, from: data), RunnerJobExtras.of(data))
+    }
+
+    /// One job, with what Engine's Job doesn't read yet.
+    func jobWithExtras(_ id: String) async throws -> (Job, RunnerJobExtras?) {
+        let data = try await send("GET", "v1/jobs/\(id)")
+        return (try Self.decoder.decode(Job.self, from: data), try? Self.decoder.decode(RunnerJobExtras.self, from: data))
     }
 
     #endif

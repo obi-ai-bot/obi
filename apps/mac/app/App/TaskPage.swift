@@ -20,6 +20,8 @@ struct TaskActions {
     var publishing: JobView.Publishing?
     var readReport: (() async throws -> ResearchDocument)?
     var fileProposal: ((Int, Bool) async throws -> FileProposalResult)?
+    /// The job's raw session after a line (#381); nil for this Mac's own jobs, which keep none.
+    var transcript: ((Int?) async throws -> [TranscriptEntry])? = nil
 
     @MainActor static func of(_ job: Job, local: Bool, model: IslandModel) -> TaskActions {
         let desk = model.desk, feed = model.feed
@@ -59,7 +61,8 @@ struct TaskActions {
                 ? JobView.Publishing(action: { try await feed.publishAction(job.id) }, publish: { try await feed.publish(job.id, action: $0) })
                 : nil,
             readReport: { try await feed.about(job.id) { try await $0.report(job.id) } },
-            fileProposal: { index, start in try await feed.about(job.id) { try await $0.fileProposal(job.id, index: index, start: start) } })
+            fileProposal: { index, start in try await feed.about(job.id) { try await $0.fileProposal(job.id, index: index, start: start) } },
+            transcript: { after in try await feed.about(job.id) { try await $0.transcript(job.id, after: after) } })
     }
 
     /// Files one of this Mac's research report's proposed issues, after the secret scan, and starts
@@ -275,11 +278,15 @@ struct StageBar: View {
     }
 }
 
-/// One task on its own page (Sangam's TaskView): its card with everything open. Its title and
-/// agent · account · where on the page; the decision, when there is one, a card of its own; then
-/// one card with Result, Stages and Details, a line between each; what it can still do under it;
-/// and at the foot the box to tell its agent something. The agent's session isn't here: the runner
-/// this Mac talks to doesn't serve a job's transcript.
+
+/// One task on its own page (Sangam's TaskView with #741's timeline, Alternative B of
+/// obi-ai-bot/obi#739). Its title and agent · account · where, with the mode to change; the
+/// decision, when there is one, a card of its own (a failure says what failed); then one card with
+/// Result (and what went out), the Timeline (the time track, then the stages as the spine with the
+/// work, the checks and the secret scan under them; "Stages" as before while the runner serves no
+/// times), Usage, Details with the full session under it, what you asked and its follow-ups; what
+/// it can still do under it; and at the foot the box to tell Oby about it, with Stop in its end slot
+/// while it runs (A14). A part whose facts the runner doesn't serve yet isn't drawn.
 struct TaskPage: View {
     let job: Job
     let actions: TaskActions
@@ -305,51 +312,73 @@ struct TaskPage: View {
     /// Why the words for the agent didn't go, over the box.
     @State private var noteProblem: String?
     @State private var showingReport = false
+    @State private var showingSession = false
+
+    private var facts: JobFacts? { actions.extras?.facts }
+    private var mode: String? { actions.extras?.mode }
+    /// It waits on you: its clock is paused, and its stage is orange.
+    private var needs: Bool { TaskDecision.shows(job, extras: actions.extras) && job.isActive }
+    private var failure: Bool { TaskPage.failure(job) && !TaskDecision.shows(job, extras: actions.extras) }
+
+    /// It ended without finishing and you haven't let it go: the page leads with what failed.
+    static func failure(_ job: Job) -> Bool {
+        (job.status == .failed || job.status == .interrupted) && job.dismissed == nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 8) {
                     header
                     if TaskDecision.shows(job, extras: actions.extras) {
                         TaskDecision(job: job, actions: actions, busy: $busy, problem: $problem, box: TaskFacts.box(job) != nil)
                             .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 18)
                             .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
-                            .padding(.bottom, 8)
+                    } else if failure {
+                        failed
                     }
                     VStack(alignment: .leading, spacing: 0) {
-                        if hasResult { section("Result", first: true) { result } }
-                        section("Stages · \(job.pipeline.label)", first: !hasResult) { StageList(job: job) }
-                        section("Details") { details }
-                        section("What you asked") {
-                            Text(job.request).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).lineSpacing(6)
-                                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                            if let notes = job.notes, !notes.isEmpty {
-                                Text("You told the agent").font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.label).padding(.top, 14)
-                                ForEach(notes.indices, id: \.self) { index in
-                                    Text(notes[index]).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).padding(.top, 6)
-                                        .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                                }
+                        // Once it's done (Sangam's #741), or while a published one runs again.
+                        let hasResult = TaskFacts.hasResult(job) && !failure && (!job.isActive || job.published != nil)
+                        if hasResult {
+                            PageSection("Result", aside: job.status == .done ? JobClock.of(job, facts: facts, mode: mode, needs: false, now: .now).took : nil,
+                                        first: true) { result }
+                        }
+                        JobTimeline(job: job, facts: facts, mode: mode, needs: needs,
+                                    onSession: actions.transcript == nil ? nil : { showingSession = true }, first: !hasResult)
+                        if JobUsageLine.shows(facts) {
+                            PageSection("Usage") {
+                                JobUsageLine(usage: facts?.usage, share: facts?.windowShare,
+                                             account: actions.accounts.first { $0.account.id == job.account }?.usage, done: job.status == .done)
                             }
                         }
-                        if let tetrix = actions.extras?.tetrix, !tetrix.isEmpty { section("Tetrix") { TetrixReportView(report: tetrix) } }
-                        if !followUps.isEmpty { section("Follow-ups") { followUpList } }
+                        PageSection(title: "Details", accessory: {
+                            if actions.transcript != nil && !showingSession { SectionLink(title: "Full session") { showingSession = true } }
+                        }) { details }
+                        if showingSession, let transcript = actions.transcript {
+                            PageSection(title: "Session", accessory: { SectionLink(title: "Hide") { showingSession = false } }) {
+                                SessionLog(agent: job.agentName, load: transcript).frame(height: 420)
+                            }
+                        }
+                        PageSection("What you asked") { asked }
+                        if let tetrix = actions.extras?.tetrix, !tetrix.isEmpty { PageSection("Tetrix") { TetrixReportView(report: tetrix) } }
+                        if !followUps.isEmpty { PageSection("Follow-ups") { followUpList } }
                     }
                     .padding(.horizontal, 18)
                     .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
                     if moving, let move = actions.move {
                         MovePanel(job: job, accounts: actions.accounts, onMove: move, onClose: { moving = false })
-                            .padding(.top, 14)
+                            .padding(.top, 6)
                     } else {
-                        controls.padding(.top, 14)
+                        controls.padding(.top, 6)
                     }
                     if let problem, action == nil {
-                        Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.top, 10)
+                        Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.top, 2)
                     }
                 }
                 .frame(maxWidth: Tokens.column, alignment: .leading)
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, Tokens.gutter).padding(.top, 8).padding(.bottom, 24)
+                .padding(.horizontal, Tokens.gutter).padding(.top, 8).padding(.bottom, 32)
             }
             .scrollIndicators(.never)
             if let placeholder = TaskFacts.box(job) {
@@ -357,11 +386,12 @@ struct TaskPage: View {
                     Text(noteProblem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger)
                         .frame(maxWidth: Tokens.column, alignment: .leading).padding(.horizontal, Tokens.gutter + 12).padding(.top, 8)
                 }
-                MessageBox(text: $note, focused: $typing, tray: tray, placeholder: placeholder, label: "Tell \(job.agentName) about \(job.heading)",
-                           maximumHeight: height * 0.5, onSend: tell, onScreenshot: {}, onStop: { false }, onEscape: onBack, attachments: false)
+                MessageBox(text: $note, focused: $typing, tray: tray, placeholder: placeholder, label: "Tell Oby about \(job.heading)",
+                           maximumHeight: height * 0.5, onSend: tell, onScreenshot: {}, onStop: { false }, onEscape: onBack, attachments: false,
+                           onStopTurn: job.isActive ? actions.stop : nil, working: job.isActive)
                     .disabled(busy)
                     .keepsDraft($note, as: Drafts.task(job.id))
-                    .frame(maxWidth: Tokens.column).padding(.horizontal, Tokens.gutter).padding(.vertical, 12)
+                    .frame(maxWidth: Tokens.column).padding(.horizontal, Tokens.gutter).padding(.top, 8).padding(.bottom, 20)
             }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
@@ -372,32 +402,17 @@ struct TaskPage: View {
         }
     }
 
-    /// Each follow-up as Sangam's thread shows it: what you said, Oby's line, and its card.
-    private var followUpList: some View {
-        ForEach(Array(followUps.enumerated()), id: \.element.id) { index, next in
-            // Its own account, which a move may have changed: by name, as the iPhone shows it.
-            let account = actions.accounts.first { $0.account.id == next.account }?.account.name ?? next.account
-            VStack(alignment: .leading, spacing: 8) {
-                Text(next.request).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).lineSpacing(6)
-                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                Text(ThreadTaskLine.followUp(next, account: account)).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                ThreadTask(job: next, account: account, onOpen: { onOpenJob(next.id) })
-            }
-            .padding(.top, index == 0 ? 0 : 16)
-        }
-    }
-
+    /// The page's head: the agent's mark, the title and how long; who has it where, and the mode.
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                AgentMark(agent: job.agent).font(Tokens.font(17, .semibold)).frame(width: 20).foregroundStyle(Tokens.muted)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 10) {
+                AgentMark(agent: job.agent).font(Tokens.font(17, .semibold)).frame(width: 20).foregroundStyle(Tokens.ink).opacity(0.7)
                 Text(job.heading).font(Tokens.font(22, .semibold)).foregroundStyle(Tokens.ink).lineSpacing(6)
                     .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 8)
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text(Elapsed.line(started: job.started ?? job.created, finished: job.finished, now: context.date))
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    Text((TaskPage.failure(job) ? "Failed " : "") + TaskFacts.ago(job, now: context.date))
                         .font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(Tokens.muted)
                 }
             }
@@ -405,15 +420,14 @@ struct TaskPage: View {
                 Text([job.agentName, actions.account ?? job.account, actions.place].filter { !$0.isEmpty }.joined(separator: " · "))
                     .font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted)
                 Text(job.badge.text).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(tone(job.badge.tone))
-                if let verdict = job.verdictLine { Text(verdict).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted) }
-                if let change = actions.mode, job.isActive, let mode = RunnerMode(actions.extras?.mode) { modeMenu(mode, change) }
+                if let change = actions.mode, job.isActive, let mode = RunnerMode(mode) { modeMenu(mode, change) }
             }
             .padding(.leading, 30)
-            if let moved = job.movedLine {
-                Text(moved).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.leading, 30)
+            ForEach([job.isWaiting ? job.line : nil, job.verdictLine, job.movedLine].compactMap { $0 }, id: \.self) { line in
+                Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.leading, 30)
             }
         }
-        .padding(.bottom, 16)
+        .padding(.bottom, 8)
     }
 
     private func tone(_ tone: JobBadge.Tone) -> Color {
@@ -426,16 +440,25 @@ struct TaskPage: View {
         }
     }
 
-    private var hasResult: Bool { TaskFacts.hasResult(job) }
+    /// What failed and what it left (Sangam's failed card, #741): the failing tests, when the runner
+    /// serves them, the session to read, and Stop here (Dismiss: it stops needing you).
+    private var failed: some View {
+        let lines = job.summary.split(separator: "\n", maxSplits: 1).map(String.init)
+        let failing = facts?.checks?.last?.failing?.map { [$0.test, $0.message.map { "  " + $0 }].compactMap { $0 }.joined(separator: "\n") }
+        return AskCard(kind: "Failed", failed: true, title: lines.first ?? job.line, happened: lines.count > 1 ? lines[1] : nil,
+                       detail: failing?.joined(separator: "\n"),
+                       options: (actions.transcript == nil ? [] : [CardOption(label: "Open the session", answer: "session")])
+                           + [CardOption(label: "Stop here", answer: "dismiss")],
+                       busy: busy, onChoose: { option in if option.answer == "dismiss" { run(actions.dismiss) } else { showingSession = true } })
+            .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 18)
+            .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
+    }
 
-    /// What the agent reported, what it left behind, and Publish, Dismiss or Read report.
+    /// What the agent reported, what it left behind and what went out, and Publish or Read report.
     @ViewBuilder private var result: some View {
         if !job.summary.isEmpty {
             Text(job.summary).font(Tokens.font(16, .medium)).foregroundStyle(Tokens.ink).lineSpacing(6)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-        }
-        if let sent = job.sentLines {
-            Text(sent).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).padding(.top, 8).textSelection(.enabled)
         }
         if let line = TaskFacts.resultLine(job) {
             Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 8)
@@ -445,6 +468,7 @@ struct TaskPage: View {
         if let url = job.published.flatMap(URL.init(string:)) {
             Link("Open pull request", destination: url).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.text).padding(.top, 6)
         }
+        if let outgoing = job.outgoing, !outgoing.isEmpty { WentOut(outgoing: outgoing).padding(.top, 14) }
         if let error = job.pullRequestError { Text(error).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 6) }
         if job.dismissed != nil {
             Text("Dismissed. Tell the agent something to pick it up again.").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 6)
@@ -506,7 +530,7 @@ struct TaskPage: View {
 
     private var details: some View {
         Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 6) {
-            ForEach(TaskFacts.facts(job), id: \.name) { fact in
+            ForEach(TaskFacts.facts(job, mode: mode), id: \.name) { fact in
                 GridRow {
                     Text(fact.name).foregroundStyle(Tokens.muted).frame(width: 96, alignment: .leading)
                     Text(fact.value).font(fact.mono ? Tokens.mono(13) : Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text)
@@ -517,13 +541,43 @@ struct TaskPage: View {
         .font(Tokens.font(Tokens.textBase))
     }
 
+    /// What you asked, and what you told the agent along the way.
+    @ViewBuilder private var asked: some View {
+        Text(job.request).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).lineSpacing(6)
+            .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        if let notes = job.notes, !notes.isEmpty {
+            Text("You told the agent").font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.label).padding(.top, 14)
+            ForEach(notes.indices, id: \.self) { index in
+                Text(notes[index]).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).padding(.top, 6)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Each follow-up as Sangam's thread shows it: what you said, Oby's line, and its card.
+    private var followUpList: some View {
+        ForEach(Array(followUps.enumerated()), id: \.element.id) { index, next in
+            // Its own account, which a move may have changed: by name, as the iPhone shows it.
+            let account = actions.accounts.first { $0.account.id == next.account }?.account.name ?? next.account
+            VStack(alignment: .leading, spacing: 8) {
+                Text(next.request).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).lineSpacing(6)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                Text(ThreadTaskLine.followUp(next, account: account)).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                ThreadTask(job: next, account: account, onOpen: { onOpenJob(next.id) })
+            }
+            .padding(.top, index == 0 ? 0 : 16)
+        }
+    }
+
     /// What the job can still do: start now when it waits for its time, use an account past its
-    /// weekly reserve, stop, or let it go.
+    /// weekly reserve, move it, stop it while the box can't (queued), or let it go.
     @ViewBuilder private var controls: some View {
         let offers = TaskFacts.controls(job)
+        let stop = offers.stop && TaskFacts.box(job) == nil
         let reserved = job.waitsToStart && actions.useAnyway != nil
             ? Usage.liftable(job.waiting?.reserved, among: actions.accounts, id: \.account.id, usage: \.usage) : []
-        if offers != TaskFacts.Controls() || !reserved.isEmpty || actions.move != nil {
+        if offers.startNow || stop || offers.dismiss || !reserved.isEmpty || actions.move != nil {
             CenteredFlow(spacing: 8, centred: false) {
                 if offers.startNow, let startNow = actions.startNow {
                     PillButton(title: "Start now") { run(startNow) }.disabled(busy).help("Start it now instead of waiting")
@@ -535,7 +589,7 @@ struct TaskPage: View {
                     PillButton(title: "Move to…") { problem = nil; moving = true }.disabled(busy)
                         .help("Move this job to another tool, account or model")
                 }
-                if offers.stop { PillButton(title: "Stop job", danger: true, action: actions.stop).disabled(busy) }
+                if stop { PillButton(title: "Stop job", danger: true, action: actions.stop).disabled(busy) }
                 if offers.dismiss {
                     PillButton(title: "Dismiss", quiet: true) { run(actions.dismiss) }.disabled(busy)
                         .help("Let this job go: it stays in the list, and stops needing you")
@@ -557,22 +611,16 @@ struct TaskPage: View {
                 .help(choice.help)
             }
         } label: {
-            Label(mode.label, systemImage: mode.symbol).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.text)
-                .padding(.horizontal, 10).frame(height: 24).background(Tokens.pill, in: Capsule())
+            HStack(spacing: 3) {
+                Text(mode.label)
+                Image(systemName: "chevron.down").font(Tokens.font(8, .semibold))
+            }
+            .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.text)
+            .padding(.leading, 9).padding(.trailing, 8).frame(height: 22).background(Tokens.pill, in: Capsule())
         }
         .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize().disabled(busy)
+        .padding(.leading, 4)
         .help("Mode: \(mode.help)").accessibilityLabel("Mode: \(mode.label)")
-    }
-
-    private func section(_ title: String, first: Bool = false, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text(title).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.label).padding(.bottom, 16)
-                .accessibilityAddTraits(.isHeader)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 16).padding(.bottom, 18)
-        .overlay(alignment: .top) { if !first { Tokens.divider.frame(height: 1) } }
     }
 
     private func tell() {
@@ -598,75 +646,31 @@ struct TaskPage: View {
     }
 }
 
-/// The stages on the task's page: a mark per stage and a dotted line down to the next; its name,
-/// then its live step or its detail, and why it failed.
-private struct StageList: View {
-    let job: Job
+#if DEBUG
+/// The page in each of the canvas's six states (JobPageFixture), as obid would send the job. The
+/// Mac's window is dark only (Tokens), so each state has the one preview.
+struct TaskPagePreview: View {
+    let fixture: JobPageFixture
 
     var body: some View {
-        let stages = job.pipeline.stages
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(stages.enumerated()), id: \.element.id) { index, stage in
-                let last = index == stages.count - 1
-                let mark = TaskFacts.mark(stage.state, needs: job.needsYou || job.waitsForAnswer || job.waitsForPermission, working: job.status == .running)
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(spacing: 0) {
-                        StageMark(mark: mark).frame(width: 16, height: 18)
-                        if !last { DottedLine().frame(width: 2).frame(minHeight: 20).padding(.top, 4).padding(.bottom, 2) }
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            if mark == .current { Sheen(text: stage.title, size: Tokens.textBase) } else {
-                                Text(stage.title).font(Tokens.font(Tokens.textBase, .medium))
-                                    .foregroundStyle(mark == .upcoming || mark == .skipped ? Tokens.text : Tokens.ink)
-                            }
-                            if mark == .skipped { Text("Skipped").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted) }
-                        }
-                        if mark == .current, job.status == .running, !job.step.isEmpty, job.step != stage.detail {
-                            Text(job.step).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
-                        }
-                        if let detail = stage.detail { Text(detail).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted) }
-                        if let reason = stage.reason { Text(reason).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.danger) }
-                    }
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.bottom, last ? 0 : 14)
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityValue(stage.state.rawValue.capitalized)
-            }
+        let data = fixture.json()
+        if let job = try? Runner.decoder.decode(Job.self, from: data) {
+            let extras = try? Runner.decoder.decode(RunnerJobExtras.self, from: data)
+            let account = AccountState(account: Account(id: "personal", agent: "claude", name: "Personal", payer: "me"),
+                                       label: "Max", fiveHour: fixture.windows.fiveHour, sevenDay: fixture.windows.sevenDay)
+            TaskPage(job: job, actions: TaskActions(place: "Studio", account: "Personal", extras: extras, accounts: [account], stop: {},
+                                                    message: { _ in }, dismiss: {}, permission: { _, _ in }, mode: { _ in },
+                                                    transcript: { _ in [] }),
+                     tray: Tray())
+                .frame(width: 700, height: 1480).background(Tokens.bg)
         }
     }
 }
 
-/// A stage's mark in its 16-point spot: a green circle with a check once done, a grey dot pulsing
-/// while worked on, orange while the task needs you, a ring still to come, a dash if skipped, red
-/// if it failed.
-private struct StageMark: View {
-    let mark: TaskFacts.Mark
-
-    var body: some View {
-        switch mark {
-        case .done:
-            Image(systemName: "checkmark").font(Tokens.font(8, .heavy)).foregroundStyle(Tokens.bg)
-                .frame(width: 14, height: 14).background(Tokens.done, in: Circle())
-        case .current: WorkMarkView(mark: .working, dot: 10)
-        case .needs: Circle().fill(Tokens.needs).frame(width: 10, height: 10)
-        case .upcoming: Circle().strokeBorder(Color.white.opacity(0.45), lineWidth: 1.5).frame(width: 10, height: 10)
-        case .skipped: Capsule().fill(Tokens.check).frame(width: 10, height: 2)
-        case .failed: Circle().fill(Tokens.danger).frame(width: 10, height: 10)
-        }
-    }
-}
-
-/// Round 2-point dots, 4 apart, down to the next stage.
-private struct DottedLine: View {
-    var body: some View {
-        GeometryReader { geometry in
-            Path { path in
-                var y: CGFloat = 1
-                while y < geometry.size.height { path.addEllipse(in: CGRect(x: 0, y: y - 1, width: 2, height: 2)); y += 6 }
-            }
-            .fill(Color.white.opacity(0.3))
-        }
-    }
-}
+#Preview("Working") { TaskPagePreview(fixture: .working) }
+#Preview("Planning") { TaskPagePreview(fixture: .planning) }
+#Preview("Waiting for you") { TaskPagePreview(fixture: .needs) }
+#Preview("Running checks") { TaskPagePreview(fixture: .checks) }
+#Preview("Failed") { TaskPagePreview(fixture: .failed) }
+#Preview("Done") { TaskPagePreview(fixture: .done) }
+#endif
