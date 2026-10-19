@@ -481,6 +481,16 @@ impl Jobs {
         self.lock().jobs.get(id).cloned()
     }
 
+    /// The follow-up of `id` that's queued or running, if any: a job has one at a time, and words
+    /// for `id` once it ended go to it.
+    pub fn following(&self, id: &str) -> Option<Job> {
+        self.lock()
+            .jobs
+            .values()
+            .find(|j| j.status.is_active() && j.follow_up_of.as_deref() == Some(id))
+            .cloned()
+    }
+
     /// The latest `limit` jobs, newest first.
     pub fn list(&self, limit: usize) -> Vec<Job> {
         let mut jobs: Vec<Job> = self.lock().jobs.values().cloned().collect();
@@ -1401,8 +1411,9 @@ impl Jobs {
                 .collect();
             if let Some(other) = active.iter().find(|j| j.follow_up_of == job.follow_up_of) {
                 return Err(Refused(format!(
-                    "{} is following it up already: tell that one instead.",
-                    other.short_title()
+                    "{} (job {}) is following it up already: tell that one instead.",
+                    other.short_title(),
+                    other.id
                 )));
             }
             if let Some(other) = active
@@ -1621,6 +1632,14 @@ impl Jobs {
             )));
         }
         if !job.status.is_active() && text != crate::brain::actions::TRY_AGAIN {
+            // Its follow-up is working already: the words go to that one, never a second.
+            if source != Source::Event
+                && let Some(next) = self.following(id)
+            {
+                return Some(self.message(&next.id, text, source)?.map_err(|why| {
+                    Refused(format!("{} ({}): {}", next.short_title(), next.id, why.0))
+                }));
+            }
             return Some(match source {
                 Source::Owner => self.create(follow_up(&job, text)),
                 Source::Untrusted | Source::Event => Err(Refused(
@@ -5688,22 +5707,15 @@ fn tail(text: &str, max: usize) -> &str {
 /// The first prompt of the owner's job (Engine/Jobs.swift, `Prompts.agent`, for what obid does).
 /// A follow-up of `job`, which ended, with the owner's `words` (Sangam's design, the owner's
 /// decision of 2026-10-18): the same kind, agent, account, repository, pull request or issue,
-/// base, check, model, mode and conversation, the words its request and task, titled by their
-/// first line, and what `job` did for its first prompt. Bypass isn't carried: only the owner's own
+/// base, check, model, mode and conversation, the words its request and task, titled
+/// `Follow-up: <job's title>` (never the words themselves, which may be long; the conversation
+/// may name it better, `oby_tell_job`'s `title`), and what `job` did for its first prompt. Bypass isn't carried: only the owner's own
 /// Confirm starts a job that never asks. When `job` has commits that aren't merged, the follow-up
 /// starts from its branch head, so its agent has that work: on that very branch while its pull
 /// request is open (publishing updates it), else on a branch of its own.
 pub fn follow_up(job: &Job, words: &str) -> NewJob {
     let unmerged = job.commits.unwrap_or(0) > 0 && !job.merged();
-    let line = words.trim().lines().next().unwrap_or("").trim();
-    let mut title: String = if line.chars().count() > 60 {
-        format!("{}…", line.chars().take(59).collect::<String>().trim_end())
-    } else {
-        line.to_owned()
-    };
-    if let Some(first) = title.get_mut(0..1) {
-        first.make_ascii_uppercase();
-    }
+    let title = crate::brain::briefing::line(&format!("Follow-up: {}", job.short_title()), 60);
     let commits = job.commits.unwrap_or(0);
     let mut did = vec![
         format!(
@@ -5729,7 +5741,7 @@ pub fn follow_up(job: &Job, words: &str) -> NewJob {
         repo: job.repo.clone(),
         kind: job.kind.clone(),
         task: words.to_owned(),
-        title: (!title.is_empty()).then_some(title),
+        title: Some(title),
         request: Some(words.to_owned()),
         pr: job.pr,
         issue: job.issue,
@@ -7150,7 +7162,7 @@ mod tests {
         let next = follow_up(&job, "and the docs");
         assert_eq!((next.branch, next.start_from), (None, None));
         assert_eq!(next.mode, None);
-        assert_eq!(next.title.as_deref(), Some("And the docs"));
+        assert_eq!(next.title.as_deref(), Some("Follow-up: Fix it"));
         job.commits = Some(2);
         let next = follow_up(&job, "and the docs");
         assert_eq!(

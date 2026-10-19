@@ -245,6 +245,13 @@ impl Briefing {
                     "the plan is quoted in {FILE}. Options: {}.",
                     item.options.join(" | ")
                 ),
+                // What a start item would run is the agent's (or the owner's) own words: only
+                // obid's first paragraph is here, the rest in the quoted file.
+                "start" => format!(
+                    "{} What it would run is quoted in {FILE}. Options: {}.",
+                    line(item.text.split("\n\n").next().unwrap_or_default(), 160),
+                    item.options.join(" | ")
+                ),
                 // Other Obis' requests and plug-ins' events: obid's words from their typed
                 // fields; their data is quoted on the item, never here.
                 _ => format!(

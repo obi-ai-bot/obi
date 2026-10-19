@@ -1997,12 +1997,9 @@ fn telling_a_finished_job_something_starts_a_follow_up() {
     assert_eq!(cards.len(), 1, "{answer}");
     let next = cards[0]["id"].as_str().unwrap().to_owned();
     assert_ne!(next, id);
+    // Titled as a follow-up, never with the words themselves.
     let title = cards[0]["title"].as_str().unwrap();
-    assert!(
-        title.starts_with("One more thing for the vault job: REPORT, and [redacted: ")
-            && !title.contains(token),
-        "{title}"
-    );
+    assert_eq!(title, "Follow-up: Vault secrets");
     assert_eq!(
         answer["text"],
         format!(

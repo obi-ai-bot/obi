@@ -2720,10 +2720,42 @@ impl Link {
                         .ok_or_else(|| {
                             open_again(api(StatusCode::CONFLICT, "That plan was lost."))
                         })?;
-                    let job = self
-                        .jobs
-                        .create(new)
-                        .map_err(|e| open_again(api(StatusCode::UNPROCESSABLE_ENTITY, e.0)))?;
+                    // A follow-up of a job whose follow-up is working already: that one hears
+                    // it (the owner's own Start), and the item is done, never a second.
+                    let following = new
+                        .follow_up_of
+                        .as_deref()
+                        .and_then(|of| self.jobs.following(of));
+                    let job =
+                        match following {
+                            Some(next) => match self.jobs.message(
+                                &next.id,
+                                &new.task,
+                                crate::jobs::Source::Owner,
+                            ) {
+                                Some(Ok(job)) => job,
+                                Some(Err(e)) => {
+                                    return Err(open_again(api(
+                                        StatusCode::UNPROCESSABLE_ENTITY,
+                                        format!(
+                                            "{} (job {}): {}",
+                                            next.short_title(),
+                                            next.id,
+                                            e.0
+                                        ),
+                                    )));
+                                }
+                                None => {
+                                    return Err(open_again(api(
+                                        StatusCode::CONFLICT,
+                                        "That job is gone.",
+                                    )));
+                                }
+                            },
+                            None => self.jobs.create(new).map_err(|e| {
+                                open_again(api(StatusCode::UNPROCESSABLE_ENTITY, e.0))
+                            })?,
+                        };
                     item.job = job.id;
                 }
             }

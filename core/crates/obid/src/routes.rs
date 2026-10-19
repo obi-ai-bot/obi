@@ -534,7 +534,10 @@ pub async fn message(
     match shared.jobs.message(&id, &text, crate::jobs::Source::Owner) {
         None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
         Some(Err(refused)) => Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
-        Some(Ok(job)) if job.id != id => Ok(json(StatusCode::CREATED, job.to_json())),
+        // A follow-up it started; one already working heard the words, and is a 200.
+        Some(Ok(job)) if job.id != id && job.heard.is_empty() => {
+            Ok(json(StatusCode::CREATED, job.to_json()))
+        }
         Some(Ok(job)) => Ok(json(StatusCode::OK, job.to_json())),
     }
 }
