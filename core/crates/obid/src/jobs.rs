@@ -5006,7 +5006,7 @@ impl Jobs {
                     };
                     return Err(stall(why).await);
                 }
-                let said = turn.text();
+                let said = turn.last_said();
                 if !turn.succeeded() {
                     let subtype = turn.result.as_ref().and_then(|r| r.get("subtype"));
                     if subtype.and_then(Value::as_str) == Some("error_max_turns") {
@@ -5059,6 +5059,19 @@ impl Jobs {
                 }
                 retries = 0;
                 self.update(id, |job| {
+                    // A turn that said nothing (its last message a tool call, say) keeps the
+                    // earlier round's summary and adds no empty one to the rounds' (#764).
+                    if said.trim().is_empty() {
+                        if !noted {
+                            job.summary = job
+                                .summaries
+                                .as_ref()
+                                .and_then(|s| s.last())
+                                .cloned()
+                                .unwrap_or_default();
+                        }
+                        return;
+                    }
                     if !noted || job.summary.is_empty() {
                         job.summary = said.clone();
                     }
