@@ -723,6 +723,47 @@ fn a_check_that_keeps_failing_stops_at_a_limit() {
     assert!(log.contains("the check failed"), "{log}");
 }
 
+/// A job stopped at a limit after committing keeps its commits and counts them (#757): words told
+/// to it start a follow-up from its branch, whose worktree has them.
+#[test]
+fn a_job_stopped_at_a_limit_counts_its_commits_for_a_follow_up() {
+    let folder = Folder::new("limit-commits");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt", "check": "false", "rounds": 1}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(
+        job["limit"], "`false` still fails after 1 round(s)",
+        "{job}"
+    );
+    assert_eq!(job["commits"], 1, "{job}");
+    let branch = format!("oby/build-{id}");
+    let head = git(&clone, &["rev-parse", &branch]);
+
+    let told = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "Go on with it."}).to_string()),
+    );
+    assert_eq!(told.status, 201, "{}", told.text);
+    let next = told.body["id"].as_str().unwrap().to_owned();
+    let follow = wait(&obid, &next);
+    assert_eq!(follow["followUpOf"], id.as_str(), "{follow}");
+    assert_eq!(follow["startCommit"], head.as_str(), "{follow}");
+    let worktree = obid.home.join("worktrees").join(&next);
+    assert!(worktree.join("a.txt").exists(), "{follow}");
+}
+
 /// A check that fails the way the owner asked for (a test meant to fail): the fix round quotes the
 /// task, the agent says the failure is intended, and the job ends with that round instead of
 /// another one that would undo it.
