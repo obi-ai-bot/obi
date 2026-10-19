@@ -4194,12 +4194,14 @@ fn a_later_step_with_no_time_left_to_think_ends_budget_spent() {
         .unwrap()
         .to_owned();
     // Step 0's first try times out at half the budget; its retry plans with under a second left
-    // for step 1, which no adapter starts.
+    // for step 1, which no adapter starts. The retry sleeps half a second, so that with nothing
+    // else taking time a second would be left: starting processes on a busy machine only takes
+    // from it, and has the whole second before the plan comes after the budget.
     queue(
         &obid,
         &[
             format!("SLEEP 5 {}", reply("")),
-            format!("SLEEP 0.9 {}", set_mode(&id, "ask")),
+            format!("SLEEP 0.6 {}", set_mode(&id, "ask")),
         ],
     );
     let answer = said(&obid, "ask before anything on Vault secrets");
