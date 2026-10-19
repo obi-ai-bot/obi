@@ -3968,6 +3968,19 @@ impl Jobs {
                     });
                 }
                 self.update(id, |job| {
+                    // A turn that said nothing (its last message a tool call, say) keeps the
+                    // earlier round's summary and adds no empty one to the rounds' (#764).
+                    if said.trim().is_empty() {
+                        if !noted {
+                            job.summary = job
+                                .summaries
+                                .as_ref()
+                                .and_then(|s| s.last())
+                                .cloned()
+                                .unwrap_or_default();
+                        }
+                        return;
+                    }
                     if !noted || job.summary.is_empty() {
                         job.summary = said.clone();
                     }
