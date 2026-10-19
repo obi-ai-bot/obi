@@ -31,6 +31,9 @@ fn config(folder: &Path) -> Config {
         "listen": "127.0.0.1:0",
         "home": folder.join("home"),
         "owner": "wellington",
+        // Set, so obid never asks the person's real Keychain whether to turn it on (in process,
+        // these tests have no stand-in `security`, unlike support::start).
+        "claudeKeychain": false,
     })
     .to_string();
     Config::parse(&text).unwrap()

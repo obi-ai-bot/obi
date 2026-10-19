@@ -131,7 +131,15 @@ final class RunnerLoginItem {
             stop.arguments = ["bootout", "gui/\(getuid())/\(Self.scriptLabel)"]
             try stop.run()
             stop.waitUntilExit()
-            // Status 3 (no such process) or 36 (not loaded): already stopped.
+            // Its agent goes only once it's stopped: else both would want the same ports.
+            guard Self.stopped(bootout: stop.terminationStatus) else {
+                problem = "install.sh's obid didn't stop (launchctl bootout said \(stop.terminationStatus)), so it keeps running. Try again in a moment."
+                refresh()
+                return
+            }
+            if let program = (plist?["ProgramArguments"] as? [String])?.first {
+                dropScriptFolders(program: program)
+            }
             try FileManager.default.removeItem(at: scriptAgent)
             Logger.feed.notice("moved install.sh's obid into Oby (launchctl bootout said \(stop.terminationStatus))")
         } catch {
@@ -141,6 +149,42 @@ final class RunnerLoginItem {
         }
         refresh()
         register()
+    }
+
+    /// Whether `launchctl bootout` left install.sh's obid stopped: it stopped it (0), or it wasn't
+    /// running (3, no such process; 36, not loaded; 113, could not find the service).
+    static func stopped(bootout status: Int32) -> Bool { [0, 3, 36, 113].contains(status) }
+
+    /// The configuration without the keys that point into install.sh's own folder (`prefix`,
+    /// where it put obid, its plug-ins and web app), so the app's obid takes its own signed copies
+    /// (Contents/Resources/obid); nil when nothing points there.
+    static func withoutScriptFolders(_ config: [String: Any], prefix: String) -> [String: Any]? {
+        let root = URL(filePath: prefix).standardizedFileURL.path
+        var kept = config
+        for key in ["bundledPlugins", "web"] {
+            guard let path = config[key] as? String else { continue }
+            let standard = URL(filePath: path).standardizedFileURL.path
+            if standard == root || standard.hasPrefix(root + "/") { kept.removeValue(forKey: key) }
+        }
+        return kept.count == config.count ? nil : kept
+    }
+
+    /// Drops install.sh's plug-in and web folders from the configuration the app's obid reads,
+    /// keeping everything else; install.sh's obid is `program`, `<prefix>/bin/obid`.
+    private func dropScriptFolders(program: String) {
+        let prefix = URL(filePath: program).deletingLastPathComponent().deletingLastPathComponent().path
+        let file = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: "Library/Application Support/Oby/obid/config.json")
+        guard let data = try? Data(contentsOf: file),
+              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let kept = Self.withoutScriptFolders(config, prefix: prefix) else { return }
+        do {
+            let text = try JSONSerialization.data(withJSONObject: kept, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            try text.write(to: file, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        } catch {
+            Logger.feed.error("couldn't take install.sh's folders out of obid's configuration: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     func refresh() {

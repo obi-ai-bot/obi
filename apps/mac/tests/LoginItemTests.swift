@@ -38,6 +38,27 @@ struct LoginItemTests {
         #expect(elsewhere?.contains("/srv/obid.json") == true)
     }
 
+    /// The move goes on only when install.sh's obid is stopped or wasn't running.
+    @Test func theMoveGoesOnOnlyOnceInstallShsObidStopped() {
+        for status: Int32 in [0, 3, 36, 113] { #expect(RunnerLoginItem.stopped(bootout: status)) }
+        for status: Int32 in [1, 5, 37, 125] { #expect(!RunnerLoginItem.stopped(bootout: status)) }
+    }
+
+    /// After the move, the configuration no longer points at install.sh's own plug-ins and web app,
+    /// so the app's obid takes its signed copies; other paths and keys stay.
+    @Test func theMoveDropsOnlyInstallShsFolders() throws {
+        let prefix = "/Users/someone/Library/Application Support/Oby/obid"
+        let config: [String: Any] = ["home": "/Users/someone/Library/Application Support/Oby/Runner",
+                                     "bundledPlugins": prefix + "/share/plugins", "web": prefix + "/share/web",
+                                     "listen": "127.0.0.1:7777"]
+        let kept = try #require(RunnerLoginItem.withoutScriptFolders(config, prefix: prefix))
+        #expect(kept["bundledPlugins"] == nil && kept["web"] == nil)
+        #expect(kept["home"] as? String == "/Users/someone/Library/Application Support/Oby/Runner")
+        #expect(kept["listen"] as? String == "127.0.0.1:7777")
+        let elsewhere: [String: Any] = ["bundledPlugins": "/srv/plugins", "web": prefix + "-other/web"]
+        #expect(RunnerLoginItem.withoutScriptFolders(elsewhere, prefix: prefix) == nil)
+    }
+
     /// With no install.sh agent where it looks, nothing runs instead of the app's obid.
     @Test func noScriptAgentMeansTheAppsObid() {
         let item = RunnerLoginItem(service: .agent(plistName: "com.deskree.oby.nothing.plist"),
