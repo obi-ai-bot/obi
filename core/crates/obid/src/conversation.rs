@@ -925,6 +925,7 @@ pub async fn remove(
     UrlPath(id): UrlPath<String>,
 ) -> Result<Response, ApiError> {
     shared.conversations.delete(&id)?;
+    shared.harness.end_warm(&id);
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

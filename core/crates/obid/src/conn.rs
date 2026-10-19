@@ -112,6 +112,16 @@ impl Conn {
         })
     }
 
+    /// A running agent's next turn: `limit` from now, and `stop` its stop signal.
+    pub fn renew(&mut self, limit: Duration, stop: watch::Receiver<process::Signal>) {
+        self.give_up_at
+            .as_mut()
+            .reset(tokio::time::Instant::now() + limit);
+        self.stopped = *stop.borrow() != process::Signal::Run;
+        self.stop = stop;
+        self.timed_out = false;
+    }
+
     /// The next JSON message, or why none comes. Lines that aren't JSON are skipped.
     pub async fn next(&mut self) -> Result<Value, Cut> {
         loop {

@@ -4883,6 +4883,27 @@ fn folder_login_ok(login: Option<&[u8]>, now: u64) -> bool {
     login.is_none_or(|login| far_from_end(expires_at(login), now))
 }
 
+/// Whether the login copy a run was given in `login` (its `.credentials.json`, or its
+/// `.claude/.credentials.json`) is good for one more turn: there is none (none was copied), or its
+/// token doesn't end within 5 minutes ([`file_login_ok`]). A conversation's Claude Code kept
+/// running between turns reads it.
+pub(crate) fn login_copy_lasts(login: &Path) -> bool {
+    match [".credentials.json", ".claude/.credentials.json"]
+        .iter()
+        .map(|name| login.join(name))
+        .find(|file| std::fs::symlink_metadata(file).is_ok())
+    {
+        None => true,
+        // A link in its place is never followed: the turn starts a Claude Code with a new copy.
+        Some(file) => {
+            std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file())
+                && std::fs::read(file)
+                    .ok()
+                    .is_some_and(|login| file_login_ok(Some(&login), now_ms()))
+        }
+    }
+}
+
 /// The issue for the Mac app's Swift engine still running agents unboxed on an account's folder,
 /// after which obid can refresh an account's own login too.
 const SHARED_FOLDER_ISSUE: &str = "#655";
@@ -6404,6 +6425,24 @@ mod tests {
                 || jobs.get("j").is_some_and(|j| j.status != Status::Queued)
         });
         assert!(started, "the job never started once the change ended");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_waiting_claude_code_runs_a_turn_only_on_a_copy_that_lasts() {
+        let root = std::env::temp_dir().join(format!("obid-lasts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        assert!(login_copy_lasts(&root), "no copy: nothing ends");
+        let ends = |ms: u64| format!(r#"{{"claudeAiOauth": {{"expiresAt": {ms}}}}}"#);
+        let file = root.join(".claude/.credentials.json");
+        std::fs::write(&file, ends(now_ms() + 60 * 60_000)).unwrap();
+        assert!(login_copy_lasts(&root));
+        std::fs::write(&file, ends(now_ms() + 60_000)).unwrap();
+        assert!(!login_copy_lasts(&root), "it ends within 5 minutes");
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), &file).unwrap();
+        assert!(!login_copy_lasts(&root), "a link isn't followed");
         let _ = std::fs::remove_dir_all(&root);
     }
 

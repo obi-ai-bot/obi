@@ -313,6 +313,9 @@ pub async fn serve(
     github.spawn(stopping_rx.clone());
     // A job a conversation started tells it how it ended (#351).
     conversation::report_job_ends(shared.clone());
+    // Each repository's spare tree for the conversations' rooms, so a new one
+    // doesn't wait for one to be extracted (docs/fast-replies.md).
+    brain::harness::prepare_rooms(&shared);
     // Job, check and inbox events go to the brain first (#590).
     brain::orchestrator::spawn(shared.clone());
     // Every event a plug-in emits becomes a `pluginEvent` inbox item. The receiver ends once
@@ -344,6 +347,7 @@ pub async fn serve(
             let _ = stopped_at.set(tokio::time::Instant::now());
             shared.sign_ins.kill_all();
             shared.github.kill();
+            shared.harness.end_all_warm();
             tokio::join!(jobs.shutdown(JOBS_GRACE), plugins.shutdown());
         })
     };
