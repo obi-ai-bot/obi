@@ -99,6 +99,7 @@ pub(super) async fn launch(
         instructions: Some(orientation(shared)),
         no_commands: true,
         usage: false,
+        priced: None,
     };
     Ok((launch, Some(options)))
 }
