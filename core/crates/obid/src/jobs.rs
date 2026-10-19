@@ -1865,7 +1865,7 @@ impl Jobs {
     }
 
     /// The job's mode, as it names it. A job from before modes is in Bypass; a mode this obid
-    /// can't read (one a newer obid wrote) asks rather than allow. A review or investigate job is
+    /// can't read (one a newer obid wrote) asks rather than allow. A review job is
     /// in Plan, whatever it says.
     fn mode_of(job: &Job) -> Mode {
         if job.read_only() {
@@ -2159,8 +2159,8 @@ impl Jobs {
     }
 
     /// Changes how much the job asks, from now on: the prompts waiting now that the new mode
-    /// allows are answered. A finished job keeps the mode for when it runs again. A review or
-    /// investigate job stays in Plan.
+    /// allows are answered. A finished job keeps the mode for when it runs again. A review job stays
+    /// in Plan.
     pub fn set_mode(&self, id: &str, mode: Mode) -> Option<Job> {
         self.update(id, |job| {
             if !job.read_only() {
@@ -7071,11 +7071,23 @@ mod tests {
         assert_eq!(Jobs::mode_of(&job), Mode::Sandbox);
     }
 
-    /// The owner's review and investigate jobs only read: Plan, whatever their mode says (#630).
-    /// A review another Obi asked for runs its own way.
+    /// The owner's review jobs only read: Plan, whatever their mode says (#630). A review another
+    /// Obi asked for runs its own way, and an investigation runs in its mode: it may run a test to
+    /// reproduce a bug (the owner's decision of 2026-10-18).
     #[test]
-    fn review_and_investigate_jobs_are_in_plan() {
-        for kind in ["review", "investigate"] {
+    fn review_jobs_are_in_plan() {
+        let mut look = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "investigate".into(),
+            "Look".into(),
+            "codex".into(),
+            "a".into(),
+        );
+        look.mode = Some("bypass".into());
+        assert_eq!(Jobs::mode_of(&look), Mode::Bypass);
+        {
+            let kind = "review";
             let mut job = Job::new(
                 "j".into(),
                 "o/r".into(),

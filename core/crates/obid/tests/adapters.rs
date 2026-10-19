@@ -227,13 +227,15 @@ fn codex_in_plan_mode_changes_no_file() {
     );
 }
 
-/// Review and investigate jobs only read (#630): Plan mode whatever they ask for or the default
-/// says, so Codex's file change is declined, and a mode change keeps them in Plan.
+/// Review jobs only read (#630): Plan mode whatever they ask for or the default says, so Codex's
+/// file change is declined, and a mode change keeps them in Plan. Investigations run as other
+/// work does (the owner's decision of 2026-10-18).
 #[test]
 fn codex_reviews_and_investigates_in_plan_mode() {
     let folder = Folder::new("codex-read-only");
     let obid = obid(&folder, false);
-    for kind in ["review", "investigate"] {
+    {
+        let kind = "review";
         let id = dispatch(
             &obid,
             json!({"agent": "codex", "kind": kind, "task": "COMMIT: plan.txt", "mode": "bypass"}),
