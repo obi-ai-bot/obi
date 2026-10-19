@@ -70,7 +70,19 @@ struct File {
     /// How long one conversation turn may act, in seconds: 1 to 110, 110 when left out.
     #[serde(default)]
     turn_budget: Option<u64>,
+    /// The least time a brain is asked to think in, in seconds: 1 to 110, 1 when left out. For
+    /// tests, which widen it so a busy machine can't miss it.
+    #[serde(default)]
+    least_think: Option<u64>,
     orchestrator_delay: Option<u64>,
+    /// How long a job may go without progress before it stalls, in seconds: 1 to 86,400, 900
+    /// when left out.
+    stall_after: Option<u64>,
+    /// The safety ceiling of one run of a job, in hours: 1 to 168, 12 when left out.
+    job_ceiling_hours: Option<u64>,
+    /// The safety budget of a job, in tokens (cache reads left out): 1 to 10^10, 50 million when
+    /// left out.
+    job_token_budget: Option<u64>,
     /// Where the vault is (crate::vault): `{"store": "file"}` or `{"store": "keychain", "service":
     /// "…"}`; left out, [`crate::vault::Location::default_for`].
     #[serde(default)]
@@ -212,9 +224,21 @@ pub struct Config {
     /// How long one conversation turn may plan and act (`Desk.turnBudget`): 110 seconds unless
     /// `turnBudget` says less, under the apps' 120-second wait.
     pub turn_budget: std::time::Duration,
+    /// The least time a brain is asked to think in (#615): with less of the turn left, none is.
+    /// [`crate::brain::planner::LEAST`] unless `leastThink` says otherwise, which only tests do.
+    pub least_think: std::time::Duration,
     /// How long the event orchestrator waits for nearby events to come together before its
     /// turn (#590): 30 seconds unless `orchestratorDelay` says otherwise (1 to 600).
     pub orchestrator_delay: std::time::Duration,
+    /// How long a job may go without progress before it stalls (docs/runner-api.md, `limit`): 15
+    /// minutes unless `stallAfter` says otherwise.
+    pub stall_after: std::time::Duration,
+    /// The safety ceiling of one run of a job, against runaway cost only: 12 hours unless
+    /// `jobCeilingHours` says otherwise.
+    pub job_ceiling: std::time::Duration,
+    /// The safety budget of a job, in tokens its tool counted, cache reads left out: 50 million
+    /// unless `jobTokenBudget` says otherwise.
+    pub job_token_budget: u64,
     /// Where paired phones reach obid (crate::gateway): `gateway`, an address on 127.0.0.1; none
     /// when it is left out.
     pub gateway: Option<SocketAddr>,
@@ -435,10 +459,43 @@ impl Config {
             }
         };
 
+        let least_think = match file.least_think {
+            None => crate::brain::planner::LEAST,
+            // Less than the whole budget: a turn no brain may ever think in is no turn.
+            Some(least) if (1..turn_budget).contains(&least) => {
+                std::time::Duration::from_secs(least)
+            }
+            Some(least) => {
+                return invalid(format!(
+                    "leastThink is {least}: it is 1 second to less than turnBudget ({turn_budget})."
+                ));
+            }
+        };
+
         let orchestrator_delay = file.orchestrator_delay.unwrap_or(30);
         if !(1..=600).contains(&orchestrator_delay) {
             return invalid(format!(
                 "orchestratorDelay is {orchestrator_delay}: it is 1 to 600 seconds."
+            ));
+        }
+
+        let stall_after = file.stall_after.unwrap_or(15 * 60);
+        if !(1..=86_400).contains(&stall_after) {
+            return invalid(format!(
+                "stallAfter is {stall_after}: it is 1 to 86400 seconds."
+            ));
+        }
+        let job_ceiling_hours = file.job_ceiling_hours.unwrap_or(12);
+        if !(1..=168).contains(&job_ceiling_hours) {
+            return invalid(format!(
+                "jobCeilingHours is {job_ceiling_hours}: it is 1 to 168 hours."
+            ));
+        }
+
+        let job_token_budget = file.job_token_budget.unwrap_or(50_000_000);
+        if !(1..=10_000_000_000).contains(&job_token_budget) {
+            return invalid(format!(
+                "jobTokenBudget is {job_token_budget}: it is 1 to 10000000000 tokens."
             ));
         }
 
@@ -491,7 +548,11 @@ impl Config {
             telemetry: file.telemetry,
             vault,
             turn_budget: std::time::Duration::from_secs(turn_budget),
+            least_think,
             orchestrator_delay: std::time::Duration::from_secs(orchestrator_delay),
+            stall_after: std::time::Duration::from_secs(stall_after),
+            job_ceiling: std::time::Duration::from_secs(job_ceiling_hours * 3600),
+            job_token_budget,
             gateway,
             claude_keychain: file.claude_keychain,
             conversation: Conversation {
@@ -891,6 +952,33 @@ mod tests {
     }
 
     #[test]
+    fn jobs_stall_after_15_minutes_and_stop_at_12_hours_unless_set() {
+        let config = Config::parse(&with(serde_json::json!({}))).unwrap();
+        assert_eq!(config.stall_after, std::time::Duration::from_secs(900));
+        assert_eq!(
+            config.job_ceiling,
+            std::time::Duration::from_secs(12 * 3600)
+        );
+        let config = Config::parse(&with(
+            serde_json::json!({"stallAfter": 2, "jobCeilingHours": 1}),
+        ))
+        .unwrap();
+        assert_eq!(config.stall_after, std::time::Duration::from_secs(2));
+        assert_eq!(config.job_ceiling, std::time::Duration::from_secs(3600));
+        assert_eq!(config.job_token_budget, 50_000_000);
+        for (key, wrong) in [
+            ("stallAfter", 0),
+            ("stallAfter", 86_401),
+            ("jobCeilingHours", 0),
+            ("jobCeilingHours", 169),
+            ("jobTokenBudget", 0),
+        ] {
+            let text = with(serde_json::json!({key: wrong}));
+            assert!(problem(&text).contains(key), "{key} {wrong}");
+        }
+    }
+
+    #[test]
     fn the_orchestrator_delay_is_1_to_600_seconds() {
         let config = Config::parse(&with(serde_json::json!({}))).unwrap();
         assert_eq!(
@@ -903,6 +991,31 @@ mod tests {
             let text = with(serde_json::json!({"orchestratorDelay": wrong}));
             assert!(problem(&text).contains("orchestratorDelay"), "{wrong}");
         }
+    }
+
+    /// #763: tests may give a brain more than a second as the least it thinks in.
+    #[test]
+    fn the_least_think_time_is_1_second_to_under_the_budget() {
+        let config = Config::parse(&with(serde_json::json!({}))).unwrap();
+        assert_eq!(config.least_think, std::time::Duration::from_secs(1));
+        let config = Config::parse(&with(serde_json::json!({"leastThink": 10}))).unwrap();
+        assert_eq!(config.least_think, std::time::Duration::from_secs(10));
+        for wrong in [0, 111] {
+            let text = with(serde_json::json!({"leastThink": wrong}));
+            assert!(problem(&text).contains("leastThink"), "{wrong}");
+        }
+        let text = with(serde_json::json!({"turnBudget": 10, "leastThink": 10}));
+        assert!(
+            problem(&text).contains("less than turnBudget (10)"),
+            "{text}"
+        );
+        let config = Config::parse(&with(
+            serde_json::json!({"turnBudget": 10, "leastThink": 9}),
+        ));
+        assert_eq!(
+            config.unwrap().least_think,
+            std::time::Duration::from_secs(9)
+        );
     }
 
     #[test]

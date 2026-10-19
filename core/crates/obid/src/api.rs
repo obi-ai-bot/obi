@@ -129,8 +129,13 @@ pub fn router(shared: Arc<Shared>) -> Router {
             "/v1/jobs",
             get(crate::routes::jobs).post(crate::routes::dispatch),
         )
-        .route("/v1/jobs/{id}", get(crate::routes::job))
+        .route(
+            "/v1/jobs/{id}",
+            get(crate::routes::job).delete(crate::routes::delete),
+        )
+        .route("/v1/jobs/{id}/archive", post(crate::routes::archive))
         .route("/v1/jobs/{id}/wait", get(crate::routes::wait))
+        .route("/v1/jobs/{id}/transcript", get(crate::routes::transcript))
         .route("/v1/jobs/{id}/stop", post(crate::routes::stop))
         .route("/v1/jobs/{id}/dismiss", post(crate::routes::dismiss))
         .route("/v1/jobs/{id}/messages", post(crate::routes::message))

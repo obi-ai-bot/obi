@@ -7,6 +7,7 @@
 
 pub mod accounts;
 pub mod acp;
+pub mod activity;
 pub mod agent;
 pub mod api;
 pub mod app;
@@ -21,6 +22,7 @@ pub mod connections;
 pub mod conversation;
 pub mod devices;
 pub mod events;
+pub mod facts;
 pub mod failures;
 pub mod gateway;
 pub mod git;
@@ -47,6 +49,7 @@ pub mod sphere;
 pub mod store;
 pub mod tetrix;
 pub mod token;
+pub mod transcript;
 pub mod usage;
 pub mod vault;
 pub mod web;

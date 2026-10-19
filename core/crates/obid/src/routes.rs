@@ -65,7 +65,45 @@ pub async fn job(
         .jobs
         .get(&id)
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, NO_JOB))?;
-    Ok(json(StatusCode::OK, job.to_json()))
+    Ok(json(StatusCode::OK, job.detail_json()))
+}
+
+#[derive(serde::Deserialize)]
+pub struct After {
+    after: Option<String>,
+    limit: Option<String>,
+}
+
+/// `GET /v1/jobs/{id}/transcript?after=<n>&limit=<k>`: the entries that came or changed after
+/// entry `n`, at most `k`, and the `n` to ask after next when there's more.
+pub async fn transcript(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    Query(query): Query<After>,
+) -> Result<Response, ApiError> {
+    let number = |text: Option<&str>, default: u64, what: &str| match text {
+        None => Ok(default),
+        Some(text) => text.parse::<u64>().map_err(|_| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{what} is a number."),
+            )
+        }),
+    };
+    let after = number(query.after.as_deref(), 0, "after")?;
+    let limit = number(
+        query.limit.as_deref(),
+        crate::transcript::PAGE as u64,
+        "limit",
+    )?;
+    let (entries, next) = shared
+        .jobs
+        .transcript(&id, after, usize::try_from(limit).unwrap_or(usize::MAX))
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, NO_JOB))?;
+    Ok(json(
+        StatusCode::OK,
+        json!({"entries": entries, "next": next}),
+    ))
 }
 
 /// `POST /v1/jobs/{id}/stop`: a job that already ended comes back as it is.
@@ -98,6 +136,53 @@ pub async fn dismiss(
         None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
         Some(Err(refused)) => Err(ApiError::new(StatusCode::CONFLICT, refused.0)),
         Some(Ok(job)) => Ok(json(StatusCode::OK, job.to_json())),
+    }
+}
+
+/// `POST /v1/jobs/{id}/archive`: `{"archived": true}` (or no body) archives a job that ended and
+/// needs nothing; `false` unarchives it.
+pub async fn archive(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let archived = if body.iter().all(u8::is_ascii_whitespace) {
+        true
+    } else {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Archive {
+            archived: bool,
+        }
+        serde_json::from_slice::<Archive>(&body)
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "The body is {\"archived\": true} or {\"archived\": false}.",
+                )
+            })?
+            .archived
+    };
+    match shared.jobs.archive(&id, archived, "by you") {
+        None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+        Some(Err(refused)) => Err(ApiError::new(StatusCode::CONFLICT, refused.0)),
+        Some(Ok(job)) => Ok(json(StatusCode::OK, job.to_json())),
+    }
+}
+
+/// `DELETE /v1/jobs/{id}`: a job that ended goes for good, its worktree and local branch with it;
+/// nothing pushed is touched.
+pub async fn delete(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    match shared.jobs.delete(&id).await {
+        None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+        Some(Err(refused)) => Err(ApiError::new(StatusCode::CONFLICT, refused.0)),
+        Some(Ok(_)) => {
+            shared.link.settle_job(&id);
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
     }
 }
 
@@ -157,13 +242,17 @@ pub async fn events(
     State(shared): State<Arc<Shared>>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let receiver = shared.events.subscribe();
-    let stream =
-        tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(|event| async move {
-            let event = event.ok()?;
-            Some(Ok(SseEvent::default()
-                .event(event.name)
-                .data(event.data.to_string())))
-        });
+    let transcripts = shared.events.subscribe_transcripts();
+    let stream = stream::select(
+        tokio_stream::wrappers::BroadcastStream::new(receiver),
+        tokio_stream::wrappers::BroadcastStream::new(transcripts),
+    )
+    .filter_map(|event| async move {
+        let event = event.ok()?;
+        Some(Ok(SseEvent::default()
+            .event(event.name)
+            .data(event.data.to_string())))
+    });
     let stream = stream.take_until(stopping(shared.stopping.clone()));
     Sse::new(stream).keep_alive(
         KeepAlive::new()
