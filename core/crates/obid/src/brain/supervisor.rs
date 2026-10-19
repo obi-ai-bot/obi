@@ -173,13 +173,7 @@ pub fn follow_up(
     title: Option<String>,
     nonce: &str,
 ) -> Result<NewJob, String> {
-    let task = format!(
-        "{}\n\n{}\n{}",
-        job.request,
-        super::briefing::fence_rule(nonce, "Oby's conversation, which picks the work up"),
-        super::briefing::fence(nonce, words)
-    );
-    let task = crate::secrets::known().redact(&crate::vault::for_agent(task.trim())?);
+    let task = format!("{}\n\n{}", job.request, quoted(words, nonce)?);
     let mut new = crate::jobs::follow_up(job, &task);
     new.request = Some(job.request.clone());
     if let Some(title) = title
@@ -189,6 +183,17 @@ pub fn follow_up(
         new.title = Some(title);
     }
     Ok(new)
+}
+
+/// What the conversation adds for a job's agent: between the turn's fences, as data, every secret
+/// taken out. `Err` when the words can't reach an agent.
+pub fn quoted(words: &str, nonce: &str) -> Result<String, String> {
+    let text = format!(
+        "{}\n{}",
+        super::briefing::fence_rule(nonce, "Oby's conversation, which picks the work up"),
+        super::briefing::fence(nonce, words.trim())
+    );
+    Ok(crate::secrets::known().redact(&crate::vault::for_agent(&text)?))
 }
 
 /// Keeps what the turn did about its job, `started` the jobs it started, and says it on the job.

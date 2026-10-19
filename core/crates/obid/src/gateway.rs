@@ -70,6 +70,8 @@ const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/jobs/*/stop"),
     ("POST", "/v1/stop-all"),
     ("POST", "/v1/jobs/*/dismiss"),
+    ("POST", "/v1/jobs/*/archive"),
+    ("DELETE", "/v1/jobs/*"),
     ("POST", "/v1/jobs/*/move"),
     ("POST", "/v1/jobs/*/start"),
     ("POST", "/v1/jobs/*/start-when"),

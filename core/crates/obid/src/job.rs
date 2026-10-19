@@ -278,6 +278,15 @@ pub struct Job {
     /// (crate::brain::supervisor), oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supervised: Vec<Supervision>,
+    /// When it was archived (`POST /v1/jobs/{id}/archive`, `oby_archive_job`), or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<i64>,
+    /// What Oby or the owner changed about it after it started, oldest first: its report's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<Change>,
+    /// Every time its tool or account was changed (`oby_change_job`), oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub moves: Vec<Move>,
 }
 
 /// One decision of the conversation about a job of its that stalled (crate::brain::supervisor).
@@ -294,6 +303,22 @@ pub struct Supervision {
     /// The automatic steps the job and the jobs it follows up had taken, this one included; for
     /// `asked`, those taken before.
     pub count: usize,
+}
+
+/// One thing changed about a job after it started, in obid's own words.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Change {
+    pub what: String,
+    pub date: i64,
+}
+
+/// A job moved to another tool or account: each "Claude Code · Personal".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Move {
+    pub from: String,
+    pub to: String,
+    pub why: Option<String>,
+    pub date: i64,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -391,7 +416,18 @@ impl Job {
             earlier: None,
             start_from: None,
             supervised: Vec::new(),
+            archived: None,
+            changes: Vec::new(),
+            moves: Vec::new(),
         }
+    }
+
+    /// Adds `what` to its changes, dated now.
+    pub fn changed(&mut self, what: String) {
+        self.changes.push(Change {
+            what,
+            date: obi_protocol::time::now(),
+        });
     }
 
     /// obid said, at `now`, what publishing its latest run by hand would do.
@@ -609,7 +645,9 @@ impl Job {
             "appleCheck": mac_check_json(self.apple_check.clone(), "apple"),
             "appleRan": mac_check_json(self.apple_ran.clone(), "apple"),
             "tetrix": self.tetrix.as_ref().map(crate::tetrix::Use::to_json),
-            "moves": [],
+            "moves": self.moves.iter().map(|m| json!({"from": m.from, "to": m.to, "why": m.why, "date": obi_protocol::time::format(m.date)})).collect::<Vec<_>>(),
+            "archived": date(self.archived),
+            "changes": self.changes.iter().map(|c| json!({"what": c.what, "date": obi_protocol::time::format(c.date)})).collect::<Vec<_>>(),
             "xcodeCloud": null,
             "xcodeCloudError": null,
             "startWhen": null,

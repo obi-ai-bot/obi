@@ -61,6 +61,18 @@ impl Mode {
         }
     }
 
+    /// How much goes through without asking the owner: Plan least, then Ask, Accept edits,
+    /// Sandbox, and Bypass most. A change to a higher one widens what a job may do.
+    pub fn reach(self) -> u8 {
+        match self {
+            Mode::Plan => 0,
+            Mode::Ask => 1,
+            Mode::AcceptEdits => 2,
+            Mode::Sandbox => 3,
+            Mode::Bypass => 4,
+        }
+    }
+
     pub fn parse(name: &str) -> Option<Mode> {
         Mode::ALL.into_iter().find(|m| m.as_str() == name)
     }
@@ -2171,6 +2183,20 @@ pub fn save(home: &Path, kept: &Kept) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Plan lets least through without asking, then Ask, Accept edits, Sandbox, and Bypass most.
+    #[test]
+    fn modes_reach_from_plan_to_bypass() {
+        let order = [
+            Mode::Plan,
+            Mode::Ask,
+            Mode::AcceptEdits,
+            Mode::Sandbox,
+            Mode::Bypass,
+        ];
+        assert!(order.windows(2).all(|w| w[0].reach() < w[1].reach()));
+    }
+
     use super::*;
 
     const WORKTREE: &str = "/tmp/oby/jobs/abc";

@@ -29,9 +29,15 @@ fn obid(name: &str) -> (Folder, Obid) {
     (folder, obid)
 }
 
-/// A conversation whose supervisor turns do what `script` says, and the job it started, which
-/// stalls.
+/// A conversation whose supervisor turns do what `script` says, and the build job it started, which
+/// stalls each time.
 fn stalling(obid: &Obid, script: &str) -> (String, String) {
+    started(obid, script, "build", "Build both halves STALLS-ALWAYS")
+}
+
+/// A conversation whose supervisor turns do what `script` says, and the `kind` job it started on
+/// `task`.
+fn started(obid: &Obid, script: &str, kind: &str, task: &str) -> (String, String) {
     let started = call(
         obid,
         "POST",
@@ -46,7 +52,11 @@ fn stalling(obid: &Obid, script: &str) -> (String, String) {
         script,
     )
     .unwrap();
-    let dispatch = r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Build both halves STALLS-ALWAYS", "kind": "build", "mode": "acceptEdits", "title": "Both halves"}"#;
+    let dispatch = format!(
+        "OBY oby_dispatch {}",
+        json!({"repo": "obi-e2e/fixture-app", "task": task, "kind": kind, "mode": "acceptEdits",
+               "title": "Both halves"})
+    );
     let answer = call(
         obid,
         "POST",
@@ -106,6 +116,63 @@ fn supervised(obid: &Obid, id: &str, n: usize) -> Value {
         );
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
+}
+
+/// A stalled job is carried on in its own session and finishes: its agent hears Try again and the
+/// conversation's words, quoted, never obid's prompt to the conversation.
+#[test]
+fn a_stalled_job_is_continued_and_finishes() {
+    let (_folder, obid) = obid("supervisor-continue");
+    let (conversation, id) = started(
+        &obid,
+        "OBY oby_continue_job {\"id\": \"$JOB\", \"words\": \"PICK-UP-THE-SECOND-HALF\"}\nSAY Carried it on in its session.",
+        "investigate",
+        "Look into both halves STALLS-ONCE",
+    );
+    let step = supervised(&obid, &id, 1)["supervised"][0].clone();
+    assert_eq!(step["decision"], "continue", "{step}");
+    assert_eq!(step["count"], 1);
+    let done = within(90, "the job finishes", || {
+        let job = job(&obid, &id);
+        (job["status"] == "done").then_some(job)
+    });
+    assert!(done["stalled"].is_null(), "{done}");
+    assert_eq!(done["round"], 2, "{done}");
+    let heard: Vec<String> = std::fs::read_dir(obid.home.join("logins"))
+        .unwrap()
+        .flatten()
+        .flat_map(|e| {
+            std::fs::read_to_string(e.path().join("turns.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|l| {
+                    serde_json::from_str::<Value>(l).unwrap()["prompt"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let carried = heard
+        .iter()
+        .find(|p| p.contains("PICK-UP-THE-SECOND-HALF"))
+        .unwrap_or_else(|| panic!("{heard:?}"));
+    let fence = carried.find("<<<quoted-").expect("the words are quoted");
+    assert!(
+        carried[fence..].contains("PICK-UP-THE-SECOND-HALF"),
+        "{carried}"
+    );
+    assert!(!carried.contains("Oby here, not the owner"), "{carried}");
+    let said = within(30, "the conversation's line", || {
+        obys(&obid, &conversation)
+            .into_iter()
+            .find(|t| t.starts_with("Carried it on"))
+    });
+    assert_eq!(
+        said,
+        "Carried it on in its session. (Oby's first of 3 automatic steps for this job: continue.)"
+    );
 }
 
 /// A stalled job is split into two new jobs by its conversation, each a follow-up from its branch
