@@ -260,12 +260,16 @@ pub async fn turn_on(
                 api_key_source = message["apiKeySource"].as_str().map(str::to_owned);
             }
             Some("assistant") => {
+                // A subagent's (Task's) messages carry the tool call they answer: their words are
+                // never the agent's own last ones.
+                let own = message.get("parent_tool_use_id").is_none_or(Value::is_null);
                 for block in message["message"]["content"]
                     .as_array()
                     .into_iter()
                     .flatten()
                 {
-                    if block.get("type").and_then(Value::as_str) == Some("text")
+                    if own
+                        && block.get("type").and_then(Value::as_str) == Some("text")
                         && let Some(text) = block.get("text").and_then(Value::as_str)
                         && !text.trim().is_empty()
                     {
@@ -454,7 +458,7 @@ mod tests {
     }
 
     /// A turn whose last message was a tool call has a `result` with no words: its text is the
-    /// last words the agent wrote (#764).
+    /// last words the agent wrote (#764), never a subagent's.
     #[tokio::test]
     async fn a_result_with_no_words_keeps_the_last_ones_written() {
         let (turn, _, root) = fake_turn_saying(
@@ -462,6 +466,7 @@ mod tests {
             &[
                 r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed it; the tests pass."}]}}"#,
                 r#"{"type":"assistant","message":{"content":[{"type":"text","text":" "},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a"}}]}}"#,
+                r#"{"type":"assistant","parent_tool_use_id":"t0","message":{"content":[{"type":"text","text":"A subagent wrote this."}]}}"#,
                 r#"{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"s1"}"#,
             ],
             "",
