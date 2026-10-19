@@ -164,10 +164,11 @@ impl Usages {
         id: &str,
         require_saved: bool,
         update: impl FnOnce(&mut Usage),
-    ) -> std::io::Result<Usage> {
+    ) -> (Usage, Usage, std::io::Result<()>) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = state.clone();
         let value = next.entry(id.to_owned()).or_default();
+        let was = value.clone();
         update(value);
         let value = value.clone();
         let saved = serde_json::to_vec_pretty(&next)
@@ -176,14 +177,15 @@ impl Usages {
         if saved.is_ok() || !require_saved {
             *state = next;
         }
-        saved?;
-        Ok(value)
+        (was, value, saved)
     }
 
     /// Keeps what a tool just reported. A window it didn't report keeps its last share and reset;
-    /// one reported without a reset keeps the last reset. A report never lifts a reserve.
-    pub fn record(&self, id: &str, usage: &Usage) -> std::io::Result<Usage> {
-        self.change(id, false, |kept| {
+    /// one reported without a reset keeps the last reset. A report never lifts a reserve. It holds
+    /// for this process even when it can't be saved (that's logged). The usage before and after,
+    /// read under one lock, so a report another job makes meanwhile can't fall between them.
+    pub fn record(&self, id: &str, usage: &Usage) -> (Usage, Usage) {
+        let (was, now, saved) = self.change(id, false, |kept| {
             if let Some(used) = usage.five_hour {
                 kept.five_hour = Some(used);
                 if usage.five_hour_resets.is_some() {
@@ -202,7 +204,11 @@ impl Usages {
             if usage.priced.is_some() {
                 kept.priced.clone_from(&usage.priced);
             }
-        })
+        });
+        if let Err(error) = saved {
+            tracing::warn!("could not keep account usage: {error}");
+        }
+        (was, now)
     }
 
     /// Forgets a removed account's usage, so an account given its id later starts unknown.
@@ -221,7 +227,7 @@ impl Usages {
         if self.get(id).priced.is_none() {
             return;
         }
-        if let Err(error) = self.change(id, false, |usage| usage.priced = None) {
+        if let (_, _, Err(error)) = self.change(id, false, |usage| usage.priced = None) {
             tracing::warn!("account {id}: could not keep that it signed in again: {error}");
         }
     }
@@ -231,9 +237,10 @@ impl Usages {
     /// again by itself; without, it's reserved again now.
     pub fn lift(&self, id: &str, lift: bool) -> std::io::Result<Usage> {
         let now = time::now();
-        self.change(id, true, |usage| {
+        let (_, kept, saved) = self.change(id, true, |usage| {
             usage.reserve_lifted_until = lift.then(|| usage.week_resets(now).unwrap_or(now + WEEK));
-        })
+        });
+        saved.map(|()| kept)
     }
 }
 
@@ -506,6 +513,99 @@ pub fn acp_tokens(answer: &Value) -> Option<Tokens> {
     .filter(|t| t != &Tokens::default())
 }
 
+impl Tokens {
+    /// Every token it counted, the cache's too: what a job's share of a window is weighed by.
+    // ponytail: cache reads weigh as much as fresh input; weigh them less if shares look off.
+    pub fn total(&self) -> u64 {
+        [self.input, self.output, self.cache_read, self.cache_write]
+            .into_iter()
+            .flatten()
+            .sum()
+    }
+}
+
+/// A job's estimated share of its account's 5-hour and weekly windows, in percentage points
+/// (#732), with the window (its reset) each sum belongs to, and the job's token total at its
+/// account's last report.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WindowShare {
+    pub five_hour: Option<f64>,
+    pub seven_day: Option<f64>,
+    pub five_hour_resets: Option<i64>,
+    pub seven_day_resets: Option<i64>,
+    pub mark: Option<u64>,
+}
+
+impl WindowShare {
+    /// What the API shows: `{fiveHour, sevenDay, estimate: true}`, or `None` before any share.
+    pub fn to_json(&self) -> Option<Value> {
+        let points = |p: Option<f64>| p.map(|p| (p * 100.0).round() / 100.0);
+        (self.five_hour.is_some() || self.seven_day.is_some()).then(|| {
+            serde_json::json!({"fiveHour": points(self.five_hour), "sevenDay": points(self.seven_day), "estimate": true})
+        })
+    }
+
+    /// Adds `part` points of the window that resets at `resets` (0 for the 5-hour window, 1 for
+    /// the week). A sum from an earlier window starts over.
+    pub fn add(&mut self, window: usize, part: f64, resets: Option<i64>) {
+        let (sum, kept) = match window {
+            0 => (&mut self.five_hour, &mut self.five_hour_resets),
+            _ => (&mut self.seven_day, &mut self.seven_day_resets),
+        };
+        if resets.is_some() && *kept != resets {
+            *sum = None;
+            *kept = resets;
+        }
+        *sum = Some(sum.unwrap_or(0.0) + part);
+    }
+}
+
+/// How many points each window (5-hour, week) rose from `before` to `after`, and its reset. A
+/// window whose reset passed, or moved more than a minute later, started over from 0. `None` for
+/// a window either report doesn't know.
+pub fn rises(before: &Usage, after: &Usage, now: i64) -> [Option<(f64, Option<i64>)>; 2] {
+    let rise = |was: Option<f64>, was_resets: Option<i64>, is: Option<f64>, resets: Option<i64>| {
+        let new_window = matches!((was_resets, resets), (Some(a), Some(b)) if b > a + 60);
+        let was = if new_window {
+            Some(0.0)
+        } else {
+            current(was, was_resets, now)
+        };
+        Some((((is? - was?) * 100.0).max(0.0), resets))
+    };
+    [
+        rise(
+            before.five_hour,
+            before.five_hour_resets,
+            after.five_hour,
+            after.five_hour_resets,
+        ),
+        rise(
+            before.seven_day,
+            before.seven_day_resets,
+            after.seven_day,
+            after.seven_day_resets,
+        ),
+    ]
+}
+
+/// `rise` divided by each running job's tokens since the last report (`weights`); evenly when
+/// none reported any.
+pub fn split(rise: f64, weights: &[u64]) -> Vec<f64> {
+    let total: u64 = weights.iter().sum();
+    weights
+        .iter()
+        .map(|w| {
+            if total == 0 {
+                rise / weights.len() as f64
+            } else {
+                rise * *w as f64 / total as f64
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,7 +638,7 @@ mod tests {
         let home = Home::new("disk-usage");
         let usages = Usages::open(&home.0);
         std::fs::create_dir(home.0.join("usage.json")).unwrap();
-        assert!(usages.record("a", &week(0.82, i64::MAX)).is_err());
+        usages.record("a", &week(0.82, i64::MAX));
         assert!(usages.get("a").reserved(time::now()));
         assert!(usages.lift("a", true).is_err());
         assert!(usages.get("a").reserved(time::now()));
@@ -554,7 +654,7 @@ mod tests {
             std::fs::read_to_string(home.0.join("usage.json.unreadable")).unwrap(),
             "{"
         );
-        usages.record("a", &week(0.82, i64::MAX)).unwrap();
+        usages.record("a", &week(0.82, i64::MAX));
         assert!(Usages::open(&home.0).get("a").reserved(time::now()));
     }
 
@@ -572,16 +672,17 @@ mod tests {
         );
         let home = Home::new("usage");
         let usages = Usages::open(&home.0);
-        usages.record("a", &usage).unwrap();
-        usages
-            .record(
-                "a",
-                &Usage {
-                    five_hour: Some(0.4),
-                    ..Usage::default()
-                },
-            )
-            .unwrap();
+        usages.record("a", &usage);
+        // The usage before and after a report, from one lock.
+        let (was, now) = usages.record(
+            "a",
+            &Usage {
+                five_hour: Some(0.4),
+                ..Usage::default()
+            },
+        );
+        assert_eq!((was.five_hour, now.five_hour), (Some(0.2), Some(0.4)));
+        assert_eq!(now.seven_day, Some(0.82));
         let kept = Usages::open(&home.0).get("a");
         assert_eq!(kept.seven_day, Some(0.82));
         assert_eq!(kept.five_hour, Some(0.4));
@@ -701,7 +802,7 @@ mod tests {
         let home = Home::new("lift");
         let usages = Usages::open(&home.0);
         let resets = time::now() + 2 * 86_400;
-        usages.record("a", &week(0.82, resets)).unwrap();
+        usages.record("a", &week(0.82, resets));
         assert_eq!(
             usages.lift("a", true).unwrap().reserve_lifted_until,
             Some(resets)
@@ -796,5 +897,50 @@ mod tests {
         let acp = json!({"stopReason": "end_turn", "usage": {"inputTokens": 7, "outputTokens": 3, "totalTokens": 10}});
         assert_eq!(acp_tokens(&acp).unwrap().input, Some(7));
         assert_eq!(acp_tokens(&json!({"stopReason": "end_turn"})), None);
+    }
+
+    #[test]
+    fn a_rise_is_split_by_tokens_and_a_new_window_starts_over() {
+        // One job used 3× the other's tokens: a 20-point rise splits 15/5; alone, it's all its.
+        assert_eq!(split(20.0, &[300, 100]), vec![15.0, 5.0]);
+        assert_eq!(split(20.0, &[500]), vec![20.0]);
+        assert_eq!(split(20.0, &[0, 0]), vec![10.0, 10.0]);
+
+        let report = |five: f64, resets: i64| Usage {
+            five_hour: Some(five),
+            five_hour_resets: Some(resets),
+            ..Usage::default()
+        };
+        let [five, week] = rises(&report(0.1, 1000), &report(0.3, 1000), 500);
+        let (points, resets) = five.unwrap();
+        assert!((points - 20.0).abs() < 1e-9);
+        assert_eq!((resets, week), (Some(1000), None));
+        // A new window: it rose from 0. Going down in the same one is no rise.
+        assert!(
+            (rises(&report(0.9, 1000), &report(0.05, 19000), 500)[0]
+                .unwrap()
+                .0
+                - 5.0)
+                .abs()
+                < 1e-9
+        );
+        assert_eq!(
+            rises(&report(0.3, 1000), &report(0.2, 1000), 500)[0]
+                .unwrap()
+                .0,
+            0.0
+        );
+        assert_eq!(rises(&Usage::default(), &report(0.2, 1000), 500)[0], None);
+
+        let mut share = WindowShare::default();
+        assert_eq!(share.to_json(), None);
+        share.add(0, 15.0, Some(1000));
+        share.add(0, 0.004, Some(1000));
+        assert_eq!(
+            share.to_json(),
+            Some(json!({"fiveHour": 15.0, "sevenDay": null, "estimate": true}))
+        );
+        share.add(0, 2.0, Some(19000));
+        assert_eq!(share.five_hour, Some(2.0));
     }
 }

@@ -684,6 +684,46 @@ impl Jobs {
             .count()
     }
 
+    /// Divides each rise of `account`'s windows, from `was` to `now`, among the jobs that were
+    /// running on it at its last report too, by their tokens since (#732), and marks where each
+    /// running job's tokens stand. A job's first report only marks it: what rose before it ran
+    /// (another job, the owner's own use) isn't its.
+    fn share_rise(&self, account: &str, was: &crate::usage::Usage, now: &crate::usage::Usage) {
+        let rises = crate::usage::rises(was, now, obi_protocol::time::now());
+        let running: Vec<(String, u64, Option<u64>)> = {
+            let state = self.lock();
+            state
+                .workers
+                .keys()
+                .filter_map(|id| state.jobs.get(id).filter(|j| j.account == account))
+                .map(|job| {
+                    let total = job.usage.as_ref().map_or(0, crate::usage::Tokens::total);
+                    let mark = job.window_share.as_ref().and_then(|s| s.mark);
+                    (job.id.clone(), total, mark.map(|m| total.saturating_sub(m)))
+                })
+                .collect()
+        };
+        let weights: Vec<u64> = running.iter().filter_map(|(_, _, since)| *since).collect();
+        let parts = rises.map(|rise| {
+            rise.filter(|_| !weights.is_empty())
+                .map(|(points, resets)| (crate::usage::split(points, &weights), resets))
+        });
+        let mut marked = 0;
+        for (id, total, since) in &running {
+            let share_of = since.map(|_| marked);
+            marked += usize::from(since.is_some());
+            self.update(id, |job| {
+                let share = job.window_share.get_or_insert_with(Default::default);
+                for (window, part) in parts.iter().enumerate() {
+                    if let (Some((parts, resets)), Some(i)) = (part, share_of) {
+                        share.add(window, parts[i], *resets);
+                    }
+                }
+                share.mark = Some(*total);
+            });
+        }
+    }
+
     /// Changes the job `id` with `change`, keeps it and tells the apps. `None` for a job obid
     /// doesn't have.
     fn update(&self, id: &str, change: impl FnOnce(&mut Job)) -> Option<Job> {
@@ -3214,9 +3254,8 @@ impl Jobs {
                 });
             }
             AgentEvent::Usage(usage) => {
-                if let Err(error) = jobs.usage.record(&job.account, &usage) {
-                    tracing::warn!("could not keep account usage: {error}");
-                }
+                let (was, now) = jobs.usage.record(&job.account, &usage);
+                jobs.share_rise(&job.account, &was, &now);
                 jobs.usage_changed.notify_one();
             }
             AgentEvent::Session(session) => {

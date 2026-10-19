@@ -10,6 +10,8 @@
 //   TOKENS           its result line reports usage, modelUsage (two models) and a cost; like
 //                    Claude Code's after --resume, modelUsage and the cost are the session's so
 //                    far (its turns counted in .obi/tokens-turn), usage the turn's own
+//   USAGES: <json>   a list: like USAGE with its first entry on the first turn, the next on the
+//                    next (counted in .obi/usage-turn)
 //   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
 //   ASKS: <json>     asks for each of a list of {"tool", "input"} in turn, then ends the turn with
 //                    "answers: allow, deny: <why>, …"
@@ -101,6 +103,14 @@ rl.on("line", (line) => {
   }
   const usage = prompt.match(/USAGE: (\{.*\})/);
   if (usage) emit({ type: "rate_limit_event", session_id: session, rate_limit_info: JSON.parse(usage[1]) });
+  const usages = prompt.match(/USAGES: (\[.*\])/);
+  if (usages) {
+    mkdirSync(".obi", { recursive: true });
+    const turn = existsSync(".obi/usage-turn") ? Number(readFileSync(".obi/usage-turn", "utf8")) : 0;
+    writeFileSync(".obi/usage-turn", String(turn + 1));
+    const info = JSON.parse(usages[1])[turn];
+    if (info) emit({ type: "rate_limit_event", session_id: session, rate_limit_info: info });
+  }
   // A fix round quotes the task after the check's output: it says the failure is intended when the
   // task asked for one (ON PURPOSE), and otherwise reads only the part before the quote.
   const quote = prompt.indexOf("\n\nThe task, as the owner wrote it:");
