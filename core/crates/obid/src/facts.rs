@@ -508,6 +508,276 @@ impl CheckWatch {
     }
 }
 
+/// How the time since a stage's last stamp counts (#733).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Clock {
+    /// Its own time.
+    #[default]
+    Running,
+    /// Waiting on the owner: a permission, a question or a plan to approve.
+    Owner,
+    /// In Plan mode, reading before a plan: its time, which estimates leave out.
+    Planning,
+    /// Queued for a free slot or an account: no one's time.
+    Idle,
+}
+
+/// A stage's times (#733): when it first started and last finished, the seconds it ran (every
+/// round's added up, waiting on the owner left out), the seconds it waited on the owner, and of
+/// its seconds those Plan mode spent reading. `open` is when it was last stamped while it's
+/// current, `clock` how that time counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageTime {
+    pub id: String,
+    pub started: i64,
+    pub finished: Option<i64>,
+    pub seconds: i64,
+    pub waited: i64,
+    #[serde(default)]
+    pub planned: i64,
+    pub open: Option<i64>,
+    #[serde(default)]
+    pub clock: Clock,
+}
+
+impl StageTime {
+    /// The time since its last stamp, counted as its clock said, up to `now`.
+    fn count(&mut self, now: i64) {
+        let Some(open) = self.open else { return };
+        let delta = (now - open).max(0);
+        match self.clock {
+            Clock::Running => self.seconds += delta,
+            Clock::Planning => {
+                self.seconds += delta;
+                self.planned += delta;
+            }
+            Clock::Owner => self.waited += delta,
+            Clock::Idle => {}
+        }
+        self.open = Some(now);
+    }
+
+    /// The seconds an estimate counts: its own, Plan mode's reading left out.
+    fn counted(&self) -> i64 {
+        self.seconds - self.planned
+    }
+}
+
+/// Stamps each stage the pipeline shows now (`stages`, `(id, state)`), at `now`, counting the time
+/// since the last stamp as each current stage's clock said, then setting it to `clock`. A stage
+/// that's current opens (again, a later round's); one that's no longer current is finished.
+/// Whether any stage opened or finished.
+pub fn stamp(
+    times: &mut Vec<StageTime>,
+    stages: &[(String, String)],
+    clock: Clock,
+    now: i64,
+) -> bool {
+    let mut moved = false;
+    for (id, state) in stages {
+        let current = state == "current";
+        let at = times.iter().position(|t| &t.id == id);
+        let time = match at {
+            Some(at) => &mut times[at],
+            None if current => {
+                times.push(StageTime {
+                    id: id.clone(),
+                    started: now,
+                    finished: None,
+                    seconds: 0,
+                    waited: 0,
+                    planned: 0,
+                    open: None,
+                    clock,
+                });
+                times.last_mut().unwrap()
+            }
+            None => continue,
+        };
+        time.count(now);
+        match (current, time.open.is_some()) {
+            (true, false) => {
+                time.open = Some(now);
+                time.finished = None;
+                moved = true;
+            }
+            (false, true) => {
+                time.open = None;
+                time.finished = Some(now);
+                moved = true;
+            }
+            _ => {}
+        }
+        time.clock = clock;
+    }
+    moved
+}
+
+/// A range of seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Range {
+    pub low: i64,
+    pub high: i64,
+}
+
+/// What a job should take (#733): the whole job's range in seconds, from prepare to publish,
+/// waiting on people left out; the plain sentence it's based on; how many jobs like it it read;
+/// the range first given, kept to set next to what it took; and each stage's range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Estimate {
+    pub low: i64,
+    pub high: i64,
+    pub basis: String,
+    pub samples: usize,
+    pub first_given: Range,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<(String, Range)>,
+}
+
+/// The stages a job's own time is in: the rest wait on people.
+const TIMED: [&str; 4] = ["prepare", "work", "check", "publish"];
+/// How many jobs like it an estimate needs before it stops saying it's too early.
+const ENOUGH: usize = 5;
+/// The most recent past jobs an estimate reads.
+const RECENT: usize = 50;
+
+/// `sorted`'s value at `p` (0 to 1) of the way along.
+fn at(sorted: &[i64], p: f64) -> i64 {
+    sorted[((sorted.len() - 1) as f64 * p).round() as usize]
+}
+
+/// The middle 80% of `values`.
+fn middle(mut values: Vec<i64>) -> Option<Range> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    Some(Range {
+        low: at(&values, 0.1),
+        high: at(&values, 0.9),
+    })
+}
+
+/// "45s", "13m", "1h 5m".
+pub fn short(seconds: i64) -> String {
+    match seconds {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", (s + 30) / 60),
+        s => format!("{}h {}m", s / 3600, s % 3600 / 60),
+    }
+}
+
+/// A finished job's seconds in its own stages, or none when it has no times (older jobs).
+fn took(job: &crate::job::Job) -> Option<i64> {
+    let times: Vec<&StageTime> = job
+        .stage_times
+        .iter()
+        .filter(|t| TIMED.contains(&t.id.as_str()))
+        .collect();
+    times
+        .iter()
+        .any(|t| t.id == "work")
+        .then(|| times.iter().map(|t| t.counted()).sum())
+}
+
+fn stage_took(job: &crate::job::Job, id: &str) -> Option<i64> {
+    job.stage_times
+        .iter()
+        .find(|t| t.id == id)
+        .map(StageTime::counted)
+}
+
+/// The job's estimate from `past` jobs (any order): the middle 80% of the last jobs done in the
+/// same repository, with the same agent and kind; with fewer than five, the repository's range,
+/// saying it's too early. For Check, the last full run of the same command there. `before` is
+/// its estimate until now, whose first range it keeps. None with nothing to go on.
+pub fn estimate<'a>(
+    job: &crate::job::Job,
+    past: impl Iterator<Item = &'a crate::job::Job>,
+    before: Option<&Estimate>,
+) -> Option<Estimate> {
+    let mut done: Vec<&crate::job::Job> = past
+        .filter(|p| p.id != job.id && p.repo == job.repo && p.status == crate::job::Status::Done)
+        .filter(|p| took(p).is_some())
+        .collect();
+    done.sort_by_key(|p| std::cmp::Reverse(p.finished));
+    let like: Vec<&crate::job::Job> = done
+        .iter()
+        .copied()
+        .filter(|p| p.agent == job.agent && p.kind == job.kind)
+        .take(RECENT)
+        .collect();
+    let read: Vec<&crate::job::Job> = if like.len() >= ENOUGH {
+        like.clone()
+    } else {
+        done.iter().copied().take(RECENT).collect()
+    };
+    let whole = middle(read.iter().filter_map(|p| took(p)).collect())?;
+    let repo = job.repo_name();
+    let agent = crate::agent::Tool::from_id(&job.agent).map_or(job.agent.as_str(), |t| t.name());
+    let basis = if like.len() >= ENOUGH {
+        let mut took: Vec<i64> = like.iter().filter_map(|p| took(p)).collect();
+        took.sort_unstable();
+        format!(
+            "From the last {} jobs like this in {repo} on {agent} ({} in the middle).",
+            like.len(),
+            short(at(&took, 0.5))
+        )
+    } else {
+        let so_far = match like.len() {
+            0 => "no jobs like this yet".to_owned(),
+            1 => "1 job like this so far".to_owned(),
+            n => format!("{n} jobs like this so far"),
+        };
+        format!(
+            "Too early to say: {so_far}. Jobs in {repo} take {}–{}.",
+            short(whole.low),
+            short(whole.high)
+        )
+    };
+    let mut stages = Vec::new();
+    for id in TIMED {
+        let range = if id == "check" {
+            // The last full run of the same check command in this repository.
+            job.check.as_ref().and_then(|command| {
+                done.iter()
+                    .filter(|p| p.check.as_ref() == Some(command))
+                    .find_map(|p| {
+                        p.checks
+                            .iter()
+                            .rev()
+                            .find(|run| run.steps.iter().all(|s| s.passed == Some(true)))
+                    })
+                    .map(|run| {
+                        let seconds =
+                            run.steps.iter().filter_map(|s| s.seconds).sum::<u64>() as i64;
+                        Range {
+                            low: seconds,
+                            high: seconds,
+                        }
+                    })
+            })
+        } else {
+            None
+        };
+        if let Some(range) =
+            range.or_else(|| middle(read.iter().filter_map(|p| stage_took(p, id)).collect()))
+        {
+            stages.push((id.to_owned(), range));
+        }
+    }
+    Some(Estimate {
+        low: whole.low,
+        high: whole.high,
+        basis,
+        samples: like.len(),
+        first_given: before.map_or(whole, |b| b.first_given),
+        stages,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,5 +940,134 @@ mod tests {
             failing[0].message,
             "[possible secret hidden]\n[possible secret hidden]\nexpected 2"
         );
+    }
+
+    fn timed(id: &str, seconds: i64) -> StageTime {
+        StageTime {
+            id: id.into(),
+            started: 0,
+            finished: Some(seconds),
+            seconds,
+            waited: 0,
+            planned: 0,
+            open: None,
+            clock: Clock::Running,
+        }
+    }
+
+    fn done(n: usize, agent: &str, kind: &str, work: i64) -> crate::job::Job {
+        let mut job = crate::job::Job::new(
+            format!("past{n}"),
+            "deskree-inc/obi".into(),
+            kind.into(),
+            "task".into(),
+            agent.into(),
+            "default".into(),
+        );
+        job.status = crate::job::Status::Done;
+        job.finished = Some(n as i64);
+        job.stage_times = vec![timed("prepare", 5), timed("work", work)];
+        job
+    }
+
+    fn new_job() -> crate::job::Job {
+        let mut job = done(0, "claude", "fix", 0);
+        job.id = "now".into();
+        job.status = crate::job::Status::Running;
+        job.stage_times.clear();
+        job
+    }
+
+    /// With 14 jobs like it, the range is their middle 80%, and the sentence names them (#733).
+    #[test]
+    fn the_estimate_is_the_middle_of_the_jobs_like_it() {
+        let mut past: Vec<crate::job::Job> = (1..=14)
+            .map(|n| done(n, "claude", "fix", 60 * n as i64))
+            .collect();
+        // Another agent's, another kind's and an unfinished one don't count.
+        past.push(done(15, "codex", "fix", 9_000));
+        past.push(done(16, "claude", "build", 9_000));
+        let mut running = done(17, "claude", "fix", 9_000);
+        running.status = crate::job::Status::Running;
+        past.push(running);
+        let estimate = estimate(&new_job(), past.iter(), None).unwrap();
+        assert_eq!((estimate.low, estimate.high), (125, 785));
+        assert_eq!(estimate.samples, 14);
+        assert_eq!(
+            estimate.basis,
+            "From the last 14 jobs like this in obi on Claude Code (8m in the middle)."
+        );
+        assert_eq!(
+            estimate.first_given,
+            Range {
+                low: 125,
+                high: 785
+            }
+        );
+        let work = estimate
+            .stages
+            .iter()
+            .find(|(id, _)| id == "work")
+            .unwrap()
+            .1;
+        assert_eq!(
+            work,
+            Range {
+                low: 120,
+                high: 780
+            }
+        );
+    }
+
+    /// With 2 jobs like it, the repository's range, saying it's too early; the check's last full
+    /// run; and the first range given is kept as later ones change.
+    #[test]
+    fn too_early_gives_the_repositorys_range_and_the_first_is_kept() {
+        let mut past = vec![done(1, "claude", "fix", 100), done(2, "claude", "fix", 200)];
+        past.extend((3..=6).map(|n| done(n, "codex", "build", 1_000)));
+        let mut checked = done(7, "codex", "build", 1_000);
+        checked.check = Some("cargo test".into());
+        let step = |seconds| CheckStep {
+            command: "cargo test".into(),
+            passed: Some(true),
+            started: None,
+            seconds: Some(seconds),
+            running: false,
+            tests: None,
+        };
+        checked.checks = vec![CheckRecord {
+            round: 1,
+            steps: vec![step(100), step(50)],
+            failing: Vec::new(),
+        }];
+        past.push(checked);
+        let mut job = new_job();
+        job.check = Some("cargo test".into());
+        let first = estimate(&job, past.iter(), None).unwrap();
+        assert_eq!(first.samples, 2);
+        assert_eq!((first.low, first.high), (205, 1_005));
+        assert_eq!(
+            first.basis,
+            "Too early to say: 2 jobs like this so far. Jobs in obi take 3m–17m."
+        );
+        let check = first.stages.iter().find(|(id, _)| id == "check").unwrap().1;
+        assert_eq!(
+            check,
+            Range {
+                low: 150,
+                high: 150
+            }
+        );
+        past.truncate(2);
+        let later = estimate(&job, past.iter(), Some(&first)).unwrap();
+        assert_eq!((later.low, later.high), (105, 205));
+        assert_eq!(
+            later.first_given,
+            Range {
+                low: 205,
+                high: 1_005
+            }
+        );
+        assert_eq!(estimate(&job, std::iter::empty(), None), None);
     }
 }

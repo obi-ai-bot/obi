@@ -691,7 +691,18 @@ impl Jobs {
             let mut state = self.lock();
             let job = state.jobs.get_mut(id)?;
             change(job);
-            job.clone()
+            // Its stages' times, and its estimate again when a stage started or ended (#733).
+            // ponytail: reads every job kept; an index by repository if that ever shows.
+            if job.stamp(obi_protocol::time::now()) && job.status.is_active() {
+                let job = state.jobs.get(id)?;
+                let estimate =
+                    crate::facts::estimate(job, state.jobs.values(), job.estimate.as_ref());
+                let job = state.jobs.get_mut(id)?;
+                if estimate.is_some() {
+                    job.estimate = estimate;
+                }
+            }
+            state.jobs.get(id)?.clone()
         };
         if let Err(e) = self.store.save(&job) {
             tracing::error!("can't keep job {id}: {e}");
