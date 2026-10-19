@@ -3229,11 +3229,8 @@ impl Jobs {
                 });
             }
             AgentEvent::Usage(usage) => {
-                let was = jobs.usage.get(&job.account);
-                if let Err(error) = jobs.usage.record(&job.account, &usage) {
-                    tracing::warn!("could not keep account usage: {error}");
-                }
-                jobs.share_rise(&job.account, &was, &jobs.usage.get(&job.account));
+                let (was, now) = jobs.usage.record(&job.account, &usage);
+                jobs.share_rise(&job.account, &was, &now);
                 jobs.usage_changed.notify_one();
             }
             AgentEvent::Session(session) => {

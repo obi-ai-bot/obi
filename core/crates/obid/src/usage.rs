@@ -164,10 +164,11 @@ impl Usages {
         id: &str,
         require_saved: bool,
         update: impl FnOnce(&mut Usage),
-    ) -> std::io::Result<Usage> {
+    ) -> (Usage, Usage, std::io::Result<()>) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = state.clone();
         let value = next.entry(id.to_owned()).or_default();
+        let was = value.clone();
         update(value);
         let value = value.clone();
         let saved = serde_json::to_vec_pretty(&next)
@@ -176,14 +177,15 @@ impl Usages {
         if saved.is_ok() || !require_saved {
             *state = next;
         }
-        saved?;
-        Ok(value)
+        (was, value, saved)
     }
 
     /// Keeps what a tool just reported. A window it didn't report keeps its last share and reset;
-    /// one reported without a reset keeps the last reset. A report never lifts a reserve.
-    pub fn record(&self, id: &str, usage: &Usage) -> std::io::Result<Usage> {
-        self.change(id, false, |kept| {
+    /// one reported without a reset keeps the last reset. A report never lifts a reserve. It holds
+    /// for this process even when it can't be saved (that's logged). The usage before and after,
+    /// read under one lock, so a report another job makes meanwhile can't fall between them.
+    pub fn record(&self, id: &str, usage: &Usage) -> (Usage, Usage) {
+        let (was, now, saved) = self.change(id, false, |kept| {
             if let Some(used) = usage.five_hour {
                 kept.five_hour = Some(used);
                 if usage.five_hour_resets.is_some() {
@@ -202,7 +204,11 @@ impl Usages {
             if usage.priced.is_some() {
                 kept.priced.clone_from(&usage.priced);
             }
-        })
+        });
+        if let Err(error) = saved {
+            tracing::warn!("could not keep account usage: {error}");
+        }
+        (was, now)
     }
 
     /// Forgets a removed account's usage, so an account given its id later starts unknown.
@@ -220,9 +226,10 @@ impl Usages {
     /// again by itself; without, it's reserved again now.
     pub fn lift(&self, id: &str, lift: bool) -> std::io::Result<Usage> {
         let now = time::now();
-        self.change(id, true, |usage| {
+        let (_, kept, saved) = self.change(id, true, |usage| {
             usage.reserve_lifted_until = lift.then(|| usage.week_resets(now).unwrap_or(now + WEEK));
-        })
+        });
+        saved.map(|()| kept)
     }
 }
 
@@ -620,7 +627,7 @@ mod tests {
         let home = Home::new("disk-usage");
         let usages = Usages::open(&home.0);
         std::fs::create_dir(home.0.join("usage.json")).unwrap();
-        assert!(usages.record("a", &week(0.82, i64::MAX)).is_err());
+        usages.record("a", &week(0.82, i64::MAX));
         assert!(usages.get("a").reserved(time::now()));
         assert!(usages.lift("a", true).is_err());
         assert!(usages.get("a").reserved(time::now()));
@@ -636,7 +643,7 @@ mod tests {
             std::fs::read_to_string(home.0.join("usage.json.unreadable")).unwrap(),
             "{"
         );
-        usages.record("a", &week(0.82, i64::MAX)).unwrap();
+        usages.record("a", &week(0.82, i64::MAX));
         assert!(Usages::open(&home.0).get("a").reserved(time::now()));
     }
 
@@ -654,16 +661,17 @@ mod tests {
         );
         let home = Home::new("usage");
         let usages = Usages::open(&home.0);
-        usages.record("a", &usage).unwrap();
-        usages
-            .record(
-                "a",
-                &Usage {
-                    five_hour: Some(0.4),
-                    ..Usage::default()
-                },
-            )
-            .unwrap();
+        usages.record("a", &usage);
+        // The usage before and after a report, from one lock.
+        let (was, now) = usages.record(
+            "a",
+            &Usage {
+                five_hour: Some(0.4),
+                ..Usage::default()
+            },
+        );
+        assert_eq!((was.five_hour, now.five_hour), (Some(0.2), Some(0.4)));
+        assert_eq!(now.seven_day, Some(0.82));
         let kept = Usages::open(&home.0).get("a");
         assert_eq!(kept.seven_day, Some(0.82));
         assert_eq!(kept.five_hour, Some(0.4));
@@ -783,7 +791,7 @@ mod tests {
         let home = Home::new("lift");
         let usages = Usages::open(&home.0);
         let resets = time::now() + 2 * 86_400;
-        usages.record("a", &week(0.82, resets)).unwrap();
+        usages.record("a", &week(0.82, resets));
         assert_eq!(
             usages.lift("a", true).unwrap().reserve_lifted_until,
             Some(resets)
