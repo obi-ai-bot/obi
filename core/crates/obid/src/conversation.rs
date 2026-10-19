@@ -631,6 +631,11 @@ impl Conversations {
         id
     }
 
+    /// The next new conversation's id, when obid named one and none took it yet.
+    pub fn peek_next(&self) -> Option<String> {
+        self.next.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// Whether `id` is the next new conversation's, not taken yet.
     pub fn is_next(&self, id: &str) -> bool {
         self.next
