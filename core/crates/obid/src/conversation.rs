@@ -612,7 +612,14 @@ pub fn job_report(job: &Value) -> Option<(String, String)> {
     let said = match job["status"].as_str()? {
         "done" => match (job["published"].as_str(), first_line("publishError")) {
             (Some(url), _) => format!("{title} is done: {url}"),
+            // The push went out; only its pull request failed (#627).
+            (None, Some(why)) if why.starts_with(crate::publish::PUSHED_BUT) => {
+                format!("{title} is done: {why}")
+            }
             (None, Some(why)) => format!("{title} is done, but it wasn't published: {why}"),
+            (None, None) if job["pushed"].as_u64().is_some_and(|n| n > 0) => {
+                format!("{title} is done and pushed.")
+            }
             (None, None) => match first_line("reason") {
                 Some(why) => format!("{title} is done. {why}"),
                 None => format!("{title} is done."),
@@ -966,6 +973,20 @@ mod tests {
             "Fix oby #351 is done, but it wasn't published: Not published: the secret scan couldn't run."
         );
         assert_eq!(job_report(&job("done")).unwrap().1, "Fix oby #351 is done.");
+        // Pushed, then only its pull request failed; or pushed to a remote with none (#627).
+        let mut pushed = job("done");
+        pushed["pushed"] = json!(1);
+        pushed["publishError"] =
+            json!("Pushed, but couldn't look for the open pull request: HTTP 404");
+        assert_eq!(
+            job_report(&pushed).unwrap().1,
+            "Fix oby #351 is done: Pushed, but couldn't look for the open pull request: HTTP 404"
+        );
+        pushed["publishError"] = json!(null);
+        assert_eq!(
+            job_report(&pushed).unwrap().1,
+            "Fix oby #351 is done and pushed."
+        );
         assert_eq!(
             job_report(&job("stopped")).unwrap().1,
             "Fix oby #351 was stopped."

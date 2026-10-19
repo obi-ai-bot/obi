@@ -497,6 +497,11 @@ impl Briefing {
             }
             None => parts.push(label),
         }
+        if !job.status.is_active()
+            && let Some(went_out) = went_out(job)
+        {
+            parts.push(went_out);
+        }
         match (job.finished, job.started) {
             (Some(finished), _) if !job.status.is_active() => {
                 parts.push(format!("ended {} ago", elapsed(now - finished)));
@@ -515,6 +520,29 @@ impl Briefing {
         parts.push(format!("asked: {}", line(&job.request, 120)));
         parts.join(" · ")
     }
+}
+
+/// What of an ended job's work went out, when it has no pull request: pushed or not, so the brain
+/// never says nothing was published when the push went out (#627). None when it has a pull
+/// request (its stage says so) or nothing was tried. Why it failed is the job's to read
+/// (`read_job`): `gh` and git said it, not obid.
+pub fn went_out(job: &Job) -> Option<String> {
+    if job.published.is_some() {
+        return None;
+    }
+    let pushed = job.pushed.unwrap_or(0);
+    let commits = format!("{pushed} commit{}", if pushed == 1 { "" } else { "s" });
+    if let Some(why) = &job.publish_error {
+        return Some(if why.starts_with(crate::publish::PUSHED_BUT) {
+            format!("pushed {commits}, but its pull request failed")
+        } else if pushed > 0 {
+            format!("pushed {commits} before, then its publish failed")
+        } else {
+            "its publish failed: nothing was pushed".to_owned()
+        });
+    }
+    job.pushed_only()
+        .then(|| format!("pushed {commits}; its remote has no pull requests"))
 }
 
 /// How much of one repository's own instructions the brain reads (#543).
@@ -1222,6 +1250,42 @@ mod tests {
         assert_eq!(empty.quoted(), None);
     }
 
+    /// The brain tells a push that went out from a publish that sent nothing (#627), and never
+    /// quotes what gh said.
+    #[test]
+    fn the_briefing_tells_pushed_from_failed() {
+        let mut done = job("d0ne0000", "Hello file");
+        done.status = Status::Done;
+        done.base = Some("main".into());
+        done.finished = Some(NOW - 60);
+        done.commits = Some(2);
+        assert_eq!(went_out(&done), None);
+        done.publish_error = Some("Not published: couldn't fetch main: no route".into());
+        assert_eq!(
+            went_out(&done).as_deref(),
+            Some("its publish failed: nothing was pushed")
+        );
+        done.pushed = Some(2);
+        done.publish_error = Some(format!(
+            "{}couldn't look for the open pull request: GraphQL: Could not resolve",
+            crate::publish::PUSHED_BUT
+        ));
+        let briefing = briefing(vec![done.clone()], vec![]);
+        let text = briefing.text();
+        assert!(
+            text.contains("· pushed 2 commits, but its pull request failed ·"),
+            "{text}"
+        );
+        assert!(!text.contains("GraphQL"), "{text}");
+        done.publish_error = None;
+        assert_eq!(
+            went_out(&done).as_deref(),
+            Some("pushed 2 commits; its remote has no pull requests")
+        );
+        done.published = Some("https://github.com/deskree-inc/oby/pull/7".into());
+        assert_eq!(went_out(&done), None);
+    }
+
     fn record(job: &str, trigger: Trigger, ago: i64, rounds: u32) -> Record {
         let date = NOW - ago;
         let (what, summary, check) = match trigger {
@@ -1556,6 +1620,7 @@ mod tests {
             remote: format!("https://github.com/{repo}.git"),
             default_branch: "main".into(),
             check: None,
+            pull_requests: None,
         }
     }
 
