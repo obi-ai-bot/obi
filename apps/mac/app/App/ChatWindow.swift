@@ -344,9 +344,10 @@ private struct HomeView: View {
     }
 
     /// Oby, a little above the middle (as a face at eye level), what's going on under it, and the
-    /// chips: every kind of work with something in it, whatever the side panel groups by.
+    /// chips: every kind of work, always, in Home's order (Sangam, mac-design B7), whatever the side
+    /// panel groups by.
     private var stage: some View {
-        let groups = WorkList.groups(work, by: .type)
+        let groups = WorkList.kinds(work)
         let running = work.count { $0.status == .running }, needs = work.count { $0.status == .needs }
         return EyeLevel {
             VStack(spacing: 16) {
