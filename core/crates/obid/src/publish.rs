@@ -208,11 +208,14 @@ pub fn action(job: &Job, base: &str) -> String {
     }
 }
 
+/// Why a review that made commits failed, and why obid won't publish one.
+pub const REVIEW_COMMITTED: &str = "A review made commits; nothing was published.";
+
 /// Why obid won't publish this job, or none to go ahead: never a review, only its own `oby/`
 /// branches, never onto `main`, `master` or the repository's default branch.
 pub fn refusal(job: &Job, base: &str, default_branch: &str) -> Option<String> {
     if job.kind == "review" {
-        return Some("A review made commits; nothing was published.".into());
+        return Some(REVIEW_COMMITTED.into());
     }
     if job.kind == "research" {
         return Some("Research jobs don't publish.".into());
@@ -581,22 +584,26 @@ pub async fn publish(
     // The base as the remote has it now: work merged since the job started counts as merged, and
     // what the remote doesn't have is all that the scan reads. Pinned to one commit, so another
     // fetch can't move it between the scan and the push. A base that can't be fetched sends
-    // nothing.
+    // nothing. A fetch the remote sent too little to is tried once more (#628).
     let since = {
         let _fetching = target.fetching.lock().await;
-        git::git(
-            clone,
-            &[
-                "fetch",
-                "--quiet",
-                "--no-tags",
-                "--no-write-fetch-head",
-                "origin",
-                &format!("+refs/heads/{base}:refs/remotes/origin/{base}"),
-            ],
-        )
-        .await
-        .map_err(|e| {
+        let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
+        let fetch = [
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "origin",
+            &refspec,
+        ];
+        let mut fetched = git::git(clone, &fetch).await;
+        if fetched
+            .as_ref()
+            .is_err_and(|e| e.0.contains("did not send all necessary objects"))
+        {
+            fetched = git::git(clone, &fetch).await;
+        }
+        fetched.map_err(|e| {
             Failure::Failed(format!(
                 "Not published: couldn't fetch {base}: {}",
                 git_said(&e, &target.remote)

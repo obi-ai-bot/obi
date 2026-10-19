@@ -154,12 +154,39 @@ struct ChatWindowTests {
         #expect(window.firstResponder === editor)
     }
 
+    /// The window's voice button (AGENTS.md): what a click heard is a draft after what's typed,
+    /// never sent, and one click listens at most 60 seconds.
+    @Test func whatTheVoiceButtonHeardIsADraft() {
+        #expect(MessageBox.draft("", adding: " add a test ") == "add a test")
+        #expect(MessageBox.draft("Please", adding: "add a test") == "Please add a test")
+        #expect(MessageBox.draft("Please ", adding: "") == "Please ")
+        #expect(MessageBox.listenLimit == .seconds(60))
+    }
+
     @Test func decisionsAttachToTheirJobEvenAfterOtherTurns() {
         let turns = [Turn(id: "start", date: now, who: .oby, text: "Starting", jobs: ["job"]),
                      Turn(id: "later", date: now + 60, who: .user, text: "Another question")]
         #expect(ConversationModel.decisionAnchor(job: "job", created: now + 120, turns: turns) == "start")
         #expect(ConversationModel.decisionAnchor(job: "older", created: now + 120, turns: turns) == "later")
         #expect(ConversationModel.decisionAnchor(job: "older", created: now - 60, turns: turns) == nil)
+    }
+
+    /// A decision lives with its task (mac-design C3): a conversation of obid's shows only the
+    /// decisions of the jobs it started, and those with no job (nothing else shows them yet, C9).
+    @Test func aConversationShowsOnlyItsOwnJobsDecisions() {
+        let turns = [Turn(id: "start", date: now, who: .oby, text: "Starting", jobs: ["mine"])]
+        let shows = { (job: String, of: String?, shown: String?) in
+            ConversationModel.shows(decisionOf: job, startedIn: of, served: true, shown: shown, turns: turns)
+        }
+        #expect(shows("mine", nil, "c1"))
+        #expect(shows("older", "c1", "c1"))
+        #expect(!shows("other", "c2", "c1"))
+        #expect(!shows("other", nil, "c1"))
+        #expect(shows("", nil, "c1"))
+        // A new conversation, before its first words: none of another's.
+        #expect(!shows("other", "c2", nil))
+        // A runner with one thread shows every decision there, as before.
+        #expect(ConversationModel.shows(decisionOf: "other", startedIn: nil, served: false, shown: nil, turns: turns))
     }
 
     @Test func confirmedAnswersLeaveTheInboxButStayInTheTranscript() {
@@ -241,6 +268,25 @@ struct ChatWindowTests {
         let options = CardOption.of(["A", "B", "C", "D", "E"], recommended: 3)
         #expect(options.map(\.answer) == ["D", "A", "B", "C"])
         #expect(CardOption.defaultOption(options)?.answer == "D")
+    }
+
+    /// A job waiting for an OK alerts, with Allow and Deny in it, again for each new ask; once
+    /// answered, its alert goes (found running two jobs at once on 2026-10-18: nothing said so).
+    @Test func aJobWaitingForAnOKAlertsEachTimeItAsks() {
+        var job = Job(id: "j", request: "Work", agent: "claude", account: "default", repo: "deskree-inc/oby",
+                      branch: "oby/fix-1", base: "dev", pr: nil, kind: .fix, task: "Work")
+        job.status = .running
+        job.permission = Permission(id: "p1", tool: "Bash", title: "Run cargo test", detail: "cargo test")
+        #expect(RunnerFeed.notice(for: job) == .permission)
+        #expect(RunnerFeed.title(.permission, for: job) == "Needs your OK: \(job.heading)")
+        #expect(RunnerFeed.body(.permission, for: job) == "Run cargo test")
+        let (first, seen) = RunnerFeed.notices([job], after: [:])
+        #expect(first.count == 1)
+        #expect(RunnerFeed.notices([job], after: seen).changes.isEmpty)
+        job.permission?.id = "p2"
+        #expect(RunnerFeed.notices([job], after: seen).changes.count == 1)
+        job.permission = nil
+        #expect(RunnerFeed.notices([job], after: seen).changes.first.map { $0.1 == nil } == true)
     }
 
     @Test func publishReviewAndFailedStatusesKeepTheirMeaning() {

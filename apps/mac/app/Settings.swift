@@ -9,17 +9,26 @@ import SwiftUI
 struct SettingsPane: View {
     let model: IslandModel
     let page: SettingsPage
+    @Environment(\.openSettingsPage) private var openSettings
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(page.label).font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink)
-                    .padding(.bottom, 16).accessibilityAddTraits(.isHeader)
-                content
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(page.label).font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink)
+                        .padding(.bottom, 16).accessibilityAddTraits(.isHeader)
+                    content
+                }
+                .frame(maxWidth: Tokens.column, alignment: .leading)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, Tokens.gutter).padding(.top, 16).padding(.bottom, 32)
             }
-            .frame(maxWidth: Tokens.column, alignment: .leading)
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, Tokens.gutter).padding(.top, 16).padding(.bottom, 32)
+            // The setting another page sent you to, in sight once the page has drawn.
+            .task(id: openSettings.spotlight) {
+                guard let spotlight = openSettings.spotlight else { return }
+                try? await Task.sleep(for: .milliseconds(200))
+                withAnimation(Tokens.warm) { proxy.scrollTo(spotlight, anchor: .center) }
+            }
         }
         .environment(\.settingsCards, true)
         .takesKeys()
@@ -118,6 +127,8 @@ struct RunnerSettingsView: View {
     @AppStorage(RunnerFeed.thisMacKey) private var onThisMac = false
     /// The login item, registered with "This Mac" and unregistered with a remote runner (apps/mac/app/LoginItem.swift).
     @State private var loginItem = RunnerLoginItem()
+    /// Asking before install.sh's obid is moved into Oby.
+    @State private var confirmingMove = false
     /// Merge checks on this Mac (apps/mac/app/MacChecks.swift).
     @AppStorage(MacChecks.setting) private var runMergeChecks = true
     /// Apple checks agents ask for (Engine/AppleChecks.swift).
@@ -128,7 +139,8 @@ struct RunnerSettingsView: View {
     var body: some View {
         // Sangam's words, but "the window" where his say "the island", which is gone.
         SetGroup("Runner", footer: onThisMac
-                 ? "The runner is Oby’s login item on this Mac, and Oby follows it on 127.0.0.1."
+                 ? (loginItem.byScript ? "Oby’s engine on this Mac was installed with install.sh. Move it into Oby and the app keeps it running and up to date, with the same settings, jobs and token."
+                                       : "Oby’s engine is the app’s login item on this Mac, and Oby follows it on 127.0.0.1.")
                  : "Oby follows the runner at this address: the window lists its jobs.",
                  problem: onThisMac ? loginItem.problem : nil) {
             SetRow("Runner") {
@@ -139,6 +151,9 @@ struct RunnerSettingsView: View {
                     SetValue(loginItem.line)
                     if loginItem.needsApproval {
                         Button("Open Login Items Settings") { RunnerLoginItem.openSettings() }.buttonStyle(.set)
+                    }
+                    if loginItem.byScript {
+                        Button("Move into Oby…") { confirmingMove = true }.buttonStyle(.set)
                     }
                 }
             } else {
@@ -155,6 +170,11 @@ struct RunnerSettingsView: View {
         }
         .onChange(of: onThisMac) { _, on in
             if on { loginItem.register() } else { loginItem.unregister() }
+        }
+        .confirmationDialog("Move Oby’s engine into the app?", isPresented: $confirmingMove) {
+            Button("Move into Oby") { loginItem.moveFromScript() }
+        } message: {
+            Text("Oby stops the obid install.sh set up and starts the one inside the app, with the same configuration, jobs and token. Running jobs pick up where they were.")
         }
         SetGroup("This Mac", footer: "On power, Oby prevents idle sleep while This Mac is enabled and this setting is on. A running job always keeps this Mac awake.") {
             SetRow("Keep my Mac available") {
@@ -226,11 +246,14 @@ struct RunnerSettingsView: View {
 /// own and runs its tunnel. The iPhone connects to the hostname when it's away from home.
 struct RemoteAccessSettingsView: View {
     let remote: RemoteAccess
+    @Environment(\.openSettingsPage) private var openSettings
     @State private var email = ""
     @State private var code = ""
     @State private var forgetting = false
 
     private var signedIn: Bool { remote.step == .signedIn || remote.step == .on }
+    /// Pair a device sent you here: the next thing to do is ringed (the email, the code, then the switch).
+    private var pointed: Bool { openSettings.spotlight == .remoteAccess }
 
     var body: some View {
         SetGroup("Oby account", footer: "Remote access goes through Oby’s control plane, which signs you in with a code by email and gives this Mac a hostname of its own.",
@@ -238,6 +261,7 @@ struct RemoteAccessSettingsView: View {
             switch remote.step {
             case .signedOut:
                 SetRow("Email") { SetField("Email", text: $email, prompt: "you@example.com").onSubmit(sendCode) }
+                    .spotlit(pointed, id: .remoteAccess)
                 SetRow("") {
                     Button("Send Code") { sendCode() }
                         .buttonStyle(.set)
@@ -247,6 +271,7 @@ struct RemoteAccessSettingsView: View {
                 SetRow("Code", about: "A six-digit code went to \(to). It works for ten minutes.") {
                     SetField("Code", text: $code, prompt: "123456").onSubmit(verify)
                 }
+                .spotlit(pointed, id: .remoteAccess)
                 SetRow("") {
                     Button("Use Another Email") { remote.useAnotherEmail() }
                         .buttonStyle(.set)
@@ -259,6 +284,11 @@ struct RemoteAccessSettingsView: View {
                 SetRow("Signed in as") { SetValue(remote.email ?? "") }
             }
         }
+        // On, and Pair a device sent you: straight back to it, its button ringed.
+        .onChange(of: remote.step) { _, step in
+            if step == .on, pointed { openSettings(.runner, spotlight: .pairDevice) }
+        }
+        .onDisappear { openSettings.clear(.remoteAccess) }
         if signedIn {
             SetGroup("Remote access", footer: "On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Off keeps the hostname for next time. Forget removes this Mac from your account, and the hostname stops answering.",
                      problem: remote.problem) {
@@ -269,6 +299,7 @@ struct RemoteAccessSettingsView: View {
                     .toggleStyle(.set)
                     .disabled(remote.busy)
                 }
+                .spotlit(pointed && remote.step != .on, id: .remoteAccess)
                 if let hostname = remote.hostname {
                     SetRow("Hostname") { SetValue(hostname) }
                 }
@@ -927,5 +958,39 @@ extension AccountStore {
         try text.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
         guard NSWorkspace.shared.open(script) else { throw Shell.Failure(message: "Couldn't open Terminal to sign out.") }
+    }
+}
+
+extension View {
+    /// The setting another Settings page sent you to (`SettingsSpotlight`): a blue ring (the new dot's blue) that
+    /// breathes, still with Reduce Motion, and the id the page scrolls to.
+    func spotlit(_ on: Bool, id: SettingsSpotlight) -> some View {
+        modifier(Spotlit(on: on)).id(id)
+    }
+}
+
+private struct Spotlit: ViewModifier {
+    let on: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var bright = false
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if on {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Tokens.unread, lineWidth: 2)
+                        .opacity(reduceMotion || bright ? 1 : 0.35)
+                        .padding(2)
+                        .allowsHitTesting(false)
+                        .onAppear {
+                            guard !reduceMotion else { return }
+                            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { bright = true }
+                        }
+                        .onDisappear { bright = false }
+                        .transition(.opacity)
+                }
+            }
+            .animation(Tokens.warm, value: on)
     }
 }

@@ -55,6 +55,12 @@ struct ConversationPage: View {
 
     // MARK: The thread
 
+    /// Whether a runner job's decision shows in this conversation: only its own jobs' (C3).
+    private func own(_ job: String, _ turns: [Turn]) -> Bool {
+        ConversationModel.shows(decisionOf: job, startedIn: feed.extras[job]?.conversation,
+                                served: feed.conversations.served, shown: feed.conversations.shown, turns: turns)
+    }
+
     private var thread: some View {
         // Every half minute: a time that turns into yesterday's, and the inbox's waits move on.
         TimelineView(.periodic(from: .now, by: 30)) { context in
@@ -62,9 +68,10 @@ struct ConversationPage: View {
             let entries = (desk.inbox.map { IslandInbox.Entry(item: $0, local: true) }
                 + (feed.inbox + feed.inboxHistory).map { IslandInbox.Entry(item: $0, local: false) })
                 .filter { $0.item.isDecision && ($0.item.later == nil || $0.item.later! <= context.date) }
+                .filter { $0.local || own($0.item.job, turns) }
                 .sorted { $0.item.created < $1.item.created }
             let waiting = entries.filter { $0.item.isOpen }
-            let permissions = feed.chatPermissions.filter { $0.done != nil || $0.waits(at: context.date) }
+            let permissions = feed.chatPermissions.filter { ($0.done != nil || $0.waits(at: context.date)) && own($0.job, turns) }
             let permissionWaits = permissions.filter { $0.waits(at: context.date) }
             let oldest = (waiting.map { ($0.id, $0.item.created) } + permissionWaits.map { ($0.id, $0.created) }).min { $0.1 < $1.1 }?.0
             let anchors = Dictionary(uniqueKeysWithValues: entries.map {
@@ -204,7 +211,8 @@ struct ConversationPage: View {
                        maximumHeight: height * 0.5, focusRequest: composerFocusRequest,
                        onSend: send, onScreenshot: screenshot,
                        onStop: { if thinking { desk.cancel(); return true }; return false },
-                       onEscape: onBack, usage: model.usageRows)
+                       onEscape: onBack, usage: model.usageRows,
+                       voice: model.voice, talkKeyListening: model.listening)
                 .disabled(sendingAnswer)
         }
     }
@@ -331,10 +339,9 @@ struct ThreadTask: View {
 
     var body: some View {
         let mark = ThreadTaskLine.mark(job)
+        // No Stop on hover (Sangam's ThreadTask has none, and it covered the mark): the menu and the
+        // task's page stop it.
         card(mark)
-            .overlay(alignment: .topTrailing) {
-                if hovering && job.isActive, let onStop { StopButton(action: onStop).padding(.top, 8).padding(.trailing, 38) }
-            }
             .onHover { hovering = $0 }
     }
 

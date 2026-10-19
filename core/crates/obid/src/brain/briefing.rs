@@ -63,6 +63,8 @@ fn tool_name(agent: &str) -> &str {
 #[derive(Debug, Clone)]
 pub struct Briefing {
     pub turns: Vec<Turn>,
+    /// The conversation the turns are of: the jobs it started are marked (#631).
+    pub conversation: String,
     /// Where the jobs run: obid's host.
     pub place: String,
     pub jobs: Vec<Job>,
@@ -236,6 +238,11 @@ impl Briefing {
                 // What it asks to run or edit is the agent's own: in the quoted file.
                 "permission" => format!(
                     "what it asks to do is quoted in {FILE}. Options: {}.",
+                    item.options.join(" | ")
+                ),
+                // The agent's plan is its own: in the quoted file, with the job's permission.
+                "plan" => format!(
+                    "the plan is quoted in {FILE}. Options: {}.",
                     item.options.join(" | ")
                 ),
                 // Other Obis' requests and plug-ins' events: obid's words from their typed
@@ -497,6 +504,14 @@ impl Briefing {
             (_, Some(started)) => parts.push(format!("started {} ago", elapsed(now - started))),
             _ => {}
         }
+        // Whose job it is (#631): another conversation's is acted on only on the owner's Confirm.
+        if let Some(started) = &job.conversation {
+            parts.push(if *started == self.conversation {
+                "started in this conversation".to_owned()
+            } else {
+                "started in another conversation".to_owned()
+            });
+        }
         parts.push(format!("asked: {}", line(&job.request, 120)));
         parts.join(" · ")
     }
@@ -713,6 +728,7 @@ pub fn with_own(file: Option<String>, own: &[Own], nonce: &str) -> Option<String
 fn kind(kind: &str) -> &str {
     match kind {
         "permission" => "Permission",
+        "plan" => "A job's plan, waiting for the user's own approval (Oby can't answer it)",
         "obiRequest" => "Request from another Obi",
         "pluginEvent" => "Plug-in event",
         "confirm" => "Waiting for the user's own Confirm (Oby can't answer it)",
@@ -1021,6 +1037,7 @@ mod tests {
         };
         Briefing {
             turns: vec![turn("user", "how is it going?"), turn("oby", "Fine.")],
+            conversation: "c0nv".into(),
             place: "tetrix-lab".into(),
             jobs,
             inbox,
@@ -1045,6 +1062,29 @@ mod tests {
             now: NOW,
             nonce: "n0nce".into(),
         }
+    }
+
+    /// #631: the jobs this conversation started are marked, and another conversation's too; a job
+    /// started by hand is neither.
+    #[test]
+    fn the_briefing_marks_whose_conversation_started_a_job() {
+        let mut ours = job("ab12cd34", "Vault secrets");
+        ours.conversation = Some("c0nv".into());
+        let mut theirs = job("cd34ef56", "Notch screens");
+        theirs.conversation = Some("other".into());
+        let by_hand = job("ef56ab12", "Docs");
+        let briefing = briefing(vec![], vec![]);
+        assert!(
+            briefing
+                .describe(&ours)
+                .ends_with("· started in this conversation · asked: work on oby #60")
+        );
+        assert!(
+            briefing
+                .describe(&theirs)
+                .ends_with("· started in another conversation · asked: work on oby #60")
+        );
+        assert!(!briefing.describe(&by_hand).contains("conversation"));
     }
 
     /// #586: a job's mode is said only when it isn't the owner's default, so a job in Bypass,

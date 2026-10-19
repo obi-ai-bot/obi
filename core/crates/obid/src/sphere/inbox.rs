@@ -74,6 +74,11 @@ pub mod action {
     /// already taken out of the vault's secrets. Made before 2026-10-18 for one more round; it
     /// starts a follow-up now, and obid makes none.
     pub const MESSAGE_JOB: &str = "message_job";
+    /// Dismiss a job whose commits aren't published, or another conversation's (#631): `target`
+    /// the job. Its commits stay on its branch.
+    pub const DISMISS_JOB: &str = "dismiss_job";
+    /// Try another conversation's job again (#631): `target` the job.
+    pub const RETRY_JOB: &str = "retry_job";
 }
 
 /// A `confirm` item: `title` says exactly what `Confirm` does, `confirmed` is what obid carries
@@ -444,26 +449,38 @@ pub fn question_item(
 
 /// The `permission` item for a permission the job's agent waits on (docs/runner-api.md, "Inbox
 /// item"): its title the job's, its text the permission's, and Allow, Always allow (only with a
-/// rule to save) and Deny. Words of the owner's own are a no, and reach the agent.
+/// rule to save) and Deny. Words of the owner's own are a no, and reach the agent. The agent's
+/// plan in Plan mode is a `plan` item instead (#609): Approve and Keep planning, the plan quoted
+/// as its `details`, only the owner's to answer.
 pub fn permission_item(
     job: &crate::job::Job,
     permission: &crate::permissions::Permission,
     now: i64,
 ) -> Item {
-    use crate::permissions::{ALLOW, ALWAYS_ALLOW, DENY};
-    let options: Vec<String> = if permission.always.is_some() {
-        vec![ALLOW.into(), ALWAYS_ALLOW.into(), DENY.into()]
+    use crate::permissions::{ALLOW, ALWAYS_ALLOW, APPROVE, DENY, KEEP_PLANNING};
+    let (kind, options, details): (_, Vec<String>, _) = if permission.is_plan() {
+        (
+            "plan",
+            vec![APPROVE.into(), KEEP_PLANNING.into()],
+            Some(vec![permission.detail.clone()]),
+        )
+    } else if permission.always.is_some() {
+        (
+            "permission",
+            vec![ALLOW.into(), ALWAYS_ALLOW.into(), DENY.into()],
+            None,
+        )
     } else {
-        vec![ALLOW.into(), DENY.into()]
+        ("permission", vec![ALLOW.into(), DENY.into()], None)
     };
     Item {
         id: permission_item_id(&job.id, &permission.id),
-        kind: "permission".into(),
+        kind: kind.into(),
         job: job.id.clone(),
         title: job.short_title(),
         text: permission.title.clone(),
         options,
-        details: None,
+        details,
         recommended: None,
         created: now,
         done: None,

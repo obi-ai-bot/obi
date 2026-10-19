@@ -273,7 +273,7 @@ impl Link {
             .map(|mut i| {
                 // A permission waited on an agent that ended with obid: its job's agent asks again
                 // when it runs, so the old item is done by itself.
-                if i.kind == "permission" && i.done.is_none() {
+                if matches!(i.kind.as_str(), "permission" | "plan") && i.done.is_none() {
                     i.done = Some(now);
                     if let Err(e) = inbox.save(&i) {
                         tracing::error!("can't keep inbox item {}: {e}", i.id);
@@ -2492,6 +2492,25 @@ impl Link {
                     None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
                 }
             }
+            inbox::action::DISMISS_JOB => match self.jobs.dismiss(target) {
+                Some(Ok(_)) => Ok(()),
+                Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
+                None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
+            },
+            inbox::action::RETRY_JOB => {
+                if self.jobs.get(target).is_some_and(|j| j.status.is_active()) {
+                    return Err(api(StatusCode::CONFLICT, "That job is running again."));
+                }
+                match self.jobs.message(
+                    target,
+                    crate::brain::actions::TRY_AGAIN,
+                    crate::jobs::Source::Owner,
+                ) {
+                    Some(Ok(_)) => Ok(()),
+                    Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
+                    None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
+                }
+            }
             // The ones that answer an inbox item, as the owner would have.
             inbox::action::ACCEPT
             | inbox::action::ACCEPT_REMEMBER
@@ -2717,7 +2736,7 @@ impl Link {
             if item.done.is_some() {
                 return Err(api(StatusCode::CONFLICT, "That item is done already."));
             }
-            if item.kind == "permission" {
+            if matches!(item.kind.as_str(), "permission" | "plan") {
                 drop(state);
                 return match given {
                     Given::Answer(answer) => self.answer_permission_item(item, Some(answer), None),

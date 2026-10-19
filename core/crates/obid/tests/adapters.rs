@@ -59,7 +59,7 @@ fn obid_and_remote(folder: &Folder, signed_out: bool) -> (Obid, PathBuf) {
 }
 
 fn dispatch(obid: &Obid, job: Value) -> String {
-    let mut whole = json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "check": "true"});
+    let mut whole = json!({"repo": "obi-e2e/fixture-app", "kind": "research", "check": "true"});
     for (key, value) in job.as_object().unwrap() {
         whole[key] = value.clone();
     }
@@ -225,6 +225,62 @@ fn codex_in_plan_mode_changes_no_file() {
             .join("plan.txt")
             .exists()
     );
+}
+
+/// Review and investigate jobs only read (#630): Plan mode whatever they ask for or the default
+/// says, so Codex's file change is declined, and a mode change keeps them in Plan.
+#[test]
+fn codex_reviews_and_investigates_in_plan_mode() {
+    let folder = Folder::new("codex-read-only");
+    let obid = obid(&folder, false);
+    for kind in ["review", "investigate"] {
+        let id = dispatch(
+            &obid,
+            json!({"agent": "codex", "kind": kind, "task": "COMMIT: plan.txt", "mode": "bypass"}),
+        );
+        let changed = call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/mode"),
+            Some(&json!({"mode": "bypass"})),
+        );
+        assert_eq!(changed.status, 200, "{}", changed.text);
+        assert_eq!(changed.body["mode"], "plan", "{kind}");
+        let job = ended(&obid, &id);
+        assert_eq!(job["mode"], "plan", "{job}");
+        assert_eq!(job["status"], "done", "{job}");
+        assert_eq!(job["commits"], 0, "{job}");
+        assert!(summary(&job).starts_with("edit: decline"), "{job}");
+        assert!(
+            !obid
+                .home
+                .join("worktrees")
+                .join(&id)
+                .join("plan.txt")
+                .exists()
+        );
+    }
+}
+
+/// A review on Codex that commits anyway (#630) fails: it publishes nothing, says so, and shows
+/// the commits it made.
+#[test]
+fn a_review_that_commits_fails() {
+    let folder = Folder::new("codex-review-commits");
+    let obid = obid(&folder, false);
+    let id = dispatch(
+        &obid,
+        json!({"agent": "codex", "kind": "review", "task": "SNEAK: notes.txt"}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(
+        summary(&job),
+        "A review made commits; nothing was published.",
+        "{job}"
+    );
+    assert_eq!(job["commits"], 1, "{job}");
+    assert_eq!(job["published"], Value::Null, "{job}");
 }
 
 /// The next round (the check failed) picks the same thread up again (`thread/resume`) in a new

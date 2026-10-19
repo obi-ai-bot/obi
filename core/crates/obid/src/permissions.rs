@@ -87,6 +87,8 @@ pub struct Call {
     pub reads: Vec<String>,
     /// The command is only a title the agent gave (`"seen": false`, Cursor without a command).
     pub unseen: bool,
+    /// The plan `ExitPlanMode` presents, as the agent wrote it.
+    pub plan: Option<String>,
 }
 
 impl Call {
@@ -107,6 +109,7 @@ impl Call {
                 .filter_map(|key| text(key))
                 .collect(),
             unseen: input.get("seen").and_then(Value::as_bool) == Some(false),
+            plan: text("plan").filter(|_| tool == "ExitPlanMode"),
         }
     }
 }
@@ -137,6 +140,12 @@ impl Permission {
     /// never the brain (#586).
     pub fn is_secret(&self) -> bool {
         self.why.as_deref() == Some(Reach::Secrets.why())
+    }
+
+    /// Whether it's the agent's plan in Plan mode (`ExitPlanMode`): only the owner approves it or
+    /// sends it back, never the brain, a rule or a new mode (#609).
+    pub fn is_plan(&self) -> bool {
+        self.tool == "ExitPlanMode"
     }
 }
 
@@ -280,12 +289,20 @@ pub const ALLOW: &str = "Allow";
 pub const ALWAYS_ALLOW: &str = "Always allow";
 pub const DENY: &str = "Deny";
 
+/// A `plan` item's answers (#609); any other words keep the agent planning, and reach it.
+pub const APPROVE: &str = "Approve";
+pub const KEEP_PLANNING: &str = "Keep planning";
+
+/// What the agent hears when the owner sends its plan back without words.
+pub const PLAN_SENT_BACK: &str =
+    "The owner didn't approve the plan yet: keep planning, then present it again.";
+
 /// The decision an inbox answer stands for, and the owner's words for the agent.
 pub fn inbox_decision(answer: &str) -> (Decision, Option<String>) {
     match answer.trim().to_lowercase().as_str() {
-        "allow" | "yes" => (Decision::Allow, None),
+        "allow" | "yes" | "approve" => (Decision::Allow, None),
         "always allow" => (Decision::Always, None),
-        "deny" | "no" => (Decision::Deny, None),
+        "deny" | "no" | "keep planning" => (Decision::Deny, None),
         _ => (Decision::Deny, Some(answer.trim().to_owned())),
     }
 }
@@ -305,6 +322,9 @@ const QUIET: [&str; 8] = [
 
 /// File edits: allowed in Accept edits, refused in Plan.
 const EDITS: [&str; 4] = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+
+/// How much of a plan its card keeps.
+const PLAN_CAP: usize = 20_000;
 
 /// What an agent in Plan hears when it tries to change something.
 pub const PLAN_ONLY: &str = "Plan mode: read only, change nothing yet. Finish with your plan; the owner approves it before you go on.";
@@ -1721,6 +1741,18 @@ pub fn card(call: &Call, id: &str, repo: &str, bounds: &Bounds) -> Permission {
     };
     let why = reach(call, bounds);
     let (title, detail, mut rule, mut what) = match family(&call.tool) {
+        // The agent's plan, as it wrote it: data for the owner to read, with no rule to save.
+        "ExitPlanMode" => (
+            "Approve the plan?".to_owned(),
+            call.plan
+                .as_deref()
+                .unwrap_or_default()
+                .chars()
+                .take(PLAN_CAP)
+                .collect(),
+            None,
+            None,
+        ),
         "Bash" => {
             let command = call.command.clone().unwrap_or_default();
             let detail: String = command.chars().take(2000).collect();

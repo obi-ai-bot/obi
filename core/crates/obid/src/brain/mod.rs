@@ -318,8 +318,8 @@ pub(super) fn acknowledge(shared: &Shared, control: &turn::Control, text: &str) 
 }
 
 /// What the brain may choose from (`Desk.brainContext`): the accounts, the repositories, the ids
-/// each action may name, and the briefing with `turns` as the conversation so far.
-pub(super) fn context(shared: &Shared, turns: &[Turn], nonce: &str) -> Context {
+/// each action may name, and the briefing with `turns` as the conversation so far, `conversation`'s.
+pub(super) fn context(shared: &Shared, conversation: &str, turns: &[Turn], nonce: &str) -> Context {
     let config = &shared.config;
     let now = obi_protocol::time::now();
     let tools = tool_accounts(config);
@@ -365,6 +365,7 @@ pub(super) fn context(shared: &Shared, turns: &[Turn], nonce: &str) -> Context {
     }
     let briefing = briefing::Briefing {
         turns: turns.to_vec(),
+        conversation: conversation.to_owned(),
         place: shared.host.clone(),
         jobs: shared.jobs.list(usize::MAX),
         inbox: shared.link.waiting_items(now),
@@ -419,7 +420,10 @@ pub(super) async fn own(
     turns: &[Turn],
     nonce: &str,
 ) -> Vec<briefing::Own> {
-    let briefing = context(shared, turns, nonce).briefing.unwrap_or_default();
+    // Only the repositories it names count: whose conversation doesn't.
+    let briefing = context(shared, "", turns, nonce)
+        .briefing
+        .unwrap_or_default();
     briefing::own_instructions(
         &shared.config.home,
         &shared.config.repos,

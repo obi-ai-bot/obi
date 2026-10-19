@@ -356,13 +356,23 @@ pub const TRY_AGAIN: &str =
 
 /// Carries out an action that changes something, and says what happened. `said` is the user's
 /// own words this turn, which message_job passes on; `source` is whose they are and whether the
-/// turn read something untrusted, which decides what they do to a job that ended.
-pub async fn act(shared: &Arc<Shared>, plan: &Plan, said: &str, source: Source) -> Outcome {
+/// turn read something untrusted, which decides what they do to a job that ended. `conversation`
+/// is the turn's: another conversation's job is tried again or dismissed only on the owner's
+/// Confirm (#631).
+pub async fn act(
+    shared: &Arc<Shared>,
+    plan: &Plan,
+    said: &str,
+    source: Source,
+    conversation: &str,
+) -> Outcome {
     match plan.action {
         Action::StopAgent => stop(shared, plan),
         Action::SetMode => set_mode(shared, plan),
         Action::AnswerPermission => answer_permission(shared, plan),
-        Action::RetryJob | Action::DismissJob | Action::StartNow => on_jobs(shared, plan),
+        Action::RetryJob | Action::DismissJob | Action::StartNow => {
+            on_jobs(shared, plan, source, conversation)
+        }
         Action::AnswerInbox => answer_inbox(shared, plan).await,
         Action::SetSetting => set_setting(shared, plan),
         Action::MessageJob => message_job(shared, plan, said, source),
@@ -392,8 +402,10 @@ pub async fn act(shared: &Arc<Shared>, plan: &Plan, said: &str, source: Source) 
 }
 
 /// retry_job, dismiss_job and start_now (Engine/JobActions.swift, `actOnJobs`), one line per
-/// job. It failed when nothing happened to any of them.
-fn on_jobs(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
+/// job. It failed when nothing happened to any of them. A job another conversation started is
+/// tried again or dismissed only on the owner's Confirm (#631); Oby's event orchestrator acts on
+/// any conversation's jobs.
+fn on_jobs(shared: &Arc<Shared>, plan: &Plan, source: Source, conversation: &str) -> Outcome {
     let ids = plan.named();
     if ids.is_empty() {
         return Outcome::NeedsWhich("Say which job.".into());
@@ -410,13 +422,14 @@ fn on_jobs(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
             continue;
         };
         let name = job.short_title();
+        let theirs = source != Source::Event
+            && job
+                .conversation
+                .as_deref()
+                .is_some_and(|c| c != conversation);
         let (line, done) = match plan.action {
-            Action::RetryJob => retry(shared, &job),
-            Action::DismissJob => match shared.jobs.dismiss(id) {
-                Some(Ok(_)) => (format!("Let {name} go."), true),
-                Some(Err(refused)) => (format!("Couldn't let {name} go: {}", refused.0), false),
-                None => ("That job isn't here any more.".into(), false),
-            },
+            Action::RetryJob => retry(shared, &job, theirs),
+            Action::DismissJob => dismiss(shared, &job, theirs),
             // obid starts every job at once (#455): none waits for a Start when.
             _ => (
                 format!("Couldn't start {name}: it isn't waiting for a Start when."),
@@ -437,7 +450,8 @@ fn on_jobs(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
 /// Runs a job that failed, was stopped or was cut off again, where it left off (`Desk.retry`,
 /// and the brain's prompt: "a failed, stopped or cut-off job"): obid has no
 /// failed-job inbox item, so it tells the job's agent to try again, which picks its session up.
-fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
+/// Another conversation's job (`theirs`) waits for the owner's Confirm.
+fn retry(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
     let name = job.short_title();
     if job.status.is_active() {
         return (
@@ -454,6 +468,27 @@ fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
             false,
         );
     }
+    if theirs {
+        confirm(
+            shared,
+            &job.id,
+            format!("Try {name} again"),
+            format!(
+                "Oby's brain planned to try {name} again, which another conversation started. It happens only if you confirm."
+            ),
+            Confirmed {
+                action: action::RETRY_JOB.into(),
+                target: job.id.clone(),
+                payload: Value::Null,
+            },
+        );
+        return (
+            format!(
+                "{name} was started in another conversation, so trying it again waits for your OK: confirm it in your inbox."
+            ),
+            true,
+        );
+    }
     // Try again's own words pick its session up again: they never start a follow-up.
     match shared.jobs.message(&job.id, TRY_AGAIN, Source::Event) {
         Some(Ok(job)) => (
@@ -461,6 +496,62 @@ fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
             true,
         ),
         Some(Err(refused)) => (format!("Couldn't try {name} again: {}", refused.0), false),
+        None => ("That job isn't here any more.".into(), false),
+    }
+}
+
+/// Lets a job that needs the owner go, saying what stays on its branch. Commits that aren't
+/// published, and another conversation's job (`theirs`), wait for the owner's Confirm (#631): a
+/// short word never throws work away.
+fn dismiss(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
+    let name = job.short_title();
+    let kept = match job.commits.unwrap_or(0) {
+        0 => String::new(),
+        1 => " (1 commit kept on its branch)".into(),
+        n => format!(" ({n} commits kept on its branch)"),
+    };
+    let unpublished = job.unpublished();
+    if job.dismissed.is_none() && job.needs_you() && (unpublished > 0 || theirs) {
+        let mut why = vec![];
+        if theirs {
+            why.push(format!("{name} was started in another conversation."));
+        }
+        if unpublished > 0 {
+            why.push(format!(
+                "{unpublished} of its commits aren't published: they stay on its branch {}, and obid doesn't publish them.",
+                job.branch
+            ));
+        }
+        confirm(
+            shared,
+            &job.id,
+            format!("Dismiss {name}{kept}"),
+            format!(
+                "Oby's brain planned to dismiss {name}. {} It happens only if you confirm.",
+                why.join(" ")
+            ),
+            Confirmed {
+                action: action::DISMISS_JOB.into(),
+                target: job.id.clone(),
+                payload: Value::Null,
+            },
+        );
+        let line = if unpublished > 0 {
+            format!(
+                "Dismissing {name} waits for your OK: its {unpublished} commit{} {} published. Confirm it in your inbox.",
+                if unpublished == 1 { "" } else { "s" },
+                if unpublished == 1 { "isn't" } else { "aren't" }
+            )
+        } else {
+            format!(
+                "{name} was started in another conversation, so dismissing it waits for your OK: confirm it in your inbox."
+            )
+        };
+        return (line, true);
+    }
+    match shared.jobs.dismiss(&job.id) {
+        Some(Ok(_)) => (format!("Dismissed {name}{kept}."), true),
+        Some(Err(refused)) => (format!("Couldn't let {name} go: {}", refused.0), false),
         None => ("That job isn't here any more.".into(), false),
     }
 }
@@ -649,6 +740,10 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
     match item.kind.as_str() {
         // A confirm item is the owner's own decision: never answered by the brain.
         "confirm" => Owners::Refuse("only you can confirm it, in your inbox.".into()),
+        // A job's plan is the owner's to approve or send back, either way (#609).
+        "plan" => Owners::Refuse(
+            "it's a job's plan: only you can approve it or send it back, in your inbox.".into(),
+        ),
         // Letting a secret through is the owner's alone, even once (#586); saying no isn't.
         "permission"
             if job
@@ -854,12 +949,28 @@ fn set_mode(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
         ));
     }
     let mut done: Vec<String> = vec![];
+    let mut kept: Vec<String> = vec![];
     for id in plan.named() {
-        if shared.jobs.get(id).is_some_and(|j| j.status.is_active())
-            && let Some(job) = shared.jobs.set_mode(id, mode)
-        {
-            done.push(job.short_title());
+        match shared.jobs.get(id) {
+            Some(job) if job.status.is_active() && job.read_only() => kept.push(job.short_title()),
+            Some(job) if job.status.is_active() => {
+                if let Some(job) = shared.jobs.set_mode(id, mode) {
+                    done.push(job.short_title());
+                }
+            }
+            _ => {}
         }
+    }
+    if done.is_empty() && !kept.is_empty() {
+        return Outcome::Done(format!(
+            "{} only {} in Plan mode.",
+            kept.join(", "),
+            if kept.len() == 1 {
+                "reads: it stays"
+            } else {
+                "read: they stay"
+            }
+        ));
     }
     if done.is_empty() {
         return Outcome::Done("That job isn't running any more.".into());
@@ -885,6 +996,12 @@ fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
     let Some(permission) = job.permission.as_ref() else {
         return Outcome::Done(format!("{name} isn't waiting for your OK."));
     };
+    // A plan is the owner's to approve or send back, either way (#609).
+    if permission.is_plan() {
+        return Outcome::Done(format!(
+            "{name} waits for you to approve its plan or send it back: only you can, in your inbox."
+        ));
+    }
     // Letting a secret through is the owner's alone, even once (#586); saying no isn't.
     if permission.is_secret() && decision != super::plan::Decision::Deny {
         return Outcome::Done(format!(

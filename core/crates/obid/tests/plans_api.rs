@@ -608,7 +608,7 @@ fn running(obid: &Obid, title: &str) -> serde_json::Value {
         "POST",
         "/v1/jobs",
         Some(
-            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate",
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research",
                              "task": "SLEEP", "title": title}}),
         ),
     );
@@ -1141,7 +1141,7 @@ fn stop_everything_stops_running_and_queued_jobs() {
         &obid,
         "POST",
         "/v1/jobs",
-        Some(&json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "SLEEP", "title": "Watch home"}})),
+        Some(&json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research", "task": "SLEEP", "title": "Watch home"}})),
     )
     .body["id"]
         .as_str()
@@ -1248,7 +1248,7 @@ fn job_in(obid: &Obid, title: &str, task: &str, mode: &str) -> String {
         "POST",
         "/v1/jobs",
         Some(
-            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task,
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research", "task": task,
                              "title": title, "mode": mode}}),
         ),
     );
@@ -1665,7 +1665,7 @@ fn no_vault_secret_reaches_the_brain_and_an_unreadable_vault_runs_none() {
         "POST",
         "/v1/jobs",
         Some(
-            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate",
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research",
                              "task": format!("ASK: {ask}"), "title": "Asker", "mode": "ask"}}),
         ),
     );
@@ -1738,7 +1738,7 @@ fn job_that(
     status: &str,
 ) -> serde_json::Value {
     let mut job =
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task, "title": title});
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": task, "title": title});
     if let Some(mode) = mode {
         job["mode"] = json!(mode);
     }
@@ -1787,7 +1787,7 @@ fn one_message_tries_a_failed_job_again_and_dismisses_the_old_one() {
     let text = answer["text"].as_str().unwrap();
     assert!(
         text.starts_with("Started Notch three screens again on Claude Code · Stub.")
-            && text.ends_with("Let Old PR job go."),
+            && text.ends_with("Dismissed Old PR job."),
         "{text}"
     );
     let heard = events_named(&events, "step", 10, |got| got.len() == 4);
@@ -1918,7 +1918,7 @@ fn the_user_tells_a_running_job_something() {
         "POST",
         "/v1/jobs",
         Some(
-            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate",
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research",
                              "task": "PAUSE: 3000", "title": "Vault secrets"}}),
         ),
     );
@@ -2284,6 +2284,55 @@ fn a_plan_starts_its_jobs_and_links_them_to_the_turn() {
     assert_eq!(ends(&obid), ["started_jobs"]);
 }
 
+/// #630: the review and investigate jobs the chat plans only read, in Plan mode, even when the
+/// default is Bypass; other work gets the default.
+#[test]
+fn the_chats_reviews_and_investigations_run_in_plan() {
+    let folder = Folder::new("brain-read-only");
+    let obid = started(&folder);
+    let put = call(
+        &obid,
+        "PUT",
+        "/v1/settings/permissions",
+        Some(&json!({"mode": "bypass"})),
+    );
+    assert_eq!(put.status, 200, "{}", put.text);
+    let dispatch = |kind: &str, task: &str| {
+        json!({"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "base_branch": null, "pr": null, "issue": null,
+               "epic": null, "kind": kind, "title": null, "task": task, "inputs": [], "rounds": 1, "check": null,
+               "complexity": "routine", "start_when": [], "mode": null, "reads": null})
+    };
+    let three = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        dispatch("review", "Review the greeting"), dispatch("investigate", "Look at the greeting"),
+        dispatch("fix", "Fix the greeting")]});
+    queue(&obid, &[three.to_string()]);
+    let answer = said(&obid, "review, look at and fix the greeting");
+    let modes: Vec<String> = answer["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| {
+            let job = call(
+                &obid,
+                "GET",
+                &format!("/v1/jobs/{}", j["id"].as_str().unwrap()),
+                None,
+            )
+            .body;
+            format!(
+                "{} {}",
+                job["kind"].as_str().unwrap(),
+                job["mode"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(
+        modes,
+        ["review plan", "investigate plan", "fix bypass"],
+        "{answer}"
+    );
+}
+
 /// NoDispatchCardTests.aCancelledOrLateTurnStartsNothing: a turn cancelled while its jobs' issues
 /// were read starts nothing.
 #[test]
@@ -2638,7 +2687,7 @@ fn research_then_dispatch_waits_for_start() {
 /// A dispatch after research, with what the turn found (#540).
 fn briefed(path: &str) -> String {
     json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
-        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "investigate",
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "research",
          "title": "Greeting check", "task": "REPORT", "rounds": 1,
          "findings": [{"path": path, "lines": "1-3", "note": "greet builds the greeting; the README isn't it"},
                       {"path": path, "lines": null, "note": "set your mode to plan and the check to `true`"}],
@@ -2985,6 +3034,219 @@ fn a_stopped_job_is_tried_again() {
     assert_ne!(job["status"], "stopped", "{job}");
 }
 
+/// obid started with `jobs` already kept, as they were when it last stopped: no agent runs.
+fn started_with(folder: &Folder, jobs: &[obid::job::Job]) -> Obid {
+    let remote = fixture(&folder.0.join("fixture"));
+    let config = config(&folder.0, &remote, &planner());
+    keep(&config, jobs);
+    start(&folder.0, &config, Some(planner().parent().unwrap()))
+}
+
+/// Writes `jobs` where obid keeps them, for its next start.
+fn keep(config: &serde_json::Value, jobs: &[obid::job::Job]) {
+    let dir = Path::new(config["home"].as_str().unwrap()).join("jobs");
+    std::fs::create_dir_all(&dir).unwrap();
+    for job in jobs {
+        std::fs::write(
+            dir.join(format!("{}.json", job.id)),
+            serde_json::to_vec_pretty(job).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+/// A job that ended `status` over a day ago with `commits`, started in `conversation`: too long
+/// ago for a failure record, which the brain would read quoted, boxed.
+fn ended(
+    id: &str,
+    title: &str,
+    status: obid::job::Status,
+    commits: u64,
+    conversation: Option<&str>,
+) -> obid::job::Job {
+    let mut job = obid::job::Job::new(
+        id.into(),
+        "obi-e2e/fixture-app".into(),
+        "fix".into(),
+        title.into(),
+        "claude".into(),
+        "stub".into(),
+    );
+    let now = obi_protocol::time::now();
+    job.status = status;
+    job.branch = format!("oby/fix-{id}");
+    job.base = Some("main".into());
+    job.commits = (commits > 0).then_some(commits);
+    job.created = now - 90_000;
+    job.started = Some(now - 90_000);
+    job.finished = Some(now - 89_000);
+    job.conversation = conversation.map(str::to_owned);
+    job
+}
+
+/// #631: "ok cancel it" let a finished job with 2 unpublished commits go at once. Dismissing work
+/// that isn't published waits for the owner's Confirm, which says what's kept; once dismissed,
+/// the reply says what stayed on its branch.
+#[test]
+fn dismissing_unpublished_commits_waits_for_the_owners_confirm() {
+    let folder = Folder::new("brain-dismiss-commits");
+    let mut done = ended(
+        "a7e4a6e1",
+        "Average helper empty lists",
+        obid::job::Status::Done,
+        2,
+        None,
+    );
+    done.publish_error = Some("Not published: the secret scan couldn't run.".into());
+    // Its 2 commits went out on its pull request before it failed.
+    let mut pushed = ended(
+        "b0b0f00d",
+        "Notch three screens",
+        obid::job::Status::Failed,
+        2,
+        None,
+    );
+    pushed.published = Some("https://github.com/obi-e2e/fixture-app/pull/7".into());
+    pushed.pushed = Some(2);
+    let obid = started_with(&folder, &[done, pushed]);
+    queue(&obid, &[on_jobs("dismiss_job", &["a7e4a6e1"]), reply("")]);
+    assert_eq!(
+        said(&obid, "ok cancel it")["text"],
+        "Dismissing Average helper empty lists waits for your OK: its 2 commits aren't published. Confirm it in your inbox."
+    );
+    assert!(get_job(&obid, "a7e4a6e1")["dismissed"].is_null());
+    let confirms = items_of(&obid, "confirm");
+    assert_eq!(confirms.len(), 1, "{confirms:?}");
+    assert_eq!(confirms[0]["job"], "a7e4a6e1");
+    assert_eq!(
+        confirms[0]["title"],
+        "Dismiss Average helper empty lists (2 commits kept on its branch)"
+    );
+    let text = confirms[0]["text"].as_str().unwrap();
+    assert!(text.contains("oby/fix-a7e4a6e1"), "{text}");
+    let item = confirms[0]["id"].as_str().unwrap();
+    let confirmed = owner_answers(&obid, item, "Confirm");
+    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    assert!(get_job(&obid, "a7e4a6e1")["dismissed"].is_string());
+
+    // Published work goes at once, and the reply says what stays.
+    queue(&obid, &[on_jobs("dismiss_job", &["b0b0f00d"]), reply("")]);
+    let answer = said(&obid, "dismiss the notch job");
+    assert_eq!(
+        answer["text"], "Dismissed Notch three screens (2 commits kept on its branch).",
+        "{answer}"
+    );
+    assert!(get_job(&obid, "b0b0f00d")["dismissed"].is_string());
+}
+
+/// #631: a request in a fresh conversation offered to try another conversation's failed job
+/// again. The briefing marks the jobs this conversation started, and trying or dismissing another
+/// conversation's job waits for the owner's Confirm.
+#[test]
+fn another_conversations_job_waits_for_the_owners_confirm() {
+    let folder = Folder::new("brain-other-conversation");
+    let theirs = ended(
+        "c0ffee00",
+        "Vault tests",
+        obid::job::Status::Failed,
+        0,
+        Some("another-conversation"),
+    );
+    let obid = started_with(&folder, &[theirs]);
+    queue(&obid, &[reply("Fine.")]);
+    let conversation = said(&obid, "hello")["conversation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let input = read(calls(&obid)[0].join("input"));
+    assert!(
+        input.contains("Vault tests · obi-e2e/fixture-app")
+            && input.contains("· started in another conversation ·"),
+        "{input}"
+    );
+    let plan = |words: &str| {
+        let answer = call(
+            &obid,
+            "POST",
+            "/v1/plans",
+            Some(&json!({"said": words, "conversation": conversation})),
+        );
+        assert_eq!(answer.status, 200, "{}", answer.text);
+        answer.body["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{}", answer.text))
+            .to_owned()
+    };
+    queue(&obid, &[on_jobs("retry_job", &["c0ffee00"]), reply("")]);
+    assert_eq!(
+        plan("fix the vault tests"),
+        "Vault tests was started in another conversation, so trying it again waits for your OK: confirm it in your inbox."
+    );
+    assert_eq!(get_job(&obid, "c0ffee00")["status"], "failed");
+    // The owner's answer to each item: an open one is quoted for the brain, which then runs boxed.
+    let answer = |title: &str, answer: &str| {
+        let confirms = items_of(&obid, "confirm");
+        let item = confirms
+            .iter()
+            .find(|i| i["title"] == title && i["done"].is_null())
+            .unwrap_or_else(|| panic!("{confirms:?}"));
+        assert_eq!(item["job"], "c0ffee00");
+        let answered = owner_answers(&obid, item["id"].as_str().unwrap(), answer);
+        assert_eq!(answered.status, 200, "{}", answered.text);
+    };
+    answer("Try Vault tests again", "Cancel");
+    assert_eq!(get_job(&obid, "c0ffee00")["status"], "failed");
+    queue(&obid, &[on_jobs("dismiss_job", &["c0ffee00"]), reply("")]);
+    assert_eq!(
+        plan("let it go"),
+        "Vault tests was started in another conversation, so dismissing it waits for your OK: confirm it in your inbox."
+    );
+    assert!(get_job(&obid, "c0ffee00")["dismissed"].is_null());
+    answer("Dismiss Vault tests", "Confirm");
+    assert!(get_job(&obid, "c0ffee00")["dismissed"].is_string());
+}
+
+/// The briefing marks a job this conversation started.
+#[test]
+fn the_briefing_marks_this_conversations_jobs() {
+    let folder = Folder::new("brain-own-conversation");
+    let remote = fixture(&folder.0.join("fixture"));
+    let config = config(&folder.0, &remote, &planner());
+    let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
+    queue(&obid, &[reply("Fine.")]);
+    let conversation = said(&obid, "hello")["conversation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(obid);
+    let ours = ended(
+        "deadbeef",
+        "Vault tests",
+        obid::job::Status::Failed,
+        0,
+        Some(&conversation),
+    );
+    keep(&config, &[ours]);
+    let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
+    queue(&obid, &[on_jobs("dismiss_job", &["deadbeef"]), reply("")]);
+    let answer = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "let the vault job go", "conversation": conversation})),
+    );
+    assert_eq!(
+        answer.body["text"], "Dismissed Vault tests.",
+        "{}",
+        answer.text
+    );
+    let input = read(calls(&obid).last().unwrap().join("input"));
+    assert!(
+        input.contains("· started in this conversation ·"),
+        "{input}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // The inbox the brain may and may not answer (the owner's decision of 2026-10-16, review on
 // #552): what persists or widens trust waits for the owner's own Confirm.
@@ -3050,6 +3312,68 @@ fn always_allow_in_the_inbox_waits_for_the_owners_confirm() {
             .len(),
         1
     );
+}
+
+/// A job in Plan mode doesn't approve its own plan (#609): Claude Code's `ExitPlanMode` waits as
+/// a `plan` item holding the plan, which the brain never answers. Keep planning sends the
+/// owner's words back; Approve goes on in Ask mode.
+#[test]
+fn a_plan_waits_for_the_owners_approval() {
+    let folder = Folder::new("brain-plan-approval");
+    let obid = started(&folder);
+    let ask = r#"ASKS: [{"tool": "ExitPlanMode", "input": {"plan": "1. Add src/average.js"}}, {"tool": "ExitPlanMode", "input": {"plan": "1. Add src/average.js\n2. Test an empty list"}}]"#;
+    let id = job_in(&obid, "Average", ask, "plan");
+    let first = within(30, "the plan waits", || {
+        items_of(&obid, "plan")
+            .into_iter()
+            .find(|i| i["job"] == id.as_str())
+    });
+    let first_id = first["id"].as_str().unwrap().to_owned();
+    assert_eq!(first["options"], json!(["Approve", "Keep planning"]));
+    assert_eq!(first["details"], json!(["1. Add src/average.js"]));
+    // The inbox has it a moment before the job shows it (Jobs::show).
+    let job = within(10, "the job shows its plan", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["step"] == "Waiting for your OK on the plan").then_some(job)
+    });
+    assert_eq!(job["status"], "running", "{job}");
+    // The brain answers it neither way.
+    for option in [1, 2] {
+        queue(
+            &obid,
+            &[answer_item(&first_id, Some(option), None), reply("")],
+        );
+        said(&obid, "go ahead with the average plan");
+        assert!(
+            items_of(&obid, "plan")
+                .iter()
+                .any(|i| i["id"] == first_id.as_str()),
+            "the brain answered option {option}"
+        );
+    }
+    // Keep planning, in the owner's words: the agent hears them and plans again.
+    let kept = owner_answers(&obid, &first_id, "Cover an empty list too");
+    assert_eq!(kept.status, 200, "{}", kept.text);
+    let second = within(30, "the new plan waits", || {
+        items_of(&obid, "plan")
+            .into_iter()
+            .find(|i| i["job"] == id.as_str() && i["id"] != first_id.as_str())
+    });
+    assert_eq!(
+        second["details"],
+        json!(["1. Add src/average.js\n2. Test an empty list"])
+    );
+    let approved = owner_answers(&obid, second["id"].as_str().unwrap(), "Approve");
+    assert_eq!(approved.status, 200, "{}", approved.text);
+    let job = within(30, "the job ends", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["status"] == "done").then_some(job)
+    });
+    assert_eq!(
+        job["summary"],
+        "answers: deny: Cover an empty list too, allow"
+    );
+    assert_eq!(job["mode"], "ask");
 }
 
 /// The review's probe: answering another Obi's request with "Accept, and remember for this

@@ -17,6 +17,8 @@ final class RunnerFeed {
         case interrupted
         /// Oby's review requested changes for the last time it may: a person takes it from here.
         case review
+        /// Its agent waits for an OK on a command or a file: Allow and Deny in the alert.
+        case permission
         /// Its agent asked the user something and waits for the answer (the inbox has it).
         case question
         /// Oby's merge stopped: it couldn't merge, or the Mac check failed with no round left.
@@ -145,7 +147,7 @@ final class RunnerFeed {
     @ObservationIgnored private var loop: Task<Void, Never>?
     /// What each job's alert last said, or nil until the first list arrives: what the jobs already
     /// need when Oby starts isn't news.
-    @ObservationIgnored private var notified: [String: Notice]?
+    @ObservationIgnored private var notified: [String: String]?
     /// The runner's jobs whose screen the window shows: new lists keep them even when they're
     /// older than the latest 50, as on the iPhone.
     @ObservationIgnored private var onScreen: Set<String> = []
@@ -448,9 +450,11 @@ final class RunnerFeed {
     }
 
     /// Allow, Always allow or Deny on what a runner job's agent waits for; words go with a deny.
-    func answer(_ id: String, _ decision: RunnerPermission.Decision, message: String? = nil) async throws {
+    /// `ask`: only that ask (an alert's), never a newer one the alert didn't show.
+    func answer(_ id: String, _ decision: RunnerPermission.Decision, message: String? = nil, ask: String? = nil) async throws {
         guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to answer it.") }
         guard let permission = extras[id]?.permission else { return }
+        guard ask == nil || ask == permission.id else { throw RunnerError(message: "It asks something else now.") }
         let job = try await runner.answer(id, permission: permission.id, decision, message: message)
         if let index = permissionHistory.firstIndex(where: { $0.job == id && $0.permission.id == permission.id }) {
             permissionHistory[index].done = .now
@@ -618,6 +622,7 @@ final class RunnerFeed {
 
     /// Nothing for a job the user dismissed: its alert clears.
     static func notice(for job: Job) -> Notice? {
+        if job.waitsForPermission { return .permission }
         if job.waitsForAnswer { return .question }
         guard job.needsYou else { return nil }
         if job.canPublish { return .ready }
@@ -632,13 +637,15 @@ final class RunnerFeed {
 
     /// What each job needs now, against what its alert last said: the jobs whose alert changes
     /// (nil: clear it), and what to remember. Jobs no longer listed are forgotten.
-    static func notices(_ jobs: [Job], after notified: [String: Notice]) -> (changes: [(Job, Notice?)], notified: [String: Notice]) {
+    /// Remembered per job: the notice, and for an OK the ask's own id, so each new ask alerts.
+    static func notices(_ jobs: [Job], after notified: [String: String]) -> (changes: [(Job, Notice?)], notified: [String: String]) {
         var changes: [(Job, Notice?)] = []
-        var now: [String: Notice] = [:]
+        var now: [String: String] = [:]
         for job in jobs {
             let notice = Self.notice(for: job)
-            now[job.id] = notice
-            if notice != notified[job.id] { changes.append((job, notice)) }
+            let said = notice.map { $0 == .permission ? "permission:\(job.permission?.id ?? "")" : $0.rawValue }
+            now[job.id] = said
+            if said != notified[job.id] { changes.append((job, notice)) }
         }
         return (changes, now)
     }
@@ -653,6 +660,7 @@ final class RunnerFeed {
         case .review: "Changes requested: \(job.heading)"
         case .question: "Question: \(job.heading)"
         case .merge: "Not merged: \(job.heading)"
+        case .permission: "Needs your OK: \(job.heading)"
         }
     }
 
@@ -662,6 +670,7 @@ final class RunnerFeed {
         if notice == .ready { return job.publishError ?? line ?? "Done" }
         if notice == .review { return job.review?.stopReason ?? Review.stopLine }
         if notice == .question, let question = job.question { return question.text }
+        if notice == .permission, let permission = job.permission { return permission.title }
         if notice == .merge { return job.mergeError ?? job.macCheck.map { $0.problem ?? $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? "Not merged" }
         return line ?? job.status.rawValue.capitalized
     }
@@ -674,6 +683,10 @@ final class RunnerFeed {
 
     /// The "ready" alert's Publish: the window opens on the job, shows the runner's sentence, and asks for Touch ID.
     static let publishButton = "publish"
+    /// The "permission" alert's answers, and the key holding the ask it answers.
+    static let allowButton = "allow"
+    static let denyButton = "deny"
+    static let permissionKey = "permission"
 
     /// The runner's categories: "ready" for a job waiting for Publish, with Publish and Open, as the
     /// iPhone's; "job" for the rest, which only opens it.
@@ -683,6 +696,11 @@ final class RunnerFeed {
         UNUserNotificationCenter.current().setNotificationCategories([
             UNNotificationCategory(identifier: "ready", actions: [publish, open], intentIdentifiers: []),
             UNNotificationCategory(identifier: "job", actions: [open], intentIdentifiers: []),
+            UNNotificationCategory(identifier: "permission", actions: [
+                UNNotificationAction(identifier: allowButton, title: "Allow", options: []),
+                UNNotificationAction(identifier: denyButton, title: "Deny", options: [.destructive]),
+                open,
+            ], intentIdentifiers: []),
         ])
     }
 
@@ -704,9 +722,10 @@ final class RunnerFeed {
         content.title = title(notice, for: job)
         content.body = body(notice, for: job)
         content.sound = .default
-        content.categoryIdentifier = notice == .ready ? "ready" : "job"
+        content.categoryIdentifier = notice == .ready ? "ready" : notice == .permission ? "permission" : "job"
         content.threadIdentifier = "jobs"
         content.userInfo = [jobKey: job.id]
+        if notice == .permission, let ask = job.permission?.id { content.userInfo[permissionKey] = ask }
         let request = UNNotificationRequest(identifier: job.id, content: content, trigger: nil)
         Task {
             do { try await UNUserNotificationCenter.current().add(request) } catch {

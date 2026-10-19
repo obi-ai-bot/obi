@@ -42,7 +42,7 @@ fn tetrix_manifest() -> Value {
     serde_json::from_str(&text).unwrap()
 }
 
-/// Dispatches an `investigate` job (or `kind`) with `task`, waits for it to end, and gives the
+/// Dispatches a `kind` job with `task`, waits for it to end, and gives the
 /// job and what the fake agent reported (`REPORT`), when it did.
 fn run_job(obid: &Obid, kind: &str, task: &str, mode: Option<&str>) -> (Value, Option<Value>) {
     let mut body = json!({"repo": "obi-e2e/fixture-app", "kind": kind, "task": task});
@@ -412,7 +412,7 @@ fn agents_use_connected_apps_without_ever_seeing_the_login() {
 
     let (job, report) = run_job(
         &obid,
-        "investigate",
+        "research",
         "REPORT MCP_CALL MCP_WRITE MCP_API MCP_PROBE",
         None,
     );
@@ -628,7 +628,7 @@ fn agents_use_connected_apps_without_ever_seeing_the_login() {
         "POST",
         "/v1/jobs",
         Some(
-            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "PAUSE: 60000"}}),
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research", "task": "PAUSE: 60000"}}),
         ),
     );
     assert_eq!(made.status, 201, "{}", made.text);
@@ -644,7 +644,7 @@ fn agents_use_connected_apps_without_ever_seeing_the_login() {
     assert_eq!(waiting["status"], "running", "{waiting}");
     let (second_job, second_report) = run_job(
         &obid,
-        "investigate",
+        "research",
         &format!("REPORT MCP_PROBE OTHER_JOB: {waiting_id}"),
         None,
     );
@@ -736,7 +736,7 @@ fn a_vault_secret_named_like_obids_own_doesnt_unlearn_them() {
     .unwrap();
     let mut obid = start(&folder.0, &config, None);
     vault_add(&obid, "api-token", &secret);
-    let (job, report) = run_job(&obid, "investigate", "REPORT MCP_CALL", None);
+    let (job, report) = run_job(&obid, "research", "REPORT MCP_CALL", None);
     assert_eq!(job["status"], "done", "{job}");
     let report = report.unwrap();
     let said = report["toolCalls"]["oby"]["result"]["content"][0]["text"]
@@ -812,7 +812,7 @@ fn a_job_keeps_its_connections_across_a_restart() {
         "POST",
         "/v1/jobs",
         Some(
-            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "REPORT LINGER"}}),
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research", "task": "REPORT LINGER"}}),
         ),
     );
     assert_eq!(made.status, 201, "{}", made.text);
@@ -839,7 +839,7 @@ fn a_job_keeps_its_connections_across_a_restart() {
     );
 
     // A job that starts now has it: the connection is good, only later.
-    let (fresh, report) = run_job(&obid, "investigate", "REPORT", None);
+    let (fresh, report) = run_job(&obid, "research", "REPORT", None);
     assert_eq!(fresh["status"], "done", "{fresh}");
     let report = report.unwrap();
     assert!(
@@ -943,7 +943,7 @@ fn obid_runs_with_no_plugin_enabled_and_tetrix_listed_disabled() {
         "installing enabled nothing"
     );
 
-    let (job, report) = run_job(&obid, "investigate", "REPORT", None);
+    let (job, report) = run_job(&obid, "research", "REPORT", None);
     assert_eq!(job["status"], "done", "{job}");
     let report = report.expect("the agent reported");
     let argv = report["argv"].as_array().unwrap();
@@ -956,7 +956,7 @@ fn obid_runs_with_no_plugin_enabled_and_tetrix_listed_disabled() {
     // An MCP tool is refused when no plug-in allows it.
     let (job, _) = run_job(
         &obid,
-        "investigate",
+        "research",
         r#"ASKS: [{"tool": "mcp__tetrix__get_entity", "input": {}}]"#,
         None,
     );
@@ -1047,7 +1047,7 @@ fn tetrix_is_enabled_and_disabled_through_put_and_its_tools_are_one_rule_each() 
     assert_eq!(kept["tetrix"]["enabled"], true);
     assert_eq!(kept["tetrix"]["config"]["url"], json!(stub.url));
 
-    let (job, report) = run_job(&obid, "investigate", "REPORT", None);
+    let (job, report) = run_job(&obid, "research", "REPORT", None);
     assert_eq!(job["status"], "done", "{job}");
     let report = report.expect("the agent reported");
     assert_eq!(
@@ -1095,7 +1095,7 @@ fn tetrix_is_enabled_and_disabled_through_put_and_its_tools_are_one_rule_each() 
     // obid's own gate: the allowed tools pass, every other MCP tool is refused.
     let (job, _) = run_job(
         &obid,
-        "investigate",
+        "research",
         r#"ASKS: [{"tool": "mcp__tetrix__get_entity", "input": {}}, {"tool": "mcp__tetrix__resume_session", "input": {}}, {"tool": "mcp__github__create_pr", "input": {}}]"#,
         None,
     );
@@ -1112,7 +1112,7 @@ fn tetrix_is_enabled_and_disabled_through_put_and_its_tools_are_one_rule_each() 
         serde_json::from_slice(&std::fs::read(obid.home.join("plugins.json")).unwrap()).unwrap();
     assert_eq!(kept["tetrix"]["enabled"], false);
     assert_eq!(kept["tetrix"]["config"]["url"], json!(stub.url));
-    let (_, report) = run_job(&obid, "investigate", "REPORT", None);
+    let (_, report) = run_job(&obid, "research", "REPORT", None);
     let report = report.unwrap();
     assert!(
         !report["argv"]
@@ -1325,8 +1325,8 @@ fn a_plugin_process_gives_quoted_context_inbox_events_and_a_redacted_log() {
     // Context, by purpose: dispatch, plan, review. Asked by typed fields only, quoted to the
     // agent as data; the prompt names the file and nothing in it.
     for (kind, mode, purpose) in [
-        ("investigate", None, "dispatch"),
-        ("investigate", Some("plan"), "plan"),
+        ("research", None, "dispatch"),
+        ("research", Some("plan"), "plan"),
         ("review", None, "review"),
     ] {
         let (job, report) = run_job(&obid, kind, "REPORT", mode);
@@ -1553,7 +1553,7 @@ fn a_committed_obi_link_never_lets_context_out_of_the_worktree() {
         None,
     );
     // No plug-in enabled.
-    let (job, _) = run_job(&obid, "investigate", "Look around.", None);
+    let (job, _) = run_job(&obid, "research", "Look around.", None);
     assert_eq!(job["status"], "done", "{job}");
     assert_eq!(tree(&victim), before);
     // A context plug-in that answers.
@@ -1564,7 +1564,7 @@ fn a_committed_obi_link_never_lets_context_out_of_the_worktree() {
         Some(&json!({"enabled": true})),
     );
     assert_eq!(enabled.body["state"], "ready", "{}", enabled.text);
-    let (job, _) = run_job(&obid, "investigate", "Look around.", None);
+    let (job, _) = run_job(&obid, "research", "Look around.", None);
     assert_eq!(job["status"], "done", "{job}");
     let requests =
         std::fs::read_to_string(obid.home.join("plugin-data/notes/requests.log")).unwrap();

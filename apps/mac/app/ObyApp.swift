@@ -109,6 +109,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         island.windowShowsTalk = { [weak self] in self.map { $0.chat.showsTalk || $0.firstLaunch.isOpen } ?? false }
         island.windowShowsConversation = { [weak self] in self?.chat.showsConversation ?? false }
         island.start()
+        // obid as This Mac's engine: the Swift runner an older build registered goes, and the
+        // engine is registered when nothing else serves this Mac (apps/mac/app/LoginItem.swift).
+        RunnerLoginItem().reconcile(onThisMac: UserDefaults.standard.bool(forKey: RunnerFeed.thisMacKey))
         // Scheduled update checks (apps/mac/app/Updater.swift), in the build that ships. A Debug build from
         // Xcode checks only when asked, so a release never replaces it quietly.
         #if !DEBUG
@@ -134,6 +137,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
         if let id = info[RunnerFeed.jobKey] as? String {
+            // Allow or Deny right in the alert, on the very ask it showed; otherwise the job opens.
+            if let ask = info[RunnerFeed.permissionKey] as? String,
+               [RunnerFeed.allowButton, RunnerFeed.denyButton].contains(response.actionIdentifier) {
+                let decision: RunnerPermission.Decision = response.actionIdentifier == RunnerFeed.allowButton ? .allow : .deny
+                if (try? await island.model.feed.answer(id, decision, ask: ask)) != nil { return }
+            }
             island.model.publishing = response.actionIdentifier == RunnerFeed.publishButton ? id : nil
             chat.show(job: (id: id, local: false))
         } else if let id = info[IslandController.localJobKey] as? String {

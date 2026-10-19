@@ -1368,10 +1368,12 @@ impl Jobs {
             .start_from
             .filter(|b| new.follow_up_of.is_some() && git::is_branch_name(b));
         job.follow_up_of = new.follow_up_of;
-        job.mode = Some(
+        job.mode = Some(if job.read_only() {
+            Mode::Plan.as_str().to_owned()
+        } else {
             new.mode
-                .unwrap_or_else(|| self.default_mode().as_str().to_owned()),
-        );
+                .unwrap_or_else(|| self.default_mode().as_str().to_owned())
+        });
         job.base = Some(new.base.unwrap_or_else(|| repo.default_branch.clone()));
         job.branch = match new
             .branch
@@ -1640,8 +1642,15 @@ impl Jobs {
             .lock()
             .asks
             .get(id)
-            .and_then(|asks| asks.front().map(|a| a.permission.id.clone()));
-        if let Some(permission) = waiting {
+            .and_then(|asks| asks.front().map(|a| a.permission.clone()));
+        // A plan goes back only on the owner's own words (#609).
+        if waiting.as_ref().is_some_and(Permission::is_plan) && source != Source::Owner {
+            return Some(Err(Refused(
+                "It waits for the owner to approve its plan or send it back, in their inbox."
+                    .into(),
+            )));
+        }
+        if let Some(Permission { id: permission, .. }) = waiting {
             return Some(
                 self.answer_permission(id, &permission, Decision::Deny, Some(text))
                     .map_err(|e| match e {
@@ -1854,8 +1863,12 @@ impl Jobs {
     }
 
     /// The job's mode, as it names it. A job from before modes is in Bypass; a mode this obid
-    /// can't read (one a newer obid wrote) asks rather than allow.
+    /// can't read (one a newer obid wrote) asks rather than allow. A review or investigate job is
+    /// in Plan, whatever it says.
     fn mode_of(job: &Job) -> Mode {
+        if job.read_only() {
+            return Mode::Plan;
+        }
         match job.mode.as_deref() {
             None => Mode::Bypass,
             Some(mode) => Mode::parse(mode).unwrap_or(Mode::Ask),
@@ -1901,12 +1914,25 @@ impl Jobs {
         };
         let call = Call::new(tool, input);
         let bounds = self.bounds(&job, worktree);
-        match permissions::decide(
-            &call,
-            Self::mode_of(&job),
-            &self.rules_for(&job.repo),
-            &bounds,
-        ) {
+        let mode = Self::mode_of(&job);
+        // A job that only reads (#630) never leaves Plan mode, so its plan is no question for
+        // the owner: it reports what it found instead.
+        if call.tool == "ExitPlanMode" && job.read_only() {
+            let why = "This job only reads: stay in Plan mode and end with your findings as your summary.".to_owned();
+            self.answered(id, &call, worktree, Some(&why));
+            return Ruling::Now(Answer::Deny(why));
+        }
+        // Claude Code's plan in Plan mode waits for the owner's own answer (#609). Codex ends its
+        // turn with its plan, and Cursor's goes on as it did.
+        let plan = call.tool == "ExitPlanMode"
+            && mode == Mode::Plan
+            && Tool::from_id(&job.agent) == Some(Tool::Claude);
+        let verdict = if plan {
+            permissions::Verdict::Ask
+        } else {
+            permissions::decide(&call, mode, &self.rules_for(&job.repo), &bounds)
+        };
+        match verdict {
             permissions::Verdict::Allow => {
                 self.answered(id, &call, worktree, None);
                 Ruling::Now(Answer::Allow)
@@ -1977,7 +2003,9 @@ impl Jobs {
         }
         self.update(id, |job| {
             job.permission = first.clone();
-            if first.is_some() {
+            if first.as_ref().is_some_and(Permission::is_plan) {
+                job.step = "Waiting for your OK on the plan".into();
+            } else if first.is_some() {
                 job.step = "Waiting for your OK".into();
             } else if let Some(step) = step {
                 job.step = step;
@@ -2001,8 +2029,9 @@ impl Jobs {
             };
             let mut kept = VecDeque::new();
             while let Some(ask) = asks.pop_front() {
-                // A secret waits for the owner's own answer: a new mode or rule never settles it.
-                if ask.permission.is_secret() {
+                // A secret or a plan waits for the owner's own answer: a new mode or rule never
+                // settles it.
+                if ask.permission.is_secret() || ask.permission.is_plan() {
                     kept.push_back(ask);
                     continue;
                 }
@@ -2072,15 +2101,25 @@ impl Jobs {
             }
             asks.pop_front().expect("one waits")
         };
+        let plan = ask.permission.is_plan();
         let said = match decision {
+            Decision::Allow if plan => permissions::APPROVE.to_owned(),
             Decision::Allow => permissions::ALLOW.to_owned(),
             Decision::Always => permissions::ALWAYS_ALLOW.to_owned(),
+            Decision::Deny if plan => words.unwrap_or(permissions::KEEP_PLANNING).to_owned(),
             Decision::Deny => words.unwrap_or(permissions::DENY).to_owned(),
         };
         let answer = match decision {
+            Decision::Deny if plan => {
+                Answer::Deny(words.unwrap_or(permissions::PLAN_SENT_BACK).to_owned())
+            }
             Decision::Deny => Answer::Deny(words.unwrap_or(permissions::SAID_NO).to_owned()),
             _ => Answer::Allow,
         };
+        // An approved plan goes on in the default mode, before the agent's next call is judged.
+        if plan && matches!(answer, Answer::Allow) {
+            self.update(id, |job| job.mode = Some(Mode::Ask.as_str().to_owned()));
+        }
         let title = ask.permission.title.clone();
         // Its item settles, and its words are noted, before the agent hears the answer (and asks
         // its next).
@@ -2104,7 +2143,11 @@ impl Jobs {
         }
         self.show(
             id,
-            Some(if decision == Decision::Deny {
+            Some(if plan && decision == Decision::Deny {
+                "Planning again".to_owned()
+            } else if plan {
+                "Plan approved".to_owned()
+            } else if decision == Decision::Deny {
                 format!("You said no: {title}")
             } else {
                 format!("Allowed: {title}")
@@ -2114,9 +2157,14 @@ impl Jobs {
     }
 
     /// Changes how much the job asks, from now on: the prompts waiting now that the new mode
-    /// allows are answered. A finished job keeps the mode for when it runs again.
+    /// allows are answered. A finished job keeps the mode for when it runs again. A review or
+    /// investigate job stays in Plan.
     pub fn set_mode(&self, id: &str, mode: Mode) -> Option<Job> {
-        self.update(id, |job| job.mode = Some(mode.as_str().to_owned()))?;
+        self.update(id, |job| {
+            if !job.read_only() {
+                job.mode = Some(mode.as_str().to_owned());
+            }
+        })?;
         self.reconsider(id);
         self.get(id)
     }
@@ -2288,7 +2336,9 @@ impl Jobs {
         if !git::is_sha(&head) {
             return Err(format!("the worktree's HEAD isn't a commit: {head}"));
         }
-        if !git::has_commit(&clone, &head).await {
+        let pack = if git::has_commit(&clone, &head).await {
+            None
+        } else {
             let sandbox = self.sandbox.as_ref().map_err(String::clone)?;
             let temp = self.temp_path(id);
             prepare_folder(&temp).map_err(|e| e.to_string())?;
@@ -2322,13 +2372,21 @@ impl Jobs {
                 None,
             )
             .await?;
-            let pack = sandboxed_output(
-                &git_args(&["pack-objects", "--stdout", "--quiet"]),
-                &env,
-                &worktree,
-                Some(objects),
+            Some(
+                sandboxed_output(
+                    &git_args(&["pack-objects", "--stdout", "--quiet"]),
+                    &env,
+                    &worktree,
+                    Some(objects),
+                )
+                .await?,
             )
-            .await?;
+        };
+        // Into the clone under the lock a publish fetches the base with (#628): a pack and a
+        // branch landing mid-fetch can fail it.
+        let fetching = self.preparing(&job.repo);
+        let _fetching = fetching.lock().await;
+        if let Some(pack) = pack {
             git::take_pack(&clone, pack)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -2889,7 +2947,7 @@ impl Jobs {
             // A job shows its steps; the words and each call's id are a conversation's.
             AgentEvent::Delta(_) | AgentEvent::Tool { .. } | AgentEvent::ToolDone { .. } => {}
         };
-        let plan = job.mode.as_deref() == Some("plan");
+        let plan = Self::mode_of(&job) == Mode::Plan;
         let ran = match tool {
             Tool::Claude => {
                 agent::run_turn(
@@ -3496,7 +3554,7 @@ impl Jobs {
             let mut message = owner_prompt(&job);
             let purpose = if job.kind == "review" {
                 obi_plugin_api::Purpose::Review
-            } else if job.mode.as_deref() == Some("plan") {
+            } else if Self::mode_of(&job) == Mode::Plan {
                 obi_plugin_api::Purpose::Plan
             } else {
                 obi_plugin_api::Purpose::Dispatch
@@ -3533,7 +3591,7 @@ impl Jobs {
                     "--permission-prompt-tool",
                     "stdio",
                     "--permission-mode",
-                    if job.mode.as_deref() == Some("plan") {
+                    if Self::mode_of(&job) == Mode::Plan {
                         "plan"
                     } else {
                         "default"
@@ -3733,6 +3791,11 @@ impl Jobs {
             // A round the owner asked for may end with nothing committed: their words decide.
             if COMMITTING.contains(&job.kind.as_str()) && commits == 0 && !job.asked {
                 return Err(format!("Nothing committed: {first_line}"));
+            }
+            // A review publishes nothing: one that committed fails, its commits counted.
+            if job.kind == "review" && commits > 0 {
+                self.update(id, |job| job.commits = Some(commits));
+                return Err(crate::publish::REVIEW_COMMITTED.into());
             }
             let pushed = self.still_pushed(&job, &head, commits).await;
             // The job as it would end, which is what gets published.
@@ -4431,27 +4494,62 @@ pub(crate) fn keychain_service(config_dir: Option<&Path>) -> String {
     }
 }
 
-/// Whether obid copies Claude Code's Keychain login (`claudeKeychain` in the configuration, set
-/// when obid starts): off unless the owner turns it on.
+/// Whether obid copies Claude Code's Keychain login (`claudeKeychain` in the configuration, or
+/// obid's own choice when it's left out, set when obid starts).
 static KEYCHAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether obid chose it itself (`claudeKeychain` left out) rather than the owner.
+static KEYCHAIN_AUTO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the Keychain copy is on.
 pub fn keychain_on() -> bool {
     KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Turns the Keychain copy on or off (crate::serve, from the configuration).
-pub fn use_keychain(on: bool) {
+/// Whether obid chose the Keychain copy's setting itself (`GET /v1/status`, `claudeKeychain`).
+pub fn keychain_auto() -> bool {
+    KEYCHAIN_AUTO.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turns the Keychain copy on or off (crate::serve), and says whether obid chose it.
+pub fn use_keychain(on: bool, auto: bool) {
     KEYCHAIN.store(on, std::sync::atomic::Ordering::Relaxed);
+    KEYCHAIN_AUTO.store(auto, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether obid turns the Keychain copy on by itself, with `claudeKeychain` left out: on macOS,
+/// when Claude Code's default login is in the Keychain and no `~/.claude/.credentials.json` is
+/// there (Claude Code writes none when it can use the Keychain), so a fresh Mac's Claude accounts
+/// don't all read as signed out. Only whether the item exists is looked at, never what it holds.
+pub fn keychain_wanted() -> bool {
+    let file = person_homes()
+        .iter()
+        .any(|home| is_regular_file(&home.join(".claude/.credentials.json")));
+    wanted(cfg!(target_os = "macos"), file, || {
+        keychain_item(None, false).is_some()
+    })
+}
+
+/// [`keychain_wanted`]'s rule: on macOS, with no login file, when the Keychain holds the item.
+fn wanted(macos: bool, file: bool, item: impl FnOnce() -> bool) -> bool {
+    macos && !file && item()
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
 }
 
 /// `security`'s answer for Claude Code's Keychain item for `config_dir`, as the person (`-a`):
-/// the item itself with `-w`, else only whether it's there.
-#[cfg(target_os = "macos")]
+/// the item itself with `-w`, else only whether it's there; nothing while the Keychain copy is off.
 fn keychain(config_dir: Option<&Path>, value: bool) -> Option<Vec<u8>> {
-    if !KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed) {
+    if !keychain_on() {
         return None;
     }
+    keychain_item(config_dir, value)
+}
+
+/// [`keychain`], whether or not the copy is on: what [`keychain_wanted`] asks once at start.
+#[cfg(target_os = "macos")]
+fn keychain_item(config_dir: Option<&Path>, value: bool) -> Option<Vec<u8>> {
     let user = nix::unistd::User::from_uid(nix::unistd::getuid())
         .ok()??
         .name;
@@ -4470,7 +4568,7 @@ fn keychain(config_dir: Option<&Path>, value: bool) -> Option<Vec<u8>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn keychain(_config_dir: Option<&Path>, _value: bool) -> Option<Vec<u8>> {
+fn keychain_item(_config_dir: Option<&Path>, _value: bool) -> Option<Vec<u8>> {
     None
 }
 
@@ -5733,6 +5831,7 @@ fn owner_prompt(job: &Job) -> String {
     }
     lines.push("To show the user something to look at (a page, a document, a chart, an image, a PDF), put it in .obi/artifacts/: one file, or one folder with an index.html, per thing. obid shows each one when the job ends; keep secrets out, or it shows none of it.".into());
     lines.push("Run checks in the foreground, and never end a turn waiting on a background command: obid takes the end of your turn as the end of your work.".into());
+    lines.push("Change files with Edit or Write, never a script (sed -i, python -c, a heredoc into a file), and run commands from this worktree's root without cd, naming paths instead (`cargo test --manifest-path core/Cargo.toml`), and keep scratch files in your own $TMPDIR, never /tmp: obid can't see what a script writes or where a cd leads, and /tmp is outside the worktree, so each of these stops the job until the user says yes.".into());
     lines.push(
         "Finish with a short summary. Its first line is one sentence the user will see.".into(),
     );
@@ -6024,6 +6123,19 @@ mod tests {
         assert!(trimmed.get("tipsHistory").is_none());
         assert_eq!(trimmed_claude_json(b"not json"), b"{}");
         assert_eq!(trimmed_claude_json(b"[1,2]"), b"{}");
+    }
+
+    /// claudeKeychain left out: on only on macOS, only with no login file, only when the Keychain
+    /// holds Claude Code's item; the Keychain isn't asked when the file is there (the owner's
+    /// decision of 2026-10-18).
+    #[test]
+    fn the_keychain_turns_on_by_itself_only_for_a_keychain_only_login() {
+        assert!(wanted(true, false, || true));
+        assert!(!wanted(true, false, || false));
+        assert!(!wanted(true, true, || panic!(
+            "the Keychain isn't asked when the file is there"
+        )));
+        assert!(!wanted(false, false, || true));
     }
 
     /// #643's security review: a job that put a link in place of its account folder can't make obid
@@ -6955,6 +7067,41 @@ mod tests {
         assert_eq!(Jobs::mode_of(&job), Mode::Sandbox);
     }
 
+    /// The owner's review and investigate jobs only read: Plan, whatever their mode says (#630).
+    /// A review another Obi asked for runs its own way.
+    #[test]
+    fn review_and_investigate_jobs_are_in_plan() {
+        for kind in ["review", "investigate"] {
+            let mut job = Job::new(
+                "j".into(),
+                "o/r".into(),
+                kind.into(),
+                "Look".into(),
+                "codex".into(),
+                "a".into(),
+            );
+            assert_eq!(Jobs::mode_of(&job), Mode::Plan, "{kind}");
+            job.mode = Some("bypass".into());
+            assert_eq!(Jobs::mode_of(&job), Mode::Plan, "{kind}");
+        }
+        let mut obi = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "review".into(),
+            "Review".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        obi.mode = Some("bypass".into());
+        obi.obi = Some(ObiRef {
+            correlation_id: "c".into(),
+            from: "f".into(),
+            from_owner: "o".into(),
+            request_id: "r".into(),
+        });
+        assert_eq!(Jobs::mode_of(&obi), Mode::Bypass);
+    }
+
     #[test]
     fn paths_inside_the_repository() {
         assert!(inside_repository("src/a.js"));
@@ -6992,6 +7139,14 @@ mod tests {
         // AUTO_MERGE ref with the job's own object folder): agents spent a turn checking a commit
         // that had landed.
         assert!(prompt.contains("packed-refs.lock"), "{prompt}");
+        // Seen live (2026-10-18): python3 -c and sed -i edits, and `cd ../..` before cargo, each
+        // stopped a job for the owner's OK, since obid can't see what they reach.
+        assert!(
+            prompt.contains("with Edit or Write, never a script"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("without cd"), "{prompt}");
+        assert!(prompt.contains("never /tmp"), "{prompt}");
     }
 
     /// A follow-up starts from the first job's unmerged work: on its branch while its pull request
@@ -7083,6 +7238,86 @@ mod tests {
             );
         }
         assert_eq!(jobs.list(10).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #609: Claude Code's plan in Plan mode waits for the owner: a new mode or the brain's words
+    /// don't settle it, Keep planning sends it back and Approve goes on in Ask mode. Cursor's plan
+    /// goes on as before.
+    #[tokio::test]
+    async fn a_plan_in_plan_mode_waits_for_the_owner() {
+        let root = std::env::temp_dir().join(format!("obid-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        for (id, agent, kind) in [
+            ("j", "claude", "fix"),
+            ("c", "cursor", "fix"),
+            ("r", "claude", "review"),
+        ] {
+            let mut job = Job::new(
+                id.into(),
+                "o/r".into(),
+                kind.into(),
+                "Fix it".into(),
+                agent.into(),
+                "a".into(),
+            );
+            job.status = Status::Running;
+            job.mode = Some("plan".into());
+            jobs.lock().jobs.insert(id.into(), job);
+        }
+        let worktree = root.join("worktree");
+        let plan = |id: &str, text: &str| {
+            jobs.rule_on(id, "ExitPlanMode", &json!({"plan": text}), &worktree)
+        };
+        assert!(matches!(plan("c", "1. Fix"), Ruling::Now(Answer::Allow)));
+        // A job that only reads never leaves Plan: its plan is declined, never the owner's card.
+        let Ruling::Now(Answer::Deny(why)) = plan("r", "1. Report") else {
+            panic!("a review's plan wasn't declined");
+        };
+        assert!(why.contains("only reads"), "{why}");
+        assert!(jobs.get("r").unwrap().permission.is_none());
+        let Ruling::Ask(sent_back) = plan("j", "1. Fix") else {
+            panic!("the plan went through by itself");
+        };
+        let job = jobs.get("j").unwrap();
+        let permission = job.permission.clone().unwrap();
+        assert!(permission.is_plan() && permission.rule.is_none());
+        assert_eq!(
+            (permission.title.as_str(), permission.detail.as_str()),
+            ("Approve the plan?", "1. Fix")
+        );
+        assert_eq!(job.step, "Waiting for your OK on the plan");
+        jobs.set_mode("j", Mode::Bypass);
+        let refused = jobs.message("j", "looks good", Source::Untrusted).unwrap();
+        assert!(refused.is_err());
+        assert!(jobs.get("j").unwrap().permission.is_some(), "still waiting");
+        jobs.set_mode("j", Mode::Plan);
+        jobs.answer_permission("j", &permission.id, Decision::Deny, None)
+            .unwrap();
+        assert_eq!(
+            sent_back.await.unwrap(),
+            Answer::Deny(permissions::PLAN_SENT_BACK.into())
+        );
+        let Ruling::Ask(approved) = plan("j", "1. Fix\n2. Test") else {
+            panic!("the plan went through by itself");
+        };
+        let again = jobs.get("j").unwrap().permission.unwrap().id;
+        jobs.answer_permission("j", &again, Decision::Allow, None)
+            .unwrap();
+        assert_eq!(approved.await.unwrap(), Answer::Allow);
+        assert_eq!(jobs.get("j").unwrap().mode.as_deref(), Some("ask"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
