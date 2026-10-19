@@ -223,21 +223,29 @@ impl Transcripts {
     }
 
     /// Keeps `entries` in the file and in memory, unless the file is full; the ones kept.
-    fn write(&self, job: &str, live: &mut Live, mut entries: Vec<Entry>) -> Vec<Entry> {
-        entries.retain(|e| e.n <= MOST_ENTRIES);
+    fn write(&self, job: &str, live: &mut Live, all: Vec<Entry>) -> Vec<Entry> {
         let mut text = String::new();
-        for entry in &entries {
-            text.push_str(&serde_json::to_string(entry).unwrap_or_default());
-            text.push('\n');
+        let mut entries = Vec::new();
+        let mut dropped = false;
+        for entry in all {
+            let line = serde_json::to_string(&entry).unwrap_or_default() + "\n";
+            // A call already written always gets its end, past the caps too: each call ends
+            // once, so a full transcript never leaves one running.
+            let end = live.now.contains_key(&entry.n);
+            let fits = entry.n <= MOST_ENTRIES
+                && live.bytes + (text.len() + line.len()) as u64 <= MOST_BYTES;
+            if end || fits {
+                text.push_str(&line);
+                entries.push(entry);
+            } else {
+                dropped = true;
+            }
         }
-        if live.bytes + text.len() as u64 > MOST_BYTES {
-            entries.clear();
+        if dropped && !live.full {
+            live.full = true;
+            tracing::warn!("job {job}'s transcript is full: obid keeps no more of it");
         }
         if entries.is_empty() {
-            if !live.full && live.last > 0 {
-                live.full = true;
-                tracing::warn!("job {job}'s transcript is full: obid keeps no more of it");
-            }
             return entries;
         }
         let path = self.path(job);
@@ -748,6 +756,37 @@ mod tests {
             .map(|e| e.n)
             .collect();
         assert_eq!(kept, [MOST_ENTRIES]);
+    }
+
+    #[test]
+    fn a_full_transcript_still_ends_its_calls() {
+        let t = transcripts("full-ends");
+        t.record(
+            "j",
+            &tool_event("a", "Bash", json!({"command": "cargo test"})),
+        );
+        t.record("j", &tool_event("b", "Read", json!({"file_path": "x.rs"})));
+        t.live.lock().unwrap().get_mut("j").unwrap().bytes = MOST_BYTES;
+        // A new call isn't kept, and neither is its end; the calls already written end.
+        assert!(
+            t.record("j", &tool_event("c", "Read", json!({"file_path": "y.rs"})))
+                .is_empty()
+        );
+        assert_eq!(
+            t.record("j", &done("a", false))[0].state.as_deref(),
+            Some("done")
+        );
+        assert!(t.record("j", &done("c", false)).is_empty());
+        let ended = t.end_turn("j");
+        assert_eq!(ended.iter().map(|e| e.n).collect::<Vec<_>>(), [2]);
+        t.forget("j");
+        let states: Vec<Option<String>> = t
+            .read("j", 0, PAGE)
+            .0
+            .into_iter()
+            .map(|e| e.state)
+            .collect();
+        assert_eq!(states, [Some("done".into()), Some("failed".into())]);
     }
 
     #[test]
