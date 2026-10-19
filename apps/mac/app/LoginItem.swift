@@ -131,8 +131,16 @@ final class RunnerLoginItem {
             stop.arguments = ["bootout", "gui/\(getuid())/\(Self.scriptLabel)"]
             try stop.run()
             stop.waitUntilExit()
-            // Its agent goes only once it's stopped: else both would want the same ports.
-            guard Self.stopped(bootout: stop.terminationStatus) else {
+            // Its agent goes only once it's stopped: else both would want the same ports. Still
+            // stopping (EINPROGRESS): asked for a few seconds whether launchd still has it.
+            var stopped = Self.bootout(stop.terminationStatus)
+            if stopped == .stopping {
+                for _ in 0..<25 where Self.loaded(Self.scriptLabel) {
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+                stopped = Self.loaded(Self.scriptLabel) ? .failed : .stopped
+            }
+            guard stopped == .stopped else {
                 problem = "install.sh's obid didn't stop (launchctl bootout said \(stop.terminationStatus)), so it keeps running. Try again in a moment."
                 refresh()
                 return
@@ -151,9 +159,30 @@ final class RunnerLoginItem {
         register()
     }
 
-    /// Whether `launchctl bootout` left install.sh's obid stopped: it stopped it (0), or it wasn't
-    /// running (3, no such process; 36, not loaded; 113, could not find the service).
-    static func stopped(bootout status: Int32) -> Bool { [0, 3, 36, 113].contains(status) }
+    /// What `launchctl bootout` left install.sh's obid as.
+    enum Bootout: Equatable { case stopped, stopping, failed }
+
+    /// Stopped: it stopped it (0), or it wasn't loaded (3, ESRCH; 113, could not find the service).
+    /// Stopping: 36, EINPROGRESS, it's still being stopped. Anything else failed.
+    static func bootout(_ status: Int32) -> Bootout {
+        switch status {
+        case 0, 3, 113: .stopped
+        case 36: .stopping
+        default: .failed
+        }
+    }
+
+    /// Whether launchd still has `label` in this user's GUI domain (`launchctl print` finds it).
+    static func loaded(_ label: String) -> Bool {
+        let print = Process()
+        print.executableURL = URL(filePath: "/bin/launchctl")
+        print.arguments = ["print", "gui/\(getuid())/\(label)"]
+        print.standardOutput = FileHandle.nullDevice
+        print.standardError = FileHandle.nullDevice
+        guard (try? print.run()) != nil else { return true }
+        print.waitUntilExit()
+        return print.terminationStatus == 0
+    }
 
     /// The configuration without the keys that point into install.sh's own folder (`prefix`,
     /// where it put obid, its plug-ins and web app), so the app's obid takes its own signed copies
@@ -180,10 +209,27 @@ final class RunnerLoginItem {
               let kept = Self.withoutScriptFolders(config, prefix: prefix) else { return }
         do {
             let text = try JSONSerialization.data(withJSONObject: kept, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-            try text.write(to: file, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            try Self.writePrivately(text, to: file)
         } catch {
             Logger.feed.error("couldn't take install.sh's folders out of obid's configuration: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Writes `data` to `file` as a new file made 0600 from the start (never readable by others
+    /// for a moment), then moved into place.
+    static func writePrivately(_ data: Data, to file: URL) throws {
+        let temporary = file.deletingLastPathComponent().appending(path: ".\(file.lastPathComponent).\(UUID().uuidString)")
+        let fd = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        do {
+            try handle.write(contentsOf: data)
+            try handle.synchronize()
+            try handle.close()
+            guard rename(temporary.path, file.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        } catch {
+            unlink(temporary.path)
+            throw error
         }
     }
 

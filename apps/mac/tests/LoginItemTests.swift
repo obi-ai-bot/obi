@@ -40,8 +40,25 @@ struct LoginItemTests {
 
     /// The move goes on only when install.sh's obid is stopped or wasn't running.
     @Test func theMoveGoesOnOnlyOnceInstallShsObidStopped() {
-        for status: Int32 in [0, 3, 36, 113] { #expect(RunnerLoginItem.stopped(bootout: status)) }
-        for status: Int32 in [1, 5, 37, 125] { #expect(!RunnerLoginItem.stopped(bootout: status)) }
+        for status: Int32 in [0, 3, 113] { #expect(RunnerLoginItem.bootout(status) == .stopped) }
+        // EINPROGRESS: still stopping, so the move waits for launchd to let it go.
+        #expect(RunnerLoginItem.bootout(36) == .stopping)
+        for status: Int32 in [1, 5, 37, 125] { #expect(RunnerLoginItem.bootout(status) == .failed) }
+        #expect(!RunnerLoginItem.loaded("com.deskree.oby.nothing.\(UUID().uuidString)"))
+    }
+
+    /// The configuration is written 0600 from the start and replaces the file whole.
+    @Test func theConfigurationIsWrittenPrivately() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "oby-config-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appending(path: "config.json")
+        try Data("old".utf8).write(to: file)
+        try RunnerLoginItem.writePrivately(Data("{}".utf8), to: file)
+        #expect(try String(contentsOf: file, encoding: .utf8) == "{}")
+        let mode = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int
+        #expect(mode == 0o600)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path) == ["config.json"])
     }
 
     /// After the move, the configuration no longer points at install.sh's own plug-ins and web app,

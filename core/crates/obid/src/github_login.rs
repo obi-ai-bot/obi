@@ -24,6 +24,8 @@ const SIGN_IN_LASTS: Duration = Duration::from_secs(15 * 60);
 const CODE_WITHIN: Duration = Duration::from_secs(30);
 /// How long a status read is kept: `gh auth status` asks GitHub.
 const STATUS_KEPT: Duration = Duration::from_secs(30);
+/// The start of a sign-in's folder's name in `home/tmp`.
+const SCRATCH_PREFIX: &str = "github-sign-in-";
 /// The only page a code is typed on.
 const DEVICE_PAGE: &str = "https://github.com/login/device";
 
@@ -324,10 +326,11 @@ async fn start(shared: &Arc<Shared>, gh: &Path) -> Result<Arc<SignIn>, String> {
             kill();
             let _ = child.wait().await;
         }
-        // Ended as soon as gh is reaped, before anything else: obid's stop (kill) then never
-        // signals the group id, which may be someone else's by now.
-        let _ = ended_tx.send(true);
+        // Its folder goes first, then it's ended at once: obid's stop (kill) never signals the
+        // group id, which may be someone else's by now, and a sign-in started after this one ended
+        // never finds its folder being removed.
         let _ = std::fs::remove_dir_all(&scratch);
+        let _ = ended_tx.send(true);
         shared.github.forget_status();
         {
             let mut slot = shared.github.slot();
@@ -346,6 +349,23 @@ async fn start(shared: &Arc<Shared>, gh: &Path) -> Result<Arc<SignIn>, String> {
         );
     });
     Ok(sign_in)
+}
+
+/// Removes the folders sign-ins left in `home/tmp` when obid stopped before they ended.
+pub fn sweep(home: &Path) {
+    let Ok(entries) = std::fs::read_dir(home.join("tmp")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(SCRATCH_PREFIX)
+            && entry.file_type().is_ok_and(|t| t.is_dir())
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// gh started and its sign-in not yet handed to its own task: dropped armed (the request ended
@@ -371,9 +391,13 @@ impl Drop for Pending {
 /// A folder of obid's own for the sign-in (its `TMPDIR`, working folder, and the git settings gh
 /// may write), removed when it ends.
 fn scratch_folder(home: &Path) -> Result<PathBuf, String> {
+    // One of its own for each sign-in: an ended one's task removing its folder never takes the
+    // next one's.
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let scratch = home
         .join("tmp")
-        .join(format!("github-sign-in-{}", std::process::id()));
+        .join(format!("{SCRATCH_PREFIX}{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     crate::store::make_private_dir(&home.join("tmp"))
         .and_then(|()| crate::store::make_private_dir(&scratch))
