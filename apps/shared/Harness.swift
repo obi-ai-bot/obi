@@ -254,7 +254,7 @@ extension Job {
         case .stopped: return JobOutcome(text: "Stopped", link: nil, failed: false)
         case .failed, .interrupted: return JobOutcome(text: first ?? status.rawValue.capitalized, link: nil, failed: true)
         case .done:
-            if let published, let url = URL(string: published) {
+            if let url = PublishedLink.url(published) {
                 let number = url.lastPathComponent
                 return JobOutcome(text: Int(number) != nil ? "Pull request #\(number)" : "Published", link: url, failed: false)
             }

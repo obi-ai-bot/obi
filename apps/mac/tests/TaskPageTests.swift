@@ -87,17 +87,20 @@ struct TaskPageTests {
         #expect(TaskFacts.facts(running).map(\.name) == ["Repository", "Branch", "Base", "Model", "Done when"])
         #expect(TaskFacts.facts(running).first { $0.name == "Branch" }?.mono == true)
         #expect(TaskFacts.facts(running).first { $0.name == "Model" }?.value == "Account default")
+        // The mode, as the job page's Details says it (Sangam's design).
+        #expect(TaskFacts.facts(running, mode: "acceptEdits").map(\.name) == ["Repository", "Branch", "Base", "Model", "Mode", "Done when"])
+        #expect(TaskFacts.facts(running, mode: "plan").first { $0.name == "Mode" }?.value == "Plan")
     }
 
-    /// The page's box: the agent while it runs, a follow-up once a finished one can pick its
-    /// session up, nothing while it's queued or can't.
+    /// The page's box: Oby about the task while it runs, and once a finished one can pick its
+    /// session up (a follow-up), nothing while it's queued or can't.
     @Test func thePagesBoxTalksToTheAgentWhenItCanListen() {
-        #expect(TaskFacts.box(job(.running)) == "Tell Claude Code…")
+        #expect(TaskFacts.box(job(.running)) == "Tell Oby about this task…")
         #expect(TaskFacts.box(job(.queued)) == nil)
         #expect(TaskFacts.box(job(.done)) == nil)
         var resumable = job(.done)
         resumable.session = "s"
-        #expect(TaskFacts.box(resumable) == "Ask for a follow-up…")
+        #expect(TaskFacts.box(resumable) == "Tell Oby about this task…")
     }
 
     /// A decision shows on the card and the page while the job waits on your OK or your answer.

@@ -337,6 +337,45 @@ impl ToolCall {
     }
 }
 
+impl ToolCall {
+    /// The Claude Code tool call it is, for a job's transcript, by its `kind` only: never by its
+    /// title, which the agent writes. A kind obid doesn't know is `Tool`.
+    fn named(&self) -> (String, Value) {
+        let path = json!({"file_path": self.paths.first()});
+        match self.kind.as_deref() {
+            Some("execute") => ("Bash".into(), json!({"command": self.command})),
+            Some("read") => ("Read".into(), path),
+            Some("search") => ("Grep".into(), json!({"pattern": self.pattern})),
+            Some("edit" | "delete" | "move") => ("Edit".into(), path),
+            Some("fetch") => ("WebFetch".into(), json!({"url": self.url})),
+            _ => ("Tool".into(), json!({})),
+        }
+    }
+}
+
+/// The lines an update's diffs add and remove, when it has any.
+fn diff_lines(content: &Value) -> Option<(u64, u64)> {
+    let count = |v: &Value| v.as_str().map_or(0, |s| s.lines().count() as u64);
+    content
+        .as_array()?
+        .iter()
+        .filter(|b| b["type"] == "diff")
+        .map(|b| (count(&b["newText"]), count(&b["oldText"])))
+        .reduce(|(a, r), (a2, r2)| (a + a2, r + r2))
+}
+
+/// A to-do list as ACP's `plan` entries or Cursor's todos say it.
+fn todos(list: &Value) -> Vec<crate::transcript::Todo> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .map(|t| crate::transcript::Todo {
+            text: t["content"].as_str().unwrap_or("").to_owned(),
+            state: crate::transcript::todo_state(t["status"].as_str().unwrap_or("")).into(),
+        })
+        .collect()
+}
+
 /// `mcp__tetrix__get_entity`, `mcp:tetrix:get_entity` or `mcp.tetrix.get_entity` as the first form.
 pub fn mcp_name(title: &str) -> Option<String> {
     static MCP: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -601,6 +640,7 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                 let said = if self.current.trim().is_empty() {
                     self.before.clone()
                 } else {
+                    (self.on_event)(Event::Said(self.current.clone()));
                     self.current.clone()
                 };
                 let reason = answer["stopReason"]
@@ -646,10 +686,12 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                         // A tool call ends the message before it: that one is what it said last.
                         if kind == "tool_call" && !self.current.is_empty() {
                             self.before = std::mem::take(&mut self.current);
+                            (self.on_event)(Event::Said(self.before.clone()));
                         }
                         let Some(id) = update["toolCallId"].as_str() else {
                             return;
                         };
+                        let new = !self.tools.contains_key(id);
                         let call = self.tools.entry(id.to_owned()).or_default();
                         call.merge(update);
                         let step = call.step();
@@ -657,12 +699,32 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                             call.said = Some(step.clone());
                             (self.on_event)(Event::Step(step));
                         }
+                        let (name, input) = call.named();
+                        if new {
+                            (self.on_event)(Event::Tool {
+                                id: id.to_owned(),
+                                name,
+                                input,
+                            });
+                        }
+                        if let Some(status @ ("completed" | "failed")) = update["status"].as_str() {
+                            (self.on_event)(Event::ToolDone {
+                                id: id.to_owned(),
+                                failed: status == "failed",
+                                exit: update["rawOutput"]["exitCode"].as_i64(),
+                                lines: diff_lines(&update["content"]),
+                            });
+                        }
                     }
-                    Some("plan") => (self.on_event)(Event::Step("Planning the work".into())),
+                    Some("plan") => {
+                        (self.on_event)(Event::Step("Planning the work".into()));
+                        (self.on_event)(Event::Plan(todos(&update["entries"])));
+                    }
                     _ => {}
                 }
             }
             Some("cursor/update_todos") => {
+                (self.on_event)(Event::Plan(todos(&params["todos"])));
                 let doing = params["todos"]
                     .as_array()
                     .into_iter()
@@ -911,6 +973,22 @@ pub mod cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_calls_name_comes_from_its_kind_never_its_title() {
+        let call = |fields: Value| {
+            let mut call = ToolCall::default();
+            call.merge(&fields);
+            call.named().0
+        };
+        assert_eq!(
+            call(json!({"kind": "other", "title": "mcp__tetrix__get_entity"})),
+            "Tool"
+        );
+        assert_eq!(call(json!({"title": "rm -rf / and a secret"})), "Tool");
+        assert_eq!(call(json!({"kind": "execute", "title": "Read"})), "Bash");
+        assert_eq!(call(json!({"kind": "search", "title": "x"})), "Grep");
+    }
 
     #[test]
     fn a_session_names_its_modes_and_options() {
