@@ -136,13 +136,23 @@ final class RunnerFeed {
         #if DEBUG
         if GitHubWork.sample != nil { return }
         #endif
-        gitHubWork = await GitHubWork.read({ try await runner.refreshGitHubWork() }, last: gitHubWork)
+        await readGitHub { try await runner.refreshGitHubWork() }
+    }
+
+    /// Applies obid's answer about GitHub to the feed as it is by then, unless the runner changed meanwhile.
+    private func readGitHub(_ ask: () async throws -> GitHubWork?) async {
+        let asked = runnerChanges
+        let answer = await GitHubWork.ask(ask)
+        guard runnerChanges == asked else { return }
+        gitHubWork = answer.applied(to: gitHubWork)
     }
 
     /// One click on a GitHub item: Oby's job on it, which joins the list as the runner's job.
     func startGitHubWork(_ id: String) async throws {
         guard let runner else { throw RunnerError(message: "Oby isn't following a runner.") }
-        apply(try await runner.startGitHubWork(id))
+        let asked = runnerChanges
+        let job = try await runner.startGitHubWork(id)
+        if runnerChanges == asked { apply(job) }
     }
     /// Merge checks this Mac runs for the runner (Settings › Runner, on by default).
     let checks = MacChecks()
@@ -281,6 +291,8 @@ final class RunnerFeed {
         version = nil
         github = nil
         checkRuns = nil
+        gitHubWork = nil
+        gitHubLater = []
         clearedAt = nil
         notified = nil
         conversation.forget()
@@ -321,7 +333,7 @@ final class RunnerFeed {
                         cleanup = status.cleanup
                         github = status.github
                         checkRuns = status.checks
-                        gitHubWork = await GitHubWork.read({ try await runner.gitHubWork() }, last: gitHubWork)
+                        await readGitHub { try await runner.gitHubWork() }
                         #if DEBUG
                         if let sample = GitHubWork.sample { gitHubWork = sample }
                         #endif

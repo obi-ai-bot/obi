@@ -28,6 +28,7 @@ struct GitHubWorkTests {
     @Test func decodesTheListsAndSkipsWhatItCantRead() throws {
         let work = try Runner.decoder.decode(GitHubWork.self, from: Data(json.utf8))
         #expect(work.signedIn && work.login == "well-prado" && work.error == nil)
+        #expect(work.checkedAt == ISO8601DateFormatter().date(from: "2026-10-18T09:12:00Z"))
         #expect(work.items.map(\.id) == ["a", "b", "c", "d"])
         #expect(work.items.map(\.list) == [.reviews, .assigned, .mine, .mine])
         #expect(work.items[1].known == false && work.items[1].author == nil)
@@ -75,15 +76,34 @@ struct GitHubWorkTests {
         #expect(GitHubWork(signedIn: true).cut(.issues).isEmpty)
     }
 
-    /// A timeout keeps what was there; only a runner without the feed (404) takes it away.
-    @Test func keepsTheLastFeedThroughATimeout() async {
-        let last = GitHubWork(signedIn: true, login: "well-prado")
+    /// A timeout keeps what's there by then; only a runner without the feed (404) takes it away,
+    /// and an answer read before the feed the app has doesn't replace it.
+    @Test func keepsTheFeedThroughATimeout() async {
         let fresh = GitHubWork(signedIn: false)
-        #expect(await GitHubWork.read({ fresh }, last: last) == fresh)
-        #expect(await GitHubWork.read({ nil }, last: last) == nil)
-        #expect(await GitHubWork.read({ throw RunnerError(message: "Not found", status: 404) }, last: last) == nil)
-        #expect(await GitHubWork.read({ throw RunnerError(message: "The runner answered 502.", status: 502) }, last: last) == last)
-        #expect(await GitHubWork.read({ throw URLError(.timedOut) }, last: last) == last)
+        #expect(await GitHubWork.ask { fresh } == .feed(fresh))
+        #expect(await GitHubWork.ask { nil } == .feed(nil))
+        #expect(await GitHubWork.ask { throw RunnerError(message: "Not found", status: 404) } == .feed(nil))
+        #expect(await GitHubWork.ask { throw RunnerError(message: "The runner answered 502.", status: 502) } == .keep)
+        #expect(await GitHubWork.ask { throw URLError(.timedOut) } == .keep)
+
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        let now = GitHubWork(signedIn: true, login: "well-prado", checkedAt: t)
+        let older = GitHubWork(signedIn: true, checkedAt: t - 180), newer = GitHubWork(signedIn: true, checkedAt: t + 180)
+        #expect(GitHubWork.Answer.keep.applied(to: now) == now)
+        #expect(GitHubWork.Answer.keep.applied(to: nil) == nil)
+        #expect(GitHubWork.Answer.feed(nil).applied(to: now) == nil)
+        #expect(GitHubWork.Answer.feed(older).applied(to: now) == now)
+        #expect(GitHubWork.Answer.feed(newer).applied(to: now) == newer)
+        #expect(GitHubWork.Answer.feed(fresh).applied(to: now) == fresh)
+    }
+
+    /// Another runner: the last one's GitHub cards and what was put off go with it.
+    @MainActor @Test func anotherRunnerForgetsTheFeed() {
+        let feed = RunnerFeed()
+        feed.apply(GitHubWork(signedIn: true, items: [.init(id: "a", list: .reviews, repo: "o/r", number: 1, title: "t", url: "")]))
+        feed.gitHubLater.insert("a")
+        feed.forget()
+        #expect(feed.gitHubWork == nil && feed.gitHubLater.isEmpty)
     }
 
     @Test func connectShowsOnlyWhileSignedOut() {

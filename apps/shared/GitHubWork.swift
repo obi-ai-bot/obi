@@ -18,6 +18,8 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
     /// Why the last read of GitHub failed (a rate limit, no network), said under the list; the
     /// lists stay as the last read that worked.
     var error: String?
+    /// The last read of GitHub that worked, as obid says: an answer read earlier never replaces it.
+    var checkedAt: Date?
     /// How many GitHub found in each list: obid lists at most 100, so more than it listed means a cut list.
     var counts: [Item.List: Int] = [:]
 
@@ -80,14 +82,15 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
     }
 
     /// The items obid listed, less any this app can't read (a newer obid's).
-    private enum Keys: String, CodingKey { case signedIn, login, error, counts, reviews, assigned, mine }
+    private enum Keys: String, CodingKey { case signedIn, login, error, checkedAt, counts, reviews, assigned, mine }
     private struct Counts: Decodable { var reviews, assigned, mine: Int? }
     private struct Lossy: Decodable {
         var item: Item?
         init(from decoder: Decoder) throws { item = try? Item(from: decoder) }
     }
 
-    init(signedIn: Bool, login: String? = nil, items: [Item] = [], error: String? = nil, counts: [Item.List: Int] = [:]) {
+    init(signedIn: Bool, login: String? = nil, items: [Item] = [], error: String? = nil, counts: [Item.List: Int] = [:], checkedAt: Date? = nil) {
+        self.checkedAt = checkedAt
         self.signedIn = signedIn
         self.login = login
         self.items = items
@@ -100,6 +103,7 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
         signedIn = try c.decode(Bool.self, forKey: .signedIn)
         login = try c.decodeIfPresent(String.self, forKey: .login)
         error = try c.decodeIfPresent(String.self, forKey: .error)
+        checkedAt = try? c.decodeIfPresent(Date.self, forKey: .checkedAt)
         if let found = try? c.decodeIfPresent(Counts.self, forKey: .counts) {
             counts = [.reviews: found.reviews, .assigned: found.assigned, .mine: found.mine].compactMapValues { $0 }
         }
@@ -191,10 +195,25 @@ extension GitHubWork {
         init(_ work: GitHubWork?) { self = work.map { $0.signedIn ? .signedIn : .signedOut } ?? .unknown }
     }
 
-    /// The feed after asking obid for it (`ask`): what it answered, nil from a runner without it
-    /// (a 404), else the `last` one, so a timeout or a dropped connection hides nothing.
-    static func read(_ ask: () async throws -> GitHubWork?, last: GitHubWork?) async -> GitHubWork? {
-        do { return try await ask() } catch let error as RunnerError where error.status == 404 { return nil } catch { return last }
+    /// What obid's answer (`ask`) does to the feed.
+    enum Answer: Equatable, Sendable {
+        /// Its feed, or nil from a runner without one (a 404).
+        case feed(GitHubWork?)
+        /// No answer (a timeout, a dropped connection, a 5xx): the feed the app has by then stays.
+        case keep
+
+        /// The feed once this answer lands on `current`, the one the app has now (not the one it
+        /// had when it asked): an answer read before it (an older `checkedAt`) doesn't replace it.
+        func applied(to current: GitHubWork?) -> GitHubWork? {
+            guard case .feed(let work) = self else { return current }
+            if let read = work?.checkedAt, let now = current?.checkedAt, read < now { return current }
+            return work
+        }
+    }
+
+    /// Asks obid for the feed; the caller applies the answer only if it still follows the same runner.
+    static func ask(_ ask: () async throws -> GitHubWork?) async -> Answer {
+        do { return .feed(try await ask()) } catch let error as RunnerError where error.status == 404 { return .feed(nil) } catch { return .keep }
     }
 
     /// Under a kind's cards, for each of its lists obid cut at 100: how many it shows of how many

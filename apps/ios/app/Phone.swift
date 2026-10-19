@@ -199,6 +199,7 @@ final class Phone {
             // Another runner: nothing the last one said holds.
             conversation.forget()
             forgetConversations()
+            forgetGitHub()
             echoes = []
             failures = [:]
             requests = [:]
@@ -214,6 +215,7 @@ final class Phone {
             if oldValue?.hostname != link?.hostname {
                 conversation.forget()
                 forgetConversations()
+                forgetGitHub()
                 echoes = []
                 failures = [:]
                 requests = [:]
@@ -265,6 +267,8 @@ final class Phone {
     private(set) var gitHubWork: GitHubWork?
     /// The GitHub items put off with Later, until Oby quits.
     var gitHubLater: Set<String> = []
+    /// Bumped by every change of runner, so an answer from the last one is dropped.
+    @ObservationIgnored private var gitHubChanges = 0
     private(set) var jobs: [Job] = [] {
         didSet {
             // Published, dismissed or running again, here or on the Mac: its alert goes.
@@ -381,6 +385,21 @@ final class Phone {
     func conversation(of job: Job) -> String?? {
         if conversations != nil { return job.conversation.map { .some($0) } }
         return ConversationModel.started(job.id, in: conversation.runnerTurns) ? .some(nil) : nil
+    }
+
+    /// Another runner: its GitHub feed and what was put off go, and answers still on their way from the last one are dropped.
+    private func forgetGitHub() {
+        gitHubChanges += 1
+        gitHubWork = nil
+        gitHubLater = []
+    }
+
+    /// Applies obid's answer about GitHub to the feed as it is by then, unless the runner changed meanwhile.
+    private func readGitHub(_ ask: () async throws -> GitHubWork?) async {
+        let asked = gitHubChanges
+        let answer = await GitHubWork.ask(ask)
+        guard gitHubChanges == asked else { return }
+        gitHubWork = answer.applied(to: gitHubWork)
     }
 
     private func forgetConversations() {
@@ -521,7 +540,7 @@ final class Phone {
         defaultMode = RunnerMode(status.permissions?.mode)
         await take(try await runner.jobs())
         inbox = try await runner.inbox()
-        gitHubWork = await GitHubWork.read({ try await runner.gitHubWork() }, last: gitHubWork)
+        await readGitHub { try await runner.gitHubWork() }
         do { conversations = try await runner.conversations() } catch {
             Logger.phone.error("listing conversations failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -558,7 +577,7 @@ final class Phone {
         do {
             await take(try await runner.jobs())
             inbox = try await runner.inbox()
-            gitHubWork = await GitHubWork.read({ try await runner.gitHubWork() }, last: gitHubWork)
+            await readGitHub { try await runner.gitHubWork() }
             loaded = true
         } catch {
             Logger.phone.error("reloading jobs failed: \(error.localizedDescription, privacy: .public)")
@@ -570,12 +589,14 @@ final class Phone {
         #if DEBUG
         if GitHubWork.sample != nil { return }
         #endif
-        gitHubWork = await GitHubWork.read({ try await runner.refreshGitHubWork() }, last: gitHubWork)
+        await readGitHub { try await runner.refreshGitHubWork() }
     }
 
     /// One tap on a GitHub item: Oby's job on it (a review, or a fix), listed at once.
     func startGitHubWork(_ id: String) async throws {
+        let asked = gitHubChanges
         let job = try await runner.startGitHubWork(id)
+        guard gitHubChanges == asked else { return }
         if let index = jobs.firstIndex(where: { $0.id == job.id }) { jobs[index] = job } else { jobs.insert(job, at: 0) }
     }
 
