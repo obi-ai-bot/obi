@@ -3828,9 +3828,10 @@ impl Jobs {
                 }
                 Err(Failure::Blocked(found)) => {
                     let job = self.get(id).ok_or("the job is gone")?;
-                    // One bounded round to rewrite the commits that hold it, while rounds are left and
-                    // it found something else than last time.
-                    if job.current_round() < job.max_rounds()
+                    // One bounded round to rewrite the commits that hold it: the first block gets it
+                    // even with no rounds left (as Claude Code fixes what a hook refused and commits
+                    // again), later ones while rounds are left and it found something else.
+                    if (blocked_before.is_none() || job.current_round() < job.max_rounds())
                         && blocked_before.as_ref() != Some(&found)
                         && found.iter().all(crate::publish::Found::fixable)
                     {
@@ -3848,7 +3849,7 @@ impl Jobs {
                             job.step = format!(
                                 "Round {} of {}: the secret scan blocked publishing",
                                 job.current_round(),
-                                job.max_rounds()
+                                job.max_rounds().max(job.current_round())
                             );
                         });
                         continue 'rounds;
