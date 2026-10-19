@@ -4097,7 +4097,15 @@ impl Jobs {
         ) else {
             return;
         };
+        // Ended already, and a round came after (a push the secret scan blocked gets one): its
+        // gaps went once, and its summary gets the line again.
         if seen.ended {
+            let line = seen.line();
+            self.update(id, |job| {
+                if job.kind != "review" && !job.summary.contains(&line) {
+                    job.summary = format!("{}\n\n{line}", job.summary.trim_end());
+                }
+            });
             return;
         }
         let (ended, outgoing) = tetrix
