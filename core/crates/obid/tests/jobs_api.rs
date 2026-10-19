@@ -610,7 +610,10 @@ fn uncommitted_work_is_kept_as_a_wip_commit() {
     let job = wait(&obid, &id);
     assert_eq!(job["status"], "done", "{job}");
     assert_eq!(job["summary"], "Nothing to do.");
-    assert_eq!(job["reason"], "Nothing committed, so nothing was published.");
+    assert_eq!(
+        job["reason"],
+        "Nothing committed, so nothing was published."
+    );
     let branch = format!("oby/fix-{id}");
     let start = job["startCommit"].as_str().unwrap();
     assert_eq!(
