@@ -476,14 +476,24 @@ fn retry(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
             false,
         );
     }
-    if theirs {
+    // Past its safety ceiling or budget, only the owner carries it on (docs/runner-api.md, `limit`).
+    let safety = crate::jobs::past_safety(job);
+    if theirs || safety {
+        let why = if safety {
+            format!(
+                "{name} stopped at its safety limit ({}). Oby's brain planned to carry it on, which happens only if you confirm.",
+                job.limit.as_deref().unwrap_or("")
+            )
+        } else {
+            format!(
+                "Oby's brain planned to try {name} again, which another conversation started. It happens only if you confirm."
+            )
+        };
         confirm(
             shared,
             &job.id,
             format!("Try {name} again"),
-            format!(
-                "Oby's brain planned to try {name} again, which another conversation started. It happens only if you confirm."
-            ),
+            why,
             Confirmed {
                 action: action::RETRY_JOB.into(),
                 target: job.id.clone(),
@@ -491,9 +501,15 @@ fn retry(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
             },
         );
         return (
-            format!(
-                "{name} was started in another conversation, so trying it again waits for your OK: confirm it in your inbox."
-            ),
+            if safety {
+                format!(
+                    "{name} stopped at its safety limit, so carrying it on waits for your OK: confirm it in your inbox."
+                )
+            } else {
+                format!(
+                    "{name} was started in another conversation, so trying it again waits for your OK: confirm it in your inbox."
+                )
+            },
             true,
         );
     }
@@ -596,9 +612,13 @@ fn message_job(
         {
             return already_on_it(shared, &job, &next, &words, source);
         }
+        // Past its safety limit, a follow-up would start its counters again: the owner confirms.
+        if source.owners() && crate::jobs::past_safety(&job) {
+            return Outcome::Done(shared.jobs.confirm_past_safety(&job, &words).0);
+        }
         let new = crate::jobs::follow_up(&job, &words);
         return match source {
-            Source::Owner => follow_up(
+            Source::Owner | Source::Confirmed => follow_up(
                 shared,
                 &job,
                 NewJob {

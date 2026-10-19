@@ -43,7 +43,10 @@
 //   CHATTY: <ms>     streams a word every 100 ms for that long, then ends the turn with "Chatted."
 //   LOOP             runs the same failing command 6 times, then waits until it is ended
 //   MAXTURNS         ends the turn as Claude Code's --max-turns does (error_max_turns)
-//   TRANSIENT        ends the turn with an overloaded API's error
+//   TRANSIENT        ends the turn with an overloaded API's error; TRANSIENT ALWAYS every turn after
+//                    too
+//   SPEND: <n>       ends the turn saying it used n input tokens
+//   COMMIT … QUIET   commits, then says nothing until it is ended
 //   a handoff note   asked for one (obid's prompt when a job stalls): ends the turn with the note,
 //                    "Done: … Left: … Failed: …", or says nothing when the task said NO NOTE
 //   ON PURPOSE       in a fix round's quoted task: ends the turn with "FAILS AS ASKED: …"
@@ -129,6 +132,15 @@ rl.on("line", (line) => {
     if (existsSync(".obi/no-note")) return setInterval(() => {}, 1000);
     return result("Done: the parser.\nLeft: the tests.\nFailed: npm test, three times: a missing fixture.");
   }
+  if (prompt.includes("TRANSIENT ALWAYS")) {
+    mkdirSync(".obi", { recursive: true });
+    writeFileSync(".obi/always-transient", "");
+  }
+  if (existsSync(".obi/always-transient")) return result('API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', true);
+  const spend = prompt.match(/SPEND: (\d+)/);
+  if (spend) {
+    return emit({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: "Spent.", session_id: session, total_cost_usd: 0, usage: { input_tokens: Number(spend[1]), output_tokens: 0 } });
+  }
   const commit = prompt.match(/COMMIT: (\S+)/);
   const ask = prompt.match(/ASK: (\{.*\})/);
   const asks = prompt.match(/ASKS: (\[.*\])/);
@@ -141,6 +153,7 @@ rl.on("line", (line) => {
     execFileSync("git", ["add", commit[1]]);
     execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add ${commit[1]}`]);
     emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Write", input: { file_path: commit[1] } }] } });
+    if (prompt.includes("QUIET")) return setInterval(() => {}, 1000);
     result(`Added ${commit[1]}.`);
   } else if (login) {
     const tries = (f) => {

@@ -28,14 +28,24 @@ pub enum Cut {
     Stopped,
 }
 
+/// How many quiet windows in a row a change in the worktree alone stands for progress: a quiet
+/// build is, a loop touching a file isn't.
+pub const FILE_WINDOWS: u32 = 4;
+
+/// Something outside the agent the turn waits on (an Apple check on a Mac): while it says so, the
+/// turn isn't quiet, as while it waits for the owner.
+pub type Waiting = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// How long a turn may take: `most` at all, and, with `quiet`, no longer than that without a line
-/// from the agent or a change in `watch` (a job's worktree): a job runs as long as it makes
-/// progress (docs/runner-api.md, `limit`). A plain `Duration` is a fixed limit.
-#[derive(Debug, Clone)]
+/// from the agent, a wait (`waiting`) or, for [`FILE_WINDOWS`] windows at most, a change in `watch`
+/// (a job's worktree): a job runs as long as it makes progress (docs/runner-api.md, `limit`). A
+/// plain `Duration` is a fixed limit.
+#[derive(Clone)]
 pub struct Limit {
     pub most: Duration,
     pub quiet: Option<Duration>,
     pub watch: Option<PathBuf>,
+    pub waiting: Option<Waiting>,
 }
 
 impl From<Duration> for Limit {
@@ -44,15 +54,18 @@ impl From<Duration> for Limit {
             most,
             quiet: None,
             watch: None,
+            waiting: None,
         }
     }
 }
 
-/// Something in `dir` (files, folders, its git folder too) changed after `since`: progress the agent
-/// made without a word, like a quiet build writing its output. Links aren't followed.
+/// Something in `dir` (files, folders, its git folder too) changed after `since`, and not after
+/// now (a file dated ahead is no progress): what the agent did without a word, like a quiet build
+/// writing its output. Links aren't followed.
 // ponytail: a full walk, once per quiet window and stopping at the first change; a file watcher if
 // worktrees get too big for that.
 pub fn changed_since(dir: &Path, since: SystemTime) -> bool {
+    let now = SystemTime::now();
     let mut folders = vec![dir.to_path_buf()];
     while let Some(folder) = folders.pop() {
         let Ok(entries) = std::fs::read_dir(&folder) else {
@@ -60,7 +73,7 @@ pub fn changed_since(dir: &Path, since: SystemTime) -> bool {
         };
         for entry in entries.flatten() {
             let Ok(meta) = entry.metadata() else { continue };
-            if meta.modified().is_ok_and(|m| m > since) {
+            if meta.modified().is_ok_and(|m| m > since && m <= now) {
                 return true;
             }
             if meta.is_dir() && !meta.file_type().is_symlink() {
@@ -91,8 +104,11 @@ pub struct Conn {
     quiet: Option<Duration>,
     quiet_at: std::pin::Pin<Box<tokio::time::Sleep>>,
     watch: Option<PathBuf>,
-    /// The last sign of progress.
+    waiting: Option<Waiting>,
+    /// The last sign of progress, and the quiet windows since the agent's last line that only a
+    /// change in `watch` filled.
     heard_at: SystemTime,
+    file_windows: u32,
     buffer: Vec<u8>,
     next_id: u64,
     /// Every message obid writes carries `"jsonrpc": "2.0"` (ACP does; Codex's app-server leaves
@@ -161,7 +177,9 @@ impl Conn {
             quiet: limit.quiet,
             quiet_at: Box::pin(tokio::time::sleep(limit.quiet.unwrap_or(limit.most))),
             watch: limit.watch,
+            waiting: limit.waiting,
             heard_at: SystemTime::now(),
+            file_windows: 0,
             buffer: Vec::new(),
             next_id: 0,
             jsonrpc,
@@ -184,6 +202,7 @@ impl Conn {
             .reset(tokio::time::Instant::now() + limit.most);
         self.quiet = limit.quiet;
         self.watch = limit.watch;
+        self.waiting = limit.waiting;
         self.heard();
         self.stopped = *stop.borrow() != process::Signal::Run;
         self.stop = stop;
@@ -191,8 +210,14 @@ impl Conn {
         self.quiet_out = false;
     }
 
-    /// A sign of progress: the quiet window starts again.
+    /// A sign of progress from the agent (or a wait): the quiet window starts again.
     fn heard(&mut self) {
+        self.file_windows = 0;
+        self.rearm();
+    }
+
+    /// The quiet window starts again.
+    fn rearm(&mut self) {
         self.heard_at = SystemTime::now();
         if let Some(quiet) = self.quiet {
             self.quiet_at
@@ -236,8 +261,19 @@ impl Conn {
                 }
                 () = &mut self.quiet_at, if self.quiet.is_some() => {
                     let since = self.heard_at;
-                    if self.watch.as_deref().is_some_and(|dir| changed_since(dir, since)) {
+                    let changed = match self.watch.clone() {
+                        Some(dir) if self.file_windows < FILE_WINDOWS => {
+                            tokio::task::spawn_blocking(move || changed_since(&dir, since))
+                                .await
+                                .unwrap_or(false)
+                        }
+                        _ => false,
+                    };
+                    if self.waiting.as_ref().is_some_and(|waiting| waiting()) {
                         self.heard();
+                    } else if changed {
+                        self.file_windows += 1;
+                        self.rearm();
                     } else {
                         self.timed_out = true;
                         self.quiet_out = true;
@@ -425,6 +461,13 @@ mod tests {
         assert!(!changed_since(&dir, since));
         std::fs::write(dir.join("target/debug/out.o"), "x").unwrap();
         assert!(changed_since(&dir, since));
+        // A file dated ahead (a `touch -d` loop) is no progress.
+        let since = SystemTime::now() + Duration::from_secs(1);
+        let ahead = std::fs::File::create(dir.join("ahead")).unwrap();
+        ahead
+            .set_modified(SystemTime::now() + Duration::from_secs(3600))
+            .unwrap();
+        assert!(!changed_since(&dir, since));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

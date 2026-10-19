@@ -62,34 +62,66 @@ const RETRY_WAITS: [Duration; 3] = [
     Duration::from_secs(5 * 60),
 ];
 
-/// The same tool call failing again and again: a loop (as OpenHands and OpenCode detect one).
+/// How much of a handoff note obid keeps.
+const NOTE_MAX: usize = 4 * 1024;
+/// The tools whose calls change the work: one of them in between makes a failing call new again.
+const EDITS: [&str; 4] = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+
+/// The same call (its tool and input, numbers and spacing aside) failing again and again with no
+/// edit in between: a loop (as OpenHands and OpenCode detect one). That call succeeding, or any
+/// edit (an edit tool, or a command that changed the `worktree`, like `sed -i`), starts it over;
+/// reads and other calls in between don't.
 #[derive(Default)]
 struct Looping {
-    calls: HashMap<String, (String, Value)>,
-    last: Option<(String, Value)>,
-    repeats: u32,
+    worktree: Option<PathBuf>,
+    calls: HashMap<String, (String, std::time::SystemTime)>,
+    failures: HashMap<String, u32>,
 }
 
 impl Looping {
-    fn called(&mut self, id: String, name: String, input: Value) {
-        self.calls.insert(id, (name, input));
+    fn in_worktree(worktree: PathBuf) -> Looping {
+        Looping {
+            worktree: Some(worktree),
+            ..Looping::default()
+        }
     }
 
-    /// The call `id` ended: true once the same call failed [`LOOP_REPEATS`] times in a row.
+    fn called(&mut self, id: String, name: String, input: Value) {
+        if EDITS.contains(&name.as_str()) {
+            self.failures.clear();
+        }
+        let mut key = String::new();
+        for c in format!("{name} {input}").to_lowercase().chars() {
+            let c = if c.is_ascii_digit() { '#' } else { c };
+            if !(c.is_whitespace() && key.ends_with(' ')) {
+                key.push(if c.is_whitespace() { ' ' } else { c });
+            }
+        }
+        self.calls.insert(id, (key, std::time::SystemTime::now()));
+    }
+
+    /// The call `id` ended: true once the same call failed [`LOOP_REPEATS`] times.
     fn done(&mut self, id: &str, failed: bool) -> bool {
-        let call = self.calls.remove(id);
+        let Some((key, began)) = self.calls.remove(id) else {
+            return false;
+        };
         if !failed {
-            self.last = None;
-            self.repeats = 0;
+            self.failures.remove(&key);
+            // ponytail: a walk of the worktree after a passing call, only while a failure is
+            // counted; keep it off the worker thread if worktrees grow too big for that.
+            if !self.failures.is_empty()
+                && self
+                    .worktree
+                    .as_deref()
+                    .is_some_and(|dir| crate::conn::changed_since(dir, began))
+            {
+                self.failures.clear();
+            }
             return false;
         }
-        if call.is_some() && call == self.last {
-            self.repeats += 1;
-        } else {
-            self.last = call;
-            self.repeats = 1;
-        }
-        self.repeats >= LOOP_REPEATS
+        let failures = self.failures.entry(key).or_default();
+        *failures += 1;
+        *failures >= LOOP_REPEATS
     }
 }
 
@@ -98,12 +130,14 @@ impl Looping {
 enum Stall {
     /// No progress for `stallAfter`.
     Quiet,
-    /// The same failing call [`LOOP_REPEATS`] times in a row.
+    /// The same failing call [`LOOP_REPEATS`] times.
     Loop,
     /// Claude Code's `--max-turns` ended the round.
     Turns,
-    /// The run reached `jobCeilingHours`.
+    /// The job ran `jobCeilingHours`.
     Ceiling,
+    /// The job used `jobTokenBudget` tokens.
+    Budget,
 }
 
 impl Stall {
@@ -113,17 +147,36 @@ impl Stall {
             Stall::Loop => "loop",
             Stall::Turns => "turns",
             Stall::Ceiling => "ceiling",
+            Stall::Budget => "budget",
         }
     }
 
     fn text(self, config: &Config) -> String {
         match self {
             Stall::Quiet => format!("no progress for {}", spell(config.stall_after)),
-            Stall::Loop => format!("the same failing call {LOOP_REPEATS} times in a row"),
+            Stall::Loop => format!("the same failing call {LOOP_REPEATS} times"),
             Stall::Turns => format!("{MAX_TURNS} turns in one round"),
             Stall::Ceiling => format!("the job ran {}", spell(config.job_ceiling)),
+            Stall::Budget => format!("the job used {} tokens", config.job_token_budget),
         }
     }
+}
+
+/// A safety stall (the ceiling or the budget): only the owner carries the job on past it.
+pub fn past_safety(job: &Job) -> bool {
+    job.stalled
+        .as_ref()
+        .is_some_and(|s| s.why == "ceiling" || s.why == "budget")
+}
+
+/// What a job spent against its budget: every token its tool counted but cache reads.
+fn spent(job: &Job) -> u64 {
+    job.usage.as_ref().map_or(0, |t| {
+        [t.input, t.output, t.cache_write]
+            .into_iter()
+            .flatten()
+            .sum()
+    })
 }
 
 /// "15 minutes", "12 hours", "1 minute", "90 seconds".
@@ -139,60 +192,61 @@ fn spell(time: Duration) -> String {
     format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
-/// An error a turn ended on that trying again mends: an overloaded or failing API, a dropped
-/// connection, a rate limit that isn't the account's usage limit (docs/runner-api.md, `limit`).
-fn transient(error: &str) -> bool {
+/// An error a turn ended on that trying again mends (docs/runner-api.md, `limit`): Claude Code's
+/// `API Error: <5xx or 429>`, an overloaded API, a dropped connection or stream. Never an account's
+/// usage limit (its words, or `full`: its usage says so).
+fn transient(error: &str, full: bool) -> bool {
     let error = error.to_lowercase();
     if [
         "usage limit",
         "hit your limit",
         "limit reached",
         "out of credits",
+        "quota",
     ]
     .iter()
     .any(|w| error.contains(w))
     {
         return false;
     }
+    let status = error
+        .split("api error: ")
+        .nth(1)
+        .and_then(|rest| rest.get(..3))
+        .and_then(|code| code.parse::<u16>().ok());
+    match status {
+        Some(429) => return !full,
+        Some(500..=599) => return true,
+        Some(_) => return false,
+        None => {}
+    }
+    if full && error.contains("429") {
+        return false;
+    }
     [
         "overloaded",
-        "529",
-        "500",
-        "502",
-        "503",
-        "504",
-        "internal server error",
-        "bad gateway",
-        "service unavailable",
         "connection error",
         "connection reset",
         "econnreset",
         "socket hang up",
         "stream disconnected",
-        "stream error",
-        "timed out",
-        "429",
-        "rate limit",
+        "request timed out",
+        "exceeded retry limit",
     ]
     .iter()
     .any(|w| error.contains(w))
 }
 
-/// The agent's handoff note as obid keeps it: quoted data, without vault secrets or a line the
-/// secret scan flags.
-fn clean_note(text: &str) -> String {
-    crate::secrets::known()
-        .redact(text.trim())
-        .lines()
-        .map(|line| {
-            if crate::scan::matches(line).is_empty() {
-                line
-            } else {
-                "[obid took out a line that looked like a secret]"
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+/// The agent's handoff note as obid keeps it: quoted data, without vault secrets, at most
+/// [`NOTE_MAX`]. A note the secret scan flags anywhere (a key's body spans lines) isn't kept at
+/// all: obid writes its own.
+fn clean_note(text: &str) -> Option<String> {
+    let text = crate::secrets::known().redact(text.trim());
+    let flagged = !crate::scan::matches(&text).is_empty()
+        || text
+            .lines()
+            .any(|line| !crate::scan::matches(line).is_empty());
+    (!flagged).then(|| crate::brain::read::clamp(&text, NOTE_MAX))
 }
 
 /// Which of obid's rules a turn's permission prompts meet.
@@ -276,7 +330,20 @@ pub enum Source {
     Owner,
     Untrusted,
     Event,
+    /// The owner's Confirm of an inbox item (crate::sphere::link): their words as surely as
+    /// [`Source::Owner`], and the only ones that carry a job on past its safety limit.
+    Confirmed,
 }
+
+impl Source {
+    /// The owner's own words.
+    pub fn owners(self) -> bool {
+        matches!(self, Source::Owner | Source::Confirmed)
+    }
+}
+
+/// Who adds the inbox's Confirm items (crate::sphere::link).
+pub type ConfirmHook = Arc<dyn Fn(crate::sphere::inbox::Item) + Send + Sync>;
 
 /// A review another Obi asked for, once the owner or a remembered decision accepted it.
 #[derive(Debug, Clone)]
@@ -397,6 +464,7 @@ pub struct Jobs {
     review_hook: std::sync::OnceLock<ReviewHook>,
     /// Told when a permission waits for the owner, and when it stops waiting.
     permission_hook: std::sync::OnceLock<PermissionHook>,
+    confirm_hook: std::sync::OnceLock<ConfirmHook>,
     /// Settings › Permissions' default mode and the saved rules (`home/permissions.json`).
     permissions: Mutex<permissions::Kept>,
     /// The plug-in host: context for the agent, and `agent-mcp` plug-ins' servers.
@@ -468,6 +536,7 @@ impl Jobs {
             preparing: Mutex::new(HashMap::new()),
             review_hook: std::sync::OnceLock::new(),
             permission_hook: std::sync::OnceLock::new(),
+            confirm_hook: std::sync::OnceLock::new(),
             permissions: Mutex::new(kept),
             plugins: std::sync::OnceLock::new(),
             connections: std::sync::OnceLock::new(),
@@ -1973,7 +2042,9 @@ impl Jobs {
                 }));
             }
             return Some(match source {
-                Source::Owner => self.create(follow_up(&job, text)),
+                // Past its safety limit, a follow-up would start its counters again.
+                Source::Owner if past_safety(&job) => Err(self.confirm_past_safety(&job, text)),
+                Source::Owner | Source::Confirmed => self.create(follow_up(&job, text)),
                 Source::Untrusted | Source::Event => Err(Refused(
                     "It ended, so these words would start a follow-up: only the owner's own words start one, where Oby read nothing untrusted.".into(),
                 )),
@@ -1995,7 +2066,7 @@ impl Jobs {
             .get(id)
             .and_then(|asks| asks.front().map(|a| a.permission.clone()));
         // A plan goes back only on the owner's own words (#609).
-        if waiting.as_ref().is_some_and(Permission::is_plan) && source != Source::Owner {
+        if waiting.as_ref().is_some_and(Permission::is_plan) && !source.owners() {
             return Some(Err(Refused(
                 "It waits for the owner to approve its plan or send it back, in their inbox."
                     .into(),
@@ -2058,6 +2129,18 @@ impl Jobs {
                 "This job never started, so there's no session to pick up.".into(),
             )));
         }
+        // Past its safety ceiling or budget, only the owner's Confirm carries it on, and gives it
+        // a new one: the owner's words anywhere else ask for that Confirm.
+        if past_safety(&job) && source != Source::Confirmed {
+            return Some(Err(if source == Source::Owner {
+                self.confirm_past_safety(&job, text)
+            } else {
+                Refused(format!(
+                    "It stopped at its safety limit ({}): only the owner carries it on past that.",
+                    job.limit.as_deref().unwrap_or("")
+                ))
+            }));
+        }
         let moved = match job.moves.last() {
             Some(last) if job.session.is_none() => format!(
                 "{text}\n\nThe owner moved this job to you from {}: what was done so far is on this branch.",
@@ -2086,6 +2169,10 @@ impl Jobs {
             job.finished = None;
             job.dismissed = None;
             job.archived = None;
+            if past_safety(job) {
+                job.ran_secs = None;
+                job.budget_from = Some(spent(job));
+            }
             job.limit = None;
             job.stalled = None;
             job.waiting = None;
@@ -2132,6 +2219,52 @@ impl Jobs {
     /// Who is told about permissions (once; a second call changes nothing).
     pub fn on_permission(&self, hook: PermissionHook) {
         let _ = self.permission_hook.set(hook);
+    }
+
+    /// Who adds Confirm items to the inbox (once; a second call changes nothing).
+    pub fn on_confirm(&self, hook: ConfirmHook) {
+        let _ = self.confirm_hook.set(hook);
+    }
+
+    /// Words for a job stopped at its safety limit (its ceiling or budget) carry it on only once
+    /// the owner confirms them in the inbox (docs/runner-api.md, `limit`), wherever they came
+    /// from: the API, oby-mcp, a conversation. Its Confirm item, and why nothing happened yet.
+    pub fn confirm_past_safety(&self, job: &Job, words: &str) -> Refused {
+        use crate::sphere::inbox::{Confirmed, action};
+        let limit = job.limit.as_deref().unwrap_or("");
+        let name = job.short_title();
+        let again = words == crate::brain::actions::TRY_AGAIN;
+        let confirmed = if again {
+            Confirmed {
+                action: action::RETRY_JOB.into(),
+                target: job.id.clone(),
+                payload: Value::Null,
+            }
+        } else {
+            Confirmed {
+                action: action::MESSAGE_JOB.into(),
+                target: job.id.clone(),
+                payload: json!({"words": words}),
+            }
+        };
+        if let Some(hook) = self.confirm_hook.get() {
+            hook(crate::sphere::inbox::confirm_item(
+                &job.id,
+                if again {
+                    format!("Try {name} again")
+                } else {
+                    format!("Start a follow-up of {name}")
+                },
+                format!(
+                    "{name} stopped at its safety limit ({limit}). Carrying it on past that waits for your OK."
+                ),
+                confirmed,
+                obi_protocol::time::now(),
+            ));
+        }
+        Refused(format!(
+            "It stopped at its safety limit ({limit}): carrying it on waits for your Confirm in the inbox."
+        ))
     }
 
     fn note(&self, note: PermissionNote) {
@@ -3614,6 +3747,7 @@ impl Jobs {
         signal: &watch::Receiver<Signal>,
         gate: Gate<'_>,
         limit: crate::conn::Limit,
+        ran: Option<&(dyn Fn() -> u64 + Sync)>,
     ) -> Result<agent::Turn, String> {
         let prompt = &crate::vault::for_agent(prompt)?;
         let (obi_review, mcp_rules) = match gate {
@@ -3654,8 +3788,13 @@ impl Jobs {
             }
         });
         let signal = &signal;
-        let mut looping = Looping::default();
+        let mut looping = Looping::in_worktree(worktree.clone());
         let mut looped = false;
+        // An owner's job's token budget (`jobTokenBudget`), counted from where the owner last let
+        // it past: a turn that reaches it is ended, and comes back `over_budget`.
+        let budget =
+            (!obi_review).then(|| job.budget_from.unwrap_or(0) + self.config.job_token_budget);
+        let mut over_budget = false;
         // What the job used before this turn: each report of the turn's own counts goes on top.
         let before = job.usage.clone().unwrap_or_default();
         let on_event = |event| match event {
@@ -3675,6 +3814,13 @@ impl Jobs {
                         tokens
                     };
                     job.usage = Some(before.plus(&own));
+                    if let Some(ran) = ran {
+                        job.ran_secs = Some(ran());
+                    }
+                    if budget.is_some_and(|budget| spent(job) >= budget) && !over_budget {
+                        over_budget = true;
+                        let _ = cut.send(Signal::Stop);
+                    }
                 });
             }
             AgentEvent::Usage(usage) => {
@@ -3686,7 +3832,13 @@ impl Jobs {
                 jobs.update(id, |job| job.session = Some(session));
             }
             AgentEvent::Step(step) | AgentEvent::Denied(step) => {
-                jobs.update(id, |job| job.step = step);
+                jobs.update(id, |job| {
+                    job.step = step;
+                    // The run's time so far, kept as it goes: a crash loses little of it.
+                    if let Some(ran) = ran {
+                        job.ran_secs = Some(ran());
+                    }
+                });
             }
             AgentEvent::Tool {
                 id: call,
@@ -3771,6 +3923,7 @@ impl Jobs {
         forward.abort();
         let mut turn = ran.map_err(|e| format!("obid couldn't start {}: {e}", tool.name()))?;
         turn.looped = looped;
+        turn.over_budget = over_budget;
         Ok(turn)
     }
 
@@ -3820,13 +3973,15 @@ impl Jobs {
                             most: HANDOFF_LIMIT,
                             quiet: Some(self.config.stall_after),
                             watch: None,
+                            waiting: None,
                         },
+                        None,
                     )
                     .await
                 && turn.succeeded()
                 && !turn.text().trim().is_empty()
             {
-                note = Some(clean_note(&turn.text()));
+                note = clean_note(&turn.text());
             }
         }
         let Some(job) = self.get(id).or(before) else {
@@ -3835,18 +3990,22 @@ impl Jobs {
         let (note, by) = match note {
             Some(note) => (note, "agent"),
             None => {
+                let note = |report: &str| {
+                    format!(
+                        "The agent couldn't write a note, so obid did.\nWhere it was: round {}, {}.\nIts last report: {report}\nWhat stopped it: {text}.",
+                        job.current_round(),
+                        if step.is_empty() {
+                            "no step yet"
+                        } else {
+                            &step
+                        },
+                    )
+                };
                 let report = job.summaries.as_deref().and_then(<[String]>::last);
-                let note = format!(
-                    "The agent couldn't write a note, so obid did.\nWhere it was: round {}, {}.\nIts last report: {}\nWhat stopped it: {text}.",
-                    job.current_round(),
-                    if step.is_empty() {
-                        "no step yet"
-                    } else {
-                        &step
-                    },
-                    report.map_or("none".into(), |r| one_line(r, 600)),
-                );
-                (clean_note(&note), "obid")
+                let report = report.map_or("none".into(), |r| one_line(r, 600));
+                // Its last report is the agent's words: left out when the scan flags them.
+                let note = clean_note(&note(&report)).unwrap_or_else(|| note("left out"));
+                (note, "obid")
             }
         };
         let stalled = crate::job::Stalled {
@@ -4136,6 +4295,7 @@ impl Jobs {
                 signal,
                 Gate::ObiReview,
                 ROUND_LIMIT.into(),
+                None,
             )
             .await?;
         if *signal.borrow() != Signal::Run {
@@ -4466,7 +4626,23 @@ impl Jobs {
         // summary to the work (#699).
         let mut noted = false;
         // No clock ends a job that makes progress: only the run's safety ceiling (`jobCeilingHours`).
+        // It counts every run's time, restarts and tries again included (`Job::ran_secs`), kept as
+        // each turn starts and ends.
+        // ponytail: a turn obid's own crash cuts off isn't counted; keep it every few minutes if
+        // crash loops show up.
+        let ran_before = Duration::from_secs(self.get(id).and_then(|j| j.ran_secs).unwrap_or(0));
         let began = std::time::Instant::now();
+        let ran = || (ran_before + began.elapsed()).as_secs();
+        // Its Apple check, queued or running on a Mac, is a wait, as the owner's answers are.
+        let waiting: crate::conn::Waiting = {
+            let jobs = self.clone();
+            let id = id.to_owned();
+            Arc::new(move || {
+                jobs.get(&id)
+                    .and_then(|j| j.apple_check)
+                    .is_some_and(|c| c["state"] == "queued" || c["state"] == "running")
+            })
+        };
         let mut retries = 0;
         'rounds: loop {
             loop {
@@ -4554,7 +4730,10 @@ impl Jobs {
                 if tool == Tool::Claude {
                     self.claude_login_ready(Some(&account)).await?;
                 }
-                let left = self.config.job_ceiling.saturating_sub(began.elapsed());
+                let left = self
+                    .config
+                    .job_ceiling
+                    .saturating_sub(Duration::from_secs(ran()));
                 let stall = |why| {
                     self.stall(
                         id,
@@ -4571,6 +4750,9 @@ impl Jobs {
                 if left.is_zero() {
                     return Err(stall(Stall::Ceiling).await);
                 }
+                if spent(&job) >= job.budget_from.unwrap_or(0) + self.config.job_token_budget {
+                    return Err(stall(Stall::Budget).await);
+                }
                 let launch =
                     self.launch(&job, &spec, tool, flags.clone(), &account, broker.as_ref())?;
                 if *signal.borrow() != Signal::Run {
@@ -4578,6 +4760,7 @@ impl Jobs {
                 }
                 self.update(id, |job| {
                     job.stalled = None;
+                    job.ran_secs = Some(ran());
                     if job.status == Status::Queued {
                         job.status = Status::Running;
                     }
@@ -4600,11 +4783,17 @@ impl Jobs {
                             most: left,
                             quiet: Some(self.config.stall_after),
                             watch: Some(worktree.clone()),
+                            waiting: Some(waiting.clone()),
                         },
+                        Some(&ran),
                     )
                     .await?;
+                self.update(id, |job| job.ran_secs = Some(ran()));
                 if *signal.borrow() != Signal::Run {
                     return Ok(());
+                }
+                if turn.over_budget {
+                    return Err(stall(Stall::Budget).await);
                 }
                 if turn.looped {
                     return Err(stall(Stall::Loop).await);
@@ -4626,7 +4815,15 @@ impl Jobs {
                     let first = said.lines().next().unwrap_or("").trim().to_owned();
                     // Claude Code and Codex retry these themselves first; one that still ends the
                     // turn gets the round again in its session, after a wait.
-                    if transient(&said) && retries < RETRY_WAITS.len() {
+                    let usage = self.usage.get(&job.account);
+                    let full = usage
+                        .full_until
+                        .is_some_and(|t| t > obi_protocol::time::now())
+                        || [usage.five_hour, usage.seven_day]
+                            .into_iter()
+                            .flatten()
+                            .any(|share| share >= 1.0);
+                    if transient(&said, full) && retries < RETRY_WAITS.len() {
                         let wait = RETRY_WAITS[retries].min(self.config.stall_after);
                         retries += 1;
                         let step = format!(
@@ -7204,53 +7401,117 @@ fn tail_chars(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
 
-    /// The same failing call 5 times in a row is a loop; a success, or another call, starts over.
+    /// The same failing call 5 times is a loop, whatever is read in between or however its
+    /// numbers change; that call succeeding, or an edit, starts it over.
     #[test]
     fn the_same_failing_call_again_and_again_is_a_loop() {
         use super::Looping;
         let mut looping = Looping::default();
-        let call = |l: &mut Looping, id: &str, command: &str, failed: bool| {
+        let mut n = 0;
+        let mut call = |l: &mut Looping, name: &str, command: &str, failed: bool| {
+            n += 1;
+            let id = format!("c{n}");
             l.called(
-                id.into(),
+                id.clone(),
+                name.into(),
+                serde_json::json!({"command": command}),
+            );
+            l.done(&id, failed)
+        };
+        for i in 0..4 {
+            assert!(!call(
+                &mut looping,
+                "Bash",
+                &format!("npm test  --seed {i}"),
+                true
+            ));
+            assert!(!call(&mut looping, "Read", "package.json", false));
+            assert!(!call(&mut looping, "Bash", "npm install", true));
+        }
+        assert!(call(&mut looping, "Bash", "npm test --seed 9", true));
+
+        // An edit between failures is work, not a loop.
+        let mut looping = Looping::default();
+        for _ in 0..6 {
+            assert!(!call(&mut looping, "Bash", "npm test", true));
+            assert!(!call(&mut looping, "Edit", "src/a.js", false));
+        }
+        // The same call passing starts its count over.
+        for _ in 0..4 {
+            assert!(!call(&mut looping, "Bash", "npm test", true));
+        }
+        assert!(!call(&mut looping, "Bash", "npm test", false));
+        for _ in 0..4 {
+            assert!(!call(&mut looping, "Bash", "npm test", true));
+        }
+        assert!(call(&mut looping, "Bash", "npm test", true));
+    }
+
+    /// A command that changed the worktree (`sed -i`) is an edit too: the failures start over.
+    #[test]
+    fn a_command_that_edits_starts_the_loop_count_over() {
+        use super::Looping;
+        let dir = std::env::temp_dir().join(format!("obid-loop-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut looping = Looping::in_worktree(dir.clone());
+        let mut n = 0;
+        let mut call = |l: &mut Looping, command: &str, failed: bool, edit: bool| {
+            n += 1;
+            let id = format!("c{n}");
+            l.called(
+                id.clone(),
                 "Bash".into(),
                 serde_json::json!({"command": command}),
             );
-            l.done(id, failed)
+            if edit {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                std::fs::write(dir.join("a.js"), format!("{n}")).unwrap();
+            }
+            l.done(&id, failed)
         };
-        for i in 0..4 {
-            assert!(!call(&mut looping, &format!("a{i}"), "npm test", true));
+        for _ in 0..4 {
+            assert!(!call(&mut looping, "npm test", true, false));
         }
-        assert!(!call(&mut looping, "b", "npm install", true));
-        for i in 0..4 {
-            assert!(!call(&mut looping, &format!("c{i}"), "npm test", true));
+        // A passing command that changes nothing isn't an edit.
+        assert!(!call(&mut looping, "ls", false, false));
+        assert!(!call(&mut looping, "sed -i s/a/b/ a.js", false, true));
+        for _ in 0..4 {
+            assert!(!call(&mut looping, "npm test", true, false));
         }
-        assert!(!call(&mut looping, "ok", "npm test", false));
-        for i in 0..4 {
-            assert!(!call(&mut looping, &format!("d{i}"), "npm test", true));
-        }
-        assert!(call(&mut looping, "d4", "npm test", true));
+        assert!(call(&mut looping, "npm test", true, false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Overloaded, failing or dropped APIs are retried; an account's usage limit isn't.
+    /// Overloaded, failing or dropped APIs are retried; an account's usage limit, an auth error,
+    /// and a number that only looks like a status aren't.
     #[test]
     fn transient_errors_are_the_ones_trying_again_mends() {
         use super::transient;
         for error in [
             r#"API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}"#,
             "API Error: 500 Internal server error",
+            "API Error: 503 upstream connect error",
             "API Error: Connection error.",
+            "API Error: Request timed out.",
             "Codex hit an error: stream disconnected before completion",
             "API Error: 429 rate limit exceeded",
         ] {
-            assert!(transient(error), "{error}");
+            assert!(transient(error, false), "{error}");
         }
         for error in [
             "Claude AI usage limit reached|1791582173",
             "Codex hit an error: You've hit your usage limit.",
             "it broke",
+            r#"API Error: 401 {"error":{"message":"invalid x-api-key","request_id":"req_500429"}}"#,
+            "Invalid API key · Please run /login (request 5004)",
+            "the tests timed out after 500 ms",
         ] {
-            assert!(!transient(error), "{error}");
+            assert!(!transient(error, false), "{error}");
         }
+        // A 429 while the account's usage says it is full is its limit, not a blip.
+        assert!(!transient("API Error: 429 rate limit exceeded", true));
+        assert!(transient("API Error: 529 overloaded", true));
     }
 
     #[test]
@@ -7263,13 +7524,24 @@ mod tests {
         assert_eq!(spell(Duration::from_secs(90)), "90 seconds");
     }
 
-    /// A handoff note keeps no line the secret scan flags.
+    /// A handoff note the secret scan flags anywhere isn't kept (a key's body spans lines, so a
+    /// line-by-line cut would keep it); a long one is cut to 4 KB.
     #[test]
-    fn a_handoff_note_keeps_no_secret() {
+    fn a_handoff_note_keeps_no_secret_and_stays_small() {
         let key = format!("AKIA{}", "QWERTYUIOPASDFGH");
-        let note = super::clean_note(&format!("Done: the parser.\nLeft: deploy with {key}\n"));
-        assert!(note.starts_with("Done: the parser.\n"), "{note}");
-        assert!(!note.contains(&key), "{note}");
+        assert_eq!(
+            super::clean_note(&format!("Done: the parser.\nLeft: deploy with {key}\n")),
+            None
+        );
+        let pem = format!(
+            "Done: the parser.\n-----BEGIN {} PRIVATE KEY-----\nMIIEowIBAAKCAQEA1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6\n-----END {} PRIVATE KEY-----\n",
+            "RSA", "RSA"
+        );
+        assert_eq!(super::clean_note(&pem), None);
+        let note = super::clean_note("Done: the parser.\nLeft: the tests.").unwrap();
+        assert_eq!(note, "Done: the parser.\nLeft: the tests.");
+        let long = super::clean_note(&"Left: more. ".repeat(1000)).unwrap();
+        assert!(long.len() <= 4 * 1024, "{}", long.len());
     }
 
     /// N5: a copied `~/.claude.json` keeps only the keys a boxed run needs to stay signed in, never
