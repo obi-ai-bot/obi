@@ -199,7 +199,7 @@ impl Seen {
             || item.done.is_some()
             || item.id.starts_with("orchestrator-")
             // Already the owner's to decide: escalating would only leave a second item for it.
-            || matches!(item.kind.as_str(), "confirm" | "start" | "permission" | "plan" | "question")
+            || matches!(item.kind.as_str(), "confirm" | "start" | "permission" | "plan" | "question" | "github")
         {
             return vec![];
         }
@@ -531,6 +531,7 @@ impl Orchestration {
             arrived: Some(crate::sphere::inbox::arrival()),
             confirm: None,
             start: None,
+            github: None,
         };
         tracing::info!("orchestrator escalates: {}", escalation.why);
         shared.link.add_confirm(item)
@@ -824,9 +825,12 @@ mod tests {
             arrived: None,
             confirm: None,
             start: None,
+            github: None,
         };
         assert!(seen.item(&item("old", "failed")).is_empty());
         assert!(seen.item(&item("orchestrator-1", "question")).is_empty());
+        // An offer of GitHub work is the owner's to start (crate::github_work).
+        assert!(seen.item(&item("github-1", "github")).is_empty());
         assert!(seen.item(&item("confirm-1", "confirm")).is_empty());
         let new = seen.item(&item("i2", "failed"));
         assert_eq!(new.len(), 1);
@@ -857,6 +861,7 @@ mod tests {
             arrived: None,
             confirm: None,
             start: None,
+            github: None,
         };
         assert!(seen.item(&item("p1", "permission")).is_empty());
         assert!(seen.item(&item("q1", "question")).is_empty());

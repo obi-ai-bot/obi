@@ -110,6 +110,12 @@ pub fn pull_request_number(url: &str, repo: &str) -> Option<u64> {
 
 /// Runs `gh` with `args`: its stdout, trimmed, or the last line it said on stderr.
 pub(crate) async fn run(gh: &Path, args: &[&str]) -> Result<String, String> {
+    output(gh, args).await.map_err(|(_, said)| said)
+}
+
+/// [`run`], keeping what `gh` printed on stdout when it fails too (trimmed; empty when it never
+/// ran): `gh api graphql` exits non-zero on an answer with `errors` even when it has `data`.
+pub(crate) async fn output(gh: &Path, args: &[&str]) -> Result<String, (String, String)> {
     let mut command = tokio::process::Command::new(gh);
     // gh signs in with its own login only: a token that found its way into obid's environment
     // (`GH_TOKEN`, `GITHUB_TOKEN`, the agents' variables) never reaches it.
@@ -132,15 +138,21 @@ pub(crate) async fn run(gh: &Path, args: &[&str]) -> Result<String, String> {
         .kill_on_drop(true);
     let child = command
         .spawn()
-        .map_err(|e| format!("gh couldn't start: {e}"))?;
+        .map_err(|e| (String::new(), format!("gh couldn't start: {e}")))?;
     let output = tokio::time::timeout(GH_TIMEOUT, child.wait_with_output())
         .await
-        .map_err(|_| format!("gh took more than {} seconds", GH_TIMEOUT.as_secs()))?
-        .map_err(|e| format!("gh: {e}"))?;
+        .map_err(|_| {
+            (
+                String::new(),
+                format!("gh took more than {} seconds", GH_TIMEOUT.as_secs()),
+            )
+        })?
+        .map_err(|e| (String::new(), format!("gh: {e}")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+        return Ok(stdout);
     }
-    Err(said(&String::from_utf8_lossy(&output.stderr)))
+    Err((stdout, said(&String::from_utf8_lossy(&output.stderr))))
 }
 
 /// The last thing a tool said on stderr, skipping git's hints, with the secrets obid holds taken

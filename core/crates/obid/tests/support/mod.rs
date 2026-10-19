@@ -209,12 +209,14 @@ pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
     }
     std::fs::create_dir_all(folder.join("tmp")).unwrap();
     let stderr = folder.join("obid.stderr");
-    let mut search = std::env::var_os("PATH").unwrap_or_default();
-    if let Some(first) = path_first {
-        let mut dirs = vec![first.to_path_buf()];
-        dirs.extend(std::env::split_paths(&search));
-        search = std::env::join_paths(dirs).unwrap();
-    }
+    // The fake gh (tests/agents/gh) always comes before the person's own: obid reads GitHub by
+    // itself (crate::github_work), and a test never reaches their real gh login.
+    let mut dirs: Vec<PathBuf> = path_first.map(Path::to_path_buf).into_iter().collect();
+    dirs.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents"));
+    dirs.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let search = std::env::join_paths(dirs).unwrap();
     let mut child = Command::new(OBID)
         .args(["serve", "--config"])
         .arg(&path)
@@ -223,6 +225,8 @@ pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
         .env("HOME", folder.join("env-home"))
         .env("TMPDIR", folder.join("tmp"))
         .env("OBID_LOG", "info")
+        // Every refresh reads (crate::github_work): tests refresh more often than 15 seconds.
+        .env("OBID_GITHUB_REFRESH_SECONDS", "0")
         // Never the person's real Keychain: a stand-in `security` that finds nothing and says
         // it was asked (tests/agents/fake-security).
         .env(

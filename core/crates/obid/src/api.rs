@@ -63,6 +63,8 @@ pub struct Shared {
     pub tetrix: Arc<crate::tetrix::Tetrix>,
     /// The browsers signed in to the web app's own files (crate::web): nothing under `/v1`.
     pub pages: crate::web::Sessions,
+    /// What GitHub wants from the owner (crate::github_work).
+    pub github_work: Arc<crate::github_work::Feed>,
     /// True once obid is stopping: streams end.
     pub stopping: tokio::sync::watch::Receiver<bool>,
 }
@@ -185,6 +187,12 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/plans", post(crate::brain::plan))
         .route("/v1/plans/cancel", post(crate::brain::cancel))
         .route("/v1/conversation/stop", post(crate::brain::stop))
+        .route("/v1/github/work", get(crate::github_work::get))
+        .route("/v1/github/work/refresh", post(crate::github_work::refresh))
+        .route(
+            "/v1/github/work/{id}/start",
+            post(crate::github_work::start),
+        )
         .route("/v1/inbox", get(crate::sphere::routes::inbox))
         .route("/v1/failures", get(crate::failures::list_route))
         .route("/v1/failures/{id}", get(crate::failures::get_route))

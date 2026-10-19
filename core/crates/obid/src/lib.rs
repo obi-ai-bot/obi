@@ -26,6 +26,7 @@ pub mod gateway;
 pub mod git;
 pub mod github;
 pub mod github_login;
+pub mod github_work;
 pub mod job;
 pub mod jobs;
 pub mod logs;
@@ -257,6 +258,8 @@ pub async fn serve(
         }
     })?;
     jobs.use_artifacts(artifacts.clone());
+    let github =
+        github_work::Feed::open(config.clone(), jobs.clone(), link.clone(), events.clone());
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -279,6 +282,7 @@ pub async fn serve(
         github: github_login::GitHubLogin::default(),
         tetrix,
         pages: web::Sessions::default(),
+        github_work: github.clone(),
         stopping: stopping_rx.clone(),
     });
     let app = api::router(shared.clone());
@@ -314,6 +318,7 @@ pub async fn serve(
     // Jobs that were queued or running when obid last stopped carry on, and so does its Sphere.
     jobs.resume();
     link.start();
+    github.spawn(stopping_rx.clone());
     // A job a conversation started tells it how it ended (#351).
     conversation::report_job_ends(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
