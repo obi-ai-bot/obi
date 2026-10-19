@@ -251,6 +251,8 @@ pub async fn serve(
         events.clone(),
     );
     jobs.use_tetrix(tetrix.clone());
+    // A login copy a crash left in a conversation's folder goes before anything runs.
+    brain::harness::forget_logins_left(&config.home);
     let conversations = conversation::Conversations::open(&config.home, events.clone());
     let artifacts = artifacts::Artifacts::open(&config.home, events.clone()).map_err(|source| {
         StartError::Jobs {

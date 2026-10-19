@@ -380,6 +380,50 @@ fn a_new_conversation_finds_its_claude_code_started() {
     );
 }
 
+/// A waiting Claude Code that wrote a line while it waited isn't given the next turn (the line
+/// would be taken for the turn's): a new one answers it.
+#[test]
+fn a_claude_code_that_wrote_while_it_waited_starts_anew() {
+    let (_folder, obid) = obid("harness-warm-stray", true);
+    let first = said(&obid, json!({"said": "SAYLATE early", "new": true}));
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    std::thread::sleep(Duration::from_millis(1000));
+    let next = said(
+        &obid,
+        json!({"said": "SAY later", "conversation": conversation}),
+    );
+    assert_eq!(next.body["text"], "later", "{}", next.text);
+    let recorded = turns(&obid);
+    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    assert_ne!(recorded[0]["pid"], recorded[1]["pid"]);
+    assert!(ends_soon(&recorded[0]["pid"].to_string()));
+}
+
+/// A login copy a crash left in a conversation's folder is gone once obid has started.
+#[test]
+fn login_copies_left_in_conversations_go_at_start() {
+    let folder = Folder::new("harness-left-logins");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &harness());
+    config["conversation"] = json!({"agent": "claude"});
+    std::fs::create_dir_all(folder.0.join("home/accounts/stub")).unwrap();
+    let place = folder
+        .0
+        .join("home/conversations/c0000000-0000-4000-8000-000000000042");
+    let left = [
+        place.join("login/.claude/.credentials.json"),
+        place.join("config/.credentials.json"),
+    ];
+    for file in &left {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, r#"{"claudeAiOauth": {"accessToken": "left"}}"#).unwrap();
+    }
+    let _obid = start(&folder.0, &config, None);
+    for file in &left {
+        assert!(!file.exists(), "{} is still there", file.display());
+    }
+}
+
 /// Whether the process `pid` runs.
 fn alive(pid: &str) -> bool {
     std::process::Command::new("kill")
