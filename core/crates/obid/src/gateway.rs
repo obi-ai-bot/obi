@@ -71,6 +71,8 @@ const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/jobs/*/stop"),
     ("POST", "/v1/stop-all"),
     ("POST", "/v1/jobs/*/dismiss"),
+    ("POST", "/v1/jobs/*/archive"),
+    ("DELETE", "/v1/jobs/*"),
     ("POST", "/v1/jobs/*/move"),
     ("POST", "/v1/jobs/*/start"),
     ("POST", "/v1/jobs/*/start-when"),
@@ -691,7 +693,11 @@ mod tests {
         assert!(allows(&Method::GET, "/v1/status"));
         assert!(allows(&Method::GET, "/v1/jobs/abc"));
         assert!(allows(&Method::POST, "/v1/jobs/abc/messages"));
-        assert!(!allows(&Method::DELETE, "/v1/jobs/abc"));
+        assert!(!allows(&Method::PUT, "/v1/jobs/abc"));
+        assert!(!allows(&Method::DELETE, "/v1/jobs/abc/messages"));
+        // Sangam's Archive task and Delete task, from the iPhone too.
+        assert!(allows(&Method::POST, "/v1/jobs/abc/archive"));
+        assert!(allows(&Method::DELETE, "/v1/jobs/abc"));
         // The GitHub work feed: read it, refresh it, start an item's work (docs/runner-api.md,
         // "obid only: GitHub work"); nothing else under it.
         assert!(allows(&Method::GET, "/v1/github/work"));

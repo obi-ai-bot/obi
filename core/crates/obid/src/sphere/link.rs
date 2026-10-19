@@ -2500,6 +2500,26 @@ impl Link {
         Value::Array(items.into_iter().map(Item::to_json).collect())
     }
 
+    /// The open items of a job that's gone are done, with no answer.
+    pub fn settle_job(&self, job: &str) {
+        let now = time::now();
+        let settled: Vec<Item> = {
+            let mut state = self.lock();
+            state
+                .inbox
+                .values_mut()
+                .filter(|i| i.job == job && i.done.is_none())
+                .map(|i| {
+                    i.done = Some(now);
+                    i.clone()
+                })
+                .collect()
+        };
+        for item in &settled {
+            self.save_item(item);
+        }
+    }
+
     /// Something Oby's brain planned that persists or widens trust waits in the inbox for the
     /// owner's own `Confirm` (#546): the brain never carries it out itself.
     pub fn add_confirm(&self, item: Item) -> Item {
@@ -2645,6 +2665,62 @@ impl Link {
                     Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
                     None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
                 }
+            }
+            // Proposed against the job as it was: after another round, a move or a new mode,
+            // the title no longer says what Confirm would do.
+            inbox::action::CONTINUE_JOB | inbox::action::DELETE_JOB | inbox::action::CHANGE_JOB
+                if self
+                    .jobs
+                    .get(target)
+                    .is_some_and(|j| j.snapshot() != confirmed.payload["snapshot"]) =>
+            {
+                Err(api(
+                    StatusCode::CONFLICT,
+                    "The job changed since Oby asked (another round, a move or a new mode): ask Oby again.",
+                ))
+            }
+            inbox::action::CONTINUE_JOB => {
+                let words = confirmed.payload["words"].as_str();
+                match self.jobs.continue_job(target, words, "on your Confirm") {
+                    Some(Ok(_)) => Ok(()),
+                    Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
+                    None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
+                }
+            }
+            inbox::action::DELETE_JOB => match self.jobs.delete(target).await {
+                Some(Ok(_)) => {
+                    self.settle_job(target);
+                    Ok(())
+                }
+                Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
+                None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
+            },
+            inbox::action::CHANGE_JOB => {
+                let text = |key: &str| confirmed.payload[key].as_str();
+                if let Some(mode) = text("mode") {
+                    let mode = crate::permissions::Mode::parse(mode)
+                        .ok_or_else(|| api(StatusCode::CONFLICT, "That mode isn't one."))?;
+                    self.jobs
+                        .set_mode(target, mode)
+                        .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone."))?;
+                    self.jobs.note_change(
+                        target,
+                        format!("Mode changed to {} on your Confirm", mode.title()),
+                    );
+                }
+                if text("agent").is_some() || text("account").is_some() {
+                    match self.jobs.change(
+                        target,
+                        text("agent"),
+                        text("account"),
+                        "on your Confirm",
+                    ) {
+                        Some(Ok(_)) => {}
+                        Some(Err(refused)) => return Err(api(StatusCode::CONFLICT, refused.0)),
+                        None => return Err(api(StatusCode::CONFLICT, "That job is gone.")),
+                    }
+                }
+                Ok(())
             }
             // The ones that answer an inbox item, as the owner would have.
             inbox::action::ACCEPT
