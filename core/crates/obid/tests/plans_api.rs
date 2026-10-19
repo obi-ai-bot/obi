@@ -725,7 +725,12 @@ fn the_brain_reads_the_conversation_and_may_stop_one_job() {
     );
     let args = read(calls[0].join("args"));
     assert!(
-        args.contains("--tools\nRead\n--allowedTools\nRead\n--max-turns\n6\n"),
+        args.contains("--tools\nRead\n--allowedTools\nRead(./work.md)\n"),
+        "{args}"
+    );
+    assert!(args.contains("--max-turns\n6\n"), "{args}");
+    assert!(
+        args.contains("--disallowedTools\nRead(./login/**)\n"),
         "{args}"
     );
     assert!(args.contains("quoted in the file work.md"));
@@ -844,7 +849,7 @@ fn a_brain_that_may_read_is_boxed() {
     running(&obid, "Vault secrets");
     queue(&obid, &[peek]);
     assert_eq!(said(&obid, "anything to read?")["text"], "hidden");
-    assert!(read(calls(&obid)[1].join("args")).contains("--allowedTools\nRead\n"));
+    assert!(read(calls(&obid)[1].join("args")).contains("--allowedTools\nRead(./work.md)\n"));
 }
 
 // ---------------------------------------------------------------------------------------------
