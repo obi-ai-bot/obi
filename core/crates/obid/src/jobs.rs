@@ -3831,11 +3831,22 @@ impl Jobs {
             }
             use crate::publish::Failure;
             match published {
-                Ok(url) => {
+                Ok(Some(url)) => {
                     self.end_done(id, commits, Some(commits), |job| {
                         job.was_published(url);
                     });
                     self.follow.notify_one();
+                }
+                // Pushed to a remote that has no pull requests: that's all of it.
+                Ok(None) => {
+                    self.end_done(id, commits, Some(commits), |job| job.publish_error = None);
+                }
+                // Pushed, and only the pull request failed: the commits count as out (#627).
+                Err(failure @ Failure::PullRequest(_)) => {
+                    let why = failure.line();
+                    self.end_done(id, commits, Some(commits), |job| {
+                        job.publish_error = Some(why)
+                    });
                 }
                 Err(Failure::AlreadyOnBase(base)) => {
                     let line = Failure::AlreadyOnBase(base).line();
@@ -3979,11 +3990,12 @@ impl Jobs {
         });
     }
 
-    /// How many of `commits` (up to `head`) its pull request has: those in the commit obid pushed
-    /// last. A rebase rewrites them, so then it's none, and they're published again. The count from
-    /// its last publish when there's no pushed commit to compare with or git can't say.
+    /// How many of `commits` (up to `head`) the remote has: those in the commit obid pushed last,
+    /// with a pull request or not. A rebase rewrites them, so then it's none, and they're published
+    /// again. The count from its last publish when there's no pushed commit to compare with or git
+    /// can't say.
     async fn still_pushed(&self, job: &Job, head: &str, commits: u64) -> Option<u64> {
-        let (Some(_), Some(pushed_head)) = (&job.published, job.pushed_head()) else {
+        let Some(pushed_head) = job.pushed_head() else {
             return job.pushed;
         };
         let clone = git::clone_path(&self.config.home, &job.repo);
@@ -4019,6 +4031,9 @@ impl Jobs {
             default_branch: repo.default_branch.clone(),
             scratch,
             gh: crate::github::gh(),
+            pull_requests: repo
+                .pull_requests
+                .unwrap_or_else(|| crate::github::is_remote(&repo.remote)),
             fetching: self.preparing(&repo.repo),
         })
     }
@@ -4030,7 +4045,7 @@ impl Jobs {
         id: &str,
         signal: Option<watch::Receiver<Signal>>,
         may: impl FnOnce(&Job) -> Result<(), crate::publish::Failure>,
-    ) -> Result<String, crate::publish::Failure> {
+    ) -> Result<Option<String>, crate::publish::Failure> {
         use crate::publish::Failure;
         // `may` and the claim under one lock: nothing changes the job between them.
         let job = {
@@ -4097,13 +4112,14 @@ impl Jobs {
     /// Publishes the job `id` by hand, once a device approved `action` at `signed_at`: only when
     /// that is still obid's own sentence for it, and it can only have been said of the job's
     /// latest run (`Job::approvable_at`: the sentence names the branch, not its commits). Answers
-    /// the pull request's URL, or the line saying why not. Never a merge.
+    /// the pull request's URL (none for a remote that has no pull requests), or the line saying why
+    /// not. Never a merge.
     pub async fn publish_by_hand(
         self: &Arc<Self>,
         id: &str,
         action: &str,
         signed_at: i64,
-    ) -> Result<String, String> {
+    ) -> Result<Option<String>, String> {
         use crate::publish::Failure;
         // Still obid's own sentence for the run that was approved, checked as it's claimed.
         let may = |job: &Job| {
@@ -4119,14 +4135,22 @@ impl Jobs {
         }
         };
         match self.publish_job(id, None, may).await {
-            Ok(url) => {
+            Ok(Some(url)) => {
                 self.update(id, |job| {
                     job.publish_step = None;
                     job.pushed = job.commits;
                     job.was_published(url.clone());
                 });
                 self.follow.notify_one();
-                Ok(url)
+                Ok(Some(url))
+            }
+            Ok(None) => {
+                self.update(id, |job| {
+                    job.publish_step = None;
+                    job.pushed = job.commits;
+                    job.publish_error = None;
+                });
+                Ok(None)
             }
             Err(Failure::AlreadyOnBase(base)) => {
                 let line = Failure::AlreadyOnBase(base).line();
@@ -4144,8 +4168,12 @@ impl Jobs {
             Err(failure @ (Failure::Busy | Failure::Refused(_))) => Err(failure.line()),
             Err(failure) => {
                 let line = failure.line();
+                let pushed = matches!(failure, Failure::PullRequest(_));
                 self.update(id, |job| {
                     job.publish_step = None;
+                    if pushed {
+                        job.pushed = job.commits;
+                    }
                     if job.can_publish() {
                         job.publish_error = Some(line.clone());
                     }
@@ -4249,6 +4277,8 @@ fn publish_action_of(job: &Job) -> Result<(String, String), String> {
             "Nothing to publish: the job hasn't finished.".into()
         } else if job.kind == "review" || job.kind == "research" {
             format!("Nothing to publish: a {} job doesn't publish.", job.kind)
+        } else if job.pushed_only() {
+            "Nothing to publish: the remote is already at its head.".into()
         } else if job.published.is_some() && job.unpublished() == 0 {
             "It's already published, with every commit.".into()
         } else if job.stranded() {

@@ -27,7 +27,8 @@ const PULL: &str = "https://github.com/obi-e2e/fixture-app/pull/7";
 /// A stand-in `gh` in `folder/bin`, keeping its state in `folder/gh`: every call's arguments
 /// (`calls`), its environment (`env`), the title and description it was given, the open pull
 /// requests `pr list` answers (`open`: `__HEAD__` stands for the commit obid's clone has the
-/// branch at, which is what obid pushed), and what `pr view` answers (`view.json`).
+/// branch at, which is what obid pushed), whether `pr list` fails (`list-fails`), and what `pr
+/// view` answers (`view.json`).
 fn fake_gh(folder: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = folder.join("bin");
@@ -42,6 +43,7 @@ env >> "$dir/env"
 prev=
 case "$1 $2" in
   "pr list")
+    [ -f "$dir/list-fails" ] && {{ echo 'GraphQL: Could not resolve to a Repository' >&2; exit 1; }}
     [ -f "$dir/open" ] || exit 0
     for a in "$@"; do [ "$prev" = --head ] && branch="$a"; prev="$a"; done
     oid=$(git -C '{clone}' rev-parse "refs/heads/$branch")
@@ -659,6 +661,84 @@ fn someone_elses_push_is_never_overwritten() {
         "{error}"
     );
     assert_eq!(remote_branch(&remote, &branch), Some(their_commit));
+}
+
+/// The push went out and then GitHub's pull request lookup failed (#627): the job counts its
+/// pushed commits, and `publishError` is the pull request's own failure, not "not published".
+/// Publishing by hand is still offered, for the pull request.
+#[test]
+fn a_pull_request_that_fails_after_the_push_still_counts_the_push() {
+    let folder = Folder::new("publish-no-pull");
+    let bin = fake_gh(&folder.0);
+    std::fs::write(folder.0.join("gh/list-fails"), "").unwrap();
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: hello.txt"}),
+    );
+    let job = ended(&obid, &id);
+    let branch = format!("oby/build-{id}");
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    assert_eq!(job["published"], Value::Null, "{job}");
+    assert_eq!(job["commits"], 1);
+    assert_eq!(job["pushed"], 1, "{job}");
+    assert_eq!(
+        job["publishError"],
+        "Pushed, but couldn't look for the open pull request: GraphQL: Could not resolve to a Repository"
+    );
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let head = git(&clone, &["rev-parse", &format!("refs/heads/{branch}")]);
+    assert_eq!(remote_branch(&remote, &branch), Some(head.clone()));
+    assert_eq!(job["outgoing"][0]["action"], "push");
+    assert_eq!(job["outgoing"][0]["id"], head.as_str());
+    assert_eq!(stage(&job, "publish")["state"], "failed");
+    let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None);
+    assert_eq!(answer.status, 200, "{}", answer.text);
+}
+
+/// A remote that isn't GitHub (here the fixture's `file://` one, with no `pullRequests` in the
+/// configuration) gets the push and nothing else (#627): no `gh` pull request call, the job's
+/// commits counted as pushed, and nothing left to publish by hand.
+#[test]
+fn a_remote_that_isnt_github_gets_the_push_and_no_pull_request() {
+    let folder = Folder::new("publish-file-remote");
+    let bin = fake_gh(&folder.0);
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &agent());
+    config["repos"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("pullRequests");
+    let obid = start(&folder.0, &config, Some(&bin));
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: hello.txt"}),
+    );
+    let job = ended(&obid, &id);
+    let branch = format!("oby/build-{id}");
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    assert_eq!(job["publishError"], Value::Null, "{job}");
+    assert_eq!(job["published"], Value::Null);
+    assert_eq!(job["pushed"], 1, "{job}");
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let head = git(&clone, &["rev-parse", &format!("refs/heads/{branch}")]);
+    assert_eq!(remote_branch(&remote, &branch), Some(head));
+    assert!(
+        !calls_now(&folder.0).contains("pr "),
+        "{}",
+        calls_now(&folder.0)
+    );
+    assert_eq!(stage(&job, "publish")["state"], "done");
+    assert_eq!(
+        stage(&job, "publish")["detail"],
+        "Secret scan clean · pushed · no pull request for this remote"
+    );
+    let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None);
+    assert_eq!(answer.status, 409, "{}", answer.text);
+    assert_eq!(
+        answer.body["error"],
+        "Nothing to publish: the remote is already at its head."
+    );
 }
 
 /// Stopped while it publishes: nothing more goes out. A gitleaks that takes its time holds the

@@ -153,6 +153,8 @@ pub enum Failure {
     /// The job may not be published now (nothing to publish, or not what was approved): nothing
     /// ran, and nothing changes.
     Refused(String),
+    /// The push went out, then the pull request failed: why, worded to follow "Pushed, but " (#627).
+    PullRequest(String),
     /// Anything else, as one line a person can read.
     Failed(String),
 }
@@ -168,10 +170,14 @@ impl Failure {
             Failure::Stopped => "Not published: the job was stopped.".into(),
             Failure::Busy => "obid is publishing it already.".into(),
             Failure::Refused(why) => why.clone(),
+            Failure::PullRequest(why) => format!("{PUSHED_BUT}{why}"),
             Failure::Failed(why) => why.clone(),
         }
     }
 }
+
+/// How a `publishError` starts when the push went out and only the pull request failed.
+pub const PUSHED_BUT: &str = "Pushed, but ";
 
 /// "Not published: possible secret in a.txt:3 (AWS access key), … and 2 more."
 pub fn blocked(found: &[Found]) -> String {
@@ -446,6 +452,8 @@ pub struct Target {
     pub scratch: PathBuf,
     /// The owner's GitHub CLI, or none when it isn't installed.
     pub gh: Option<PathBuf>,
+    /// Whether the push gets a pull request: the remote is GitHub's (`Repo::pull_requests`).
+    pub pull_requests: bool,
     /// Held while the base is fetched into the clone: one fetch at a time per clone.
     pub fetching: Arc<tokio::sync::Mutex<()>>,
 }
@@ -518,13 +526,13 @@ fn forbidden_names() -> Vec<String> {
 }
 
 /// Publishes `job` from `target`: the gate, then the push of one pinned commit, then the pull
-/// request into `base`. Answers the pull request's URL.
+/// request into `base`. Answers the pull request's URL, or none for a remote that gets none.
 pub async fn publish(
     job: &Job,
     base: &str,
     target: &Target,
     hooks: &dyn Hooks,
-) -> Result<String, Failure> {
+) -> Result<Option<String>, Failure> {
     hooks.progress(Step::Scan);
     if let Some(why) = refusal(job, base, &target.default_branch) {
         return Err(Failure::Failed(why));
@@ -645,9 +653,11 @@ pub async fn publish(
     let title = title(job, &subjects);
     // Read once: the scan checks the very description the pull request gets.
     let closes = match (job.issue, &target.gh) {
-        (Some(number), Some(gh)) => github::issue_body(gh, &job.repo, number)
-            .await
-            .is_some_and(|issue| closes(&issue)),
+        (Some(number), Some(gh)) if target.pull_requests => {
+            github::issue_body(gh, &job.repo, number)
+                .await
+                .is_some_and(|issue| closes(&issue))
+        }
         _ => false,
     };
     let description = body(job, closes);
@@ -681,18 +691,24 @@ pub async fn publish(
         &head,
         Some(job.branch.as_str()),
     ));
+    // Not GitHub (a `file://` remote): the push is all there is, and gh is never asked (#627).
+    if !target.pull_requests {
+        return Ok(None);
+    }
     if !hooks.proceed() {
         return Err(Failure::Stopped);
     }
     hooks.progress(Step::PullRequest);
     let gh = target.gh.as_deref().ok_or_else(|| {
-        Failure::Failed("Couldn't open the pull request: GitHub's CLI (gh) isn't installed.".into())
+        Failure::PullRequest(
+            "couldn't open the pull request: GitHub's CLI (gh) isn't installed.".into(),
+        )
     })?;
     let file = target.scratch.join("pull-request.md");
     let _ = std::fs::remove_file(&file);
     crate::store::write_private(&file, description.as_bytes()).map_err(|e| {
-        Failure::Failed(format!(
-            "Couldn't open the pull request: obid couldn't write its description ({e})."
+        Failure::PullRequest(format!(
+            "couldn't open the pull request: obid couldn't write its description ({e})."
         ))
     })?;
     let opened = {
@@ -702,13 +718,13 @@ pub async fn publish(
         github::open_pull_request(gh, &job.repo, base, &job.branch, &heads, &title, &file).await
     };
     let _ = std::fs::remove_file(&file);
-    let (url, sent) = opened.map_err(Failure::Failed)?;
+    let (url, sent) = opened.map_err(Failure::PullRequest)?;
     match sent {
         github::Sent::Opened => hooks.sent(Outgoing::new("pullRequest", &job.repo, &url, None)),
         github::Sent::Edited => hooks.sent(Outgoing::new("pullRequestEdit", &job.repo, &url, None)),
         github::Sent::Nothing => {}
     }
-    Ok(url)
+    Ok(Some(url))
 }
 
 /// What git said when a command of publishing failed: its last line on stderr, never the command

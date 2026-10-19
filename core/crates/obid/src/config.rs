@@ -173,6 +173,10 @@ pub struct Repo {
     pub default_branch: String,
     /// The one-line command that decides `tests_pass` and serves as the job's check.
     pub check: Option<String>,
+    /// Whether its pushes get a pull request on GitHub (`gh`): by default only when `remote` is
+    /// GitHub's (`crate::github::is_remote`).
+    #[serde(default)]
+    pub pull_requests: Option<bool>,
 }
 
 fn default_branch() -> String {

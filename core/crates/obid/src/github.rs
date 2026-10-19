@@ -79,6 +79,19 @@ pub fn is_repo(repo: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// A remote on GitHub (`https://github.com/…`, `ssh://git@github.com/…` or `git@github.com:…`),
+/// where a push can have a pull request. Any other (a `file://` one) gets the push alone.
+pub fn is_remote(remote: &str) -> bool {
+    let remote = remote.to_ascii_lowercase();
+    [
+        "https://github.com/",
+        "ssh://git@github.com/",
+        "git@github.com:",
+    ]
+    .iter()
+    .any(|prefix| remote.starts_with(prefix))
+}
+
 /// The number of a pull request URL in `repo`: exactly `https://github.com/<repo>/pull/<n>`, or
 /// none. Only a pull request of the job's own repository is ever read or followed.
 pub fn pull_request_number(url: &str, repo: &str) -> Option<u64> {
@@ -178,7 +191,7 @@ pub fn own_pull_request(listed: &str, repo: &str, base: &str, heads: &[&str]) ->
 /// Opens the pull request for `branch` into `base`, ready for review (never a draft), or finds the
 /// one obid already opened for it (`own_pull_request`: same repository, one of `heads` its head) and
 /// brings its description up to date from `body_file`. Answers its URL, which must be a pull
-/// request of `repo`, and what went out.
+/// request of `repo`, and what went out; or what failed, worded to follow "Pushed, but ".
 pub async fn open_pull_request(
     gh: &Path,
     repo: &str,
@@ -207,7 +220,7 @@ pub async fn open_pull_request(
         ],
     )
     .await
-    .map_err(|e| format!("Couldn't look for the open pull request: {e}"))?;
+    .map_err(|e| format!("couldn't look for the open pull request: {e}"))?;
     if let Some(open) = own_pull_request(&listed, repo, base, heads) {
         // The commits are on it already; a description that didn't update isn't worth failing for.
         let edited = run(gh, &["pr", "edit", &open, "-R", repo, "--body-file", &body])
@@ -233,7 +246,7 @@ pub async fn open_pull_request(
         ],
     )
     .await
-    .map_err(|e| format!("Couldn't open the pull request: {e}"))?;
+    .map_err(|e| format!("couldn't open the pull request: {e}"))?;
     let url = created.lines().last().unwrap_or("").trim().to_owned();
     if pull_request_number(&url, repo).is_none() {
         return Err("gh opened no pull request of this repository.".into());
@@ -390,6 +403,27 @@ mod tests {
                 None,
                 "{listed}"
             );
+        }
+    }
+
+    #[test]
+    fn only_githubs_remotes_get_pull_requests() {
+        for remote in [
+            "https://github.com/deskree-inc/oby.git",
+            "ssh://git@github.com/deskree-inc/oby.git",
+            "git@github.com:deskree-inc/oby.git",
+            "HTTPS://GitHub.com/deskree-inc/oby",
+        ] {
+            assert!(is_remote(remote), "{remote}");
+        }
+        for remote in [
+            "file:///srv/fixture.git",
+            "/srv/fixture.git",
+            "https://github.com.evil/deskree-inc/oby",
+            "https://gitlab.com/deskree-inc/oby.git",
+            "git@gitlab.com:deskree-inc/oby.git",
+        ] {
+            assert!(!is_remote(remote), "{remote}");
         }
     }
 

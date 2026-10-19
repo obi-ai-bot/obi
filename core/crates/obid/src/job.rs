@@ -418,15 +418,25 @@ impl Job {
     }
 
     /// Commits beyond its base that aren't on its pull request yet: all of them before it's
-    /// published, then the ones later rounds made (Engine/Jobs.swift, `unpublished`).
+    /// published, then the ones later rounds made (Engine/Jobs.swift, `unpublished`). On a remote
+    /// with no pull requests, the ones that aren't pushed; one whose pull request failed after the
+    /// push has it still to open, so all of them (#627).
     pub fn unpublished(&self) -> u64 {
         let commits = self.commits.unwrap_or(0);
-        let on_it = if self.published.is_none() {
-            0
-        } else {
-            self.pushed.unwrap_or(commits)
+        let on_it = match (&self.published, &self.publish_error) {
+            (Some(_), _) => self.pushed.unwrap_or(commits),
+            (None, None) => self.pushed.unwrap_or(0),
+            (None, Some(_)) => 0,
         };
         commits.saturating_sub(on_it)
+    }
+
+    /// Pushed, with no pull request to open: its remote has none, and it has every commit.
+    pub fn pushed_only(&self) -> bool {
+        self.published.is_none()
+            && self.publish_error.is_none()
+            && self.pushed.is_some_and(|n| n > 0)
+            && self.unpublished() == 0
     }
 
     /// Whether its pull request, if it has one, is open as far as obid knows.
@@ -693,6 +703,17 @@ impl Job {
                     Some(detail),
                     self.publish_error.as_deref(),
                 );
+            } else if self.pushed_only() {
+                set(
+                    &mut stages,
+                    "publish",
+                    "done",
+                    Some("Secret scan clean · pushed · no pull request for this remote"),
+                    None,
+                );
+                for id in ["review", "merged"] {
+                    set(&mut stages, id, "skipped", None, None);
+                }
             } else if self.published.is_none() {
                 for id in ["publish", "review", "merged"] {
                     set(&mut stages, id, "skipped", None, None);
@@ -989,6 +1010,26 @@ mod tests {
         assert!(job.can_publish() && job.needs_you());
         assert_eq!(state(&job, "publish").0, "failed");
         assert_eq!(job.pipeline()["stages"][2]["reason"], "Couldn't push");
+        // Pushed, then the pull request failed: still publishable, for the pull request (#627).
+        job.pushed = Some(1);
+        job.publish_error = Some("Pushed, but couldn't open the pull request: gh broke".into());
+        assert!(job.can_publish() && !job.pushed_only());
+        // Pushed to a remote with no pull requests: nothing left to publish.
+        job.publish_error = None;
+        assert!(job.pushed_only() && !job.can_publish() && !job.needs_you());
+        assert_eq!(
+            state(&job, "publish"),
+            (
+                "done".into(),
+                "Secret scan clean · pushed · no pull request for this remote".into()
+            )
+        );
+        assert_eq!(state(&job, "review").0, "skipped");
+        // A new commit on it isn't pushed yet.
+        job.commits = Some(2);
+        assert!(job.can_publish() && !job.pushed_only());
+        job.commits = Some(1);
+        job.pushed = None;
         // Published: Review waits, Merged is upcoming.
         job.was_published("https://github.com/deskree-inc/oby/pull/42".into());
         job.pushed = Some(1);
