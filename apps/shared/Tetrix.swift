@@ -98,22 +98,24 @@ nonisolated struct TetrixStatus: Decodable, Equatable, Sendable {
 
 /// Tetrix's sign-in under way on obid (`POST /v1/tetrix/sign-in`): the authorization server's page
 /// to open in the browser, which hands the login back to obid's loopback page, never to the app.
+/// `server` is the authorization server's issuer, as obid found it in the MCP server's metadata
+/// (it can be on another domain: Logto, Keycloak), when obid says it.
 nonisolated struct TetrixSignIn: Codable, Equatable, Sendable {
     var url: URL
     var expiresAt: Date?
+    var server: URL?
 
-    /// Whether the Mac may open it: https, no login in it, on the server's own host or one under the
-    /// server's parent domain (auth.tetrix.dev for mcp.tetrix.dev), where its authorization server
-    /// lives. Anything else a runner answers is never opened.
-    // ponytail: "parent domain" drops the first label when 3+ are left, so a server at a.co.uk
-    // allows *.co.uk; a public-suffix list if a Tetrix ever lives there.
-    func opens(for server: TetrixStatus.Server) -> Bool {
-        guard url.scheme?.lowercased() == "https", server.url.scheme?.lowercased() == "https", url.user() == nil, url.password() == nil,
-              let host = url.host()?.lowercased(), let own = server.url.host()?.lowercased() else { return false }
-        let labels = own.split(separator: ".")
-        let domain = labels.count > 2 ? labels.dropFirst().joined(separator: ".") : own
-        return host == own || host == domain || host.hasSuffix("." + domain)
+    /// Whether the Mac may open it: https with no login in it and, when obid names its
+    /// authorization server, on that server's host. Anything else is never opened; the sheet shows
+    /// the person which host it is (`host`).
+    var opens: Bool {
+        guard url.scheme?.lowercased() == "https", url.user() == nil, url.password() == nil, let host else { return false }
+        guard let server else { return true }
+        return server.scheme?.lowercased() == "https" && server.host()?.lowercased() == host
     }
+
+    /// The host the sign-in page is on, as the sheet shows it.
+    var host: String? { url.host()?.lowercased() }
 }
 
 /// What a job's agent did with Tetrix through obid (`tetrix` on a job, docs/runner-api.md): its

@@ -28,23 +28,20 @@ struct TetrixConnectTests {
         #expect(try Runner.decoder.decode(TetrixStatus.self, from: Data("{}".utf8)) == TetrixStatus())
     }
 
-    /// The Mac opens a sign-in page only over https, with no login in it, on the server's host or one
-    /// under its parent domain (its authorization server's).
-    @Test func opensOnlyTheServersOwnPage() {
-        let page = { (text: String) in TetrixSignIn(url: URL(string: text)!).opens(for: dogfood) }
-        #expect(page("https://mcp.tetrix.dev/oauth/authorize?client_id=obid"))
-        #expect(page("https://auth.tetrix.dev/authorize") && page("https://tetrix.dev/authorize") && page("https://MCP.Tetrix.dev/a"))
-        #expect(!page("http://mcp.tetrix.dev/authorize"))
-        #expect(!page("https://evil.example.com/authorize"))
-        #expect(!page("https://tetrix.dev.evil.example.com/authorize") && !page("https://eviltetrix.dev/authorize"))
-        #expect(!page("https://user:pass@auth.tetrix.dev/authorize"))
-        #expect(!page("file:///etc/passwd") && !page("javascript:alert(1)"))
-        // A server on a two-label host allows only that host and what's under it.
-        let bare = TetrixStatus.Server(preset: nil, name: "t", url: URL(string: "https://tetrix.dev/mcp")!)
-        #expect(TetrixSignIn(url: URL(string: "https://auth.tetrix.dev/a")!).opens(for: bare))
-        #expect(!TetrixSignIn(url: URL(string: "https://other.dev/a")!).opens(for: bare))
-        let plain = TetrixStatus.Server(preset: nil, name: "x", url: URL(string: "http://mcp.tetrix.dev/mcp")!)
-        #expect(!TetrixSignIn(url: URL(string: "https://mcp.tetrix.dev/a")!).opens(for: plain))
+    /// The Mac opens a sign-in page only over https with no login in it, and, when obid names the
+    /// authorization server (its issuer, which can be on another domain), only on that server's host.
+    @Test func opensOnlyTheSignInServersPage() {
+        let page = { (text: String, server: String?) in TetrixSignIn(url: URL(string: text)!, server: server.flatMap(URL.init(string:))).opens }
+        #expect(page("https://auth.example.com/oidc/auth?client_id=obid", "https://auth.example.com/oidc"))
+        #expect(page("https://AUTH.example.com/a", "https://auth.example.com"))
+        #expect(page("https://tetrix.34-45-0-97.sslip.io/auth/realms/tetrix/protocol/openid-connect/auth", nil))
+        #expect(!page("https://evil.example.com/authorize", "https://auth.example.com"))
+        #expect(!page("https://auth.example.com.evil.dev/authorize", "https://auth.example.com"))
+        #expect(!page("https://auth.example.com/a", "http://auth.example.com"))
+        #expect(!page("http://auth.example.com/authorize", nil))
+        #expect(!page("https://user:pass@auth.example.com/authorize", nil))
+        #expect(!page("file:///etc/passwd", nil) && !page("javascript:alert(1)", nil))
+        #expect(TetrixSignIn(url: URL(string: "https://Auth.Example.com/a")!).host == "auth.example.com")
     }
 
     /// Another Tetrix takes what obid takes (https, a host, no login, query or fragment), named by its host.
@@ -99,14 +96,15 @@ struct TetrixConnectTests {
         let obid = RunnerStub { request in
             switch (request.method, request.path) {
             case ("GET", "/v1/tetrix"): (200, #"{"connected": false, "presets": [{"id": "dogfood", "name": "Tetrix Dogfood", "url": "https://mcp.tetrix.dev/mcp"}]}"#)
-            case ("POST", "/v1/tetrix/sign-in"): (200, #"{"url": "https://auth.tetrix.dev/authorize?state=s", "expiresAt": "2026-10-18T22:00:00Z"}"#)
+            case ("POST", "/v1/tetrix/sign-in"):
+                (200, #"{"url": "https://auth.tetrix.dev/authorize?state=s", "expiresAt": "2026-10-18T22:00:00Z", "server": "https://auth.tetrix.dev"}"#)
             case ("DELETE", "/v1/tetrix/sign-in"), ("DELETE", "/v1/tetrix"): (204, "")
             default: (404, "")
             }
         }
         #expect(try await obid.runner.tetrix()?.presets == [dogfood])
         let signIn = try await obid.runner.startTetrixSignIn(dogfood)
-        #expect(signIn.opens(for: dogfood) && obid.requests.last?.json as? [String: String] == ["preset": "dogfood"])
+        #expect(signIn.opens && signIn.server?.host() == "auth.tetrix.dev" && obid.requests.last?.json as? [String: String] == ["preset": "dogfood"])
         let other = try #require(TetrixStatus.custom("https://tetrix.example.com/mcp"))
         _ = try await obid.runner.startTetrixSignIn(other)
         #expect(obid.requests.last?.json as? [String: String] == ["url": "https://tetrix.example.com/mcp"])

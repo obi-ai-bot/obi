@@ -534,8 +534,8 @@ struct ConnectorsSettingsView: View {
     @State private var asking: String?
     /// "Another Tetrix…" asks for its MCP URL in the same field.
     @State private var askingTetrix = false
-    /// The Tetrix obid is signing in to, while its sheet waits for Tetrix's page.
-    @State private var tetrixSignIn: TetrixStatus.Server?
+    /// The sign-in obid started, while its sheet waits for Tetrix's page.
+    @State private var tetrixSignIn: ShownTetrixSignIn?
     @State private var url = ""
     @State private var busy = false
     /// What went wrong with a row's button, by the row's id, shown under that row.
@@ -587,8 +587,8 @@ struct ConnectorsSettingsView: View {
             }
             .task { await waitForGitHub() }
         }
-        .sheet(item: $tetrixSignIn) { server in
-            TetrixSignInSheet(server: server, place: feed.name, again: { openTetrixPage(server) }) {
+        .sheet(item: $tetrixSignIn) { shown in
+            TetrixSignInSheet(server: shown.server, host: shown.signIn.host ?? "", place: feed.name, again: { openTetrixPage() }) {
                 tetrixSignIn = nil
                 Task { try? await feed.runner?.cancelTetrixSignIn() }
             }
@@ -783,13 +783,13 @@ struct ConnectorsSettingsView: View {
             defer { busy = false }
             do {
                 let signIn = try await runner.startTetrixSignIn(server)
-                guard signIn.opens(for: server) else {
-                    problems[row] = "\(feed.name) answered with a page that isn't \(server.url.host() ?? server.name)'s own sign-in, so Oby opened nothing."
+                guard signIn.opens else {
+                    problems[row] = "\(feed.name) answered with a sign-in page that isn't https on Tetrix's sign-in server, so Oby opened nothing."
                     try? await runner.cancelTetrixSignIn()
                     return
                 }
                 problems[row] = nil
-                tetrixSignIn = server
+                tetrixSignIn = ShownTetrixSignIn(server: server, signIn: signIn)
                 NSWorkspace.shared.open(signIn.url)
                 lists.tetrix = try? await runner.tetrix()
             } catch {
@@ -798,11 +798,12 @@ struct ConnectorsSettingsView: View {
         }
     }
 
-    /// The sheet's Open Again: the sign-in page obid holds now, checked again.
-    private func openTetrixPage(_ server: TetrixStatus.Server) {
+    /// The sheet's Open Again: the page it showed, if obid still has that sign-in under way.
+    private func openTetrixPage() {
+        guard let shown = tetrixSignIn else { return }
         Task {
-            guard let signIn = try? await feed.runner?.tetrix()?.signIn, signIn.opens(for: server) else { return }
-            NSWorkspace.shared.open(signIn.url)
+            guard let now = try? await feed.runner?.tetrix()?.signIn, now.url == shown.signIn.url, now.opens else { return }
+            NSWorkspace.shared.open(now.url)
         }
     }
 
@@ -869,10 +870,20 @@ struct ConnectorsSettingsView: View {
     }
 }
 
-/// obid signing in to Tetrix, waiting for the person on Tetrix's page: the page again; Cancel.
+/// A Tetrix sign-in as a sheet's item: the server and the page opened for it.
+private struct ShownTetrixSignIn: Identifiable {
+    var server: TetrixStatus.Server
+    var signIn: TetrixSignIn
+    var id: URL { signIn.url }
+}
+
+/// obid signing in to Tetrix, waiting for the person on Tetrix's page: the host it's on, the page
+/// again, Cancel.
 /// Not in Sangam's design (his Knowledge modal says "Signing in…" on its button); kept as GitHub's sheet.
 private struct TetrixSignInSheet: View {
     let server: TetrixStatus.Server
+    /// The host of the sign-in page, so the person sees where they're signing in.
+    let host: String
     let place: String
     let again: () -> Void
     let cancel: () -> Void
@@ -880,8 +891,10 @@ private struct TetrixSignInSheet: View {
     var body: some View {
         VStack(spacing: 12) {
             Text("Sign in to Tetrix").font(Tokens.font(17, .semibold)).foregroundStyle(Tokens.ink)
-            Text("\(server.name)'s page opened in your browser. Sign in there; every agent on every account uses it after that.")
+            Text("\(server.name)'s sign-in opened in your browser. Sign in there; every agent on every account uses it after that.")
                 .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).multilineTextAlignment(.center)
+            Text(verbatim: host).font(Tokens.mono(13)).foregroundStyle(Tokens.ink).textSelection(.enabled)
+                .accessibilityLabel("Signing in at \(host)")
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
                 Text("Waiting for Tetrix").font(Tokens.font(13)).foregroundStyle(Tokens.muted)
