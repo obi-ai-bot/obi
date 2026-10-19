@@ -273,6 +273,49 @@ struct WindowScreens {
         try await save("mac-obid-\(screen)", window: window)
     }
 
+    /// Tetrix held by obid for every agent (Settings › Connectors, ready and connected; Accounts'
+    /// "used in" lines; a job's Tetrix section): staged on the feed, no runner asked.
+    @Test(arguments: ["connectors-ready", "connectors-on", "accounts", "task"])
+    func tetrix(_ screen: String) async throws {
+        let suite = try #require(UserDefaults(suiteName: "oby-screens-\(UUID().uuidString)"))
+        suite.set(true, forKey: "ObySidebarOpen")
+        suite.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
+        let dogfood = TetrixStatus.Server(preset: "dogfood", name: "Tetrix Dogfood", url: URL(string: "https://mcp.tetrix.dev/mcp")!)
+        func account(_ id: String, _ agent: String, _ name: String, week: Double, jobs: Int, used: Int) -> AccountState {
+            AccountState(account: Account(id: id, agent: agent, name: name, payer: "", home: nil), label: nil, sevenDay: week,
+                         sevenDayResets: now + 3 * 86_400, tetrix: true, tetrixJobs: jobs, tetrixUsed: used, runnerSignedIn: true)
+        }
+        let model = model()
+        model.feed.stage(accounts: [account("personal", "claude", "Personal", week: 0.36, jobs: 12, used: 9),
+                                    account("deskree", "codex", "Deskree", week: 0.62, jobs: 4, used: 4)],
+                         models: ModelSettings(claude: ModelChoice(model: "claude-opus-5-5", effort: "xhigh"), codex: ModelChoice(model: "gpt-6.1-sol", effort: "high"),
+                                               cursor: CursorModelChoice(model: "auto")),
+                         options: ModelOptions(claude: .init(models: [], efforts: []), codex: .init(models: []), cursor: .init(models: [])))
+        let on = screen != "connectors-ready"
+        var report = RunnerJobExtras(id: "r3")
+        report.tetrix = TetrixJobReport(connected: true, calls: ["search_entities": 2, "get_entity": 1, "save_session": 1], context: true,
+                                        saved: ["ses_8f2a"],
+                                        gaps: .init(noResults: ["deskree-inc/tetrix-ee#398"], unknownFiles: ["src/graph/fixtures.ts"],
+                                                    sent: now, session: "ses_c41d"))
+        model.feed.stage(tetrix: on ? TetrixStatus(connected: true, url: dogfood.url, preset: "dogfood", presets: [dogfood])
+                                    : TetrixStatus(presets: [dogfood]),
+                         lists: Connectors.Lists(plugins: [], connections: nil, gitHub: GitHubLogin(gh: true, signedIn: true, user: "you", signIn: nil)),
+                         extras: ["r3": report])
+        let state = ChatState()
+        if screen == "task" { state.trail.start(.group(.review), .job(id: "r3", local: false)) }
+        else { state.openSettings(screen == "accounts" ? .accounts : .connectors) }
+        let character = ObyCharacter(query: "embed&size=1.23")
+        let window = ChatWindow.make(ChatView(model: model, state: state, character: character).defaultAppStorage(suite),
+                                     size: NSSize(width: 994, height: 900))
+        window.setFrameOrigin(NSPoint(x: 40, y: 40))
+        window.orderFrontRegardless()
+        defer { window.close() }
+        ChatWindow.measureLights(window, into: state)
+        for _ in 0..<50 where !character.ready { try await Task.sleep(for: .milliseconds(100)) }
+        try await Task.sleep(for: .milliseconds(1500))
+        try await save("mac-tetrix-\(screen)", window: window)
+    }
+
     @Test func taskNeedingYou() async throws {
         let state = ChatState(defaults: .scratch)
         state.trail.start(.group(.review), .job(id: "r1", local: false))

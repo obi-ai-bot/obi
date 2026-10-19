@@ -27,13 +27,14 @@ use serde_json::json;
 use support::*;
 
 /// The app's files the client is built from, under the repository root.
-const APP_SOURCES: [&str; 6] = [
+const APP_SOURCES: &[&str] = &[
     "apps/shared/Runner.swift",
     "apps/shared/Harness.swift",
     "apps/shared/Decisions.swift",
     "apps/shared/JobList.swift",
     "apps/shared/Elapsed.swift",
     "apps/shared/DeviceKey.swift",
+    "apps/shared/TetrixStatus.swift",
 ];
 
 /// What Package.swift and the Xcode project compile Oby's Swift with.
