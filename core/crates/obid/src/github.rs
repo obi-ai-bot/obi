@@ -18,9 +18,24 @@ use serde_json::{Value, json};
 /// How long one `gh` call may take.
 const GH_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The GitHub CLI obid uses, or none when it isn't installed.
+/// The GitHub CLI obid uses: the one Oby.app carries when obid runs from inside it (the owner's
+/// decision of 2026-10-18: nobody installs gh to use Oby), else the login shell's, or none.
 pub fn gh() -> Option<PathBuf> {
-    crate::process::resolve_bin("gh")
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| bundled_gh(&exe))
+        .or_else(|| crate::process::resolve_bin("gh"))
+}
+
+/// `Contents/MacOS/gh` of the app obid runs from (`Contents/Helpers/obid` or `Contents/MacOS/obid`),
+/// signed with it (apps/mac/app/Tools/bundle-gh.sh); none for an obid anywhere else.
+fn bundled_gh(exe: &Path) -> Option<PathBuf> {
+    let contents = exe.parent()?.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let gh = contents.join("MacOS/gh");
+    crate::sandbox::is_executable(&gh).then_some(gh)
 }
 
 /// The pull request as obid last read it from GitHub (`pullRequest` on a job): only typed status,
@@ -95,6 +110,12 @@ pub fn pull_request_number(url: &str, repo: &str) -> Option<u64> {
 
 /// Runs `gh` with `args`: its stdout, trimmed, or the last line it said on stderr.
 pub(crate) async fn run(gh: &Path, args: &[&str]) -> Result<String, String> {
+    output(gh, args).await.map_err(|(_, said)| said)
+}
+
+/// [`run`], keeping what `gh` printed on stdout when it fails too (trimmed; empty when it never
+/// ran): `gh api graphql` exits non-zero on an answer with `errors` even when it has `data`.
+pub(crate) async fn output(gh: &Path, args: &[&str]) -> Result<String, (String, String)> {
     let mut command = tokio::process::Command::new(gh);
     // gh signs in with its own login only: a token that found its way into obid's environment
     // (`GH_TOKEN`, `GITHUB_TOKEN`, the agents' variables) never reaches it.
@@ -117,15 +138,21 @@ pub(crate) async fn run(gh: &Path, args: &[&str]) -> Result<String, String> {
         .kill_on_drop(true);
     let child = command
         .spawn()
-        .map_err(|e| format!("gh couldn't start: {e}"))?;
+        .map_err(|e| (String::new(), format!("gh couldn't start: {e}")))?;
     let output = tokio::time::timeout(GH_TIMEOUT, child.wait_with_output())
         .await
-        .map_err(|_| format!("gh took more than {} seconds", GH_TIMEOUT.as_secs()))?
-        .map_err(|e| format!("gh: {e}"))?;
+        .map_err(|_| {
+            (
+                String::new(),
+                format!("gh took more than {} seconds", GH_TIMEOUT.as_secs()),
+            )
+        })?
+        .map_err(|e| (String::new(), format!("gh: {e}")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+        return Ok(stdout);
     }
-    Err(said(&String::from_utf8_lossy(&output.stderr)))
+    Err((stdout, said(&String::from_utf8_lossy(&output.stderr))))
 }
 
 /// The last thing a tool said on stderr, skipping git's hints, with the secrets obid holds taken
@@ -318,6 +345,27 @@ fn git_sha(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gh Oby.app carries is found only beside an obid inside an app's Contents.
+    #[test]
+    fn the_bundled_gh_is_found_only_inside_the_app() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("obid-bundled-gh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let contents = root.join("Oby.app/Contents");
+        for dir in ["MacOS", "Helpers"] {
+            std::fs::create_dir_all(contents.join(dir)).unwrap();
+        }
+        let gh = contents.join("MacOS/gh");
+        std::fs::write(&gh, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(bundled_gh(&contents.join("Helpers/obid")), Some(gh.clone()));
+        assert_eq!(bundled_gh(&contents.join("MacOS/obid")), Some(gh.clone()));
+        assert_eq!(bundled_gh(&root.join("bin/obid")), None);
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(bundled_gh(&contents.join("Helpers/obid")), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn only_pull_requests_of_the_jobs_repository() {

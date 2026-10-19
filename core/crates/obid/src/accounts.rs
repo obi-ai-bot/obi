@@ -855,7 +855,7 @@ pub async fn sign_in(
         ));
     }
     if tool == Tool::Claude && cfg!(target_os = "macos") && !crate::jobs::keychain_on() {
-        return conflict("On macOS Claude Code keeps its login in the Keychain, which obid uses only with claudeKeychain on in its configuration.".into());
+        return conflict("On macOS Claude Code keeps its login in the Keychain, which obid uses only with claudeKeychain on: obid turns it on by itself when it's left out and Claude Code's login is only in the Keychain, or set it to true in its configuration.".into());
     }
     let bin = agent_of(&agents, tool)
         .as_ref()
@@ -1187,7 +1187,7 @@ impl Drop for Pending {
 }
 
 /// Reads `out` a line at a time, each cut to [`LONGEST_LINE`] bytes, into `lines`, until it ends.
-async fn read_lines(
+pub(crate) async fn read_lines(
     mut out: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
     lines: tokio::sync::mpsc::UnboundedSender<String>,
 ) {
@@ -1308,7 +1308,7 @@ fn interpreter(script: &Path) -> Option<String> {
 }
 
 /// `line` without terminal colours and around spaces.
-fn plain(line: &str) -> String {
+pub(crate) fn plain(line: &str) -> String {
     static ESCAPES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     ESCAPES
         .get_or_init(|| regex::Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").expect("a valid pattern"))

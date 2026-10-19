@@ -136,6 +136,17 @@ fn an_event_it_cant_match_escalates_and_changes_nothing() {
     let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
     assert_eq!(job["status"], "failed");
     assert_eq!(job["round"], 1);
+    // The owner settles it, and it goes (#710: it answered "settled already" and stayed).
+    assert_eq!(item["options"], serde_json::json!(["Done"]));
+    let path = format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap());
+    let settled = call(
+        &obid,
+        "POST",
+        &path,
+        Some(&serde_json::json!({"done": true})),
+    );
+    assert_eq!(settled.status, 200, "{}", settled.text);
+    assert!(escalations(&obid).is_empty());
 }
 
 /// Telling a job that ended something starts a follow-up (the owner's decision of 2026-10-18),

@@ -504,6 +504,20 @@ fn credentials(remote: &str, gh: Option<&Path>, unset: &[String]) -> Vec<String>
     args
 }
 
+/// The `-c` settings for a clone or fetch of an `https` remote ([`crate::git::ensure_clone`]):
+/// git's own credential helpers reset, then the owner's `gh` login, exactly as a push signs in
+/// ([`credentials`]). So a private repository clones with nothing set up but gh's own sign-in (no
+/// `gh auth setup-git`), and gh's token never reaches another helper: after a successful clone git
+/// sends `store` to every helper, and Apple's git turns `osxkeychain` on system-wide, which would
+/// copy the token into the login Keychain, where it outlived `gh auth logout`. None for another
+/// remote, or without a gh: then git's own settings, as before.
+pub(crate) fn fetch_credentials(remote: &str, gh: Option<&Path>) -> Vec<String> {
+    if gh.is_none() || !remote.starts_with("https://") {
+        return Vec::new();
+    }
+    credentials(remote, gh, &forbidden_names())
+}
+
 /// The variables in obid's environment that never reach gh (`crate::process::is_forbidden`),
 /// `GH_TOKEN` and `GITHUB_TOKEN` always among them: names only, never their values.
 fn forbidden_names() -> Vec<String> {
@@ -573,15 +587,10 @@ pub async fn publish(
     // nothing. A fetch the remote sent too little to is tried once more (#628).
     let since = {
         let _fetching = target.fetching.lock().await;
-        let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
-        let fetch = [
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "origin",
-            &refspec,
-        ];
+        // Signed in with gh's login alone, as a clone is (fetch_credentials).
+        let refspecs = [format!("+refs/heads/{base}:refs/remotes/origin/{base}")];
+        let signed = fetch_credentials(&target.remote, target.gh.as_deref());
+        let fetch = git::fetch_args(&signed, &refspecs);
         let mut fetched = git::git(clone, &fetch).await;
         if fetched
             .as_ref()
@@ -1252,6 +1261,26 @@ async fn push(head: &str, job: &Job, target: &Target, lease: Option<&str>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clone or fetch of an https remote resets git's own helpers before gh's, as a push does, so
+    /// no other helper (Apple git's system-wide osxkeychain) is asked to `store` gh's token; nothing
+    /// for another remote or without a gh.
+    #[test]
+    fn fetches_reset_gits_own_helpers_before_ghs() {
+        let gh = Path::new("/opt/gh");
+        let https = fetch_credentials("https://github.com/o/r.git", Some(gh));
+        assert_eq!(https.len(), 4, "{https:?}");
+        assert_eq!(&https[..2], ["-c", "credential.helper="], "{https:?}");
+        assert_eq!(https[2], "-c");
+        assert!(https[3].starts_with("credential.helper=!env "), "{https:?}");
+        assert!(
+            https[3].ends_with("'/opt/gh' auth git-credential"),
+            "{https:?}"
+        );
+        assert!(fetch_credentials("https://github.com/o/r.git", None).is_empty());
+        assert!(fetch_credentials("git@github.com:o/r.git", Some(gh)).is_empty());
+        assert!(fetch_credentials("file:///tmp/r.git", Some(gh)).is_empty());
+    }
 
     fn job() -> Job {
         let mut job = Job::new(

@@ -84,7 +84,11 @@ fn command(folder: &Path, config_path: &Path) -> Command {
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", folder.join("env-home"))
-        .env("TMPDIR", folder.join("tmp"));
+        .env("TMPDIR", folder.join("tmp"))
+        .env(
+            "OBID_SECURITY_BIN",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-security"),
+        );
     std::fs::create_dir_all(folder.join("env-home")).unwrap();
     std::fs::create_dir_all(folder.join("tmp")).unwrap();
     command
@@ -113,13 +117,25 @@ fn put_token(config: &Value, token: &str) {
 
 /// Starts obid with `config` (written to `folder/config.json`) and waits for it to listen.
 fn start(folder: &Path, config: &Value, token: Option<&str>) -> Obid {
+    start_with(folder, config, token, |_| {})
+}
+
+/// [`start`], with `change` made to obid's command first.
+fn start_with(
+    folder: &Path,
+    config: &Value,
+    token: Option<&str>,
+    change: impl FnOnce(&mut Command),
+) -> Obid {
     let path = folder.join("config.json");
     std::fs::write(&path, config.to_string()).unwrap();
     let stderr = folder.join("obid.stderr");
     if let Some(token) = token {
         put_token(config, token);
     }
-    let mut child = command(folder, &path)
+    let mut command = command(folder, &path);
+    change(&mut command);
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(std::fs::File::create(&stderr).unwrap())
         .spawn()
@@ -268,6 +284,8 @@ fn status_answers_with_engine_obid() {
     assert_eq!(status["github"], "owner");
     assert_eq!(status["checks"], "no app");
     assert_eq!(status["permissions"], json!({"mode": "sandbox"}));
+    // claudeKeychain left out: obid decided, and the stand-in Keychain holds no Claude login.
+    assert_eq!(status["claudeKeychain"], json!({"on": false, "auto": true}));
     let worktrees = folder.0.join("home").join("worktrees");
     assert_eq!(
         status["cleanup"],
@@ -317,6 +335,45 @@ fn an_account_is_signed_in_when_its_login_file_is_there() {
     assert_eq!(signed_in(), [json!(true), json!(true)]);
     std::fs::remove_file(work.join(".credentials.json")).unwrap();
     assert_eq!(signed_in(), [json!(true), json!(false)]);
+}
+
+/// #646: a `.credentials.json` an older obid copied from the Keychain into an account's folder
+/// (#643, no refresh token) is taken out at start even with `claudeKeychain` turned off since, so
+/// the account doesn't look signed in by it and no run copies it again. A login file Claude Code
+/// wrote itself (with its refresh token) stays.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_older_obids_keychain_copy_goes_with_claude_keychain_off() {
+    let folder = Folder::new("older-copy");
+    let mut config = config(&folder.0, 0);
+    config["claudeKeychain"] = json!(false);
+    let work = folder.0.join("accounts/work");
+    std::fs::create_dir_all(&work).unwrap();
+    // Built at runtime, so a secret scan doesn't take the test's value for a credential.
+    let access = ["copied", "-access"].concat();
+    let copy = json!({"claudeAiOauth": {"accessToken": access, "expiresAt": 1}});
+    std::fs::write(work.join(".credentials.json"), copy.to_string()).unwrap();
+    let holding = |command: &mut Command| {
+        command.env(
+            "OBID_SECURITY_BIN",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-security-holding"),
+        );
+    };
+    let obid = start_with(&folder.0, &config, Some(TOKEN), holding);
+    let host = format!("127.0.0.1:{}", obid.port);
+    let answer = get_status(&obid, &host, TOKEN);
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert_eq!(answer.body["accounts"][1]["signedIn"], json!(false));
+    assert!(!work.join(".credentials.json").exists());
+    drop(obid);
+    // The person's own login file stays.
+    let own = json!({"claudeAiOauth": {"accessToken": "a", "refreshToken": "r"}});
+    std::fs::write(work.join(".credentials.json"), own.to_string()).unwrap();
+    let obid = start_with(&folder.0, &config, Some(TOKEN), holding);
+    let host = format!("127.0.0.1:{}", obid.port);
+    let answer = get_status(&obid, &host, TOKEN);
+    assert_eq!(answer.body["accounts"][1]["signedIn"], json!(true));
+    assert!(work.join(".credentials.json").is_file());
 }
 
 fn answer_contains(value: &Value, needle: &str) -> bool {
@@ -802,6 +859,12 @@ fn a_signal_while_obid_starts_exits_0() {
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", folder.0.join("env-home"))
         .env("TMPDIR", folder.0.join("tmp"))
+        // Never the person's real Keychain (support::start): obid asks it at start when
+        // claudeKeychain is left out.
+        .env(
+            "OBID_SECURITY_BIN",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-security"),
+        )
         .stdout(Stdio::piped());
     let mut shell = shell.spawn().unwrap();
     exit_within_10_seconds(&mut shell, "SIGTERM while starting");

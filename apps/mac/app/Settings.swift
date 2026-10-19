@@ -127,6 +127,8 @@ struct RunnerSettingsView: View {
     @AppStorage(RunnerFeed.thisMacKey) private var onThisMac = false
     /// The login item, registered with "This Mac" and unregistered with a remote runner (apps/mac/app/LoginItem.swift).
     @State private var loginItem = RunnerLoginItem()
+    /// Asking before install.sh's obid is moved into Oby.
+    @State private var confirmingMove = false
     /// Merge checks on this Mac (apps/mac/app/MacChecks.swift).
     @AppStorage(MacChecks.setting) private var runMergeChecks = true
     /// Apple checks agents ask for (Engine/AppleChecks.swift).
@@ -137,7 +139,8 @@ struct RunnerSettingsView: View {
     var body: some View {
         // Sangam's words, but "the window" where his say "the island", which is gone.
         SetGroup("Runner", footer: onThisMac
-                 ? "The runner is Oby’s login item on this Mac, and Oby follows it on 127.0.0.1."
+                 ? (loginItem.byScript ? "Oby’s engine on this Mac was installed with install.sh. Move it into Oby and the app keeps it running and up to date, with the same settings, jobs and token."
+                                       : "Oby’s engine is the app’s login item on this Mac, and Oby follows it on 127.0.0.1.")
                  : "Oby follows the runner at this address: the window lists its jobs.",
                  problem: onThisMac ? loginItem.problem : nil) {
             SetRow("Runner") {
@@ -148,6 +151,9 @@ struct RunnerSettingsView: View {
                     SetValue(loginItem.line)
                     if loginItem.needsApproval {
                         Button("Open Login Items Settings") { RunnerLoginItem.openSettings() }.buttonStyle(.set)
+                    }
+                    if loginItem.byScript {
+                        Button("Move into Oby…") { confirmingMove = true }.buttonStyle(.set)
                     }
                 }
             } else {
@@ -164,6 +170,11 @@ struct RunnerSettingsView: View {
         }
         .onChange(of: onThisMac) { _, on in
             if on { loginItem.register() } else { loginItem.unregister() }
+        }
+        .confirmationDialog("Move Oby’s engine into the app?", isPresented: $confirmingMove) {
+            Button("Move into Oby") { loginItem.moveFromScript() }
+        } message: {
+            Text("Oby stops the obid install.sh set up and starts the one inside the app, with the same configuration, jobs and token. Running jobs pick up where they were.")
         }
         SetGroup("This Mac", footer: "On power, Oby prevents idle sleep while This Mac is enabled and this setting is on. A running job always keeps this Mac awake.") {
             SetRow("Keep my Mac available") {
@@ -522,6 +533,8 @@ struct ConnectorsSettingsView: View {
     @State private var busy = false
     /// What went wrong with a row's button, by the row's id, shown under that row.
     @State private var problems: [String: String] = [:]
+    /// gh's sign-in under way on the runner, shown in its sheet until it signs in or is cancelled.
+    @State private var gitHubSignIn: GitHubSignIn?
 
     var body: some View {
         let groups = Connectors.groups(list, query: query)
@@ -560,6 +573,13 @@ struct ConnectorsSettingsView: View {
         } message: { connector in
             Text(warning(connector))
         }
+        .sheet(item: Binding(get: { gitHubSignIn.map(IdentifiedSignIn.init) }, set: { gitHubSignIn = $0?.signIn })) { shown in
+            GitHubSignInSheet(signIn: shown.signIn, place: feed.name) {
+                gitHubSignIn = nil
+                Task { try? await feed.runner?.endGitHubSignIn() }
+            }
+            .task { await waitForGitHub() }
+        }
         .alert("Connect Tetrix", isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } })) {
             TextField("MCP URL", text: $url, prompt: Text("https://"))
             Button("Connect") {
@@ -576,7 +596,7 @@ struct ConnectorsSettingsView: View {
     private var list: [Connector] {
         let runner = feed.runner == nil || feed.connection != .live ? nil : Connectors.RunnerState(
             name: feed.name, local: feed.local, accounts: feed.accounts, github: feed.github, checks: feed.checkRuns,
-            plugins: lists.plugins, connections: lists.connections)
+            gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections)
         return Connectors.list(mac: store.accounts, runner: runner)
     }
 
@@ -640,6 +660,7 @@ struct ConnectorsSettingsView: View {
         case .signIn(let account): attempt(connector.id) { try store.signIn(account) }
         case .signInTetrix(let account): attempt(connector.id) { try store.signIn(account, tetrix: true) }
         case .signOutTetrix(let account): attempt(connector.id) { try store.signOutOfTetrix(account) }
+        case .signInGitHub: signInToGitHub(row: connector.id)
         case .enablePlugin(let id, let needsURL):
             if needsURL {
                 url = ""
@@ -704,6 +725,44 @@ struct ConnectorsSettingsView: View {
         }
     }
 
+    /// gh's own sign-in on the runner: GitHub's device page opens in the browser with its code on
+    /// the clipboard, and the sheet waits for GitHub. Oby never sees the login.
+    private func signInToGitHub(row: String) {
+        guard let runner = feed.runner else { return }
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                let signIn = try await runner.startGitHubSignIn()
+                guard signIn.isGitHubs else {
+                    problems[row] = "\(feed.name) answered with something other than GitHub's sign-in page and code, so Oby opened nothing."
+                    try? await runner.endGitHubSignIn()
+                    return
+                }
+                problems[row] = nil
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(signIn.userCode, forType: .string)
+                gitHubSignIn = signIn
+                NSWorkspace.shared.open(GitHubSignIn.devicePage)
+            } catch {
+                problems[row] = error.localizedDescription
+            }
+        }
+    }
+
+    /// While the sheet is up: asks every 2 seconds whether gh is signed in, and closes it once it is.
+    private func waitForGitHub() async {
+        while gitHubSignIn != nil, !Task.isCancelled, let runner = feed.runner {
+            try? await Task.sleep(for: .seconds(2))
+            guard let login = try? await runner.gitHubLogin() else { continue }
+            if login.signedIn || login.signIn == nil {
+                lists.gitHub = login
+                if !login.signedIn { problems["github"] = "GitHub's sign-in ended without signing in." }
+                gitHubSignIn = nil
+            }
+        }
+    }
+
     /// Runs a row's button, keeping what went wrong under that row.
     private func attempt(_ row: String, _ action: () throws -> Void) {
         do {
@@ -712,6 +771,44 @@ struct ConnectorsSettingsView: View {
         } catch {
             problems[row] = error.localizedDescription
         }
+    }
+}
+
+/// A GitHub sign-in as a sheet's item.
+private struct IdentifiedSignIn: Identifiable {
+    var signIn: GitHubSignIn
+    var id: String { signIn.userCode }
+}
+
+/// gh's sign-in, waiting for the person on GitHub's page (docs/onboarding.md, Mac 5): the code to
+/// type there, already on the clipboard; the page again; Cancel.
+private struct GitHubSignInSheet: View {
+    let signIn: GitHubSignIn
+    let place: String
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Sign in to GitHub").font(Tokens.font(17, .semibold)).foregroundStyle(Tokens.ink)
+            Text("GitHub's page opened in your browser. Type this code there; it's on your clipboard.")
+                .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).multilineTextAlignment(.center)
+            Text(signIn.userCode).font(Tokens.mono(30)).foregroundStyle(Tokens.ink).textSelection(.enabled)
+                .accessibilityLabel("Code \(signIn.userCode.map(String.init).joined(separator: " "))")
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Waiting for GitHub").font(Tokens.font(13)).foregroundStyle(Tokens.muted)
+            }
+            HStack(spacing: 8) {
+                Button("Cancel", action: cancel).buttonStyle(.set).keyboardShortcut(.cancelAction)
+                Button("Open the Page Again") { NSWorkspace.shared.open(GitHubSignIn.devicePage) }.buttonStyle(.set)
+            }
+            .padding(.top, 6)
+            Text("GitHub's CLI on \(place == Connectors.thisMac ? "this Mac" : place) keeps the login. Oby only learns that it worked.")
+                .font(Tokens.font(12)).foregroundStyle(Tokens.muted).multilineTextAlignment(.center)
+        }
+        .padding(26)
+        .frame(width: 400)
+        .background(Tokens.surface)
     }
 }
 
