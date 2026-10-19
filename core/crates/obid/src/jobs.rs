@@ -37,6 +37,8 @@ pub const CHECK_LIMIT: Duration = Duration::from_secs(20 * 60);
 pub const CHECK_TOO_LONG: &str = "obid stopped it after 20 minutes, the most a test run may take.";
 /// How much of a check's output obid keeps: its end.
 const CHECK_OUTPUT_MAX: usize = 64 * 1024;
+/// What a round's summary starts with when the check's failure is what the task asked for.
+const FAILS_AS_ASKED: &str = "FAILS AS ASKED";
 /// Claude Code's own turn limit for a round.
 const MAX_TURNS: &str = "200";
 /// How often obid lets git tidy a clone.
@@ -3705,6 +3707,15 @@ impl Jobs {
                     if *signal.borrow() != Signal::Run {
                         return Ok(());
                     }
+                    // A failure the agent says the task asked for (a test meant to fail) ends the
+                    // rounds: another round would undo what the owner asked. It isn't a pass, so
+                    // nothing goes out: only checks that pass publish (AGENTS.md), whatever the
+                    // agent says. The owner publishes it by hand if that's what they want.
+                    if !run.passed && said.trim_start().starts_with(FAILS_AS_ASKED) {
+                        return Err(format!(
+                            "`{command}` fails, as the agent says the task asked for, so nothing was pushed. The branch is kept: publish it by hand if that's right."
+                        ));
+                    }
                     if run.passed {
                         // The last turn, unless the owner's words came meanwhile: those are the next.
                         let words = self.last_turn(id);
@@ -3722,8 +3733,9 @@ impl Jobs {
                             "Stopped at a limit: {limit}. The branch is kept and nothing was pushed; one more round is possible."
                         ));
                     }
+                    let quoted: String = job.task.lines().map(|l| format!("> {l}\n")).collect();
                     message = format!(
-                        "`{command}` failed after your last round. Its output, from the end:\n\n```\n{}\n```\n\nFix what it shows, run it again in the foreground, commit, and finish with a short summary.",
+                        "`{command}` failed after your last round. Its output, from the end:\n\n```\n{}\n```\n\nThe task, as the owner wrote it:\n\n{quoted}\nIf this failure is what the task asks for (a test meant to fail, say), change nothing: start the first line of your summary with `{FAILS_AS_ASKED}` and say so. Otherwise fix what it shows, run it again in the foreground, commit, and finish with a short summary.",
                         tail(&run.output, 8_000)
                     );
                 } else if job.max_rounds() > 1 {
