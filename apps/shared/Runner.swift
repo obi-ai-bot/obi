@@ -1003,13 +1003,6 @@ nonisolated struct Runner: Sendable {
     func startGitHubWork(_ id: String) async throws -> Job {
         try await call("POST", "v1/github/work/\(id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id)/start")
     }
-
-    /// Hands obid a fine-grained token for its gh (`gh auth login --with-token`), for an
-    /// organization that blocks GitHub's own sign-in. The app never keeps, logs or stores it.
-    func signInToGitHub(token: String) async throws {
-        struct Body: Encodable { var token: String }
-        try await send("POST", "v1/github/token", body: Body(token: token))
-    }
     func report(_ id: String) async throws -> ResearchDocument { try await call("GET", "v1/jobs/\(id)/report") }
     func fileProposal(_ id: String, index: Int, start: Bool) async throws -> FileProposalResult {
         try await call("POST", "v1/jobs/\(id)/proposals/\(index)/file", body: FileProposalBody(start: start))

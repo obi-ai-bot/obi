@@ -18,6 +18,8 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
     /// Why the last read of GitHub failed (a rate limit, no network), said under the list; the
     /// lists stay as the last read that worked.
     var error: String?
+    /// How many GitHub found in each list: obid lists at most 100, so more than it listed means a cut list.
+    var counts: [Item.List: Int] = [:]
 
     nonisolated struct Item: Decodable, Identifiable, Equatable, Sendable {
         enum List: String, Decodable, Sendable {
@@ -39,6 +41,8 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
         /// Who opened it.
         var author: String?
         var updated: Date?
+        /// On pull requests: whether it's still a draft.
+        var draft: Bool = false
         /// On pull requests: `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or nil.
         var reviewDecision: String?
         /// On pull requests: the head commit's checks, `SUCCESS`, `FAILURE`, `ERROR`, `PENDING`, `EXPECTED`, or nil.
@@ -48,11 +52,12 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
         /// The queued or running job on it: the job is listed instead.
         var job: String?
 
-        private enum Keys: String, CodingKey { case id, list, repo, number, title, url, author, updated, reviewDecision, checks, known, job }
+        private enum Keys: String, CodingKey { case id, list, repo, number, title, url, author, updated, draft, reviewDecision, checks, known, job }
 
         init(id: String, list: List, repo: String, number: Int, title: String, url: String, author: String? = nil, updated: Date? = nil,
-             reviewDecision: String? = nil, checks: String? = nil, known: Bool = true, job: String? = nil) {
+             draft: Bool = false, reviewDecision: String? = nil, checks: String? = nil, known: Bool = true, job: String? = nil) {
             (self.id, self.list, self.repo, self.number, self.title, self.url, self.author, self.updated) = (id, list, repo, number, title, url, author, updated)
+            self.draft = draft
             (self.reviewDecision, self.checks, self.known, self.job) = (reviewDecision, checks, known, job)
         }
 
@@ -66,6 +71,7 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
             url = try c.decode(String.self, forKey: .url)
             author = try c.decodeIfPresent(String.self, forKey: .author)
             updated = try? c.decodeIfPresent(Date.self, forKey: .updated)
+            draft = (try? c.decodeIfPresent(Bool.self, forKey: .draft)) ?? false
             reviewDecision = try c.decodeIfPresent(String.self, forKey: .reviewDecision)
             checks = try c.decodeIfPresent(String.self, forKey: .checks)
             known = try c.decodeIfPresent(Bool.self, forKey: .known) ?? true
@@ -74,17 +80,19 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
     }
 
     /// The items obid listed, less any this app can't read (a newer obid's).
-    private enum Keys: String, CodingKey { case signedIn, login, error, reviews, assigned, mine }
+    private enum Keys: String, CodingKey { case signedIn, login, error, counts, reviews, assigned, mine }
+    private struct Counts: Decodable { var reviews, assigned, mine: Int? }
     private struct Lossy: Decodable {
         var item: Item?
         init(from decoder: Decoder) throws { item = try? Item(from: decoder) }
     }
 
-    init(signedIn: Bool, login: String? = nil, items: [Item] = [], error: String? = nil) {
+    init(signedIn: Bool, login: String? = nil, items: [Item] = [], error: String? = nil, counts: [Item.List: Int] = [:]) {
         self.signedIn = signedIn
         self.login = login
         self.items = items
         self.error = error
+        self.counts = counts
     }
 
     init(from decoder: Decoder) throws {
@@ -92,6 +100,9 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
         signedIn = try c.decode(Bool.self, forKey: .signedIn)
         login = try c.decodeIfPresent(String.self, forKey: .login)
         error = try c.decodeIfPresent(String.self, forKey: .error)
+        if let found = try? c.decodeIfPresent(Counts.self, forKey: .counts) {
+            counts = [.reviews: found.reviews, .assigned: found.assigned, .mine: found.mine].compactMapValues { $0 }
+        }
         items = try [Keys.reviews, .assigned, .mine].flatMap { (try c.decodeIfPresent([Lossy].self, forKey: $0) ?? []).compactMap(\.item) }
     }
 }
@@ -123,7 +134,7 @@ extension GitHubWork.Item {
     /// The one tap that starts Oby's job on it, or nil where Oby can't start one: your own pull
     /// requests (obid doesn't yet), and repositories obid doesn't work in.
     var action: String? {
-        guard known else { return nil }
+        guard known, !draft else { return nil }
         switch list {
         case .reviews: return "Review it"
         case .assigned: return "Fix it"
@@ -163,7 +174,9 @@ extension GitHubWork.Item {
 
     /// Under the headline: why Oby can't start on it, when it can't.
     var note: String? {
-        list == .mine || known ? nil : "Oby doesn't work in \(repo) yet: add it to repos in obid's configuration."
+        if list == .mine { return nil }
+        if !known { return "Oby doesn't work in \(repo) yet: add it to repos in obid's configuration." }
+        return draft ? "It's a draft: Oby can review it once it's ready for review." : nil
     }
 
     /// Its page on GitHub, only when it's one (`GitHubWork.page`).
@@ -176,6 +189,27 @@ extension GitHubWork {
     enum Connect: Equatable, Sendable {
         case unknown, signedOut, signedIn
         init(_ work: GitHubWork?) { self = work.map { $0.signedIn ? .signedIn : .signedOut } ?? .unknown }
+    }
+
+    /// The feed after asking obid for it (`ask`): what it answered, nil from a runner without it
+    /// (a 404), else the `last` one, so a timeout or a dropped connection hides nothing.
+    static func read(_ ask: () async throws -> GitHubWork?, last: GitHubWork?) async -> GitHubWork? {
+        do { return try await ask() } catch let error as RunnerError where error.status == 404 { return nil } catch { return last }
+    }
+
+    /// Under a kind's cards, for each of its lists obid cut at 100: how many it shows of how many
+    /// GitHub found. Not in Sangam's design.
+    func cut(_ kind: WorkType) -> [String] {
+        let lists: [(Item.List, String)] = switch kind {
+        case .review: [(.reviews, "pull requests waiting for your review"), (.mine, "your open pull requests")]
+        case .issues: [(.assigned, "issues assigned to you")]
+        default: []
+        }
+        return lists.compactMap { list, what in
+            let shown = items.count { $0.list == list }
+            guard let found = counts[list], found > shown else { return nil }
+            return "The latest \(shown) of \(found) \(what). The rest are on GitHub."
+        }
     }
 
     /// The items under `kind` with no job on them, newest first: a started one is its job now,
@@ -200,9 +234,6 @@ extension GitHubWork {
             .split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
         return line.count > 200 ? String(line.prefix(199)) + "…" : line
     }
-
-    /// The token page for "Use a token instead": a fine-grained token, made on GitHub's own page.
-    static let tokenPage = URL(string: "https://github.com/settings/personal-access-tokens/new")!
 
     /// Home's chips with GitHub's: Review PR and Issues show while GitHub has something there, or
     /// while it's signed out (so Connect GitHub can be found); each chip's count holds what waits to start.
@@ -311,12 +342,10 @@ struct GitHubCard: View {
 }
 
 /// Connect GitHub, at the top of Review PR and Issues while obid's gh is signed out: why, then the
-/// one way in (`connect`), and "Use a token instead" for organizations that block GitHub's own
-/// sign-in (`token`, nil where the token can't be given, as on the iPhone). Not in Sangam's design.
+/// one way in (`connect`; nil where it can't be done, as on the iPhone). Not in Sangam's design.
 struct ConnectGitHubCard: View {
     let line: String
     let connect: (() -> Void)?
-    let token: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -326,17 +355,8 @@ struct ConnectGitHubCard: View {
             }
             Text(line).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).lineSpacing(4)
                 .fixedSize(horizontal: false, vertical: true).padding(.top, 8)
-            if connect != nil || token != nil {
-                HStack(spacing: 8) {
-                    if let connect {
-                        Button("Connect GitHub", action: connect).buttonStyle(.set)
-                    }
-                    if let token {
-                        Button("Use a token instead", action: token).buttonStyle(.plain)
-                            .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
-                    }
-                }
-                .padding(.top, 14)
+            if let connect {
+                Button("Connect GitHub", action: connect).buttonStyle(.set).padding(.top, 14)
             }
         }
         .padding(20)

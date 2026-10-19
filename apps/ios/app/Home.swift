@@ -319,9 +319,12 @@ struct KindPage: View {
                 .padding(.bottom, 12)
                 let cards = WorkList.items(items, in: tab)
                 if tab == .running {
-                    if connect == .signedOut { ConnectGitHubCard(line: Self.connectLine, connect: nil, token: nil) }
+                    if connect == .signedOut { ConnectGitHubCard(line: Self.connectLine, connect: nil) }
                     ForEach(waiting) { item in
                         GitHubCard(item: item, start: { try await phone.startGitHubWork(item.id) }, later: { phone.gitHubLater.insert(item.id) })
+                    }
+                    ForEach(phone.gitHubWork?.cut(kind) ?? [], id: \.self) { line in
+                        Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.horizontal, 4)
                     }
                     if let problem = phone.gitHubWork?.error {
                         Text(verbatim: GitHubWork.plain(problem)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.horizontal, 4)

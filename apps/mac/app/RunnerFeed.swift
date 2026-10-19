@@ -132,11 +132,11 @@ final class RunnerFeed {
 
     /// Has obid read GitHub again (opening Review PR or Issues); the feed it answers replaces this one.
     func refreshGitHubWork() async {
-        guard gitHubWork != nil, let runner else { return }
+        guard let runner else { return }
         #if DEBUG
         if GitHubWork.sample != nil { return }
         #endif
-        if let work = try? await runner.refreshGitHubWork() { apply(work) }
+        gitHubWork = await GitHubWork.read({ try await runner.refreshGitHubWork() }, last: gitHubWork)
     }
 
     /// One click on a GitHub item: Oby's job on it, which joins the list as the runner's job.
@@ -321,7 +321,7 @@ final class RunnerFeed {
                         cleanup = status.cleanup
                         github = status.github
                         checkRuns = status.checks
-                        gitHubWork = try? await runner.gitHubWork()
+                        gitHubWork = await GitHubWork.read({ try await runner.gitHubWork() }, last: gitHubWork)
                         #if DEBUG
                         if let sample = GitHubWork.sample { gitHubWork = sample }
                         #endif

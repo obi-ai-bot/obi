@@ -7,7 +7,7 @@ import Testing
 struct GitHubWorkTests {
     let json = #"""
     {"signedIn": true, "login": "well-prado", "checkedAt": "2026-10-18T09:12:00Z", "nextCheck": "2026-10-18T09:15:00Z", "error": null,
-     "counts": {"reviews": 2, "assigned": 1, "mine": 1},
+     "counts": {"reviews": 1, "assigned": 140, "mine": 2},
      "reviews": [
       {"id": "a", "list": "reviews", "repo": "deskree-inc/tetrix-ee", "number": 412, "title": "retry jitter", "url": "https://github.com/deskree-inc/tetrix-ee/pull/412",
        "author": "Ernesto", "labels": [], "updated": "2026-10-18T09:00:00Z", "state": "OPEN", "draft": false, "reviewDecision": "REVIEW_REQUIRED",
@@ -56,6 +56,34 @@ struct GitHubWorkTests {
         #expect(mine.headline == "Changes requested, checks failed.")
         #expect(GitHubWork.Item(id: "f", list: .mine, repo: "o/r", number: 3, title: "t", url: "").headline == "Open in r #3.")
         #expect(GitHubWork.Item(id: "e", list: .assigned, repo: "o/r", number: 2, title: "t", url: "").action == "Fix it")
+    }
+
+    @Test func aDraftIsntReviewedYet() {
+        let draft = GitHubWork.Item(id: "g", list: .reviews, repo: "o/r", number: 4, title: "t", url: "", author: "Dima", draft: true)
+        #expect(draft.action == nil && draft.label == "On GitHub")
+        #expect(draft.note == "It's a draft: Oby can review it once it's ready for review.")
+        let json = #"{"id": "g", "list": "reviews", "repo": "o/r", "number": 4, "title": "t", "url": "https://github.com/o/r/pull/4", "draft": true}"#
+        #expect((try? Runner.decoder.decode(GitHubWork.Item.self, from: Data(json.utf8)))?.draft == true)
+    }
+
+    @Test func saysWhenAListWasCutAt100() throws {
+        let work = try Runner.decoder.decode(GitHubWork.self, from: Data(json.utf8))
+        #expect(work.counts == [.reviews: 1, .assigned: 140, .mine: 2])
+        #expect(work.cut(.issues) == ["The latest 1 of 140 issues assigned to you. The rest are on GitHub."])
+        #expect(work.cut(.review).isEmpty)
+        #expect(work.cut(.tasks).isEmpty)
+        #expect(GitHubWork(signedIn: true).cut(.issues).isEmpty)
+    }
+
+    /// A timeout keeps what was there; only a runner without the feed (404) takes it away.
+    @Test func keepsTheLastFeedThroughATimeout() async {
+        let last = GitHubWork(signedIn: true, login: "well-prado")
+        let fresh = GitHubWork(signedIn: false)
+        #expect(await GitHubWork.read({ fresh }, last: last) == fresh)
+        #expect(await GitHubWork.read({ nil }, last: last) == nil)
+        #expect(await GitHubWork.read({ throw RunnerError(message: "Not found", status: 404) }, last: last) == nil)
+        #expect(await GitHubWork.read({ throw RunnerError(message: "The runner answered 502.", status: 502) }, last: last) == last)
+        #expect(await GitHubWork.read({ throw URLError(.timedOut) }, last: last) == last)
     }
 
     @Test func connectShowsOnlyWhileSignedOut() {

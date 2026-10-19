@@ -521,7 +521,7 @@ final class Phone {
         defaultMode = RunnerMode(status.permissions?.mode)
         await take(try await runner.jobs())
         inbox = try await runner.inbox()
-        gitHubWork = try? await runner.gitHubWork()
+        gitHubWork = await GitHubWork.read({ try await runner.gitHubWork() }, last: gitHubWork)
         do { conversations = try await runner.conversations() } catch {
             Logger.phone.error("listing conversations failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -558,7 +558,7 @@ final class Phone {
         do {
             await take(try await runner.jobs())
             inbox = try await runner.inbox()
-            gitHubWork = try? await runner.gitHubWork()
+            gitHubWork = await GitHubWork.read({ try await runner.gitHubWork() }, last: gitHubWork)
             loaded = true
         } catch {
             Logger.phone.error("reloading jobs failed: \(error.localizedDescription, privacy: .public)")
@@ -567,13 +567,10 @@ final class Phone {
 
     /// Has the Mac's obid read GitHub again; the feed it answers replaces this one.
     func refreshGitHubWork() async {
-        guard gitHubWork != nil else { return }
         #if DEBUG
         if GitHubWork.sample != nil { return }
         #endif
-        do { gitHubWork = try await runner.refreshGitHubWork() } catch {
-            Logger.phone.error("refreshing GitHub work failed: \(error.localizedDescription, privacy: .public)")
-        }
+        gitHubWork = await GitHubWork.read({ try await runner.refreshGitHubWork() }, last: gitHubWork)
     }
 
     /// One tap on a GitHub item: Oby's job on it (a review, or a fix), listed at once.
