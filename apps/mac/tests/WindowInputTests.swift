@@ -35,7 +35,7 @@ struct WindowInputTests {
     /// own buttons (the panel's toggle, back to Home), not only drag the window.
     @Test func clicksInTheTitleBarReachItsButtons() async throws {
         try await withPanel(open: false) {
-            let state = ChatState()
+            let state = ChatState(defaults: .scratch)
             state.trail.start(.group(.review))
             let window = ChatWindow.make(ChatView(model: model(), state: state, character: nil))
             window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
@@ -68,7 +68,7 @@ struct WindowInputTests {
     @Test func escapeGoesBackAPage() async throws {
         try await withPanel(open: true) {
             for start in [WindowStep.group(.review), .talk] {
-                let state = ChatState()
+                let state = ChatState(defaults: .scratch)
                 if start == .talk { state.open() } else { state.newTask() }
                 let window = ChatWindow.make(ChatView(model: model(), state: state, character: nil))
                 window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
