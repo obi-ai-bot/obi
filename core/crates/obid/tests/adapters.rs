@@ -175,7 +175,8 @@ fn a_codex_jobs_transcript_matches_claudes() {
     assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
     let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript"), None);
     assert_eq!(answer.status, 200, "{}", answer.text);
-    let entries = answer.body.as_array().unwrap().clone();
+    assert_eq!(answer.body["next"], Value::Null, "{}", answer.text);
+    let entries = answer.body["entries"].as_array().unwrap().clone();
     let shape: Vec<(&str, &str, &str)> = entries
         .iter()
         .map(|e| {

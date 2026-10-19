@@ -337,16 +337,18 @@ impl ToolCall {
 }
 
 impl ToolCall {
-    /// The Claude Code tool call it is, for a job's transcript: the first of [`ToolCall::calls`],
-    /// else its title.
+    /// The Claude Code tool call it is, for a job's transcript, by its `kind` only: never by its
+    /// title, which the agent writes. A kind obid doesn't know is `Tool`.
     fn named(&self) -> (String, Value) {
-        let mut calls = self.calls().unwrap_or_default().into_iter();
-        calls.next().unwrap_or_else(|| {
-            (
-                self.title.clone().unwrap_or_else(|| "Tool".into()),
-                json!({}),
-            )
-        })
+        let path = json!({"file_path": self.paths.first()});
+        match self.kind.as_deref() {
+            Some("execute") => ("Bash".into(), json!({"command": self.command})),
+            Some("read") => ("Read".into(), path),
+            Some("search") => ("Grep".into(), json!({"pattern": self.pattern})),
+            Some("edit" | "delete" | "move") => ("Edit".into(), path),
+            Some("fetch") => ("WebFetch".into(), json!({"url": self.url})),
+            _ => ("Tool".into(), json!({})),
+        }
     }
 }
 
@@ -946,6 +948,22 @@ pub mod cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_calls_name_comes_from_its_kind_never_its_title() {
+        let call = |fields: Value| {
+            let mut call = ToolCall::default();
+            call.merge(&fields);
+            call.named().0
+        };
+        assert_eq!(
+            call(json!({"kind": "other", "title": "mcp__tetrix__get_entity"})),
+            "Tool"
+        );
+        assert_eq!(call(json!({"title": "rm -rf / and a secret"})), "Tool");
+        assert_eq!(call(json!({"kind": "execute", "title": "Read"})), "Bash");
+        assert_eq!(call(json!({"kind": "search", "title": "x"})), "Grep");
+    }
 
     #[test]
     fn a_session_names_its_modes_and_options() {

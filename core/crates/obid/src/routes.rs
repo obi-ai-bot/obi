@@ -71,25 +71,39 @@ pub async fn job(
 #[derive(serde::Deserialize)]
 pub struct After {
     after: Option<String>,
+    limit: Option<String>,
 }
 
-/// `GET /v1/jobs/{id}/transcript?after=<n>`: the entries that came or changed after entry `n`.
+/// `GET /v1/jobs/{id}/transcript?after=<n>&limit=<k>`: the entries that came or changed after
+/// entry `n`, at most `k`, and the `n` to ask after next when there's more.
 pub async fn transcript(
     State(shared): State<Arc<Shared>>,
     Path(id): Path<String>,
     Query(query): Query<After>,
 ) -> Result<Response, ApiError> {
-    let after = match query.after.as_deref() {
-        None => 0,
-        Some(text) => text
-            .parse::<u64>()
-            .map_err(|_| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "after is a number."))?,
+    let number = |text: Option<&str>, default: u64, what: &str| match text {
+        None => Ok(default),
+        Some(text) => text.parse::<u64>().map_err(|_| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{what} is a number."),
+            )
+        }),
     };
-    let entries = shared
+    let after = number(query.after.as_deref(), 0, "after")?;
+    let limit = number(
+        query.limit.as_deref(),
+        crate::transcript::PAGE as u64,
+        "limit",
+    )?;
+    let (entries, next) = shared
         .jobs
-        .transcript(&id, after)
+        .transcript(&id, after, usize::try_from(limit).unwrap_or(usize::MAX))
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, NO_JOB))?;
-    Ok(json(StatusCode::OK, json!(entries)))
+    Ok(json(
+        StatusCode::OK,
+        json!({"entries": entries, "next": next}),
+    ))
 }
 
 /// `POST /v1/jobs/{id}/stop`: a job that already ended comes back as it is.
@@ -181,13 +195,17 @@ pub async fn events(
     State(shared): State<Arc<Shared>>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let receiver = shared.events.subscribe();
-    let stream =
-        tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(|event| async move {
-            let event = event.ok()?;
-            Some(Ok(SseEvent::default()
-                .event(event.name)
-                .data(event.data.to_string())))
-        });
+    let transcripts = shared.events.subscribe_transcripts();
+    let stream = stream::select(
+        tokio_stream::wrappers::BroadcastStream::new(receiver),
+        tokio_stream::wrappers::BroadcastStream::new(transcripts),
+    )
+    .filter_map(|event| async move {
+        let event = event.ok()?;
+        Some(Ok(SseEvent::default()
+            .event(event.name)
+            .data(event.data.to_string())))
+    });
     let stream = stream.take_until(stopping(shared.stopping.clone()));
     Sse::new(stream).keep_alive(
         KeepAlive::new()

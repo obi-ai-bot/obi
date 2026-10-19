@@ -19,6 +19,18 @@ use crate::agent::{self, Event};
 
 /// How long the agent's or the owner's words may be in an entry.
 const WORDS: usize = 300;
+/// How long a tool's name and a call's summary may be.
+const NAME: usize = 64;
+const SUMMARY: usize = 200;
+/// How many items of a to-do list an entry keeps.
+const TODOS: usize = 50;
+/// How much of a job's transcript obid keeps: past either, it writes no more of it.
+pub const MOST_ENTRIES: u64 = 5_000;
+pub const MOST_BYTES: u64 = 8 * 1024 * 1024;
+/// How many entries one read gives at most, and unless asked for fewer.
+pub const PAGE: usize = 1_000;
+/// How long a finished job's transcript is kept.
+pub const KEPT_DAYS: i64 = 30;
 
 /// One entry.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -55,10 +67,21 @@ pub struct Todo {
     pub state: String,
 }
 
-/// What a running job's transcript holds in memory: the last `n`, the calls not ended yet.
+/// What a job's transcript holds in memory while its agent runs (dropped after each turn,
+/// [`Transcripts::forget`]): every entry as it is now, the order its lines were written in, and
+/// the calls not ended yet.
 #[derive(Default)]
 struct Live {
     last: u64,
+    now: std::collections::BTreeMap<u64, Entry>,
+    /// The `n` of each line, in the order they were written.
+    log: Vec<u64>,
+    /// Where in `log` each entry first came, by `n` - 1.
+    first: Vec<usize>,
+    /// The file's size.
+    bytes: u64,
+    /// The file is full ([`MOST_ENTRIES`], [`MOST_BYTES`]): said in the log once.
+    full: bool,
     open: HashMap<String, (Entry, Instant)>,
     /// The call obid declined last: its end says `declined`, not `failed`.
     declined: Option<String>,
@@ -129,8 +152,7 @@ impl Transcripts {
             Event::Plan(todos) => vec![plan(live, todos.clone())],
             Event::Session(_) | Event::Step(_) | Event::Delta(_) => vec![],
         };
-        self.write(job, &entries);
-        entries
+        self.write(job, live, entries)
     }
 
     /// The owner's words the agent heard.
@@ -160,27 +182,63 @@ impl Transcripts {
         })
     }
 
+    /// Drops what's held in memory for the job: its turn is over. The file has it all.
+    pub fn forget(&self, job: &str) {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(job);
+    }
+
     fn note(&self, job: &str, make: impl FnOnce(&mut Live) -> Vec<Entry>) -> Vec<Entry> {
         let mut all = self.live.lock().unwrap_or_else(|e| e.into_inner());
-        let entries = make(self.live_for(&mut all, job));
-        self.write(job, &entries);
-        entries
+        let live = self.live_for(&mut all, job);
+        let entries = make(live);
+        self.write(job, live, entries)
     }
 
     fn live_for<'a>(&self, all: &'a mut HashMap<String, Live>, job: &str) -> &'a mut Live {
-        all.entry(job.to_owned()).or_insert_with(|| Live {
-            last: lines(&self.path(job))
-                .iter()
-                .map(|e| e.n)
-                .max()
-                .unwrap_or(0),
-            ..Live::default()
-        })
+        all.entry(job.to_owned()).or_insert_with(|| self.load(job))
     }
 
-    fn write(&self, job: &str, entries: &[Entry]) {
+    /// The job's transcript as its file has it.
+    fn load(&self, job: &str) -> Live {
+        let path = self.path(job);
+        let mut live = Live {
+            bytes: std::fs::metadata(&path).map_or(0, |m| m.len()),
+            ..Live::default()
+        };
+        for entry in lines(&path) {
+            live.take(entry);
+        }
+        // ponytail: Claude Code's task list picks up from the last to-do list written, which
+        // may have been a TodoWrite's.
+        live.tasks = live
+            .now
+            .values()
+            .rev()
+            .find_map(|e| e.todos.clone())
+            .unwrap_or_default();
+        live
+    }
+
+    /// Keeps `entries` in the file and in memory, unless the file is full; the ones kept.
+    fn write(&self, job: &str, live: &mut Live, mut entries: Vec<Entry>) -> Vec<Entry> {
+        entries.retain(|e| e.n <= MOST_ENTRIES);
+        let mut text = String::new();
+        for entry in &entries {
+            text.push_str(&serde_json::to_string(entry).unwrap_or_default());
+            text.push('\n');
+        }
+        if live.bytes + text.len() as u64 > MOST_BYTES {
+            entries.clear();
+        }
         if entries.is_empty() {
-            return;
+            if !live.full && live.last > 0 {
+                live.full = true;
+                tracing::warn!("job {job}'s transcript is full: obid keeps no more of it");
+            }
+            return entries;
         }
         let path = self.path(job);
         let written = (|| -> std::io::Result<()> {
@@ -192,40 +250,94 @@ impl Transcripts {
                 use std::os::unix::fs::OpenOptionsExt;
                 options.mode(0o600);
             }
-            let mut text = String::new();
-            for entry in entries {
-                text.push_str(&serde_json::to_string(entry).map_err(std::io::Error::other)?);
-                text.push('\n');
-            }
             options.open(&path)?.write_all(text.as_bytes())
         })();
-        if let Err(e) = written {
-            tracing::error!("can't keep job {job}'s transcript: {e}");
+        match written {
+            Ok(()) => {
+                live.bytes += text.len() as u64;
+                for entry in &entries {
+                    live.take(entry.clone());
+                }
+            }
+            Err(e) => {
+                tracing::error!("can't keep job {job}'s transcript: {e}");
+                entries.clear();
+            }
         }
+        entries
     }
 
     /// The entries that came or changed after entry `after` first did, each as it is now, in
-    /// order: everything with `after` 0. A client that saw up to `after` upserts them by `n`.
-    pub fn read(&self, job: &str, after: u64) -> Vec<Entry> {
-        let lines = lines(&self.path(job));
-        let from = if after == 0 {
-            0
-        } else {
-            lines
-                .iter()
-                .position(|e| e.n == after)
-                .map_or(lines.len(), |i| i + 1)
+    /// order, at most `limit` of them: everything with `after` 0. A client that saw up to `after`
+    /// upserts them by `n`. When there's more, the `n` to ask after next.
+    pub fn read(&self, job: &str, after: u64, limit: usize) -> (Vec<Entry>, Option<u64>) {
+        let all = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        // A job whose agent isn't running is read from its file (no other job waits on that),
+        // and not kept in memory.
+        let loaded;
+        let live = match all.get(job) {
+            Some(live) => live,
+            None => {
+                drop(all);
+                loaded = self.load(job);
+                return page(&loaded, after, limit);
+            }
         };
-        let changed: std::collections::HashSet<u64> = lines[from..].iter().map(|e| e.n).collect();
-        let mut now: HashMap<u64, Entry> = HashMap::new();
-        for entry in lines {
-            if changed.contains(&entry.n) {
-                now.insert(entry.n, entry);
+        page(live, after, limit)
+    }
+
+    /// Removes the transcripts `keep` says no to (by job id): those of jobs that ended more than
+    /// [`KEPT_DAYS`] ago, when obid starts.
+    pub fn sweep(&self, keep: impl Fn(&str) -> bool) {
+        let Ok(folders) = std::fs::read_dir(self.home.join("jobs")) else {
+            return;
+        };
+        for folder in folders.flatten() {
+            let path = folder.path();
+            let id = folder.file_name().to_string_lossy().into_owned();
+            if path.join("transcript.jsonl").is_file() && !keep(&id) {
+                let _ = std::fs::remove_file(path.join("transcript.jsonl"));
+                let _ = std::fs::remove_dir(&path);
             }
         }
-        let mut entries: Vec<Entry> = now.into_values().collect();
-        entries.sort_by_key(|e| e.n);
-        entries
+    }
+}
+
+/// [`Transcripts::read`]'s page of `live`: the earlier entries that changed (calls that were
+/// running when `after` came: few) always, then at most `limit` newer ones, so the next marker is
+/// always past `after`.
+fn page(live: &Live, after: u64, limit: usize) -> (Vec<Entry>, Option<u64>) {
+    let from = match after {
+        0 => 0,
+        n => live
+            .first
+            .get(n as usize - 1)
+            .map_or(live.log.len(), |i| i + 1),
+    };
+    let changed: std::collections::BTreeSet<u64> = live.log[from..].iter().copied().collect();
+    let newer = changed.range(after + 1..);
+    let more = newer.clone().count() > limit.clamp(1, PAGE);
+    let entries: Vec<Entry> = changed
+        .range(..=after)
+        .chain(newer.take(limit.clamp(1, PAGE)))
+        .filter_map(|n| live.now.get(n).cloned())
+        .collect();
+    let next = more.then(|| entries.last().map(|e| e.n)).flatten();
+    (entries, next)
+}
+
+impl Live {
+    /// Takes in one line.
+    fn take(&mut self, entry: Entry) {
+        let n = entry.n;
+        if n > self.last {
+            self.last = n;
+        }
+        if n as usize > self.first.len() {
+            self.first.resize(n as usize, self.log.len());
+        }
+        self.log.push(n);
+        self.now.insert(n, entry);
     }
 }
 
@@ -272,7 +384,7 @@ fn plan(live: &mut Live, todos: Vec<Todo>) -> Entry {
     let done = todos.iter().filter(|t| t.state == "done").count();
     let summary = format!("{done} of {} done", todos.len());
     let mut entry = entry(live, "plan", None, summary);
-    entry.todos = Some(todos);
+    entry.todos = Some(todos.into_iter().take(TODOS).collect());
     entry
 }
 
@@ -316,9 +428,11 @@ fn tool(live: &mut Live, id: &str, name: &str, input: &Value) -> Vec<Entry> {
             vec![plan(live, live.tasks.clone())]
         }
         _ => {
-            // Masked before it's cut short, so no part of a secret is left.
-            let summary = mask(&agent::step(name, &masked(input)));
-            let mut entry = entry(live, "tool", Some(name), summary);
+            // Masked before they're cut short, so no part of a secret is left.
+            let shown = crate::brain::briefing::line(&mask(name), NAME);
+            let summary =
+                crate::brain::briefing::line(&mask(&agent::step(&shown, &masked(input))), SUMMARY);
+            let mut entry = entry(live, "tool", Some(&shown), summary);
             entry.state = Some("running".into());
             if let Some((added, removed)) = edited(name, input) {
                 (entry.added, entry.removed) = (Some(added), Some(removed));
@@ -452,7 +566,7 @@ mod tests {
         t.record("j", &Event::Denied("no".into()));
         t.record("j", &done("a", true));
         t.record("j", &done("zz", false));
-        let all = t.read("j", 0);
+        let all = t.read("j", 0, PAGE).0;
         assert_eq!(all.len(), 3, "{all:?}");
         assert_eq!(
             (all[0].kind.as_str(), all[0].summary.as_str()),
@@ -476,7 +590,7 @@ mod tests {
         );
         t.record("j", &Event::Denied("never".into()));
         t.record("j", &done("a", true));
-        assert_eq!(t.read("j", 0)[0].state.as_deref(), Some("declined"));
+        assert_eq!(t.read("j", 0, PAGE).0[0].state.as_deref(), Some("declined"));
     }
 
     #[test]
@@ -487,13 +601,17 @@ mod tests {
         t.record("j", &tool_event("c", "Read", json!({"file_path": "c.rs"})));
         // A client saw up to 2; then `a` ended and 3 came.
         t.record("j", &done("a", false));
-        let since: Vec<(u64, Option<String>)> =
-            t.read("j", 2).into_iter().map(|e| (e.n, e.state)).collect();
+        let since: Vec<(u64, Option<String>)> = t
+            .read("j", 2, PAGE)
+            .0
+            .into_iter()
+            .map(|e| (e.n, e.state))
+            .collect();
         assert_eq!(
             since,
             [(1, Some("done".into())), (3, Some("running".into()))]
         );
-        assert!(t.read("j", 99).is_empty());
+        assert!(t.read("j", 99, PAGE).0.is_empty());
         // Another obid reading the same file numbers on.
         let again = Transcripts::new(&t.home);
         assert_eq!(again.start("j", "Round 2 on Claude Code")[0].n, 4);
@@ -572,5 +690,114 @@ mod tests {
             diff_lines("--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-a\n+b\n+c\n d\n"),
             (2, 1)
         );
+    }
+
+    #[test]
+    fn reads_come_in_pages() {
+        let t = transcripts("pages");
+        for n in 0..5 {
+            t.record(
+                "j",
+                &tool_event(&format!("c{n}"), "Read", json!({"file_path": "a.rs"})),
+            );
+        }
+        t.record("j", &done("c0", false));
+        let (first, next) = t.read("j", 0, 2);
+        assert_eq!(first.iter().map(|e| e.n).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(first[0].state.as_deref(), Some("done"));
+        assert_eq!(next, Some(2));
+        // Call 1 ended after entry 2 came: it comes again, beside the newer page.
+        let (rest, next) = t.read("j", 2, 2);
+        assert_eq!(rest.iter().map(|e| e.n).collect::<Vec<_>>(), [1, 3, 4]);
+        assert_eq!(next, Some(4));
+        let (last, next_after) = t.read("j", 4, 2);
+        assert_eq!(last.iter().map(|e| e.n).collect::<Vec<_>>(), [1, 5]);
+        assert_eq!(next_after, None);
+        t.record("j", &done("c1", false));
+        let (again, _) = t.read("j", 2, 2);
+        assert_eq!(again.iter().map(|e| e.n).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        // A job whose turn is over is read from its file, the same.
+        t.forget("j");
+        assert_eq!(t.read("j", 0, PAGE).0.len(), 5);
+        assert!(t.live.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_full_transcript_takes_no_more() {
+        let t = transcripts("full");
+        let todos: Vec<Todo> = (0..80)
+            .map(|i| Todo {
+                text: format!("item {i}"),
+                state: "pending".into(),
+            })
+            .collect();
+        let entry = t.record("j", &Event::Plan(todos)).remove(0);
+        assert_eq!(entry.todos.as_ref().unwrap().len(), TODOS);
+        assert_eq!(entry.summary, "0 of 80 done");
+        // Near its size: a line that would pass it isn't written.
+        let size = std::fs::metadata(t.path("j")).unwrap().len();
+        t.live.lock().unwrap().get_mut("j").unwrap().bytes = MOST_BYTES - 10;
+        assert!(t.record("j", &Event::Said("words".into())).is_empty());
+        assert_eq!(std::fs::metadata(t.path("j")).unwrap().len(), size);
+        // At its count: no entry past it.
+        let t = transcripts("full-count");
+        t.record("j", &Event::Said("words".into()));
+        t.live.lock().unwrap().get_mut("j").unwrap().last = MOST_ENTRIES - 1;
+        let kept: Vec<u64> = (0..3)
+            .flat_map(|_| t.record("j", &Event::Said("words".into())))
+            .map(|e| e.n)
+            .collect();
+        assert_eq!(kept, [MOST_ENTRIES]);
+    }
+
+    #[test]
+    fn an_unknown_tools_name_is_masked_and_cut() {
+        let t = transcripts("names");
+        let value = ["name-", "secret/", "Z9q+r=s"].concat();
+        crate::secrets::known().learn("vault transcript-name", &value);
+        let long = format!("{value} {}", "x".repeat(500));
+        let entry = t.record("j", &tool_event("a", &long, json!({}))).remove(0);
+        crate::secrets::known().forget("vault transcript-name");
+        let tool = entry.tool.unwrap();
+        assert!(
+            !tool.contains(&value) && tool.chars().count() <= NAME,
+            "{tool}"
+        );
+        assert!(
+            entry.summary.chars().count() <= SUMMARY,
+            "{}",
+            entry.summary
+        );
+        assert!(!entry.summary.contains(&value), "{}", entry.summary);
+    }
+
+    #[test]
+    fn the_task_list_carries_on_after_a_turn() {
+        let t = transcripts("tasks");
+        t.record(
+            "j",
+            &tool_event("t1", "TaskCreate", json!({"subject": "One"})),
+        );
+        t.forget("j");
+        let updated = t.record(
+            "j",
+            &tool_event(
+                "t2",
+                "TaskUpdate",
+                json!({"taskId": "1", "status": "completed"}),
+            ),
+        );
+        assert_eq!(updated[0].summary, "1 of 1 done");
+        assert_eq!(updated[0].n, 2);
+    }
+
+    #[test]
+    fn old_transcripts_are_swept() {
+        let t = transcripts("sweep");
+        t.start("old", "Started on Claude Code");
+        t.start("new", "Started on Claude Code");
+        t.sweep(|id| id == "new");
+        assert!(!t.path("old").exists());
+        assert!(t.path("new").exists());
     }
 }

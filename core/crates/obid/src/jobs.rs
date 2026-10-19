@@ -293,6 +293,13 @@ impl Jobs {
         let api_url = format!("http://{}", config.listen);
         let approvals = crate::approval::Approvals::open(&config.home);
         let transcripts = crate::transcript::Transcripts::new(&config.home);
+        let now = obi_protocol::time::now();
+        transcripts.sweep(|id| {
+            jobs.get(id).is_some_and(|job: &Job| {
+                job.finished
+                    .is_none_or(|f| now - f < crate::transcript::KEPT_DAYS * 86_400)
+            })
+        });
         Ok(Arc::new(Jobs {
             config,
             store,
@@ -3240,6 +3247,7 @@ impl Jobs {
             }
         };
         self.transcribed(id, self.transcripts.end_turn(id));
+        self.transcripts.forget(id);
         ran.map_err(|e| format!("obid couldn't start {}: {e}", tool.name()))
     }
 
@@ -3253,9 +3261,14 @@ impl Jobs {
 
     /// The job's transcript entries that came or changed after entry `after`
     /// (`GET /v1/jobs/{id}/transcript`); `None` for a job obid doesn't have.
-    pub fn transcript(&self, id: &str, after: u64) -> Option<Vec<crate::transcript::Entry>> {
+    pub fn transcript(
+        &self,
+        id: &str,
+        after: u64,
+        limit: usize,
+    ) -> Option<(Vec<crate::transcript::Entry>, Option<u64>)> {
         self.get(id)?;
-        Some(self.transcripts.read(id, after))
+        Some(self.transcripts.read(id, after, limit))
     }
 
     /// Runs the repository's check in the job sandbox, with no network at all.

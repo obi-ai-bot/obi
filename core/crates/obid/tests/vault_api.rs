@@ -817,7 +817,8 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
     assert_eq!(job["status"], "done", "{job}");
     let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript"), None);
     assert_eq!(answer.status, 200, "{}", answer.text);
-    let entries = answer.body.as_array().unwrap().clone();
+    assert_eq!(answer.body["next"], Value::Null, "{}", answer.text);
+    let entries = answer.body["entries"].as_array().unwrap().clone();
     let kinds: Vec<&str> = entries
         .iter()
         .map(|e| e["kind"].as_str().unwrap())
@@ -847,7 +848,7 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
     );
     assert_eq!(
         entries[8]["summary"],
-        "Found it. Fixing it, with [redacted: vault staging-api-key] for staging."
+        "Found it. Fixing it, with [redacted: vault staging-api-key] for staging ([redacted: vault staging-api-key], [redacted: vault staging-api-key])."
     );
     for tool in entries.iter().filter(|e| e["kind"] == "tool") {
         assert!(
@@ -884,7 +885,25 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
         &format!("/v1/jobs/{id}/transcript?after=9"),
         None,
     );
-    assert_eq!(since.body, json!(entries[9..]), "{}", since.text);
+    assert_eq!(
+        since.body,
+        json!({"entries": entries[9..], "next": null}),
+        "{}",
+        since.text
+    );
+    // In pages: at most `limit`, and where to go on from.
+    let page = call(
+        &obid,
+        "GET",
+        &format!("/v1/jobs/{id}/transcript?limit=5"),
+        None,
+    );
+    assert_eq!(
+        page.body,
+        json!({"entries": entries[..5], "next": 5}),
+        "{}",
+        page.text
+    );
     let wrong = call(
         &obid,
         "GET",
