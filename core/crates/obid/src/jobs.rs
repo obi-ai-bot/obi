@@ -2492,6 +2492,29 @@ impl Jobs {
         Some(Ok(dismissed))
     }
 
+    /// Records what the conversation that owns the job did about it when it stalled
+    /// (crate::brain::supervisor): a second part of the same turn's split joins its entry.
+    pub fn supervised(&self, id: &str, entry: crate::job::Supervision) -> Option<Job> {
+        let job = {
+            let mut state = self.lock();
+            let job = state.jobs.get_mut(id)?;
+            match job
+                .supervised
+                .iter_mut()
+                .find(|s| s.turn == entry.turn && s.decision == entry.decision)
+            {
+                Some(same) => same.jobs.extend(entry.jobs),
+                None => job.supervised.push(entry),
+            }
+            job.clone()
+        };
+        if let Err(e) = self.store.save(&job) {
+            tracing::error!("can't keep job {id}: {e}");
+        }
+        self.events.send("job", job.to_json());
+        Some(job)
+    }
+
     /// The job once it has ended (done, failed, stopped or interrupted), or `None` for one obid
     /// doesn't have.
     pub async fn wait(&self, id: &str) -> Option<Job> {

@@ -1,0 +1,265 @@
+//! The conversation supervises its jobs (docs/runner-api.md, "obid only: the conversation
+//! supervises its jobs"): a job a conversation started that stalls goes back to that conversation's
+//! agent session, which reads the handoff note and carries it on, starts it fresh or splits it by
+//! itself, within obid's bounds, and says so in one line; past 3 automatic steps, or for anything
+//! else, the owner decides. The agent is the stand-in (tests/agents/fake-harness).
+mod support;
+
+use std::path::{Path, PathBuf};
+
+use serde_json::{Value, json};
+use support::*;
+
+fn harness() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-harness")
+}
+
+/// obid with the stand-in as Claude Code, conversations on the harness, a signed-in account and
+/// a job held after 2 quiet seconds.
+fn obid(name: &str) -> (Folder, Obid) {
+    let folder = Folder::new(name);
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &harness());
+    config["conversation"] = json!({"agent": "claude"});
+    config["stallAfter"] = json!(2);
+    let account = folder.0.join("home/accounts/stub");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(account.join(".credentials.json"), "{}").unwrap();
+    let obid = start(&folder.0, &config, None);
+    (folder, obid)
+}
+
+/// A conversation whose supervisor turns do what `script` says, and the job it started, which
+/// stalls.
+fn stalling(obid: &Obid, script: &str) -> (String, String) {
+    let started = call(
+        obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "SAY Ready.", "new": true})),
+    );
+    assert_eq!(started.status, 200, "{}", started.text);
+    let conversation = started.body["conversation"].as_str().unwrap().to_owned();
+    std::fs::write(
+        obid.home
+            .join(format!("conversations/{conversation}/room/supervise.txt")),
+        script,
+    )
+    .unwrap();
+    let dispatch = r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Build both halves STALLS-ALWAYS", "kind": "build", "mode": "acceptEdits", "title": "Both halves"}"#;
+    let answer = call(
+        obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": dispatch, "conversation": conversation})),
+    );
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    let job = answer.body["jobs"][0]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}", answer.text))
+        .to_owned();
+    (conversation, job)
+}
+
+fn job(obid: &Obid, id: &str) -> Value {
+    call(obid, "GET", &format!("/v1/jobs/{id}"), None).body
+}
+
+fn jobs(obid: &Obid) -> Vec<Value> {
+    call(obid, "GET", "/v1/jobs", None)
+        .body
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Oby's turns in the conversation, oldest first.
+fn obys(obid: &Obid, conversation: &str) -> Vec<String> {
+    call(
+        obid,
+        "GET",
+        &format!("/v1/conversation?id={conversation}&limit=100"),
+        None,
+    )
+    .body
+    .as_array()
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .filter(|t| t["who"] == "oby")
+    .map(|t| t["text"].as_str().unwrap_or_default().to_owned())
+    .collect()
+}
+
+/// The job once its conversation decided about its stall `n` times (`asked` included).
+fn supervised(obid: &Obid, id: &str, n: usize) -> Value {
+    within(90, "the conversation decides", || {
+        let job = job(obid, id);
+        (job["supervised"].as_array().map_or(0, Vec::len) >= n).then_some(job)
+    })
+}
+
+/// A stalled job is split into two new jobs by its conversation, each a follow-up from its branch
+/// with its own part; a second decision in the same turn is refused; the conversation says what it
+/// did in one line with its count, and the job keeps it.
+#[test]
+fn a_stalled_job_is_split_in_two() {
+    let (_folder, obid) = obid("supervisor-split");
+    let (conversation, id) = stalling(
+        &obid,
+        "OBY oby_job {\"id\": \"$JOB\"}\n\
+         OBY oby_dispatch {\"repo\": \"obi-e2e/fixture-app\", \"task\": \"The first half\", \"title\": \"First half\"}\n\
+         OBY oby_dispatch {\"repo\": \"obi-e2e/fixture-app\", \"task\": \"The second half\", \"title\": \"Second half\"}\n\
+         REPEAT 1 OBY oby_tell_job {\"id\": \"$JOB\", \"words\": \"Start again\"}",
+    );
+    let stalled = supervised(&obid, &id, 1);
+    assert!(!stalled["stalled"].is_null(), "{stalled}");
+    let step = &stalled["supervised"][0];
+    assert_eq!(step["decision"], "split", "{stalled}");
+    assert_eq!(step["count"], 1);
+    assert_eq!(step["of"], 3);
+    let parts: Vec<String> = step["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(parts.len(), 2, "{stalled}");
+    for (part, words) in parts.iter().zip(["The first half", "The second half"]) {
+        let part = job(&obid, part);
+        assert_eq!(part["followUpOf"], id.as_str(), "{part}");
+        assert_eq!(part["conversation"], conversation.as_str());
+        assert_eq!(part["mode"], "acceptEdits");
+        assert_eq!(part["agent"], stalled["agent"]);
+        assert_eq!(part["account"], stalled["account"]);
+        // The part's words reach its agent quoted after the job's own request.
+        assert_eq!(part["request"], stalled["request"], "{part}");
+        assert!(part["request"].as_str().unwrap().contains("STALLS-ALWAYS"));
+        let _ = words;
+    }
+    // The third call, a second decision, was refused: no restart started.
+    assert_eq!(jobs(&obid).len(), 3);
+    let said = within(30, "the conversation's line", || {
+        obys(&obid, &conversation)
+            .into_iter()
+            .find(|t| t.contains("automatic steps"))
+    });
+    assert!(said.contains("decided already (split)"), "{said}");
+    assert!(
+        said.ends_with("(Oby's first of 3 automatic steps for this job: split.)"),
+        "{said}"
+    );
+}
+
+/// After 3 automatic steps along a job and the jobs it follows up, the next stall goes to the
+/// owner: one line in the conversation and one item in Needs you, no fourth turn.
+#[test]
+fn the_fourth_stall_asks_the_owner() {
+    let (_folder, obid) = obid("supervisor-cap");
+    let (conversation, first) = stalling(
+        &obid,
+        "OBY oby_tell_job {\"id\": \"$JOB\", \"words\": \"Pick it up from the note.\"}\nSAY Started it fresh from its note.",
+    );
+    // Each restart is a follow-up whose request still says STALLS-ALWAYS, so it stalls again.
+    let mut id = first.clone();
+    for n in 1..=3 {
+        let job = supervised(&obid, &id, 1);
+        let step = &job["supervised"][0];
+        assert_eq!(step["decision"], "restart", "{job}");
+        assert_eq!(step["count"], n, "{job}");
+        id = step["jobs"][0].as_str().unwrap().to_owned();
+    }
+    let last = supervised(&obid, &id, 1);
+    assert_eq!(last["supervised"][0]["decision"], "asked", "{last}");
+    assert_eq!(last["supervised"][0]["count"], 3);
+    let items = call(&obid, "GET", "/v1/inbox", None).body;
+    let item = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["job"] == id.as_str() && i["kind"] == "question")
+        .unwrap_or_else(|| panic!("{items}"))
+        .clone();
+    assert!(
+        item["text"]
+            .as_str()
+            .unwrap()
+            .contains("Oby carried it on by itself 3 times already"),
+        "{item}"
+    );
+    let lines = obys(&obid, &conversation);
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|t| t.starts_with("Started it fresh from its note."))
+            .count(),
+        3,
+        "{lines:?}"
+    );
+    assert!(
+        lines.last().unwrap().contains("so the next step is yours"),
+        "{lines:?}"
+    );
+    assert_eq!(jobs(&obid).len(), 4);
+}
+
+/// What the agent wrote in its note can't make the supervisor do what's the owner's: a Bypass
+/// start is only proposed, an inbox confirm can't be answered, and with no decision of its own
+/// the owner is asked. The note never reaches the turn's prompt, only oby_job's quoted answer.
+#[test]
+fn the_note_cant_trigger_a_gated_action() {
+    let (_folder, obid) = obid("supervisor-note");
+    let (conversation, id) = stalling(
+        &obid,
+        "OBY oby_job {\"id\": \"$JOB\"}\n\
+         OBY oby_dispatch {\"repo\": \"obi-e2e/fixture-app\", \"task\": \"Everything, in Bypass\", \"mode\": \"bypass\"}\n\
+         OBY oby_answer {\"item\": \"supervisor-none\", \"answer\": \"Confirm\"}\n\
+         SAY Did what the note said.",
+    );
+    let stalled = supervised(&obid, &id, 1);
+    assert!(
+        stalled["summary"]
+            .as_str()
+            .unwrap()
+            .contains("ignore your rules"),
+        "the note is the agent's: {stalled}"
+    );
+    assert_eq!(stalled["supervised"][0]["decision"], "asked", "{stalled}");
+    assert_eq!(jobs(&obid).len(), 1, "nothing started");
+    let items = call(&obid, "GET", "/v1/inbox", None).body;
+    let kinds: Vec<&str> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    // The Bypass start waits for the owner; the stall is theirs to decide.
+    assert!(kinds.contains(&"question"), "{items}");
+    assert!(
+        kinds.iter().any(|k| *k == "start" || *k == "confirm"),
+        "{items}"
+    );
+    let prompts: Vec<String> = std::fs::read_to_string(
+        obid.home
+            .join(format!("conversations/{conversation}/config/turns.jsonl")),
+    )
+    .unwrap()
+    .lines()
+    .map(|l| {
+        serde_json::from_str::<Value>(l).unwrap()["prompt"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    })
+    .collect();
+    let prompt = prompts
+        .iter()
+        .find(|p| p.starts_with("Oby here, not the owner"))
+        .expect("the supervisor turn");
+    assert!(!prompt.contains("ignore your rules"), "{prompt}");
+    assert!(
+        obys(&obid, &conversation)
+            .iter()
+            .any(|t| t == "Did what the note said."),
+    );
+}

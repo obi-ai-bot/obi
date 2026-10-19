@@ -75,6 +75,9 @@ pub struct Session {
     pub room: PathBuf,
     /// The artifacts its tools published this turn, `{id, version}` each: they go on the turn.
     pub artifacts: Mutex<Vec<Value>>,
+    /// A supervisor turn's stalled job, and what it decided (super::supervisor); none for the
+    /// owner's own turns.
+    pub supervising: Option<Arc<super::supervisor::Watch>>,
 }
 
 impl Session {
@@ -363,7 +366,7 @@ pub async fn run(
     let tool = shared.config.conversation.agent;
     let why = match shared.jobs.signed_in_account(tool) {
         None => format!("no {} account is signed in for conversations", tool.name()),
-        Some(account) => match session(shared, &account, said, given, asked, control).await {
+        Some(account) => match session(shared, &account, said, given, asked, control, None).await {
             Ok(answered) => return answered,
             Err(why) => why,
         },
@@ -383,6 +386,27 @@ pub async fn run(
     let why = placed(&crate::secrets::known().redact(&why), &homes(shared));
     answered.talk = said_why(answered.talk, &why);
     answered
+}
+
+/// A supervisor turn (super::supervisor) in its conversation's session, on `account`: never the
+/// plan loop, which would read obid's words as the owner's. `Err` says why it couldn't run.
+pub(super) async fn supervise(
+    shared: &Arc<Shared>,
+    account: &crate::config::Account,
+    asked: &Asked<'_>,
+    control: &Arc<Control>,
+    watch: Arc<super::supervisor::Watch>,
+) -> Result<Answered, String> {
+    session(
+        shared,
+        account,
+        asked.said,
+        &[],
+        asked,
+        control,
+        Some(watch),
+    )
+    .await
 }
 
 /// The plan loop's answer, with the line that says why it answered.
@@ -722,6 +746,7 @@ async fn session(
     given: &[Turn],
     asked: &Asked<'_>,
     control: &Arc<Control>,
+    supervising: Option<Arc<super::supervisor::Watch>>,
 ) -> Result<Answered, String> {
     let watch = Stopwatch::new();
     let place = Place::of(&shared.config.home, &control.conversation);
@@ -755,7 +780,13 @@ async fn session(
         account: account.id.clone(),
         room: place.room.clone(),
         artifacts: Mutex::new(vec![]),
+        supervising,
     });
+    // A supervisor turn is about what an agent wrote: nothing it does counts as the owner's own
+    // words, except what super::supervisor lets it do by itself.
+    if session.supervising.is_some() {
+        session.taint();
+    }
     // Its Claude Code still running from the turn before, on the same session and account.
     let warm = (shared.config.conversation.agent == Tool::Claude)
         .then(|| {
@@ -2197,6 +2228,7 @@ mod tests {
             account: "a".into(),
             room: place.room.clone(),
             artifacts: Mutex::new(vec![]),
+            supervising: None,
         };
         // The run names its session: kept at once, unmarked.
         session.keep(Some("c0000000-0000-4000-8000-000000000001"));
@@ -2410,6 +2442,7 @@ mod tests {
             account: "a".into(),
             room: PathBuf::from("/nowhere/room"),
             artifacts: Mutex::new(vec![]),
+            supervising: None,
         }));
         assert!(sessions.session("conversation-c1", &token).is_some());
         assert!(sessions.session("conversation-c2", &token).is_none());

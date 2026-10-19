@@ -167,6 +167,11 @@ impl Turns {
             .any(|c| c.conversation != super::orchestrator::CONVERSATION)
     }
 
+    /// Whether a turn is under way in `conversation`: a supervisor turn waits for it to end.
+    pub fn underway_in(&self, conversation: &str) -> bool {
+        self.lock().iter().any(|c| c.conversation == conversation)
+    }
+
     /// The conversation of the latest turn under way.
     pub fn latest_conversation(&self) -> Option<String> {
         self.lock().last().map(|c| c.conversation.clone())

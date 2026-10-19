@@ -117,7 +117,11 @@ impl Seen {
         };
         let now = Snapshot::of(job);
         let before = self.jobs.insert(id.to_owned(), now.clone());
-        if !job["dismissed"].is_null() {
+        // A stalled job a conversation started is that conversation's to supervise
+        // (super::supervisor), not an event of the orchestrator's.
+        if !job["dismissed"].is_null()
+            || (!job["stalled"].is_null() && !job["conversation"].is_null())
+        {
             return vec![];
         }
         let before = before.unwrap_or_default();
@@ -892,6 +896,12 @@ mod tests {
         let mut dismissed = job("failed");
         dismissed["dismissed"] = serde_json::json!("2026-10-17T00:00:00Z");
         assert!(Seen::default().job(&dismissed).is_empty());
+        // A stalled job its conversation supervises is no event here; one with no conversation is.
+        let mut stalled = job("failed");
+        stalled["stalled"] = serde_json::json!({"text": "no progress for 15 minutes"});
+        assert_eq!(Seen::default().job(&stalled).len(), 1);
+        stalled["conversation"] = serde_json::json!("c1");
+        assert!(Seen::default().job(&stalled).is_empty());
     }
 
     /// Every published job says obid doesn't run Oby's review yet (#525): that's no event, or

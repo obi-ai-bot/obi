@@ -668,7 +668,14 @@ pub fn job_report(job: &Value) -> Option<(String, String)> {
             }
             (None, None) => format!("{title} is done."),
         },
-        "failed" => format!("{title} failed."),
+        // A stall says why in obid's words (`stalled.text`), and its conversation decides next.
+        "failed" => match job["stalled"]["text"].as_str() {
+            Some(why) => format!(
+                "{title} stalled: {}.",
+                crate::brain::briefing::line(why, 120)
+            ),
+            None => format!("{title} failed."),
+        },
         "stopped" => format!("{title} was stopped."),
         "interrupted" => format!("{title} was interrupted."),
         _ => return None,
@@ -1034,6 +1041,13 @@ mod tests {
         assert_eq!(
             job_report(&job("interrupted")).unwrap().1,
             "Fix oby #351 was interrupted."
+        );
+        // A stall says why in obid's words; its conversation decides what comes next.
+        let mut stalled = job("failed");
+        stalled["stalled"] = json!({"text": "no progress for 15 minutes", "note": "Left: tests"});
+        assert_eq!(
+            job_report(&stalled).unwrap().1,
+            "Fix oby #351 stalled: no progress for 15 minutes."
         );
         // Nothing for a job still under way, one no conversation started, or one let go.
         assert_eq!(job_report(&job("running")), None);

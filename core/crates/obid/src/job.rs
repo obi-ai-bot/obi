@@ -274,6 +274,26 @@ pub struct Job {
     /// for a follow-up of work that isn't merged. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_from: Option<String>,
+    /// What the conversation that owns it did by itself each time it stalled
+    /// (crate::brain::supervisor), oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supervised: Vec<Supervision>,
+}
+
+/// One decision of the conversation about a job of its that stalled (crate::brain::supervisor).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Supervision {
+    pub at: i64,
+    /// `continue`, `restart` or `split`; `asked` when it left the next step to the owner.
+    pub decision: String,
+    /// The jobs it started: the restart, or the split's parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<String>,
+    /// Its turn in the conversation.
+    pub turn: String,
+    /// The automatic steps the job and the jobs it follows up had taken, this one included; for
+    /// `asked`, those taken before.
+    pub count: usize,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -370,6 +390,7 @@ impl Job {
             follow_up_of: None,
             earlier: None,
             start_from: None,
+            supervised: Vec::new(),
         }
     }
 
@@ -610,6 +631,10 @@ impl Job {
             "artifacts": self.artifacts.iter().map(|a| json!({"id": a.id, "version": a.version})).collect::<Vec<_>>(),
             "artifactProblems": self.artifact_problems,
             "followUpOf": self.follow_up_of,
+            "supervised": self.supervised.iter().map(|s| json!({
+                "at": obi_protocol::time::format(s.at), "decision": s.decision, "jobs": s.jobs,
+                "turn": s.turn, "count": s.count, "of": crate::brain::supervisor::MOST,
+            })).collect::<Vec<_>>(),
         });
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
@@ -948,8 +973,9 @@ mod tests {
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's eight.
-        assert_eq!(object.len(), 74);
+        // The Swift runner's 65 keys, obid's eight, `stalled` and `supervised`.
+        assert_eq!(object.len(), 75);
+        assert_eq!(value["supervised"], json!([]));
         assert_eq!(value["artifacts"], json!([]));
         assert_eq!(value["artifactProblems"], json!([]));
         assert_eq!(value["answered"], json!([]));
