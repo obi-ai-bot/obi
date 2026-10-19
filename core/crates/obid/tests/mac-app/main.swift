@@ -101,6 +101,8 @@ do {
             say("event accounts \(accounts.count)")
         case .check, .turn, .step, .conversation, .delta, .artifact:
             say("event other")
+        case .github(let work):
+            say("event github \(work.signedIn)")
         }
     }
     say("events ended")
