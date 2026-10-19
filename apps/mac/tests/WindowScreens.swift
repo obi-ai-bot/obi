@@ -133,6 +133,38 @@ struct WindowScreens {
         try await shoot("mac-convo-working", model: model, state: state, sidebar: false)
     }
 
+    /// Your GitHub work (`GET /v1/github/work`): Review PR with what waits for your review and your
+    /// own pull request, beside the jobs already on it.
+    @Test func gitHubReview() async throws {
+        let model = model()
+        model.feed.apply(gitHub())
+        let state = ChatState()
+        state.trail.start(.group(.review))
+        try await shoot("mac-github-review", model: model, state: state)
+    }
+
+    /// Issues while obid's gh isn't signed in: Connect GitHub first.
+    @Test func gitHubConnect() async throws {
+        let model = model()
+        model.feed.apply(GitHubWork(signedIn: false))
+        let state = ChatState()
+        state.trail.start(.group(.issues))
+        try await shoot("mac-github-connect", model: model, state: state)
+    }
+
+    func gitHub() -> GitHubWork {
+        GitHubWork(signedIn: true, login: "well-prado", items: [
+            .init(id: "a1", list: .reviews, repo: "deskree-inc/tetrix-ee", number: 389, title: "webhook fix", url: "https://github.com/deskree-inc/tetrix-ee/pull/389",
+                  author: "Ernesto", updated: now - 1500),
+            .init(id: "a2", list: .reviews, repo: "deskree-inc/tetrix-front-end", number: 405, title: "usage meters", url: "https://github.com/deskree-inc/tetrix-front-end/pull/405",
+                  author: "Daniel", updated: now - 7000, known: false),
+            .init(id: "a3", list: .mine, repo: "deskree-inc/oby", number: 700, title: "Pair a device sends you to Remote access",
+                  url: "https://github.com/deskree-inc/oby/pull/700", author: "well-prado", updated: now - 3000, reviewDecision: "CHANGES_REQUESTED", checks: "SUCCESS"),
+            .init(id: "a4", list: .assigned, repo: "deskree-inc/oby", number: 640, title: "Clear done keeps a merged job", url: "https://github.com/deskree-inc/oby/issues/640",
+                  author: "well-prado", updated: now - 4000),
+        ])
+    }
+
     @Test func task() async throws {
         let state = ChatState(defaults: .scratch)
         state.trail.start(.group(.review), .job(id: "r2", local: false))

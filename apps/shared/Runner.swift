@@ -685,6 +685,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     case delta(TurnDelta)
     /// An artifact was made, got a version, or was deleted (obid only).
     case artifact(ArtifactEvent)
+    /// Your work on GitHub changed, or obid's gh signed in or out (obid only): the whole list.
+    case github(GitHubWork)
 }
 
 #if os(iOS) || os(watchOS)
@@ -1013,6 +1015,25 @@ nonisolated struct Runner: Sendable {
 
     /// One job, however old: the list has only the latest 50.
     func job(_ id: String) async throws -> Job { try await call("GET", "v1/jobs/\(id)") }
+
+    /// Your work on GitHub as obid's gh finds it (docs/runner-api.md, "obid only: GitHub work"),
+    /// or nil from a runner that doesn't list it.
+    func gitHubWork() async throws -> GitHubWork? {
+        do {
+            return try await call("GET", "v1/github/work")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// Has obid read GitHub now; answers the feed once the read ends (up to 2 minutes).
+    func refreshGitHubWork() async throws -> GitHubWork { try await call("POST", "v1/github/work/refresh", timeout: 150) }
+
+    /// Starts Oby's job on a GitHub item, a review or a fix: the new job, or the one already on it.
+    @discardableResult
+    func startGitHubWork(_ id: String) async throws -> Job {
+        try await call("POST", "v1/github/work/\(id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id)/start")
+    }
     func report(_ id: String) async throws -> ResearchDocument { try await call("GET", "v1/jobs/\(id)/report") }
 
     /// The job's raw session after line `after` (#381), oldest first: a list, or `{entries: […]}`.
@@ -1635,6 +1656,7 @@ nonisolated struct EventParser {
             case "conversation": return (try? Runner.decoder.decode(RunnerConversation.self, from: json)).map(RunnerEvent.conversation)
             case "delta": return (try? Runner.decoder.decode(TurnDelta.self, from: json)).map(RunnerEvent.delta)
             case "artifact": return (try? Runner.decoder.decode(ArtifactEvent.self, from: json)).map(RunnerEvent.artifact)
+            case "github": return (try? Runner.decoder.decode(GitHubWork.self, from: json)).map(RunnerEvent.github)
             default: return nil
             }
         }

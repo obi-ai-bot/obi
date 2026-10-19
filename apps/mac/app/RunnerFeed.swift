@@ -125,6 +125,38 @@ final class RunnerFeed {
     /// pull requests, as it last said (Settings › Connectors); nil from older runners.
     private(set) var github: String?
     private(set) var checkRuns: String?
+    /// Your work on GitHub as obid's gh finds it (Review PR and Issues), nil from a runner that doesn't list it.
+    private(set) var gitHubWork: GitHubWork?
+    /// The GitHub items put off with Later, until Oby quits.
+    var gitHubLater: Set<String> = []
+
+    /// obid's GitHub work, as the `github` event or a refresh brings it: the whole feed.
+    func apply(_ work: GitHubWork) { gitHubWork = work }
+
+    /// Has obid read GitHub again (opening Review PR or Issues); the feed it answers replaces this one.
+    func refreshGitHubWork() async {
+        guard let runner else { return }
+        #if DEBUG
+        if GitHubWork.sample != nil { return }
+        #endif
+        await readGitHub { try await runner.refreshGitHubWork() }
+    }
+
+    /// Applies obid's answer about GitHub to the feed as it is by then, unless the runner changed meanwhile.
+    private func readGitHub(_ ask: () async throws -> GitHubWork?) async {
+        let asked = runnerChanges
+        let answer = await GitHubWork.ask(ask)
+        guard runnerChanges == asked else { return }
+        gitHubWork = answer.applied(to: gitHubWork)
+    }
+
+    /// One click on a GitHub item: Oby's job on it, which joins the list as the runner's job.
+    func startGitHubWork(_ id: String) async throws {
+        guard let runner else { throw RunnerError(message: "Oby isn't following a runner.") }
+        let asked = runnerChanges
+        let job = try await runner.startGitHubWork(id)
+        if runnerChanges == asked { apply(job) }
+    }
     /// Merge checks this Mac runs for the runner (Settings › Runner, on by default).
     let checks = MacChecks()
     /// This Mac's Touch ID key, registered on every connection: with it, the runner's jobs publish from here.
@@ -271,6 +303,8 @@ final class RunnerFeed {
         version = nil
         github = nil
         checkRuns = nil
+        gitHubWork = nil
+        gitHubLater = []
         clearedAt = nil
         notified = nil
         conversation.forget()
@@ -314,6 +348,10 @@ final class RunnerFeed {
                         cleanup = status.cleanup
                         github = status.github
                         checkRuns = status.checks
+                        await readGitHub { try await runner.gitHubWork() }
+                        #if DEBUG
+                        if let sample = GitHubWork.sample { gitHubWork = sample }
+                        #endif
                         defaultMode = RunnerMode(status.permissions?.mode)
                         self.extras = extras
                         await take(list, from: runner)
@@ -351,6 +389,7 @@ final class RunnerFeed {
                     case .step(let step): if conversations.shows(step.conversation) { conversation.apply(step) }
                     case .delta(let delta): if conversations.shows(delta.conversation) { conversation.apply(delta) }
                     case .artifact(let artifact): conversation.apply(artifact)
+                    case .github(let work): apply(work)
                     case .conversation(let change): conversations.apply(change)
                     }
                 }
