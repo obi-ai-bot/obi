@@ -4,7 +4,7 @@ A proposal for the page a task opens to, on the Mac and the iPhone. It's design 
 
 Canvas (Claude Design, private until shared): https://claude.ai/artifact/Mrtz8qT4UaxLHqD8EkaJwh
 
-The canvas follows one real job from start to finish: "Give the scan's first block a fix round" in `obi-ai-bot/obi` (the work behind #722), run by Claude Code on the Personal account. Each row is one state. Every row has the Mac page and the iPhone page, both in dark and light:
+The canvas follows one real job from start to finish: "Give the scan's first block a fix round" in `obi-ai-bot/obi` (the work behind #722), run by Claude Code on the Personal account. Each row is one state, with B, the layout the owner picked, on the left (`B-*` and `BP-*` boards) and A on the right. Both have the Mac page and the iPhone page, in dark and light:
 
 1. Working: tools are streaming. This row is the hero.
 2. Planning: Plan mode, reading before it changes anything.
@@ -12,9 +12,20 @@ The canvas follows one real job from start to finish: "Give the scan's first blo
 4. Running checks.
 5. Failed, with the reason, and nothing sent.
 6. Done, with the pull request.
-7. Alternative B (timeline first), and the raw session on the Mac and iPhone.
+7. The raw session on the Mac and iPhone.
 
-## What's on the page (recommended: A, current step first)
+## The decision: B, timeline first (2026-10-19)
+
+The owner picked B. The stages are the page's spine: the tool groups hang under Work, the checks under Check and Publish, and usage is one line of small bars. It keeps four things from A, in a lean form:
+
+- the stage's context sentence, under its one-line detail;
+- the estimate's basis, in one line under the time track;
+- the detail line (counts, files, `+/−`) on the open group only;
+- this job's share of each window as a number ("46% · this job ≈ 11%").
+
+Everything below describes the parts both layouts share; B arranges them on the timeline.
+
+## What's on the page (A, current step first)
 
 Sangam's order stays the same: the title and its meta line, then the decision card when there is one, then the parts as quiet cards, with the message box at the foot. While the job runs, Stop sits in the message box's end slot (A14).
 
@@ -40,10 +51,6 @@ Sangam's order stays the same: the title and its meta line, then the decision ca
   - The message box, which asks for a follow-up.
 - **Details.** Repository, branch into base, model and effort, mode (also a pill by the meta line, so it can be changed), "Done when", and where it was asked.
 - **iPhone.** Same order, tighter. The counts scroll sideways, only the open group shows, and Stages and Details fold into rows once the job is done. The session opens as a sheet.
-
-## Alternative B: timeline first
-
-The stages are the page's spine. The tool groups hang under Work, the checks under Check, and usage shrinks to one line of small bars. It reads well when you want to see where the time went, but what's happening now sits lower down, and the page gets long while Work is open. I recommend A, and showing B's spine inside Stages, as A already does.
 
 ## How the estimate works (proposed)
 
