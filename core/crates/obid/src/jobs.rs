@@ -39,6 +39,8 @@ pub const CHECK_TOO_LONG: &str = "obid stopped it after 20 minutes, the most a t
 const CHECK_OUTPUT_MAX: usize = 64 * 1024;
 /// How long git in a job's sandbox may take.
 const SANDBOXED_GIT_LIMIT: Duration = Duration::from_secs(600);
+/// How much of what git in a job's sandbox says on stderr obid keeps: its end.
+const SANDBOXED_GIT_STDERR_MAX: usize = 64 * 1024;
 /// How long reading a round's diff stat may take, and how much it may print (#736): a round goes
 /// on without its stat rather than wait on it.
 const DIFF_LIMIT: Duration = Duration::from_secs(60);
@@ -4829,9 +4831,20 @@ async fn sandboxed_output(
                 }
                 Ok(out)
             },
+            // Its end only, all of it read so git never waits on it: the last line is what's said.
             async {
                 let mut err = Vec::new();
-                stderr.read_to_end(&mut err).await?;
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let n = stderr.read(&mut buffer).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    err.extend_from_slice(&buffer[..n]);
+                    if err.len() > 2 * SANDBOXED_GIT_STDERR_MAX {
+                        err.drain(..err.len() - SANDBOXED_GIT_STDERR_MAX);
+                    }
+                }
                 Ok(err)
             },
         )?;
@@ -6809,6 +6822,15 @@ mod tests {
             too_much.contains("printed more than 100 bytes"),
             "{too_much}"
         );
+        // A failure's last line is said, however much came before it on stderr.
+        let said = run(
+            "yes noise | head -n 200000 >&2; echo the last line >&2; false",
+            10,
+            100,
+        )
+        .await
+        .unwrap_err();
+        assert!(said.ends_with("failed: the last line"), "{said}");
         let too_long = run("sleep 30", 1, 100).await.unwrap_err();
         assert!(too_long.contains("took more than 1 seconds"), "{too_long}");
     }
