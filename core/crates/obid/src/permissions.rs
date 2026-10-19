@@ -948,14 +948,69 @@ fn read_until(
 }
 
 /// Where the program of a simple command is, after assignments (`FOO=1`) and wrappers (`sudo`,
-/// `timeout 5s`, `env -i`) with their options and numbers.
+/// `timeout 5s`, `env -i`, `env -C dir`) with their options and numbers.
 fn program_index(words: &[String]) -> Option<usize> {
-    words.iter().position(|w| {
+    let mut i = 0;
+    while let Some(w) = words.get(i) {
         let digits = w.trim_end_matches(['s', 'm', 'h', 'd']);
         let number = digits.starts_with(|c: char| c.is_ascii_digit())
             && digits.chars().all(|c| c.is_ascii_digit() || c == '.');
-        !(is_assignment(w) || w.starts_with('-') || number || WRAPPERS.contains(&base(w)))
-    })
+        if !(is_assignment(w) || w.starts_with('-') || number || WRAPPERS.contains(&base(w))) {
+            return Some(i);
+        }
+        // `env -C dir`: the folder isn't the program.
+        let env_folder =
+            matches!(w.as_str(), "-C" | "--chdir") && words[..i].iter().any(|w| base(w) == "env");
+        i += if env_folder { 2 } else { 1 };
+    }
+    None
+}
+
+/// The folders a simple command names to work in, in order, each with the index of the word it's
+/// in: `git -C dir` (before git's subcommand), `make -C dir` or `--directory=dir`, `tar -C dir`
+/// or `--directory=dir`, `env -C dir` or `--chdir=dir`. A `-C` with nothing after it names `""`.
+fn own_folders(words: &[String]) -> Vec<(usize, &str)> {
+    let p = program_index(words).unwrap_or(words.len());
+    let mut found = Vec::new();
+    // `-C dir`, `-Cdir` when `joined`, `<long> dir` and `<long>=dir`, in `words[from..to]`.
+    let mut options = |from: usize, to: usize, joined: bool, long: Option<&str>, git: bool| {
+        let mut i = from;
+        while i < to {
+            let w = words[i].as_str();
+            if w == "-C" || Some(w) == long {
+                found.push(match words.get(i + 1).filter(|_| i + 1 < to) {
+                    Some(dir) => (i + 1, dir.as_str()),
+                    None => (i, ""),
+                });
+                i += 2;
+                continue;
+            }
+            let attached = long
+                .and_then(|long| w.strip_prefix(long))
+                .and_then(|dir| dir.strip_prefix('='))
+                .or_else(|| w.strip_prefix("-C").filter(|_| joined));
+            if let Some(dir) = attached {
+                found.push((i, dir));
+            } else if git && !w.starts_with('-') {
+                // git's subcommand: a `-C` after it is the subcommand's (`git log -C`).
+                break;
+            } else if git && w == "-c" {
+                i += 1;
+            }
+            i += 1;
+        }
+    };
+    if let Some(env) = words[..p].iter().rposition(|w| base(w) == "env") {
+        options(env + 1, p, true, Some("--chdir"), false);
+    }
+    match words.get(p).map(|w| base(w)) {
+        Some("git") => options(p + 1, words.len(), false, None, true),
+        Some("make" | "gmake" | "tar" | "gtar" | "bsdtar") => {
+            options(p + 1, words.len(), true, Some("--directory"), false);
+        }
+        _ => {}
+    }
+    found
 }
 
 /// The subcommand of a tool's command: the first word after the tool's own options, and after the
@@ -1223,6 +1278,14 @@ impl Bounds {
             Some(dir) if dir == "-" || dir.starts_with('+') => None,
             Some(dir) => self.path_of(dir, from),
         }
+    }
+
+    /// Where a simple command run from `at` works: where its own folders ([`own_folders`]) lead,
+    /// each followed like a `cd`, or `at`; none when obid can't tell where one is (#636).
+    fn works_in(&self, folders: &[(usize, &str)], at: &Path) -> Option<PathBuf> {
+        folders
+            .iter()
+            .try_fold(at.to_path_buf(), |here, (_, dir)| self.path_of(dir, &here))
     }
 
     /// Whether `path` is in the agent's login folders, as written or after links.
@@ -1527,44 +1590,55 @@ pub fn reads_beyond(command: &str, bounds: &Bounds) -> bool {
 
 /// Whether a command names a file outside what the job may read without asking: an absolute path
 /// (or one from `~`) that isn't in its worktree, its temporary folder or the system's folders, or
-/// any command after a `cd` whose folder obid can't tell ([`with_folders`]).
+/// any command after a `cd` whose folder obid can't tell ([`with_folders`]). A command's own
+/// folder (`git -C dir`, [`own_folders`]) is where its relative words are read from, and is
+/// outside the same way.
 fn reads_outside(command: &str, bounds: &Bounds) -> bool {
     let Some(commands) = simple_commands(command) else {
         return true;
     };
+    let outside = |path: &Path| {
+        if bounds.holds(&path.to_string_lossy()) {
+            return false;
+        }
+        // A system folder as written (`..` taken out) and after links: `/home` leads into
+        // `/System` on macOS, and `../../x` or a link out of the worktree is out.
+        let system = |p: &Path| SYSTEM_FOLDERS.iter().any(|f| p.starts_with(f));
+        let written: PathBuf = path.components().fold(PathBuf::new(), |mut out, c| {
+            match c {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                other => out.push(other),
+            }
+            out
+        });
+        let real = crate::policy::real_path(path).unwrap_or_else(|| written.clone());
+        !(system(&written) && system(&real))
+    };
     with_folders(&commands, bounds).iter().any(|(words, at)| {
-        let Some(at) = at else {
+        let folders = own_folders(words);
+        let Some(here) = at.as_deref().and_then(|at| bounds.works_in(&folders, at)) else {
             return true;
         };
-        file_words(words).into_iter().any(|word| {
-            word.split('=').any(|part| {
-                let Some(path) = bounds.path_of(part, at) else {
-                    return false;
-                };
-                // `awk '/x/ {print}'`: a quoted program, not a file.
-                if part.contains(char::is_whitespace) {
-                    return false;
-                }
-                if bounds.holds(&path.to_string_lossy()) {
-                    return false;
-                }
-                // A system folder as written (`..` taken out) and after links: `/home` leads into
-                // `/System` on macOS, and `../../x` or a link out of the worktree is out.
-                let system = |p: &Path| SYSTEM_FOLDERS.iter().any(|f| p.starts_with(f));
-                let written: PathBuf = path.components().fold(PathBuf::new(), |mut out, c| {
-                    match c {
-                        Component::ParentDir => {
-                            out.pop();
-                        }
-                        Component::CurDir => {}
-                        other => out.push(other),
-                    }
-                    out
-                });
-                let real = crate::policy::real_path(&path).unwrap_or_else(|| written.clone());
-                !(system(&written) && system(&real))
+        if !folders.is_empty() && outside(&here) {
+            return true;
+        }
+        let names_a_folder =
+            |word: &String| folders.iter().any(|(i, _)| std::ptr::eq(word, &words[*i]));
+        file_words(words)
+            .into_iter()
+            .filter(|word| !names_a_folder(word))
+            .any(|word| {
+                word.split('=').any(|part| {
+                    // `awk '/x/ {print}'`: a quoted program, not a file.
+                    !part.contains(char::is_whitespace)
+                        && bounds
+                            .path_of(part, &here)
+                            .is_some_and(|path| outside(&path))
+                })
             })
-        })
     })
 }
 
@@ -2941,6 +3015,31 @@ mod tests {
             ("echo $(cd src/a/b; pwd) && cat ../x", Some(Reach::Outside)),
             ("(cd src/a; (cd b); cat ../../x)", None),
             ("(cd src/a; (cd b); cat ../../../x)", Some(Reach::Outside)),
+        ] {
+            assert_eq!(super::reach(&bash(command), &bounds), reach, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #636: `git -C`, `make -C`, `tar -C` and `env -C` are read like a `cd` for their own
+    /// command: its relative words are paths from there, and a folder obid can't tell asks.
+    #[test]
+    fn a_dash_c_folder_is_read_like_a_cd() {
+        let (root, bounds) = job_folders("dash-c");
+        std::fs::create_dir_all(bounds.worktree.join("src/a/b")).unwrap();
+        for (command, reach) in [
+            ("git -C \"$OLDPWD\" status", Some(Reach::Outside)),
+            ("make -C $(pwd) test", Some(Reach::Outside)),
+            ("tar -C \"$OUT\" -xf a.tar", Some(Reach::Outside)),
+            ("env -C \"$D\" ls", Some(Reach::Outside)),
+            ("make --directory=$D", Some(Reach::Outside)),
+            ("git -C src/a/b log -- ../../../../x", Some(Reach::Outside)),
+            ("make -C src/a/b -f ../../Makefile", None),
+            ("tar -C src/a -xf ../a.tar", None),
+            ("git -C src -C a/b status", None),
+            ("cd src && git -C .. status", None),
+            ("env -C src ls", None),
+            ("git log -C HEAD", None),
         ] {
             assert_eq!(super::reach(&bash(command), &bounds), reach, "{command}");
         }
