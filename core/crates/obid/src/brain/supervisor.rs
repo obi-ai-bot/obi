@@ -344,7 +344,10 @@ async fn supervise(shared: &Arc<Shared>, job: &Job) -> bool {
         );
         return true;
     };
-    let control = shared.turns.begin(&turn, &conversation);
+    // The owner's turn began meanwhile: this one comes after it.
+    let Some(control) = shared.turns.begin_if_idle(&turn, &conversation) else {
+        return false;
+    };
     let watch = Arc::new(Watch::new(&job.id, &turn));
     let said = prompt(job, taken);
     let asked = Asked {
