@@ -202,17 +202,20 @@ fn jobs_have_iso_dates_and_every_key() {
             [
                 "answered",
                 "answeredCount",
+                "archived",
                 "artifactProblems",
                 "artifacts",
+                "changes",
                 "conversation",
                 "followUpOf",
                 "obi",
+                "stalled",
                 "supervised",
                 "worktree"
             ],
             "{body}"
         );
-        assert_eq!(keys.len(), 75);
+        assert_eq!(keys.len(), 77);
         // What obid never sets is there, as null.
         for key in [
             "published",
