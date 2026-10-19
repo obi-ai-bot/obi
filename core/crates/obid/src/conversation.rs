@@ -565,6 +565,11 @@ impl Conversations {
     }
 
     /// Forgets the conversation `id` and its turns. The jobs it started stay, with its id.
+    /// Whether the conversation `id` is there.
+    pub fn exists(&self, id: &str) -> bool {
+        self.lock().iter().any(|t| t.id == id)
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), Error> {
         let mut threads = self.lock();
         let index = threads
@@ -925,7 +930,6 @@ pub async fn remove(
     UrlPath(id): UrlPath<String>,
 ) -> Result<Response, ApiError> {
     shared.conversations.delete(&id)?;
-    shared.harness.end_warm(&id);
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

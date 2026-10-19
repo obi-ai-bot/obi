@@ -170,6 +170,8 @@ async function act(words, prompt = "", before = resumed) {
   } else if (words.startsWith("WEB ")) {
     use("w1", "WebSearch", { query: "fixture app greeting" });
     used("w1", "results");
+    // A real search takes a moment, so its step reaches obid before the next call does.
+    await new Promise((done) => setTimeout(done, 200));
     await act(words.slice(4), prompt);
   } else if (words.startsWith("CURL ")) {
     emit({ type: "control_request", request_id: "c1", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "curl -s https://example.com" } } });

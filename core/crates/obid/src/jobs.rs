@@ -535,7 +535,7 @@ impl Jobs {
         })
     }
 
-    fn being_changed(&self, account: &str) -> bool {
+    pub(crate) fn being_changed(&self, account: &str) -> bool {
         self.lock().changing.contains(account)
     }
 

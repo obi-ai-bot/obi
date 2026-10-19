@@ -112,6 +112,11 @@ impl Conn {
         })
     }
 
+    /// The agent's process id.
+    pub fn pid(&self) -> u32 {
+        self.pgid
+    }
+
     /// A running agent's next turn: `limit` from now, and `stop` its stop signal.
     pub fn renew(&mut self, limit: Duration, stop: watch::Receiver<process::Signal>) {
         self.give_up_at
@@ -120,6 +125,16 @@ impl Conn {
         self.stopped = *stop.borrow() != process::Signal::Run;
         self.stop = stop;
         self.timed_out = false;
+    }
+
+    /// Nothing waits to be read and the agent hasn't closed its output, which is how a running
+    /// agent stays between turns: looked at without waiting. A line it wrote while idle would be
+    /// taken for the next turn's.
+    pub async fn quiet(&mut self) -> bool {
+        self.lines.buffer().is_empty()
+            && tokio::time::timeout(Duration::ZERO, self.lines.fill_buf())
+                .await
+                .is_err()
     }
 
     /// The next JSON message, or why none comes. Lines that aren't JSON are skipped.

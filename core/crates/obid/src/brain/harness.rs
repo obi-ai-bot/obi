@@ -131,8 +131,12 @@ struct Warm {
     conn: crate::conn::Conn,
     token: String,
     account: String,
+    /// Where its account's login came from: a turn on the account's folder as it is now only.
+    config_dir: Option<PathBuf>,
     /// Its session's id.
     session: String,
+    /// What it was started with ([`flags_key`]): a turn that would start it otherwise starts anew.
+    key: u64,
     place: Place,
     since: Instant,
 }
@@ -175,6 +179,22 @@ impl Sessions {
         self.warm.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Ends the Claude Code waiting on `account`'s login, if any: the account is being removed,
+    /// signed in again or changed.
+    pub fn end_warm_on(&self, account: &str) {
+        let mut all = self.warm();
+        let on: Vec<String> = all
+            .iter()
+            .filter(|(_, w)| w.account == account)
+            .map(|(c, _)| c.clone())
+            .collect();
+        for conversation in on {
+            if let Some(warm) = all.remove(&conversation) {
+                warm.end();
+            }
+        }
+    }
+
     /// Ends `conversation`'s waiting Claude Code, if one waits: the conversation went.
     pub fn end_warm(&self, conversation: &str) {
         if let Some(warm) = self.warm().remove(conversation) {
@@ -189,16 +209,56 @@ impl Sessions {
         }
     }
 
-    /// `conversation`'s waiting Claude Code, when it runs `session` on `account`; one that runs
-    /// another ends.
-    fn take_warm(&self, conversation: &str, account: &str, session: Option<&str>) -> Option<Warm> {
+    /// `conversation`'s waiting Claude Code, when it runs `session` on `account`'s login as it is
+    /// now; one that runs another ends.
+    fn take_warm(
+        &self,
+        conversation: &str,
+        account: &crate::config::Account,
+        session: Option<&str>,
+    ) -> Option<Warm> {
         let mut all = self.warm();
         let warm = all.remove(conversation)?;
-        if warm.account == account && session == Some(warm.session.as_str()) {
+        if warm.account == account.id
+            && warm.config_dir == account.config_dir
+            && session == Some(warm.session.as_str())
+        {
             return Some(warm);
         }
         warm.end();
         None
+    }
+
+    /// Keeps `warm` for `conversation`'s next turn; the one waiting longest ends when
+    /// [`WARM_MOST`] already wait.
+    fn keep(&self, conversation: &str, warm: Warm) {
+        let mut all = self.warm();
+        if let Some(old) = all.insert(conversation.to_owned(), warm) {
+            old.end();
+        }
+        while all.len() > WARM_MOST {
+            let Some(oldest) = all
+                .iter()
+                .min_by_key(|(_, w)| w.since)
+                .map(|(c, _)| c.clone())
+            else {
+                break;
+            };
+            if let Some(old) = all.remove(&oldest) {
+                old.end();
+            }
+        }
+    }
+
+    /// Ends `conversation`'s waiting Claude Code when it's still the one kept at `since`: its
+    /// [`WARM_FOR`] is up.
+    fn expire(&self, conversation: &str, since: Instant) {
+        let mut all = self.warm();
+        if all.get(conversation).is_some_and(|w| w.since == since)
+            && let Some(warm) = all.remove(conversation)
+        {
+            warm.end();
+        }
     }
 
     /// The artifacts the turn `turn` published (`{id, version}` each), taken once: its answer and
@@ -237,36 +297,53 @@ impl Sessions {
 
 /// Keeps `warm` for `conversation`'s next turn, [`WARM_FOR`] at most; the one waiting longest ends
 /// when [`WARM_MOST`] already wait.
+/// It isn't kept when the conversation went, or its account is being changed or isn't there
+/// with the same folder any more, while the turn ran.
 fn keep_warm(shared: &Arc<Shared>, conversation: &str, warm: Warm) {
-    let since = warm.since;
+    let account_as_was = crate::accounts::find(&shared.config.agents.get(), &warm.account)
+        .is_some_and(|(_, a)| a.config_dir == warm.config_dir);
+    if !shared.conversations.exists(conversation)
+        || !account_as_was
+        || shared.jobs.being_changed(&warm.account)
     {
-        let mut all = shared.harness.warm();
-        if let Some(old) = all.insert(conversation.to_owned(), warm) {
-            old.end();
-        }
-        while all.len() > WARM_MOST {
-            let Some(oldest) = all
-                .iter()
-                .min_by_key(|(_, w)| w.since)
-                .map(|(c, _)| c.clone())
-            else {
-                break;
-            };
-            if let Some(old) = all.remove(&oldest) {
-                old.end();
-            }
-        }
+        warm.end();
+        return;
     }
+    let since = warm.since;
+    shared.harness.keep(conversation, warm);
     let (shared, conversation) = (shared.clone(), conversation.to_owned());
     tokio::spawn(async move {
         tokio::time::sleep(WARM_FOR).await;
-        let mut all = shared.harness.warm();
-        if all.get(&conversation).is_some_and(|w| w.since == since)
-            && let Some(warm) = all.remove(&conversation)
-        {
-            warm.end();
+        shared.harness.expire(&conversation, since);
+    });
+}
+
+/// A conversation's deleted (`DELETE /v1/conversations/{id}`, or the oldest forgotten past the
+/// most kept): its waiting Claude Code ends. Started once, by obid's start.
+pub fn end_warm_with_conversations(shared: Arc<Shared>) {
+    let mut events = shared.events.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) if event.name == "conversation" && event.data["deleted"] == true => {
+                    if let Some(id) = event.data["id"].as_str() {
+                        shared.harness.end_warm(id);
+                    }
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
         }
     });
+}
+
+/// What a run's command line says, in one number: a waiting Claude Code started with other flags
+/// (another model, other repositories in its orientation) isn't given the turn.
+fn flags_key(flags: &[OsString]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    flags.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Runs one conversation turn: in its session when conversations are on the harness and a Claude
@@ -684,7 +761,7 @@ async fn session(
         .then(|| {
             shared.harness.take_warm(
                 &control.conversation,
-                &account.id,
+                account,
                 resumed.as_ref().map(|k| k.session.as_str()),
             )
         })
@@ -860,6 +937,7 @@ async fn attempts(
         .iter()
         .map(OsString::from)
         .collect();
+        let key = flags_key(&flags);
         if let Some(session) = &resume {
             flags.extend(["--resume".into(), session.into()]);
         }
@@ -873,39 +951,52 @@ async fn attempts(
         // too (it loads nothing again, but the rule is the turn's).
         place.scrub();
         let was_warm = warm.is_some();
-        let (run, codex) = match warm.take() {
-            // Its Claude Code is waiting with a login copy good for the turn: the words go to it.
-            Some(warm) if crate::jobs::login_copy_lasts(place.login_for(account)) => {
+        // Its Claude Code is given the turn when it was started as this run would be, its login
+        // copy is good for the turn, and it wrote nothing while it waited (a line read now would be
+        // taken for this turn's); else it ends, and the turn starts one.
+        let warm = match warm.take() {
+            Some(mut warm)
+                if warm.key == key && crate::jobs::login_copy_lasts(place.login_for(account)) =>
+            {
+                if warm.conn.quiet().await {
+                    Some(warm)
+                } else {
+                    warm.end();
+                    None
+                }
+            }
+            Some(stale) => {
+                stale.end();
+                None
+            }
+            None => None,
+        };
+        let (run, codex) = match warm {
+            Some(warm) => {
                 watch.mark("its Claude Code was running");
                 (Run::Warm(Box::new(warm.conn)), None)
             }
-            stale => {
-                if let Some(warm) = stale {
-                    warm.end();
+            None => match tool {
+                Tool::Codex => {
+                    let (launch, codex) =
+                        super::harness_codex::launch(shared, account, place, &url, token, &resume)
+                            .await?;
+                    (Run::Cold(launch), codex)
                 }
-                match tool {
-                    Tool::Codex => {
-                        let (launch, codex) = super::harness_codex::launch(
-                            shared, account, place, &url, token, &resume,
-                        )
-                        .await?;
-                        (Run::Cold(launch), codex)
-                    }
-                    _ => {
-                        let launch = shared.jobs.conversation_launch(
-                            Tool::Claude,
-                            account,
-                            &place.room,
-                            &place.temp,
-                            place.login_for(account),
-                            vec![place.repos.clone()],
-                            flags,
-                            place.folder.join("agent.log"),
-                        )?;
-                        (Run::Cold(launch), None)
-                    }
+                _ => {
+                    let launch = shared.jobs.conversation_launch(
+                        Tool::Claude,
+                        account,
+                        &place.room,
+                        &place.temp,
+                        place.login_for(account),
+                        vec![place.repos.clone()],
+                        flags,
+                        place.folder.join("agent.log"),
+                    )?;
+                    (Run::Cold(launch), None)
                 }
-            }
+            },
         };
         watch.mark("starting");
         let turn = one(
@@ -962,7 +1053,9 @@ async fn attempts(
                 conn,
                 token: token.to_owned(),
                 account: account.id.clone(),
+                config_dir: account.config_dir.clone(),
                 session: id.clone(),
+                key,
                 place: place.clone(),
                 since: Instant::now(),
             }),
@@ -1670,6 +1763,11 @@ async fn swap(
 ) -> Result<(), String> {
     let (owner, name) = repo.repo.split_once('/').ok_or("it isn't owner/name")?;
     let tree = tree_at(shared, repo, sha).await?;
+    // The conversation went while the tree was made: nothing of it is made again.
+    if !place.repos.is_dir() {
+        let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(tree)).await;
+        return Err("its conversation went".into());
+    }
     let owners = place.repos.join(owner);
     let dest = owners.join(name);
     for dir in [&owners, &dest] {
@@ -1841,6 +1939,118 @@ async fn extract(shared: &Shared, repo: &str, sha: &str, dest: &Path) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in for a waiting Claude Code (`cat`, which waits on its stdin), kept for `account`
+    /// on `config_dir` with `session`.
+    async fn waiting(account: &str, config_dir: Option<&str>, session: &str) -> Warm {
+        let root = std::env::temp_dir().join(format!("obid-warm-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let launch = agent::Launch {
+            argv: vec!["/bin/cat".into()],
+            env: vec![],
+            cwd: root.clone(),
+            stderr: root.join("agent.log"),
+        };
+        let (_signal, stop) = tokio::sync::watch::channel(crate::process::Signal::Run);
+        let conn = crate::conn::Conn::spawn(&launch, Duration::from_secs(600), stop, false)
+            .await
+            .unwrap();
+        Warm {
+            conn,
+            token: "t".into(),
+            account: account.into(),
+            config_dir: config_dir.map(PathBuf::from),
+            session: session.into(),
+            key: 1,
+            place: Place::of(&root, "c"),
+            since: Instant::now(),
+        }
+    }
+
+    fn account(id: &str, config_dir: Option<&str>) -> crate::config::Account {
+        crate::config::Account {
+            id: id.into(),
+            name: id.into(),
+            config_dir: config_dir.map(PathBuf::from),
+            payer: None,
+        }
+    }
+
+    /// Whether `pid` ends within 10 seconds.
+    async fn ends(pid: u32) -> bool {
+        let give_up_at = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < give_up_at {
+            let alive =
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok();
+            // An ended child stays a zombie until it's reaped: ask its state.
+            let zombie = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().starts_with('Z'))
+                .unwrap_or(false);
+            if !alive || zombie {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// A waiting Claude Code is given a turn only on the same session and the same account's login
+    /// as it is now; one on another ends.
+    #[tokio::test]
+    async fn a_waiting_claude_code_runs_only_its_own_session_on_its_own_login() {
+        let sessions = Sessions::default();
+        for (who, folder, session) in [
+            ("b", Some("/a"), "s1"),
+            ("a", Some("/elsewhere"), "s1"),
+            ("a", Some("/a"), "s2"),
+        ] {
+            let warm = waiting("a", Some("/a"), "s1").await;
+            let pid = warm.conn.pid();
+            sessions.keep("c", warm);
+            assert!(
+                sessions
+                    .take_warm("c", &account(who, folder), Some(session))
+                    .is_none()
+            );
+            assert!(ends(pid).await, "{who} {folder:?} {session}");
+        }
+        sessions.keep("c", waiting("a", Some("/a"), "s1").await);
+        let mine = sessions.take_warm("c", &account("a", Some("/a")), Some("s1"));
+        assert!(mine.is_some());
+        mine.unwrap().end();
+    }
+
+    /// At most WARM_MOST wait: the one kept longest ago ends. One ends when its time is up, and
+    /// they end with their account's change.
+    #[tokio::test]
+    async fn at_most_three_wait_each_for_its_time() {
+        let sessions = Sessions::default();
+        let mut pids = vec![];
+        for c in ["c1", "c2", "c3", "c4"] {
+            let warm = waiting("a", None, "s").await;
+            pids.push(warm.conn.pid());
+            sessions.keep(c, warm);
+        }
+        assert!(ends(pids[0]).await, "the oldest ends");
+        assert_eq!(sessions.warm().len(), WARM_MOST);
+        let since = sessions.warm()["c2"].since;
+        sessions.expire("c2", Instant::now());
+        assert!(
+            sessions.warm().contains_key("c2"),
+            "a newer one's time isn't up"
+        );
+        sessions.expire("c2", since);
+        assert!(!sessions.warm().contains_key("c2"));
+        assert!(ends(pids[1]).await);
+        sessions.keep("c5", waiting("b", None, "s").await);
+        sessions.end_warm_on("a");
+        assert_eq!(sessions.warm().keys().collect::<Vec<_>>(), vec!["c5"]);
+        assert!(ends(pids[2]).await && ends(pids[3]).await);
+        sessions.end_all_warm();
+        assert!(sessions.warm().is_empty());
+    }
 
     #[test]
     fn steps_name_the_tool_and_what_it_is_about() {

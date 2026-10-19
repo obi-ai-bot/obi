@@ -316,6 +316,8 @@ pub async fn serve(
     // Each repository's spare tree for the conversations' rooms, so a new one
     // doesn't wait for one to be extracted (docs/fast-replies.md).
     brain::harness::prepare_rooms(&shared);
+    // A deleted conversation's waiting Claude Code ends with it.
+    brain::harness::end_warm_with_conversations(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
     brain::orchestrator::spawn(shared.clone());
     // Every event a plug-in emits becomes a `pluginEvent` inbox item. The receiver ends once

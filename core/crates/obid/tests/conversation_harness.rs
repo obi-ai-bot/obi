@@ -263,15 +263,7 @@ fn the_next_turn_goes_to_the_waiting_claude_code() {
     assert_eq!(recorded[0]["pid"], recorded[1]["pid"], "{recorded:?}");
     assert_eq!(recorded[1]["prompt"], "REMEMBER");
     let pid = recorded[0]["pid"].to_string();
-    let alive = || {
-        std::process::Command::new("kill")
-            .args(["-0", &pid])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap()
-            .success()
-    };
-    assert!(alive(), "it waits for the next turn");
+    assert!(alive(&pid), "it waits for the next turn");
     let gone = call(
         &obid,
         "DELETE",
@@ -279,11 +271,96 @@ fn the_next_turn_goes_to_the_waiting_claude_code() {
         None,
     );
     assert_eq!(gone.status, 204, "{}", gone.text);
+    assert!(ends_soon(&pid), "it ends with its conversation");
+}
+
+/// Whether the process `pid` runs.
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// Whether the process `pid` ends within 15 seconds.
+fn ends_soon(pid: &str) -> bool {
     let give_up_at = Instant::now() + Duration::from_secs(15);
-    while alive() && Instant::now() < give_up_at {
+    while alive(pid) && Instant::now() < give_up_at {
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(!alive(), "it ends with its conversation");
+    !alive(pid)
+}
+
+/// A turn stopped or out of time keeps no Claude Code waiting: the next starts a new one.
+#[test]
+fn nothing_waits_after_a_stop_or_the_budget() {
+    let (_folder, obid) = obid_with(
+        "harness-warm-ends",
+        true,
+        json!({"agent": "claude", "budget": 10}),
+    );
+    let first = said(&obid, json!({"said": "SAY hi", "new": true}));
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    let pid = |n: usize| turns(&obid)[n]["pid"].to_string();
+    let late = said(
+        &obid,
+        json!({"said": "LINGER 15000", "conversation": conversation}),
+    );
+    assert!(
+        late.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("as far as Oby got"),
+        "{}",
+        late.text
+    );
+    assert_eq!(pid(0), pid(1), "the turn went to the waiting one");
+    assert!(ends_soon(&pid(1)), "the budget ended it");
+    said(
+        &obid,
+        json!({"said": "SAY again", "conversation": conversation}),
+    );
+    assert_ne!(pid(2), pid(1));
+    std::thread::scope(|scope| {
+        let slow = scope.spawn(|| {
+            said(
+                &obid,
+                json!({"said": "LINGER 20000", "conversation": conversation}),
+            )
+        });
+        let give_up_at = Instant::now() + Duration::from_secs(15);
+        while turns(&obid).len() < 4 && Instant::now() < give_up_at {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let stopped = call(
+            &obid,
+            "POST",
+            "/v1/conversation/stop",
+            Some(&json!({"conversation": conversation})),
+        );
+        assert_eq!(stopped.status, 200, "{}", stopped.text);
+        slow.join().unwrap();
+    });
+    assert_eq!(pid(3), pid(2));
+    assert!(ends_soon(&pid(3)), "the stop ended it");
+    said(
+        &obid,
+        json!({"said": "SAY last", "conversation": conversation}),
+    );
+    assert_ne!(pid(4), pid(3));
+}
+
+/// obid's stop ends every waiting Claude Code.
+#[test]
+fn obids_stop_ends_the_waiting_claude_code() {
+    let (_folder, mut obid) = obid("harness-warm-stop", true);
+    said(&obid, json!({"said": "SAY hi", "new": true}));
+    let pid = turns(&obid)[0]["pid"].to_string();
+    assert!(alive(&pid));
+    obid.stop();
+    assert!(ends_soon(&pid));
 }
 
 /// A new room takes the spare tree obid keeps ready (a rename, nothing extracted while the turn
@@ -865,6 +942,11 @@ fn the_taint_lasts_across_resumed_turns() {
         json!({"said": dispatch, "conversation": conversation}),
     );
     assert_eq!(answer.body["jobs"], json!([]), "{}", answer.text);
+    let recorded = turns(&obid);
+    assert_eq!(
+        recorded[0]["pid"], recorded[1]["pid"],
+        "the later turn went to the waiting Claude Code, and the taint with it"
+    );
     assert!(
         answer.body["text"]
             .as_str()
