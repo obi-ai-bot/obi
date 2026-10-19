@@ -340,10 +340,18 @@ const BY_OBY: &str = "by Oby, in a conversation";
 /// The job `id`, when it's the owner's own: never a review another Obi asked for.
 fn owners_job(shared: &Shared, id: &str) -> Result<crate::job::Job, String> {
     let job = shared.jobs.get(id).ok_or("There's no job with that id.")?;
-    if job.obi.is_some() {
-        return Err("That's a review another Oby asked for: it isn't yours to change.".into());
+    match foreign(&job) {
+        Some(why) => Err(why.into()),
+        None => Ok(job),
     }
-    Ok(job)
+}
+
+/// Why these tools leave `job` alone, when they do: it's a review another Obi asked for, whose
+/// answer goes back to that Obi.
+fn foreign(job: &crate::job::Job) -> Option<&'static str> {
+    job.obi
+        .is_some()
+        .then_some("That's a review another Oby asked for: it isn't yours to change.")
 }
 
 /// Why acting on `job` in this turn waits for the owner's Confirm, when it does: the turn read
@@ -379,13 +387,19 @@ fn confirm_waits(
     title: String,
     why: &str,
     words: Option<&str>,
-    confirmed: crate::sphere::inbox::Confirmed,
+    mut confirmed: crate::sphere::inbox::Confirmed,
 ) -> Result<String, String> {
+    // What the job was when Oby asked: a Confirm after another round, a move or a new mode is
+    // refused, so the owner confirms what the title said (Link::carry_out).
+    if confirmed.payload.is_null() {
+        confirmed.payload = json!({});
+    }
+    confirmed.payload["snapshot"] = job.snapshot();
     let mut text = format!(
         "Oby's conversation planned this, and it waits for you because {why}. It happens only if you confirm."
     );
     if let Some(words) = words.filter(|w| !w.trim().is_empty()) {
-        text.push_str(&format!("\n\nWhat it adds:\n{}", quoted_lines(words)));
+        text.push_str(&format!("\n\n{}", quoted_lines(words)));
     }
     actions::confirm(shared, &job.id, title.clone(), text, confirmed);
     Ok(format!(
@@ -414,6 +428,15 @@ fn continue_job(shared: &Arc<Shared>, session: &Session, args: Value) -> Result<
         return Err("What it hears as it continues is at most 2,000 characters: say less.".into());
     }
     let bypass = crate::jobs::Jobs::mode_of(&job) == crate::permissions::Mode::Bypass;
+    // What the owner reads on the card: the words as they were said, never the agent's fences.
+    let mut shown = vec![];
+    if !said.is_empty() {
+        shown.push(format!("Your words:\n{said}"));
+    }
+    if let Some(words) = words.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+        shown.push(format!("What Oby adds for its agent:\n{words}"));
+    }
+    let shown = crate::secrets::known().redact(&shown.join("\n\n"));
     // A supervisor turn carries its stalled job on by itself, within obid's bounds
     // (super::supervisor): the job hears Try again and the conversation's words, quoted, never
     // obid's prompt as the owner's.
@@ -444,9 +467,13 @@ fn continue_job(shared: &Arc<Shared>, session: &Session, args: Value) -> Result<
         return confirm_waits(
             shared,
             &job,
-            format!("Continue {name}"),
+            if bypass {
+                format!("Continue {name} in Bypass mode")
+            } else {
+                format!("Continue {name}")
+            },
             why,
-            Some(&added),
+            Some(&shown),
             Confirmed {
                 action: action::CONTINUE_JOB.into(),
                 target: job.id.clone(),
@@ -475,10 +502,15 @@ fn delete_job(shared: &Shared, id: &str) -> Result<String, String> {
         1 => "; 1 commit that isn't published is lost".into(),
         n => format!("; {n} commits that aren't published are lost"),
     };
+    let goes = if shared.jobs.branch_stays(id) {
+        "its worktree goes; its branch stays, another job uses it"
+    } else {
+        "its worktree and local branch go"
+    };
     confirm_waits(
         shared,
         &job,
-        format!("Delete {name} (its worktree and local branch go{lost})"),
+        format!("Delete {name} ({goes}{lost})"),
         "deleting a job can't be undone",
         None,
         Confirmed {
@@ -609,14 +641,16 @@ fn change_job(shared: &Arc<Shared>, session: &Session, args: Value) -> Result<St
 fn tasks(shared: &Shared, session: &Session, args: Value) -> Result<String, String> {
     let TaskArgs { tasks } = parse(args)?;
     let gone = |_| "This conversation isn't here any more.".to_owned();
-    let list = match tasks {
+    let (list, tainted) = match tasks {
         Some(tasks) => {
             let tasks = crate::conversation::checked_tasks(tasks)?;
+            // Written after the turn read something untrusted, it may carry that text on.
+            let tainted = session.web.load(Ordering::SeqCst);
             shared
                 .conversations
-                .set_tasks(&session.conversation, tasks.clone())
+                .set_tasks(&session.conversation, tasks.clone(), tainted)
                 .map_err(gone)?;
-            tasks
+            (tasks, tainted)
         }
         None => shared
             .conversations
@@ -626,7 +660,16 @@ fn tasks(shared: &Shared, session: &Session, args: Value) -> Result<String, Stri
     if list.is_empty() {
         return Ok("Your task list is empty.".into());
     }
-    Ok(serde_json::to_string_pretty(&json!({"tasks": list})).unwrap_or_default())
+    let listed = serde_json::to_string_pretty(&json!({"tasks": list})).unwrap_or_default();
+    if !tainted {
+        return Ok(listed);
+    }
+    session.taint();
+    Ok(quoted(
+        session,
+        "your task list, written after reading text Oby didn't write",
+        &listed,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1557,6 +1600,29 @@ fn glob_regex(glob: &str) -> Result<regex::Regex, String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A review another Obi asked for is never the conversation's to continue, archive, delete
+    /// or change; the owner's own job is.
+    #[test]
+    fn another_obis_review_is_left_alone() {
+        let mut job = crate::job::Job::new(
+            "r1".into(),
+            "acme/app".into(),
+            "review".into(),
+            "x".into(),
+            "claude".into(),
+            "stub".into(),
+        );
+        assert_eq!(foreign(&job), None);
+        job.obi = Some(crate::job::ObiRef {
+            correlation_id: "c1".into(),
+            from: "obi-b".into(),
+            from_owner: "bob".into(),
+            request_id: "q1".into(),
+        });
+        assert!(foreign(&job).unwrap().contains("another Oby asked for"));
+    }
+
     use super::*;
 
     /// A conversation's folder in a home of its own: a file in its room, a repository checkout,

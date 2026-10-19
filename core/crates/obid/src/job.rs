@@ -451,6 +451,14 @@ impl Job {
         }
     }
 
+    /// What a Confirm about it is proposed against: its round, status, commits, mode, tool and
+    /// account. Confirmed after any of them changed, it's refused.
+    pub fn snapshot(&self) -> Value {
+        json!({"round": self.current_round(), "status": self.status.as_str(),
+               "commits": self.commits, "unpublished": self.unpublished(),
+               "mode": self.mode, "agent": self.agent, "account": self.account})
+    }
+
     /// Adds `what` to its changes, dated now.
     pub fn changed(&mut self, what: String) {
         self.changes.push(Change {
@@ -1059,6 +1067,8 @@ mod tests {
         // `changes`.
         assert_eq!(object.len(), 78);
         assert_eq!(value["supervised"], json!([]));
+        assert_eq!(value["archived"], Value::Null);
+        assert_eq!(value["changes"], json!([]));
         assert_eq!(value["artifacts"], json!([]));
         assert_eq!(value["artifactProblems"], json!([]));
         assert_eq!(value["answered"], json!([]));

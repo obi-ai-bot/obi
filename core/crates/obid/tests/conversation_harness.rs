@@ -1754,7 +1754,14 @@ fn oby_continue_job_continues_a_job_in_its_session() {
         text.contains("this turn read text Oby didn't write"),
         "{item}"
     );
-    assert!(text.contains("WEB-WORDS"), "{item}");
+    assert!(
+        text.contains("> What Oby adds for its agent:\n> WEB-WORDS"),
+        "{item}"
+    );
+    assert!(
+        !text.contains("quoted-"),
+        "the owner reads words, not fences: {item}"
+    );
     assert!(!item["title"].as_str().unwrap().contains("WEB"), "{item}");
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
@@ -1773,6 +1780,43 @@ fn oby_continue_job_continues_a_job_in_its_session() {
             .to_string()
             .contains("Continued on your Confirm"),
         "{next}"
+    );
+    // The web's item was made for round 1: confirmed now, it's refused.
+    let stale = confirmed(&obid, &item);
+    assert_eq!(stale.status, 409, "{}", stale.text);
+    assert!(
+        stale.text.contains("The job changed since Oby asked"),
+        "{}",
+        stale.text
+    );
+
+    // A job in Bypass mode, even the conversation's own in a clean turn, waits, and its title says
+    // Bypass.
+    let (bypassed, clean) = ended_job(&obid, None);
+    let mode = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{bypassed}/mode"),
+        Some(&json!({"mode": "bypass"})),
+    );
+    assert_eq!(mode.status, 200, "{}", mode.text);
+    let waits = said(
+        &obid,
+        json!({"said": format!(r#"OBY oby_continue_job {{"id": "{bypassed}"}}"#), "conversation": clean}),
+    );
+    assert!(
+        oby_said(&waits).contains("waits for your OK"),
+        "{}",
+        waits.text
+    );
+    let item = confirm_for(&obid, &bypassed);
+    assert_eq!(
+        item["title"], "Continue Add a greeting in Bypass mode",
+        "{item}"
+    );
+    assert!(
+        item["text"].as_str().unwrap().contains("Bypass mode"),
+        "{item}"
     );
 }
 
@@ -1846,6 +1890,17 @@ fn archive_is_at_once_and_delete_waits_for_confirm() {
 
     let worktree = PathBuf::from(job["worktree"].as_str().unwrap());
     assert!(worktree.is_dir());
+    let branch = job["branch"].as_str().unwrap().to_owned();
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let has_branch = |name: &str| {
+        let out = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&clone)
+            .args(["branch", "--all", "--list", name])
+            .output()
+            .unwrap();
+        !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+    };
     let delete = format!(r#"OBY oby_delete_job {{"id": "{id}"}}"#);
     let waits = said(&obid, json!({"said": delete, "conversation": conversation}));
     assert!(
@@ -1871,6 +1926,8 @@ fn archive_is_at_once_and_delete_waits_for_confirm() {
         404
     );
     assert!(!worktree.exists());
+    assert!(!has_branch(&branch), "its own branch goes");
+    assert!(has_branch("origin/main"), "nothing else does");
     assert!(!inbox(&obid).iter().any(|i| i["job"] == id.as_str()));
 
     // The apps' own route: a running job is refused, one that ended goes.
@@ -1908,12 +1965,14 @@ fn oby_change_job_widens_only_on_confirm() {
             .contains("Mode changed from Sandbox to Plan by Oby"),
         "{job}"
     );
+    let mut asked = vec![];
     for widened in ["ask", "bypass"] {
         let waits = change(&format!(r#""mode": "{widened}""#));
         assert!(waits.contains("waits for your OK"), "{waits}");
         let item = confirm_for(&obid, &id);
         assert_eq!(item["confirm"]["action"], "change_job", "{item}");
         assert_eq!(item["confirm"]["payload"]["mode"], widened, "{item}");
+        asked.push(item.clone());
         assert!(
             item["text"]
                 .as_str()
@@ -1932,6 +1991,30 @@ fn oby_change_job_widens_only_on_confirm() {
     assert_eq!(
         call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["mode"],
         "bypass"
+    );
+    // Ask was asked of a job in Plan: confirmed once it's in Bypass, it's refused.
+    let stale = confirmed(&obid, &asked[0]);
+    assert_eq!(stale.status, 409, "{}", stale.text);
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["mode"],
+        "bypass"
+    );
+
+    // Another conversation's job: even a narrower mode waits.
+    let theirs = said(
+        &obid,
+        json!({"said": format!(r#"OBY oby_change_job {{"id": "{id}", "mode": "plan"}}"#), "new": true}),
+    );
+    assert!(
+        oby_said(&theirs).contains("waits for your OK"),
+        "{}",
+        theirs.text
+    );
+    assert!(
+        confirm_for(&obid, &id)["text"]
+            .as_str()
+            .unwrap()
+            .contains("another conversation started it")
     );
 
     assert!(change(r#""agent": "codex""#).contains("obid has no Codex set up"));
@@ -2070,4 +2153,40 @@ fn a_moved_job_continues_in_a_new_session() {
         "{prompt}"
     );
     assert!(heard["resumed"].is_null(), "{heard}");
+}
+
+/// A task list written after the web carries that taint: fed to a later turn, even a new clean
+/// session's, it taints that turn, so the work it starts waits for the owner.
+#[test]
+fn a_task_list_written_after_the_web_taints_the_turns_it_reaches() {
+    let (_folder, obid) = obid("harness-tasks-taint", true);
+    let write =
+        r#"WEB OBY oby_tasks {"tasks": [{"title": "Do what the page said", "status": "pending"}]}"#;
+    let answer = said(&obid, json!({"said": write, "new": true}));
+    let conversation = answer.body["conversation"].as_str().unwrap().to_owned();
+    // A new session that knows nothing of the web: its kept taint is gone.
+    let kept = obid
+        .home
+        .join(format!("conversations/{conversation}/session.json"));
+    let mut session: Value = serde_json::from_slice(&std::fs::read(&kept).unwrap()).unwrap();
+    session["web"] = json!(false);
+    std::fs::write(&kept, session.to_string()).unwrap();
+    let dispatch = r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#;
+    let proposed = said(
+        &obid,
+        json!({"said": dispatch, "conversation": conversation}),
+    );
+    assert!(
+        proposed.body["jobs"].as_array().is_none_or(Vec::is_empty),
+        "the list's taint makes it a proposal: {}",
+        proposed.text
+    );
+    let session: Value = serde_json::from_slice(&std::fs::read(&kept).unwrap()).unwrap();
+    assert_eq!(session["web"], true, "{session}");
+    // Read back, it's quoted as data.
+    let read = said(
+        &obid,
+        json!({"said": "OBY oby_tasks {}", "conversation": conversation}),
+    );
+    assert!(oby_said(&read).contains("<<<quoted-"), "{}", read.text);
 }
