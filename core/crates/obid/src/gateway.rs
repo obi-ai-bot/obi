@@ -55,6 +55,12 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/conversations"),
     ("PATCH", "/v1/conversations/*"),
     ("DELETE", "/v1/conversations/*"),
+    ("GET", "/v1/routines"),
+    ("POST", "/v1/routines"),
+    ("GET", "/v1/routines/*"),
+    ("PATCH", "/v1/routines/*"),
+    ("DELETE", "/v1/routines/*"),
+    ("POST", "/v1/routines/*/run"),
     ("GET", "/v1/artifacts"),
     ("GET", "/v1/artifacts/*"),
     ("GET", "/v1/artifacts/*/*/**"),
@@ -690,6 +696,9 @@ mod tests {
         assert!(allows(&Method::GET, "/v1/status"));
         assert!(allows(&Method::GET, "/v1/jobs/abc"));
         assert!(allows(&Method::POST, "/v1/jobs/abc/messages"));
+        assert!(allows(&Method::PATCH, "/v1/routines/a1b2c3d4"));
+        assert!(allows(&Method::POST, "/v1/routines/a1b2c3d4/run"));
+        assert!(!allows(&Method::PUT, "/v1/routines/a1b2c3d4"));
         assert!(!allows(&Method::DELETE, "/v1/jobs/abc"));
         // The GitHub work feed: read it, refresh it, start an item's work (docs/runner-api.md,
         // "obid only: GitHub work"); nothing else under it.

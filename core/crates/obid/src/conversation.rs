@@ -49,6 +49,10 @@ pub struct Turn {
     /// section 4). Left out when it made none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<Value>,
+    /// On the turn a routine's run adds (crate::routines): `{id, name, outcome, scheduled,
+    /// catchUp}`. Left out on every other turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine: Option<Value>,
 }
 
 /// One conversation as obid keeps it.
@@ -315,7 +319,16 @@ impl Conversations {
             threads.len() - 1
         });
         let before = threads[index].turns.clone();
-        let turn = match self.add(&mut threads, index, "user", said, vec![], false, vec![]) {
+        let turn = match self.add(
+            &mut threads,
+            index,
+            "user",
+            said,
+            vec![],
+            false,
+            vec![],
+            None,
+        ) {
             Ok(turn) => turn.id,
             Err(e) => {
                 if found.is_none() {
@@ -350,7 +363,7 @@ impl Conversations {
         text: String,
         jobs: Vec<String>,
     ) -> Result<Turn, Error> {
-        self.append_as(id, who, text, jobs, false, vec![])
+        self.append_as(id, who, text, jobs, false, vec![], None)
     }
 
     /// Oby's turn in the conversation `id`, with the artifacts it made (`{id, version}` each).
@@ -361,14 +374,52 @@ impl Conversations {
         jobs: Vec<String>,
         artifacts: Vec<Value>,
     ) -> Result<Turn, Error> {
-        self.append_as(id, "oby", text, jobs, false, artifacts)
+        self.append_as(id, "oby", text, jobs, false, artifacts, None)
     }
 
     /// Oby's turn telling the conversation `id` how the job `job` ended ([`job_report`], #351).
     pub fn job_ended(&self, id: &str, text: String, job: String) -> Result<Turn, Error> {
-        self.append_as(id, "oby", text, vec![job], true, vec![])
+        self.append_as(id, "oby", text, vec![job], true, vec![], None)
     }
 
+    /// A new conversation titled `title`, with no turn yet: the one a routine's runs go to
+    /// (crate::routines). Its first turn follows at once.
+    pub fn start_for(&self, title: &str) -> Result<String, Error> {
+        let mut threads = self.lock();
+        let thread = Thread {
+            id: new_id(),
+            title: titled(title),
+            pinned: false,
+            created: obi_protocol::time::format(obi_protocol::time::now()),
+            sequence: next_sequence(&threads),
+            turns: vec![],
+        };
+        self.write(&thread).map_err(Error::Io)?;
+        self.events.send("conversation", thread.summary());
+        let id = thread.id.clone();
+        threads.push(thread);
+        self.prune(&mut threads);
+        Ok(id)
+    }
+
+    /// Oby's turn in the conversation `id` for a routine's run (crate::routines): `routine` is
+    /// `{id, name, outcome, scheduled, catchUp}`, and `jobs` the job it started, if it did.
+    pub fn routine_turn(
+        &self,
+        id: &str,
+        text: String,
+        jobs: Vec<String>,
+        routine: Value,
+    ) -> Result<Turn, Error> {
+        self.append_as(id, "oby", text, jobs, false, vec![], Some(routine))
+    }
+
+    /// Whether the conversation `id` is kept.
+    pub fn has(&self, id: &str) -> bool {
+        self.lock().iter().any(|t| t.id == id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn append_as(
         &self,
         id: &str,
@@ -377,13 +428,23 @@ impl Conversations {
         jobs: Vec<String>,
         ended: bool,
         artifacts: Vec<Value>,
+        routine: Option<Value>,
     ) -> Result<Turn, Error> {
         let mut threads = self.lock();
         let index = threads
             .iter()
             .position(|t| t.id == id)
             .ok_or(Error::NoConversation)?;
-        self.add(&mut threads, index, who, text, jobs, ended, artifacts)
+        self.add(
+            &mut threads,
+            index,
+            who,
+            text,
+            jobs,
+            ended,
+            artifacts,
+            routine,
+        )
     }
 
     /// The turn, kept, written and announced: the conversation as it is now, then the turn.
@@ -397,6 +458,7 @@ impl Conversations {
         jobs: Vec<String>,
         ended: bool,
         artifacts: Vec<Value>,
+        routine: Option<Value>,
     ) -> Result<Turn, Error> {
         let sequence = next_sequence(threads);
         let thread = &mut threads[index];
@@ -410,6 +472,7 @@ impl Conversations {
             conversation: thread.id.clone(),
             ended,
             artifacts,
+            routine,
         };
         thread.turns.push(turn.clone());
         let excess = thread.turns.len().saturating_sub(KEPT);

@@ -79,6 +79,9 @@ pub mod action {
     pub const DISMISS_JOB: &str = "dismiss_job";
     /// Try another conversation's job again (#631): `target` the job.
     pub const RETRY_JOB: &str = "retry_job";
+    /// Make the routine the brain planned (#395): `target` the conversation that planned it,
+    /// `payload` `{"routine": <the routine as POST /v1/routines takes it>}`.
+    pub const CREATE_ROUTINE: &str = "create_routine";
 }
 
 /// A `confirm` item: `title` says exactly what `Confirm` does, `confirmed` is what obid carries

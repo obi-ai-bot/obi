@@ -248,6 +248,21 @@ pub struct Job {
     /// for a follow-up of work that isn't merged. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_from: Option<String>,
+    /// The routine whose run started it (crate::routines), or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine: Option<RoutineMark>,
+}
+
+/// Which routine's run a job is (docs/runner-api.md, "obid only: routines"): the routine, its
+/// name when the run started, the time it was due, and whether it ran late.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineMark {
+    pub id: String,
+    pub name: String,
+    /// When the run was due, in seconds since the epoch.
+    pub scheduled: i64,
+    pub catch_up: bool,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -342,6 +357,7 @@ impl Job {
             follow_up_of: None,
             earlier: None,
             start_from: None,
+            routine: None,
         }
     }
 
@@ -577,6 +593,8 @@ impl Job {
             "artifacts": self.artifacts.iter().map(|a| json!({"id": a.id, "version": a.version})).collect::<Vec<_>>(),
             "artifactProblems": self.artifact_problems,
             "followUpOf": self.follow_up_of,
+            "routine": self.routine.as_ref().map(|r| json!({"id": r.id, "name": r.name,
+                "scheduled": obi_protocol::time::format(r.scheduled), "catchUp": r.catch_up})),
         });
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
@@ -911,11 +929,12 @@ mod tests {
             "permission",
             "conversation",
             "followUpOf",
+            "routine",
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's eight.
-        assert_eq!(object.len(), 73);
+        // The Swift runner's 65 keys, and obid's nine.
+        assert_eq!(object.len(), 74);
         assert_eq!(value["artifacts"], json!([]));
         assert_eq!(value["artifactProblems"], json!([]));
         assert_eq!(value["answered"], json!([]));

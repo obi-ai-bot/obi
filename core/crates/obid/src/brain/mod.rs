@@ -595,6 +595,7 @@ fn validate_turns(input: Option<Vec<InputTurn>>) -> Result<Option<Vec<Turn>>, Ap
             conversation: String::new(),
             ended: false,
             artifacts: vec![],
+            routine: None,
         });
     }
     Ok(Some(out))

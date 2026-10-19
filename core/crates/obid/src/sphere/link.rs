@@ -2603,6 +2603,19 @@ impl Link {
                 Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
                 None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
             },
+            inbox::action::CREATE_ROUTINE => {
+                let draft: crate::routines::Draft =
+                    serde_json::from_value(confirmed.payload["routine"].clone())
+                        .map_err(|_| api(StatusCode::CONFLICT, "That routine's plan was lost."))?;
+                let routines = self
+                    .jobs
+                    .routines()
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "obid keeps no routines."))?;
+                routines
+                    .create(&self.jobs, draft, time::now())
+                    .map(|_| ())
+                    .map_err(|why| api(StatusCode::UNPROCESSABLE_ENTITY, why))
+            }
             inbox::action::RETRY_JOB => {
                 if self.jobs.get(target).is_some_and(|j| j.status.is_active()) {
                     return Err(api(StatusCode::CONFLICT, "That job is running again."));
