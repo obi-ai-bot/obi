@@ -745,8 +745,11 @@ fn a_remote_that_isnt_github_gets_the_push_and_no_pull_request() {
     let clone = obid.home.join("clones/obi-e2e/fixture-app");
     let head = git(&clone, &["rev-parse", &format!("refs/heads/{branch}")]);
     assert_eq!(remote_branch(&remote, &branch), Some(head));
+    // No pull request is looked for or opened (the GitHub feed's own `api graphql` calls aside).
     assert!(
-        !calls_now(&folder.0).contains("pr "),
+        !calls_now(&folder.0)
+            .lines()
+            .any(|call| call.starts_with("pr ")),
         "{}",
         calls_now(&folder.0)
     );
