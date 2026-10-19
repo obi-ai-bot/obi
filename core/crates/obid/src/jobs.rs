@@ -2650,6 +2650,12 @@ impl Jobs {
                 let keeps_none = self.get(id).is_some_and(|j| {
                     j.kind == "review" || j.status == Status::Done && j.commits.unwrap_or(0) > 0
                 });
+                // What it committed itself, before obid's `wip:` commit, which never counts.
+                let start_commit = self
+                    .get(id)
+                    .and_then(|j| j.start_commit)
+                    .unwrap_or_default();
+                let made = count_commits(&self.worktree_path(id), &start_commit).await;
                 if *signal.borrow() != Signal::Shutdown
                     && !keeps_none
                     && let Err(e) = self.keep_wip(id).await
@@ -2657,9 +2663,18 @@ impl Jobs {
                     tracing::info!("job {id}: its uncommitted work stays in its worktree: {e}");
                 }
                 // Whatever ended it (a limit, a stop, a failure), what it committed is on its
-                // branch.
-                if let Err(e) = self.keep_commits(id).await {
-                    tracing::info!("job {id}: its commits stay in its worktree: {e}");
+                // branch, and counted, so a follow-up starts from them and Dismiss warns (#757).
+                // Done counted its own.
+                match self.keep_commits(id).await {
+                    Ok(_) if made > 0 => {
+                        self.update(id, |job| {
+                            if job.status != Status::Done {
+                                job.commits = Some(made);
+                            }
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::info!("job {id}: its commits stay in its worktree: {e}"),
                 }
                 outcome
             }
@@ -4047,17 +4062,10 @@ impl Jobs {
             stages.begin("keep commits");
             let head = self.keep_commits(id).await?;
             self.tetrix_ended(id, &worktree, &start_commit).await;
-            let commits = if start_commit.is_empty() || head == start_commit {
+            let commits = if head == start_commit {
                 0
             } else {
-                git::git(
-                    &worktree,
-                    &["rev-list", "--count", &format!("{start_commit}..HEAD")],
-                )
-                .await
-                .ok()
-                .and_then(|n| n.parse::<u64>().ok())
-                .unwrap_or(0)
+                count_commits(&worktree, &start_commit).await
             };
             let job = self.get(id).ok_or("the job is gone")?;
             let first_line = job.summary.lines().next().unwrap_or("").trim().to_owned();
@@ -6060,6 +6068,21 @@ fn tail(text: &str, max: usize) -> &str {
         start += 1;
     }
     &text[start..]
+}
+
+/// The commits in `worktree` since `start_commit`: none without one.
+async fn count_commits(worktree: &Path, start_commit: &str) -> u64 {
+    if start_commit.is_empty() {
+        return 0;
+    }
+    git::git(
+        worktree,
+        &["rev-list", "--count", &format!("{start_commit}..HEAD")],
+    )
+    .await
+    .ok()
+    .and_then(|n| n.parse::<u64>().ok())
+    .unwrap_or(0)
 }
 
 /// `job` hears `text`: its notes, what it heard, and its step.
