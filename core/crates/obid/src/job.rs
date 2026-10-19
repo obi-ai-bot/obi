@@ -1183,7 +1183,7 @@ mod tests {
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's twelve.
+        // The Swift runner's 65 keys, and obid's thirteen.
         assert_eq!(object.len(), 78);
         assert_eq!(value["archived"], Value::Null);
         assert_eq!(value["changes"], json!([]));
