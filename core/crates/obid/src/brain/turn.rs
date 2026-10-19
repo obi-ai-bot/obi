@@ -19,7 +19,7 @@ use super::actions::{self, Asked, Outcome, Talk};
 use super::find::{self, Finds};
 use super::orchestrator::{self, Orchestration};
 use super::plan::{Action, Plan};
-use super::planner::{LEAST, Planner, Record, Room};
+use super::planner::{Planner, Record, Room};
 use super::read::{self, JobReads};
 use super::research;
 use super::rules::{self, Number};
@@ -815,6 +815,7 @@ async fn run_with(
                 // Rules never stand in for an event turn: they read a person's words.
                 falls_back_to_rules: step == 0 && orchestration.is_none(),
                 deadline: Some(deadline),
+                least: shared.config.least_think,
             };
             if named.is_none() {
                 named = Some(asked_for(shared, said, &context));
@@ -862,7 +863,9 @@ async fn run_with(
             // is a guess. With too little time left for any brain to think, it's the budget that
             // ended the turn, not the brain (#615).
             if step > 0 && planned.by == "rules" {
-                let end = if deadline.saturating_duration_since(Instant::now()) <= LEAST {
+                let end = if deadline.saturating_duration_since(Instant::now())
+                    <= shared.config.least_think
+                {
                     End::BudgetSpent
                 } else {
                     End::BrainFailed

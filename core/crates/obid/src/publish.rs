@@ -139,6 +139,34 @@ impl std::fmt::Display for Found {
     }
 }
 
+/// The secret scan's result as the job keeps it (`scan`, #735): whether it ran, what it read, and
+/// where it found something, never what. `reason` says why it didn't run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Scanned {
+    pub ran: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<ScanFinding>,
+}
+
+/// Where the scan found something: the file (or `commit message`, `pull request title`…), the
+/// line when it has one, and the rule. Never the matched text.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScanFinding {
+    pub file: String,
+    pub line: Option<usize>,
+    pub rule: String,
+}
+
 /// Why nothing (more) went out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
@@ -261,23 +289,33 @@ pub fn has_login(remote: &str) -> bool {
 }
 
 /// The pull request's title in Conventional Commits form, ending with `(#issue)` when there is
-/// one: the first commit subject already in that form, else the job's kind and the agent's first
-/// line. At most 100 characters.
+/// one: the first commit subject already in that form that changes the code (`fix`, `feat`,
+/// `perf` or `refactor`, the job's own kind first), else the first in that form, else the job's
+/// kind and the agent's first line. At most 100 characters.
 pub fn title(job: &Job, subjects: &[String]) -> String {
     let conventional =
-        regex::Regex::new(r"^[a-z]+(\([^()]+\))?!?: \S.*$").expect("the title pattern compiles");
-    let mut title = subjects
+        regex::Regex::new(r"^([a-z]+)(\([^()]+\))?!?: \S.*$").expect("the title pattern compiles");
+    let kind = match job.kind.as_str() {
+        "build" => "feat",
+        "fix" => "fix",
+        "test" => "test",
+        _ => "chore",
+    };
+    let typed: Vec<(&str, &str)> = subjects
         .iter()
         .map(|s| s.trim())
-        .find(|s| conventional.is_match(s))
-        .map(str::to_owned);
+        // A subject with a control character (an escape, a carriage return) never titles one.
+        .filter(|s| !s.chars().any(char::is_control))
+        .filter_map(|s| Some((conventional.captures(s)?.get(1)?.as_str(), s)))
+        .collect();
+    let changes = |t: &str| ["fix", "feat", "perf", "refactor"].contains(&t);
+    let mut title = typed
+        .iter()
+        .find(|(t, _)| *t == kind && changes(t))
+        .or_else(|| typed.iter().find(|(t, _)| changes(t)))
+        .or(typed.first())
+        .map(|(_, s)| (*s).to_owned());
     if title.is_none() {
-        let kind = match job.kind.as_str() {
-            "build" => "feat",
-            "fix" => "fix",
-            "test" => "test",
-            _ => "chore",
-        };
         let said = job
             .summaries
             .as_ref()
@@ -439,6 +477,8 @@ pub trait Hooks: Send + Sync {
     fn proceed(&self) -> bool;
     /// Something just went out, for `outgoing` and the log.
     fn sent(&self, outgoing: Outgoing);
+    /// How the secret scan went, once it ended or couldn't run (#735).
+    fn scanned(&self, _scanned: Scanned) {}
 }
 
 /// Where a job publishes from and to.
@@ -626,7 +666,8 @@ pub async fn publish(
         .ok_or_else(|| Failure::Failed(format!("Not published: can't read {base}.")))?
     };
     let range = format!("{since}..{head}");
-    if git_in(clone, &["rev-list", "--count", &range]).await.ok() == Some("0".into()) {
+    let count = git_in(clone, &["rev-list", "--count", &range]).await.ok();
+    if count.as_deref() == Some("0") {
         return Err(Failure::Failed(format!(
             "Nothing to publish: {} has no commits that aren't on {base}.",
             job.branch
@@ -642,8 +683,46 @@ pub async fn publish(
         Some(0) => return Err(Failure::AlreadyOnBase(base.to_owned())),
         Some(_) => {}
     }
-    let found = scan_changes(clone, &since, &head, &target.scratch).await?;
+    // What the scan read and how it went, for the job (#735).
+    let started = std::time::Instant::now();
+    let files = git_in(
+        clone,
+        &["diff", "--name-only", "-z", "--no-renames", &since, &head],
+    )
+    .await
+    .ok()
+    .map(|names| names.split('\0').filter(|n| !n.is_empty()).count() as u64);
+    let scanned = |result: Result<&[Found], &Failure>| {
+        let (clean, reason, found) = match result {
+            Ok(found) => (Some(found.is_empty()), None, found),
+            Err(failure) => (None, Some(failure.line()), &[][..]),
+        };
+        let ran = reason.is_none();
+        hooks.scanned(Scanned {
+            ran,
+            clean,
+            commits: count
+                .as_deref()
+                .and_then(|n| n.parse().ok())
+                .filter(|_| ran),
+            files: files.filter(|_| ran),
+            seconds: ran.then(|| started.elapsed().as_secs()),
+            reason,
+            findings: found
+                .iter()
+                .map(|f| ScanFinding {
+                    file: f.file.clone(),
+                    line: f.line,
+                    rule: f.rule.clone(),
+                })
+                .collect(),
+        });
+    };
+    let found = scan_changes(clone, &since, &head, &target.scratch)
+        .await
+        .inspect_err(|failure| scanned(Err(failure)))?;
     if !found.is_empty() {
+        scanned(Ok(&found));
         return Err(Failure::Blocked(found));
     }
     // Everything else that goes out: every commit's message, and the pull request's title and
@@ -657,7 +736,8 @@ pub async fn publish(
         Failure::Failed(format!(
             "Not published: the secret scan couldn't read the commit messages ({e})."
         ))
-    })?;
+    })
+    .inspect_err(|failure| scanned(Err(failure)))?;
     let subjects: Vec<String> = subjects.lines().map(str::to_owned).collect();
     let title = title(job, &subjects);
     // Read once: the scan checks the very description the pull request gets.
@@ -678,9 +758,18 @@ pub async fn publish(
     let mut said: Vec<Found> = match scan::scan(&texts, &target.scratch).await {
         Verdict::Clean => Vec::new(),
         Verdict::Found(found) => found.into_iter().map(|f| Found::of(f, None)).collect(),
-        Verdict::CouldNotRun(why) => return Err(could_not_run(&why)),
+        Verdict::CouldNotRun(why) => {
+            let failure = could_not_run(&why);
+            scanned(Err(&failure));
+            return Err(failure);
+        }
     };
-    said.extend(scan_commits(clone, &range, &target.scratch).await?);
+    said.extend(
+        scan_commits(clone, &range, &target.scratch)
+            .await
+            .inspect_err(|failure| scanned(Err(failure)))?,
+    );
+    scanned(Ok(&said));
     if !said.is_empty() {
         return Err(Failure::Blocked(said));
     }
@@ -1406,6 +1495,36 @@ mod tests {
         let long = title(&job, &[]);
         assert_eq!(long.chars().count(), 100);
         assert!(long.ends_with("… (#75)"));
+    }
+
+    /// A test-first fix goes out titled by its fix, not by the test that came first (#765).
+    #[test]
+    fn titles_prefer_the_change_over_its_test() {
+        let mut job = job();
+        job.issue = Some(7);
+        let subjects = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            title(
+                &job,
+                &subjects(&["test(obid): x fails", "fix(obid): x works", "docs: x"])
+            ),
+            "fix(obid): x works (#7)"
+        );
+        assert_eq!(
+            title(&job, &subjects(&["feat: y", "fix: x"])),
+            "fix: x (#7)"
+        );
+        assert_eq!(
+            title(&job, &subjects(&["test(obid): x fails", "test: y"])),
+            "test(obid): x fails (#7)"
+        );
+        assert_eq!(
+            title(
+                &job,
+                &subjects(&["fix: \u{1b}[2Jlooks fine", "fix(obid): x works"])
+            ),
+            "fix(obid): x works (#7)"
+        );
     }
 
     #[test]

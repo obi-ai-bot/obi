@@ -77,21 +77,21 @@ nonisolated enum TaskFacts {
     }
 
     /// The facts under Details, in order: a name, its value, and whether it reads as code.
-    static func facts(_ job: Job) -> [(name: String, value: String, mono: Bool)] {
+    /// `mode` is the runner's word for how freely its agent works (`RunnerMode`).
+    static func facts(_ job: Job, mode: String? = nil) -> [(name: String, value: String, mono: Bool)] {
         var facts: [(String, String, Bool)] = [
             ("Repository", job.repo, false), ("Branch", job.branch, true), ("Base", job.base ?? "Repository default", job.base != nil),
             ("Model", job.model.map(ModelChoice.name) ?? "Account default", false),
         ]
-        if job.maxRounds > 1 { facts.append(("Rounds", "Round \(job.currentRound) of \(job.maxRounds)", false)) }
+        if let mode = RunnerMode(mode) { facts.append(("Mode", mode.label, false)) }
         if let check = job.check { facts.append(("Done when", "\(check) passes", true)) }
         return facts
     }
 
-    /// The page's box: a word for the agent while it can take one (it runs, or a finished one can
-    /// pick its session up), as a follow-up once it's done; nil when there's nothing to tell.
+    /// The page's box (Sangam's TaskView): words for Oby about the task while it can take them (it
+    /// runs, or a finished one can pick its session up, which starts a follow-up); nil when there's
+    /// nothing to tell.
     static func box(_ job: Job) -> String? {
-        if job.status == .running { return "Tell \(job.agentName)…" }
-        if !job.isActive && job.resumable { return "Ask for a follow-up…" }
-        return nil
+        job.status == .running || (!job.isActive && job.resumable) ? "Tell Oby about this task…" : nil
     }
 }

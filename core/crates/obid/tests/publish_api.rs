@@ -168,6 +168,17 @@ fn a_done_job_publishes_by_itself_and_follows_its_pull_request() {
     assert_eq!(job["commits"], 1);
     assert_eq!(job["pushed"], 1);
     assert_eq!(job["summary"], "Added hello.txt.");
+    // The scan ran on what went out, and was clean (#735).
+    let scan = &job["scan"];
+    assert_eq!(scan["ran"], true, "{job}");
+    assert_eq!(scan["clean"], true, "{job}");
+    assert_eq!(scan["commits"], 1, "{job}");
+    assert_eq!(scan["files"], 1, "{job}");
+    assert!(scan["seconds"].is_u64(), "{job}");
+    assert!(
+        scan.get("findings").is_none() && scan.get("reason").is_none(),
+        "{job}"
+    );
     // The branch on the remote is the job's commit; the base is where it was.
     let clone = obid.home.join("clones/obi-e2e/fixture-app");
     let head = git(&clone, &["rev-parse", &format!("refs/heads/{branch}")]);
@@ -393,6 +404,23 @@ fn a_possible_secret_sends_nothing() {
     );
     assert!(!summary.contains(&leaked_key()), "{summary}");
     assert!(!obid.log().contains(&leaked_key()));
+    // The scan's record names the file, line and rule, never the token (#735).
+    let scan = &job["scan"];
+    assert_eq!(
+        (&scan["ran"], &scan["clean"]),
+        (&json!(true), &json!(false)),
+        "{job}"
+    );
+    let finding = &scan["findings"][0];
+    assert_eq!(
+        (&finding["file"], &finding["line"]),
+        (&json!("keys.txt"), &json!(1)),
+        "{job}"
+    );
+    assert!(finding["rule"].as_str().unwrap().contains("AWS"), "{job}");
+    assert!(!job.to_string().contains(&leaked_key()), "{job}");
+    let kept = std::fs::read_to_string(obid.home.join(format!("jobs/{id}.json"))).unwrap();
+    assert!(!kept.contains(&leaked_key()));
     assert_eq!(job["published"], Value::Null);
     assert_eq!(job["outgoing"], json!([]));
     assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
@@ -468,6 +496,8 @@ fn a_scanner_that_cant_run_sends_nothing() {
     assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
     assert_eq!(stage(&job, "publish")["state"], "failed");
     assert_eq!(stage(&job, "publish")["reason"], error);
+    // It didn't run, and the record says why (#735).
+    assert_eq!(job["scan"], json!({"ran": false, "reason": error}));
     let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None);
     assert_eq!(answer.status, 200, "{}", answer.text);
 }
