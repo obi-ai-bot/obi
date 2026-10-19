@@ -61,6 +61,8 @@ pub struct Shared {
     pub sign_ins: crate::accounts::SignIns,
     /// The GitHub login and its sign-in (crate::github_login).
     pub github: crate::github_login::GitHubLogin,
+    /// Oby's Tetrix login, and agents' Tetrix through obid (crate::tetrix).
+    pub tetrix: Arc<crate::tetrix::Tetrix>,
     /// The browsers signed in to the web app's own files (crate::web): nothing under `/v1`.
     pub pages: crate::web::Sessions,
     /// What GitHub wants from the owner (crate::github_work).
@@ -154,6 +156,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/clear", post(crate::routes::clear))
         .route("/v1/devices", post(crate::routes::register_device))
         .merge(crate::connections::router())
+        .merge(crate::tetrix::router())
         .route("/v1/checks/next", get(crate::routes::next_check))
         .route("/v1/checks/{id}/bundle", get(crate::routes::check_bundle))
         .route("/v1/checks/{id}/result", post(crate::routes::check_result))
@@ -311,10 +314,10 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
     }
     let api = request.uri().path().starts_with("/v1/");
     let agent_check = request.uri().path() == "/v1/agent/apple-check";
-    let agent_mcp = request
-        .uri()
-        .path()
+    let path = request.uri().path();
+    let agent_mcp = path
         .strip_prefix("/v1/agent/mcp/")
+        .or_else(|| path.strip_prefix("/v1/agent/tetrix/"))
         .filter(|id| !id.is_empty() && !id.contains('/'));
     let admitted = admit(request.uri(), request.headers(), &shared.token).or_else(|error| {
         if (!agent_check && agent_mcp.is_none())
@@ -644,9 +647,10 @@ pub fn account_json(
         seven_day_resets: None,
         running: shared.jobs.running_on(&account.id) as u32,
         full_until: None,
-        tetrix: None,
-        tetrix_jobs: 0,
-        tetrix_used: 0,
+        // Every tool's agents get Tetrix through obid while Oby is signed in (crate::tetrix).
+        tetrix: shared.tetrix.connected().then_some(true),
+        tetrix_jobs: shared.jobs.tetrix_counts(&account.id).0,
+        tetrix_used: shared.jobs.tetrix_counts(&account.id).1,
         reserved: false,
         reserve_lifted_until: None,
     }

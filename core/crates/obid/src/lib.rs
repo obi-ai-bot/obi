@@ -45,6 +45,7 @@ pub mod secrets;
 pub mod settings;
 pub mod sphere;
 pub mod store;
+pub mod tetrix;
 pub mod token;
 pub mod vault;
 pub mod web;
@@ -244,6 +245,12 @@ pub async fn serve(
     };
     let connections = connections::Connections::open(&config.home, &jobs, broker_host);
     jobs.use_connections(connections.clone());
+    let tetrix = tetrix::Tetrix::open(
+        &config.home,
+        vault::shared().expect("the vault is installed first"),
+        events.clone(),
+    );
+    jobs.use_tetrix(tetrix.clone());
     let conversations = conversation::Conversations::open(&config.home, events.clone());
     let artifacts = artifacts::Artifacts::open(&config.home, events.clone()).map_err(|source| {
         StartError::Jobs {
@@ -277,6 +284,7 @@ pub async fn serve(
         plugins: plugins.clone(),
         sign_ins: accounts::SignIns::default(),
         github: github_login::GitHubLogin::default(),
+        tetrix,
         pages: web::Sessions::default(),
         github_work: github.clone(),
         stopping: stopping_rx.clone(),
@@ -317,6 +325,11 @@ pub async fn serve(
     github.spawn(stopping_rx.clone());
     // A job a conversation started tells it how it ended (#351).
     conversation::report_job_ends(shared.clone());
+    // Each repository's spare tree for the conversations' rooms, so a new one
+    // doesn't wait for one to be extracted (docs/fast-replies.md).
+    brain::harness::prepare_rooms(&shared);
+    // A deleted conversation's waiting Claude Code ends with it.
+    brain::harness::end_warm_with_conversations(shared.clone());
     // Routines run on their schedules (#395).
     routines::spawn(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
@@ -350,6 +363,7 @@ pub async fn serve(
             let _ = stopped_at.set(tokio::time::Instant::now());
             shared.sign_ins.kill_all();
             shared.github.kill();
+            shared.harness.end_all_warm();
             tokio::join!(jobs.shutdown(JOBS_GRACE), plugins.shutdown());
         })
     };

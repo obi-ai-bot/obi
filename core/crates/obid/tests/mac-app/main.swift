@@ -101,6 +101,10 @@ do {
             say("event accounts \(accounts.count)")
         case .check, .turn, .step, .conversation, .delta, .artifact, .routine:
             say("event other")
+        case .tetrix(let status):
+            say("event tetrix connected=\(status.connected)")
+        case .github(let work):
+            say("event github \(work.signedIn)")
         }
     }
     say("events ended")

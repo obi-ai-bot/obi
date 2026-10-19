@@ -25,6 +25,7 @@ struct SettingsScreen: View {
                     // The runner's "accounts" event brings a lifted reserve back.
                     PhoneAccountRow(account: account) { lift in _ = try await phone.runner.liftReserve(account.id, lift) }
                 }
+                connectors
                 RunnerModelsSections(options: options, models: phone.models, save: phone.setModels)
                 PermissionsSection(runner: phone.runner, defaultMode: phone.defaultMode, setDefault: phone.setDefaultMode)
                 RoutinesSection(runner: phone.runner, changes: phone.routineChanges)
@@ -58,6 +59,18 @@ struct SettingsScreen: View {
             do { options = try await phone.runner.modelOptions() } catch { problem = error.localizedDescription }
             // A runner older than the Watch API has no list: then there's nothing to show.
             try? await watchPairing.load(phone)
+        }
+    }
+
+    /// Sangam's Connectors, as far as the iPhone goes: Tetrix, which obid on the Mac holds once for
+    /// every agent. The iPhone can't start it: Tetrix's sign-in and its login stay on the Mac, so the
+    /// row says where to go. Connected once the Mac's accounts say their agents have it.
+    private var connectors: some View {
+        let connected = phone.accounts.contains { $0.tetrix == true }
+        return SetGroup("Connectors", footer: connected ? nil : "Connect Tetrix on your Mac, in Settings › Connectors: one sign-in, for every agent. Its login stays there, never on this iPhone.") {
+            SetRow("Tetrix", about: TetrixStatus.about) {
+                SetValue(connected ? "Connected" : "Connect on your Mac", connected: connected)
+            }
         }
     }
 
@@ -187,8 +200,9 @@ private struct PhoneAccountRow: View {
                             if let problem { SetAbout(problem, color: Tokens.danger) }
                         }
                         if account.signedIn {
-                            SetAbout(Usage.tetrix(account.tetrix, jobs: account.tetrixJobs ?? 0, used: account.tetrixUsed ?? 0),
-                                     color: account.tetrix == false ? Tokens.needsInk : Tokens.muted)
+                            SetAbout(TetrixJobReport.accountLine(connected: account.tetrix == true, jobs: account.tetrixJobs ?? 0,
+                                                                 used: account.tetrixUsed ?? 0, there: "on your Mac"),
+                                     color: account.tetrix == true ? Tokens.muted : Tokens.needsInk)
                         }
                     }
                 }

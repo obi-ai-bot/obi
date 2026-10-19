@@ -199,6 +199,7 @@ final class Phone {
             // Another runner: nothing the last one said holds.
             conversation.forget()
             forgetConversations()
+            forgetGitHub()
             echoes = []
             failures = [:]
             requests = [:]
@@ -214,6 +215,7 @@ final class Phone {
             if oldValue?.hostname != link?.hostname {
                 conversation.forget()
                 forgetConversations()
+                forgetGitHub()
                 echoes = []
                 failures = [:]
                 requests = [:]
@@ -261,6 +263,12 @@ final class Phone {
     private(set) var host = ""
     /// The job list arrived at least once, so an empty list really is empty.
     private(set) var loaded = false
+    /// Your work on GitHub as the Mac's obid finds it (Review PR and Issues), nil from a runner that doesn't list it.
+    private(set) var gitHubWork: GitHubWork?
+    /// The GitHub items put off with Later, until Oby quits.
+    var gitHubLater: Set<String> = []
+    /// Bumped by every change of runner, so an answer from the last one is dropped.
+    @ObservationIgnored private var gitHubChanges = 0
     private(set) var jobs: [Job] = [] {
         didSet {
             // Published, dismissed or running again, here or on the Mac: its alert goes.
@@ -352,6 +360,7 @@ final class Phone {
         offlineQueue.bindUnscopedEntries(to: offlineQueueTarget)
         restoreQueuedMessages(for: offlineQueueTarget)
         #if DEBUG
+        if let sample = GitHubWork.sample { gitHubWork = sample }
         if SampleTasks.on { jobs = SampleTasks.jobs; conversations = SampleTasks.conversations; accounts = SampleTasks.accounts; loaded = true; SampleTasks.talk(self) }
         // `-ObySampleUnreachable YES`: the Mac out of reach since 40 minutes ago, for the notice's screenshots.
         if UserDefaults.standard.bool(forKey: "ObySampleUnreachable") { self.connection = .offline(""); self.lastSeen = .now.addingTimeInterval(-2400) }
@@ -378,6 +387,21 @@ final class Phone {
     func conversation(of job: Job) -> String?? {
         if conversations != nil { return job.conversation.map { .some($0) } }
         return ConversationModel.started(job.id, in: conversation.runnerTurns) ? .some(nil) : nil
+    }
+
+    /// Another runner: its GitHub feed and what was put off go, and answers still on their way from the last one are dropped.
+    private func forgetGitHub() {
+        gitHubChanges += 1
+        gitHubWork = nil
+        gitHubLater = []
+    }
+
+    /// Applies obid's answer about GitHub to the feed as it is by then, unless the runner changed meanwhile.
+    private func readGitHub(_ ask: () async throws -> GitHubWork?) async {
+        let asked = gitHubChanges
+        let answer = await GitHubWork.ask(ask)
+        guard gitHubChanges == asked else { return }
+        gitHubWork = answer.applied(to: gitHubWork)
     }
 
     private func forgetConversations() {
@@ -414,6 +438,7 @@ final class Phone {
         }
         if let list = conversations { conversations = ConversationOrder.placed(changed, in: list) }
         if changed.deleted, changed.id == current { show(nil) }
+        if changed.deleted { Drafts.keep("", as: Drafts.conversation(changed.id)) }
     }
 
     var runner: Runner {
@@ -518,6 +543,7 @@ final class Phone {
         defaultMode = RunnerMode(status.permissions?.mode)
         await take(try await runner.jobs())
         inbox = try await runner.inbox()
+        await readGitHub { try await runner.gitHubWork() }
         do { conversations = try await runner.conversations() } catch {
             Logger.phone.error("listing conversations failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -554,10 +580,27 @@ final class Phone {
         do {
             await take(try await runner.jobs())
             inbox = try await runner.inbox()
+            await readGitHub { try await runner.gitHubWork() }
             loaded = true
         } catch {
             Logger.phone.error("reloading jobs failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Has the Mac's obid read GitHub again; the feed it answers replaces this one.
+    func refreshGitHubWork() async {
+        #if DEBUG
+        if GitHubWork.sample != nil { return }
+        #endif
+        await readGitHub { try await runner.refreshGitHubWork() }
+    }
+
+    /// One tap on a GitHub item: Oby's job on it (a review, or a fix), listed at once.
+    func startGitHubWork(_ id: String) async throws {
+        let asked = gitHubChanges
+        let job = try await runner.startGitHubWork(id)
+        guard gitHubChanges == asked else { return }
+        if let index = jobs.firstIndex(where: { $0.id == job.id }) { jobs[index] = job } else { jobs.insert(job, at: 0) }
     }
 
     private func unfollow() {
@@ -603,6 +646,8 @@ final class Phone {
             else if startingNew, delta.conversation != nil { heldDeltas.append(delta) }
         case .artifact(let artifact):
             conversation.apply(artifact)
+        case .github(let work):
+            gitHubWork = work
         case .conversation(let changed):
             take(changed)
         case .routine:
@@ -689,7 +734,8 @@ final class Phone {
         guard let request = requests[id] else { return }
         removeQueued(id)
         drop(echo: id)
-        plan(request.said, answer: request.answer, voice: request.voice, new: request.new)
+        // The same id: if the first request reached obid after all, it keeps the words once.
+        plan(request.said, answer: request.answer, voice: request.voice, new: request.new, id: id)
     }
 
     /// Edit on words that didn't go through: they leave the thread for the field.
@@ -698,14 +744,16 @@ final class Phone {
         drop(echo: id)
     }
 
-    private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false, new: Bool = false) {
+    /// `id`: the echo's, given again by Try again; obid's turn of the words takes it.
+    private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false, new: Bool = false,
+                      id: String = UUID().uuidString.lowercased()) {
         planning?.cancel()
         speaker.stop()
         dropPending()
         stopProblem = nil
         talk = .thinking(said)
         // The thread shows the words as the runner will list them: an answer is its option.
-        let echo = Turn(who: .user, text: answer?.option ?? said, voice: voice ? true : nil)
+        let echo = Turn(id: id, who: .user, text: answer?.option ?? said, voice: voice ? true : nil)
         echoes.append(echo)
         let request = Request(said: said, answer: answer, voice: voice, conversation: current, new: new)
         requests[echo.id] = request
@@ -750,7 +798,7 @@ final class Phone {
             )
             let echo = echoes.first(where: { $0.id == item.id }) ?? Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil)
             let planned = try await destinationRunner.planned(request.said, answer: request.answer,
-                                                              conversation: request.conversation, new: request.new)
+                                                              conversation: request.conversation, new: request.new, id: item.id)
             apply(planned, request: request, echo: echo)
         }
     }
@@ -776,7 +824,7 @@ final class Phone {
         planning = Task {
             do {
                 let planned = try await runner.planned(request.said, answer: request.answer,
-                                                       conversation: request.conversation, new: request.new)
+                                                       conversation: request.conversation, new: request.new, id: echo.id)
                 guard !Task.isCancelled else { return }
                 apply(planned, request: request, echo: echo)
             } catch {
@@ -828,6 +876,8 @@ final class Phone {
 
     private func finish(_ talk: Talk, started: [Job], request: Request, echo: Turn) {
         if pending == echo.id { pending = nil }
+        // Answered: the runner has the words, whatever its event missed (a failure keeps them).
+        if failures[echo.id] == nil { drop(echo: echo.id) }
         conversation.settleLatestSteps()
         self.talk = talk
         for job in started { apply(.job(job)) }

@@ -49,6 +49,9 @@ struct Request {
     conversation: Option<String>,
     /// True: it starts a new conversation.
     new: Option<bool>,
+    /// The id the app gave the user's words (a lower-case UUID): sent again with an id obid has,
+    /// they're the same words, and nothing new happens.
+    id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +74,16 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "said is 1 to 2,000 characters.",
+        ));
+    }
+    let id = req.id.clone();
+    if id
+        .as_deref()
+        .is_some_and(|id| !crate::conversation::is_id(id))
+    {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "id is a lower-case UUID.",
         ));
     }
     let attachments = validate_attachments(
@@ -129,7 +142,17 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
             )
         })
         .unwrap_or_else(|| words.to_owned());
-    let begun = shared.conversations.begin(target, said.clone())?;
+    let begun = shared.conversations.begin(target, said.clone(), id)?;
+    // The same words sent again: obid has them (and answered, or answers, them in its turn).
+    if begun.repeated {
+        return Ok((
+            StatusCode::OK,
+            axum::Json(
+                json!({"kind": "none", "jobs": [], "drafts": [], "conversation": begun.conversation, "repeated": true}),
+            ),
+        )
+            .into_response());
+    }
     let given = turns.unwrap_or(begun.before);
     let control = shared.turns.begin(&begun.turn, &begun.conversation);
     // The turn goes on by itself: a client that stops waiting can't be told from a slow one, so

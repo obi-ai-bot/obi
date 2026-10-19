@@ -2473,6 +2473,7 @@ impl Link {
     /// `GET /v1/inbox` (`done` false: open and put off, the longest-waiting first) or
     /// `?state=done` (the latest settled first, at most `limit`).
     pub fn inbox_json(&self, done: bool, limit: usize) -> Value {
+        self.settle_stale_starts();
         let state = self.lock();
         let mut items: Vec<&Item> = state
             .inbox
@@ -2671,9 +2672,79 @@ impl Link {
         }
     }
 
+    /// A `start` item for a follow-up whose work merged after it was proposed (the first job's pull
+    /// request or a follow-up's) is done by itself, with no options, its text saying so above the
+    /// owner's words. Checked whenever the inbox is read; nothing starts.
+    fn settle_stale_starts(&self) {
+        let open: Vec<Item> = self
+            .lock()
+            .inbox
+            .values()
+            .filter(|i| i.kind == "start" && i.done.is_none())
+            .cloned()
+            .collect();
+        if open.is_empty() {
+            return;
+        }
+        let jobs = self.jobs.list(usize::MAX);
+        let now = time::now();
+        let mut closed = Vec::new();
+        for mut item in open {
+            let Some(of) = item.start.as_ref().and_then(|s| s["follow_up_of"].as_str()) else {
+                continue;
+            };
+            // The work it would follow up merged after it was proposed: the first job's pull
+            // request, or one of its follow-ups'. Anything else (a follow-up that ended, even
+            // failed) leaves it open, its words and Start as they were.
+            let Some(merged) = jobs
+                .iter()
+                .filter(|j| j.id == of || j.follow_up_of.as_deref() == Some(of))
+                .find(|j| {
+                    j.pull_request
+                        .as_ref()
+                        .and_then(|pr| pr.merged_at)
+                        .is_some_and(|at| at > item.created)
+                })
+            else {
+                continue;
+            };
+            item.text = format!(
+                "Closed by Oby: {}'s work merged after this was proposed.\n\n{}",
+                merged.short_title(),
+                inbox::unfenced(&item.text)
+            );
+            item.options = vec![];
+            item.details = None;
+            item.recommended = None;
+            item.done = Some(now);
+            closed.push(item);
+        }
+        {
+            let mut state = self.lock();
+            for item in &closed {
+                // Answered meanwhile: the owner's answer stands.
+                if state.inbox.get(&item.id).is_some_and(|i| i.done.is_none()) {
+                    state.inbox.insert(item.id.clone(), item.clone());
+                }
+            }
+        }
+        for item in &closed {
+            self.save_item(item);
+        }
+    }
+
     /// Work the brain planned after looking things up waits for the owner's Start, as a `start`
     /// item (Engine/Inbox.swift, `Inbox.proposal`): nothing starts until they say so.
-    pub fn propose(&self, new: &crate::jobs::NewJob, title: String, text: String) -> Item {
+    /// `conversation`: the one it was proposed in, which shows it (`Item::conversation`).
+    pub fn propose(
+        &self,
+        new: &crate::jobs::NewJob,
+        title: String,
+        text: String,
+        conversation: &str,
+    ) -> Item {
+        let mut start = serde_json::to_value(new).unwrap_or_default();
+        start["proposedIn"] = json!(conversation);
         let item = Item {
             id: format!("start-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
             kind: "start".into(),
@@ -2694,7 +2765,7 @@ impl Link {
             plugin: None,
             arrived: Some(inbox::arrival()),
             confirm: None,
-            start: serde_json::to_value(new).ok().map(Box::new),
+            start: Some(Box::new(start)),
             github: None,
         };
         self.lock().inbox.insert(item.id.clone(), item.clone());
@@ -2733,10 +2804,41 @@ impl Link {
                         .ok_or_else(|| {
                             open_again(api(StatusCode::CONFLICT, "That plan was lost."))
                         })?;
-                    let job = self
-                        .jobs
-                        .create(new)
-                        .map_err(|e| open_again(api(StatusCode::UNPROCESSABLE_ENTITY, e.0)))?;
+                    // A follow-up of a job whose follow-up is working already: that one hears
+                    // it (the owner's own Start), and the item is done, never a second. Only
+                    // while it's at work with nothing waiting, checked as the words are taken
+                    // (`hear_at_work`): a permission or plan would take them as its answer, so
+                    // the item stays open until then.
+                    let following = new
+                        .follow_up_of
+                        .as_deref()
+                        .and_then(|of| self.jobs.following(of));
+                    let job = match following {
+                        Some(next) => match self.jobs.hear_at_work(&next.id, &new.task) {
+                            Some(Ok(job)) => job,
+                            Some(Err(e)) => {
+                                return Err(open_again(api(
+                                    StatusCode::CONFLICT,
+                                    format!(
+                                        "{} (job {}) is following it up already. {} Start it again once it's at work, or tell that job.",
+                                        next.short_title(),
+                                        next.id,
+                                        e.0
+                                    ),
+                                )));
+                            }
+                            None => {
+                                return Err(open_again(api(
+                                    StatusCode::CONFLICT,
+                                    "That job is gone.",
+                                )));
+                            }
+                        },
+                        None => self
+                            .jobs
+                            .create(new)
+                            .map_err(|e| open_again(api(StatusCode::UNPROCESSABLE_ENTITY, e.0)))?,
+                    };
                     item.job = job.id;
                 }
             }
@@ -2756,6 +2858,7 @@ impl Link {
     /// The items waiting for the owner now (not done, and not put off past `now`), in the order
     /// they came: what the brain is told about the inbox (#546).
     pub fn waiting_items(&self, now: i64) -> Vec<Item> {
+        self.settle_stale_starts();
         let state = self.lock();
         let mut items: Vec<Item> = state
             .inbox
