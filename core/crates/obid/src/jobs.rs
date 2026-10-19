@@ -246,6 +246,8 @@ pub struct Jobs {
     sandbox: Result<Sandbox, String>,
     state: Mutex<State>,
     changed: Notify,
+    /// Each job's transcript (`home/jobs/<id>/transcript.jsonl`).
+    transcripts: crate::transcript::Transcripts,
     /// How many jobs run at once (Settings, `home/settings.json`).
     max_running: std::sync::atomic::AtomicUsize,
     shutting_down: std::sync::atomic::AtomicBool,
@@ -305,6 +307,14 @@ impl Jobs {
         let kept = permissions::load(&config.home);
         let api_url = format!("http://{}", config.listen);
         let approvals = crate::approval::Approvals::open(&config.home);
+        let transcripts = crate::transcript::Transcripts::new(&config.home);
+        let now = obi_protocol::time::now();
+        transcripts.sweep(|id| {
+            jobs.get(id).is_some_and(|job: &Job| {
+                job.finished
+                    .is_none_or(|f| now - f < crate::transcript::KEPT_DAYS * 86_400)
+            })
+        });
         let usage = crate::usage::Usages::open(&config.home);
         Ok(Arc::new(Jobs {
             config,
@@ -322,6 +332,7 @@ impl Jobs {
                 changing: std::collections::HashSet::new(),
             }),
             changed: Notify::new(),
+            transcripts,
             max_running: std::sync::atomic::AtomicUsize::new(max_running),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             identity,
@@ -1893,6 +1904,9 @@ impl Jobs {
                 tracing::error!("can't keep job {id}: {e}");
             }
             self.events.send("job", job.to_json());
+            if source == Source::Owner {
+                self.transcribed(id, self.transcripts.you(id, text));
+            }
             self.changed.notify_waiters();
             return Some(Ok(job));
         }
@@ -1941,6 +1955,9 @@ impl Jobs {
             tracing::error!("can't keep job {id}: {e}");
         }
         self.events.send("job", resumed.to_json());
+        if source == Source::Owner {
+            self.transcribed(id, self.transcripts.you(id, text));
+        }
         self.changed.notify_waiters();
         self.schedule();
         Some(Ok(resumed))
@@ -3296,38 +3313,45 @@ impl Jobs {
         };
         // What the job used before this turn: each report of the turn's own counts goes on top.
         let before = job.usage.clone().unwrap_or_default();
-        let on_event = |event| match event {
-            AgentEvent::Tokens(tokens) => {
-                jobs.update(id, |job| {
-                    // Claude Code's counts are its session's so far, the turns it resumed
-                    // included: this turn's own are what grew since the session's last ones.
-                    let own = if tool == Tool::Claude {
-                        let session = job.session.clone().unwrap_or_default();
-                        let own = match &job.usage_seen {
-                            Some((seen_in, seen)) if *seen_in == session => tokens.minus(seen),
-                            _ => tokens.clone(),
+        let on_event = |event: AgentEvent| {
+            jobs.transcribed(id, jobs.transcripts.record(id, &event));
+            match event {
+                AgentEvent::Tokens(tokens) => {
+                    jobs.update(id, |job| {
+                        // Claude Code's counts are its session's so far, the turns it resumed
+                        // included: this turn's own are what grew since the session's last ones.
+                        let own = if tool == Tool::Claude {
+                            let session = job.session.clone().unwrap_or_default();
+                            let own = match &job.usage_seen {
+                                Some((seen_in, seen)) if *seen_in == session => tokens.minus(seen),
+                                _ => tokens.clone(),
+                            };
+                            job.usage_seen = Some((session, tokens));
+                            own
+                        } else {
+                            tokens
                         };
-                        job.usage_seen = Some((session, tokens));
-                        own
-                    } else {
-                        tokens
-                    };
-                    job.usage = Some(before.plus(&own));
-                });
+                        job.usage = Some(before.plus(&own));
+                    });
+                }
+                AgentEvent::Usage(usage) => {
+                    let (was, now) = jobs.usage.record(&job.account, &usage);
+                    jobs.share_rise(&job.account, &was, &now);
+                    jobs.usage_changed.notify_one();
+                }
+                AgentEvent::Session(session) => {
+                    jobs.update(id, |job| job.session = Some(session));
+                }
+                AgentEvent::Step(step) | AgentEvent::Denied(step) => {
+                    jobs.update(id, |job| job.step = step);
+                }
+                // The calls, words and to-do list are the transcript's.
+                AgentEvent::Delta(_)
+                | AgentEvent::Tool { .. }
+                | AgentEvent::ToolDone { .. }
+                | AgentEvent::Said(_)
+                | AgentEvent::Plan(_) => {}
             }
-            AgentEvent::Usage(usage) => {
-                let (was, now) = jobs.usage.record(&job.account, &usage);
-                jobs.share_rise(&job.account, &was, &now);
-                jobs.usage_changed.notify_one();
-            }
-            AgentEvent::Session(session) => {
-                jobs.update(id, |job| job.session = Some(session));
-            }
-            AgentEvent::Step(step) | AgentEvent::Denied(step) => {
-                jobs.update(id, |job| job.step = step);
-            }
-            // A job shows its steps; the words and each call's id are a conversation's.
-            AgentEvent::Delta(_) | AgentEvent::Tool { .. } | AgentEvent::ToolDone { .. } => {}
         };
         let plan = Self::mode_of(&job) == Mode::Plan;
         let ran = match tool {
@@ -3395,7 +3419,29 @@ impl Jobs {
                 .await
             }
         };
+        self.transcribed(id, self.transcripts.end_turn(id));
+        self.transcripts.forget(id);
         ran.map_err(|e| format!("obid couldn't start {}: {e}", tool.name()))
+    }
+
+    /// Tells the apps about transcript entries that came or changed (`transcript` events).
+    fn transcribed(&self, id: &str, entries: Vec<crate::transcript::Entry>) {
+        for entry in entries {
+            self.events
+                .send("transcript", json!({"job": id, "entry": entry}));
+        }
+    }
+
+    /// The job's transcript entries that came or changed after entry `after`
+    /// (`GET /v1/jobs/{id}/transcript`); `None` for a job obid doesn't have.
+    pub fn transcript(
+        &self,
+        id: &str,
+        after: u64,
+        limit: usize,
+    ) -> Option<(Vec<crate::transcript::Entry>, Option<u64>)> {
+        self.get(id)?;
+        Some(self.transcripts.read(id, after, limit))
     }
 
     /// Runs the repository's check in the job sandbox, with no network at all.
@@ -4086,6 +4132,16 @@ impl Jobs {
                     }
                 });
                 stages.begin(&format!("agent round {round}"));
+                self.transcribed(
+                    id,
+                    self.transcripts.start(
+                        id,
+                        &match round {
+                            1 => format!("Started on {}", tool.name()),
+                            n => format!("Round {n} on {}", tool.name()),
+                        },
+                    ),
+                );
                 let turn = self
                     .turn(
                         id,
