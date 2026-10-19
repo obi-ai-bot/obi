@@ -252,6 +252,8 @@ pub struct Jobs {
     plugins: std::sync::OnceLock<Arc<crate::plugins::Plugins>>,
     /// The connected-app broker: job-scoped MCP config and use records.
     connections: std::sync::OnceLock<Arc<crate::connections::Connections>>,
+    /// Oby's Tetrix login: every owner's job's agent gets Tetrix through obid (crate::tetrix).
+    tetrix: std::sync::OnceLock<Arc<crate::tetrix::Tetrix>>,
     /// Where a job's `.obi/artifacts/` is published when it ends.
     artifacts: std::sync::OnceLock<Arc<crate::artifacts::Artifacts>>,
     /// Loopback endpoint given to agents for `oby-check apple`.
@@ -313,6 +315,7 @@ impl Jobs {
             permissions: Mutex::new(kept),
             plugins: std::sync::OnceLock::new(),
             connections: std::sync::OnceLock::new(),
+            tetrix: std::sync::OnceLock::new(),
             artifacts: std::sync::OnceLock::new(),
             api_url: Mutex::new(api_url),
             approvals,
@@ -334,6 +337,64 @@ impl Jobs {
         let _ = self.connections.set(connections);
     }
 
+    pub fn use_tetrix(&self, tetrix: Arc<crate::tetrix::Tetrix>) {
+        let _ = self.tetrix.set(tetrix);
+    }
+
+    /// Oby's Tetrix, when `job` is the owner's own and Oby is signed in to Tetrix.
+    fn tetrix_for(&self, job: &Job) -> Option<&Arc<crate::tetrix::Tetrix>> {
+        self.tetrix
+            .get()
+            .filter(|t| job.obi.is_none() && t.connected())
+    }
+
+    /// Oby's Tetrix server for `job`'s agent (URL and the job's token), when it gets one.
+    fn tetrix_mcp(&self, job: &Job) -> Option<(String, String)> {
+        self.tetrix_for(job)?;
+        Some(self.connections.get()?.open_tetrix(&job.id))
+    }
+
+    /// Notes what the agent of job `id` got from Tetrix through obid.
+    pub fn tetrix_used(&self, id: &str, change: impl FnOnce(&mut crate::tetrix::Use)) {
+        self.update(id, |job| {
+            change(job.tetrix.get_or_insert_with(Default::default))
+        });
+    }
+
+    /// The session job `id`'s agent saved in Tetrix, in its outgoing actions.
+    pub fn sent_to_tetrix(&self, id: &str, session: &str) {
+        self.update(id, |job| {
+            let sent = crate::publish::Outgoing::new("tetrixSession", &job.repo, session, None);
+            if !job
+                .outgoing
+                .iter()
+                .any(|o| o.action == sent.action && o.id == sent.id)
+            {
+                job.outgoing.push(sent);
+            }
+        });
+    }
+
+    /// Of `account`'s latest 50 ended jobs that had Tetrix through obid: how many, and how many
+    /// of them called it.
+    pub fn tetrix_counts(&self, account: &str) -> (u32, u32) {
+        let state = self.lock();
+        let mut ended: Vec<&Job> = state
+            .jobs
+            .values()
+            .filter(|j| j.account == account && j.tetrix.as_ref().is_some_and(|t| t.ended))
+            .collect();
+        ended.sort_by_key(|j| std::cmp::Reverse(j.finished));
+        let recent = &ended[..ended.len().min(50)];
+        (
+            recent.len() as u32,
+            recent
+                .iter()
+                .filter(|j| j.tetrix.as_ref().is_some_and(crate::tetrix::Use::used))
+                .count() as u32,
+        )
+    }
+
     /// Where jobs' artifacts go (once; without it, a job publishes none).
     pub fn use_artifacts(&self, artifacts: Arc<crate::artifacts::Artifacts>) {
         let _ = self.artifacts.set(artifacts);
@@ -343,6 +404,16 @@ impl Jobs {
     /// in the job's private MCP config.
     fn connection_mcp(&self, id: &str) -> Option<(String, String)> {
         self.connections.get()?.open_job(id)
+    }
+
+    /// The line that tells job `id`'s agent what the fences around its connected apps' results
+    /// mean, when `tool` gets the broker and its agent wasn't told yet.
+    fn connection_rule(&self, id: &str, tool: Tool) -> Option<String> {
+        if tool == Tool::Cursor {
+            return None;
+        }
+        self.connection_mcp(id)?;
+        self.connections.get()?.take_rule(id)
     }
 
     /// The connections job `id` started with, kept on the job the first time its broker opens.
@@ -385,9 +456,15 @@ impl Jobs {
         purpose: obi_plugin_api::Purpose,
         job: obi_plugin_api::ContextJob,
         worktree: &Path,
+        more: Vec<(obi_plugin_api::PluginId, Vec<obi_plugin_api::ContextItem>)>,
     ) -> Option<String> {
-        let plugins = self.plugins.get()?;
-        let answers = plugins.context(purpose, job).await;
+        let mut answers = match self.plugins.get() {
+            Some(plugins) => plugins.context(purpose, job).await,
+            None => Vec::new(),
+        };
+        // obid's own (Tetrix's) in place of a plug-in's of the same name.
+        answers.retain(|(plugin, _)| !more.iter().any(|(own, _)| own == plugin));
+        answers.extend(more);
         match crate::plugins::write_context(worktree, &answers) {
             Ok(files) => crate::plugins::context_note(&files),
             Err(e) => {
@@ -583,7 +660,7 @@ impl Jobs {
         })
     }
 
-    fn being_changed(&self, account: &str) -> bool {
+    pub(crate) fn being_changed(&self, account: &str) -> bool {
         self.lock().changing.contains(account)
     }
 
@@ -2712,8 +2789,9 @@ impl Jobs {
             ));
             extra.push(("OBY_CHECK_TOKEN", token.into()));
         }
+        let tetrix = self.tetrix_mcp(job);
         if tool == Tool::Codex
-            && let Some((_, token)) = broker
+            && let Some((_, token)) = broker.or(tetrix.as_ref())
         {
             extra.push(("OBY_MCP_TOKEN", token.into()));
         }
@@ -2795,6 +2873,7 @@ impl Jobs {
             Tool::Codex => codex::argv(
                 bin,
                 broker.map(|(url, token)| (url.as_str(), token.as_str())),
+                tetrix.as_ref().map(|(url, _)| url.as_str()),
             ),
             Tool::Cursor => acp::cursor::argv(bin),
         };
@@ -3124,6 +3203,12 @@ impl Jobs {
                     plan,
                     plan_mode: "plan".into(),
                     agent_mode: "agent".into(),
+                    // Oby's Tetrix server, the only one Cursor gets (crate::tetrix).
+                    mcp: self
+                        .tetrix_mcp(&job)
+                        .map(|(url, token)| vec![json!({"type": "http", "name": "tetrix", "url": url,
+                            "headers": [{"name": "Authorization", "value": format!("Bearer {token}")}]})])
+                        .unwrap_or_default(),
                 };
                 acp::run_turn(
                     launch,
@@ -3345,6 +3430,7 @@ impl Jobs {
                     files: Vec::new(),
                 },
                 &worktree,
+                Vec::new(),
             )
             .await;
         let mut prompt = review::prompt(&request);
@@ -3678,11 +3764,34 @@ impl Jobs {
             } else {
                 obi_plugin_api::Purpose::Dispatch
             };
+            // What Tetrix knows about the job, asked with Oby's login (crate::tetrix).
+            let mut more = Vec::new();
+            if let (Some(tetrix), Some(connections)) =
+                (self.tetrix_for(&job), self.connections.get())
+            {
+                let (items, seen) = tetrix.context(connections, &job).await;
+                self.tetrix_used(id, |used| used.absorb(seen));
+                if !items.is_empty() {
+                    more.push((
+                        obi_plugin_api::PluginId::new("tetrix").expect("a plug-in id"),
+                        items,
+                    ));
+                }
+            }
             if let Some(note) = self
-                .plugin_context(id, purpose, crate::plugins::context_job(&job), &worktree)
+                .plugin_context(
+                    id,
+                    purpose,
+                    crate::plugins::context_job(&job),
+                    &worktree,
+                    more,
+                )
                 .await
             {
                 message = format!("{message}\n\n{note}");
+            }
+            if self.tetrix_for(&job).is_some() {
+                message = format!("{message}\n\n{}", crate::tetrix::PROMPT);
             }
             if job.session.is_some() {
                 message = format!(
@@ -3694,6 +3803,10 @@ impl Jobs {
             }
             message
         };
+        // What the fences around connected apps' results mean, once (#575).
+        if let Some(rule) = self.connection_rule(id, tool) {
+            message = format!("{message}\n\n{rule}");
+        }
         // What the secret scan found the last time it blocked publishing: the same again stops.
         let mut blocked_before: Option<Vec<crate::publish::Found>> = None;
         // The turn only the owner's words started after the work's: its reply leaves the job's
@@ -3736,7 +3849,14 @@ impl Jobs {
                 // The ready agent-mcp plug-ins' servers, from a file in the job's own folder, and
                 // one permission rule per tool each allows, each its own argument (last, since
                 // --allowedTools takes every argument after it).
-                let servers = self.agent_mcp(tool);
+                // Signed in to Tetrix, obid's own Tetrix server replaces the plug-in's: the same
+                // name, the same tools, Oby's login (crate::tetrix).
+                let tetrix = self.tetrix_mcp(&job);
+                let servers: Vec<_> = self
+                    .agent_mcp(tool)
+                    .into_iter()
+                    .filter(|s| tetrix.is_none() || s.plugin.as_str() != "tetrix")
+                    .collect();
                 let broker = if tool == Tool::Cursor {
                     None
                 } else {
@@ -3746,11 +3866,24 @@ impl Jobs {
                 if broker.is_some() && tool != Tool::Cursor {
                     mcp_rules.push(crate::connections::BROKER_RULE.into());
                 }
-                if !servers.is_empty() || broker.is_some() && tool == Tool::Claude {
+                if tetrix.is_some() {
+                    self.tetrix_used(id, |_| {});
+                    mcp_rules.extend(
+                        crate::tetrix::TOOLS
+                            .iter()
+                            .map(|tool| format!("mcp__tetrix__{tool}")),
+                    );
+                }
+                if !servers.is_empty()
+                    || (broker.is_some() || tetrix.is_some()) && tool == Tool::Claude
+                {
                     let file = spec.temp.join(MCP_CONFIG_FILE);
                     let mut config = crate::plugins::claude_mcp_config(&servers);
                     if let Some((url, token)) = broker.as_ref().filter(|_| tool == Tool::Claude) {
                         config["mcpServers"]["oby"] = json!({"type":"http","url":url,"headers":{"Authorization":format!("Bearer {token}")}});
+                    }
+                    if let Some((url, token)) = tetrix.as_ref().filter(|_| tool == Tool::Claude) {
+                        config["mcpServers"]["tetrix"] = json!({"type":"http","url":url,"headers":{"Authorization":format!("Bearer {token}")}});
                     }
                     let text = serde_json::to_vec(&config).map_err(|e| e.to_string())?;
                     let _ = std::fs::remove_file(&file);
@@ -3913,6 +4046,7 @@ impl Jobs {
             self.publish_artifacts(id).await;
             stages.begin("keep commits");
             let head = self.keep_commits(id).await?;
+            self.tetrix_ended(id, &worktree, &start_commit).await;
             let commits = if start_commit.is_empty() || head == start_commit {
                 0
             } else {
@@ -4110,6 +4244,40 @@ impl Jobs {
                 job.artifact_problems = problems;
             });
         }
+    }
+
+    /// Job `id`'s Tetrix as it ends (crate::tetrix): its commits' stamps, its graph gaps sent to
+    /// Tetrix, and the summary's last line.
+    async fn tetrix_ended(&self, id: &str, worktree: &Path, start: &str) {
+        let Some(job) = self.get(id) else { return };
+        let (Some(seen), Some(tetrix), Some(connections)) = (
+            job.tetrix.clone(),
+            self.tetrix.get(),
+            self.connections.get(),
+        ) else {
+            return;
+        };
+        // Ended already, and a round came after (a push the secret scan blocked gets one): its
+        // gaps went once, and its summary gets the line again.
+        if seen.ended {
+            let line = seen.line();
+            self.update(id, |job| {
+                if job.kind != "review" && !job.summary.contains(&line) {
+                    job.summary = format!("{}\n\n{line}", job.summary.trim_end());
+                }
+            });
+            return;
+        }
+        let (ended, outgoing) = tetrix
+            .job_ended(connections, &job, &seen, worktree, start)
+            .await;
+        self.update(id, |job| {
+            if job.kind != "review" {
+                job.summary = format!("{}\n\n{}", job.summary.trim_end(), ended.line());
+            }
+            job.tetrix = Some(ended);
+            job.outgoing.extend(outgoing);
+        });
     }
 
     /// Ends the job `id` done with `commits` (and `pushed` of them on its pull request), then
@@ -5016,6 +5184,27 @@ pub(crate) async fn keychain_ready(
 /// is good to copy: there is none (nothing is copied from it), or its token is far from its end.
 fn folder_login_ok(login: Option<&[u8]>, now: u64) -> bool {
     login.is_none_or(|login| far_from_end(expires_at(login), now))
+}
+
+/// Whether the login copy a run was given in `login` (its `.credentials.json`, or its
+/// `.claude/.credentials.json`) is good for one more turn: there is none (none was copied), or its
+/// token doesn't end within 5 minutes ([`file_login_ok`]). A conversation's Claude Code kept
+/// running between turns reads it.
+pub(crate) fn login_copy_lasts(login: &Path) -> bool {
+    match [".credentials.json", ".claude/.credentials.json"]
+        .iter()
+        .map(|name| login.join(name))
+        .find(|file| std::fs::symlink_metadata(file).is_ok())
+    {
+        None => true,
+        // A link in its place is never followed: the turn starts a Claude Code with a new copy.
+        Some(file) => {
+            std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file())
+                && std::fs::read(file)
+                    .ok()
+                    .is_some_and(|login| file_login_ok(Some(&login), now_ms()))
+        }
+    }
 }
 
 /// The issue for the Mac app's Swift engine still running agents unboxed on an account's folder,
@@ -6541,6 +6730,24 @@ mod tests {
                 || jobs.get("j").is_some_and(|j| j.status != Status::Queued)
         });
         assert!(started, "the job never started once the change ended");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_waiting_claude_code_runs_a_turn_only_on_a_copy_that_lasts() {
+        let root = std::env::temp_dir().join(format!("obid-lasts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        assert!(login_copy_lasts(&root), "no copy: nothing ends");
+        let ends = |ms: u64| format!(r#"{{"claudeAiOauth": {{"expiresAt": {ms}}}}}"#);
+        let file = root.join(".claude/.credentials.json");
+        std::fs::write(&file, ends(now_ms() + 60 * 60_000)).unwrap();
+        assert!(login_copy_lasts(&root));
+        std::fs::write(&file, ends(now_ms() + 60_000)).unwrap();
+        assert!(!login_copy_lasts(&root), "it ends within 5 minutes");
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), &file).unwrap();
+        assert!(!login_copy_lasts(&root), "a link isn't followed");
         let _ = std::fs::remove_dir_all(&root);
     }
 
