@@ -76,6 +76,14 @@ These come from a read of `docs/runner-api.md` and `core/crates/obid` on 2026-10
 
 Already there and used as they are: `step`, `pipeline` (stages with `state`, `detail` and `reason`), `round` and `rounds`, `check`, `mode`, `model`, `effort`, `permission`, `outgoing`, `published`, `pullRequest`, `publishError`, `macCheck`, `appleCheck`, failure records (`/v1/failures`), and `answered` (the last 50 permission rulings).
 
+## Issues
+
+Tracked on #739, on the roadmap board:
+
+- design: #729
+- obid: #381 (transcript, already open), #730 (activity), #731 (tokens and cost), #450 (account windows, already open), #732 (window share), #733 (timings and estimate), #734 (check run), #735 (scan record), #736 (diff stat), #448 (question, already open)
+- apps: #737 (Mac), #738 (iPhone)
+
 ## Open questions for the owner and Sangam
 
 - Is Usage a card on every job, or folded into one line (as B does) unless an account is past 80%?
