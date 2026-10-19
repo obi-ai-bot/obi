@@ -1417,13 +1417,14 @@ mod tests {
     /// both causes and quotes both records, and the system prompt and schema stay the same (#534).
     #[tokio::test]
     async fn the_brain_is_sent_both_causes_and_the_same_system_prompt() {
-        use super::super::planner::{Adapter, Planner, tests::Fake};
+        use super::super::planner::{Adapter, LEAST, Planner, tests::Fake};
         use std::sync::Arc;
         let fake = Arc::new(Fake::default());
         let planner = Planner {
             adapters: vec![Adapter::Fake(fake.clone())],
             falls_back_to_rules: true,
             deadline: None,
+            least: LEAST,
         };
         let context = |briefing: &Briefing| super::super::plan::Context {
             accounts: std::collections::BTreeMap::from([("claude".into(), vec!["default".into()])]),

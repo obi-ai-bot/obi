@@ -12,6 +12,10 @@
 //   SLOW             waits 3 seconds, then commits hello.txt
 //   BIG              commits big.txt: 1 MB of long lines of ordinary words, slow to scan
 //   WAIT             waits 60 seconds, then ends the turn
+//   TOOLS            a session of tool calls, each answered (tests/vault_api.rs): its words, 5
+//                    reads, a to-do list, more words with VALUE in them plain, hex and
+//                    URL-encoded, 2 edits, and a run of the job's check (node --test) whose
+//                    command holds VALUE plain and base64 and fails
 //   anything else    ends the turn with "Nothing to do."
 // Every turn writes the prompt it got to .obi/seen-prompt.txt in the worktree (.obi/ is never part
 // of the work), so a test can read what reached the agent.
@@ -78,6 +82,22 @@ rl.on("line", (line) => {
       git("add", "config.b64");
       git("commit", "-q", "-m", "chore: add config.b64");
       result("Added config.b64.");
+    } else if (prompt.includes("TOOLS")) {
+      let n = 0;
+      const say = (text) => emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "text", text }] } });
+      const call = (name, input, error = false) => {
+        const id = `toolu_${++n}`;
+        emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } });
+        emit({ type: "user", session_id: session, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, is_error: error, content: "raw output that never leaves obid" }] } });
+      };
+      say("Looking for where a blocked scan ends the job.");
+      for (const file of ["scan.rs", "jobs.rs", "publish.rs", "git.rs", "lib.rs"]) call("Read", { file_path: `${process.cwd()}/src/${file}` });
+      call("TodoWrite", { todos: [{ content: "Find it", status: "completed", activeForm: "Finding it" }, { content: "Fix it", status: "in_progress", activeForm: "Fixing it" }] });
+      say(`Found it. Fixing it, with ${VALUE} for staging (${forms.hex}, ${forms.url}).`);
+      call("Edit", { file_path: `${process.cwd()}/src/scan.rs`, old_string: "a\nb", new_string: "c\nd\ne" });
+      call("Edit", { file_path: `${process.cwd()}/src/jobs.rs`, old_string: "x", new_string: "y" });
+      call("Bash", { command: `export STAGING_KEY=${VALUE} KEY64=${forms.base64} && node --test` }, true);
+      result("Fixed it.");
     } else if (prompt.includes("WAIT")) {
       execFileSync("sleep", ["60"]);
       result("Waited.");
