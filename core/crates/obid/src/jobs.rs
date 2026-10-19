@@ -562,6 +562,52 @@ impl Jobs {
         self.lock().jobs.get(id).cloned()
     }
 
+    /// The follow-up of `id` that's queued or running, if any: a job has one at a time, and words
+    /// for `id` once it ended go to it.
+    pub fn following(&self, id: &str) -> Option<Job> {
+        self.lock()
+            .jobs
+            .values()
+            .find(|j| j.status.is_active() && j.follow_up_of.as_deref() == Some(id))
+            .cloned()
+    }
+
+    /// Words for job `id` as words, never as an answer: taken only while it's at work in a turn
+    /// with no permission or plan waiting, all checked under the one lock that takes them (a
+    /// proposal's Start, link.rs: its words must never become the "no" of something the job asks
+    /// meanwhile). Otherwise refused, and nothing changes.
+    pub fn hear_at_work(&self, id: &str, text: &str) -> Option<Result<Job, Refused>> {
+        let text = text.trim();
+        if text.is_empty() || text.chars().count() > 2000 {
+            return Some(Err(Refused(
+                "Tell the agent something of 1 to 2,000 characters.".into(),
+            )));
+        }
+        let taken = {
+            let mut state = self.lock();
+            let free = state.workers.contains_key(id)
+                && !state.wrapping.contains(id)
+                && state.asks.get(id).is_none_or(VecDeque::is_empty);
+            let job = state.jobs.get_mut(id)?;
+            (free && job.status == Status::Running && job.phase == Some(Phase::Work)).then(|| {
+                hear(job, text);
+                job.clone()
+            })
+        };
+        let Some(job) = taken else {
+            return Some(Err(Refused(
+                "It can't take words now: it's getting ready, waiting for your answer or wrapping up."
+                    .into(),
+            )));
+        };
+        if let Err(e) = self.store.save(&job) {
+            tracing::error!("can't keep job {id}: {e}");
+        }
+        self.events.send("job", job.to_json());
+        self.changed.notify_waiters();
+        Some(Ok(job))
+    }
+
     /// The latest `limit` jobs, newest first.
     pub fn list(&self, limit: usize) -> Vec<Job> {
         let mut jobs: Vec<Job> = self.lock().jobs.values().cloned().collect();
@@ -1482,8 +1528,9 @@ impl Jobs {
                 .collect();
             if let Some(other) = active.iter().find(|j| j.follow_up_of == job.follow_up_of) {
                 return Err(Refused(format!(
-                    "{} is following it up already: tell that one instead.",
-                    other.short_title()
+                    "{} (job {}) is following it up already: tell that one instead.",
+                    other.short_title(),
+                    other.id
                 )));
             }
             if let Some(other) = active
@@ -1702,6 +1749,14 @@ impl Jobs {
             )));
         }
         if !job.status.is_active() && text != crate::brain::actions::TRY_AGAIN {
+            // Its follow-up is working already: the words go to that one, never a second.
+            if source != Source::Event
+                && let Some(next) = self.following(id)
+            {
+                return Some(self.message(&next.id, text, source)?.map_err(|why| {
+                    Refused(format!("{} ({}): {}", next.short_title(), next.id, why.0))
+                }));
+            }
             return Some(match source {
                 Source::Owner => self.create(follow_up(&job, text)),
                 Source::Untrusted | Source::Event => Err(Refused(
@@ -1742,11 +1797,7 @@ impl Jobs {
                     }),
             );
         }
-        let heard = |job: &mut Job| {
-            job.notes.get_or_insert_with(Vec::new).push(text.to_owned());
-            job.heard.push(text.to_owned());
-            job.step = format!("You: {text}");
-        };
+        let heard = |job: &mut Job| hear(job, text);
         if job.status.is_active() {
             // Checked and changed under one lock: a worker wrapping up takes no more words.
             let taken = {
@@ -6011,25 +6062,26 @@ fn tail(text: &str, max: usize) -> &str {
     &text[start..]
 }
 
+/// `job` hears `text`: its notes, what it heard, and its step.
+fn hear(job: &mut Job, text: &str) {
+    job.notes.get_or_insert_with(Vec::new).push(text.to_owned());
+    job.heard.push(text.to_owned());
+    // What the owner said; the agent's words quoted after it aren't theirs to show.
+    job.step = format!("You: {}", crate::sphere::inbox::owners_part(text));
+}
+
 /// The first prompt of the owner's job (Engine/Jobs.swift, `Prompts.agent`, for what obid does).
 /// A follow-up of `job`, which ended, with the owner's `words` (Sangam's design, the owner's
 /// decision of 2026-10-18): the same kind, agent, account, repository, pull request or issue,
-/// base, check, model, mode and conversation, the words its request and task, titled by their
-/// first line, and what `job` did for its first prompt. Bypass isn't carried: only the owner's own
+/// base, check, model, mode and conversation, the words its request and task, titled
+/// `Follow-up: <job's title>` (never the words themselves, which may be long; the conversation
+/// may name it better, `oby_tell_job`'s `title`), and what `job` did for its first prompt. Bypass isn't carried: only the owner's own
 /// Confirm starts a job that never asks. When `job` has commits that aren't merged, the follow-up
 /// starts from its branch head, so its agent has that work: on that very branch while its pull
 /// request is open (publishing updates it), else on a branch of its own.
 pub fn follow_up(job: &Job, words: &str) -> NewJob {
     let unmerged = job.commits.unwrap_or(0) > 0 && !job.merged();
-    let line = words.trim().lines().next().unwrap_or("").trim();
-    let mut title: String = if line.chars().count() > 60 {
-        format!("{}…", line.chars().take(59).collect::<String>().trim_end())
-    } else {
-        line.to_owned()
-    };
-    if let Some(first) = title.get_mut(0..1) {
-        first.make_ascii_uppercase();
-    }
+    let title = crate::brain::briefing::line(&format!("Follow-up: {}", job.short_title()), 60);
     let commits = job.commits.unwrap_or(0);
     let mut did = vec![
         format!(
@@ -6055,7 +6107,7 @@ pub fn follow_up(job: &Job, words: &str) -> NewJob {
         repo: job.repo.clone(),
         kind: job.kind.clone(),
         task: words.to_owned(),
-        title: (!title.is_empty()).then_some(title),
+        title: Some(title),
         request: Some(words.to_owned()),
         pr: job.pr,
         issue: job.issue,
@@ -7518,7 +7570,7 @@ mod tests {
         let next = follow_up(&job, "and the docs");
         assert_eq!((next.branch, next.start_from), (None, None));
         assert_eq!(next.mode, None);
-        assert_eq!(next.title.as_deref(), Some("And the docs"));
+        assert_eq!(next.title.as_deref(), Some("Follow-up: Fix it"));
         job.commits = Some(2);
         let next = follow_up(&job, "and the docs");
         assert_eq!(
@@ -7588,6 +7640,59 @@ mod tests {
             );
         }
         assert_eq!(jobs.list(10).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A proposal's Start reaches a running follow-up only as words, never as the answer to what it
+    /// asks: taken while it's at work, refused once a plan (or permission) waits, even one that
+    /// arrived after it was free, and the plan stays unanswered.
+    #[tokio::test]
+    async fn words_at_work_never_answer_what_the_job_asks() {
+        let root = std::env::temp_dir().join(format!("obid-hear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let mut job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        job.status = Status::Running;
+        job.phase = Some(Phase::Work);
+        job.mode = Some("plan".into());
+        let (worker, _signals) = watch::channel(Signal::Run);
+        {
+            let mut state = jobs.lock();
+            state.jobs.insert("j".into(), job);
+            state.workers.insert("j".into(), worker);
+        }
+        let heard = jobs.hear_at_work("j", "and the docs").unwrap().unwrap();
+        assert_eq!(heard.step, "You: and the docs");
+        // A plan arrives: the next Start's words are refused, and the plan still waits.
+        let worktree = root.join("worktree");
+        let Ruling::Ask(_waiting) =
+            jobs.rule_on("j", "ExitPlanMode", &json!({"plan": "1. Fix"}), &worktree)
+        else {
+            panic!("the plan went through by itself");
+        };
+        let refused = jobs.hear_at_work("j", "from the web").unwrap();
+        assert!(refused.unwrap_err().0.contains("can't take words now"));
+        let job = jobs.get("j").unwrap();
+        assert!(job.permission.is_some(), "still waiting");
+        assert_eq!(job.heard, ["and the docs"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -771,10 +771,19 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
         .into_iter()
         .find(|i| i["kind"] == "start")
         .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
+    // The card reads as the owner wrote it: their words, then the agent's, never the fences the
+    // agent's prompt keeps.
+    let text = start["text"].as_str().unwrap();
     assert!(
-        start["text"].as_str().unwrap().contains("AGENT-WORDS-2"),
+        text.contains(&format!("Your words:\n{web}"))
+            && text.ends_with("What Oby adds for its agent:\nAGENT-WORDS-2"),
         "{start}"
     );
+    assert!(
+        !text.contains("quoted-") && !text.contains("Everything between"),
+        "{start}"
+    );
+    assert_eq!(start["title"], "Follow-up: Add a greeting");
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(
         call(&obid, "GET", "/v1/jobs", None)
@@ -785,6 +794,108 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
         jobs,
         "nothing started"
     );
+
+    // A follow-up of the job working already takes the item's Start once it's at work: it hears
+    // the words, the item is done, and nothing else starts.
+    let pausing = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "PAUSE: 30000"})),
+    );
+    assert_eq!(pausing.status, 201, "{}", pausing.text);
+    let follow = pausing.body["id"].as_str().unwrap().to_owned();
+    // Still getting ready, it isn't at work: the item's words would wait for nothing, or answer
+    // what it asks next. Start is refused, naming it, and the item stays open.
+    let item = start["id"].as_str().unwrap();
+    let refused = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{item}/answer"),
+        Some(&json!({"answer": "Start"})),
+    );
+    assert_eq!(refused.status, 409, "{}", refused.text);
+    assert!(refused.text.contains(&follow), "{}", refused.text);
+    assert!(inbox(&obid).iter().any(|i| i["id"] == item), "still open");
+    within(60, "the follow-up is at work", || {
+        let body = call(&obid, "GET", &format!("/v1/jobs/{follow}"), None).body;
+        (body["status"] == "running" && body["step"] == "Starting Claude Code").then_some(())
+    });
+    let answered = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{item}/answer"),
+        Some(&json!({"answer": "Start"})),
+    );
+    assert_eq!(answered.status, 200, "{}", answered.text);
+    assert_eq!(answered.body["job"], follow.as_str());
+    assert!(answered.body["done"].is_string(), "{}", answered.text);
+    let heard = call(&obid, "GET", &format!("/v1/jobs/{follow}"), None).body;
+    assert!(
+        heard["notes"].to_string().contains("AGENT-WORDS-2"),
+        "{heard}"
+    );
+    // Its step shows the owner's words, not the agent's quoted after them.
+    assert_eq!(heard["step"], format!("You: {web}"), "{heard}");
+    assert_eq!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        jobs + 1,
+        "only the follow-up the owner started"
+    );
+
+    // Told again in the conversation, the job's working follow-up hears it: no second follow-up,
+    // and its card goes on the answer.
+    let again = format!(r#"OBY oby_tell_job {{"id": "{id}", "words": "AGENT-WORDS-3"}}"#);
+    let on_it = said(&obid, json!({"said": again, "conversation": conversation}));
+    assert!(
+        on_it.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("Already on it in"),
+        "{}",
+        on_it.text
+    );
+    assert_eq!(
+        on_it.body["jobs"][0]["id"],
+        follow.as_str(),
+        "{}",
+        on_it.text
+    );
+    ended(&obid, &follow);
+
+    // A proposal names the conversation it was made in (another than the job's here), which
+    // shows it; a later follow-up that ended, here failed, leaves it open as it was.
+    let web = format!(r#"WEB OBY oby_tell_job {{"id": "{id}", "words": "AGENT-WORDS-4"}}"#);
+    let elsewhere = said(&obid, json!({"said": web, "new": true}));
+    let elsewhere = elsewhere.body["conversation"].as_str().unwrap().to_owned();
+    assert_ne!(elsewhere, conversation);
+    let proposed = inbox(&obid)
+        .into_iter()
+        .find(|i| i["kind"] == "start")
+        .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
+    assert_eq!(proposed["conversation"], elsewhere.as_str(), "{proposed}");
+    std::thread::sleep(Duration::from_millis(1100));
+    let other = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "and the docs"})),
+    );
+    assert_eq!(other.status, 201, "{}", other.text);
+    assert_eq!(
+        ended(&obid, other.body["id"].as_str().unwrap())["status"],
+        "failed"
+    );
+    let still = inbox(&obid)
+        .into_iter()
+        .find(|i| i["id"] == proposed["id"])
+        .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
+    assert_eq!(still["text"], proposed["text"]);
+    assert_eq!(still["options"], json!(["Start", "Cancel"]));
 }
 
 /// One turn starts at most ten jobs and tells jobs at most ten times: past that a tool says why.
