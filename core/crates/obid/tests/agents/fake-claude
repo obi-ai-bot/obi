@@ -2,6 +2,8 @@
 // A stand-in for Claude Code in obid's tests: stream-json in and out, as obid runs `claude`. What
 // it does comes from the prompt (the job's task):
 //   COMMIT: <file>   writes the file in the worktree and commits it
+//   DRAFT: <file>    writes the file in the worktree and leaves it uncommitted, then goes on with
+//                    the rest of the prompt
 //   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is ended
 //   FAIL             ends the turn with an error result
 //   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
@@ -26,10 +28,11 @@
 //                    (--allowedTools), what each http MCP server answered to `tools/list`, and
 //                    the files in .obi/context/; then ends the turn with "Reported." With
 //                    MCP_CALL, MCP_WRITE, MCP_API or MCP_PROBE it also calls the `oby` broker's
-//                    tools, and MCP_PROBE tries the broker's token on the runner's other routes.
-//                    With TETRIX_CALL it calls the `tetrix` server's search_entities, get_entity,
-//                    save_session and resume_session, and commits tetrix.txt with a
-//                    Tetrix-Session trailer naming the session save_session answered
+//                    tools (MCP_CALL's search with its prompt as the query), and MCP_PROBE tries
+//                    the broker's token on the runner's other routes. With TETRIX_CALL it calls
+//                    the `tetrix` server's search_entities, get_entity, save_session and
+//                    resume_session, and commits tetrix.txt with a Tetrix-Session trailer naming
+//                    the session save_session answered
 //   ON PURPOSE       in a fix round's quoted task: ends the turn with "FAILS AS ASKED: …"
 //   anything else    ends the turn with "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
@@ -95,6 +98,8 @@ rl.on("line", (line) => {
   const asks = prompt.match(/ASKS: (\[.*\])/);
   const login = prompt.match(/LOGIN: (\S+)/);
   const plant = prompt.match(/PLANT: (\S+)/);
+  const draft = prompt.match(/DRAFT: (\S+)/);
+  if (draft) writeFileSync(draft[1], "draft\n");
   if (commit) {
     writeFileSync(commit[1], "hello\n");
     execFileSync("git", ["add", commit[1]]);
@@ -223,7 +228,7 @@ async function report(prompt) {
           const called = await fetch(server.url, {
             method: "POST",
             headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(server.headers ?? {}) },
-            body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: first.name, arguments: {} } }),
+            body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: first.name, arguments: { query: prompt } } }),
           });
           toolCalls[name] = await called.json();
         }
