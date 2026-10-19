@@ -2013,6 +2013,8 @@ fn telling_a_finished_job_something_starts_a_follow_up() {
         (job["status"] == "done").then_some(job)
     });
     assert_eq!(follow["followUpOf"], json!(id));
+    // Its parent isn't this conversation's (POST /v1/jobs), so neither is it: no turn here names it.
+    assert!(follow["turn"].is_null(), "{follow}");
     for key in [
         "kind",
         "agent",

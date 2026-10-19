@@ -111,6 +111,25 @@ struct ChatPageTests {
         let later = all + [again]
         let shownLater = ThreadTaskLine.shown(in: thread + [ended], jobs: later, startedBy: startedBy, ended: { $0.id == "e" })
         #expect(ThreadTaskLine.attached(to: fix, in: later, shown: shownLater).map(\.id) == ["told", "again"])
+        // A followUpOf loop ends: no job goes under itself.
+        var loop = fix
+        loop.followUpOf = "again"
+        #expect(ThreadTaskLine.attached(to: loop, in: [loop, told, again], shown: []).map(\.id) == ["told", "again"])
+    }
+
+    /// A job's turn counts only in its own conversation: another conversation's job, whatever its
+    /// turn, never shows under these words.
+    @Test func aJobShowsOnlyInItsOwnConversation() {
+        var started = job(.running)
+        started.turn = "u"
+        #expect(ThreadTaskLine.startedBy(started, in: "c1", showing: "c1") == "u")
+        #expect(ThreadTaskLine.startedBy(started, in: "c2", showing: "c1") == nil)
+        // A runner with one thread names none.
+        #expect(ThreadTaskLine.startedBy(started, in: nil, showing: nil) == "u")
+        let words = Turn(id: "u", date: now, who: .user, text: "fix it")
+        let elsewhere = { (job: Job) in ThreadTaskLine.startedBy(job, in: "c2", showing: "c1") }
+        #expect(ThreadTaskLine.cards(under: words, in: [words], jobs: [started], startedBy: elsewhere).isEmpty)
+        #expect(ThreadTaskLine.shown(in: [words], jobs: [started], startedBy: elsewhere, ended: { _ in false }).isEmpty)
     }
 
     /// The card under an answer says where its task stands, then who has it where; never "new"

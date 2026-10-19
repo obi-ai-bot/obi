@@ -149,7 +149,8 @@ struct WindowScreens {
                                                tool: "oby_dispatch", detail: "deskree-inc/oby"))
         var started = job("t3", "Dark mode flashes on launch", status: .running, ago: 10)
         started.step = "Getting ready"
-        model.feed.apply(started, extras: RunnerJobExtras(id: "t3", turn: "s3"))
+        started.turn = "s3"
+        model.feed.apply(started)
         let state = ChatState(defaults: .scratch)
         state.trail.start(.talk)
         try await shoot("mac-convo-starting", model: model, state: state, sidebar: false)

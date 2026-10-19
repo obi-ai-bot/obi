@@ -148,8 +148,15 @@ nonisolated enum ThreadTaskLine {
         jobs.filter { $0.followUpOf == id }.sorted { $0.created < $1.created }
     }
 
+    /// The user's turn that started `job` (obid's `turn`), when `job` is in the conversation on
+    /// screen (`conversation` is the job's, `showing` the screen's); another conversation's
+    /// job never counts, whatever its turn.
+    static func startedBy(_ job: Job, in conversation: String?, showing: String?) -> String? {
+        conversation == showing ? job.turn : nil
+    }
+
     /// The jobs whose cards go under `turn`: those it lists, then, under the user's words, the
-    /// jobs those words started (obid's `turn`, `startedBy`) that no turn of the thread lists yet,
+    /// jobs those words started (`startedBy`) that no turn of the thread lists yet,
     /// oldest first: a card shows the moment its job starts, not when Oby's answer is in.
     static func cards(under turn: Turn, in thread: [Turn], jobs: [Job], startedBy: (Job) -> String?) -> [Job] {
         let listed = ConversationModel.jobs(of: turn, among: jobs)
@@ -168,9 +175,12 @@ nonisolated enum ThreadTaskLine {
 
     /// The follow-ups that go with `job`'s card, oldest first, each followed by its own: those the
     /// thread doesn't show where they started (`shown`), like one told from the task's page. Each
-    /// goes under Sangam's line (`followUp`), as on the task's page.
-    static func attached(to job: Job, in jobs: [Job], shown: Set<String>) -> [Job] {
-        followUps(of: job.id, in: jobs).filter { !shown.contains($0.id) }.flatMap { [$0] + attached(to: $0, in: jobs, shown: shown) }
+    /// goes under Sangam's line (`followUp`), as on the task's page. A job is never under itself
+    /// (`seen`), so a `followUpOf` loop ends.
+    static func attached(to job: Job, in jobs: [Job], shown: Set<String>, seen: Set<String> = []) -> [Job] {
+        let seen = seen.union([job.id])
+        return followUps(of: job.id, in: jobs).filter { !shown.contains($0.id) && !seen.contains($0.id) }
+            .flatMap { [$0] + attached(to: $0, in: jobs, shown: shown, seen: seen) }
     }
 
     /// A job's mark in the thread, as in the side panel but never "new": you're looking at it.

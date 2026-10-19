@@ -362,7 +362,15 @@ async fn act(
     problems(shared, session, &plan)?;
     outcome_answer(
         session,
-        actions::act(shared, &plan, words, source(session), &session.conversation).await,
+        actions::act(
+            shared,
+            &plan,
+            words,
+            source(session),
+            &session.conversation,
+            &session.control.turn,
+        )
+        .await,
     )
 }
 
@@ -467,6 +475,7 @@ async fn tell(
                 &words,
                 source(session),
                 &session.conversation,
+                &session.control.turn,
             )
             .await,
         );
@@ -515,6 +524,7 @@ async fn tell(
             &session.conversation,
         ));
     }
+    new.turn = actions::started_by(&job, &session.conversation, &session.control.turn);
     outcome_answer(session, actions::follow_up(shared, &job, new))
 }
 
