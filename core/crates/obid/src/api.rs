@@ -57,10 +57,12 @@ pub struct Shared {
     pub plugins: Arc<crate::plugins::Plugins>,
     /// The accounts' sign-ins under way (crate::accounts).
     pub sign_ins: crate::accounts::SignIns,
+    /// The GitHub login and its sign-in (crate::github_login).
+    pub github: crate::github_login::GitHubLogin,
     /// The browsers signed in to the web app's own files (crate::web): nothing under `/v1`.
     pub pages: crate::web::Sessions,
     /// What GitHub wants from the owner (crate::github_work).
-    pub github: Arc<crate::github_work::Feed>,
+    pub github_work: Arc<crate::github_work::Feed>,
     /// True once obid is stopping: streams end.
     pub stopping: tokio::sync::watch::Receiver<bool>,
 }
@@ -107,6 +109,11 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route(
             "/v1/accounts/{id}",
             axum::routing::patch(crate::accounts::change).delete(crate::accounts::remove),
+        )
+        .route("/v1/github", get(crate::github_login::get))
+        .route(
+            "/v1/github/sign-in",
+            post(crate::github_login::sign_in).delete(crate::github_login::end_sign_in),
         )
         .route(
             "/v1/accounts/{id}/sign-in",
@@ -476,6 +483,14 @@ pub struct Status {
     pub checks: &'static str,
     pub permissions: ModeJson,
     pub cleanup: CleanupJson,
+    /// Whether obid copies Claude Code's Keychain login, and whether it chose that itself.
+    pub claude_keychain: KeychainJson,
+}
+
+#[derive(Serialize)]
+pub struct KeychainJson {
+    pub on: bool,
+    pub auto: bool,
 }
 
 #[derive(Serialize)]
@@ -649,6 +664,10 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
             bytes: shared.cleanup.bytes(),
             // obid has no cleanup pass yet; when it does, it sets this and calls `remeasure`.
             last_run: None,
+        },
+        claude_keychain: KeychainJson {
+            on: crate::jobs::keychain_on(),
+            auto: crate::jobs::keychain_auto(),
         },
     }))
 }

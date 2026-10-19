@@ -807,12 +807,12 @@ fn answer(status: StatusCode, value: Value) -> Response {
 
 /// `GET /v1/github/work`.
 pub async fn get(State(shared): State<Arc<Shared>>) -> Response {
-    answer(StatusCode::OK, shared.github.to_json())
+    answer(StatusCode::OK, shared.github_work.to_json())
 }
 
 /// `POST /v1/github/work/refresh`.
 pub async fn refresh(State(shared): State<Arc<Shared>>) -> Response {
-    answer(StatusCode::OK, shared.github.refresh().await)
+    answer(StatusCode::OK, shared.github_work.refresh().await)
 }
 
 /// `POST /v1/github/work/{id}/start`.
@@ -821,7 +821,7 @@ pub async fn start(
     UrlPath(id): UrlPath<String>,
 ) -> Result<Response, ApiError> {
     crate::brain::recap::tapped(&shared);
-    let (job, new) = shared.github.start(&id).await?;
+    let (job, new) = shared.github_work.start(&id).await?;
     let status = if new {
         StatusCode::CREATED
     } else {

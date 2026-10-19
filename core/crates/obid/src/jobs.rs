@@ -3082,35 +3082,17 @@ impl Jobs {
             "+refs/heads/{0}:refs/remotes/origin/{0}",
             request.base_branch
         );
-        if let Err(e) = git::git(
-            &clone,
-            &[
-                "fetch",
-                "--quiet",
-                "--no-tags",
-                "--no-write-fetch-head",
-                "origin",
-                &base_ref,
-            ],
-        )
-        .await
-        {
+        if let Err(e) = git::fetch(&clone, &repo.remote, &[base_ref]).await {
             tracing::info!(
                 "job {id}: the base {} didn't fetch: {e}",
                 request.base_branch
             );
         }
         if !git::has_commit(&clone, &request.head_sha).await {
-            let _ = git::git(
+            let _ = git::fetch(
                 &clone,
-                &[
-                    "fetch",
-                    "--quiet",
-                    "--no-tags",
-                    "--no-write-fetch-head",
-                    "origin",
-                    &request.head_sha,
-                ],
+                &repo.remote,
+                std::slice::from_ref(&request.head_sha),
             )
             .await;
         }
@@ -4494,27 +4476,62 @@ pub(crate) fn keychain_service(config_dir: Option<&Path>) -> String {
     }
 }
 
-/// Whether obid copies Claude Code's Keychain login (`claudeKeychain` in the configuration, set
-/// when obid starts): off unless the owner turns it on.
+/// Whether obid copies Claude Code's Keychain login (`claudeKeychain` in the configuration, or
+/// obid's own choice when it's left out, set when obid starts).
 static KEYCHAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether obid chose it itself (`claudeKeychain` left out) rather than the owner.
+static KEYCHAIN_AUTO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the Keychain copy is on.
 pub fn keychain_on() -> bool {
     KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Turns the Keychain copy on or off (crate::serve, from the configuration).
-pub fn use_keychain(on: bool) {
+/// Whether obid chose the Keychain copy's setting itself (`GET /v1/status`, `claudeKeychain`).
+pub fn keychain_auto() -> bool {
+    KEYCHAIN_AUTO.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turns the Keychain copy on or off (crate::serve), and says whether obid chose it.
+pub fn use_keychain(on: bool, auto: bool) {
     KEYCHAIN.store(on, std::sync::atomic::Ordering::Relaxed);
+    KEYCHAIN_AUTO.store(auto, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether obid turns the Keychain copy on by itself, with `claudeKeychain` left out: on macOS,
+/// when Claude Code's default login is in the Keychain and no `~/.claude/.credentials.json` is
+/// there (Claude Code writes none when it can use the Keychain), so a fresh Mac's Claude accounts
+/// don't all read as signed out. Only whether the item exists is looked at, never what it holds.
+pub fn keychain_wanted() -> bool {
+    let file = person_homes()
+        .iter()
+        .any(|home| is_regular_file(&home.join(".claude/.credentials.json")));
+    wanted(cfg!(target_os = "macos"), file, || {
+        keychain_item(None, false).is_some()
+    })
+}
+
+/// [`keychain_wanted`]'s rule: on macOS, with no login file, when the Keychain holds the item.
+fn wanted(macos: bool, file: bool, item: impl FnOnce() -> bool) -> bool {
+    macos && !file && item()
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
 }
 
 /// `security`'s answer for Claude Code's Keychain item for `config_dir`, as the person (`-a`):
-/// the item itself with `-w`, else only whether it's there.
-#[cfg(target_os = "macos")]
+/// the item itself with `-w`, else only whether it's there; nothing while the Keychain copy is off.
 fn keychain(config_dir: Option<&Path>, value: bool) -> Option<Vec<u8>> {
-    if !KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed) {
+    if !keychain_on() {
         return None;
     }
+    keychain_item(config_dir, value)
+}
+
+/// [`keychain`], whether or not the copy is on: what [`keychain_wanted`] asks once at start.
+#[cfg(target_os = "macos")]
+fn keychain_item(config_dir: Option<&Path>, value: bool) -> Option<Vec<u8>> {
     let user = nix::unistd::User::from_uid(nix::unistd::getuid())
         .ok()??
         .name;
@@ -4533,7 +4550,7 @@ fn keychain(config_dir: Option<&Path>, value: bool) -> Option<Vec<u8>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn keychain(_config_dir: Option<&Path>, _value: bool) -> Option<Vec<u8>> {
+fn keychain_item(_config_dir: Option<&Path>, _value: bool) -> Option<Vec<u8>> {
     None
 }
 
@@ -6088,6 +6105,19 @@ mod tests {
         assert!(trimmed.get("tipsHistory").is_none());
         assert_eq!(trimmed_claude_json(b"not json"), b"{}");
         assert_eq!(trimmed_claude_json(b"[1,2]"), b"{}");
+    }
+
+    /// claudeKeychain left out: on only on macOS, only with no login file, only when the Keychain
+    /// holds Claude Code's item; the Keychain isn't asked when the file is there (the owner's
+    /// decision of 2026-10-18).
+    #[test]
+    fn the_keychain_turns_on_by_itself_only_for_a_keychain_only_login() {
+        assert!(wanted(true, false, || true));
+        assert!(!wanted(true, false, || false));
+        assert!(!wanted(true, true, || panic!(
+            "the Keychain isn't asked when the file is there"
+        )));
+        assert!(!wanted(false, false, || true));
     }
 
     /// #643's security review: a job that put a link in place of its account folder can't make obid
