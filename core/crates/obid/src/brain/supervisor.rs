@@ -181,13 +181,17 @@ pub fn allowed(
 
 /// Why a supervisor turn can't call Oby's `tool` with `args`, when it can't: nobody watches it,
 /// so it reads only its own stalled job (never other jobs, the inbox, past conversations or the
-/// room's files, which carry the owner's other work) and archives nothing.
+/// room's files, which carry the owner's other work), runs no commands and archives nothing.
 pub fn refused(session: &Session, tool: &str, args: &serde_json::Value) -> Option<&'static str> {
     let watch = session.supervising.as_ref()?;
     match tool {
         "oby_jobs" | "oby_conversations" | "oby_inbox" | "oby_archive_job" | "oby_read"
         | "oby_search" | "oby_list" => {
             Some("A turn nobody watches reads only its own job and archives nothing.")
+        }
+        // The conversation's shell (super::shell) runs commands in the room: never unattended.
+        "oby_shell" | "oby_shell_output" | "oby_shell_stop" => {
+            Some("A turn nobody watches runs no commands.")
         }
         "oby_job" if args["id"].as_str() != Some(watch.job.as_str()) => {
             Some("A turn nobody watches reads only the job it's about.")
@@ -597,6 +601,9 @@ mod tests {
             "oby_read",
             "oby_search",
             "oby_list",
+            "oby_shell",
+            "oby_shell_output",
+            "oby_shell_stop",
         ] {
             assert!(
                 refused(&unattended, tool, &serde_json::json!({})).is_some(),
@@ -609,6 +616,7 @@ mod tests {
         assert!(refused(&unattended, "oby_continue_job", &other).is_none());
         let owners = session(None);
         assert!(refused(&owners, "oby_inbox", &serde_json::json!({})).is_none());
+        assert!(refused(&owners, "oby_shell", &serde_json::json!({})).is_none());
         assert!(refused(&owners, "oby_job", &other).is_none());
     }
 

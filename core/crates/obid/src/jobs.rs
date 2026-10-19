@@ -2354,7 +2354,7 @@ impl Jobs {
     }
 
     /// Saves an allow rule for a repository, once; the prompts waiting now, in every job, follow it.
-    fn save_rule(&self, rule: &str, repo: &str) {
+    pub(crate) fn save_rule(&self, rule: &str, repo: &str) {
         {
             let mut kept = self.kept();
             if kept
@@ -3490,12 +3490,16 @@ impl Jobs {
                     .clone()
                     .into(),
             ));
+            crate::secrets::known().learn(&format!("job {} check token", job.id), &token);
             extra.push(("OBY_CHECK_TOKEN", token.into()));
         }
         let tetrix = self.tetrix_mcp(job);
         if tool == Tool::Codex
             && let Some((_, token)) = broker.or(tetrix.as_ref())
         {
+            // Whatever repeats it (a conversation's shell that read another process's
+            // environment) is redacted.
+            crate::secrets::known().learn(&format!("job {} MCP token", job.id), token);
             extra.push(("OBY_MCP_TOKEN", token.into()));
         }
         match (&account.config_dir, tool) {
@@ -3680,6 +3684,72 @@ impl Jobs {
             flags,
             stderr,
             confined: true,
+        })
+    }
+
+    /// A command of a conversation's shell (docs/runner-api.md, "obid only: the conversation's
+    /// shell"): `bash -c` in the room, confined as the conversation's agent is, but with no account
+    /// and no login, its own temporary folder as `HOME` and `TMPDIR`, `frozen` read-only, and the
+    /// network only when the owner gave it to this command.
+    pub(crate) fn shell_launch(
+        &self,
+        room: &Path,
+        temp: &Path,
+        frozen: Vec<PathBuf>,
+        network: bool,
+        command: &str,
+    ) -> Result<Launch, String> {
+        let sandbox = self
+            .sandbox
+            .as_ref()
+            .map_err(|why| format!("obid can't box the command: {why}"))?;
+        let mut hidden = vec![self.config.home.clone()];
+        hidden.extend(person_homes());
+        hidden.extend(self.config.agents.hidden_folders(&self.config.home));
+        let mut read_only = sandbox::tool_roots(
+            &process::tools_path(),
+            &hidden,
+            std::slice::from_ref(&self.config.home),
+        );
+        read_only.extend(sandbox::path_software(&process::tools_path(), &hidden));
+        let spec = Spec {
+            worktree: room.to_path_buf(),
+            git_admin: None,
+            git_common: None,
+            commits: false,
+            temp: temp.to_path_buf(),
+            accounts: Vec::new(),
+            read_only,
+            hidden,
+            network,
+            frozen,
+        };
+        // No file it writes grows past 256 MB (bash's `ulimit -f` counts KB), then bash runs the
+        // command, which comes as an argument, never inside code. `oby-shell` names it, for the
+        // sweep of what an obid that crashed left running (crate::brain::shell::reap_leftovers).
+        let argv: Vec<OsString> = [
+            "/bin/bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            "ulimit -f 262144 || exit 1; exec /bin/bash --noprofile --norc -c \"$1\"",
+            crate::brain::shell::NAME,
+            command,
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        // git reads no settings but the room's own (and runs no program they name: git isn't one
+        // of the commands that run without asking).
+        let git = [
+            ("GIT_CONFIG_NOSYSTEM", OsString::from("1")),
+            ("GIT_CONFIG_GLOBAL", OsString::from("/dev/null")),
+        ];
+        Ok(Launch {
+            argv: sandbox.wrap_command(&spec, &argv),
+            env: process::sandbox_env(&process::tools_path(), temp, &git),
+            cwd: room.to_path_buf(),
+            stderr: temp.join("stderr.log"),
         })
     }
 

@@ -551,3 +551,27 @@ fn a_supervisor_turn_is_a_fresh_session_that_cant_list_jobs() {
         "{records:?}"
     );
 }
+
+/// A supervisor turn gets no conversation shell: nobody watches it, so it runs no commands.
+#[test]
+fn a_supervisor_turn_runs_no_commands() {
+    let (_folder, obid) = obid("supervisor-shell");
+    let (conversation, id) = started(
+        &obid,
+        "OBY oby_continue_job {\"id\": \"$JOB\"}\nOBY oby_shell {\"command\": \"echo ran > ran.txt\"}",
+        "investigate",
+        "Look into both halves STALLS-ONCE",
+    );
+    supervised(&obid, &id, 1);
+    let said = within(30, "the conversation's line", || {
+        obys(&obid, &conversation)
+            .into_iter()
+            .find(|t| t.contains("automatic steps"))
+    });
+    assert!(
+        said.starts_with("oby: refused: A turn nobody watches runs no commands."),
+        "{said}"
+    );
+    let room = obid.home.join(format!("conversations/{conversation}/room"));
+    assert!(!room.join("ran.txt").exists());
+}

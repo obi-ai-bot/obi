@@ -17,6 +17,7 @@ pub mod read;
 pub mod recap;
 pub mod research;
 pub mod rules;
+pub mod shell;
 pub mod supervisor;
 pub mod tools;
 pub mod turn;
