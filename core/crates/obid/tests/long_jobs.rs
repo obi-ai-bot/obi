@@ -79,15 +79,16 @@ fn a_job_making_progress_runs_past_its_quiet_window() {
 }
 
 /// A silent agent stalls after its quiet window: it writes its handoff note in one more turn of
-/// its session, the job is failed with `limit` and `stalled` (and a `stalled` event), keeps its
-/// branch, and the Try-again words carry it on in the same session.
+/// its session, the job needs you (`interrupted`, #725) with `limit` and `stalled` (and a `stalled`
+/// event), keeps its branch and the agent's own summary, and the Try-again words carry it on in
+/// the same session.
 #[test]
 fn a_silent_job_stalls_with_a_handoff_note_and_carries_on() {
     let (_folder, obid) = obid("long-quiet");
     let events = follow_events(&obid);
     let id = post_job(&obid, "QUIET");
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert_eq!(job["limit"], "no progress for 3 seconds");
     let stalled = &job["stalled"];
     assert_eq!(stalled["why"], "quiet", "{job}");
@@ -103,14 +104,20 @@ fn a_silent_job_stalls_with_a_handoff_note_and_carries_on() {
             .contains("Left: the tests."),
         "{job}"
     );
-    let summary = job["summary"].as_str().unwrap();
-    assert!(
-        summary.starts_with(
-            "Stalled: no progress for 3 seconds. The branch is kept and nothing was pushed"
-        ),
-        "{summary}"
+    assert_eq!(
+        job["reason"], "Stalled: no progress for 3 seconds.",
+        "{job}"
     );
-    assert!(summary.contains("Failed: npm test"), "{summary}");
+    assert_eq!(job["nextStep"], "Try again", "{job}");
+    assert!(
+        stalled["note"]
+            .as_str()
+            .unwrap()
+            .contains("Failed: npm test"),
+        "{job}"
+    );
+    // Its agent reported nothing before it went quiet: its summary is why it stopped.
+    assert_eq!(job["summary"], job["reason"], "{job}");
     assert!(job["published"].is_null(), "{job}");
     let sent = events_named(&events, "stalled", 10, |got| !got.is_empty());
     assert_eq!(sent[0]["id"], id.as_str());
@@ -153,7 +160,7 @@ fn a_looping_job_stalls() {
     let (_folder, obid) = obid("long-loop");
     let id = post_job(&obid, "LOOP");
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert_eq!(job["limit"], "the same failing call 5 times");
     assert_eq!(job["stalled"]["why"], "loop");
     assert_eq!(job["stalled"]["noteBy"], "agent");
@@ -186,7 +193,7 @@ fn a_committing_job_that_stalls_publishes_nothing() {
     let (_folder, obid) = obid_with("long-commit-quiet", json!({"stallAfter": 30}), &[]);
     let id = post_kind(&obid, "build", "COMMIT: a.txt QUIET");
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert_eq!(job["stalled"]["why"], "quiet", "{job}");
     assert_eq!(job["stalled"]["commits"], 1, "{job}");
     assert!(job["stalled"]["commit"].is_string(), "{job}");
@@ -205,7 +212,7 @@ fn a_permanent_error_is_not_retried() {
     let events = follow_events(&obid);
     let id = post_job(&obid, "FAIL");
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert_eq!(job["summary"], "it broke");
     assert!(job["stalled"].is_null(), "{job}");
     let retried = std::iter::from_fn(|| events.try_recv().ok()).any(|(name, job)| {
@@ -217,14 +224,14 @@ fn a_permanent_error_is_not_retried() {
     assert!(!retried);
 }
 
-/// A transient error every time: three retries, then the job fails with it (not stalled).
+/// A transient error every time: three retries, then the job needs you with it (not stalled).
 #[test]
 fn retries_run_out() {
     let (_folder, obid) = obid("long-retries-out");
     let events = follow_events(&obid);
     let id = post_job(&obid, "TRANSIENT ALWAYS");
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert!(job["summary"].as_str().unwrap().contains("529"), "{job}");
     assert!(job["stalled"].is_null(), "{job}");
     let steps: Vec<String> = std::iter::from_fn(|| events.try_recv().ok())
@@ -248,7 +255,7 @@ fn the_token_budget_stalls_and_only_the_owners_confirm_carries_on() {
     let (_folder, obid) = obid_with("long-budget", json!({"jobTokenBudget": 1000}), &[]);
     let id = post_job(&obid, "SPEND: 5000");
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert_eq!(job["limit"], "the job used 1000 tokens", "{job}");
     assert_eq!(job["stalled"]["why"], "budget");
     let confirms = || -> Vec<Value> {
@@ -282,7 +289,7 @@ fn the_token_budget_stalls_and_only_the_owners_confirm_carries_on() {
         );
     }
     let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert!(job["followUpOf"].is_null());
     let items = confirms();
     assert_eq!(items.len(), 2, "{items:?}");
@@ -323,6 +330,7 @@ fn the_ceiling_counts_every_run() {
     job.ran_secs = Some(3600);
     let (_folder, obid) = obid_with("long-ceiling", json!({"jobCeilingHours": 1}), &[job]);
     let job = wait(&obid, "ce111ng0");
+    // It never had a session to pick up: a dead end (#725), its stall kept.
     assert_eq!(job["status"], "failed", "{job}");
     assert_eq!(job["limit"], "the job ran 1 hour", "{job}");
     assert_eq!(job["stalled"]["why"], "ceiling");
