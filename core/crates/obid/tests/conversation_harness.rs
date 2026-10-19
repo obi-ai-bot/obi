@@ -868,7 +868,8 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
     ended(&obid, &follow);
 
     // A proposal names the conversation it was made in (another than the job's here), which
-    // shows it; a later follow-up that ended, here failed, leaves it open as it was.
+    // shows it; a later follow-up that ended, here done with nothing committed, leaves it open as
+    // it was.
     let web = format!(r#"WEB OBY oby_tell_job {{"id": "{id}", "words": "AGENT-WORDS-4"}}"#);
     let elsewhere = said(&obid, json!({"said": web, "new": true}));
     let elsewhere = elsewhere.body["conversation"].as_str().unwrap().to_owned();
@@ -888,7 +889,7 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
     assert_eq!(other.status, 201, "{}", other.text);
     assert_eq!(
         ended(&obid, other.body["id"].as_str().unwrap())["status"],
-        "failed"
+        "done"
     );
     let still = inbox(&obid)
         .into_iter()

@@ -761,7 +761,7 @@ fn a_job_stopped_at_a_limit_counts_its_commits_for_a_follow_up() {
         .unwrap()
         .to_owned();
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert_eq!(
         job["limit"], "`false` still fails after 1 round(s)",
         "{job}"
