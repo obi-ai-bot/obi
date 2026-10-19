@@ -22,6 +22,16 @@ fn obid(name: &str, signed_in: bool) -> (Folder, Obid) {
 
 /// [`obid`], with `conversation` as the configuration's.
 fn obid_with(name: &str, signed_in: bool, conversation: Value) -> (Folder, Obid) {
+    obid_env(name, signed_in, conversation, &[])
+}
+
+/// [`obid_with`], with `env` over a test obid's.
+fn obid_env(
+    name: &str,
+    signed_in: bool,
+    conversation: Value,
+    env: &[(&str, &str)],
+) -> (Folder, Obid) {
     let folder = Folder::new(name);
     let remote = fixture(&folder.0.join("fixture"));
     let mut config = config(&folder.0, &remote, &harness());
@@ -31,7 +41,7 @@ fn obid_with(name: &str, signed_in: bool, conversation: Value) -> (Folder, Obid)
     if signed_in {
         std::fs::write(account.join(".credentials.json"), "{}").unwrap();
     }
-    let obid = start(&folder.0, &config, None);
+    let obid = start_with(&folder.0, &config, None, env);
     (folder, obid)
 }
 
@@ -279,7 +289,12 @@ fn the_next_turn_goes_to_the_waiting_claude_code() {
 /// conversation's first turn goes to it.
 #[test]
 fn a_new_conversation_finds_its_claude_code_started() {
-    let (_folder, obid) = obid("harness-prestart", true);
+    let (_folder, obid) = obid_env(
+        "harness-prestart",
+        true,
+        json!({"agent": "claude"}),
+        &[("OBID_PRESTART", "on")],
+    );
     let first = said(&obid, json!({"said": "SAY hi", "new": true}));
     let one = first.body["conversation"].as_str().unwrap().to_owned();
     let conversations = obid.home.join("conversations");

@@ -337,10 +337,14 @@ fn keep_warm(shared: &Arc<Shared>, conversation: &str, warm: Warm) {
 /// of [`WARM_MOST`]), with no session until its first turn, and its token connects to Oby's tools
 /// but calls none before a turn is under way. Started after each of the owner's turns, so a
 /// Claude Code waits only while the owner is talking to Oby; one at a time.
+/// `OBID_PRESTART=off` (obid's tests set it, but in the tests of this) starts none.
 fn prestart(shared: &Arc<Shared>) {
     static STARTING: AtomicBool = AtomicBool::new(false);
     let config = &shared.config.conversation;
-    if !config.harness || config.agent != Tool::Claude {
+    if !config.harness
+        || config.agent != Tool::Claude
+        || std::env::var_os("OBID_PRESTART").is_some_and(|v| v == "off")
+    {
         return;
     }
     let id = shared.conversations.next_id();
