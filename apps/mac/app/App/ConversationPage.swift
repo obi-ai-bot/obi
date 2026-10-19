@@ -55,9 +55,11 @@ struct ConversationPage: View {
 
     // MARK: The thread
 
-    /// Whether a runner job's decision shows in this conversation: only its own jobs' (C3).
-    private func own(_ job: String, _ turns: [Turn]) -> Bool {
+    /// Whether a runner job's decision shows in this conversation: only its own jobs' (C3), and an
+    /// item with no job only in the conversation it came from (`InboxWords.conversation`).
+    private func own(_ job: String, _ turns: [Turn], item: String? = nil) -> Bool {
         ConversationModel.shows(decisionOf: job, startedIn: feed.extras[job]?.conversation,
+                                from: item.flatMap { feed.inboxWords[$0]?.conversation },
                                 served: feed.conversations.served, shown: feed.conversations.shown, turns: turns)
     }
 
@@ -68,7 +70,7 @@ struct ConversationPage: View {
             let entries = (desk.inbox.map { IslandInbox.Entry(item: $0, local: true) }
                 + (feed.inbox + feed.inboxHistory).map { IslandInbox.Entry(item: $0, local: false) })
                 .filter { $0.item.isDecision && ($0.item.later == nil || $0.item.later! <= context.date) }
-                .filter { $0.local || own($0.item.job, turns) }
+                .filter { $0.local || own($0.item.job, turns, item: $0.item.id) }
                 .sorted { $0.item.created < $1.item.created }
             let waiting = entries.filter { $0.item.isOpen }
             let permissions = feed.chatPermissions.filter { ($0.done != nil || $0.waits(at: context.date)) && own($0.job, turns) }
