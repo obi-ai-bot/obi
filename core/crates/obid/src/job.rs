@@ -265,6 +265,13 @@ pub struct Job {
     /// How its last publish's secret scan went (#735).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan: Option<crate::publish::Scanned>,
+    /// Each stage's times, as the job went through it (#733). Finished jobs' are the history
+    /// estimates read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stage_times: Vec<crate::facts::StageTime>,
+    /// What it should take, from jobs like it (#733).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<crate::facts::Estimate>,
     /// What its turns used, in tokens and cost, as its tool reported them (#731).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::usage::Tokens>,
@@ -374,6 +381,8 @@ impl Job {
             diffs: Vec::new(),
             checks: Vec::new(),
             scan: None,
+            stage_times: Vec::new(),
+            estimate: None,
             usage: None,
             usage_seen: None,
             window_share: None,
@@ -646,6 +655,15 @@ impl Job {
         if let Some(scan) = scan {
             value["scan"] = scan;
         }
+        if let Some(estimate) = &self.estimate {
+            value["estimate"] = json!({
+                "low": estimate.low,
+                "high": estimate.high,
+                "basis": estimate.basis,
+                "samples": estimate.samples,
+                "firstGiven": estimate.first_given,
+            });
+        }
         value
     }
 
@@ -660,6 +678,34 @@ impl Job {
             value["checks"] = json!(self.checks);
         }
         value
+    }
+
+    /// Stamps its stages' times at `now` (#733): how the time since the last stamp counts follows
+    /// the job as it was then. Whether a stage started or finished.
+    pub fn stamp(&mut self, now: i64) -> bool {
+        let pipeline = self.pipeline();
+        let stages: Vec<(String, String)> = pipeline["stages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|s| {
+                (
+                    s["id"].as_str().unwrap_or("").to_owned(),
+                    s["state"].as_str().unwrap_or("").to_owned(),
+                )
+            })
+            .collect();
+        use crate::facts::Clock;
+        let clock = if self.permission.is_some() {
+            Clock::Owner
+        } else if self.status == Status::Queued && self.waiting.is_some() {
+            Clock::Idle
+        } else if self.mode.as_deref() == Some("plan") && !self.read_only() {
+            Clock::Planning
+        } else {
+            Clock::Running
+        };
+        crate::facts::stamp(&mut self.stage_times, &stages, clock, now)
     }
 
     /// The stages the apps draw (Engine/Pipeline.swift): prepare, work, the check, publish,
@@ -891,6 +937,29 @@ impl Job {
             })
             .unwrap_or(0);
         let total = stages.len();
+        for stage in stages.iter_mut() {
+            let id = stage["id"].as_str().unwrap_or("").to_owned();
+            if let Some(time) = self.stage_times.iter().find(|t| t.id == id) {
+                stage["started"] = json!(obi_protocol::time::format(time.started));
+                // Once it's no longer current: what a current one has taken changes every second,
+                // so the apps count it from `started`.
+                if let Some(finished) = time.finished.filter(|_| time.open.is_none()) {
+                    stage["finished"] = json!(obi_protocol::time::format(finished));
+                    stage["seconds"] = json!(time.seconds);
+                }
+                stage["waited"] = json!(time.waited);
+            }
+            let ahead = stage["state"] == "upcoming" || stage["state"] == "current";
+            if let Some((_, range)) = self
+                .estimate
+                .iter()
+                .flat_map(|e| e.stages.iter())
+                .find(|(s, _)| *s == id)
+                .filter(|_| ahead)
+            {
+                stage["estimate"] = json!(range);
+            }
+        }
         json!({"stages": stages, "number": position + 1, "total": total})
     }
 }
@@ -1014,6 +1083,57 @@ mod tests {
         assert_eq!(value["status"], "queued");
         assert_eq!(value["obi"], Value::Null);
         assert_eq!(value["worktree"], Value::Null);
+    }
+
+    /// Each stage is timed as the job goes (#733): every round's time added up, and the time
+    /// it waited on the owner kept apart, not in its seconds.
+    #[test]
+    fn stages_are_timed_and_waiting_on_the_owner_isnt_counted() {
+        let mut job = job();
+        job.kind = "fix".into();
+        job.pr = None;
+        job.check = Some("node --test".into());
+        let t0 = job.created;
+        job.stamp(t0);
+        job.status = Status::Running;
+        job.started = Some(t0 + 10);
+        job.phase = Some(Phase::Work);
+        assert!(job.stamp(t0 + 10));
+        job.permission = Some(crate::permissions::Permission {
+            id: "p1".into(),
+            tool: "Bash".into(),
+            title: "Run it".into(),
+            detail: "it".into(),
+            rule: None,
+            always: None,
+            why: None,
+        });
+        assert!(!job.stamp(t0 + 20));
+        job.permission = None;
+        job.stamp(t0 + 50);
+        job.phase = Some(Phase::Check);
+        job.stamp(t0 + 70);
+        job.status = Status::Done;
+        job.finished = Some(t0 + 80);
+        job.stamp(t0 + 80);
+        let time = |id: &str| job.stage_times.iter().find(|t| t.id == id).unwrap();
+        assert_eq!((time("prepare").started, time("prepare").seconds), (t0, 10));
+        let work = time("work");
+        assert_eq!((work.started, work.finished), (t0 + 10, Some(t0 + 70)));
+        assert_eq!((work.seconds, work.waited), (30, 30));
+        assert_eq!(
+            (time("check").seconds, time("check").finished),
+            (10, Some(t0 + 80))
+        );
+        assert!(job.stage_times.iter().all(|t| t.id != "publish"));
+        let stages = job.pipeline()["stages"].clone();
+        assert_eq!(stages[1]["started"], obi_protocol::time::format(t0 + 10));
+        assert_eq!(stages[1]["finished"], obi_protocol::time::format(t0 + 70));
+        assert_eq!(
+            (stages[1]["seconds"].clone(), stages[1]["waited"].clone()),
+            (json!(30), json!(30))
+        );
+        assert!(stages[3].get("started").is_none());
     }
 
     #[test]
