@@ -14,12 +14,15 @@ nonisolated enum ChatThread {
     /// device's by this much.
     static let tolerance: TimeInterval = 60
 
-    /// Whether the runner's `turn` lists the words of `echo`: the user's, the same, said at or after
-    /// it (within `tolerance`; an older turn with the same words is another message). An answer to
-    /// Oby's question shows as its option, which obid lists after the words and the question
-    /// ("… The user answered: <option>)").
+    /// Whether the runner's `turn` lists the words of `echo`. obid's turn takes the echo's id (the
+    /// words go with it, `Runner.planned`), so only that one does: the same words said again
+    /// soon after are another message. A runner with one thread, which gives no ids (its turns
+    /// name no conversation), by the words: the user's, the same, said at or after it (within
+    /// `tolerance`), an answer to Oby's question as its option ("… The user answered: <option>)").
     static func lists(_ turn: Turn, _ echo: Turn) -> Bool {
-        turn.who == .user && turn.date >= echo.date - tolerance
+        if turn.id == echo.id { return true }
+        guard turn.conversation == nil else { return false }
+        return turn.who == .user && turn.date >= echo.date - tolerance
             && (turn.text == echo.text || turn.text.hasSuffix("The user answered: \(echo.text))"))
     }
 
@@ -31,9 +34,13 @@ nonisolated enum ChatThread {
 
 /// What was typed in a message box and not sent yet, by box (Home's, a conversation's, a task's
 /// reply box): restored when the box shows again, kept across a relaunch, and gone once sent (the
-/// box emptied). The user's own words, so UserDefaults holds them; nothing else is kept this way.
+/// box emptied), once its conversation is deleted, or a week after it was last typed in (so what
+/// was pasted, a secret among it, doesn't stay for good). The user's own words, so UserDefaults
+/// holds them; nothing else is kept this way.
 nonisolated enum Drafts {
     static let key = "ObyDrafts"
+    /// How long an untouched draft is kept.
+    static let kept: TimeInterval = 7 * 86_400
 
     /// Home's box.
     static let home = "home"
@@ -42,17 +49,22 @@ nonisolated enum Drafts {
     /// A task's reply box.
     static func task(_ id: String) -> String { "task:\(id)" }
 
-    static func text(_ box: String, in defaults: UserDefaults = .standard) -> String {
-        (defaults.dictionary(forKey: key) as? [String: String])?[box] ?? ""
+    static func text(_ box: String, in defaults: UserDefaults = .standard, now: Date = .now) -> String {
+        live(defaults, now: now)[box]?["text"] as? String ?? ""
     }
 
-    /// Keeps `text` as the box's draft; nothing but white space lets it go.
-    static func keep(_ text: String, as box: String, in defaults: UserDefaults = .standard) {
-        var all = defaults.dictionary(forKey: key) as? [String: String] ?? [:]
-        let kept = ChatThread.words(text) == nil ? nil : text
-        guard all[box] != kept else { return }
-        all[box] = kept
+    /// Keeps `text` as the box's draft, and lets go of every draft past `kept`; nothing but white
+    /// space lets the box's go.
+    static func keep(_ text: String, as box: String, in defaults: UserDefaults = .standard, now: Date = .now) {
+        var all = live(defaults, now: now)
+        all[box] = ChatThread.words(text) == nil ? nil : ["text": text, "at": now.timeIntervalSince1970]
         defaults.set(all, forKey: key)
+    }
+
+    /// The drafts still kept at `now`, each `["text": String, "at": seconds]`.
+    private static func live(_ defaults: UserDefaults, now: Date) -> [String: [String: Any]] {
+        let all = defaults.dictionary(forKey: key) as? [String: [String: Any]] ?? [:]
+        return all.filter { _, draft in (draft["at"] as? Double).map { now.timeIntervalSince1970 - $0 < kept } ?? false }
     }
 }
 

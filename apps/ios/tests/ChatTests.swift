@@ -150,6 +150,13 @@ struct ChatTests {
         model.apply(Turn(id: "r6", date: now.addingTimeInterval(1001), who: .user,
                          text: "deploy it\n\n(Oby asked: Where? The user answered: Staging)"))
         #expect(ChatThread.pending([option], runner: model.runnerTurns).isEmpty)
+        // obid's turns name their conversation and take the echo's id: only that one settles it,
+        // so a second "yes" sent a moment after the first shows.
+        let yes = Turn(date: now.addingTimeInterval(2000), who: .user, text: "yes")
+        model.apply(Turn(id: "r7", date: now.addingTimeInterval(1999), who: .user, text: "yes", conversation: "c"))
+        #expect(ChatThread.pending([yes], runner: model.runnerTurns) == [yes])
+        model.apply(Turn(id: yes.id, date: now.addingTimeInterval(2001), who: .user, text: "yes", conversation: "c"))
+        #expect(ChatThread.pending([yes], runner: model.runnerTurns).isEmpty)
     }
 
     /// The thread follows a new turn at its end, not a page of older ones above: what decides a

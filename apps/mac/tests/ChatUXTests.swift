@@ -20,6 +20,35 @@ struct ChatUXTests {
         #expect(Drafts.text(Drafts.conversation("a"), in: defaults).isEmpty)
         #expect(Drafts.text(Drafts.home, in: defaults) == "for Home")
         #expect(Drafts.conversation(nil) != Drafts.conversation("new-id") && Drafts.task("j") != Drafts.conversation("j"))
+        // A week untouched, a draft (a pasted secret too) is let go; the next save drops it for good.
+        let then = Date(timeIntervalSince1970: 1_800_000_000)
+        Drafts.keep("pasted sk-test", as: Drafts.task("old"), in: defaults, now: then)
+        #expect(Drafts.text(Drafts.task("old"), in: defaults, now: then + 86_400) == "pasted sk-test")
+        #expect(Drafts.text(Drafts.task("old"), in: defaults, now: then + Drafts.kept + 1).isEmpty)
+        Drafts.keep("new", as: Drafts.home, in: defaults, now: then + Drafts.kept + 1)
+        #expect(!(defaults.dictionary(forKey: Drafts.key)?.keys.contains(Drafts.task("old")) ?? true))
+    }
+
+    /// obid's turn takes the echo's id (`Runner.planned`), so only it settles the echo: the same words
+    /// in another conversation, or said again a moment later, are other messages; a failed echo
+    /// gives way only to its own turn (they reached obid after all).
+    @Test func onlyObidsTurnOfTheirIdSettlesWordsOnTheirWay() async throws {
+        let feed = RunnerFeed()
+        let model = IslandModel(desk: Desk(), feed: feed, availability: MacAvailability())
+        feed.conversations.take([RunnerConversation(id: "a", title: "A")])
+        feed.echo("yes")
+        let echo = try #require(feed.echoes.first?.turn)
+        // A "yes" a moment earlier in this conversation, and one in another: not these words.
+        let earlier = Turn(date: echo.date - 5, who: .user, text: "yes", conversation: "a")
+        feed.conversation.apply(earlier)
+        feed.settleEchoes(earlier)
+        feed.settleEchoes(Turn(date: echo.date + 1, who: .user, text: "yes", conversation: "b"))
+        #expect(feed.echoes.count == 1 && model.thread.map(\.id) == [earlier.id, echo.id])
+        // obid's turn of their id: one bubble, obid's.
+        let listed = Turn(id: echo.id, date: echo.date + 1, who: .user, text: "yes", conversation: "a")
+        feed.conversation.apply(listed)
+        feed.settleEchoes(listed)
+        #expect(feed.echoes.isEmpty && model.thread.map(\.id) == [earlier.id, echo.id])
     }
 
     /// A port that takes connections and never answers: a send that stays on its way.
@@ -89,7 +118,17 @@ struct ChatUXTests {
         await #expect(throws: (any Error).self) { try await feed.plan("ship it", answer: nil, on: nowhere) }
         let echo = try #require(feed.echoes.first)
         #expect(model.thread.map(\.text) == ["ship it"] && feed.echoProblem(echo.turn.id) != nil)
+        // The same words in a turn of another id don't hide them: failed, they wait for their own.
+        let other = Turn(date: echo.turn.date + 1, who: .user, text: "ship it", conversation: "a")
+        feed.conversation.apply(other)
+        feed.settleEchoes(other)
+        #expect(feed.echoes.count == 1 && model.thread.map(\.id) == [echo.turn.id, other.id])
+        // Try again sends the same echo, with its id (obid keeps the words once).
+        feed.retryEcho(echo.turn.id)
+        await #expect(throws: (any Error).self) { try await feed.plan("ship it", answer: nil, on: nowhere) }
+        #expect(feed.echoes.map(\.turn.id) == [echo.turn.id] && feed.echoProblem(echo.turn.id) != nil)
         feed.dropEcho(echo.turn.id)
+        feed.conversation.forget()
         #expect(model.thread.isEmpty)
         // An answer to Oby's question shows as its option, as obid lists it.
         _ = try? await feed.plan("deploy", answer: (question: "Where?", option: "Staging"), on: nowhere)

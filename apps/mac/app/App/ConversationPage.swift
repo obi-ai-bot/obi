@@ -118,7 +118,7 @@ struct ConversationPage: View {
                                            streamed: conversation.streamed(under: row.turn, in: turns),
                                            conversation: conversation, feed: feed,
                                            onOpenJob: onOpenJob, onStopJob: { model.stopChatJob($0, local: $1) },
-                                           onRetry: { feed.dropEcho(row.turn.id); desk.ask(row.turn.text) },
+                                           onRetry: { feed.retryEcho(row.turn.id); desk.ask(row.turn.text) },
                                            onEdit: { feed.dropEcho(row.turn.id); text = row.turn.text; typing = true })
                                     .task(id: row.turn.jobs ?? []) {
                                         // A runner's job older than its list: fetched, so its card shows.

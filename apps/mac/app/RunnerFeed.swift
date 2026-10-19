@@ -388,20 +388,32 @@ final class RunnerFeed {
     }
     private(set) var echoes: [Echo] = []
 
-    /// The echoes the conversation shown lists: its own, and a new one's while it starts.
+    /// The echoes the conversation shown lists: its own, and a new one's while it starts. One that
+    /// failed gives way only to obid's turn of its id (they reached obid after all).
     var shownEchoes: [Turn] {
         let mine = echoes.filter { $0.conversation == conversations.shown || ($0.conversation == nil && (conversations.shown == nil || conversations.creating)) }
-        return ChatThread.pending(mine.map(\.turn), runner: conversation.runnerTurns)
+        return mine.filter { echo in
+            !conversation.runnerTurns.contains { echo.problem == nil ? ChatThread.lists($0, echo.turn) : $0.id == echo.turn.id }
+        }.map(\.turn)
     }
 
     func echoProblem(_ id: String) -> String? { echoes.first { $0.turn.id == id }?.problem }
 
-    /// Lets go of an echo: listed by obid, given up, edited or sent again.
+    /// Lets go of an echo: listed by obid, given up or edited.
     func dropEcho(_ id: String) { echoes.removeAll { $0.turn.id == id } }
 
-    /// obid listed the user's `turn`, in any conversation: its echo has done its job.
-    private func settleEchoes(_ turn: Turn) {
-        echoes.removeAll { ChatThread.lists(turn, $0.turn) }
+    /// Try again on words that didn't reach obid: the same echo goes again, with its id, so obid
+    /// keeps them once even if the first request did reach it (`Runner.planned`'s `id`).
+    func retryEcho(_ id: String) {
+        guard let at = echoes.firstIndex(where: { $0.turn.id == id }) else { return }
+        echoes[at].problem = nil
+        echoes[at].sending = false
+    }
+
+    /// The runner listed the user's `turn`: the echo it lists has done its job (obid's: the one of
+    /// its id; a failed one only so, never by its words).
+    func settleEchoes(_ turn: Turn) {
+        echoes.removeAll { $0.turn.id == turn.id || ($0.problem == nil && $0.conversation == turn.conversation && ChatThread.lists(turn, $0.turn)) }
     }
 
     /// Send was pressed: the words show now. `Desk.ask` may first wait for the turn they replace to
@@ -431,7 +443,7 @@ final class RunnerFeed {
         // In the conversation shown, or a new one (obid keeps many, #493); neither for one thread.
         let planned: PlannedTurn
         do {
-            planned = try await runner.planned(said, answer: answer, attachments: attachments, in: conversations.target(said))
+            planned = try await runner.planned(said, answer: answer, attachments: attachments, in: conversations.target(said), id: echo)
         } catch {
             conversations.failed()
             // Given up (Stop, or other words in their place): they leave the thread. Else they stay, failed.

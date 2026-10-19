@@ -412,6 +412,7 @@ final class Phone {
         }
         if let list = conversations { conversations = ConversationOrder.placed(changed, in: list) }
         if changed.deleted, changed.id == current { show(nil) }
+        if changed.deleted { Drafts.keep("", as: Drafts.conversation(changed.id)) }
     }
 
     var runner: Runner {
@@ -685,7 +686,8 @@ final class Phone {
         guard let request = requests[id] else { return }
         removeQueued(id)
         drop(echo: id)
-        plan(request.said, answer: request.answer, voice: request.voice, new: request.new)
+        // The same id: if the first request reached obid after all, it keeps the words once.
+        plan(request.said, answer: request.answer, voice: request.voice, new: request.new, id: id)
     }
 
     /// Edit on words that didn't go through: they leave the thread for the field.
@@ -694,14 +696,16 @@ final class Phone {
         drop(echo: id)
     }
 
-    private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false, new: Bool = false) {
+    /// `id`: the echo's, given again by Try again; obid's turn of the words takes it.
+    private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false, new: Bool = false,
+                      id: String = UUID().uuidString.lowercased()) {
         planning?.cancel()
         speaker.stop()
         dropPending()
         stopProblem = nil
         talk = .thinking(said)
         // The thread shows the words as the runner will list them: an answer is its option.
-        let echo = Turn(who: .user, text: answer?.option ?? said, voice: voice ? true : nil)
+        let echo = Turn(id: id, who: .user, text: answer?.option ?? said, voice: voice ? true : nil)
         echoes.append(echo)
         let request = Request(said: said, answer: answer, voice: voice, conversation: current, new: new)
         requests[echo.id] = request
@@ -746,7 +750,7 @@ final class Phone {
             )
             let echo = echoes.first(where: { $0.id == item.id }) ?? Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil)
             let planned = try await destinationRunner.planned(request.said, answer: request.answer,
-                                                              conversation: request.conversation, new: request.new)
+                                                              conversation: request.conversation, new: request.new, id: item.id)
             apply(planned, request: request, echo: echo)
         }
     }
@@ -772,7 +776,7 @@ final class Phone {
         planning = Task {
             do {
                 let planned = try await runner.planned(request.said, answer: request.answer,
-                                                       conversation: request.conversation, new: request.new)
+                                                       conversation: request.conversation, new: request.new, id: echo.id)
                 guard !Task.isCancelled else { return }
                 apply(planned, request: request, echo: echo)
             } catch {
@@ -824,6 +828,8 @@ final class Phone {
 
     private func finish(_ talk: Talk, started: [Job], request: Request, echo: Turn) {
         if pending == echo.id { pending = nil }
+        // Answered: the runner has the words, whatever its event missed (a failure keeps them).
+        if failures[echo.id] == nil { drop(echo: echo.id) }
         conversation.settleLatestSteps()
         self.talk = talk
         for job in started { apply(.job(job)) }
