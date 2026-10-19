@@ -276,6 +276,8 @@ pub fn title(job: &Job, subjects: &[String]) -> String {
     let typed: Vec<(&str, &str)> = subjects
         .iter()
         .map(|s| s.trim())
+        // A subject with a control character (an escape, a carriage return) never titles one.
+        .filter(|s| !s.chars().any(char::is_control))
         .filter_map(|s| Some((conventional.captures(s)?.get(1)?.as_str(), s)))
         .collect();
     let changes = |t: &str| ["fix", "feat", "perf", "refactor"].contains(&t);
@@ -1436,6 +1438,13 @@ mod tests {
         assert_eq!(
             title(&job, &subjects(&["test(obid): x fails", "test: y"])),
             "test(obid): x fails (#7)"
+        );
+        assert_eq!(
+            title(
+                &job,
+                &subjects(&["fix: \u{1b}[2Jlooks fine", "fix(obid): x works"])
+            ),
+            "fix(obid): x works (#7)"
         );
     }
 
