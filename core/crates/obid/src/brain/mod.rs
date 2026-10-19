@@ -164,6 +164,7 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
             said: &said,
             attachments: &attachments,
             conversation: &conversation,
+            turn: &control.turn,
         };
         // The recap is written while the brain thinks; a background call is bounded and
         // tried once, and when it fails the answer is the same as without it.

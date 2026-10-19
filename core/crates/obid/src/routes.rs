@@ -317,6 +317,7 @@ fn new_job(job: &Map<String, Value>) -> Result<NewJob, String> {
         attachments: None,
         mode: text("mode")?,
         conversation: None,
+        turn: None,
         brief: None,
         follow_up_of: None,
         earlier: None,

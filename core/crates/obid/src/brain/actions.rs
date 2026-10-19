@@ -65,6 +65,9 @@ pub struct Asked<'a> {
     pub said: &'a str,
     pub attachments: &'a [String],
     pub conversation: &'a str,
+    /// The user's turn the words are, which the jobs started now name (`Job::turn`); empty for an
+    /// event turn's, which no turn of the conversation holds.
+    pub turn: &'a str,
 }
 
 /// A plan that answers rather than acts: a reply, a question, or jobs it starts (#269). `live` is
@@ -197,6 +200,11 @@ async fn dispatch(
             waiting.push(what);
             continue;
         }
+        // Started now, by these words: its card shows under them before the answer lists it.
+        let new = NewJob {
+            turn: (!asked.turn.is_empty()).then(|| asked.turn.to_owned()),
+            ..new
+        };
         match shared.jobs.create(new) {
             Ok(job) => {
                 jobs.push(job.to_json());
@@ -357,13 +365,14 @@ pub const TRY_AGAIN: &str =
 /// own words this turn, which message_job passes on; `source` is whose they are and whether the
 /// turn read something untrusted, which decides what they do to a job that ended. `conversation`
 /// is the turn's: another conversation's job is tried again or dismissed only on the owner's
-/// Confirm (#631).
+/// Confirm (#631). `turn` is the user's turn the words are, which a follow-up they start names.
 pub async fn act(
     shared: &Arc<Shared>,
     plan: &Plan,
     said: &str,
     source: Source,
     conversation: &str,
+    turn: &str,
 ) -> Outcome {
     match plan.action {
         Action::StopAgent => stop(shared, plan),
@@ -374,7 +383,7 @@ pub async fn act(
         }
         Action::AnswerInbox => answer_inbox(shared, plan).await,
         Action::SetSetting => set_setting(shared, plan),
-        Action::MessageJob => message_job(shared, plan, said, source, conversation),
+        Action::MessageJob => message_job(shared, plan, said, source, conversation, turn),
         Action::MoveJob => {
             let names: Vec<String> = plan
                 .named()
@@ -566,6 +575,7 @@ fn message_job(
     said: &str,
     source: Source,
     conversation: &str,
+    turn: &str,
 ) -> Outcome {
     let Some(id) = plan.named().first() else {
         return Outcome::Failed("Say which job to tell.".into());
@@ -588,7 +598,14 @@ fn message_job(
         }
         let new = crate::jobs::follow_up(&job, &words);
         return match source {
-            Source::Owner => follow_up(shared, &job, new),
+            Source::Owner => follow_up(
+                shared,
+                &job,
+                NewJob {
+                    turn: started_by(&job, conversation, turn),
+                    ..new
+                },
+            ),
             Source::Untrusted => {
                 Outcome::Done(propose_follow_up(shared, &job, &new, None, conversation))
             }
@@ -602,6 +619,12 @@ fn message_job(
         Some(Err(refused)) => Outcome::Failed(format!("Couldn't tell {name}: {}", refused.0)),
         None => Outcome::Failed("That job isn't here any more.".into()),
     }
+}
+
+/// The turn whose words start a follow-up of `job` now, for `Job::turn`: only in `job`'s own
+/// conversation, the one the follow-up joins, whose thread shows its card under them.
+pub(super) fn started_by(job: &Job, conversation: &str, turn: &str) -> Option<String> {
+    (job.conversation.as_deref() == Some(conversation) && !turn.is_empty()).then(|| turn.to_owned())
 }
 
 /// Starts `new`, the follow-up of `job`, and says so as Sangam's design does, its card on the

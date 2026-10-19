@@ -104,6 +104,11 @@ pub enum Event {
     },
     /// The answer to the tool call `id` came back; `failed` when it was an error.
     ToolDone { id: String, failed: bool },
+    /// The account's usage, as the tool just reported it (crate::usage).
+    Usage(crate::usage::Usage),
+    /// What this turn used so far, in tokens and cost (crate::usage::Tokens): each one replaces
+    /// the turn's last.
+    Tokens(crate::usage::Tokens),
 }
 
 /// How a turn ended, for every adapter.
@@ -200,11 +205,15 @@ pub async fn turn_on(
     conn.send(&user_message(prompt)).await;
 
     let mut turn = Turn::default();
+    let mut api_key_source = None;
     loop {
         let message = match conn.next().await {
             Ok(message) => message,
             Err(_) => break,
         };
+        if message["type"] == "rate_limit_event" {
+            on_event(Event::Usage(crate::usage::claude(&message)));
+        }
         match message.get("type").and_then(Value::as_str) {
             Some("control_request") => {
                 let request = &message["request"];
@@ -237,6 +246,7 @@ pub async fn turn_on(
                     turn.session = Some(session.to_owned());
                     on_event(Event::Session(session.to_owned()));
                 }
+                api_key_source = message["apiKeySource"].as_str().map(str::to_owned);
             }
             Some("assistant") => {
                 for block in message["message"]["content"]
@@ -283,6 +293,10 @@ pub async fn turn_on(
                 if let Some(session) = message.get("session_id").and_then(Value::as_str) {
                     turn.session.get_or_insert_with(|| session.to_owned());
                 }
+                on_event(Event::Tokens(crate::usage::claude_tokens(
+                    &message,
+                    api_key_source.as_deref(),
+                )));
                 turn.result = Some(message);
                 // The turn is over: no more input (unless it's kept), and nothing more to read.
                 if !keep {
