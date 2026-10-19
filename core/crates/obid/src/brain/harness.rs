@@ -1769,7 +1769,11 @@ fn rule(tool: &str, input: &Value, bounds: &Bounds, repos: &Path, taint: &dyn Fn
     }
     // A git folder's settings and hooks name programs git runs (`core.fsmonitor`, a diff or filter
     // driver): the agent never writes one, as written or after links.
-    let in_git = |p: &Path| p.components().any(|c| c.as_os_str() == ".git");
+    // Any case: macOS's file names don't tell `.GIT` from `.git`.
+    let in_git = |p: &Path| {
+        p.components()
+            .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git"))
+    };
     if edit
         && call.paths.iter().any(|p| {
             let full = bounds.worktree.join(p);
@@ -2576,7 +2580,13 @@ mod tests {
         std::fs::create_dir_all(place.room.join("sub/.git")).unwrap();
         let _ = std::fs::remove_file(place.room.join("lnk"));
         std::os::unix::fs::symlink(place.room.join("sub/.git"), place.room.join("lnk")).unwrap();
-        for file in [".git/config", "sub/.git/hooks/pre-commit", "lnk/config"] {
+        for file in [
+            ".git/config",
+            ".GIT/config",
+            "sub/.Git/hooks/pre-commit",
+            "sub/.git/hooks/pre-commit",
+            "lnk/config",
+        ] {
             for tool in ["Write", "Edit"] {
                 let path = place.room.join(file);
                 assert!(

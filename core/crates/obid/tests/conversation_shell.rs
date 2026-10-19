@@ -301,10 +301,27 @@ fn a_command_never_reads_another_conversations_room() {
 #[test]
 fn an_allowed_network_command_never_reaches_obid() {
     let (_folder, obid) = obid("shell-loopback");
-    let command = format!(
-        "curl -sS -m 5 -o /dev/null http://127.0.0.1:{}/v1/status && echo REACHED-OBID || echo NO-LOOPBACK",
-        obid.port
-    );
+    // obid's own address, the same port by every other name for this machine, and a server on
+    // IPv6's loopback (#774's re-review, 1).
+    let six = std::net::TcpListener::bind("[::1]:0").ok();
+    let mut targets = vec![
+        format!("127.0.0.1:{}", obid.port),
+        format!("0.0.0.0:{}", obid.port),
+        format!("localhost:{}", obid.port),
+    ];
+    if let Some(six) = &six {
+        targets.push(format!("[::1]:{}", six.local_addr().unwrap().port()));
+    }
+    let command = targets
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            format!(
+                "curl -sS -m 5 -o /dev/null http://{t}/ && echo REACHED-{i} || echo NO-LOOPBACK-{i}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
     scope(|turns| {
         let waiting = turns.spawn(|| shell(&obid, None, json!({"command": command})));
         let first = within(30, "the conversation", || {
@@ -318,7 +335,46 @@ fn an_allowed_network_command_never_reaches_obid() {
         assert!(item["text"].as_str().unwrap().contains("network"), "{item}");
         assert_eq!(answer(&obid, &item, "Allow").status, 200);
         let (text, _) = waiting.join().unwrap();
-        assert!(text.contains("NO-LOOPBACK"), "{text}");
-        assert!(!text.contains("REACHED-OBID"), "{text}");
+        for (i, target) in targets.iter().enumerate() {
+            assert!(
+                text.contains(&format!("NO-LOOPBACK-{i}")),
+                "{target}: {text}"
+            );
+            assert!(!text.contains(&format!("REACHED-{i}")), "{target}: {text}");
+        }
     });
+}
+
+/// A git setting that runs a program, planted in the room, never runs without the owner: git
+/// isn't a read, so once the conversation read something (any command), `git status` asks, and a
+/// no keeps it from running (#774's re-review, 4).
+#[test]
+fn a_planted_git_setting_never_runs_without_the_owner() {
+    let (_folder, obid) = obid("shell-git");
+    let (text, conversation) = shell(
+        &obid,
+        None,
+        json!({"command": "mkdir -p sub/.git && printf '[core]\\n\\tfsmonitor = touch PWNED\\n' > sub/.git/config && echo planted"}),
+    );
+    assert!(text.contains("planted"), "{text}");
+    let room = obid.home.join(format!("conversations/{conversation}/room"));
+    assert!(!room.join("sub/PWNED").exists());
+    scope(|turns| {
+        let waiting = turns.spawn(|| {
+            shell(
+                &obid,
+                Some(&conversation),
+                json!({"command": "cd sub && git status"}),
+            )
+        });
+        let item = waiting_item(&obid, &conversation);
+        assert!(
+            item["text"].as_str().unwrap().contains("untrusted"),
+            "{item}"
+        );
+        assert_eq!(answer(&obid, &item, "Deny").status, 200);
+        let (text, _) = waiting.join().unwrap();
+        assert!(text.contains("The owner said no."), "{text}");
+    });
+    assert!(!room.join("sub/PWNED").exists());
 }

@@ -347,14 +347,25 @@ const BUILTINS: &[&str] = &[
 /// Whether `name`, as bash finds it on the box's `PATH`, is the system's software. A name with a
 /// folder in it (`./cat`, `bin/git`) never is: the agent could have written it.
 fn system_program(name: &str) -> bool {
+    system_program_on(name, &crate::process::tools_path())
+}
+
+/// [`system_program`] with `path` as the box's `PATH`. A `PATH` with a relative or empty entry
+/// (`.`, `bin`, `::`) makes nothing a system program: bash looks those up from the room, where the
+/// agent writes, and they may come before the system's folder.
+fn system_program_on(name: &str, path: &std::ffi::OsStr) -> bool {
     if name.contains('/') || name.is_empty() {
         return false;
     }
     if BUILTINS.contains(&name) {
         return true;
     }
-    let path = crate::process::tools_path();
-    let Some(found) = std::env::split_paths(&path)
+    let dirs: Vec<PathBuf> = std::env::split_paths(path).collect();
+    if dirs.iter().any(|d| !d.is_absolute()) {
+        return false;
+    }
+    let Some(found) = dirs
+        .iter()
         .map(|dir| dir.join(name))
         .find(|p| crate::sandbox::is_executable(p))
     else {
@@ -1094,6 +1105,12 @@ mod tests {
         }
         assert!(!reads_only(&["./cat".into(), "x".into()]));
         assert!(!reads_only(&["no-such-program-anywhere".into()]));
+        // A relative entry in PATH is looked up from the room: then nothing is the system's
+        // (#774's re-review, 3).
+        assert!(system_program_on("cat", "/bin:/usr/bin".as_ref()));
+        for path in [".:/bin", "/bin:.", "/bin::/usr/bin", "bin:/bin", ""] {
+            assert!(!system_program_on("cat", path.as_ref()), "{path:?}");
+        }
     }
 
     /// Options are allowed by name, per program: an attached short one or an abbreviated long one
