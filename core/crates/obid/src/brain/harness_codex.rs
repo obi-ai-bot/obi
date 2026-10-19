@@ -98,6 +98,7 @@ pub(super) async fn launch(
         plan: false,
         instructions: Some(orientation(shared)),
         no_commands: true,
+        usage: false,
     };
     Ok((launch, Some(options)))
 }

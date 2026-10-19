@@ -265,6 +265,10 @@ pub struct Jobs {
     approvals: crate::approval::Approvals,
     /// Wakes the pull request follower: a job just published.
     follow: Notify,
+    /// Each account's usage and weekly reserve (crate::usage).
+    pub usage: crate::usage::Usages,
+    /// Told when an account's usage changed: the `accounts` event goes out (crate::lib).
+    pub usage_changed: Notify,
 }
 
 impl Jobs {
@@ -293,6 +297,7 @@ impl Jobs {
         let kept = permissions::load(&config.home);
         let api_url = format!("http://{}", config.listen);
         let approvals = crate::approval::Approvals::open(&config.home);
+        let usage = crate::usage::Usages::open(&config.home);
         Ok(Arc::new(Jobs {
             config,
             store,
@@ -323,6 +328,8 @@ impl Jobs {
             api_url: Mutex::new(api_url),
             approvals,
             follow: Notify::new(),
+            usage,
+            usage_changed: Notify::new(),
         }))
     }
 
@@ -1345,7 +1352,9 @@ impl Jobs {
             .map(str::trim)
             .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("auto"));
         let home = login_home();
+        let now = obi_protocol::time::now();
         let mut first = None;
+        let mut held = Vec::new();
         for tool in &tools {
             let mut accounts = self.accounts(*tool);
             if let Some(changing) = named.and_then(|named| {
@@ -1361,13 +1370,17 @@ impl Jobs {
             // Routing skips an account being signed in or removed.
             accounts.retain(|a| !self.being_changed(&a.id));
             match named {
-                // Routing skips an account that isn't signed in (#626).
+                // Routing skips an account that isn't signed in (#626), and one without room
+                // (crate::usage): full, at 95% of a window, or in its weekly reserve.
                 None => {
                     for account in accounts {
-                        if signed_in(*tool, &account, home.as_deref()) {
+                        if !signed_in(*tool, &account, home.as_deref()) {
+                            first.get_or_insert((*tool, account));
+                        } else if let Some(why) = self.usage.get(&account.id).held(now) {
+                            held.push(format!("{} {why}", account.name));
+                        } else {
                             return Ok((*tool, account));
                         }
-                        first.get_or_insert((*tool, account));
                     }
                 }
                 Some(named) => {
@@ -1379,6 +1392,12 @@ impl Jobs {
                     }
                 }
             }
+        }
+        if !held.is_empty() {
+            return Err(Refused(format!(
+                "No account has room: {}.",
+                held.join("; ")
+            )));
         }
         // None is signed in: the first, whose tool then says why it can't run.
         if let Some(found) = first {
@@ -3174,6 +3193,12 @@ impl Jobs {
             }
         };
         let on_event = |event| match event {
+            AgentEvent::Usage(usage) => {
+                if let Err(error) = jobs.usage.record(&job.account, &usage) {
+                    tracing::warn!("could not keep account usage: {error}");
+                }
+                jobs.usage_changed.notify_one();
+            }
             AgentEvent::Session(session) => {
                 jobs.update(id, |job| job.session = Some(session));
             }
@@ -3203,6 +3228,7 @@ impl Jobs {
                     plan,
                     instructions: None,
                     no_commands: false,
+                    usage: true,
                 };
                 codex::run_turn(
                     launch,

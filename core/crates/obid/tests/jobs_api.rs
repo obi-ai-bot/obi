@@ -1636,3 +1636,93 @@ fn routing_skips_an_account_that_isnt_signed_in() {
     std::fs::remove_file(accounts.join("file/.credentials.json")).unwrap();
     assert_eq!(job(json!("auto")), (json!("codex"), json!("codex")));
 }
+
+/// Ports ReserveTests.theAPILiftsAndRestoresTheReserve: the usage Claude Code reports during a job
+/// fills its Account, and the reserve it puts the account in is lifted and put back, across a
+/// restart.
+#[test]
+fn the_api_lifts_and_restores_the_reserve() {
+    let folder = Folder::new("reserve");
+    let remote = fixture(&folder.0);
+    let config = config(&folder.0, &remote);
+    let account = folder.0.join("home/accounts/stub");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(account.join(".credentials.json"), "{}").unwrap();
+    let mut obid = start(&folder.0, &config);
+    let status = |obid: &Obid| request(obid, "GET", "/v1/status", None).body["accounts"][0].clone();
+    assert!(status(&obid)["sevenDay"].is_null());
+
+    let reset = obi_protocol::time::now() + 2 * 86_400;
+    let usage = json!({"status": "allowed_warning", "unifiedWindows": {
+        "five_hour": {"utilization": 0.1, "resetsAt": reset - 86_400},
+        "seven_day": {"utilization": 0.82, "resetsAt": reset}}});
+    let job = |task: String| json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task, "check": "true"});
+    let first = post_job(&obid, job(format!("USAGE: {usage}")));
+    assert_eq!(first.status, 201, "{}", first.text);
+    wait(&obid, first.body["id"].as_str().unwrap());
+    let stub = status(&obid);
+    assert_eq!(stub["fiveHour"], 0.1);
+    assert_eq!(stub["sevenDay"], 0.82);
+    assert_eq!(
+        stub["fiveHourResets"],
+        obi_protocol::time::format(reset - 86_400)
+    );
+    assert_eq!(stub["sevenDayResets"], obi_protocol::time::format(reset));
+    assert_eq!(stub["reserved"], true);
+    assert!(stub["fullUntil"].is_null());
+
+    // In its reserve, it takes only a job sent to it by name.
+    let refused = post_job(&obid, job("Nothing to do".into()));
+    assert_eq!(refused.status, 422, "{}", refused.text);
+    assert!(
+        refused
+            .text
+            .contains("Stub is in its weekly reserve (82% of its week used)"),
+        "{}",
+        refused.text
+    );
+    let mut named = job("Nothing to do".into());
+    named["account"] = json!("stub");
+    assert_eq!(post_job(&obid, named.clone()).status, 201);
+
+    let lift =
+        |obid: &Obid, body: &str| request(obid, "POST", "/v1/accounts/stub/reserve", Some(body));
+    let lifted = lift(&obid, r#"{"lift": true}"#);
+    assert_eq!(lifted.status, 200, "{}", lifted.text);
+    assert_eq!(lifted.body["reserved"], false);
+    assert_eq!(
+        lifted.body["reserveLiftedUntil"],
+        obi_protocol::time::format(reset)
+    );
+    assert_eq!(post_job(&obid, job("Nothing to do".into())).status, 201);
+
+    // A restart keeps the usage and the lift.
+    obid.child.kill().unwrap();
+    obid.child.wait().unwrap();
+    drop(obid);
+    let obid = start(&folder.0, &config);
+    assert_eq!(status(&obid)["sevenDay"], 0.82);
+    assert_eq!(status(&obid)["reserved"], false);
+    let restored = lift(&obid, r#"{"lift": false}"#);
+    assert_eq!(restored.status, 200, "{}", restored.text);
+    assert_eq!(restored.body["reserved"], true);
+    assert!(restored.body["reserveLiftedUntil"].is_null());
+    assert_eq!(post_job(&obid, job("Nothing to do".into())).status, 422);
+
+    let nobody = request(
+        &obid,
+        "POST",
+        "/v1/accounts/nobody/reserve",
+        Some(r#"{"lift": true}"#),
+    );
+    assert_eq!(nobody.status, 404);
+    for (body, status) in [
+        ("false", 400),
+        ("{", 400),
+        ("{}", 422),
+        (r#"{"lift": "true"}"#, 422),
+        (r#"{"lift": true, "x": 1}"#, 422),
+    ] {
+        assert_eq!(lift(&obid, body).status, status, "{body}");
+    }
+}

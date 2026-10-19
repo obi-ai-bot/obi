@@ -6,6 +6,7 @@
 //                    the rest of the prompt
 //   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is ended
 //   FAIL             ends the turn with an error result
+//   USAGE: <json>    first sends a rate_limit_event whose rate_limit_info is the JSON
 //   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
 //   ASKS: <json>     asks for each of a list of {"tool", "input"} in turn, then ends the turn with
 //                    "answers: allow, deny: <why>, …"
@@ -86,6 +87,8 @@ rl.on("line", (line) => {
   let prompt = typeof message.message.content === "string" ? message.message.content : "";
   emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Bash", "Read", "Edit"], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
   if (leaked.length) return result(`leaked: ${leaked.join(", ")}`, true);
+  const usage = prompt.match(/USAGE: (\{.*\})/);
+  if (usage) emit({ type: "rate_limit_event", session_id: session, rate_limit_info: JSON.parse(usage[1]) });
   // A fix round quotes the task after the check's output: it says the failure is intended when the
   // task asked for one (ON PURPOSE), and otherwise reads only the part before the quote.
   const quote = prompt.indexOf("\n\nThe task, as the owner wrote it:");

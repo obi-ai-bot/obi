@@ -635,6 +635,7 @@ impl CodexBrain {
             plan: true,
             instructions: None,
             no_commands: false,
+            usage: false,
         };
         let turn = crate::codex::run_turn(
             launch,
