@@ -7,6 +7,7 @@
 
 pub mod accounts;
 pub mod acp;
+pub mod activity;
 pub mod agent;
 pub mod api;
 pub mod app;

@@ -838,10 +838,42 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
     let events = follow_events(&obid);
     let id = dispatch(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "TOOLS"}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "TOOLS",
+               "check": "node --test"}),
     );
     let job = ended(&obid, &id);
     assert_eq!(job["status"], "done", "{job}");
+    // Its activity at a glance (#730): the counts, and the groups the agent's words split.
+    let activity = &job["activity"];
+    assert_eq!(
+        activity["counts"],
+        json!({"read": 5, "search": 0, "edit": 2, "command": 0, "test": 1, "tetrix": 0, "web": 0, "mcp": 0}),
+        "{job}"
+    );
+    let groups = activity["groups"].as_array().unwrap();
+    let titles: Vec<&str> = groups
+        .iter()
+        .map(|g| g["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        ["Looking for where a blocked scan ends the job", "Found it"]
+    );
+    assert_eq!(groups[0]["files"].as_array().unwrap().len(), 5);
+    assert_eq!(groups[0]["files"][0], "src/scan.rs");
+    assert_eq!(
+        groups.iter().map(|g| &g["by"]).collect::<Vec<_>>(),
+        [&json!("agent"); 2]
+    );
+    assert_eq!(groups[1]["state"], "failed");
+    assert_eq!(groups[1]["diff"], json!({"added": 4, "removed": 3}));
+    assert_eq!(job["contextBy"], "agent");
+    assert_eq!(
+        job["context"],
+        "Found it. Fixing it, with [redacted: vault staging-api-key] for staging ([redacted: vault staging-api-key], [redacted: vault staging-api-key])."
+    );
+    let stored = std::fs::read_to_string(obid.home.join(format!("jobs/{id}.json"))).unwrap();
+    holds_none(&stored, &value(), "the job's file");
     let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript"), None);
     assert_eq!(answer.status, 200, "{}", answer.text);
     assert_eq!(answer.body["next"], Value::Null, "{}", answer.text);
@@ -896,11 +928,12 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
     );
     assert_eq!(entries[11]["tool"], "Bash");
     assert_eq!(entries[11]["state"], "failed");
+    assert_eq!(entries[11]["activity"], "test");
     assert!(
         entries[11]["summary"]
             .as_str()
             .unwrap()
-            .starts_with("Running STAGING_KEY=[redacted: vault staging-api-key]"),
+            .starts_with("Running export STAGING_KEY=[redacted"),
         "{}",
         entries[11]
     );

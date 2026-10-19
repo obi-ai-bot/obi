@@ -57,6 +57,13 @@ pub struct Entry {
     /// A `plan`'s items.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todos: Option<Vec<Todo>>,
+    /// A tool call's kind in the job's activity (`crate::activity::kind`): `read`, `search`,
+    /// `edit`, `command`, `test`, `tetrix`, `web`, `mcp` or `other`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
+    /// The file a tool call reads or changes, from the worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 /// One item of the agent's to-do list.
@@ -80,6 +87,8 @@ struct Live {
     first: Vec<usize>,
     /// The file's size.
     bytes: u64,
+    /// The job's activity, built as entries come.
+    activity: crate::activity::Activity,
     /// The file is full ([`MOST_ENTRIES`], [`MOST_BYTES`]): said in the log once.
     full: bool,
     open: HashMap<String, (Entry, Instant)>,
@@ -106,12 +115,19 @@ impl Transcripts {
         self.home.join("jobs").join(job).join("transcript.jsonl")
     }
 
-    /// Takes in what the agent did; the entries it wrote or changed, in order.
-    pub fn record(&self, job: &str, event: &Event) -> Vec<Entry> {
+    /// Takes in what the agent did in `worktree`, where the job's check is `check`; the entries
+    /// it wrote or changed, in order.
+    pub fn record(
+        &self,
+        job: &str,
+        event: &Event,
+        worktree: &Path,
+        check: Option<&str>,
+    ) -> Vec<Entry> {
         let mut all = self.live.lock().unwrap_or_else(|e| e.into_inner());
         let live = self.live_for(&mut all, job);
         let entries = match event {
-            Event::Tool { id, name, input } => tool(live, id, name, input),
+            Event::Tool { id, name, input } => tool(live, id, name, input, worktree, check),
             Event::ToolDone {
                 id,
                 failed,
@@ -157,6 +173,22 @@ impl Transcripts {
             | Event::Tokens(_) => vec![],
         };
         self.write(job, live, entries)
+    }
+
+    /// The job's `activity` (none before its first tool call) and `context` (`crate::activity`),
+    /// from its entries as they are now.
+    pub fn glance(&self, job: &str) -> (Option<Value>, Option<String>) {
+        let all = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        let loaded;
+        let live = match all.get(job) {
+            Some(live) => live,
+            None => {
+                drop(all);
+                loaded = self.load(job);
+                return glance(&loaded);
+            }
+        };
+        glance(live)
     }
 
     /// The owner's words the agent heard.
@@ -315,6 +347,10 @@ impl Transcripts {
     }
 }
 
+fn glance(live: &Live) -> (Option<Value>, Option<String>) {
+    (live.activity.to_json(), live.activity.context())
+}
+
 /// [`Transcripts::read`]'s page of `live`: the earlier entries that changed (calls that were
 /// running when `after` came: few) always, then at most `limit` newer ones, so the next marker is
 /// always past `after`.
@@ -349,6 +385,7 @@ impl Live {
             self.first.resize(n as usize, self.log.len());
         }
         self.log.push(n);
+        self.activity.take(&entry);
         self.now.insert(n, entry);
     }
 }
@@ -401,7 +438,14 @@ fn plan(live: &mut Live, todos: Vec<Todo>) -> Entry {
 }
 
 /// A tool call starts: its entry, running; or the to-do list it changes.
-fn tool(live: &mut Live, id: &str, name: &str, input: &Value) -> Vec<Entry> {
+fn tool(
+    live: &mut Live,
+    id: &str,
+    name: &str,
+    input: &Value,
+    worktree: &Path,
+    check: Option<&str>,
+) -> Vec<Entry> {
     let text = |key: &str| input.get(key).and_then(Value::as_str).unwrap_or("");
     match name {
         // Loading a deferred tool's schema is the agent's bookkeeping (as a conversation's steps).
@@ -446,6 +490,8 @@ fn tool(live: &mut Live, id: &str, name: &str, input: &Value) -> Vec<Entry> {
                 crate::brain::briefing::line(&mask(&agent::step(&shown, &masked(input))), SUMMARY);
             let mut entry = entry(live, "tool", Some(&shown), summary);
             entry.state = Some("running".into());
+            entry.activity = Some(crate::activity::kind(name, input, check).into());
+            entry.file = file_of(input, worktree);
             if let Some((added, removed)) = edited(name, input) {
                 (entry.added, entry.removed) = (Some(added), Some(removed));
             }
@@ -465,6 +511,31 @@ pub fn todo_state(status: &str) -> &'static str {
         "deleted" => "deleted",
         _ => "pending",
     }
+}
+
+/// The file a call is about (`file_path`, `notebook_path` or `path`), masked: from the worktree
+/// when it's in it, else only its name (never the home folder or another place on the Mac).
+fn file_of(input: &Value, worktree: &Path) -> Option<String> {
+    let path = ["file_path", "notebook_path", "path"]
+        .iter()
+        .find_map(|k| input[k].as_str().filter(|p| !p.is_empty()))?;
+    let path = Path::new(path);
+    let real = crate::policy::real_path(worktree).unwrap_or_else(|| worktree.to_path_buf());
+    let inside = path
+        .strip_prefix(worktree)
+        .or_else(|_| path.strip_prefix(&real))
+        .ok()
+        .or_else(|| {
+            path.is_relative().then_some(path).filter(|p| {
+                p.components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+            })
+        });
+    let shown = match inside {
+        Some(relative) => relative.display().to_string(),
+        None => path.file_name()?.to_string_lossy().into_owned(),
+    };
+    Some(crate::brain::briefing::line(&mask(&shown), SUMMARY))
 }
 
 /// The lines a Claude Code edit adds and removes, from its input.
@@ -534,6 +605,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    impl Transcripts {
+        fn rec(&self, job: &str, event: &Event) -> Vec<Entry> {
+            self.record(job, event, Path::new("/w"), None)
+        }
+    }
+
     fn transcripts(name: &str) -> Transcripts {
         let home =
             std::env::temp_dir().join(format!("obid-transcript-{name}-{}", std::process::id()));
@@ -561,12 +638,12 @@ mod tests {
     #[test]
     fn each_call_is_one_entry_with_its_end() {
         let t = transcripts("calls");
-        t.record("j", &Event::Said("Looking at the scan.\n".into()));
-        t.record(
+        t.rec("j", &Event::Said("Looking at the scan.\n".into()));
+        t.rec(
             "j",
             &tool_event("a", "Bash", json!({"command": "cargo test"})),
         );
-        t.record(
+        t.rec(
             "j",
             &tool_event(
                 "b",
@@ -574,10 +651,10 @@ mod tests {
                 json!({"file_path": "/w/src/x.rs", "old_string": "a", "new_string": "b\nc"}),
             ),
         );
-        t.record("j", &done("b", false));
-        t.record("j", &Event::Denied("no".into()));
-        t.record("j", &done("a", true));
-        t.record("j", &done("zz", false));
+        t.rec("j", &done("b", false));
+        t.rec("j", &Event::Denied("no".into()));
+        t.rec("j", &done("a", true));
+        t.rec("j", &done("zz", false));
         let all = t.read("j", 0, PAGE).0;
         assert_eq!(all.len(), 3, "{all:?}");
         assert_eq!(
@@ -596,23 +673,23 @@ mod tests {
     #[test]
     fn a_refused_call_is_declined() {
         let t = transcripts("declined");
-        t.record(
+        t.rec(
             "j",
             &tool_event("a", "Bash", json!({"command": "git push"})),
         );
-        t.record("j", &Event::Denied("never".into()));
-        t.record("j", &done("a", true));
+        t.rec("j", &Event::Denied("never".into()));
+        t.rec("j", &done("a", true));
         assert_eq!(t.read("j", 0, PAGE).0[0].state.as_deref(), Some("declined"));
     }
 
     #[test]
     fn after_gives_what_came_or_changed_since() {
         let t = transcripts("after");
-        t.record("j", &tool_event("a", "Read", json!({"file_path": "a.rs"})));
-        t.record("j", &tool_event("b", "Read", json!({"file_path": "b.rs"})));
-        t.record("j", &tool_event("c", "Read", json!({"file_path": "c.rs"})));
+        t.rec("j", &tool_event("a", "Read", json!({"file_path": "a.rs"})));
+        t.rec("j", &tool_event("b", "Read", json!({"file_path": "b.rs"})));
+        t.rec("j", &tool_event("c", "Read", json!({"file_path": "c.rs"})));
         // A client saw up to 2; then `a` ended and 3 came.
-        t.record("j", &done("a", false));
+        t.rec("j", &done("a", false));
         let since: Vec<(u64, Option<String>)> = t
             .read("j", 2, PAGE)
             .0
@@ -632,7 +709,7 @@ mod tests {
     #[test]
     fn todos_from_every_tool() {
         let t = transcripts("todos");
-        let entries = t.record(
+        let entries = t.rec(
             "j",
             &tool_event(
                 "p",
@@ -646,15 +723,15 @@ mod tests {
         assert_eq!(entries[0].kind, "plan");
         assert_eq!(entries[0].summary, "1 of 3 done");
         assert_eq!(entries[0].todos.as_ref().unwrap()[1].state, "running");
-        t.record(
+        t.rec(
             "j",
             &tool_event("t1", "TaskCreate", json!({"subject": "One"})),
         );
-        t.record(
+        t.rec(
             "j",
             &tool_event("t2", "TaskCreate", json!({"subject": "Two"})),
         );
-        let updated = t.record(
+        let updated = t.rec(
             "j",
             &tool_event(
                 "t3",
@@ -664,13 +741,13 @@ mod tests {
         );
         assert_eq!(updated[0].summary, "1 of 2 done");
         // Their ends make no entries.
-        assert!(t.record("j", &done("t3", false)).is_empty());
+        assert!(t.rec("j", &done("t3", false)).is_empty());
     }
 
     #[test]
     fn a_turn_that_ends_ends_its_calls() {
         let t = transcripts("ends");
-        t.record(
+        t.rec(
             "j",
             &tool_event("a", "Bash", json!({"command": "sleep 100"})),
         );
@@ -684,11 +761,11 @@ mod tests {
         let t = transcripts("secrets");
         let value = ["transcript-", "secret/", "Q7m2+a=b"].concat();
         crate::secrets::known().learn("vault transcript-test", &value);
-        t.record(
+        t.rec(
             "j",
             &tool_event("a", "Bash", json!({"command": format!("echo {value}")})),
         );
-        t.record("j", &Event::Said(format!("I used {value}")));
+        t.rec("j", &Event::Said(format!("I used {value}")));
         t.you("j", &format!("Use {value}"));
         crate::secrets::known().forget("vault transcript-test");
         let file = std::fs::read_to_string(t.path("j")).unwrap();
@@ -708,12 +785,12 @@ mod tests {
     fn reads_come_in_pages() {
         let t = transcripts("pages");
         for n in 0..5 {
-            t.record(
+            t.rec(
                 "j",
                 &tool_event(&format!("c{n}"), "Read", json!({"file_path": "a.rs"})),
             );
         }
-        t.record("j", &done("c0", false));
+        t.rec("j", &done("c0", false));
         let (first, next) = t.read("j", 0, 2);
         assert_eq!(first.iter().map(|e| e.n).collect::<Vec<_>>(), [1, 2]);
         assert_eq!(first[0].state.as_deref(), Some("done"));
@@ -725,7 +802,7 @@ mod tests {
         let (last, next_after) = t.read("j", 4, 2);
         assert_eq!(last.iter().map(|e| e.n).collect::<Vec<_>>(), [1, 5]);
         assert_eq!(next_after, None);
-        t.record("j", &done("c1", false));
+        t.rec("j", &done("c1", false));
         let (again, _) = t.read("j", 2, 2);
         assert_eq!(again.iter().map(|e| e.n).collect::<Vec<_>>(), [1, 2, 3, 4]);
         // A job whose turn is over is read from its file, the same.
@@ -743,20 +820,20 @@ mod tests {
                 state: "pending".into(),
             })
             .collect();
-        let entry = t.record("j", &Event::Plan(todos)).remove(0);
+        let entry = t.rec("j", &Event::Plan(todos)).remove(0);
         assert_eq!(entry.todos.as_ref().unwrap().len(), TODOS);
         assert_eq!(entry.summary, "0 of 80 done");
         // Near its size: a line that would pass it isn't written.
         let size = std::fs::metadata(t.path("j")).unwrap().len();
         t.live.lock().unwrap().get_mut("j").unwrap().bytes = MOST_BYTES - 10;
-        assert!(t.record("j", &Event::Said("words".into())).is_empty());
+        assert!(t.rec("j", &Event::Said("words".into())).is_empty());
         assert_eq!(std::fs::metadata(t.path("j")).unwrap().len(), size);
         // At its count: no entry past it.
         let t = transcripts("full-count");
-        t.record("j", &Event::Said("words".into()));
+        t.rec("j", &Event::Said("words".into()));
         t.live.lock().unwrap().get_mut("j").unwrap().last = MOST_ENTRIES - 1;
         let kept: Vec<u64> = (0..3)
-            .flat_map(|_| t.record("j", &Event::Said("words".into())))
+            .flat_map(|_| t.rec("j", &Event::Said("words".into())))
             .map(|e| e.n)
             .collect();
         assert_eq!(kept, [MOST_ENTRIES]);
@@ -765,22 +842,22 @@ mod tests {
     #[test]
     fn a_full_transcript_still_ends_its_calls() {
         let t = transcripts("full-ends");
-        t.record(
+        t.rec(
             "j",
             &tool_event("a", "Bash", json!({"command": "cargo test"})),
         );
-        t.record("j", &tool_event("b", "Read", json!({"file_path": "x.rs"})));
+        t.rec("j", &tool_event("b", "Read", json!({"file_path": "x.rs"})));
         t.live.lock().unwrap().get_mut("j").unwrap().bytes = MOST_BYTES;
         // A new call isn't kept, and neither is its end; the calls already written end.
         assert!(
-            t.record("j", &tool_event("c", "Read", json!({"file_path": "y.rs"})))
+            t.rec("j", &tool_event("c", "Read", json!({"file_path": "y.rs"})))
                 .is_empty()
         );
         assert_eq!(
-            t.record("j", &done("a", false))[0].state.as_deref(),
+            t.rec("j", &done("a", false))[0].state.as_deref(),
             Some("done")
         );
-        assert!(t.record("j", &done("c", false)).is_empty());
+        assert!(t.rec("j", &done("c", false)).is_empty());
         let ended = t.end_turn("j");
         assert_eq!(ended.iter().map(|e| e.n).collect::<Vec<_>>(), [2]);
         t.forget("j");
@@ -799,7 +876,7 @@ mod tests {
         let value = ["name-", "secret/", "Z9q+r=s"].concat();
         crate::secrets::known().learn("vault transcript-name", &value);
         let long = format!("{value} {}", "x".repeat(500));
-        let entry = t.record("j", &tool_event("a", &long, json!({}))).remove(0);
+        let entry = t.rec("j", &tool_event("a", &long, json!({}))).remove(0);
         crate::secrets::known().forget("vault transcript-name");
         let tool = entry.tool.unwrap();
         assert!(
@@ -817,12 +894,12 @@ mod tests {
     #[test]
     fn the_task_list_carries_on_after_a_turn() {
         let t = transcripts("tasks");
-        t.record(
+        t.rec(
             "j",
             &tool_event("t1", "TaskCreate", json!({"subject": "One"})),
         );
         t.forget("j");
-        let updated = t.record(
+        let updated = t.rec(
             "j",
             &tool_event(
                 "t2",
@@ -842,5 +919,15 @@ mod tests {
         t.sweep(|id| id == "new");
         assert!(!t.path("old").exists());
         assert!(t.path("new").exists());
+    }
+
+    #[test]
+    fn files_outside_the_worktree_show_only_their_name() {
+        let w = Path::new("/w");
+        let file = |path: &str| file_of(&json!({"file_path": path}), w);
+        assert_eq!(file("/w/src/a.rs").as_deref(), Some("src/a.rs"));
+        assert_eq!(file("src/a.rs").as_deref(), Some("src/a.rs"));
+        assert_eq!(file("/Users/me/.ssh/config").as_deref(), Some("config"));
+        assert_eq!(file("../../etc/hosts").as_deref(), Some("hosts"));
     }
 }

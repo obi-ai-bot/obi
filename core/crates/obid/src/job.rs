@@ -249,6 +249,12 @@ pub struct Job {
     /// design, the owner's decision of 2026-10-18).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up_of: Option<String>,
+    /// Its activity at a glance, from its transcript (`crate::activity`, #730).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Value>,
+    /// The agent's latest words, shortened: what it's doing now and why (#730).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
     /// What the job it follows up did, for its first prompt, quoted there. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub earlier: Option<String>,
@@ -376,6 +382,8 @@ impl Job {
             artifacts: Vec::new(),
             artifact_problems: Vec::new(),
             follow_up_of: None,
+            activity: None,
+            context: None,
             earlier: None,
             start_from: None,
             diffs: Vec::new(),
@@ -623,6 +631,14 @@ impl Job {
             "artifactProblems": self.artifact_problems,
             "followUpOf": self.follow_up_of,
         });
+        if let Some(activity) = &self.activity {
+            value["activity"] = activity.clone();
+        }
+        if let Some(context) = &self.context {
+            value["context"] = json!(context);
+            // The agent's own words, quoted: never obid's.
+            value["contextBy"] = json!("agent");
+        }
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
         }

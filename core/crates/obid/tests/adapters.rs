@@ -170,7 +170,10 @@ fn codex_commits_with_obids_approval() {
 fn a_codex_jobs_transcript_matches_claudes() {
     let folder = Folder::new("codex-transcript");
     let obid = obid(&folder, false);
-    let id = dispatch(&obid, json!({"agent": "codex", "task": "TOOLS"}));
+    let id = dispatch(
+        &obid,
+        json!({"agent": "codex", "task": "TOOLS", "check": "node --test"}),
+    );
     let job = ended(&obid, &id);
     assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
     let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript"), None);
@@ -218,9 +221,17 @@ fn a_codex_jobs_transcript_matches_claudes() {
         (&entries[9]["added"], &entries[9]["removed"]),
         (&json!(3), &json!(2))
     );
-    assert_eq!(entries[11]["summary"], "Running cargo test");
+    assert_eq!(entries[11]["summary"], "Running node --test");
     assert_eq!(entries[11]["exit"], 101);
     assert!(!answer.text.contains("raw output"), "{}", answer.text);
+    // The same kinds in its activity (#730).
+    assert_eq!(
+        job["activity"]["counts"],
+        json!({"read": 5, "search": 0, "edit": 2, "command": 0, "test": 1, "tetrix": 0, "web": 0, "mcp": 0}),
+        "{job}"
+    );
+    assert_eq!(job["activity"]["groups"][1]["title"], "Found it");
+    assert_eq!(job["context"], "Found it. Fixing it.");
 }
 
 /// obid's fixed denials hold for Codex: a push is declined, and since the decision carries no
