@@ -27,6 +27,14 @@ impl Store {
         write_private(&self.path(&job.id), &text)
     }
 
+    /// Forgets the job `id`: one that isn't kept is gone already.
+    pub fn remove(&self, id: &str) -> std::io::Result<()> {
+        match std::fs::remove_file(self.path(id)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+
     /// Every job kept, oldest first. A file that doesn't read as a job is left alone and logged.
     pub fn load_all(&self) -> Vec<Job> {
         let mut jobs = Vec::new();
