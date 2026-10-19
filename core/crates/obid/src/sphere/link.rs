@@ -2617,6 +2617,46 @@ impl Link {
                     .map(|_| ())
                     .map_err(|why| api(StatusCode::UNPROCESSABLE_ENTITY, why))
             }
+            inbox::action::CHANGE_ROUTINE => {
+                use crate::routines::{Change, NotRun};
+                let routines = self
+                    .jobs
+                    .routines()
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "obid keeps no routines."))?;
+                let gone = || api(StatusCode::CONFLICT, "That routine is gone.");
+                let now = time::now();
+                let change = |change: Change| match routines.change(&self.jobs, target, change, now)
+                {
+                    None => Err(gone()),
+                    Some(Err(why)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, why)),
+                    Some(Ok(_)) => Ok(()),
+                };
+                match confirmed.payload["action"].as_str() {
+                    Some("resume") => change(Change {
+                        enabled: Some(true),
+                        ..Default::default()
+                    }),
+                    Some("reschedule") => change(Change {
+                        schedule: serde_json::from_value(confirmed.payload["schedule"].clone())
+                            .ok(),
+                        zone: confirmed.payload["zone"].as_str().map(str::to_owned),
+                        ..Default::default()
+                    }),
+                    Some("delete") => routines.delete(target).then_some(()).ok_or_else(gone),
+                    Some("run") => match routines.run(target, now) {
+                        Ok(_) => Ok(()),
+                        Err(NotRun::NoRoutine) => Err(gone()),
+                        Err(NotRun::Busy) => Err(api(
+                            StatusCode::CONFLICT,
+                            "Its previous run is still going.",
+                        )),
+                        Err(NotRun::Refused(why)) => {
+                            Err(api(StatusCode::UNPROCESSABLE_ENTITY, why))
+                        }
+                    },
+                    _ => Err(api(StatusCode::CONFLICT, "That change was lost.")),
+                }
+            }
             inbox::action::RETRY_JOB => {
                 if self.jobs.get(target).is_some_and(|j| j.status.is_active()) {
                     return Err(api(StatusCode::CONFLICT, "That job is running again."));

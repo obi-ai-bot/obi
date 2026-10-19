@@ -267,7 +267,7 @@ impl Routine {
     }
 
     /// The job a run starts.
-    fn job(&self, scheduled: i64, catch_up: bool) -> NewJob {
+    pub fn job(&self, scheduled: i64, catch_up: bool) -> NewJob {
         NewJob {
             repo: self.repo.clone(),
             kind: self.kind.clone(),
@@ -370,6 +370,12 @@ pub struct Routines {
     dir: PathBuf,
     kept: Mutex<BTreeMap<String, Routine>>,
     events: Events,
+    /// Held from a run's busy check until its run is kept: a scheduled run and Run now never
+    /// both start. ponytail: one lock for every routine; per routine if runs ever queue on it.
+    firing: Mutex<()>,
+    /// What runs a run the owner confirmed (`create_routine`'s sibling `change_routine`, from the
+    /// inbox, which has no conversations of its own).
+    shared: std::sync::OnceLock<std::sync::Weak<Shared>>,
 }
 
 impl Routines {
@@ -387,7 +393,24 @@ impl Routines {
             dir,
             kept: Mutex::new(kept),
             events,
+            firing: Mutex::new(()),
+            shared: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Lets [`Routines::run`] reach the conversations and the jobs.
+    pub fn attach(&self, shared: &Arc<Shared>) {
+        let _ = self.shared.set(Arc::downgrade(shared));
+    }
+
+    /// Run now, from the owner's Confirm in the inbox: as `POST /v1/routines/{id}/run`.
+    pub fn run(&self, id: &str, now: i64) -> Result<(Routine, Job), NotRun> {
+        let shared = self
+            .shared
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| NotRun::Refused("obid is stopping.".into()))?;
+        run_now(&shared, id, now)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Routine>> {
@@ -473,6 +496,35 @@ impl Routines {
         now: i64,
     ) -> Option<Result<Routine, String>> {
         let mut kept = self.lock();
+        let routine = match self.changed(&kept, jobs, id, change, now)? {
+            Ok(routine) => routine,
+            Err(why) => return Some(Err(why)),
+        };
+        kept.insert(routine.id.clone(), routine.clone());
+        drop(kept);
+        self.save(&routine);
+        Some(Ok(routine))
+    }
+
+    /// What `change` would make of the routine `id`, checked, not kept.
+    pub fn check_change(
+        &self,
+        jobs: &Jobs,
+        id: &str,
+        change: Change,
+        now: i64,
+    ) -> Option<Result<Routine, String>> {
+        self.changed(&self.lock(), jobs, id, change, now)
+    }
+
+    fn changed(
+        &self,
+        kept: &BTreeMap<String, Routine>,
+        jobs: &Jobs,
+        id: &str,
+        change: Change,
+        now: i64,
+    ) -> Option<Result<Routine, String>> {
         let mut routine = kept.get(id)?.clone();
         let restarts = change.schedule.is_some()
             || change.zone.is_some()
@@ -516,9 +568,6 @@ impl Routines {
         if restarts {
             routine.last_fire = Some(now);
         }
-        kept.insert(routine.id.clone(), routine.clone());
-        drop(kept);
-        self.save(&routine);
         Some(Ok(routine))
     }
 
@@ -584,7 +633,8 @@ enum Due {
 /// counted as missed, never run.
 fn due(routine: &Routine, now: i64) -> Due {
     let zone = routine.zone();
-    let from = routine.last_fire.unwrap_or(routine.created);
+    // A clock set back leaves no time in the future to wait for.
+    let from = routine.last_fire.unwrap_or(routine.created).min(now);
     let Some(first) = routine
         .schedule
         .next_after(&zone, from)
@@ -715,9 +765,16 @@ pub fn tick(shared: &Shared, now: i64) {
     let ids: Vec<String> = routines.lock().keys().cloned().collect();
     for id in ids {
         ended(shared, &id);
-        let Some(routine) = routines.get(&id).filter(|r| r.enabled) else {
+        let Some(mut routine) = routines.get(&id).filter(|r| r.enabled) else {
             continue;
         };
+        // The clock went back past the time it last acted on: it counts from now.
+        if routine.last_fire.is_some_and(|t| t > now) {
+            match routines.update(&id, |r| r.last_fire = Some(now)) {
+                Some(clamped) => routine = clamped,
+                None => continue,
+            }
+        }
         let Due::Run {
             scheduled,
             catch_up,
@@ -752,8 +809,7 @@ pub fn tick(shared: &Shared, now: i64) {
         if let Some(run) = &missed_run {
             say(shared, &routine, run, words(&routine, run, false));
         }
-        let (run, conversation) = fire(shared, &routine, scheduled, catch_up, now);
-        finish(shared, &id, run, conversation, false);
+        let _ = fire_kept(shared, &id, scheduled, catch_up, now, false);
     }
 }
 
@@ -845,15 +901,39 @@ fn pause_if_failing(shared: &Shared, routine: &Routine) {
 /// Run now: a run for `now`, paused or not, that leaves its next time as it was.
 pub fn run_now(shared: &Shared, id: &str, now: i64) -> Result<(Routine, Job), NotRun> {
     ended(shared, id);
-    let routine = shared.routines.get(id).ok_or(NotRun::NoRoutine)?;
-    let (run, conversation) = fire(shared, &routine, now, false, now);
+    let (run, routine) = fire_kept(shared, id, now, false, now, true).ok_or(NotRun::NoRoutine)?;
     if run.outcome == "skipped" {
         return Err(NotRun::Busy);
     }
+    let routine = routine.ok_or(NotRun::NoRoutine)?;
     let job = run.job.as_deref().and_then(|j| shared.jobs.get(j));
-    let why = run.reason.clone().unwrap_or_default();
-    let routine = finish(shared, id, run, conversation, true).ok_or(NotRun::NoRoutine)?;
-    job.map(|job| (routine, job)).ok_or(NotRun::Refused(why))
+    job.map(|job| (routine, job))
+        .ok_or_else(|| NotRun::Refused(run.reason.unwrap_or_default()))
+}
+
+/// A run of the routine `id` started and kept under the firing lock, from its busy check to its
+/// record, so a scheduled run and Run now never both start. Run now's skip isn't kept: the owner
+/// hears it instead. None when there's no such routine.
+fn fire_kept(
+    shared: &Shared,
+    id: &str,
+    scheduled: i64,
+    catch_up: bool,
+    now: i64,
+    now_asked: bool,
+) -> Option<(Run, Option<Routine>)> {
+    let _firing = shared
+        .routines
+        .firing
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let routine = shared.routines.get(id)?;
+    let (run, conversation) = fire(shared, &routine, scheduled, catch_up, now);
+    if now_asked && run.outcome == "skipped" {
+        return Some((run, None));
+    }
+    let kept = finish(shared, id, run.clone(), conversation, now_asked);
+    Some((run, kept))
 }
 
 /// Checks every routine once now, then every minute, until obid stops.
@@ -900,12 +980,14 @@ pub async fn list(State(shared): State<Arc<Shared>>) -> Response {
 
 /// `POST /v1/routines`.
 pub async fn create(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
-    let draft: Draft = serde_json::from_slice(&body).map_err(|e| {
+    let mut draft: Draft = serde_json::from_slice(&body).map_err(|e| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
             format!("That isn't a routine: {e}"),
         )
     })?;
+    // Only the owner's Confirm of what the brain planned makes a chat routine.
+    draft.created_by = draft.created_by.filter(|by| by != "chat");
     if let Some(conversation) = &draft.conversation
         && !shared.conversations.has(conversation)
     {
@@ -1167,6 +1249,25 @@ mod tests {
         );
         r.last_fire = Some(at("2026-10-16T09:00:00Z"));
         assert_eq!(due(&r, at("2026-10-16T09:00:50Z")), Due::Nothing);
+    }
+
+    #[test]
+    fn a_last_run_in_the_future_waits_for_nothing() {
+        // The clock jumped ahead, then back: the time it acted on is ahead of now.
+        let mut r = routine(daily("09:00"), "2026-10-10T00:00:00Z");
+        r.last_fire = Some(at("2026-10-25T09:00:00Z"));
+        // Nothing runs for the times it seems to have done already, and nothing waits for them:
+        // the check sets it to now (tick), and the next time runs.
+        assert_eq!(due(&r, at("2026-10-18T09:00:30Z")), Due::Nothing);
+        r.last_fire = Some(at("2026-10-18T09:00:30Z"));
+        assert_eq!(
+            due(&r, at("2026-10-19T09:00:30Z")),
+            Due::Run {
+                scheduled: at("2026-10-19T09:00:00Z"),
+                catch_up: false,
+                missed: None,
+            }
+        );
     }
 
     #[test]

@@ -82,6 +82,9 @@ pub mod action {
     /// Make the routine the brain planned (#395): `target` the conversation that planned it,
     /// `payload` `{"routine": <the routine as POST /v1/routines takes it>}`.
     pub const CREATE_ROUTINE: &str = "create_routine";
+    /// Change a routine the brain named (#395): `target` the routine, `payload`
+    /// `{"action": "resume" | "delete" | "run" | "reschedule", "schedule", "zone"}`.
+    pub const CHANGE_ROUTINE: &str = "change_routine";
 }
 
 /// A `confirm` item: `title` says exactly what `Confirm` does, `confirmed` is what obid carries

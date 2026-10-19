@@ -1722,6 +1722,19 @@ nonisolated struct RunnerRoutine: Codable, Identifiable, Equatable, Sendable {
         return parts.joined(separator: " · ")
     }
 
+    /// Its next run as Home's Routines page says it (Sangam's "Starts Monday at 9"), or nil while
+    /// paused.
+    func starts(now: Date = .now) -> String? {
+        guard enabled, let next = nextRun else { return nil }
+        let day = Self.day(next, now: now)
+        return "Starts " + day
+    }
+
+    /// The routines waiting for their next run, soonest first.
+    static func upcoming(_ routines: [RunnerRoutine]) -> [RunnerRoutine] {
+        routines.filter { $0.enabled && $0.nextRun != nil }.sorted { ($0.nextRun ?? .distantFuture) < ($1.nextRun ?? .distantFuture) }
+    }
+
     /// "today at 9:00", "tomorrow at 9:00", "Monday at 9:00", or "Oct 30 at 9:00", in this device's zone.
     static func day(_ date: Date, now: Date = .now, calendar: Calendar = .current) -> String {
         let time = date.formatted(.dateTime.hour().minute())

@@ -61,6 +61,16 @@ fn routines_are_made_paused_run_and_deleted() {
     assert_eq!(made.body["enabled"], true);
     assert!(made.body["nextRun"].is_string(), "{}", made.body);
     assert_eq!(made.body["lastRun"], Value::Null);
+    // A client can't say the brain made it: only the owner's Confirm of a chat routine does.
+    let mut claims = routine("Claims chat");
+    claims["createdBy"] = json!("chat");
+    let claimed = call(&obid, "POST", "/v1/routines", Some(&claims));
+    assert_eq!(claimed.body["createdBy"], "app", "{}", claimed.text);
+    let other = claimed.body["id"].as_str().unwrap();
+    assert_eq!(
+        call(&obid, "DELETE", &format!("/v1/routines/{other}"), None).status,
+        204
+    );
     let listed = call(&obid, "GET", "/v1/routines", None);
     assert_eq!(listed.body.as_array().unwrap().len(), 1);
 

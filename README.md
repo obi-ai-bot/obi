@@ -35,7 +35,7 @@ Say the word and the work starts, like Claude Code or Codex: no card to confirm.
 
 ## I do it again, on schedule
 
-“Every weekday at 9, review the open pull requests in obi.” I save it as a routine once you confirm it in your inbox, and from then on each run is an ordinary job, with the same checks, scan and review as one you ask for, in the conversation you asked in. If I wasn't running at 9, I catch up once when I'm back; if yesterday's run is still going, I skip today's and say so. Pause, resume, run now or delete it by asking me, or in Settings › Routines on your Mac and iPhone.
+“Every weekday at 9, review the open pull requests in obi.” I save it as a routine once you confirm it in your inbox, and from then on each run is an ordinary job, with the same checks, scan and review as one you ask for, in the conversation you asked in. If I wasn't running at 9, I catch up once when I'm back; if yesterday's run is still going, I skip today's and say so. Ask me to pause it; resuming, running it now, changing its time or deleting it waits for your OK in the inbox, as making it did. Or do it in Settings › Routines on your Mac and iPhone. Home's Routines shows when each one starts next.
 
 ## Then I get out of your way
 

@@ -331,6 +331,7 @@ pub async fn serve(
     // A deleted conversation's waiting Claude Code ends with it.
     brain::harness::end_warm_with_conversations(shared.clone());
     // Routines run on their schedules (#395).
+    shared.routines.attach(&shared);
     routines::spawn(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
     brain::orchestrator::spawn(shared.clone());

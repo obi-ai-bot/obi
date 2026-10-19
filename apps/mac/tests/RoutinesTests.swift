@@ -33,6 +33,17 @@ struct RoutinesTests {
         #expect(RoutineMark(id: "a1b2c3d4", name: "Review open PRs").line == "From routine: Review open PRs")
     }
 
+    /// Home's Routines page: each routine waiting for its next run, soonest first, says when it
+    /// starts (Sangam's "Starts Monday at 9"); a paused one isn't waiting.
+    @Test func upcomingRunsSayWhenTheyStart() {
+        let later = Self.routine("Dependency updates", next: "2026-10-26T12:00:00Z")
+        let sooner = Self.routine("Review open PRs")
+        let paused = Self.routine("Weekly repo health", enabled: false, next: nil)
+        #expect(RunnerRoutine.upcoming([later, paused, sooner]).map(\.name) == ["Review open PRs", "Dependency updates"])
+        #expect(sooner.starts(now: Self.now)?.hasPrefix("Starts tomorrow at ") == true)
+        #expect(paused.starts(now: Self.now) == nil)
+    }
+
     @Test func aRoutinesRunGoesUnderRoutinesOnHome() throws {
         let json = #"[{"id":"a1","routine":{"id":"r1","name":"Review open PRs","scheduled":"2026-10-19T12:00:00Z","catchUp":false}},{"id":"a2"}]"#
         let extras = RunnerJobExtras.of(Data(json.utf8))

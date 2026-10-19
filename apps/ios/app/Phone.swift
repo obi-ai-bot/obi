@@ -291,6 +291,8 @@ final class Phone {
     private(set) var accounts: [Account] = []
     /// Counts the `routine` events (#395): Settings › Routines reads the routines again on each.
     private(set) var routineChanges = 0
+    /// obid's routines (#395), for the next runs on Home's Routines page; none from a runner without.
+    private(set) var routines: [RunnerRoutine] = []
     /// What waits in the runner's inbox, put-off items too: answered on the Mac, it goes from here too.
     private(set) var inbox: [InboxItem]
     private let offlineQueue: OfflineQueue
@@ -544,6 +546,7 @@ final class Phone {
         await take(try await runner.jobs())
         inbox = try await runner.inbox()
         await readGitHub { try await runner.gitHubWork() }
+        await readRoutines()
         do { conversations = try await runner.conversations() } catch {
             Logger.phone.error("listing conversations failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -573,6 +576,13 @@ final class Phone {
         guard let fresh = try? await runner.jobs() else { return }
         await take(fresh)
         await syncing?.value
+    }
+
+    /// obid's routines again; an answer that fails keeps what was read.
+    func readRoutines() async {
+        do { routines = try await runner.routines() ?? [] } catch {
+            Logger.phone.error("listing routines failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Pull to refresh: fetch the job list now, without waiting for the runner's next event.
@@ -652,6 +662,7 @@ final class Phone {
             take(changed)
         case .routine:
             routineChanges += 1
+            Task { await readRoutines() }
         }
     }
 

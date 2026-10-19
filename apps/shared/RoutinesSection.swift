@@ -103,4 +103,28 @@ struct RoutinesSection: View {
         return routine
     }
 }
+
+/// A routine waiting for its next run, on Home's Routines page (Sangam's tasks.ts: "Starts
+/// Monday at 9"): its name, where and when it runs, and when it starts next, marked Queued.
+struct UpcomingRoutineCard: View {
+    let routine: RunnerRoutine
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(verbatim: routine.name).font(Tokens.font(Tokens.textLg, .semibold)).foregroundStyle(Tokens.ink).lineLimit(2)
+                Spacer(minLength: 8)
+                WorkMarkView(mark: .queued)
+            }
+            Text(verbatim: "\(routine.repoName) · \(routine.when)").font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted).lineLimit(1)
+            if let starts = routine.starts() {
+                Text(verbatim: starts).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted)
+            }
+        }
+        .padding(.horizontal, 20).padding(.vertical, 18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.cardRadius, style: .continuous))
+        .accessibilityElement(children: .combine)
+    }
+}
 #endif

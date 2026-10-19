@@ -360,6 +360,29 @@ fn routines(shared: &Shared) -> String {
         .join("\n")
 }
 
+/// A routine in obid's own words, for its confirm items: its name, when it runs, and the job each
+/// run starts as `actions::describe` says it (mode, tool, account, check): "Readme check
+/// (Weekdays at 9:00, build fixture-app in Bypass mode, on Claude Code · Personal)".
+fn routine_words(routine: &crate::routines::Routine) -> String {
+    let mut job = routine.job(0, false);
+    job.title = None;
+    format!(
+        "{} ({}, {})",
+        routine.name,
+        routine.schedule.words(),
+        super::actions::describe(&job)
+    )
+}
+
+/// What a Bypass routine's card says plainly: no run of it asks the owner anything.
+fn bypass_line(routine: &crate::routines::Routine) -> &'static str {
+    if routine.mode.as_deref() == Some("bypass") {
+        " It's in Bypass mode: every run's job never asks you anything, every time it runs, until you pause or delete it."
+    } else {
+        ""
+    }
+}
+
 /// `at` as `zone` reads it: "Mon Oct 20, 9:00".
 fn local(zone: &str, at: i64) -> String {
     let zone = jiff::tz::TimeZone::get(zone).unwrap_or(jiff::tz::TimeZone::UTC);
@@ -434,17 +457,12 @@ fn propose_routine(shared: &Shared, session: &Session, args: Value) -> Result<St
         next.push(local(&routine.zone, after));
         t = after;
     }
-    let repo_name = routine.repo.rsplit('/').next().unwrap_or(&routine.repo);
-    let what = format!(
-        "{} ({}, {} {repo_name})",
-        routine.name,
-        routine.schedule.words(),
-        routine.kind
-    );
+    let what = routine_words(&routine);
     let nonce = super::briefing::nonce();
     let text = format!(
-        "Oby's brain planned a routine: {what}, in {}. Each run starts a job, as one you ask for does. Its next runs: {}. It's saved only if you confirm.\n\n{}\n{}",
+        "Oby's brain planned a routine: {what}, in {}.{} Each run starts a job, as one you ask for does. Its next runs: {}. It's saved only if you confirm.\n\n{}\n{}",
         routine.zone,
+        bypass_line(&routine),
         next.join("; "),
         super::briefing::fence_rule(&nonce, "the task Oby planned"),
         super::briefing::fence(&nonce, &crate::secrets::known().redact(&routine.task)),
@@ -475,8 +493,10 @@ struct ChangeRoutine {
     zone: Option<String>,
 }
 
-/// oby_change_routine: the owner's words pause, resume, run, delete or reschedule a routine, as
-/// they stop a job. A turn that read what others wrote changes none.
+/// oby_change_routine: the owner's words pause a routine, as they stop a job. Resuming,
+/// rescheduling, deleting and running one now each wait for the owner's Confirm in the inbox
+/// (`change_routine`), since words in the conversation may be an agent's. A turn that read what
+/// others wrote changes none.
 fn change_routine(shared: &Shared, session: &Session, args: Value) -> Result<String, String> {
     let ChangeRoutine {
         id,
@@ -488,33 +508,51 @@ fn change_routine(shared: &Shared, session: &Session, args: Value) -> Result<Str
         return Err("This turn read what others wrote, so Oby changes routines only when the owner says it again.".into());
     }
     let routines = &shared.routines;
-    let name = routines
+    let routine = routines
         .get(&id)
-        .map(|r| r.name)
         .ok_or("There's no routine with that id.")?;
+    let name = routine.name.clone();
     let now = obi_protocol::time::now();
-    let change = |change: crate::routines::Change| -> Result<crate::routines::Routine, String> {
+    let check = |change: crate::routines::Change| -> Result<crate::routines::Routine, String> {
         routines
-            .change(&shared.jobs, &id, change, now)
+            .check_change(&shared.jobs, &id, change, now)
             .ok_or("There's no routine with that id.")?
             .map_err(|why| format!("Oby refused that: {why}"))
     };
-    match action.as_str() {
-        "pause" => change(crate::routines::Change {
-            enabled: Some(false),
-            ..Default::default()
-        })
-        .map(|_| format!("Paused {name}.")),
-        "resume" => change(crate::routines::Change {
-            enabled: Some(true),
-            ..Default::default()
-        })
-        .map(|r| {
-            format!(
-                "{name} is on again: next run {}.",
-                r.next_run().map_or_else(String::new, |t| local(&r.zone, t))
+    let (title, text, payload) = match action.as_str() {
+        "pause" => {
+            routines
+                .change(
+                    &shared.jobs,
+                    &id,
+                    crate::routines::Change {
+                        enabled: Some(false),
+                        ..Default::default()
+                    },
+                    now,
+                )
+                .ok_or("There's no routine with that id.")?
+                .map_err(|why| format!("Oby refused that: {why}"))?;
+            return Ok(format!("Paused {name}."));
+        }
+        "resume" => {
+            let resumed = check(crate::routines::Change {
+                enabled: Some(true),
+                ..Default::default()
+            })?;
+            (
+                format!("Resume the routine {}", routine_words(&resumed)),
+                format!(
+                    "Oby's brain planned to turn the routine {} back on.{} Its next run: {}. It happens only if you confirm.",
+                    routine_words(&resumed),
+                    bypass_line(&resumed),
+                    resumed
+                        .next_run()
+                        .map_or_else(String::new, |t| local(&resumed.zone, t))
+                ),
+                json!({"action": "resume"}),
             )
-        }),
+        }
         "reschedule" => {
             let schedule = schedule
                 .map(serde_json::from_value::<crate::routines::Schedule>)
@@ -523,36 +561,60 @@ fn change_routine(shared: &Shared, session: &Session, args: Value) -> Result<Str
             if schedule.is_none() && zone.is_none() {
                 return Err("Say the new schedule or zone.".into());
             }
-            change(crate::routines::Change {
-                schedule,
-                zone,
+            let moved = check(crate::routines::Change {
+                schedule: schedule.clone(),
+                zone: zone.clone(),
                 ..Default::default()
-            })
-            .map(|r| format!("{name} now runs {}.", r.schedule.words().to_lowercase()))
+            })?;
+            (
+                format!("Reschedule the routine {}", routine_words(&moved)),
+                format!(
+                    "Oby's brain planned to change when {name} runs: {} in {}, instead of {} in {}. It happens only if you confirm.",
+                    moved.schedule.words(),
+                    moved.zone,
+                    routine.schedule.words(),
+                    routine.zone
+                ),
+                json!({"action": "reschedule", "schedule": schedule, "zone": zone}),
+            )
         }
-        "delete" => {
-            routines.delete(&id);
-            Ok(format!("Deleted {name}. The jobs its runs started stay."))
-        }
-        "run" => match crate::routines::run_now(shared, &id, now) {
-            Ok((_, job)) => outcome_answer(
-                session,
-                Outcome::Started(format!("{name} started a run now."), job.to_json()),
+        "delete" => (
+            format!("Delete the routine {name}"),
+            format!(
+                "Oby's brain planned to delete the routine {}. It won't run again; the jobs its runs started stay. It happens only if you confirm.",
+                routine_words(&routine)
             ),
-            Err(crate::routines::NotRun::Busy) => {
-                Err(format!("{name}'s previous run is still going."))
-            }
-            Err(crate::routines::NotRun::Refused(why)) => {
-                Err(format!("{name} couldn't start: {why}"))
-            }
-            Err(crate::routines::NotRun::NoRoutine) => {
-                Err("There's no routine with that id.".into())
-            }
+            json!({"action": "delete"}),
+        ),
+        "run" => (
+            format!("Run the routine {} now", routine_words(&routine)),
+            format!(
+                "Oby's brain planned to start a run of the routine {} now.{} It starts only if you confirm.",
+                routine_words(&routine),
+                bypass_line(&routine)
+            ),
+            json!({"action": "run"}),
+        ),
+        other => {
+            return Err(format!(
+                "action is pause, resume, run, delete or reschedule, not {other}."
+            ));
+        }
+    };
+    super::actions::confirm(
+        shared,
+        "",
+        title.clone(),
+        text,
+        crate::sphere::inbox::Confirmed {
+            action: crate::sphere::inbox::action::CHANGE_ROUTINE.into(),
+            target: id,
+            payload,
         },
-        other => Err(format!(
-            "action is pause, resume, run, delete or reschedule, not {other}."
-        )),
-    }
+    );
+    Ok(format!(
+        "{title} waits for the owner's OK in their inbox: nothing changes until they confirm it."
+    ))
 }
 
 #[derive(Deserialize)]

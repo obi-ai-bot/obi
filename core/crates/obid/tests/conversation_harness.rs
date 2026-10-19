@@ -568,7 +568,26 @@ fn owner_only_answers_become_confirm_items() {
 #[test]
 fn a_routine_said_in_chat_waits_for_the_owners_confirm() {
     let (_folder, obid) = obid("harness-routine", true);
-    let routine = r#"OBY oby_routine {"name": "Readme check", "repo": "obi-e2e/fixture-app", "task": "Say what the README covers.", "kind": "investigate", "schedule": {"every": "weekdays", "at": "09:00"}, "zone": "America/Sao_Paulo"}"#;
+    // The owner's Confirm of the open confirm item whose title starts with `title`.
+    let confirm = |title: &str| {
+        let item = inbox(&obid)
+            .into_iter()
+            .find(|i| {
+                i["kind"] == "confirm"
+                    && i["done"].is_null()
+                    && i["title"].as_str().unwrap().starts_with(title)
+            })
+            .unwrap_or_else(|| panic!("a confirm item {title}: {:?}", inbox(&obid)));
+        let confirmed = call(
+            &obid,
+            "POST",
+            &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
+            Some(&json!({"answer": "Confirm"})),
+        );
+        assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+        item
+    };
+    let routine = r#"OBY oby_routine {"name": "Readme check", "repo": "obi-e2e/fixture-app", "task": "Add a line to the README.", "kind": "build", "mode": "bypass", "schedule": {"every": "weekdays", "at": "09:00"}, "zone": "America/Sao_Paulo"}"#;
     let answer = said(&obid, json!({"said": routine, "new": true}));
     let conversation = answer.body["conversation"].as_str().unwrap().to_owned();
     assert!(
@@ -586,27 +605,32 @@ fn a_routine_said_in_chat_waits_for_the_owners_confirm() {
         "nothing saved yet: {}",
         routines.text
     );
-    let item = inbox(&obid)
-        .into_iter()
-        .find(|i| i["kind"] == "confirm")
-        .expect("a confirm item");
+    // The card names the job each run starts, its mode and where it runs, and says plainly that
+    // a Bypass routine never asks.
+    let item = confirm("Make the routine ");
     assert_eq!(
         item["title"],
-        "Make the routine Readme check (Weekdays at 9:00, investigate fixture-app)"
+        "Make the routine Readme check (Weekdays at 9:00, build fixture-app in Bypass mode, on auto · auto)"
     );
-    let confirmed = call(
-        &obid,
-        "POST",
-        &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
-        Some(&json!({"answer": "Confirm"})),
+    assert!(
+        item["text"]
+            .as_str()
+            .unwrap()
+            .contains("every run's job never asks you anything"),
+        "{item}"
     );
-    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
     let routines = call(&obid, "GET", "/v1/routines", None).body;
     let made = &routines[0];
     assert_eq!(made["name"], "Readme check", "{routines}");
     assert_eq!(made["createdBy"], "chat");
+    assert_eq!(made["mode"], "bypass");
     assert_eq!(made["conversation"], conversation.as_str());
     let id = made["id"].as_str().unwrap().to_owned();
+    let routine_now = || call(&obid, "GET", &format!("/v1/routines/{id}"), None).body;
+    let change = |action: &str| {
+        let words = format!(r#"OBY oby_change_routine {{"id": "{id}", "action": "{action}"}}"#);
+        said(&obid, json!({"said": words, "conversation": conversation}))
+    };
 
     let listed = said(
         &obid,
@@ -617,8 +641,8 @@ fn a_routine_said_in_chat_waits_for_the_owners_confirm() {
         "{}",
         listed.text
     );
-    let pause = format!(r#"OBY oby_change_routine {{"id": "{id}", "action": "pause"}}"#);
-    let paused = said(&obid, json!({"said": pause, "conversation": conversation}));
+    // Pausing is the owner's words alone.
+    let paused = change("pause");
     assert!(
         paused.body["text"]
             .as_str()
@@ -627,10 +651,7 @@ fn a_routine_said_in_chat_waits_for_the_owners_confirm() {
         "{}",
         paused.text
     );
-    assert_eq!(
-        call(&obid, "GET", &format!("/v1/routines/{id}"), None).body["enabled"],
-        false
-    );
+    assert_eq!(routine_now()["enabled"], false);
 
     // After reading what others wrote, the turn's words change no routine.
     let resume = format!(r#"READREPO OBY oby_change_routine {{"id": "{id}", "action": "resume"}}"#);
@@ -643,9 +664,47 @@ fn a_routine_said_in_chat_waits_for_the_owners_confirm() {
         "{}",
         refused.text
     );
+    assert_eq!(routine_now()["enabled"], false);
+
+    // Resuming, running now and deleting wait for the owner's Confirm.
+    let resumed = change("resume");
+    assert!(
+        resumed.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("waits for the owner's OK"),
+        "{}",
+        resumed.text
+    );
+    assert_eq!(routine_now()["enabled"], false);
+    confirm("Resume the routine Readme check");
+    assert_eq!(routine_now()["enabled"], true);
+
+    change("run");
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs, json!([]), "no Bypass job before the Confirm");
+    let run = confirm("Run the routine Readme check (");
+    assert!(
+        run["text"]
+            .as_str()
+            .unwrap()
+            .contains("never asks you anything"),
+        "{run}"
+    );
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs[0]["routine"]["id"], id.as_str(), "{jobs}");
+    assert_eq!(jobs[0]["mode"], "bypass");
+
+    change("delete");
     assert_eq!(
-        call(&obid, "GET", &format!("/v1/routines/{id}"), None).body["enabled"],
-        false
+        routine_now()["id"],
+        id.as_str(),
+        "not deleted before the Confirm"
+    );
+    confirm("Delete the routine Readme check");
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/routines/{id}"), None).status,
+        404
     );
 }
 
