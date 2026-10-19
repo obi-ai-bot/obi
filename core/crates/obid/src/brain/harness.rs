@@ -2303,10 +2303,11 @@ mod tests {
                 "{command}"
             );
         }
-        // The backstop refuses them by name, saying running is a job's (not only as an unknown tool).
+        // The backstop refuses them by name, pointing at Oby's own shell (not only as an unknown
+        // tool): a command runs in a box of its own, never in the agent's.
         for runner in ["Bash", "PowerShell", "REPL", "JavaScript"] {
             match decide(runner, json!({})) {
-                Answer::Deny(why) => assert!(why.contains("can't run commands"), "{runner}: {why}"),
+                Answer::Deny(why) => assert!(why.contains("oby_shell"), "{runner}: {why}"),
                 other => panic!("{runner}: {other:?}"),
             }
         }
