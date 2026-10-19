@@ -241,8 +241,8 @@ fn retries_run_out() {
 }
 
 /// The token budget stalls a job. Past it, Try again or other words through the API (what oby-mcp
-/// and other sessions call) do nothing but ask the owner in the inbox; their Confirm carries it on
-/// with a new budget.
+/// and other sessions call) do nothing but ask the owner in the inbox, once per kind however often
+/// they're sent; their Confirm carries it on with a new budget.
 #[test]
 fn the_token_budget_stalls_and_only_the_owners_confirm_carries_on() {
     let (_folder, obid) = obid_with("long-budget", json!({"jobTokenBudget": 1000}), &[]);
@@ -261,7 +261,13 @@ fn the_token_budget_stalls_and_only_the_owners_confirm_carries_on() {
             .cloned()
             .collect()
     };
-    for words in [TRY_AGAIN, "start it again from scratch"] {
+    // Asked again and again (a looping caller), each kind of item comes once.
+    for words in [
+        TRY_AGAIN,
+        "start it again from scratch",
+        TRY_AGAIN,
+        "start it again from scratch",
+    ] {
         let answer = call(
             &obid,
             "POST",
