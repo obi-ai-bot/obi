@@ -34,6 +34,12 @@ pub struct Options {
     pub instructions: Option<String>,
     /// A conversation's thread, whose shell is off: a command that runs anyway ends the turn.
     pub no_commands: bool,
+    /// A job's run: it asks Codex for the account's usage as it starts (crate::usage). The
+    /// brain's and conversations' runs don't: nothing keeps it there.
+    pub usage: bool,
+    /// How the job's account pays (`api` or `plan`), when obid knows it already: then the run
+    /// doesn't ask `account/read`.
+    pub priced: Option<String>,
 }
 
 /// The `command` line `codex app-server` runs as: the binary, then `app-server`. Oby's broker
@@ -86,7 +92,7 @@ pub async fn run_turn(
         limits_read: None,
         account_read: None,
         tokens_before: None,
-        priced: None,
+        priced: options.priced.clone(),
         fatal: None,
         thread: None,
         turn: None,
@@ -191,12 +197,22 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         self.conn.notify("initialized", None).await;
         // The account's usage, answered while the thread starts: reading it asks OpenAI, and the
         // job doesn't wait for that (`handle`).
-        self.limits_read = Some(
-            self.conn
-                .request("account/rateLimits/read", json!({}))
-                .await,
-        );
-        self.account_read = Some(self.conn.request("account/read", json!({})).await);
+        if options.usage {
+            self.limits_read = Some(
+                self.conn
+                    .request("account/rateLimits/read", json!({}))
+                    .await,
+            );
+            // How the account pays, once per account: obid keeps it (crate::usage), and the answer
+            // holds who is signed in, which obid never reads. Never a token refresh for it.
+            if options.priced.is_none() {
+                self.account_read = Some(
+                    self.conn
+                        .request("account/read", json!({"refreshToken": false}))
+                        .await,
+                );
+            }
+        }
 
         let cwd = self.worktree.to_string_lossy().into_owned();
         let mut params = thread_params(&cwd);
@@ -271,6 +287,12 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             self.priced = answer
                 .ok()
                 .and_then(|read| crate::usage::codex_priced(&read));
+            if self.priced.is_some() {
+                (self.on_event)(Event::Usage(crate::usage::Usage {
+                    priced: self.priced.clone(),
+                    ..Default::default()
+                }));
+            }
             return;
         }
         if message["method"] == "account/rateLimits/updated"
@@ -865,10 +887,8 @@ mod tests {
             r#"#!/bin/sh
 read l; echo '{"id":1,"result":{}}'
 read l
-read l
-read l
-read l; echo '{"id":4,"result":{"thread":{"id":"t1"}}}'
-read l; echo '{"id":5,"result":{"turn":{"id":"u1"}}}'
+read l; echo '{"id":2,"result":{"thread":{"id":"t1"}}}'
+read l; echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
 echo '{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"completed","items":[{"type":"agentMessage","text":"Done."}]}}}'
 exec sleep 30
 "#,
@@ -918,10 +938,8 @@ exec sleep 30
             r#"#!/bin/sh
 read l; echo '{"id":1,"result":{}}'
 read l
-read l
-read l
-read l; echo '{"id":4,"result":{"thread":{"id":"t1"}}}'
-read l; echo '{"id":5,"result":{"turn":{"id":"u1"}}}'
+read l; echo '{"id":2,"result":{"thread":{"id":"t1"}}}'
+read l; echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
 echo '{"method":"item/started","params":{"threadId":"t1","turnId":"u1","item":{"type":"commandExecution","id":"c1","command":"/bin/zsh -lc '"'"'cat x'"'"'"}}}'
 exec sleep 30
 "#,

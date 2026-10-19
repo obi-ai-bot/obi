@@ -254,6 +254,10 @@ pub struct Job {
     /// What its turns used, in tokens and cost, as its tool reported them (#731).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::usage::Tokens>,
+    /// Claude Code's session and its counts at its last result, which the next turn's resumed
+    /// counts include (crate::jobs). Never in the API's job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_seen: Option<(String, crate::usage::Tokens)>,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -350,6 +354,7 @@ impl Job {
             earlier: None,
             start_from: None,
             usage: None,
+            usage_seen: None,
         }
     }
 

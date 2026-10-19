@@ -38,6 +38,8 @@ pub struct Usage {
     pub full_until: Option<i64>,
     /// The owner let it past its weekly reserve until then, its week's reset.
     pub reserve_lifted_until: Option<i64>,
+    /// How the account pays, as its tool said (`api` or `plan`, crate::usage::Tokens): asked once.
+    pub priced: Option<String>,
 }
 
 /// A window's share now: one whose reset has passed starts again from nothing.
@@ -197,7 +199,20 @@ impl Usages {
             if usage.full_until.is_some() {
                 kept.full_until = usage.full_until;
             }
+            if usage.priced.is_some() {
+                kept.priced.clone_from(&usage.priced);
+            }
         })
+    }
+
+    /// Forgets a removed account's usage, so an account given its id later starts unknown.
+    pub fn forget(&self, id: &str) -> std::io::Result<()> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.remove(id).is_none() {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec_pretty(&*state).map_err(std::io::Error::other)?;
+        crate::store::write_private(&self.file, &bytes)
     }
 
     /// "Use anyway" (#278): with `lift`, the account takes automatic work past its weekly reserve
@@ -374,20 +389,30 @@ impl Tokens {
         }
     }
 
-    fn minus(&self, other: &Tokens) -> Tokens {
+    /// What `self` has beyond `other`: what a running total grew by since `other`.
+    pub fn minus(&self, other: &Tokens) -> Tokens {
         let less = |a: Option<u64>, b: Option<u64>| a.map(|a| a.saturating_sub(b.unwrap_or(0)));
         Tokens {
             input: less(self.input, other.input),
             output: less(self.output, other.output),
             cache_read: less(self.cache_read, other.cache_read),
-            ..self.clone()
+            cache_write: less(self.cache_write, other.cache_write),
+            cost_usd: self
+                .cost_usd
+                .map(|c| (c - other.cost_usd.unwrap_or(0.0)).max(0.0)),
+            priced: self.priced.clone(),
         }
     }
 }
 
 /// A Claude Code `result` line's counts: its `modelUsage` summed over the models when it's there
-/// (it counts the subagents' models too), else its `usage`, and `total_cost_usd`. `priced` from
-/// the run's `init` line: `apiKeySource` `none` is the account's subscription login.
+/// (it counts Claude Code's side calls and subagents' models too), else its `usage`, and
+/// `total_cost_usd`. They're its session's so far: after `--resume`, `modelUsage` and
+/// `total_cost_usd` carry the earlier turns' too (claude 2.1.302, 2026-10-19), so a job counts
+/// what grew since the session's last result (crate::jobs). `priced` from the run's `init` line:
+/// `apiKeySource` `none` is the account's subscription login.
+// ponytail: `usage` alone is the run's own, so a Claude Code without `modelUsage` would undercount
+// its resumed turns; every 2.x sends `modelUsage`.
 pub fn claude_tokens(result: &Value, api_key_source: Option<&str>) -> Tokens {
     let count = |v: &Value| v.as_u64();
     let mut tokens = match result["modelUsage"].as_object().filter(|m| !m.is_empty()) {
@@ -673,6 +698,10 @@ mod tests {
         assert!(!Usages::open(&home.0).get("a").reserved(time::now()));
         assert_eq!(usages.lift("a", false).unwrap().reserve_lifted_until, None);
         assert!(usages.get("a").reserved(time::now()));
+        // A removed account's usage goes, kept or not.
+        usages.forget("a").unwrap();
+        assert_eq!(Usages::open(&home.0).get("a"), Usage::default());
+        usages.forget("nobody").unwrap();
         // Unknown reset: a week from now.
         let until = usages
             .lift("b", true)

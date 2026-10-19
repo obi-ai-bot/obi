@@ -3171,7 +3171,22 @@ impl Jobs {
         let before = job.usage.clone().unwrap_or_default();
         let on_event = |event| match event {
             AgentEvent::Tokens(tokens) => {
-                jobs.update(id, |job| job.usage = Some(before.plus(&tokens)));
+                jobs.update(id, |job| {
+                    // Claude Code's counts are its session's so far, the turns it resumed
+                    // included: this turn's own are what grew since the session's last ones.
+                    let own = if tool == Tool::Claude {
+                        let session = job.session.clone().unwrap_or_default();
+                        let own = match &job.usage_seen {
+                            Some((seen_in, seen)) if *seen_in == session => tokens.minus(seen),
+                            _ => tokens.clone(),
+                        };
+                        job.usage_seen = Some((session, tokens));
+                        own
+                    } else {
+                        tokens
+                    };
+                    job.usage = Some(before.plus(&own));
+                });
             }
             AgentEvent::Usage(usage) => {
                 if let Err(error) = jobs.usage.record(&job.account, &usage) {
@@ -3208,6 +3223,8 @@ impl Jobs {
                     plan,
                     instructions: None,
                     no_commands: false,
+                    usage: true,
+                    priced: self.usage.get(&job.account).priced,
                 };
                 codex::run_turn(
                     launch,

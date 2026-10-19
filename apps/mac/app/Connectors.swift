@@ -22,10 +22,16 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
         case removeAccount(Account)
         /// The tool's own login, in Terminal, with the account's home.
         case signIn(Account)
-        /// The tool's own login to its `tetrix` MCP server, in Terminal (Engine/TetrixUse.swift).
-        case signInTetrix(Account)
-        /// The tool's own sign-out from its `tetrix` MCP server, in Terminal (`Connectors.tetrixSignOutScript`).
-        case signOutTetrix(Account)
+        /// obid signs in to this Tetrix for every agent (`POST /v1/tetrix/sign-in`): Tetrix's own page.
+        case connectTetrix(TetrixStatus.Server)
+        /// Asks for another Tetrix's MCP address, then connects it as `connectTetrix` does.
+        case connectOtherTetrix
+        /// The sign-in under way: its page again, after the same checks (`TetrixSignIn.opens`).
+        case reopenTetrixSignIn
+        /// `DELETE /v1/tetrix/sign-in`: ends the sign-in under way.
+        case cancelTetrixSignIn
+        /// `DELETE /v1/tetrix`: obid forgets its Tetrix login.
+        case disconnectTetrix
         /// `PUT /v1/obid/plugins/{id}` on; `needsURL` asks for Tetrix's MCP URL first.
         case enablePlugin(id: String, needsURL: Bool)
         /// `PUT /v1/obid/plugins/{id}` off.
@@ -54,6 +60,8 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
     var how: String
     var state: State
     var way: Way?
+    /// A second button after `way`'s: "Another Tetrix…".
+    var also: Way? = nil
     /// The SF Symbol in front of it.
     var symbol: String
 
@@ -71,7 +79,7 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
 
 nonisolated enum Connectors {
     static let thisMac = "This Mac"
-    static let tetrixAbout = "Project knowledge and blast radius"
+    static let tetrixAbout = TetrixStatus.about
 
     /// What the runner said about itself, for the page: nil parts are what it doesn't say (an
     /// older runner, or obid, which lists no connections yet, #444).
@@ -87,6 +95,8 @@ nonisolated enum Connectors {
         var gitHubLogin: GitHubLogin? = nil
         var plugins: [RunnerPlugin]?
         var connections: [ConnectedApp]?
+        /// obid's Tetrix, held once for every agent (`GET /v1/tetrix`); nil from a runner that doesn't hold one.
+        var tetrix: TetrixStatus? = nil
     }
 
     /// One of the page's groups, with its title.
@@ -101,6 +111,8 @@ nonisolated enum Connectors {
         var connections: [ConnectedApp]?
         /// obid's GitHub login (`GET /v1/github`); nil from a runner that doesn't say.
         var gitHub: GitHubLogin?
+        /// obid's Tetrix (`GET /v1/tetrix`); nil from a runner that doesn't hold one.
+        var tetrix: TetrixStatus?
         /// Why a list couldn't be read: a timeout, a 500, a 401. Only a 404 means the runner has
         /// none to list; anything else is said, never shown as an empty list.
         var problems: [String] = []
@@ -121,6 +133,11 @@ nonisolated enum Connectors {
         }
         // Said on GitHub's own row: without it, the row says what the status says.
         lists.gitHub = try? await runner.gitHubLogin()
+        do {
+            lists.tetrix = try await runner.tetrix()
+        } catch {
+            lists.problems.append("Couldn't read Tetrix on \(name): \(error.localizedDescription)")
+        }
         return lists
     }
 
@@ -133,9 +150,10 @@ nonisolated enum Connectors {
         }
         var list = mac.map { account($0, place: thisMac, runner: nil) }
         if let runner { list += runnerAccounts.map { account($0, place: runner.name, runner: runner.name) } }
-        if let runner { list += (runner.plugins ?? []).map { plugin($0, place: runner.name) } }
-        list += mac.compactMap { tetrix($0, place: thisMac, runner: nil) }
-        if let runner { list += runnerAccounts.compactMap { tetrix($0, place: runner.name, runner: runner.name) } }
+        // obid's own Tetrix replaces its older plug-in of the same name: one Tetrix row.
+        let plugins = (runner?.plugins ?? []).filter { runner?.tetrix == nil || $0.id != "tetrix" }
+        if let runner { list += plugins.map { plugin($0, place: runner.name) } }
+        if let runner, let status = runner.tetrix { list.append(tetrix(status, place: runner.name, local: runner.local)) }
         if let runner, let login = runner.gitHubLogin { list.append(gitHub(login, place: runner.name)) }
         else if let runner, let github = runner.github { list.append(gitHub(github, checks: runner.checks, place: runner.name)) }
         if let runner { list += (runner.connections ?? []).map { connection($0, place: runner.name) } }
@@ -166,24 +184,27 @@ nonisolated enum Connectors {
                          state: state.signedIn ? .connected : .available, way: way, symbol: Usage.symbol(state.account.agent))
     }
 
-    /// Tetrix for one account's agents, once its tool has said whether they have it (`tetrix`): its
-    /// own MCP login, never Oby's. An account that isn't signed in can't say, and Oby asks only
-    /// Claude Code and Codex (Engine/TetrixUse.swift): Cursor's list is never read.
-    static func tetrix(_ state: AccountState, place: String, runner: String?) -> Connector? {
-        guard state.signedIn, ["claude", "codex"].contains(state.account.agent), let connected = state.tetrix else { return nil }
-        let tool = Usage.tool(state.account.agent)
-        let way: Connector.Way = switch (connected, runner) {
-        case (true, nil): .button("Disconnect…", .signOutTetrix(state.account))
-        case (false, nil): .button("Sign In", .signInTetrix(state.account))
-        case (true, let runner?):
-            .steps("To disconnect it, sign this account out of its tetrix MCP server on \(runner), with \(tool)'s own login in its home.")
-        case (false, let runner?):
-            .steps("Sign this account in to its tetrix MCP server on \(runner), with \(tool)'s own login in its home.")
+    /// Tetrix, held by obid for every agent of every account: one sign-in, on Tetrix's own page.
+    /// Not connected, it offers the first server obid knows ("Tetrix Dogfood") and another one.
+    /// Only obid on this Mac gets buttons: the sign-in comes back to 127.0.0.1 on obid's own machine,
+    /// so a remote runner's is done there.
+    static func tetrix(_ status: TetrixStatus, place: String, local: Bool) -> Connector {
+        let row = { (state: Connector.State, way: Connector.Way?, also: Connector.Way?) in
+            Connector(id: "tetrix", name: "Tetrix", about: tetrixAbout, place: place, how: status.how, state: state,
+                      way: way, also: also, symbol: "point.3.connected.trianglepath.dotted")
         }
-        return Connector(id: "tetrix-\(place)-\(state.account.id)", name: "Tetrix", about: tetrixAbout, place: place,
-                         how: connected ? "\(state.account.heading)'s agents, through \(tool)'s own MCP login"
-                                        : "\(state.account.heading)'s agents aren't signed in to it",
-                         state: connected ? .connected : .available, way: way, symbol: "point.3.connected.trianglepath.dotted")
+        let there = local ? nil : Connector.Way.steps("Connect or disconnect it on \(place) itself, with Oby there: Tetrix's sign-in comes back to that machine.")
+        switch status.state {
+        case .connected:
+            return row(.connected, there ?? .button("Disconnect…", .disconnectTetrix), nil)
+        case .signingIn:
+            return row(.unconfirmed, there ?? .button("Open the Page Again", .reopenTetrixSignIn), local ? .button("Cancel", .cancelTetrixSignIn) : nil)
+        case .available:
+            let first = status.presets.first
+            return row(status.error == nil ? .available : .broken,
+                       there ?? first.map { .button("Connect", .connectTetrix($0)) } ?? .button("Connect…", .connectOtherTetrix),
+                       local && first != nil ? .button("Another Tetrix…", .connectOtherTetrix) : nil)
+        }
     }
 
     /// A plug-in obid found (docs/ARCHITECTURE.md, "Plug-ins"). Ready is connected, failed needs
@@ -286,30 +307,5 @@ nonisolated enum Connectors {
     /// "Signed in with Claude Code's own login · Max": the plan, never the email the label carries.
     static func signedIn(tool: String, label: String?) -> String {
         "Signed in with \(tool)'s own login" + (Usage.plan(label).map { " · \($0)" } ?? "")
-    }
-
-    /// What Terminal runs to sign an account's agents out of Tetrix: the tool's own sign-out for its
-    /// `tetrix` MCP server, with the account's home, as `TetrixUse.signInScript` signs them in. Only
-    /// Claude Code and Codex: Oby never learns Cursor's Tetrix state, so it offers no sign-out there.
-    static func tetrixSignOutScript(for account: Account) -> String? {
-        let quote = { (text: String) in "'" + text.replacingOccurrences(of: "'", with: #"'\''"#) + "'" }
-        let lines: [String]
-        switch account.agent {
-        case "codex":
-            lines = [account.home.map { "export CODEX_HOME=\(quote($0))" } ?? "unset CODEX_HOME",
-                     "echo \(quote("Oby: sign \(account.name)'s agents out of Tetrix."))",
-                     "codex mcp logout tetrix"]
-        case "claude":
-            lines = [account.home.map { "export CLAUDE_CONFIG_DIR=\(quote($0))" } ?? "unset CLAUDE_CONFIG_DIR",
-                     // Terminal may inherit a Claude session or API credentials from its shell (AGENTS.md, "Spawning claude").
-                     "unset CLAUDECODE",
-                     #"for oby_login_key in $(/usr/bin/env | /usr/bin/sed -E -n 's/^((CLAUDE_CODE_|ANTHROPIC_)[A-Za-z0-9_]*)=.*/\1/p'); do unset "$oby_login_key"; done"#,
-                     "echo \(quote("Oby: sign \(account.name)'s agents out of Tetrix."))",
-                     "echo 'In Claude Code, type /mcp, choose tetrix and Clear authentication, then /exit.'",
-                     "claude"]
-        default:
-            return nil
-        }
-        return (["#!/bin/sh"] + lines + ["echo", "echo 'Done? Go back to Oby. You can close this window.'"]).joined(separator: "\n") + "\n"
     }
 }

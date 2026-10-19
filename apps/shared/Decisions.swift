@@ -96,8 +96,10 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     var conversation: String?
     /// What it made to be looked at (obid only), or nil.
     var artifacts: [ArtifactRef]?
+    /// What its agent asked Tetrix, the session it saved and where the graph fell short, or nil.
+    var tetrix: TetrixJobReport?
 
-    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, artifacts }
+    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, artifacts, tetrix }
 
     init(id: String, mode: String? = nil, permission: RunnerPermission? = nil, question: Question? = nil, conversation: String? = nil) {
         self.id = id
@@ -115,6 +117,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
         question = try? keys.decodeIfPresent(Question.self, forKey: .question)
         conversation = try? keys.decodeIfPresent(String.self, forKey: .conversation)
         artifacts = try? keys.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
+        tetrix = try? keys.decodeIfPresent(TetrixJobReport.self, forKey: .tetrix)
     }
 
     /// Each job's, by id; a list that can't be read gives none.
@@ -134,6 +137,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
                       RunnerPermission(id: $0.id, tool: $0.tool, title: $0.title, detail: $0.detail, rule: $0.rule, always: $0.always)
                   },
                   question: job.question.map { Question(text: $0.text, options: $0.options, recommended: $0.recommended, plan: $0.plan) })
+        tetrix = job.tetrix.map { TetrixJobReport(connected: $0.connected, calls: $0.calls, saved: $0.stamps?.sessions ?? []) }
     }
 }
 #endif
