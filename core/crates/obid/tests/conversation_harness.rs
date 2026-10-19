@@ -584,8 +584,8 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
         "nothing started"
     );
 
-    // A follow-up working already takes the item's Start: it hears the words, the item is done,
-    // and nothing else starts.
+    // A follow-up of the job working already takes the item's Start once it's at work: it hears
+    // the words, the item is done, and nothing else starts.
     let pausing = call(
         &obid,
         "POST",
@@ -594,11 +594,22 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
     );
     assert_eq!(pausing.status, 201, "{}", pausing.text);
     let follow = pausing.body["id"].as_str().unwrap().to_owned();
+    // Still getting ready, it isn't at work: the item's words would wait for nothing, or answer
+    // what it asks next. Start is refused, naming it, and the item stays open.
+    let item = start["id"].as_str().unwrap();
+    let refused = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{item}/answer"),
+        Some(&json!({"answer": "Start"})),
+    );
+    assert_eq!(refused.status, 409, "{}", refused.text);
+    assert!(refused.text.contains(&follow), "{}", refused.text);
+    assert!(inbox(&obid).iter().any(|i| i["id"] == item), "still open");
     within(60, "the follow-up is at work", || {
         let body = call(&obid, "GET", &format!("/v1/jobs/{follow}"), None).body;
         (body["status"] == "running" && body["step"] == "Starting Claude Code").then_some(())
     });
-    let item = start["id"].as_str().unwrap();
     let answered = call(
         &obid,
         "POST",
@@ -613,6 +624,8 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
         heard["notes"].to_string().contains("AGENT-WORDS-2"),
         "{heard}"
     );
+    // Its step shows the owner's words, not the agent's quoted after them.
+    assert_eq!(heard["step"], format!("You: {web}"), "{heard}");
     assert_eq!(
         call(&obid, "GET", "/v1/jobs", None)
             .body
@@ -643,16 +656,17 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
     );
     ended(&obid, &follow);
 
-    // A start item a later follow-up made needless is done by itself, saying why; it names the
-    // conversation it came from, so the apps show it only there.
+    // A proposal names the conversation it was made in (another than the job's here), which
+    // shows it; a later follow-up that ended, here failed, leaves it open as it was.
     let web = format!(r#"WEB OBY oby_tell_job {{"id": "{id}", "words": "AGENT-WORDS-4"}}"#);
-    said(&obid, json!({"said": web, "conversation": conversation}));
-    let stale = inbox(&obid)
+    let elsewhere = said(&obid, json!({"said": web, "new": true}));
+    let elsewhere = elsewhere.body["conversation"].as_str().unwrap().to_owned();
+    assert_ne!(elsewhere, conversation);
+    let proposed = inbox(&obid)
         .into_iter()
         .find(|i| i["kind"] == "start")
         .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
-    assert_eq!(stale["conversation"], conversation.as_str(), "{stale}");
-    // obid's clock counts seconds: the follow-up ends in a later one.
+    assert_eq!(proposed["conversation"], elsewhere.as_str(), "{proposed}");
     std::thread::sleep(Duration::from_millis(1100));
     let other = call(
         &obid,
@@ -661,26 +675,16 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
         Some(&json!({"text": "and the docs"})),
     );
     assert_eq!(other.status, 201, "{}", other.text);
-    ended(&obid, other.body["id"].as_str().unwrap());
-    assert!(
-        !inbox(&obid).iter().any(|i| i["id"] == stale["id"]),
-        "{:?}",
-        inbox(&obid)
-    );
-    let done = call(&obid, "GET", "/v1/inbox?state=done", None).body;
-    let closed = done
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|i| i["id"] == stale["id"])
-        .unwrap_or_else(|| panic!("{done}"));
-    // A build that commits nothing ends failed; the item says how it ended.
     assert_eq!(
-        closed["text"],
-        "Closed by Oby: Follow-up: Add a greeting followed it up already, and ended failed.",
-        "{closed}"
+        ended(&obid, other.body["id"].as_str().unwrap())["status"],
+        "failed"
     );
-    assert_eq!(closed["options"], json!([]));
+    let still = inbox(&obid)
+        .into_iter()
+        .find(|i| i["id"] == proposed["id"])
+        .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
+    assert_eq!(still["text"], proposed["text"]);
+    assert_eq!(still["options"], json!(["Start", "Cancel"]));
 }
 
 /// One turn starts at most ten jobs and tells jobs at most ten times: past that a tool says why.

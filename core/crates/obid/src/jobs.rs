@@ -495,6 +495,17 @@ impl Jobs {
             .cloned()
     }
 
+    /// Whether job `id` would hear words as words now: at work in a turn, with no permission or
+    /// plan waiting (those take words as their answer).
+    pub fn at_work(&self, id: &str) -> bool {
+        let state = self.lock();
+        let working = state.workers.contains_key(id) && !state.wrapping.contains(id);
+        let asking = state.asks.get(id).is_some_and(|asks| !asks.is_empty());
+        state.jobs.get(id).is_some_and(|job| {
+            working && !asking && job.status == Status::Running && job.phase == Some(Phase::Work)
+        })
+    }
+
     /// The latest `limit` jobs, newest first.
     pub fn list(&self, limit: usize) -> Vec<Job> {
         let mut jobs: Vec<Job> = self.lock().jobs.values().cloned().collect();
@@ -1687,7 +1698,8 @@ impl Jobs {
         let heard = |job: &mut Job| {
             job.notes.get_or_insert_with(Vec::new).push(text.to_owned());
             job.heard.push(text.to_owned());
-            job.step = format!("You: {text}");
+            // What the owner said; the agent's words quoted after it aren't theirs to show.
+            job.step = format!("You: {}", crate::sphere::inbox::owners_part(text));
         };
         if job.status.is_active() {
             // Checked and changed under one lock: a worker wrapping up takes no more words.

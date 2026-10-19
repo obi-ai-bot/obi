@@ -507,7 +507,13 @@ async fn tell(
     }
     if source(session) == crate::jobs::Source::Untrusted {
         let added = agent_ready(added)?;
-        return Ok(actions::propose_follow_up(shared, &job, &new, Some(&added)));
+        return Ok(actions::propose_follow_up(
+            shared,
+            &job,
+            &new,
+            Some(&added),
+            &session.conversation,
+        ));
     }
     outcome_answer(session, actions::follow_up(shared, &job, new))
 }

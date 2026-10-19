@@ -174,7 +174,7 @@ async fn dispatch(
                 describe(&new),
                 crate::secrets::known().redact(d.task.trim()),
             );
-            shared.link.propose(&new, title, text);
+            shared.link.propose(&new, title, text, asked.conversation);
             continue;
         }
         // A job that would never ask the owner anything widens trust: only their own Confirm
@@ -374,7 +374,7 @@ pub async fn act(
         }
         Action::AnswerInbox => answer_inbox(shared, plan).await,
         Action::SetSetting => set_setting(shared, plan),
-        Action::MessageJob => message_job(shared, plan, said, source),
+        Action::MessageJob => message_job(shared, plan, said, source, conversation),
         Action::MoveJob => {
             let names: Vec<String> = plan
                 .named()
@@ -560,7 +560,13 @@ fn dismiss(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
 /// one that ended gets a follow-up that starts with them (Sangam's design, the owner's decision of
 /// 2026-10-18), and stays as it ended. After research the follow-up waits for the owner's Start;
 /// an event turn's words never start one.
-fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str, source: Source) -> Outcome {
+fn message_job(
+    shared: &Arc<Shared>,
+    plan: &Plan,
+    said: &str,
+    source: Source,
+    conversation: &str,
+) -> Outcome {
     let Some(id) = plan.named().first() else {
         return Outcome::Failed("Say which job to tell.".into());
     };
@@ -583,7 +589,9 @@ fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str, source: Source) ->
         let new = crate::jobs::follow_up(&job, &words);
         return match source {
             Source::Owner => follow_up(shared, &job, new),
-            Source::Untrusted => Outcome::Done(propose_follow_up(shared, &job, &new, None)),
+            Source::Untrusted => {
+                Outcome::Done(propose_follow_up(shared, &job, &new, None, conversation))
+            }
             Source::Event => Outcome::Failed(format!(
                 "Couldn't tell {name}: it ended, so that starts a follow-up, which only your own words start."
             )),
@@ -651,6 +659,7 @@ pub(super) fn propose_follow_up(
     job: &Job,
     new: &NewJob,
     added: Option<&str>,
+    conversation: &str,
 ) -> String {
     let name = job.short_title();
     let mut text = format!(
@@ -665,7 +674,7 @@ pub(super) fn propose_follow_up(
         .title
         .clone()
         .unwrap_or_else(|| format!("Follow-up of {name}"));
-    shared.link.propose(new, title, text);
+    shared.link.propose(new, title, text, conversation);
     format!(
         "{name} is finished, and this turn looked something up, so its follow-up waits for your Start in your inbox."
     )

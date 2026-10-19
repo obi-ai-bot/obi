@@ -2659,10 +2659,9 @@ impl Link {
         }
     }
 
-    /// A `start` item for a follow-up no longer needed is done by itself, its text saying why, with
-    /// no options: a follow-up of the same job ended after it was proposed (that one took the
-    /// work; a later second, so one that ended as it was proposed doesn't count), or that job's
-    /// work merged. Checked whenever the inbox is read; nothing starts.
+    /// A `start` item for a follow-up whose work merged after it was proposed (the first job's pull
+    /// request or a follow-up's) is done by itself, with no options, its text saying so above the
+    /// owner's words. Checked whenever the inbox is read; nothing starts.
     fn settle_stale_starts(&self) {
         let open: Vec<Item> = self
             .lock()
@@ -2681,29 +2680,26 @@ impl Link {
             let Some(of) = item.start.as_ref().and_then(|s| s["follow_up_of"].as_str()) else {
                 continue;
             };
-            let follow_ups = || {
-                jobs.iter()
-                    .filter(|j| j.follow_up_of.as_deref() == Some(of))
+            // The work it would follow up merged after it was proposed: the first job's pull
+            // request, or one of its follow-ups'. Anything else (a follow-up that ended, even
+            // failed) leaves it open, its words and Start as they were.
+            let Some(merged) = jobs
+                .iter()
+                .filter(|j| j.id == of || j.follow_up_of.as_deref() == Some(of))
+                .find(|j| {
+                    j.pull_request
+                        .as_ref()
+                        .and_then(|pr| pr.merged_at)
+                        .is_some_and(|at| at > item.created)
+                })
+            else {
+                continue;
             };
-            let first = jobs.iter().find(|j| j.id == of);
-            let why =
-                if let Some(merged) = first.into_iter().chain(follow_ups()).find(|j| j.merged()) {
-                    format!(
-                        "Closed by Oby: {}'s work merged already.",
-                        merged.short_title()
-                    )
-                } else if let Some(ended) =
-                    follow_ups().find(|j| j.finished.is_some_and(|at| at > item.created))
-                {
-                    format!(
-                        "Closed by Oby: {} followed it up already, and ended {}.",
-                        ended.short_title(),
-                        ended.status.as_str()
-                    )
-                } else {
-                    continue;
-                };
-            item.text = why;
+            item.text = format!(
+                "Closed by Oby: {}'s work merged after this was proposed.\n\n{}",
+                merged.short_title(),
+                inbox::unfenced(&item.text)
+            );
             item.options = vec![];
             item.details = None;
             item.recommended = None;
@@ -2726,7 +2722,16 @@ impl Link {
 
     /// Work the brain planned after looking things up waits for the owner's Start, as a `start`
     /// item (Engine/Inbox.swift, `Inbox.proposal`): nothing starts until they say so.
-    pub fn propose(&self, new: &crate::jobs::NewJob, title: String, text: String) -> Item {
+    /// `conversation`: the one it was proposed in, which shows it (`Item::conversation`).
+    pub fn propose(
+        &self,
+        new: &crate::jobs::NewJob,
+        title: String,
+        text: String,
+        conversation: &str,
+    ) -> Item {
+        let mut start = serde_json::to_value(new).unwrap_or_default();
+        start["proposedIn"] = json!(conversation);
         let item = Item {
             id: format!("start-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
             kind: "start".into(),
@@ -2747,7 +2752,7 @@ impl Link {
             plugin: None,
             arrived: Some(inbox::arrival()),
             confirm: None,
-            start: serde_json::to_value(new).ok().map(Box::new),
+            start: Some(Box::new(start)),
             github: None,
         };
         self.lock().inbox.insert(item.id.clone(), item.clone());
@@ -2787,11 +2792,23 @@ impl Link {
                             open_again(api(StatusCode::CONFLICT, "That plan was lost."))
                         })?;
                     // A follow-up of a job whose follow-up is working already: that one hears
-                    // it (the owner's own Start), and the item is done, never a second.
+                    // it (the owner's own Start), and the item is done, never a second. Only
+                    // while it's at work: a permission or plan waiting would take the words
+                    // as its answer, so the item stays open until then.
                     let following = new
                         .follow_up_of
                         .as_deref()
                         .and_then(|of| self.jobs.following(of));
+                    if let Some(next) = following.as_ref().filter(|n| !self.jobs.at_work(&n.id)) {
+                        return Err(open_again(api(
+                            StatusCode::CONFLICT,
+                            format!(
+                                "{} (job {}) is following it up already, and can't take this now: it's getting ready, waiting for your answer or wrapping up. Start it again once it's at work, or tell that job.",
+                                next.short_title(),
+                                next.id
+                            ),
+                        )));
+                    }
                     let job =
                         match following {
                             Some(next) => match self.jobs.message(

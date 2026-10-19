@@ -199,10 +199,12 @@ impl Item {
         }
     }
 
-    /// The conversation a `start` item, or a confirm to start a job, came from: the apps show it
-    /// opened out only there (any other conversation, at most in its count).
+    /// The conversation a `start` item was proposed in (kept beside its job as `proposedIn`; the
+    /// planned job's own `conversation` for one made before), or a confirm to start a job came
+    /// from: the apps show it opened out only there.
     pub fn conversation(&self) -> Option<String> {
         let planned = match (&self.start, &self.confirm) {
+            (Some(start), _) if start["proposedIn"].is_string() => &start["proposedIn"],
             (Some(start), _) => &start["conversation"],
             (None, Some(c)) if c.action == action::START_JOB => &c.payload["job"]["conversation"],
             _ => return None,
@@ -251,6 +253,15 @@ impl Item {
         }
         shown
     }
+}
+
+/// Words for an agent, up to what's quoted after them (`oby_tell_job`'s: the owner's, then the
+/// conversation's agent's, fenced): what shows as the owner's.
+pub fn owners_part(text: &str) -> &str {
+    text.split("\n\nEverything between a line <<<quoted-")
+        .next()
+        .unwrap_or(text)
+        .trim()
 }
 
 /// `text` without the agents' quoting fences: no fence rule, no `<<<quoted-…` or `quoted-…>>>`

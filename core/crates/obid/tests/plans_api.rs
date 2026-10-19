@@ -4326,3 +4326,64 @@ fn reading_the_same_job_again_and_again_ends_the_turn() {
     assert_eq!(calls(&obid).len(), 3);
     assert_eq!(ends(&obid), ["repeated"]);
 }
+
+/// An app's Try again, after an answer it lost, sends the same words with the same `id`: obid has
+/// them, adds nothing and starts nothing, wherever the app sends them. The user's turn takes the
+/// id the app gave it, so the app's own copy of the words gives way to it; an id that isn't a
+/// lower-case UUID is refused.
+#[test]
+fn the_same_words_sent_again_with_their_id_are_kept_once() {
+    let folder = Folder::new("brain-repeat-id");
+    let obid = started(&folder);
+    queue(&obid, &[reply("Ready"), reply("Again")]);
+    let id = "0b1e0c0a-0000-4000-8000-000000000001";
+    let first = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "hello", "id": id})),
+    );
+    assert_eq!(first.status, 200, "{}", first.text);
+    assert_eq!(first.body["text"], "Ready");
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    let again = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "hello", "id": id, "new": true})),
+    );
+    assert_eq!(again.status, 200, "{}", again.text);
+    assert_eq!(
+        (
+            &again.body["kind"],
+            &again.body["repeated"],
+            &again.body["conversation"]
+        ),
+        (&json!("none"), &json!(true), &json!(conversation)),
+        "{}",
+        again.text
+    );
+    assert_eq!(calls(&obid).len(), 1, "the brain ran once");
+    let page = call(
+        &obid,
+        "GET",
+        &format!("/v1/conversation?id={conversation}"),
+        None,
+    )
+    .body;
+    let users: Vec<&serde_json::Value> = page
+        .as_array()
+        .unwrap_or_else(|| panic!("{page}"))
+        .iter()
+        .filter(|t| t["who"] == "user")
+        .collect();
+    assert_eq!(users.len(), 1, "{page}");
+    assert_eq!(users[0]["id"], id);
+    let bad = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "hello", "id": "not-a-uuid"})),
+    );
+    assert_eq!(bad.status, 422, "{}", bad.text);
+}
