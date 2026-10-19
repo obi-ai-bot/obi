@@ -594,16 +594,49 @@ fn base(word: &str) -> &str {
 /// comments dropped. What `$(…)` and backticks run (inside double quotes too), what a shell runs
 /// with `-c` or `eval`, and a here-document or here-string fed to a shell are read the same way.
 /// Any other here-document and every quoted argument are words, not commands: a commit message
-/// that says "run curl" isn't a download. None when the code nests deeper than [`NESTING`].
-fn simple_commands(command: &str) -> Option<Vec<Vec<String>>> {
+/// that says "run curl" isn't a download. They come in the order they run: what a `$(…)` runs
+/// before its command, what a command's code runs after it. None when the code nests deeper than
+/// [`NESTING`].
+fn simple_commands(command: &str) -> Option<Vec<Simple>> {
     let mut out = Vec::new();
-    read_commands(command, 0, &mut out).then_some(out)
+    let mut next = 0;
+    read_commands(command, &Within::default(), &mut next, &mut out).then_some(out)
+}
+
+/// A simple command of a line, as [`simple_commands`] reads it.
+#[derive(Debug, Default)]
+struct Simple {
+    words: Vec<String>,
+    /// The subshells it runs in (`( … )`, `$(…)`, backticks), outermost first: where a `cd` in
+    /// one leads ends with it.
+    subshells: Vec<usize>,
+    /// Code obid read out of a word (`bash -c`, `eval`, a here-document fed to a shell): obid
+    /// doesn't follow where a `cd` in it leads.
+    nested: bool,
+    /// Part of a pipeline, or run in the background: a shell may run it in a subshell of its own.
+    piped: bool,
+}
+
+/// Where code read by [`read_until`] runs: how deep in code inside code, in which subshells, and
+/// whether obid read it out of a word.
+#[derive(Clone, Default)]
+struct Within {
+    depth: usize,
+    subshells: Vec<usize>,
+    nested: bool,
 }
 
 /// Where [`simple_commands`] is in a line.
 #[derive(Default)]
 struct Reader {
-    commands: Vec<Vec<String>>,
+    commands: Vec<Simple>,
+    /// What each `$(…)` and backtick runs, and the command it's in.
+    substituted: Vec<(Vec<Simple>, usize)>,
+    /// The subshells open where the reader is, the outer ones first.
+    subshells: Vec<usize>,
+    nested: bool,
+    /// The command being read follows a `|`.
+    piped: bool,
     words: Vec<String>,
     word: String,
     in_word: bool,
@@ -629,20 +662,50 @@ impl Reader {
         }
     }
 
-    fn end_command(&mut self) {
+    /// Ends the command being read; `piped` when a `|` or a `&` ends it.
+    fn end_command(&mut self, piped: bool) {
         self.end_word();
         if !self.words.is_empty() {
-            self.commands.push(std::mem::take(&mut self.words));
+            self.commands.push(Simple {
+                words: std::mem::take(&mut self.words),
+                subshells: self.subshells.clone(),
+                nested: self.nested,
+                piped: self.piped || piped,
+            });
         }
+        self.piped = false;
+    }
+
+    /// Reads a `$(…)` or a backtick, a subshell of its own, from `*i` up to `stop`.
+    fn substitute(
+        &mut self,
+        chars: &[char],
+        i: &mut usize,
+        stop: char,
+        within: &Within,
+        next: &mut usize,
+    ) -> bool {
+        *next += 1;
+        let mut subshells = self.subshells.clone();
+        subshells.push(*next);
+        let inner = Within {
+            depth: within.depth + 1,
+            subshells,
+            nested: self.nested,
+        };
+        let mut run = Vec::new();
+        let ok = read_until(chars, i, Some(stop), &inner, next, &mut run);
+        self.substituted.push((run, self.commands.len()));
+        ok
     }
 }
 
 /// Adds the simple commands of `text` to `out`, and those of the code inside it; false when it
-/// nests deeper than [`NESTING`].
-fn read_commands(text: &str, depth: usize, out: &mut Vec<Vec<String>>) -> bool {
+/// nests deeper than [`NESTING`]. `next` numbers the subshells.
+fn read_commands(text: &str, within: &Within, next: &mut usize, out: &mut Vec<Simple>) -> bool {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
-    read_until(&chars, &mut i, None, depth, out)
+    read_until(&chars, &mut i, None, within, next, out)
 }
 
 /// Reads the simple commands of `chars` from `*i` into `out`, up to `stop` (the `)` that closes a
@@ -652,13 +715,18 @@ fn read_until(
     chars: &[char],
     i: &mut usize,
     stop: Option<char>,
-    depth: usize,
-    out: &mut Vec<Vec<String>>,
+    within: &Within,
+    next: &mut usize,
+    out: &mut Vec<Simple>,
 ) -> bool {
-    if depth > NESTING {
+    if within.depth > NESTING {
         return false;
     }
-    let mut r = Reader::default();
+    let mut r = Reader {
+        subshells: within.subshells.clone(),
+        nested: within.nested,
+        ..Reader::default()
+    };
     let mut ok = true;
     // Subshells opened inside: their `)` isn't `stop`'s.
     let mut parens = 0usize;
@@ -688,12 +756,12 @@ fn read_until(
                         }
                         '$' if chars.get(*i + 1) == Some(&'(') => {
                             *i += 2;
-                            ok &= read_until(chars, i, Some(')'), depth + 1, out);
+                            ok &= r.substitute(chars, i, ')', within, next);
                             continue;
                         }
                         '`' => {
                             *i += 1;
-                            ok &= read_until(chars, i, Some('`'), depth + 1, out);
+                            ok &= r.substitute(chars, i, '`', within, next);
                             continue;
                         }
                         other => r.word.push(other),
@@ -711,13 +779,13 @@ fn read_until(
             }
             '$' if chars.get(*i + 1) == Some(&'(') => {
                 *i += 2;
-                ok &= read_until(chars, i, Some(')'), depth + 1, out);
+                ok &= r.substitute(chars, i, ')', within, next);
                 r.in_word = true;
                 continue;
             }
             '`' => {
                 *i += 1;
-                ok &= read_until(chars, i, Some('`'), depth + 1, out);
+                ok &= r.substitute(chars, i, '`', within, next);
                 r.in_word = true;
                 continue;
             }
@@ -728,7 +796,7 @@ fn read_until(
             }
             ' ' | '\t' => r.end_word(),
             '\n' => {
-                r.end_command();
+                r.end_command(false);
                 // The lines of each here-document the line opened, up to the word that ends it.
                 for (end, strip, command) in std::mem::take(&mut r.heredocs) {
                     let mut body = String::new();
@@ -756,13 +824,33 @@ fn read_until(
             }
             '(' => {
                 parens += 1;
-                r.end_command();
+                r.end_command(false);
+                *next += 1;
+                r.subshells.push(*next);
             }
             ')' => {
-                parens = parens.saturating_sub(1);
-                r.end_command();
+                r.end_command(false);
+                if parens > 0 {
+                    parens -= 1;
+                    r.subshells.pop();
+                }
             }
-            '|' | ';' | '&' => r.end_command(),
+            // `&> file` sends output somewhere.
+            '&' if chars.get(*i + 1) == Some(&'>') => r.end_word(),
+            // `a | b`, `a |& b` and `a &`, but not `a || b` or `a && b`.
+            '|' | '&' => {
+                let doubled = chars.get(*i + 1) == Some(&c);
+                r.end_command(!doubled);
+                if doubled {
+                    *i += 1;
+                } else if c == '|' {
+                    r.piped = true;
+                    if chars.get(*i + 1) == Some(&'&') {
+                        *i += 1;
+                    }
+                }
+            }
+            ';' => r.end_command(false),
             '<' | '>' => {
                 r.end_word();
                 if c == '<' && chars.get(*i + 1) == Some(&'<') {
@@ -805,17 +893,20 @@ fn read_until(
         }
         *i += 1;
     }
-    r.end_command();
-    let mut nested = Vec::new();
+    r.end_command(false);
+    // The code each command runs: a here-document or here-string fed to a shell, what `bash -c`
+    // or `eval` runs.
+    let mut nested: Vec<Vec<String>> = vec![Vec::new(); r.commands.len()];
     for (text, command) in std::mem::take(&mut r.fed) {
-        let feeds_a_shell = r.commands.get(command).is_some_and(|words| {
-            program_index(words).is_some_and(|p| SHELLS.contains(&base(&words[p])))
+        let feeds_a_shell = r.commands.get(command).is_some_and(|c| {
+            program_index(&c.words).is_some_and(|p| SHELLS.contains(&base(&c.words[p])))
         });
         if feeds_a_shell {
-            nested.push(text);
+            nested[command].push(text);
         }
     }
-    for words in &r.commands {
+    for (command, code) in r.commands.iter().zip(&mut nested) {
+        let words = &command.words;
         let Some(p) = program_index(words) else {
             continue;
         };
@@ -826,18 +917,34 @@ fn read_until(
             && let Some(flag) = rest
                 .iter()
                 .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'))
-            && let Some(code) = rest.get(flag + 1)
+            && let Some(text) = rest.get(flag + 1)
         {
-            nested.push(code.clone());
+            code.push(text.clone());
         }
         if program == "eval" {
-            nested.push(rest.join(" "));
+            code.push(rest.join(" "));
         }
     }
-    out.append(&mut r.commands);
-    ok && nested
-        .iter()
-        .all(|code| read_commands(code, depth + 1, out))
+    // In the order they run: what a command's substitutions run, the command, the code it runs.
+    let mut substituted = std::mem::take(&mut r.substituted).into_iter().peekable();
+    for (index, (command, code)) in r.commands.into_iter().zip(nested).enumerate() {
+        while let Some((mut run, _)) = substituted.next_if(|(_, at)| *at <= index) {
+            out.append(&mut run);
+        }
+        let inner = Within {
+            depth: within.depth + 1,
+            subshells: command.subshells.clone(),
+            nested: true,
+        };
+        out.push(command);
+        for text in code {
+            ok &= read_commands(&text, &inner, next, out);
+        }
+    }
+    for (mut run, _) in substituted {
+        out.append(&mut run);
+    }
+    ok
 }
 
 /// Where the program of a simple command is, after assignments (`FOO=1`) and wrappers (`sudo`,
@@ -986,7 +1093,7 @@ fn uses_network(command: &str, bounds: &Bounds) -> bool {
     command.contains("/dev/tcp")
         || command.contains("/dev/udp")
         || simple_commands(command)
-            .is_none_or(|commands| commands.iter().any(|w| downloads(w, bounds)))
+            .is_none_or(|commands| commands.iter().any(|c| downloads(&c.words, bounds)))
 }
 
 /// Names that say a file holds secrets or a login, wherever it is.
@@ -1098,13 +1205,23 @@ impl Bounds {
         plain.then(|| base.join(word))
     }
 
-    /// Where `cd` leaves a command that ran from `base`.
-    fn cd(&self, words: &[String], base: &Path) -> PathBuf {
-        match words.get(1) {
-            None => self.home.clone().unwrap_or_else(|| base.to_path_buf()),
-            Some(dir) => self
-                .path_of(dir, base)
-                .unwrap_or_else(|| base.to_path_buf()),
+    /// Where `cd`, `pushd` or `popd` leaves a command that ran from `from`; none when obid can't
+    /// tell (#636): `cd -`, a folder named by a variable or a substitution, `popd`, `pushd` with
+    /// no folder or with a place in its stack (`+1`), `cd` home when obid doesn't know `HOME`.
+    fn cd(&self, words: &[String], from: &Path) -> Option<PathBuf> {
+        let p = program_index(words)?;
+        let program = base(&words[p]);
+        let rest = &words[p + 1..];
+        if program == "popd"
+            || (program == "pushd" && rest.iter().all(|w| w.starts_with(['-', '+'])))
+        {
+            return None;
+        }
+        // `cd -P dir`, `cd -- dir`: the options before the folder.
+        match rest.iter().find(|w| *w == "-" || !w.starts_with('-')) {
+            None => self.home.clone(),
+            Some(dir) if dir == "-" || dir.starts_with('+') => None,
+            Some(dir) => self.path_of(dir, from),
         }
     }
 
@@ -1270,17 +1387,51 @@ fn reads_a_secret(words: &[String], bounds: &Bounds, base_dir: &Path) -> bool {
 }
 
 /// Each simple command of `commands` with the folder it runs from: the worktree, then where each
-/// `cd` (or `pushd`) before it in the same command line leaves it.
-fn with_folders<'a>(commands: &'a [Vec<String>], bounds: &Bounds) -> Vec<(&'a [String], PathBuf)> {
-    let mut here = bounds.worktree.clone();
+/// `cd` (or `pushd`) before it in the same command line leaves it, until the subshell the `cd` is
+/// in ends. None from the first `cd` on whose folder obid can't tell (#636): one [`Bounds::cd`]
+/// can't follow, one in code obid read out of a word (`bash -c`, `eval`), one in a pipeline or in
+/// the background.
+fn with_folders<'a>(
+    commands: &'a [Simple],
+    bounds: &Bounds,
+) -> Vec<(&'a [String], Option<PathBuf>)> {
+    // The subshells open at a command, and the folder of the line and of each of them.
+    let mut open: Vec<usize> = Vec::new();
+    let mut folders = vec![bounds.worktree.clone()];
+    let mut lost = false;
     commands
         .iter()
-        .map(|words| {
-            let at = here.clone();
-            if program_index(words).is_some_and(|p| matches!(base(&words[p]), "cd" | "pushd")) {
-                here = bounds.cd(words, &here);
+        .map(|command| {
+            let words = command.words.as_slice();
+            if lost {
+                return (words, None);
             }
-            (words.as_slice(), at)
+            // Leave the subshells that ended; each one entered starts where its parent is.
+            let kept = open
+                .iter()
+                .zip(&command.subshells)
+                .take_while(|(a, b)| a == b)
+                .count();
+            open.truncate(kept);
+            folders.truncate(kept + 1);
+            for &subshell in &command.subshells[kept..] {
+                open.push(subshell);
+                folders.push(folders[folders.len() - 1].clone());
+            }
+            let here = folders.last_mut().expect("the line's own folder");
+            let at = here.clone();
+            if program_index(words)
+                .is_some_and(|p| matches!(base(&words[p]), "cd" | "pushd" | "popd"))
+            {
+                match bounds
+                    .cd(words, here)
+                    .filter(|_| !command.nested && !command.piped)
+                {
+                    Some(to) => *here = to,
+                    None => lost = true,
+                }
+            }
+            (words, Some(at))
         })
         .collect()
 }
@@ -1290,9 +1441,9 @@ fn with_folders<'a>(commands: &'a [Vec<String>], bounds: &Bounds) -> Vec<(&'a [S
 fn command_touches_a_secret(command: &str, bounds: &Bounds) -> bool {
     holds_a_vault_value(command)
         || simple_commands(command).is_none_or(|commands| {
-            with_folders(&commands, bounds)
-                .iter()
-                .any(|(words, at)| reads_a_secret(words, bounds, at))
+            with_folders(&commands, bounds).iter().any(|(words, at)| {
+                reads_a_secret(words, bounds, at.as_deref().unwrap_or(&bounds.worktree))
+            })
         })
 }
 
@@ -1317,7 +1468,8 @@ fn runs_through_git_settings(command: &str) -> bool {
     let Some(commands) = simple_commands(command) else {
         return true;
     };
-    commands.iter().any(|words| {
+    commands.iter().any(|command| {
+        let words = &command.words;
         let runs = |name: &str| {
             let name = name.to_ascii_lowercase();
             !(GIT_SAFE_SETTINGS.contains(&name.as_str())
@@ -1374,12 +1526,16 @@ pub fn reads_beyond(command: &str, bounds: &Bounds) -> bool {
 }
 
 /// Whether a command names a file outside what the job may read without asking: an absolute path
-/// (or one from `~`) that isn't in its worktree, its temporary folder or the system's folders.
+/// (or one from `~`) that isn't in its worktree, its temporary folder or the system's folders, or
+/// any command after a `cd` whose folder obid can't tell ([`with_folders`]).
 fn reads_outside(command: &str, bounds: &Bounds) -> bool {
     let Some(commands) = simple_commands(command) else {
         return true;
     };
     with_folders(&commands, bounds).iter().any(|(words, at)| {
+        let Some(at) = at else {
+            return true;
+        };
         file_words(words).into_iter().any(|word| {
             word.split('=').any(|part| {
                 let Some(path) = bounds.path_of(part, at) else {
@@ -2737,6 +2893,54 @@ mod tests {
             ("find . -name '*.o' -exec rm {} +", None),
             ("find . -exec curl {} \\;", Some(Reach::Network)),
             ("find . -exec sh -c 'curl x' \\;", Some(Reach::Network)),
+        ] {
+            assert_eq!(super::reach(&bash(command), &bounds), reach, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #636: when obid can't tell where a `cd` lands, every later simple command of the line is
+    /// outside, whatever it names.
+    #[test]
+    fn an_unknown_folder_makes_the_rest_of_the_line_outside() {
+        let (root, bounds) = job_folders("unknown-cd");
+        for (command, reach) in [
+            ("cd - && ls", Some(Reach::Outside)),
+            ("cd $OLDPWD && cat a", Some(Reach::Outside)),
+            (
+                "cd \"$(git rev-parse --show-toplevel)\" && ls",
+                Some(Reach::Outside),
+            ),
+            ("pushd src && popd && ls", Some(Reach::Outside)),
+            ("pushd +1 && ls", Some(Reach::Outside)),
+            ("bash -c 'cd src && cat a'", Some(Reach::Outside)),
+            ("cd src | true; cat ../../x", Some(Reach::Outside)),
+            ("ls && cd -", None),
+            ("cd src && ls", None),
+            ("cd -P src && ls", None),
+        ] {
+            assert_eq!(super::reach(&bash(command), &bounds), reach, "{command}");
+        }
+        // A `cd` home when obid doesn't know the job's `HOME`.
+        let worktree = &Bounds::of(Path::new(WORKTREE));
+        assert_eq!(
+            super::reach(&bash("cd && ls"), worktree),
+            Some(Reach::Outside)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #636: a subshell's `cd` ends with the subshell; the folder after it is the one before.
+    #[test]
+    fn a_subshell_keeps_its_cd() {
+        let (root, bounds) = job_folders("subshell-cd");
+        std::fs::create_dir_all(bounds.worktree.join("src/a/b")).unwrap();
+        for (command, reach) in [
+            ("(cd src/a/b) && cat ../x", Some(Reach::Outside)),
+            ("(cd src && ls) && cat x", None),
+            ("echo $(cd src/a/b; pwd) && cat ../x", Some(Reach::Outside)),
+            ("(cd src/a; (cd b); cat ../../x)", None),
+            ("(cd src/a; (cd b); cat ../../../x)", Some(Reach::Outside)),
         ] {
             assert_eq!(super::reach(&bash(command), &bounds), reach, "{command}");
         }
