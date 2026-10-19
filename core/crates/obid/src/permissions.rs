@@ -594,16 +594,49 @@ fn base(word: &str) -> &str {
 /// comments dropped. What `$(…)` and backticks run (inside double quotes too), what a shell runs
 /// with `-c` or `eval`, and a here-document or here-string fed to a shell are read the same way.
 /// Any other here-document and every quoted argument are words, not commands: a commit message
-/// that says "run curl" isn't a download. None when the code nests deeper than [`NESTING`].
-fn simple_commands(command: &str) -> Option<Vec<Vec<String>>> {
+/// that says "run curl" isn't a download. They come in the order they run: what a `$(…)` runs
+/// before its command, what a command's code runs after it. None when the code nests deeper than
+/// [`NESTING`].
+fn simple_commands(command: &str) -> Option<Vec<Simple>> {
     let mut out = Vec::new();
-    read_commands(command, 0, &mut out).then_some(out)
+    let mut next = 0;
+    read_commands(command, &Within::default(), &mut next, &mut out).then_some(out)
+}
+
+/// A simple command of a line, as [`simple_commands`] reads it.
+#[derive(Debug, Default)]
+struct Simple {
+    words: Vec<String>,
+    /// The subshells it runs in (`( … )`, `$(…)`, backticks), outermost first: where a `cd` in
+    /// one leads ends with it.
+    subshells: Vec<usize>,
+    /// Code obid read out of a word (`bash -c`, `eval`, a here-document fed to a shell): obid
+    /// doesn't follow where a `cd` in it leads.
+    nested: bool,
+    /// Part of a pipeline, or run in the background: a shell may run it in a subshell of its own.
+    piped: bool,
+}
+
+/// Where code read by [`read_until`] runs: how deep in code inside code, in which subshells, and
+/// whether obid read it out of a word.
+#[derive(Clone, Default)]
+struct Within {
+    depth: usize,
+    subshells: Vec<usize>,
+    nested: bool,
 }
 
 /// Where [`simple_commands`] is in a line.
 #[derive(Default)]
 struct Reader {
-    commands: Vec<Vec<String>>,
+    commands: Vec<Simple>,
+    /// What each `$(…)` and backtick runs, and the command it's in.
+    substituted: Vec<(Vec<Simple>, usize)>,
+    /// The subshells open where the reader is, the outer ones first.
+    subshells: Vec<usize>,
+    nested: bool,
+    /// The command being read follows a `|`.
+    piped: bool,
     words: Vec<String>,
     word: String,
     in_word: bool,
@@ -629,20 +662,50 @@ impl Reader {
         }
     }
 
-    fn end_command(&mut self) {
+    /// Ends the command being read; `piped` when a `|` or a `&` ends it.
+    fn end_command(&mut self, piped: bool) {
         self.end_word();
         if !self.words.is_empty() {
-            self.commands.push(std::mem::take(&mut self.words));
+            self.commands.push(Simple {
+                words: std::mem::take(&mut self.words),
+                subshells: self.subshells.clone(),
+                nested: self.nested,
+                piped: self.piped || piped,
+            });
         }
+        self.piped = false;
+    }
+
+    /// Reads a `$(…)` or a backtick, a subshell of its own, from `*i` up to `stop`.
+    fn substitute(
+        &mut self,
+        chars: &[char],
+        i: &mut usize,
+        stop: char,
+        within: &Within,
+        next: &mut usize,
+    ) -> bool {
+        *next += 1;
+        let mut subshells = self.subshells.clone();
+        subshells.push(*next);
+        let inner = Within {
+            depth: within.depth + 1,
+            subshells,
+            nested: self.nested,
+        };
+        let mut run = Vec::new();
+        let ok = read_until(chars, i, Some(stop), &inner, next, &mut run);
+        self.substituted.push((run, self.commands.len()));
+        ok
     }
 }
 
 /// Adds the simple commands of `text` to `out`, and those of the code inside it; false when it
-/// nests deeper than [`NESTING`].
-fn read_commands(text: &str, depth: usize, out: &mut Vec<Vec<String>>) -> bool {
+/// nests deeper than [`NESTING`]. `next` numbers the subshells.
+fn read_commands(text: &str, within: &Within, next: &mut usize, out: &mut Vec<Simple>) -> bool {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
-    read_until(&chars, &mut i, None, depth, out)
+    read_until(&chars, &mut i, None, within, next, out)
 }
 
 /// Reads the simple commands of `chars` from `*i` into `out`, up to `stop` (the `)` that closes a
@@ -652,13 +715,18 @@ fn read_until(
     chars: &[char],
     i: &mut usize,
     stop: Option<char>,
-    depth: usize,
-    out: &mut Vec<Vec<String>>,
+    within: &Within,
+    next: &mut usize,
+    out: &mut Vec<Simple>,
 ) -> bool {
-    if depth > NESTING {
+    if within.depth > NESTING {
         return false;
     }
-    let mut r = Reader::default();
+    let mut r = Reader {
+        subshells: within.subshells.clone(),
+        nested: within.nested,
+        ..Reader::default()
+    };
     let mut ok = true;
     // Subshells opened inside: their `)` isn't `stop`'s.
     let mut parens = 0usize;
@@ -688,12 +756,12 @@ fn read_until(
                         }
                         '$' if chars.get(*i + 1) == Some(&'(') => {
                             *i += 2;
-                            ok &= read_until(chars, i, Some(')'), depth + 1, out);
+                            ok &= r.substitute(chars, i, ')', within, next);
                             continue;
                         }
                         '`' => {
                             *i += 1;
-                            ok &= read_until(chars, i, Some('`'), depth + 1, out);
+                            ok &= r.substitute(chars, i, '`', within, next);
                             continue;
                         }
                         other => r.word.push(other),
@@ -711,13 +779,13 @@ fn read_until(
             }
             '$' if chars.get(*i + 1) == Some(&'(') => {
                 *i += 2;
-                ok &= read_until(chars, i, Some(')'), depth + 1, out);
+                ok &= r.substitute(chars, i, ')', within, next);
                 r.in_word = true;
                 continue;
             }
             '`' => {
                 *i += 1;
-                ok &= read_until(chars, i, Some('`'), depth + 1, out);
+                ok &= r.substitute(chars, i, '`', within, next);
                 r.in_word = true;
                 continue;
             }
@@ -728,7 +796,7 @@ fn read_until(
             }
             ' ' | '\t' => r.end_word(),
             '\n' => {
-                r.end_command();
+                r.end_command(false);
                 // The lines of each here-document the line opened, up to the word that ends it.
                 for (end, strip, command) in std::mem::take(&mut r.heredocs) {
                     let mut body = String::new();
@@ -756,13 +824,33 @@ fn read_until(
             }
             '(' => {
                 parens += 1;
-                r.end_command();
+                r.end_command(false);
+                *next += 1;
+                r.subshells.push(*next);
             }
             ')' => {
-                parens = parens.saturating_sub(1);
-                r.end_command();
+                r.end_command(false);
+                if parens > 0 {
+                    parens -= 1;
+                    r.subshells.pop();
+                }
             }
-            '|' | ';' | '&' => r.end_command(),
+            // `&> file` sends output somewhere.
+            '&' if chars.get(*i + 1) == Some(&'>') => r.end_word(),
+            // `a | b`, `a |& b` and `a &`, but not `a || b` or `a && b`.
+            '|' | '&' => {
+                let doubled = chars.get(*i + 1) == Some(&c);
+                r.end_command(!doubled);
+                if doubled {
+                    *i += 1;
+                } else if c == '|' {
+                    r.piped = true;
+                    if chars.get(*i + 1) == Some(&'&') {
+                        *i += 1;
+                    }
+                }
+            }
+            ';' => r.end_command(false),
             '<' | '>' => {
                 r.end_word();
                 if c == '<' && chars.get(*i + 1) == Some(&'<') {
@@ -805,17 +893,20 @@ fn read_until(
         }
         *i += 1;
     }
-    r.end_command();
-    let mut nested = Vec::new();
+    r.end_command(false);
+    // The code each command runs: a here-document or here-string fed to a shell, what `bash -c`
+    // or `eval` runs.
+    let mut nested: Vec<Vec<String>> = vec![Vec::new(); r.commands.len()];
     for (text, command) in std::mem::take(&mut r.fed) {
-        let feeds_a_shell = r.commands.get(command).is_some_and(|words| {
-            program_index(words).is_some_and(|p| SHELLS.contains(&base(&words[p])))
+        let feeds_a_shell = r.commands.get(command).is_some_and(|c| {
+            program_index(&c.words).is_some_and(|p| SHELLS.contains(&base(&c.words[p])))
         });
         if feeds_a_shell {
-            nested.push(text);
+            nested[command].push(text);
         }
     }
-    for words in &r.commands {
+    for (command, code) in r.commands.iter().zip(&mut nested) {
+        let words = &command.words;
         let Some(p) = program_index(words) else {
             continue;
         };
@@ -826,29 +917,100 @@ fn read_until(
             && let Some(flag) = rest
                 .iter()
                 .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'))
-            && let Some(code) = rest.get(flag + 1)
+            && let Some(text) = rest.get(flag + 1)
         {
-            nested.push(code.clone());
+            code.push(text.clone());
         }
         if program == "eval" {
-            nested.push(rest.join(" "));
+            code.push(rest.join(" "));
         }
     }
-    out.append(&mut r.commands);
-    ok && nested
-        .iter()
-        .all(|code| read_commands(code, depth + 1, out))
+    // In the order they run: what a command's substitutions run, the command, the code it runs.
+    let mut substituted = std::mem::take(&mut r.substituted).into_iter().peekable();
+    for (index, (command, code)) in r.commands.into_iter().zip(nested).enumerate() {
+        while let Some((mut run, _)) = substituted.next_if(|(_, at)| *at <= index) {
+            out.append(&mut run);
+        }
+        let inner = Within {
+            depth: within.depth + 1,
+            subshells: command.subshells.clone(),
+            nested: true,
+        };
+        out.push(command);
+        for text in code {
+            ok &= read_commands(&text, &inner, next, out);
+        }
+    }
+    for (mut run, _) in substituted {
+        out.append(&mut run);
+    }
+    ok
 }
 
 /// Where the program of a simple command is, after assignments (`FOO=1`) and wrappers (`sudo`,
-/// `timeout 5s`, `env -i`) with their options and numbers.
+/// `timeout 5s`, `env -i`, `env -C dir`) with their options and numbers.
 fn program_index(words: &[String]) -> Option<usize> {
-    words.iter().position(|w| {
+    let mut i = 0;
+    while let Some(w) = words.get(i) {
         let digits = w.trim_end_matches(['s', 'm', 'h', 'd']);
         let number = digits.starts_with(|c: char| c.is_ascii_digit())
             && digits.chars().all(|c| c.is_ascii_digit() || c == '.');
-        !(is_assignment(w) || w.starts_with('-') || number || WRAPPERS.contains(&base(w)))
-    })
+        if !(is_assignment(w) || w.starts_with('-') || number || WRAPPERS.contains(&base(w))) {
+            return Some(i);
+        }
+        // `env -C dir`: the folder isn't the program.
+        let env_folder =
+            matches!(w.as_str(), "-C" | "--chdir") && words[..i].iter().any(|w| base(w) == "env");
+        i += if env_folder { 2 } else { 1 };
+    }
+    None
+}
+
+/// The folders a simple command names to work in, in order, each with the index of the word it's
+/// in: `git -C dir` (before git's subcommand), `make -C dir` or `--directory=dir`, `tar -C dir`
+/// or `--directory=dir`, `env -C dir` or `--chdir=dir`. A `-C` with nothing after it names `""`.
+fn own_folders(words: &[String]) -> Vec<(usize, &str)> {
+    let p = program_index(words).unwrap_or(words.len());
+    let mut found = Vec::new();
+    // `-C dir`, `-Cdir` when `joined`, `<long> dir` and `<long>=dir`, in `words[from..to]`.
+    let mut options = |from: usize, to: usize, joined: bool, long: Option<&str>, git: bool| {
+        let mut i = from;
+        while i < to {
+            let w = words[i].as_str();
+            if w == "-C" || Some(w) == long {
+                found.push(match words.get(i + 1).filter(|_| i + 1 < to) {
+                    Some(dir) => (i + 1, dir.as_str()),
+                    None => (i, ""),
+                });
+                i += 2;
+                continue;
+            }
+            let attached = long
+                .and_then(|long| w.strip_prefix(long))
+                .and_then(|dir| dir.strip_prefix('='))
+                .or_else(|| w.strip_prefix("-C").filter(|_| joined));
+            if let Some(dir) = attached {
+                found.push((i, dir));
+            } else if git && !w.starts_with('-') {
+                // git's subcommand: a `-C` after it is the subcommand's (`git log -C`).
+                break;
+            } else if git && w == "-c" {
+                i += 1;
+            }
+            i += 1;
+        }
+    };
+    if let Some(env) = words[..p].iter().rposition(|w| base(w) == "env") {
+        options(env + 1, p, true, Some("--chdir"), false);
+    }
+    match words.get(p).map(|w| base(w)) {
+        Some("git") => options(p + 1, words.len(), false, None, true),
+        Some("make" | "gmake" | "tar" | "gtar" | "bsdtar") => {
+            options(p + 1, words.len(), true, Some("--directory"), false);
+        }
+        _ => {}
+    }
+    found
 }
 
 /// The subcommand of a tool's command: the first word after the tool's own options, and after the
@@ -986,7 +1148,7 @@ fn uses_network(command: &str, bounds: &Bounds) -> bool {
     command.contains("/dev/tcp")
         || command.contains("/dev/udp")
         || simple_commands(command)
-            .is_none_or(|commands| commands.iter().any(|w| downloads(w, bounds)))
+            .is_none_or(|commands| commands.iter().any(|c| downloads(&c.words, bounds)))
 }
 
 /// Names that say a file holds secrets or a login, wherever it is.
@@ -1098,14 +1260,32 @@ impl Bounds {
         plain.then(|| base.join(word))
     }
 
-    /// Where `cd` leaves a command that ran from `base`.
-    fn cd(&self, words: &[String], base: &Path) -> PathBuf {
-        match words.get(1) {
-            None => self.home.clone().unwrap_or_else(|| base.to_path_buf()),
-            Some(dir) => self
-                .path_of(dir, base)
-                .unwrap_or_else(|| base.to_path_buf()),
+    /// Where `cd`, `pushd` or `popd` leaves a command that ran from `from`; none when obid can't
+    /// tell (#636): `cd -`, a folder named by a variable or a substitution, `popd`, `pushd` with
+    /// no folder or with a place in its stack (`+1`), `cd` home when obid doesn't know `HOME`.
+    fn cd(&self, words: &[String], from: &Path) -> Option<PathBuf> {
+        let p = program_index(words)?;
+        let program = base(&words[p]);
+        let rest = &words[p + 1..];
+        if program == "popd"
+            || (program == "pushd" && rest.iter().all(|w| w.starts_with(['-', '+'])))
+        {
+            return None;
         }
+        // `cd -P dir`, `cd -- dir`: the options before the folder.
+        match rest.iter().find(|w| *w == "-" || !w.starts_with('-')) {
+            None => self.home.clone(),
+            Some(dir) if dir == "-" || dir.starts_with('+') => None,
+            Some(dir) => self.path_of(dir, from),
+        }
+    }
+
+    /// Where a simple command run from `at` works: where its own folders ([`own_folders`]) lead,
+    /// each followed like a `cd`, or `at`; none when obid can't tell where one is (#636).
+    fn works_in(&self, folders: &[(usize, &str)], at: &Path) -> Option<PathBuf> {
+        folders
+            .iter()
+            .try_fold(at.to_path_buf(), |here, (_, dir)| self.path_of(dir, &here))
     }
 
     /// Whether `path` is in the agent's login folders, as written or after links.
@@ -1270,17 +1450,67 @@ fn reads_a_secret(words: &[String], bounds: &Bounds, base_dir: &Path) -> bool {
 }
 
 /// Each simple command of `commands` with the folder it runs from: the worktree, then where each
-/// `cd` (or `pushd`) before it in the same command line leaves it.
-fn with_folders<'a>(commands: &'a [Vec<String>], bounds: &Bounds) -> Vec<(&'a [String], PathBuf)> {
-    let mut here = bounds.worktree.clone();
+/// `cd` (or `pushd`) before it in the same command line leaves it, until the subshell the `cd` is
+/// in ends. None from the first `cd` on whose folder obid can't tell (#636): one [`Bounds::cd`]
+/// can't follow, one in code obid read out of a word (`bash -c`, `eval`), one in a pipeline or in
+/// the background.
+fn with_folders<'a>(
+    commands: &'a [Simple],
+    bounds: &Bounds,
+) -> Vec<(&'a [String], Option<PathBuf>)> {
+    // The subshells open at a command, and the folder of the line and of each of them.
+    let mut open: Vec<usize> = Vec::new();
+    let mut folders = vec![bounds.worktree.clone()];
+    let mut lost = false;
+    let mut before: Option<&Simple> = None;
     commands
         .iter()
-        .map(|words| {
-            let at = here.clone();
-            if program_index(words).is_some_and(|p| matches!(base(&words[p]), "cd" | "pushd")) {
-                here = bounds.cd(words, &here);
+        .map(|command| {
+            let words = command.words.as_slice();
+            let previous = before.replace(command);
+            if lost {
+                return (words, None);
             }
-            (words.as_slice(), at)
+            // Leave the subshells that ended; each one entered starts where its parent is.
+            let kept = open
+                .iter()
+                .zip(&command.subshells)
+                .take_while(|(a, b)| a == b)
+                .count();
+            open.truncate(kept);
+            folders.truncate(kept + 1);
+            for &subshell in &command.subshells[kept..] {
+                open.push(subshell);
+                folders.push(folders[folders.len() - 1].clone());
+            }
+            let here = folders.last_mut().expect("the line's own folder");
+            let at = here.clone();
+            // `cd "$(git rev-parse --show-toplevel)"` from inside the worktree: the substitution ran
+            // just before, from here, and its answer is the worktree's top (agents use it a lot).
+            // From anywhere else git's answer is another repository's, or none.
+            let to_the_top = words.len() == 2
+                && base(&words[0]) == "cd"
+                && words[1].is_empty()
+                && previous.is_some_and(|p| {
+                    !p.nested
+                        && p.subshells.len() == command.subshells.len() + 1
+                        && p.words == ["git", "rev-parse", "--show-toplevel"]
+                })
+                && crate::policy::path_inside(&here.to_string_lossy(), &bounds.worktree);
+            if to_the_top && !command.nested && !command.piped {
+                *here = bounds.worktree.clone();
+            } else if program_index(words)
+                .is_some_and(|p| matches!(base(&words[p]), "cd" | "pushd" | "popd"))
+            {
+                match bounds
+                    .cd(words, here)
+                    .filter(|_| !command.nested && !command.piped)
+                {
+                    Some(to) => *here = to,
+                    None => lost = true,
+                }
+            }
+            (words, Some(at))
         })
         .collect()
 }
@@ -1290,56 +1520,69 @@ fn with_folders<'a>(commands: &'a [Vec<String>], bounds: &Bounds) -> Vec<(&'a [S
 fn command_touches_a_secret(command: &str, bounds: &Bounds) -> bool {
     holds_a_vault_value(command)
         || simple_commands(command).is_none_or(|commands| {
-            with_folders(&commands, bounds)
-                .iter()
-                .any(|(words, at)| reads_a_secret(words, bounds, at))
+            with_folders(&commands, bounds).iter().any(|(words, at)| {
+                reads_a_secret(words, bounds, at.as_deref().unwrap_or(&bounds.worktree))
+            })
         })
 }
 
-/// git settings given on the command line (`git -c key=value`) that can't run a program: any other
-/// one could (`core.sshCommand`, `core.fsmonitor`, `core.pager`, `diff.external`, `alias.*`,
-/// `credential.helper`, …), so the command asks.
-const GIT_SAFE_SETTINGS: &[&str] = &[
-    "user.name",
-    "user.email",
-    "init.defaultbranch",
-    "core.quotepath",
-    "core.autocrlf",
-    "core.safecrlf",
-    "commit.gpgsign",
-    "tag.gpgsign",
-    "pull.rebase",
-    "merge.ff",
+/// The only `GIT_*` variables a command may set, exactly as written (#636): each keeps git from
+/// opening an editor, a pager or a prompt. Any other could run a program (`GIT_SSH_COMMAND`,
+/// `GIT_PAGER=less`, `GIT_CONFIG_PARAMETERS`, …), so the command asks.
+const GIT_QUIET_VARIABLES: &[&str] = &[
+    "GIT_EDITOR=true",
+    "GIT_SEQUENCE_EDITOR=:",
+    "GIT_PAGER=cat",
+    "GIT_TERMINAL_PROMPT=0",
 ];
 
-/// Whether a command gives git a setting, or a variable, that can run a program obid doesn't read.
+/// The settings a command may give git on its command line (`git -c key=value`) exactly as
+/// written (#636), besides who a commit is by and colours ([`quiet_git_setting`]). Any other could
+/// run a program (`core.sshCommand`, `core.fsmonitor`,
+/// `core.pager`, `diff.external`, `alias.*`, `credential.helper`, …), so the command asks.
+const GIT_QUIET_SETTINGS: &[&str] = &["core.editor=true", "commit.gpgsign=false"];
+
+/// What a commit is by and when, whatever the value: they run no program, and agents set them all
+/// the time (as before #636).
+const GIT_WHO_VARIABLES: &[&str] = &[
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_DATE",
+    "GIT_PAGER_IN_USE",
+];
+
+/// Whether `git -c key=value` is one of the settings that run nothing: the quiet ones exactly as
+/// written, who a commit is by, and colours, whatever the value.
+fn quiet_git_setting(kv: &str) -> bool {
+    let key = kv.split_once('=').map_or(kv, |(key, _)| key);
+    GIT_QUIET_SETTINGS.contains(&kv)
+        || matches!(key, "user.name" | "user.email")
+        || key.starts_with("color.")
+}
+
+/// Whether a command gives git a setting, or a variable, that can run a program obid doesn't read:
+/// any but [`GIT_QUIET_VARIABLES`] and [`GIT_QUIET_SETTINGS`].
 fn runs_through_git_settings(command: &str) -> bool {
     let Some(commands) = simple_commands(command) else {
         return true;
     };
-    commands.iter().any(|words| {
-        let runs = |name: &str| {
-            let name = name.to_ascii_lowercase();
-            !(GIT_SAFE_SETTINGS.contains(&name.as_str())
-                || name.starts_with("color.")
-                || name.starts_with("advice."))
-        };
-        // `GIT_SSH_COMMAND=…`, `GIT_PAGER=…`, `GIT_CONFIG_PARAMETERS=…` before the program.
-        let variables = words.iter().take_while(|w| is_assignment(w)).any(|w| {
-            let name = w.split('=').next().unwrap_or_default();
-            name.starts_with("GIT_")
-                && !matches!(
-                    name,
-                    "GIT_AUTHOR_NAME"
-                        | "GIT_AUTHOR_EMAIL"
-                        | "GIT_COMMITTER_NAME"
-                        | "GIT_COMMITTER_EMAIL"
-                        | "GIT_AUTHOR_DATE"
-                        | "GIT_COMMITTER_DATE"
-                        | "GIT_PAGER_IN_USE"
-                )
-        });
-        let Some(p) = program_index(words).filter(|p| base(&words[*p]) == "git") else {
+    commands.iter().any(|command| {
+        let words = &command.words;
+        // `GIT_SSH_COMMAND=…` before the program, or after `env`.
+        let program = program_index(words);
+        let variables = words[..program.unwrap_or(words.len())]
+            .iter()
+            .filter(|w| is_assignment(w))
+            .any(|w| {
+                let name = w.split_once('=').map_or(w.as_str(), |(name, _)| name);
+                w.starts_with("GIT_")
+                    && !GIT_QUIET_VARIABLES.contains(&w.as_str())
+                    && !GIT_WHO_VARIABLES.contains(&name)
+            });
+        let Some(p) = program.filter(|p| base(&words[*p]) == "git") else {
             return variables;
         };
         // git's own options, before its subcommand (`git log -c` is a diff's option).
@@ -1350,7 +1593,7 @@ fn runs_through_git_settings(command: &str) -> bool {
                 "-C" => None,
                 _ => w.strip_prefix("-c").filter(|kv| !kv.is_empty()),
             };
-            if setting.is_some_and(|kv| runs(kv.split('=').next().unwrap_or_default()))
+            if setting.is_some_and(|kv| !quiet_git_setting(kv))
                 || w.starts_with("--config-env")
                 || w.starts_with("--exec-path=")
             {
@@ -1374,41 +1617,56 @@ pub fn reads_beyond(command: &str, bounds: &Bounds) -> bool {
 }
 
 /// Whether a command names a file outside what the job may read without asking: an absolute path
-/// (or one from `~`) that isn't in its worktree, its temporary folder or the system's folders.
+/// (or one from `~`) that isn't in its worktree, its temporary folder or the system's folders, or
+/// any command after a `cd` whose folder obid can't tell ([`with_folders`]). A command's own
+/// folder (`git -C dir`, [`own_folders`]) is where its relative words are read from, and is
+/// outside the same way.
 fn reads_outside(command: &str, bounds: &Bounds) -> bool {
     let Some(commands) = simple_commands(command) else {
         return true;
     };
+    let outside = |path: &Path| {
+        if bounds.holds(&path.to_string_lossy()) {
+            return false;
+        }
+        // A system folder as written (`..` taken out) and after links: `/home` leads into
+        // `/System` on macOS, and `../../x` or a link out of the worktree is out.
+        let system = |p: &Path| SYSTEM_FOLDERS.iter().any(|f| p.starts_with(f));
+        let written: PathBuf = path.components().fold(PathBuf::new(), |mut out, c| {
+            match c {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                other => out.push(other),
+            }
+            out
+        });
+        let real = crate::policy::real_path(path).unwrap_or_else(|| written.clone());
+        !(system(&written) && system(&real))
+    };
     with_folders(&commands, bounds).iter().any(|(words, at)| {
-        file_words(words).into_iter().any(|word| {
-            word.split('=').any(|part| {
-                let Some(path) = bounds.path_of(part, at) else {
-                    return false;
-                };
-                // `awk '/x/ {print}'`: a quoted program, not a file.
-                if part.contains(char::is_whitespace) {
-                    return false;
-                }
-                if bounds.holds(&path.to_string_lossy()) {
-                    return false;
-                }
-                // A system folder as written (`..` taken out) and after links: `/home` leads into
-                // `/System` on macOS, and `../../x` or a link out of the worktree is out.
-                let system = |p: &Path| SYSTEM_FOLDERS.iter().any(|f| p.starts_with(f));
-                let written: PathBuf = path.components().fold(PathBuf::new(), |mut out, c| {
-                    match c {
-                        Component::ParentDir => {
-                            out.pop();
-                        }
-                        Component::CurDir => {}
-                        other => out.push(other),
-                    }
-                    out
-                });
-                let real = crate::policy::real_path(&path).unwrap_or_else(|| written.clone());
-                !(system(&written) && system(&real))
+        let folders = own_folders(words);
+        let Some(here) = at.as_deref().and_then(|at| bounds.works_in(&folders, at)) else {
+            return true;
+        };
+        if !folders.is_empty() && outside(&here) {
+            return true;
+        }
+        let names_a_folder =
+            |word: &String| folders.iter().any(|(i, _)| std::ptr::eq(word, &words[*i]));
+        file_words(words)
+            .into_iter()
+            .filter(|word| !names_a_folder(word))
+            .any(|word| {
+                word.split('=').any(|part| {
+                    // `awk '/x/ {print}'`: a quoted program, not a file.
+                    !part.contains(char::is_whitespace)
+                        && bounds
+                            .path_of(part, &here)
+                            .is_some_and(|path| outside(&path))
+                })
             })
-        })
     })
 }
 
@@ -1763,7 +2021,8 @@ pub fn card(call: &Call, id: &str, repo: &str, bounds: &Bounds) -> Permission {
                     Some(format!("Bash({prefix}:*)")),
                     Some(prefix),
                 ),
-                None => (format!("Run {}", line(&command, 60)), detail, None, None),
+                // Allowed only once at a time, so the owner reads all of it (#634).
+                None => (format!("Run {detail}"), detail, None, None),
             }
         }
         "Edit" => {
@@ -2164,6 +2423,13 @@ mod tests {
         assert_eq!(
             (chained.rule, chained.title.as_str()),
             (None, "Run swift build && swift test")
+        );
+        // Without a rule the title is the whole command, however long (#634).
+        let long =
+            "git add src/permissions.rs src/codex.rs && git commit -m 'fix(obid): show it all'";
+        assert_eq!(
+            card(&bash(long), "p2", "deskree-inc/oby", worktree).title,
+            format!("Run {long}")
         );
         let edit = card(
             &tool("Edit", &["/tmp/oby/jobs/abc/Engine/Jobs.swift"]),
@@ -2733,6 +2999,132 @@ mod tests {
             assert_eq!(super::reach(&bash(command), &bounds), reach, "{command}");
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #636: when obid can't tell where a `cd` lands, every later simple command of the line is
+    /// outside, whatever it names.
+    #[test]
+    fn an_unknown_folder_makes_the_rest_of_the_line_outside() {
+        let (root, bounds) = job_folders("unknown-cd");
+        for (command, reach) in [
+            ("cd - && ls", Some(Reach::Outside)),
+            ("cd $OLDPWD && cat a", Some(Reach::Outside)),
+            // The worktree's top, from inside it: where git's answer leads (agents use it a lot).
+            ("cd \"$(git rev-parse --show-toplevel)\" && ls", None),
+            (
+                "cd src && cd $(git rev-parse --show-toplevel) && cat a",
+                None,
+            ),
+            // From outside the worktree, git's answer is another repository's, or none.
+            (
+                "cd /tmp && cd \"$(git rev-parse --show-toplevel)\" && ls",
+                Some(Reach::Outside),
+            ),
+            (
+                "cd \"$(git -C /tmp rev-parse --show-toplevel)\" && ls",
+                Some(Reach::Outside),
+            ),
+            ("pushd src && popd && ls", Some(Reach::Outside)),
+            ("pushd +1 && ls", Some(Reach::Outside)),
+            ("bash -c 'cd src && cat a'", Some(Reach::Outside)),
+            ("cd src | true; cat ../../x", Some(Reach::Outside)),
+            ("ls && cd -", None),
+            ("cd src && ls", None),
+            ("cd -P src && ls", None),
+        ] {
+            assert_eq!(super::reach(&bash(command), &bounds), reach, "{command}");
+        }
+        // A `cd` home when obid doesn't know the job's `HOME`.
+        let worktree = &Bounds::of(Path::new(WORKTREE));
+        assert_eq!(
+            super::reach(&bash("cd && ls"), worktree),
+            Some(Reach::Outside)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #636: a subshell's `cd` ends with the subshell; the folder after it is the one before.
+    #[test]
+    fn a_subshell_keeps_its_cd() {
+        let (root, bounds) = job_folders("subshell-cd");
+        std::fs::create_dir_all(bounds.worktree.join("src/a/b")).unwrap();
+        for (command, reach) in [
+            ("(cd src/a/b) && cat ../x", Some(Reach::Outside)),
+            ("(cd src && ls) && cat x", None),
+            ("echo $(cd src/a/b; pwd) && cat ../x", Some(Reach::Outside)),
+            ("(cd src/a; (cd b); cat ../../x)", None),
+            ("(cd src/a; (cd b); cat ../../../x)", Some(Reach::Outside)),
+        ] {
+            assert_eq!(super::reach(&bash(command), &bounds), reach, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #636: `git -C`, `make -C`, `tar -C` and `env -C` are read like a `cd` for their own
+    /// command: its relative words are paths from there, and a folder obid can't tell asks.
+    #[test]
+    fn a_dash_c_folder_is_read_like_a_cd() {
+        let (root, bounds) = job_folders("dash-c");
+        std::fs::create_dir_all(bounds.worktree.join("src/a/b")).unwrap();
+        for (command, reach) in [
+            ("git -C \"$OLDPWD\" status", Some(Reach::Outside)),
+            ("make -C $(pwd) test", Some(Reach::Outside)),
+            ("tar -C \"$OUT\" -xf a.tar", Some(Reach::Outside)),
+            ("env -C \"$D\" ls", Some(Reach::Outside)),
+            ("make --directory=$D", Some(Reach::Outside)),
+            ("git -C src/a/b log -- ../../../../x", Some(Reach::Outside)),
+            ("make -C src/a/b -f ../../Makefile", None),
+            ("tar -C src/a -xf ../a.tar", None),
+            ("git -C src -C a/b status", None),
+            ("cd src && git -C .. status", None),
+            ("env -C src ls", None),
+            ("git log -C HEAD", None),
+        ] {
+            assert_eq!(super::reach(&bash(command), &bounds), reach, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #636: git goes through with only the settings that keep it from opening an editor, a pager
+    /// or a prompt, exactly as written; any other setting or `GIT_*` variable asks.
+    #[test]
+    fn only_the_quiet_git_settings_go_through() {
+        let worktree = &Bounds::of(Path::new(WORKTREE));
+        for command in [
+            "GIT_EDITOR=true git rebase --continue",
+            "GIT_SEQUENCE_EDITOR=: git rebase -i HEAD~2",
+            "GIT_PAGER=cat git log",
+            "GIT_TERMINAL_PROMPT=0 git status",
+            "git -c core.editor=true commit --amend",
+            "GIT_EDITOR=true GIT_PAGER=cat git -c core.editor=true log",
+            // Who a commit is by, and colours, run no program, whatever their value: agents use
+            // them all the time, and asking would stop jobs for nothing.
+            "GIT_AUTHOR_NAME=t git commit -m x",
+            "GIT_COMMITTER_EMAIL=t@t git commit -m x",
+            "git -c user.name=t -c user.email=t@t commit -m x",
+            "git -c color.ui=never log",
+            // Not signing runs no program (agents have no key, and commit unsigned).
+            "git -c commit.gpgsign=false commit --fixup HEAD",
+        ] {
+            assert_eq!(super::reach(&bash(command), worktree), None, "{command}");
+        }
+        for command in [
+            "GIT_EDITOR=vim git commit",
+            "GIT_PAGER=less git log",
+            "GIT_SEQUENCE_EDITOR=true git rebase -i HEAD~2",
+            "GIT_TERMINAL_PROMPT=1 git status",
+            "env GIT_PAGER=less git log",
+            "git -c core.editor=vim commit",
+            "git -ccore.pager=less log",
+            "git -c commit.gpgsign=true commit -m x",
+            "git -c gpg.program=./x commit -m x",
+        ] {
+            assert_eq!(
+                super::reach(&bash(command), worktree),
+                Some(Reach::Unknown),
+                "{command}"
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,9 @@
+#!/bin/sh
+# A stand-in for macOS's /usr/bin/security in obid's tests (OBID_SECURITY_BIN), as fake-security
+# but holding every Claude Code item it's asked for: with -w it answers a login with a refresh
+# token, as Claude Code keeps it. It notes what it was asked in $TMPDIR/obid-test-security-calls.
+printf '%s\n' "$*" >> "${TMPDIR:-/nonexistent}/obid-test-security-calls"
+case " $* " in
+*" -w "*) printf '%s\n' '{"claudeAiOauth":{"accessToken":"held-access","refreshToken":"held-refresh","expiresAt":4102444800000}}' ;;
+esac
+exit 0

@@ -94,6 +94,19 @@ pub fn is_repo(repo: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// A remote on GitHub (`https://github.com/…`, `ssh://git@github.com/…` or `git@github.com:…`),
+/// where a push can have a pull request. Any other (a `file://` one) gets the push alone.
+pub fn is_remote(remote: &str) -> bool {
+    let remote = remote.to_ascii_lowercase();
+    [
+        "https://github.com/",
+        "ssh://git@github.com/",
+        "git@github.com:",
+    ]
+    .iter()
+    .any(|prefix| remote.starts_with(prefix))
+}
+
 /// The number of a pull request URL in `repo`: exactly `https://github.com/<repo>/pull/<n>`, or
 /// none. Only a pull request of the job's own repository is ever read or followed.
 pub fn pull_request_number(url: &str, repo: &str) -> Option<u64> {
@@ -110,6 +123,12 @@ pub fn pull_request_number(url: &str, repo: &str) -> Option<u64> {
 
 /// Runs `gh` with `args`: its stdout, trimmed, or the last line it said on stderr.
 pub(crate) async fn run(gh: &Path, args: &[&str]) -> Result<String, String> {
+    output(gh, args).await.map_err(|(_, said)| said)
+}
+
+/// [`run`], keeping what `gh` printed on stdout when it fails too (trimmed; empty when it never
+/// ran): `gh api graphql` exits non-zero on an answer with `errors` even when it has `data`.
+pub(crate) async fn output(gh: &Path, args: &[&str]) -> Result<String, (String, String)> {
     let mut command = tokio::process::Command::new(gh);
     // gh signs in with its own login only: a token that found its way into obid's environment
     // (`GH_TOKEN`, `GITHUB_TOKEN`, the agents' variables) never reaches it.
@@ -132,15 +151,21 @@ pub(crate) async fn run(gh: &Path, args: &[&str]) -> Result<String, String> {
         .kill_on_drop(true);
     let child = command
         .spawn()
-        .map_err(|e| format!("gh couldn't start: {e}"))?;
+        .map_err(|e| (String::new(), format!("gh couldn't start: {e}")))?;
     let output = tokio::time::timeout(GH_TIMEOUT, child.wait_with_output())
         .await
-        .map_err(|_| format!("gh took more than {} seconds", GH_TIMEOUT.as_secs()))?
-        .map_err(|e| format!("gh: {e}"))?;
+        .map_err(|_| {
+            (
+                String::new(),
+                format!("gh took more than {} seconds", GH_TIMEOUT.as_secs()),
+            )
+        })?
+        .map_err(|e| (String::new(), format!("gh: {e}")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+        return Ok(stdout);
     }
-    Err(said(&String::from_utf8_lossy(&output.stderr)))
+    Err((stdout, said(&String::from_utf8_lossy(&output.stderr))))
 }
 
 /// The last thing a tool said on stderr, skipping git's hints, with the secrets obid holds taken
@@ -193,7 +218,7 @@ pub fn own_pull_request(listed: &str, repo: &str, base: &str, heads: &[&str]) ->
 /// Opens the pull request for `branch` into `base`, ready for review (never a draft), or finds the
 /// one obid already opened for it (`own_pull_request`: same repository, one of `heads` its head) and
 /// brings its description up to date from `body_file`. Answers its URL, which must be a pull
-/// request of `repo`, and what went out.
+/// request of `repo`, and what went out; or what failed, worded to follow "Pushed, but ".
 pub async fn open_pull_request(
     gh: &Path,
     repo: &str,
@@ -222,7 +247,7 @@ pub async fn open_pull_request(
         ],
     )
     .await
-    .map_err(|e| format!("Couldn't look for the open pull request: {e}"))?;
+    .map_err(|e| format!("couldn't look for the open pull request: {e}"))?;
     if let Some(open) = own_pull_request(&listed, repo, base, heads) {
         // The commits are on it already; a description that didn't update isn't worth failing for.
         let edited = run(gh, &["pr", "edit", &open, "-R", repo, "--body-file", &body])
@@ -248,7 +273,7 @@ pub async fn open_pull_request(
         ],
     )
     .await
-    .map_err(|e| format!("Couldn't open the pull request: {e}"))?;
+    .map_err(|e| format!("couldn't open the pull request: {e}"))?;
     let url = created.lines().last().unwrap_or("").trim().to_owned();
     if pull_request_number(&url, repo).is_none() {
         return Err("gh opened no pull request of this repository.".into());
@@ -426,6 +451,27 @@ mod tests {
                 None,
                 "{listed}"
             );
+        }
+    }
+
+    #[test]
+    fn only_githubs_remotes_get_pull_requests() {
+        for remote in [
+            "https://github.com/deskree-inc/oby.git",
+            "ssh://git@github.com/deskree-inc/oby.git",
+            "git@github.com:deskree-inc/oby.git",
+            "HTTPS://GitHub.com/deskree-inc/oby",
+        ] {
+            assert!(is_remote(remote), "{remote}");
+        }
+        for remote in [
+            "file:///srv/fixture.git",
+            "/srv/fixture.git",
+            "https://github.com.evil/deskree-inc/oby",
+            "https://gitlab.com/deskree-inc/oby.git",
+            "git@gitlab.com:deskree-inc/oby.git",
+        ] {
+            assert!(!is_remote(remote), "{remote}");
         }
     }
 

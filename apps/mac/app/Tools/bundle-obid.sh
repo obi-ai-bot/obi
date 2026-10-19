@@ -45,7 +45,16 @@ cp "$SRCROOT/mac/app/Tools/com.deskree.oby.obid.plist" "$agents/com.deskree.oby.
 cp "$root/Runner/com.deskree.oby.runner.plist" "$agents/com.deskree.oby.runner.plist"
 
 rm -rf "$resources/plugins" "$resources/web"
-cp -R "$root/plugins" "$resources/plugins"
+# Only the plug-ins' files the repository tracks: nothing a checkout happens to hold (a local
+# secret, a build folder) is signed into the app.
+git -C "$root" ls-files -z -- plugins | rsync -a --from0 --files-from=- "$root/" "$resources/"
+# The web app obid serves at /app/: a release builds it, and fails if it can't; a debug build takes
+# it when it's built, and obid answers 404 there otherwise.
+if [[ "${CONFIGURATION:-Debug}" == Release ]]; then
+  env -i HOME="$HOME" PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \
+    zsh -c 'cd "$1" && npm ci --silent && npm run build --silent' zsh "$root/apps/web" \
+    || { echo "error: a release of Oby needs obid's web app: npm ci && npm run build in apps/web failed" >&2; exit 1; }
+fi
 if [[ -f "$root/apps/web/dist/index.html" ]]; then cp -R "$root/apps/web/dist" "$resources/web"; fi
 
 # Signed like the app: the hardened runtime for notarization, and a secure timestamp on release

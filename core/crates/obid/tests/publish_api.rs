@@ -27,7 +27,8 @@ const PULL: &str = "https://github.com/obi-e2e/fixture-app/pull/7";
 /// A stand-in `gh` in `folder/bin`, keeping its state in `folder/gh`: every call's arguments
 /// (`calls`), its environment (`env`), the title and description it was given, the open pull
 /// requests `pr list` answers (`open`: `__HEAD__` stands for the commit obid's clone has the
-/// branch at, which is what obid pushed), and what `pr view` answers (`view.json`).
+/// branch at, which is what obid pushed), whether `pr list` fails (`list-fails`), and what `pr
+/// view` answers (`view.json`).
 fn fake_gh(folder: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = folder.join("bin");
@@ -42,6 +43,7 @@ env >> "$dir/env"
 prev=
 case "$1 $2" in
   "pr list")
+    [ -f "$dir/list-fails" ] && {{ echo 'GraphQL: Could not resolve to a Repository' >&2; exit 1; }}
     [ -f "$dir/open" ] || exit 0
     for a in "$@"; do [ "$prev" = --head ] && branch="$a"; prev="$a"; done
     oid=$(git -C '{clone}' rev-parse "refs/heads/$branch")
@@ -369,8 +371,8 @@ fn calls_now(folder: &Path) -> String {
     kept(folder, "calls")
 }
 
-/// A possible secret in a commit: nothing goes out (no push, no pull request), the job fails
-/// naming the file, the line and the rule, and never the secret.
+/// A possible secret in a commit that the fix round leaves there: nothing goes out (no push, no
+/// pull request), the job fails naming the file, the line and the rule, and never the secret.
 #[test]
 fn a_possible_secret_sends_nothing() {
     let folder = Folder::new("publish-secret");
@@ -378,10 +380,12 @@ fn a_possible_secret_sends_nothing() {
     let (obid, remote, _) = obid_with(&folder, &bin);
     let id = dispatch(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "LEAK: keys.txt"}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "LEAK: keys.txt STUBBORN"}),
     );
     let job = ended(&obid, &id);
     assert_eq!(job["status"], "failed", "{job}");
+    // It had its one fix round, and a second block of the same is the end.
+    assert_eq!(job["round"], 2, "{job}");
     let summary = job["summary"].as_str().unwrap();
     assert!(
         summary.starts_with("Not published: possible secret in keys.txt:1 (AWS access key"),
@@ -393,6 +397,26 @@ fn a_possible_secret_sends_nothing() {
     assert_eq!(job["outgoing"], json!([]));
     assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
     assert!(!calls_now(&folder.0).contains("pr create"));
+}
+
+/// A job with one round still gets one to rewrite what the scan found (seen live 2026-10-18: a
+/// chat job's test token failed it outright, and Claude Code would just fix and commit again).
+#[test]
+fn a_one_round_job_still_gets_its_fix_round() {
+    let folder = Folder::new("publish-fix-one");
+    let bin = fake_gh(&folder.0);
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "LEAK: keys.txt"}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    assert_eq!(job["round"], 2);
+    assert_eq!(job["published"], PULL);
+    let pushed = remote_branch(&remote, &format!("oby/build-{id}")).unwrap();
+    let history = git(&remote, &["log", "-p", &format!("main..{pushed}")]);
+    assert!(!history.contains(&leaked_key()), "{history}");
 }
 
 /// With a round left, the agent gets one to rewrite the commit that holds the secret (a fixup,
@@ -661,6 +685,87 @@ fn someone_elses_push_is_never_overwritten() {
     assert_eq!(remote_branch(&remote, &branch), Some(their_commit));
 }
 
+/// The push went out and then GitHub's pull request lookup failed (#627): the job counts its
+/// pushed commits, and `publishError` is the pull request's own failure, not "not published".
+/// Publishing by hand is still offered, for the pull request.
+#[test]
+fn a_pull_request_that_fails_after_the_push_still_counts_the_push() {
+    let folder = Folder::new("publish-no-pull");
+    let bin = fake_gh(&folder.0);
+    std::fs::write(folder.0.join("gh/list-fails"), "").unwrap();
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: hello.txt"}),
+    );
+    let job = ended(&obid, &id);
+    let branch = format!("oby/build-{id}");
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    assert_eq!(job["published"], Value::Null, "{job}");
+    assert_eq!(job["commits"], 1);
+    assert_eq!(job["pushed"], 1, "{job}");
+    assert_eq!(
+        job["publishError"],
+        "Pushed, but couldn't look for the open pull request: GraphQL: Could not resolve to a Repository"
+    );
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let head = git(&clone, &["rev-parse", &format!("refs/heads/{branch}")]);
+    assert_eq!(remote_branch(&remote, &branch), Some(head.clone()));
+    assert_eq!(job["outgoing"][0]["action"], "push");
+    assert_eq!(job["outgoing"][0]["id"], head.as_str());
+    assert_eq!(stage(&job, "publish")["state"], "failed");
+    let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None);
+    assert_eq!(answer.status, 200, "{}", answer.text);
+}
+
+/// A remote that isn't GitHub (here the fixture's `file://` one, with no `pullRequests` in the
+/// configuration) gets the push and nothing else (#627): no `gh` pull request call, the job's
+/// commits counted as pushed, and nothing left to publish by hand.
+#[test]
+fn a_remote_that_isnt_github_gets_the_push_and_no_pull_request() {
+    let folder = Folder::new("publish-file-remote");
+    let bin = fake_gh(&folder.0);
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &agent());
+    config["repos"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("pullRequests");
+    let obid = start(&folder.0, &config, Some(&bin));
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: hello.txt"}),
+    );
+    let job = ended(&obid, &id);
+    let branch = format!("oby/build-{id}");
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    assert_eq!(job["publishError"], Value::Null, "{job}");
+    assert_eq!(job["published"], Value::Null);
+    assert_eq!(job["pushed"], 1, "{job}");
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let head = git(&clone, &["rev-parse", &format!("refs/heads/{branch}")]);
+    assert_eq!(remote_branch(&remote, &branch), Some(head));
+    // No pull request is looked for or opened (the GitHub feed's own `api graphql` calls aside).
+    assert!(
+        !calls_now(&folder.0)
+            .lines()
+            .any(|call| call.starts_with("pr ")),
+        "{}",
+        calls_now(&folder.0)
+    );
+    assert_eq!(stage(&job, "publish")["state"], "done");
+    assert_eq!(
+        stage(&job, "publish")["detail"],
+        "Secret scan clean · pushed · no pull request for this remote"
+    );
+    let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None);
+    assert_eq!(answer.status, 409, "{}", answer.text);
+    assert_eq!(
+        answer.body["error"],
+        "Nothing to publish: the remote is already at its head."
+    );
+}
+
 /// Stopped while it publishes: nothing more goes out. A gitleaks that takes its time holds the
 /// scan open; the job is stopped then, and no push or pull request follows.
 #[test]
@@ -880,7 +985,7 @@ fn the_owners_git_configuration_cant_hide_a_root_commit() {
     let (obid, remote, _) = obid_with(&folder, &bin);
     let id = dispatch(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "ORPHAN"}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "ORPHAN STUBBORN"}),
     );
     let job = ended(&obid, &id);
     assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
