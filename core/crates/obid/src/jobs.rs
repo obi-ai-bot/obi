@@ -6416,11 +6416,13 @@ fn undeletable_in(jobs: &HashMap<String, Job>, publishing: bool, id: &str) -> Op
     }
 }
 
-/// Whether `job`'s branch must stay when it's deleted: another job of any status on its
-/// repository names it (a follow-up on its parent's branch, repeat jobs on one issue or pull
-/// request, a review of a pull request's head), or it's the base or the default branch.
+/// Whether `job`'s branch must stay when it's deleted: obid didn't make it (only `oby/…` are
+/// obid's; a pull request's head a review fetched is someone else's), another job of any status
+/// on its repository names it (a follow-up on its parent's branch, repeat jobs on one issue or
+/// pull request), or it's the base or the default branch.
 fn branch_shared(jobs: &HashMap<String, Job>, job: &Job, default: Option<&str>) -> bool {
-    job.base.as_deref() == Some(job.branch.as_str())
+    !job.branch.starts_with("oby/")
+        || job.base.as_deref() == Some(job.branch.as_str())
         || default == Some(job.branch.as_str())
         || jobs
             .values()
@@ -6921,6 +6923,13 @@ mod tests {
         assert!(!branch_shared(
             &map(&[job.clone(), elsewhere]),
             &job,
+            Some("main")
+        ));
+        // A pull request's head a review fetched isn't obid's to remove, alone or not.
+        let head = job_on("f", "acme/app", "feature/login");
+        assert!(branch_shared(
+            &map(std::slice::from_ref(&head)),
+            &head,
             Some("main")
         ));
         let on_main = job_on("d", "acme/app", "main");
