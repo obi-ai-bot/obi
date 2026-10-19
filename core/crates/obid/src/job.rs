@@ -38,8 +38,9 @@ impl Status {
 /// The kinds of work.
 pub const KINDS: [&str; 6] = ["review", "fix", "build", "test", "investigate", "research"];
 
-/// The kinds that only read: they run in Plan mode, whatever the default mode.
-pub const READ_ONLY: [&str; 2] = ["review", "investigate"];
+/// The kinds that only read: they run in Plan mode, whatever the default mode. An investigation
+/// isn't one: it may run a test or a build to reproduce a bug (the owner's decision of 2026-10-18).
+pub const READ_ONLY: [&str; 1] = ["review"];
 
 /// The permission modes (docs/runner-api.md, "Permission modes").
 pub const MODES: [&str; 5] = ["ask", "acceptEdits", "plan", "bypass", "sandbox"];
@@ -367,7 +368,7 @@ impl Job {
             })
     }
 
-    /// The owner's review or investigate job: always in Plan mode. A review another Obi asked for
+    /// The owner's review job: always in Plan mode. A review another Obi asked for
     /// runs its own way (runner-api.md, "obid only: Obi-to-Obi review jobs").
     pub fn read_only(&self) -> bool {
         READ_ONLY.contains(&self.kind.as_str()) && self.obi.is_none()

@@ -37,6 +37,8 @@ pub const CHECK_LIMIT: Duration = Duration::from_secs(20 * 60);
 pub const CHECK_TOO_LONG: &str = "obid stopped it after 20 minutes, the most a test run may take.";
 /// How much of a check's output obid keeps: its end.
 const CHECK_OUTPUT_MAX: usize = 64 * 1024;
+/// What a round's summary starts with when the check's failure is what the task asked for.
+const FAILS_AS_ASKED: &str = "FAILS AS ASKED";
 /// Claude Code's own turn limit for a round.
 const MAX_TURNS: &str = "200";
 /// How often obid lets git tidy a clone.
@@ -1863,7 +1865,7 @@ impl Jobs {
     }
 
     /// The job's mode, as it names it. A job from before modes is in Bypass; a mode this obid
-    /// can't read (one a newer obid wrote) asks rather than allow. A review or investigate job is
+    /// can't read (one a newer obid wrote) asks rather than allow. A review job is
     /// in Plan, whatever it says.
     fn mode_of(job: &Job) -> Mode {
         if job.read_only() {
@@ -2157,8 +2159,8 @@ impl Jobs {
     }
 
     /// Changes how much the job asks, from now on: the prompts waiting now that the new mode
-    /// allows are answered. A finished job keeps the mode for when it runs again. A review or
-    /// investigate job stays in Plan.
+    /// allows are answered. A finished job keeps the mode for when it runs again. A review job stays
+    /// in Plan.
     pub fn set_mode(&self, id: &str, mode: Mode) -> Option<Job> {
         self.update(id, |job| {
             if !job.read_only() {
@@ -3082,35 +3084,17 @@ impl Jobs {
             "+refs/heads/{0}:refs/remotes/origin/{0}",
             request.base_branch
         );
-        if let Err(e) = git::git(
-            &clone,
-            &[
-                "fetch",
-                "--quiet",
-                "--no-tags",
-                "--no-write-fetch-head",
-                "origin",
-                &base_ref,
-            ],
-        )
-        .await
-        {
+        if let Err(e) = git::fetch(&clone, &repo.remote, &[base_ref]).await {
             tracing::info!(
                 "job {id}: the base {} didn't fetch: {e}",
                 request.base_branch
             );
         }
         if !git::has_commit(&clone, &request.head_sha).await {
-            let _ = git::git(
+            let _ = git::fetch(
                 &clone,
-                &[
-                    "fetch",
-                    "--quiet",
-                    "--no-tags",
-                    "--no-write-fetch-head",
-                    "origin",
-                    &request.head_sha,
-                ],
+                &repo.remote,
+                std::slice::from_ref(&request.head_sha),
             )
             .await;
         }
@@ -3577,6 +3561,9 @@ impl Jobs {
         };
         // What the secret scan found the last time it blocked publishing: the same again stops.
         let mut blocked_before: Option<Vec<crate::publish::Found>> = None;
+        // The turn only the owner's words started after the work's: its reply leaves the job's
+        // summary to the work (#699).
+        let mut noted = false;
         'rounds: loop {
             loop {
                 let job = self.get(id).ok_or("the job is gone")?;
@@ -3692,16 +3679,20 @@ impl Jobs {
                     });
                 }
                 self.update(id, |job| {
-                    job.summary = said.clone();
+                    if !noted || job.summary.is_empty() {
+                        job.summary = said.clone();
+                    }
                     job.summaries
                         .get_or_insert_with(Vec::new)
                         .push(said.clone());
                 });
+                noted = false;
                 // Words the owner sent while it worked: the agent hears them now, in another turn of
                 // this round, before the check.
                 let words = self.take_heard(id);
                 if !words.is_empty() {
                     message = words.join("\n\n");
+                    noted = true;
                     continue;
                 }
                 let job = self.get(id).ok_or("the job is gone")?;
@@ -3716,6 +3707,15 @@ impl Jobs {
                     if *signal.borrow() != Signal::Run {
                         return Ok(());
                     }
+                    // A failure the agent says the task asked for (a test meant to fail) ends the
+                    // rounds: another round would undo what the owner asked. It isn't a pass, so
+                    // nothing goes out: only checks that pass publish (AGENTS.md), whatever the
+                    // agent says. The owner publishes it by hand if that's what they want.
+                    if !run.passed && said.trim_start().starts_with(FAILS_AS_ASKED) {
+                        return Err(format!(
+                            "`{command}` fails, as the agent says the task asked for, so nothing was pushed. The branch is kept: publish it by hand if that's right."
+                        ));
+                    }
                     if run.passed {
                         // The last turn, unless the owner's words came meanwhile: those are the next.
                         let words = self.last_turn(id);
@@ -3723,6 +3723,7 @@ impl Jobs {
                             break;
                         }
                         message = words.join("\n\n");
+                        noted = true;
                         continue;
                     }
                     if !more_rounds {
@@ -3732,8 +3733,9 @@ impl Jobs {
                             "Stopped at a limit: {limit}. The branch is kept and nothing was pushed; one more round is possible."
                         ));
                     }
+                    let quoted: String = job.task.lines().map(|l| format!("> {l}\n")).collect();
                     message = format!(
-                        "`{command}` failed after your last round. Its output, from the end:\n\n```\n{}\n```\n\nFix what it shows, run it again in the foreground, commit, and finish with a short summary.",
+                        "`{command}` failed after your last round. Its output, from the end:\n\n```\n{}\n```\n\nThe task, as the owner wrote it:\n\n{quoted}\nIf this failure is what the task asks for (a test meant to fail, say), change nothing: start the first line of your summary with `{FAILS_AS_ASKED}` and say so. Otherwise fix what it shows, run it again in the foreground, commit, and finish with a short summary.",
                         tail(&run.output, 8_000)
                     );
                 } else if job.max_rounds() > 1 {
@@ -3750,6 +3752,7 @@ impl Jobs {
                             break;
                         }
                         message = words.join("\n\n");
+                        noted = true;
                         continue;
                     }
                     message = "Your last line didn't say `GOAL MET`: carry on with what's left, then end with `GOAL MET` or `GOAL NOT MET: <what's left>`.".into();
@@ -3760,6 +3763,7 @@ impl Jobs {
                         break;
                     }
                     message = words.join("\n\n");
+                    noted = true;
                     continue;
                 }
                 // What obid declined last round, for a tool whose answers carry no words (ACP).
@@ -3846,9 +3850,10 @@ impl Jobs {
                 }
                 Err(Failure::Blocked(found)) => {
                     let job = self.get(id).ok_or("the job is gone")?;
-                    // One bounded round to rewrite the commits that hold it, while rounds are left and
-                    // it found something else than last time.
-                    if job.current_round() < job.max_rounds()
+                    // One bounded round to rewrite the commits that hold it: the first block gets it
+                    // even with no rounds left (as Claude Code fixes what a hook refused and commits
+                    // again), later ones while rounds are left and it found something else.
+                    if (blocked_before.is_none() || job.current_round() < job.max_rounds())
                         && blocked_before.as_ref() != Some(&found)
                         && found.iter().all(crate::publish::Found::fixable)
                     {
@@ -3866,7 +3871,7 @@ impl Jobs {
                             job.step = format!(
                                 "Round {} of {}: the secret scan blocked publishing",
                                 job.current_round(),
-                                job.max_rounds()
+                                job.max_rounds().max(job.current_round())
                             );
                         });
                         continue 'rounds;
@@ -4903,9 +4908,9 @@ pub(crate) fn folder_login(config_dir: &Path) -> Option<Vec<u8>> {
 
 /// At obid's start, each configured account's folder looked at once: what a box of an older obid
 /// could have planted there for the next unboxed run (#655), said in obid's log
-/// ([`planted`]); and, with the Keychain in use, a `.credentials.json` an older obid copied there
-/// (it has no refresh token) taken out, since it would make the account look signed in after its
-/// Keychain item is gone.
+/// ([`planted`]); and, where the Keychain holds the account's login, a `.credentials.json` an older
+/// obid copied there (it has no refresh token) taken out, `claudeKeychain` on or off, since it
+/// would make the account look signed in after its Keychain item is gone (#646).
 pub fn check_account_folders(agents: &crate::config::Agents) {
     for (tool, agent) in [
         (Tool::Claude, &agents.claude),
@@ -4925,11 +4930,11 @@ pub fn check_account_folders(agents: &crate::config::Agents) {
                 );
             }
             // Only where the Keychain holds that login: the file is then a copy, never the login
-            // itself.
+            // itself. Whether or not `claudeKeychain` is on now (#646): a copy left by an obid
+            // that had it on would make the account look signed in, and be copied for runs.
             if tool == Tool::Claude
                 && cfg!(target_os = "macos")
-                && keychain_on()
-                && remove_older_copy(dir, keychain_has(Some(dir)))
+                && remove_older_copy(dir, keychain_item(Some(dir), false).is_some())
             {
                 tracing::info!(
                     "account {}: took out an older obid's copy of its login from its folder",
@@ -5795,7 +5800,7 @@ fn owner_prompt(job: &Job) -> String {
         ),
     }];
     if let Some(issue) = job.issue {
-        lines.push(format!("The work is about issue #{issue}."));
+        lines.push(format!("The work is about issue #{issue}. Work from what this prompt says of it: there's no GitHub login here, so don't fetch the issue (gh, curl or the web)."));
     }
     if let Some(paths) = job.attachments.as_ref().filter(|paths| !paths.is_empty()) {
         let names = paths
@@ -7067,11 +7072,23 @@ mod tests {
         assert_eq!(Jobs::mode_of(&job), Mode::Sandbox);
     }
 
-    /// The owner's review and investigate jobs only read: Plan, whatever their mode says (#630).
-    /// A review another Obi asked for runs its own way.
+    /// The owner's review jobs only read: Plan, whatever their mode says (#630). A review another
+    /// Obi asked for runs its own way, and an investigation runs in its mode: it may run a test to
+    /// reproduce a bug (the owner's decision of 2026-10-18).
     #[test]
-    fn review_and_investigate_jobs_are_in_plan() {
-        for kind in ["review", "investigate"] {
+    fn review_jobs_are_in_plan() {
+        let mut look = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "investigate".into(),
+            "Look".into(),
+            "codex".into(),
+            "a".into(),
+        );
+        look.mode = Some("bypass".into());
+        assert_eq!(Jobs::mode_of(&look), Mode::Bypass);
+        {
+            let kind = "review";
             let mut job = Job::new(
                 "j".into(),
                 "o/r".into(),
@@ -7147,6 +7164,10 @@ mod tests {
         );
         assert!(prompt.contains("without cd"), "{prompt}");
         assert!(prompt.contains("never /tmp"), "{prompt}");
+        // Seen live: both jobs of a round ran `gh issue view` for the issue they were about.
+        let mut about = job.clone();
+        about.issue = Some(627);
+        assert!(owner_prompt(&about).contains("don't fetch the issue"));
     }
 
     /// A follow-up starts from the first job's unmerged work: on its branch while its pull request

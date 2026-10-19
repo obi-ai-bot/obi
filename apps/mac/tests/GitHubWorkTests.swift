@@ -112,19 +112,6 @@ struct GitHubWorkTests {
         #expect(GitHubWork.Connect(GitHubWork(signedIn: true)) == .signedIn)
     }
 
-    @Test func chipsShowReviewAndIssuesWithWhatWaits() {
-        let tasks = WorkList.Group<Int>(id: "tasks", type: .tasks, label: "Tasks", items: [], count: 2, countLabel: "open", needs: 0, fresh: false)
-        let review = WorkList.Group<Int>(id: "review", type: .review, label: "Review PR", items: [], count: 1, countLabel: "open", needs: 0, fresh: false)
-        // Nothing on GitHub, signed in: the chips stay as they were.
-        #expect(GitHubWork.chips([tasks], waiting: { _ in 0 }, connect: .signedIn).map(\.label) == ["Tasks"])
-        // Signed out: Review PR and Issues show, so Connect GitHub can be found.
-        #expect(GitHubWork.chips([tasks], waiting: { _ in 0 }, connect: .signedOut).map(\.label) == ["Review PR", "Issues", "Tasks"])
-        // What waits on GitHub adds to a kind's count, in Home's order.
-        let chips = GitHubWork.chips([tasks, review], waiting: { $0 == .review ? 2 : 0 }, connect: .signedIn)
-        #expect(chips.map(\.label) == ["Review PR", "Tasks"])
-        #expect(chips.map(\.count) == [3, 2])
-    }
-
     @Test func opensOnlyGitHubPages() {
         #expect(GitHubWork.page("https://github.com/deskree-inc/oby/pull/700")?.absoluteString == "https://github.com/deskree-inc/oby/pull/700")
         #expect(GitHubWork.page("https://GitHub.com/a/b/issues/1") != nil)

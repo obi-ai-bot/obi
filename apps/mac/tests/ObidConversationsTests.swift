@@ -110,7 +110,7 @@ struct ObidConversationsTests {
     /// The window on obid's list, the side panel on Conversations and the conversation open.
     private func picture(feed: RunnerFeed, folder: URL) async throws {
         let model = IslandModel(desk: Desk(), feed: feed, availability: MacAvailability())
-        let state = ChatState()
+        let state = ChatState(defaults: .scratch)
         state.trail.start(.talk)
         state.section = .conversations
         let defaults = UserDefaults.standard

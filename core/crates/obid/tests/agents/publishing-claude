@@ -4,6 +4,7 @@
 //   COMMIT: <file>   writes the file in the worktree and commits it
 //   LEAK: <file>     commits the file with a made-up AWS access key id in it (put together here at
 //                    run time, so this file holds none a scanner flags)
+//   STUBBORN         with any of these: the fix round below leaves what the scan found
 //   AUTHOR: <file>   commits the file with a made-up GitHub token as the commit's author's name
 //   HEADER: <file>   commits the file through a commit object with an extra header holding that
 //                    token (git hash-object), and moves HEAD to it
@@ -26,7 +27,7 @@
 //   anything else    ends the turn with "Nothing to do."
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
@@ -67,7 +68,12 @@ rl.on("line", (line) => {
   const move = prompt.match(/MOVE: (\S+) (\S+)/);
   const gitlink = prompt.includes("GITLINK");
   try {
-    if (fix) {
+    // STUBBORN anywhere in the task: the fix round leaves what the scan found (.obi/ is never
+    // committed, so the fix round finds the mark there).
+    if (prompt.includes("STUBBORN")) { mkdirSync(".obi", { recursive: true }); writeFileSync(".obi/stubborn", ""); }
+    if (fix && existsSync(".obi/stubborn")) {
+      result("Left it as it is.");
+    } else if (fix) {
       const file = git("show", "--name-only", "--format=", fix[1]).trim().split("\n")[0];
       writeFileSync(file, readFileSync(file, "utf8").split("\n").filter((l) => !l.includes(KEY)).join("\n"));
       git("add", file);

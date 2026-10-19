@@ -160,10 +160,28 @@ final class ChatState {
     var chrome = WindowChrome()
     /// The window is on screen (not closed or in the Dock): Oby on Home draws only then.
     var visible = true
-    /// When this state began, and the job rows opened since: a job created after it and not
-    /// opened yet is new (#496), its row and its kind's chip with a blue dot.
-    let since = Date.now
-    var seen: Set<String> = []
+    /// Since when, and the job rows opened since: a job created after it and not opened yet is new
+    /// (#496), its row and its kind's chip with a blue dot. Both are kept across launches (C8), so a
+    /// task made while Oby was closed is new, and one opened before isn't.
+    let since: Date
+    var seen: Set<String> {
+        // ponytail: every row ever opened, a few dozen bytes each; drop the oldest past a few thousand if it grows.
+        didSet { defaults.set(Array(seen), forKey: Self.seenKey) }
+    }
+    @ObservationIgnored private let defaults: UserDefaults
+    private static let sinceKey = "newWorkSince"
+    private static let seenKey = "newWorkSeen"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if let kept = defaults.object(forKey: Self.sinceKey) as? Date {
+            since = kept
+        } else {
+            since = .now
+            defaults.set(since, forKey: Self.sinceKey)
+        }
+        seen = Set(defaults.stringArray(forKey: Self.seenKey) ?? [])
+    }
     /// The side panel's folded groups and those showing all their done tasks.
     var folded: Set<String> = []
     var more: Set<String> = []
@@ -326,11 +344,10 @@ private struct HomeView: View {
     }
 
     /// Oby, a little above the middle (as a face at eye level), what's going on under it, and the
-    /// chips: every kind of work with something in it, whatever the side panel groups by.
+    /// chips: every kind of work, always, in Home's order (Sangam, mac-design B7), whatever the side
+    /// panel groups by.
     private var stage: some View {
-        let gitHub = model.feed.gitHubWork, later = model.feed.gitHubLater
-        let groups = GitHubWork.chips(WorkList.groups(work, by: .type), waiting: { gitHub?.waiting($0, later: later).count ?? 0 },
-                                      connect: .init(gitHub))
+        let groups = WorkList.kinds(work)
         let running = work.count { $0.status == .running }, needs = work.count { $0.status == .needs }
         return EyeLevel {
             VStack(spacing: 16) {

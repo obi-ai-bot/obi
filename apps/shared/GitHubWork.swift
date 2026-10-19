@@ -253,25 +253,6 @@ extension GitHubWork {
             .split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
         return line.count > 200 ? String(line.prefix(199)) + "…" : line
     }
-
-    /// Home's chips with GitHub's: Review PR and Issues show while GitHub has something there, or
-    /// while it's signed out (so Connect GitHub can be found); each chip's count holds what waits to start.
-    static func chips<J>(_ groups: [WorkList.Group<J>], waiting: (WorkType) -> Int, connect: Connect) -> [WorkList.Group<J>] {
-        var list = groups
-        for kind in [WorkType.review, .issues] {
-            let count = waiting(kind)
-            if let index = list.firstIndex(where: { $0.type == kind }) {
-                list[index].count += count
-            } else if count > 0 || connect == .signedOut {
-                list.append(WorkList.Group(id: kind.id, type: kind, label: kind.label, items: [], count: count, countLabel: "open", needs: 0, fresh: false))
-            }
-        }
-        return list.sorted { order($0.type) < order($1.type) }
-    }
-
-    private static func order(_ type: WorkType?) -> Int {
-        switch type { case .review: 0; case .issues: 1; case .teammate: 2; case .tasks, nil: 3 }
-    }
 }
 
 #if DEBUG

@@ -2284,8 +2284,9 @@ fn a_plan_starts_its_jobs_and_links_them_to_the_turn() {
     assert_eq!(ends(&obid), ["started_jobs"]);
 }
 
-/// #630: the review and investigate jobs the chat plans only read, in Plan mode, even when the
-/// default is Bypass; other work gets the default.
+/// #630: the reviews the chat plans only read, in Plan mode, even when the default is Bypass;
+/// other work gets the default, investigations included: they may run a test to reproduce a bug
+/// (the owner's decision of 2026-10-18).
 #[test]
 fn the_chats_reviews_and_investigations_run_in_plan() {
     let folder = Folder::new("brain-read-only");
@@ -2328,7 +2329,7 @@ fn the_chats_reviews_and_investigations_run_in_plan() {
         .collect();
     assert_eq!(
         modes,
-        ["review plan", "investigate plan", "fix bypass"],
+        ["review plan", "investigate bypass", "fix bypass"],
         "{answer}"
     );
 }

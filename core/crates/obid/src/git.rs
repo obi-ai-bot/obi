@@ -192,8 +192,7 @@ pub async fn ensure_clone(
     git(&clone, &["config", "fetch.hideRefs", "worktrees/"]).await?;
     exclude_obi_folders(&clone)?;
     if !refspecs.is_empty() {
-        let signed = crate::publish::fetch_credentials(remote, crate::github::gh().as_deref());
-        git(&clone, &fetch_args(&signed, refspecs)).await?;
+        fetch(&clone, remote, refspecs).await?;
     }
     Ok(clone)
 }
@@ -213,8 +212,16 @@ fn clone_args<'a>(signed: &'a [String], remote: &'a str, partial: &'a Path) -> V
     args
 }
 
+/// `git fetch --quiet --no-tags --no-write-fetch-head origin <refspecs>` in `clone`, an `https`
+/// `remote` signed in with gh's login alone, as a clone is ([`crate::publish::fetch_credentials`]):
+/// a private repository fetches with nothing set up but gh's sign-in.
+pub async fn fetch(clone: &Path, remote: &str, refspecs: &[String]) -> Result<String, GitError> {
+    let signed = crate::publish::fetch_credentials(remote, crate::github::gh().as_deref());
+    git(clone, &fetch_args(&signed, refspecs)).await
+}
+
 /// `git fetch` of `refspecs` from origin, after the credential settings `signed`.
-fn fetch_args<'a>(signed: &'a [String], refspecs: &'a [String]) -> Vec<&'a str> {
+pub(crate) fn fetch_args<'a>(signed: &'a [String], refspecs: &'a [String]) -> Vec<&'a str> {
     let mut args: Vec<&str> = signed.iter().map(String::as_str).collect();
     args.extend([
         "fetch",

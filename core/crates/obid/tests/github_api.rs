@@ -142,3 +142,39 @@ fn a_starting_sign_in_holds_nothing_up() {
         assert_eq!(first.body["userCode"], "AB12-CD34");
     });
 }
+
+/// A sign-in started right after the last one ended gets a folder of its own, which the ended
+/// one's task never removes.
+#[test]
+fn back_to_back_sign_ins_keep_their_own_folders() {
+    let folder = Folder::new("github-sign-in-again");
+    let remote = folder.0.join("remote.git");
+    let config = config(&folder.0, &remote, &stub_agent());
+    let bin = stand_in_gh(&folder.0);
+    let obid = start(&folder.0, &config, Some(&bin));
+    let home = folder.0.join("env-home");
+    let global = || {
+        std::path::PathBuf::from(
+            std::fs::read_to_string(home.join("git-config-global"))
+                .unwrap()
+                .trim(),
+        )
+    };
+    let first = call(&obid, "POST", "/v1/github/sign-in", None);
+    assert_eq!(first.status, 200, "{}", first.text);
+    let first_folder = global().parent().unwrap().to_path_buf();
+    let ended = call(&obid, "DELETE", "/v1/github/sign-in", None);
+    assert_eq!(ended.status, 204, "{}", ended.text);
+    let second = call(&obid, "POST", "/v1/github/sign-in", None);
+    assert_eq!(second.status, 200, "{}", second.text);
+    let second_folder = global().parent().unwrap().to_path_buf();
+    assert_ne!(first_folder, second_folder);
+    assert!(!first_folder.exists(), "{first_folder:?}");
+    // The ended one's task is long done; the new one's folder is still there while it waits.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(second_folder.is_dir(), "{second_folder:?}");
+    assert_eq!(
+        call(&obid, "GET", "/v1/github", None).body["signIn"]["userCode"],
+        "AB12-CD34"
+    );
+}

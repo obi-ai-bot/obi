@@ -227,13 +227,15 @@ fn codex_in_plan_mode_changes_no_file() {
     );
 }
 
-/// Review and investigate jobs only read (#630): Plan mode whatever they ask for or the default
-/// says, so Codex's file change is declined, and a mode change keeps them in Plan.
+/// Review jobs only read (#630): Plan mode whatever they ask for or the default says, so Codex's
+/// file change is declined, and a mode change keeps them in Plan. Investigations run as other
+/// work does (the owner's decision of 2026-10-18).
 #[test]
 fn codex_reviews_and_investigates_in_plan_mode() {
     let folder = Folder::new("codex-read-only");
     let obid = obid(&folder, false);
-    for kind in ["review", "investigate"] {
+    {
+        let kind = "review";
         let id = dispatch(
             &obid,
             json!({"agent": "codex", "kind": kind, "task": "COMMIT: plan.txt", "mode": "bypass"}),
@@ -623,4 +625,55 @@ fn codex_and_cursor_ask_the_owner_in_ask_mode() {
     answer(&cursor, "deny");
     assert_eq!(summary(&ended(&obid, &codex)), "answer: accept");
     assert_eq!(summary(&ended(&obid, &cursor)), "answer: reject-once");
+}
+
+/// Codex wraps each command in `/bin/zsh -lc "…"` (#634): the card asks about the command out of
+/// that shell, all of it, and offers Always with a rule when it's a single simple command.
+#[test]
+fn codex_cards_show_the_command_out_of_its_shell() {
+    let folder = Folder::new("codex-cards");
+    let obid = obid(&folder, false);
+    let simple = dispatch(
+        &obid,
+        json!({"agent": "codex", "task": r#"ASK: /bin/zsh -lc "git add \"src/my notes.txt\"""#, "mode": "ask"}),
+    );
+    let chained = dispatch(
+        &obid,
+        json!({"agent": "codex", "task": r#"ASK: /bin/zsh -lc "git add src/permissions.rs src/codex.rs && git commit -m \"fix(obid): show it all\"""#, "mode": "ask"}),
+    );
+    let card = |id: &str| {
+        within(60, "the tool waits for the owner", || {
+            let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+            job["permission"]
+                .is_object()
+                .then(|| job["permission"].clone())
+        })
+    };
+    let answer = |id: &str, card: &Value| {
+        let answered = call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/permission"),
+            Some(&json!({"id": card["id"], "decision": "allow"})),
+        );
+        assert_eq!(answered.status, 200, "{}", answered.text);
+    };
+    let first = card(&simple);
+    assert_eq!(first["title"], "Run git add", "{first}");
+    assert_eq!(first["detail"], r#"git add "src/my notes.txt""#, "{first}");
+    assert_eq!(first["rule"], "Bash(git add:*)", "{first}");
+    assert_eq!(
+        first["always"],
+        "Yes, and don't ask again for git add in obi-e2e/fixture-app"
+    );
+    let second = card(&chained);
+    let command =
+        r#"git add src/permissions.rs src/codex.rs && git commit -m "fix(obid): show it all""#;
+    assert_eq!(second["title"], format!("Run {command}"), "{second}");
+    assert_eq!(second["detail"], command, "{second}");
+    assert_eq!(second["rule"], Value::Null, "{second}");
+    answer(&simple, &first);
+    answer(&chained, &second);
+    assert_eq!(summary(&ended(&obid, &simple)), "answer: accept");
+    assert_eq!(summary(&ended(&obid, &chained)), "answer: accept");
 }
