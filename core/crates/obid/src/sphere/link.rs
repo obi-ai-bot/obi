@@ -334,6 +334,12 @@ impl Link {
             }
         }));
         let hook = Arc::downgrade(&link);
+        link.jobs.on_confirm(Arc::new(move |item| {
+            if let Some(link) = hook.upgrade() {
+                link.add_confirm_once(item);
+            }
+        }));
+        let hook = Arc::downgrade(&link);
         link.jobs.on_review_end(Arc::new(move |job, done| {
             let link = hook.upgrade();
             Box::pin(async move {
@@ -657,10 +663,41 @@ impl Link {
                 Some(at) => item.later = Some(at),
                 None => item.done = Some(now),
             }
+            // Done without an answer: a shell command waiting for it doesn't run.
+            if item.done.is_some() && crate::brain::shell::is_item(&item) {
+                crate::brain::shell::answered(&item.id, None);
+            }
             self.lock().inbox.insert(item.id.clone(), item.clone());
             self.save_item(&item);
             return Ok(item.to_json());
         };
+        // A command of a conversation's shell: the owner's answer goes to it, and only once.
+        if crate::brain::shell::is_item(&item) {
+            if answer == crate::permissions::ALWAYS_ALLOW
+                && !item
+                    .options
+                    .iter()
+                    .any(|o| o == crate::permissions::ALWAYS_ALLOW)
+            {
+                return Err(api(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "It has no rule to save: allow it once instead.",
+                ));
+            }
+            if !crate::brain::shell::answered(&item.id, Some(answer.clone())) {
+                self.settle(&item.id);
+                return Err(api(
+                    StatusCode::CONFLICT,
+                    "Its command isn't waiting any more: its turn ended.",
+                ));
+            }
+            let mut item = item;
+            item.answer = Some(answer);
+            item.done = Some(now);
+            self.lock().inbox.insert(item.id.clone(), item.clone());
+            self.save_item(&item);
+            return Ok(item.to_json());
+        }
         let permission = item
             .id
             .strip_prefix(&format!("{}-permission-", item.job))
@@ -2494,6 +2531,25 @@ impl Link {
         Value::Array(items.into_iter().map(Item::to_json).collect())
     }
 
+    /// Settles an open item with no answer: what it asked about is gone (a shell command whose
+    /// turn ended). Nothing for an item that's done already.
+    pub fn settle(&self, id: &str) {
+        let settled = {
+            let mut state = self.lock();
+            state
+                .inbox
+                .get_mut(id)
+                .filter(|i| i.done.is_none())
+                .map(|item| {
+                    item.done = Some(time::now());
+                    item.clone()
+                })
+        };
+        if let Some(item) = settled {
+            self.save_item(&item);
+        }
+    }
+
     /// The open items of a job that's gone are done, with no answer.
     pub fn settle_job(&self, job: &str) {
         let now = time::now();
@@ -2515,11 +2571,31 @@ impl Link {
     }
 
     /// Something Oby's brain planned that persists or widens trust waits in the inbox for the
-    /// owner's own `Confirm` (#546): the brain never carries it out itself.
+    /// owner's own `Confirm` (#546): the brain never carries it out itself. A conversation's shell
+    /// keeps its `permission` items here too.
     pub fn add_confirm(&self, item: Item) -> Item {
         self.lock().inbox.insert(item.id.clone(), item.clone());
         self.save_item(&item);
         item
+    }
+
+    /// [`Link::add_confirm`], unless a `confirm` item for the same job and action is still open:
+    /// that one stands, so a caller asking again and again adds nothing (crate::jobs,
+    /// `confirm_past_safety`).
+    pub fn add_confirm_once(&self, item: Item) -> Item {
+        let action = |i: &Item| i.confirm.as_ref().map(|c| c.action.clone());
+        {
+            let state = self.lock();
+            if let Some(open) = state.inbox.values().find(|i| {
+                i.kind == "confirm"
+                    && i.done.is_none()
+                    && i.job == item.job
+                    && action(i) == action(&item)
+            }) {
+                return open.clone();
+            }
+        }
+        self.add_confirm(item)
     }
 
     /// `POST /v1/inbox/{id}/answer` on a `confirm` item: `Confirm` carries out what its title
@@ -2613,7 +2689,10 @@ impl Link {
             // words for a job that ended do.
             inbox::action::MESSAGE_JOB => {
                 let words = confirmed.payload["words"].as_str().unwrap_or("");
-                match self.jobs.message(target, words, crate::jobs::Source::Owner) {
+                match self
+                    .jobs
+                    .message(target, words, crate::jobs::Source::Confirmed)
+                {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
                     None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
@@ -2631,7 +2710,7 @@ impl Link {
                 match self.jobs.message(
                     target,
                     crate::brain::actions::TRY_AGAIN,
-                    crate::jobs::Source::Owner,
+                    crate::jobs::Source::Confirmed,
                 ) {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),

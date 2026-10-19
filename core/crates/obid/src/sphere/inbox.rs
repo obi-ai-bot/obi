@@ -211,6 +211,10 @@ impl Item {
     /// planned job's own `conversation` for one made before), or a confirm to start a job came
     /// from: the apps show it opened out only there.
     pub fn conversation(&self) -> Option<String> {
+        // A conversation's shell command waiting for the owner names it in its id.
+        if crate::brain::shell::is_item(self) {
+            return crate::brain::shell::conversation_of(&self.id).map(str::to_owned);
+        }
         let planned = match (&self.start, &self.confirm) {
             (Some(start), _) if start["proposedIn"].is_string() => &start["proposedIn"],
             (Some(start), _) => &start["conversation"],

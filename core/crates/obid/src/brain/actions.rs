@@ -476,6 +476,11 @@ fn retry(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
             false,
         );
     }
+    // Past its safety ceiling or budget, only the owner's Confirm carries it on (docs/runner-api.md,
+    // `limit`): one item, however often it's asked.
+    if crate::jobs::past_safety(job) {
+        return (shared.jobs.confirm_past_safety(job, TRY_AGAIN).0, true);
+    }
     if theirs {
         confirm(
             shared,
@@ -596,9 +601,13 @@ fn message_job(
         {
             return already_on_it(shared, &job, &next, &words, source);
         }
+        // Past its safety limit, a follow-up would start its counters again: the owner confirms.
+        if source.owners() && crate::jobs::past_safety(&job) {
+            return Outcome::Done(shared.jobs.confirm_past_safety(&job, &words).0);
+        }
         let new = crate::jobs::follow_up(&job, &words);
         return match source {
-            Source::Owner => follow_up(
+            Source::Owner | Source::Confirmed => follow_up(
                 shared,
                 &job,
                 NewJob {
@@ -814,6 +823,17 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
         "plan" => Owners::Refuse(
             "it's a job's plan: only you can approve it or send it back, in your inbox.".into(),
         ),
+        // A conversation's shell command runs only on the owner's own answer; saying no isn't.
+        "permission"
+            if super::shell::is_item(item)
+                && crate::permissions::inbox_decision(words)
+                    != (crate::permissions::Decision::Deny, None) =>
+        {
+            Owners::Refuse(
+                "it's a command in a conversation's shell: only you can let it run, in your inbox."
+                    .into(),
+            )
+        }
         // Letting a secret through is the owner's alone, even once (#586); saying no isn't.
         "permission"
             if job
@@ -1296,6 +1316,25 @@ mod tests {
         assert_eq!(owners_call(&request, "Decline", None), Owners::No);
         let start = item("start", "start-1", "Fix", &["Start", "Cancel"]);
         assert_eq!(owners_call(&start, "Cancel", None), Owners::No);
+    }
+
+    /// A conversation's shell command runs only on the owner's own answer: the brain may only say
+    /// a bare no to it.
+    #[test]
+    fn owners_call_never_lets_a_shell_command_run() {
+        let shell = item(
+            "permission",
+            "shell-5b0e2c4d-1111-2222-3333-444455556666-pa1b2c3",
+            "Run brew install gh",
+            &["Allow", "Deny"],
+        );
+        for words in ["Allow", "yes", "Always allow", "Deny, but use pip instead"] {
+            assert!(
+                matches!(owners_call(&shell, words, None), Owners::Refuse(_)),
+                "{words}"
+            );
+        }
+        assert_eq!(owners_call(&shell, "Deny", None), Owners::No);
     }
 
     /// #586: the brain never lets a secret through, not even once; a no still goes through it.

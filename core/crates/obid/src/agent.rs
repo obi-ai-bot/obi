@@ -134,6 +134,12 @@ pub struct Turn {
     pub exit: String,
     /// The turn ran past its time and obid ended it.
     pub timed_out: bool,
+    /// What timed it out was a quiet spell (`conn::Limit::quiet`): no progress for so long.
+    pub quiet: bool,
+    /// obid ended it for making the same failing call again and again (crate::jobs).
+    pub looped: bool,
+    /// obid ended it at the job's token budget (crate::jobs).
+    pub over_budget: bool,
     /// obid was told to stop it.
     pub stopped: bool,
     /// What the agent should hear at the start of its next prompt: what obid declined this turn
@@ -204,7 +210,7 @@ pub const AFTER_RESULT: Duration = Duration::from_secs(3);
 pub async fn run_turn(
     launch: Launch,
     prompt: &str,
-    limit: Duration,
+    limit: impl Into<crate::conn::Limit>,
     stop: watch::Receiver<process::Signal>,
     decide: impl Fn(&str, &Value) -> Ruling,
     on_event: impl FnMut(Event),
@@ -342,6 +348,7 @@ pub async fn turn_on(
         }
     }
     turn.timed_out = conn.timed_out;
+    turn.quiet = conn.quiet_out;
     turn.stopped = conn.stopped;
     if keep && turn.result.is_some() && !turn.timed_out && !turn.stopped {
         turn.exit = "still running".into();
