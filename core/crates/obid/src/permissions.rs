@@ -1510,51 +1510,36 @@ fn command_touches_a_secret(command: &str, bounds: &Bounds) -> bool {
         })
 }
 
-/// git settings given on the command line (`git -c key=value`) that can't run a program: any other
-/// one could (`core.sshCommand`, `core.fsmonitor`, `core.pager`, `diff.external`, `alias.*`,
-/// `credential.helper`, …), so the command asks.
-const GIT_SAFE_SETTINGS: &[&str] = &[
-    "user.name",
-    "user.email",
-    "init.defaultbranch",
-    "core.quotepath",
-    "core.autocrlf",
-    "core.safecrlf",
-    "commit.gpgsign",
-    "tag.gpgsign",
-    "pull.rebase",
-    "merge.ff",
+/// The only `GIT_*` variables a command may set, exactly as written (#636): each keeps git from
+/// opening an editor, a pager or a prompt. Any other could run a program (`GIT_SSH_COMMAND`,
+/// `GIT_PAGER=less`, `GIT_CONFIG_PARAMETERS`, …), so the command asks.
+const GIT_QUIET_VARIABLES: &[&str] = &[
+    "GIT_EDITOR=true",
+    "GIT_SEQUENCE_EDITOR=:",
+    "GIT_PAGER=cat",
+    "GIT_TERMINAL_PROMPT=0",
 ];
 
-/// Whether a command gives git a setting, or a variable, that can run a program obid doesn't read.
+/// The only setting a command may give git on its command line (`git -c key=value`), exactly as
+/// written (#636). Any other could run a program (`core.sshCommand`, `core.fsmonitor`,
+/// `core.pager`, `diff.external`, `alias.*`, `credential.helper`, …), so the command asks.
+const GIT_QUIET_SETTINGS: &[&str] = &["core.editor=true"];
+
+/// Whether a command gives git a setting, or a variable, that can run a program obid doesn't read:
+/// any but [`GIT_QUIET_VARIABLES`] and [`GIT_QUIET_SETTINGS`].
 fn runs_through_git_settings(command: &str) -> bool {
     let Some(commands) = simple_commands(command) else {
         return true;
     };
     commands.iter().any(|command| {
         let words = &command.words;
-        let runs = |name: &str| {
-            let name = name.to_ascii_lowercase();
-            !(GIT_SAFE_SETTINGS.contains(&name.as_str())
-                || name.starts_with("color.")
-                || name.starts_with("advice."))
-        };
-        // `GIT_SSH_COMMAND=…`, `GIT_PAGER=…`, `GIT_CONFIG_PARAMETERS=…` before the program.
-        let variables = words.iter().take_while(|w| is_assignment(w)).any(|w| {
-            let name = w.split('=').next().unwrap_or_default();
-            name.starts_with("GIT_")
-                && !matches!(
-                    name,
-                    "GIT_AUTHOR_NAME"
-                        | "GIT_AUTHOR_EMAIL"
-                        | "GIT_COMMITTER_NAME"
-                        | "GIT_COMMITTER_EMAIL"
-                        | "GIT_AUTHOR_DATE"
-                        | "GIT_COMMITTER_DATE"
-                        | "GIT_PAGER_IN_USE"
-                )
-        });
-        let Some(p) = program_index(words).filter(|p| base(&words[*p]) == "git") else {
+        // `GIT_SSH_COMMAND=…` before the program, or after `env`.
+        let program = program_index(words);
+        let variables = words[..program.unwrap_or(words.len())]
+            .iter()
+            .filter(|w| is_assignment(w))
+            .any(|w| w.starts_with("GIT_") && !GIT_QUIET_VARIABLES.contains(&w.as_str()));
+        let Some(p) = program.filter(|p| base(&words[*p]) == "git") else {
             return variables;
         };
         // git's own options, before its subcommand (`git log -c` is a diff's option).
@@ -1565,7 +1550,7 @@ fn runs_through_git_settings(command: &str) -> bool {
                 "-C" => None,
                 _ => w.strip_prefix("-c").filter(|kv| !kv.is_empty()),
             };
-            if setting.is_some_and(|kv| runs(kv.split('=').next().unwrap_or_default()))
+            if setting.is_some_and(|kv| !GIT_QUIET_SETTINGS.contains(&kv))
                 || w.starts_with("--config-env")
                 || w.starts_with("--exec-path=")
             {
@@ -2959,7 +2944,10 @@ mod tests {
             ("git -c alias.st=status st", Some(Reach::Unknown)),
             ("git -cdiff.external=x diff", Some(Reach::Unknown)),
             ("GIT_SSH_COMMAND=x git status", Some(Reach::Unknown)),
-            ("git -c user.name=t -c user.email=t@t commit -m x", None),
+            (
+                "git -c user.name=t -c user.email=t@t commit -m x",
+                Some(Reach::Unknown),
+            ),
             ("git log -c HEAD", None),
             ("busybox wget https://x", Some(Reach::Network)),
             ("python3 -m pytest -c setup.cfg", None),
@@ -3044,6 +3032,40 @@ mod tests {
             assert_eq!(super::reach(&bash(command), &bounds), reach, "{command}");
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #636: git goes through with only the settings that keep it from opening an editor, a pager
+    /// or a prompt, exactly as written; any other setting or `GIT_*` variable asks.
+    #[test]
+    fn only_the_quiet_git_settings_go_through() {
+        let worktree = &Bounds::of(Path::new(WORKTREE));
+        for command in [
+            "GIT_EDITOR=true git rebase --continue",
+            "GIT_SEQUENCE_EDITOR=: git rebase -i HEAD~2",
+            "GIT_PAGER=cat git log",
+            "GIT_TERMINAL_PROMPT=0 git status",
+            "git -c core.editor=true commit --amend",
+            "GIT_EDITOR=true GIT_PAGER=cat git -c core.editor=true log",
+        ] {
+            assert_eq!(super::reach(&bash(command), worktree), None, "{command}");
+        }
+        for command in [
+            "GIT_EDITOR=vim git commit",
+            "GIT_PAGER=less git log",
+            "GIT_SEQUENCE_EDITOR=true git rebase -i HEAD~2",
+            "GIT_TERMINAL_PROMPT=1 git status",
+            "GIT_AUTHOR_NAME=t git commit -m x",
+            "env GIT_PAGER=less git log",
+            "git -c core.editor=vim commit",
+            "git -c color.ui=never log",
+            "git -ccore.pager=less log",
+        ] {
+            assert_eq!(
+                super::reach(&bash(command), worktree),
+                Some(Reach::Unknown),
+                "{command}"
+            );
+        }
     }
 
     #[test]
