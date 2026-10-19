@@ -81,6 +81,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var waiting: Waiting?
     /// The conversation whose words started it (obid only, #493), or nil.
     var conversation: String?
+    /// The user's turn whose words started it (obid only): its card shows under them as it starts.
+    var turn: String?
     /// What it made to be looked at (obid only, its `.obi/artifacts/`), or nil.
     var artifacts: [ArtifactRef]?
     /// The job this one follows up (obid only): the owner told that one something after it ended,
@@ -119,7 +121,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
-             conversation, artifacts, followUpOf, tetrix
+             conversation, turn, artifacts, followUpOf, tetrix
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"

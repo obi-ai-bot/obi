@@ -22,6 +22,16 @@ fn obid(name: &str, signed_in: bool) -> (Folder, Obid) {
 
 /// [`obid`], with `conversation` as the configuration's.
 fn obid_with(name: &str, signed_in: bool, conversation: Value) -> (Folder, Obid) {
+    obid_env(name, signed_in, conversation, &[])
+}
+
+/// [`obid_with`], with `env` over a test obid's.
+fn obid_env(
+    name: &str,
+    signed_in: bool,
+    conversation: Value,
+    env: &[(&str, &str)],
+) -> (Folder, Obid) {
     let folder = Folder::new(name);
     let remote = fixture(&folder.0.join("fixture"));
     let mut config = config(&folder.0, &remote, &harness());
@@ -31,7 +41,7 @@ fn obid_with(name: &str, signed_in: bool, conversation: Value) -> (Folder, Obid)
     if signed_in {
         std::fs::write(account.join(".credentials.json"), "{}").unwrap();
     }
-    let obid = start(&folder.0, &config, None);
+    let obid = start_with(&folder.0, &config, None, env);
     (folder, obid)
 }
 
@@ -274,6 +284,102 @@ fn the_next_turn_goes_to_the_waiting_claude_code() {
     assert!(ends_soon(&pid), "it ends with its conversation");
 }
 
+/// After the owner's turn, the next new conversation's Claude Code starts and waits (docs/
+/// fast-replies.md): it connects to Oby's tools but can call none before its turn, and the new
+/// conversation's first turn goes to it.
+#[test]
+fn a_new_conversation_finds_its_claude_code_started() {
+    let (_folder, obid) = obid_env(
+        "harness-prestart",
+        true,
+        json!({"agent": "claude"}),
+        &[("OBID_PRESTART", "on")],
+    );
+    let first = said(&obid, json!({"said": "SAY hi", "new": true}));
+    let one = first.body["conversation"].as_str().unwrap().to_owned();
+    let conversations = obid.home.join("conversations");
+    let started = || -> Option<(String, Value)> {
+        std::fs::read_dir(&conversations)
+            .ok()?
+            .flatten()
+            .filter(|e| e.path().is_dir() && e.file_name().to_string_lossy() != one)
+            .find_map(|e| {
+                let line = std::fs::read_to_string(e.path().join("config/started.jsonl")).ok()?;
+                let record = serde_json::from_str(line.lines().next()?).ok()?;
+                Some((e.file_name().to_string_lossy().into_owned(), record))
+            })
+    };
+    let give_up_at = Instant::now() + Duration::from_secs(30);
+    while started().is_none() && Instant::now() < give_up_at {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (next, record) = started().expect("the next conversation's Claude Code started");
+    let pid = record["pid"].to_string();
+    assert!(alive(&pid));
+    assert_eq!(
+        std::fs::read_to_string(conversations.join("next-id")).unwrap(),
+        next
+    );
+
+    // Its token connects and lists the tools, and calls none; another token is refused.
+    let config: Value = serde_json::from_slice(
+        &std::fs::read(conversations.join(format!("{next}/home/oby-mcp.json"))).unwrap(),
+    )
+    .unwrap();
+    let token = config["mcpServers"]["oby"]["headers"]["Authorization"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .unwrap()
+        .to_owned();
+    let endpoint = format!("/v1/agent/mcp/conversation-{next}");
+    let mcp = |token: &str, method: &str| {
+        call_with_token(
+            &obid,
+            token,
+            "POST",
+            &endpoint,
+            Some(&json!({"jsonrpc": "2.0", "id": 1, "method": method,
+                         "params": {"name": "oby_jobs", "arguments": {}}})),
+        )
+    };
+    let hello = mcp(&token, "initialize");
+    assert_eq!(hello.status, 200, "{}", hello.text);
+    assert_eq!(hello.body["result"]["serverInfo"]["name"], "oby");
+    let listed = mcp(&token, "tools/list");
+    assert!(listed.body["result"]["tools"].as_array().unwrap().len() > 3);
+    let called = mcp(&token, "tools/call");
+    assert!(
+        called.body["error"]["message"].is_string(),
+        "{}",
+        called.text
+    );
+    assert_eq!(mcp("not-its-token", "initialize").status, 401);
+
+    // The new conversation is that one, and its first turn goes to it, with Oby's tools.
+    let second = said(&obid, json!({"said": "OBY oby_jobs {}", "new": true}));
+    assert_eq!(
+        second.body["conversation"],
+        next.as_str(),
+        "{}",
+        second.text
+    );
+    assert!(
+        second.body["text"].as_str().unwrap().starts_with("oby: "),
+        "{}",
+        second.text
+    );
+    assert!(!second.body["text"].as_str().unwrap().contains("refused"));
+    let recorded = recorded(&conversations.join(format!("{next}/config/turns.jsonl")));
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["pid"].to_string(), pid);
+    assert!(
+        !conversations.join("next-id").exists() || {
+            std::fs::read_to_string(conversations.join("next-id")).unwrap() != next
+        }
+    );
+}
+
 /// Whether the process `pid` runs.
 fn alive(pid: &str) -> bool {
     std::process::Command::new("kill")
@@ -496,6 +602,23 @@ fn oby_dispatch_starts_a_job_whose_card_is_on_the_turn() {
             .any(|(n, d)| n == "step" && d["tool"] == "oby_dispatch"),
         "{seen:?}"
     );
+    // The job names the words that started it, and says so as it starts, before Oby's answer
+    // lists it: the conversation shows its card at once.
+    let user = seen
+        .iter()
+        .find(|(n, d)| n == "turn" && d["who"] == "user")
+        .map(|(_, d)| d["id"].clone())
+        .expect("the user's turn");
+    assert_eq!(job.body["turn"], user, "{}", job.text);
+    let started = seen
+        .iter()
+        .position(|(n, d)| n == "job" && d["id"] == id && d["turn"] == user)
+        .expect("the job's event with its turn");
+    let answered = seen
+        .iter()
+        .position(|(n, d)| n == "turn" && d["who"] == "oby" && d["jobs"] == json!([id]))
+        .expect("Oby's answer listing the job");
+    assert!(started < answered, "{seen:?}");
 }
 
 /// What widens trust is the owner's alone: a Bypass job waits for their Confirm, and the agent
@@ -910,6 +1033,21 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
     let follow = ended(&obid, &next);
     assert_eq!(follow["followUpOf"], id.as_str());
     assert_eq!(follow["conversation"], conversation.as_str());
+    // Started by these words in its parent's conversation: its card shows under them at once.
+    let words = call(
+        &obid,
+        "GET",
+        &format!("/v1/conversation?id={conversation}"),
+        None,
+    )
+    .body
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|t| t["who"] == "user" && t["text"] == tell.as_str())
+    .map(|t| t["id"].clone())
+    .expect("the user's turn");
+    assert_eq!(follow["turn"], words, "{follow}");
     assert_eq!(follow["request"], tell.as_str());
     assert_eq!(follow["kind"], first["kind"]);
     let heard = within(30, "the follow-up's agent hears it", || {

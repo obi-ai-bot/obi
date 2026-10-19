@@ -379,9 +379,7 @@ final class RunnerFeed {
                         Self.ask()
                         checks.look(runner)
                         register(runner)
-                    case .job(let job, let extras):
-                        if let extras { self.extras[job.id] = extras }
-                        apply(job)
+                    case .job(let job, let extras): apply(job, extras: extras)
                     case .cleared(let date): clearedAt = date
                     case .inbox(let item, let words):
                         apply(item, words: words)
@@ -646,6 +644,12 @@ final class RunnerFeed {
     }
 
     /// The runner's answer to Stop or a message, or one of its events: the job with that id.
+    /// A `job` event: what obid adds to the job (its decision, conversation, turn…), then the job.
+    func apply(_ job: Job, extras: RunnerJobExtras?) {
+        if let extras { self.extras[job.id] = extras }
+        apply(job)
+    }
+
     func apply(_ job: Job) {
         if let index = jobs.firstIndex(where: { $0.id == job.id }) { jobs[index] = job } else { jobs.insert(job, at: 0) }
         noticeChanges()

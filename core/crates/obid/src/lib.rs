@@ -47,6 +47,7 @@ pub mod sphere;
 pub mod store;
 pub mod tetrix;
 pub mod token;
+pub mod usage;
 pub mod vault;
 pub mod web;
 
@@ -323,6 +324,19 @@ pub async fn serve(
     jobs.resume();
     link.start();
     github.spawn(stopping_rx.clone());
+    // A tool reported an account's usage: every app hears the accounts as they are now.
+    {
+        let shared = shared.clone();
+        let mut stopping = stopping_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = shared.jobs.usage_changed.notified() => accounts::send_accounts(&shared).await,
+                    _ = stopping.changed() => return,
+                }
+            }
+        });
+    }
     // A job a conversation started tells it how it ended (#351).
     conversation::report_job_ends(shared.clone());
     // Each repository's spare tree for the conversations' rooms, so a new one

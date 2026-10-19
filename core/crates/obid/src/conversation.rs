@@ -203,7 +203,14 @@ pub struct Conversations {
     dir: PathBuf,
     threads: Mutex<Vec<Thread>>,
     events: Events,
+    /// The id the next new conversation gets once obid named it ([`Conversations::next_id`]):
+    /// its folder may hold a Claude Code started for it already (crate::brain::harness). Kept in
+    /// `next-id`, so the folder is found again after obid restarts.
+    next: Mutex<Option<String>>,
 }
+
+/// Where the next new conversation's id is kept.
+const NEXT: &str = "next-id";
 
 impl Conversations {
     /// The conversations in `home/conversations`, after moving the single thread of obid before
@@ -227,10 +234,15 @@ impl Conversations {
                 named
             })
             .collect();
+        let next = std::fs::read_to_string(dir.join(NEXT))
+            .ok()
+            .map(|id| id.trim().to_owned())
+            .filter(|id| is_id(id) && !threads.iter().any(|t| &t.id == id));
         let conversations = Conversations {
             dir,
             threads: Mutex::new(threads),
             events,
+            next: Mutex::new(next),
         };
         conversations.migrate(home);
         conversations.prune(&mut conversations.lock());
@@ -347,7 +359,7 @@ impl Conversations {
         };
         let index = found.unwrap_or_else(|| {
             threads.push(Thread {
-                id: new_id(),
+                id: self.take_next().unwrap_or_else(new_id),
                 title: titled(&said),
                 pinned: false,
                 created: obi_protocol::time::format(obi_protocol::time::now()),
@@ -670,12 +682,42 @@ impl Conversations {
         Ok(summary)
     }
 
-    /// Forgets the conversation `id` and its turns. The jobs it started stay, with its id.
+    /// The id the next new conversation will get, named now and kept until one takes it.
+    pub fn next_id(&self) -> String {
+        let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(id) = &*next {
+            return id.clone();
+        }
+        let id = new_id();
+        if let Err(e) = crate::store::write_private(&self.dir.join(NEXT), id.as_bytes()) {
+            tracing::warn!("the next conversation's id isn't kept: {e}");
+        }
+        *next = Some(id.clone());
+        id
+    }
+
+    /// Whether `id` is the next new conversation's, not taken yet.
+    pub fn is_next(&self, id: &str) -> bool {
+        self.next
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+            == Some(id)
+    }
+
+    /// The next new conversation's id, taken by the conversation beginning now.
+    fn take_next(&self) -> Option<String> {
+        let id = self.next.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+        let _ = std::fs::remove_file(self.dir.join(NEXT));
+        Some(id)
+    }
+
     /// Whether the conversation `id` is there.
     pub fn exists(&self, id: &str) -> bool {
         self.lock().iter().any(|t| t.id == id)
     }
 
+    /// Forgets the conversation `id` and its turns. The jobs it started stay, with its id.
     pub fn delete(&self, id: &str) -> Result<(), Error> {
         let mut threads = self.lock();
         let index = threads

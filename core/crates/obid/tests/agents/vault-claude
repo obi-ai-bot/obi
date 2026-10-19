@@ -10,6 +10,7 @@
 //   WRAPPED          commits config.b64: LONG (a second value, 64 bytes), base64 wrapped at 76 characters
 //                    as GNU base64 writes it
 //   SLOW             waits 3 seconds, then commits hello.txt
+//   BIG              commits big.txt: 1 MB of long lines of ordinary words, slow to scan
 //   WAIT             waits 60 seconds, then ends the turn
 //   anything else    ends the turn with "Nothing to do."
 // Every turn writes the prompt it got to .obi/seen-prompt.txt in the worktree (.obi/ is never part
@@ -80,6 +81,12 @@ rl.on("line", (line) => {
     } else if (prompt.includes("WAIT")) {
       execFileSync("sleep", ["60"]);
       result("Waited.");
+    } else if (prompt.includes("BIG")) {
+      const line = "the quick brown fox jumps over the lazy dog ".repeat(100);
+      writeFileSync("big.txt", `${line}\n`.repeat(250));
+      git("add", "big.txt");
+      git("commit", "-q", "-m", "chore: add big.txt");
+      result("Added big.txt.");
     } else if (prompt.includes("SLOW")) {
       execFileSync("sleep", ["3"]);
       writeFileSync("hello.txt", "hello\n");

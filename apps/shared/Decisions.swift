@@ -94,6 +94,8 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     var question: Question?
     /// obid only (#493): the conversation whose words started the job, kept when that one is deleted.
     var conversation: String?
+    /// obid only: the user's turn whose words started it, so its card shows under them as it starts.
+    var turn: String?
     /// What it made to be looked at (obid only), or nil.
     var artifacts: [ArtifactRef]?
     /// obid only (#395): the routine whose run started it.
@@ -101,14 +103,16 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     /// What its agent asked Tetrix, the session it saved and where the graph fell short, or nil.
     var tetrix: TetrixJobReport?
 
-    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, artifacts, routine, tetrix }
+    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, turn, artifacts, routine, tetrix }
 
-    init(id: String, mode: String? = nil, permission: RunnerPermission? = nil, question: Question? = nil, conversation: String? = nil) {
+    init(id: String, mode: String? = nil, permission: RunnerPermission? = nil, question: Question? = nil, conversation: String? = nil,
+         turn: String? = nil) {
         self.id = id
         self.mode = mode
         self.permission = permission
         self.question = question
         self.conversation = conversation
+        self.turn = turn
     }
 
     init(from decoder: any Decoder) throws {
@@ -118,6 +122,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
         permission = try? keys.decodeIfPresent(RunnerPermission.self, forKey: .permission)
         question = try? keys.decodeIfPresent(Question.self, forKey: .question)
         conversation = try? keys.decodeIfPresent(String.self, forKey: .conversation)
+        turn = try? keys.decodeIfPresent(String.self, forKey: .turn)
         artifacts = try? keys.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
         routine = try? keys.decodeIfPresent(RoutineMark.self, forKey: .routine)
         tetrix = try? keys.decodeIfPresent(TetrixJobReport.self, forKey: .tetrix)
