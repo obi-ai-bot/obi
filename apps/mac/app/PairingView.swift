@@ -15,8 +15,8 @@ struct PairingView: View {
     @State private var invitation: GatewayInvitation?
     /// The route the invitation was made for, shown with its QR.
     @State private var invited: PairingRoute?
-    /// Nil until looked for once.
-    @State private var tailscale: String??
+    /// What the tailnet offers, and the gateway's port (nil: obid has no gateway); nil until looked for once.
+    @State private var tailnet: (PairingRoute.Tailnet, port: Int?)?
     @State private var chosen: PairingRoute?
     @State private var devices: [PairedGatewayDevice] = []
     @State private var problem: String?
@@ -35,17 +35,18 @@ struct PairingView: View {
                     }
                 }
             }
-            if tailscale != nil, routes.isEmpty {
-                // No way in yet: either route works, and the buttons check again once one is on.
-                SetRow("No way to reach this Mac yet", about: "Turn on Remote access, or publish the gateway on your tailnet: \(PairingRoute.serveCommand(port: PairingRoute.gatewayPort()))") {
-                    if remote != nil {
+            if let (title, about) = blocker {
+                // The buttons check again once it's fixed.
+                SetRow(title, about: about) {
+                    if remote != nil, routes.isEmpty {
                         Button("Allow Remote Access") { openSettings(.remote, spotlight: .remoteAccess) }
                             .buttonStyle(.set)
                     }
                     Button("Check again") { Task { await findTailscale() } }
                         .buttonStyle(.set)
                 }
-            } else {
+            }
+            if tailnet == nil || !routes.isEmpty {
                 if routes.count > 1 {
                     SetRow("Pair over") {
                         SetSelect("Pair over", selection: Binding { route } set: { chosen = $0 },
@@ -90,13 +91,35 @@ struct PairingView: View {
         return hostname
     }
 
-    private var routes: [PairingRoute] { PairingRoute.routes(remote: remoteHostname, tailscale: tailscale ?? nil) }
+    private var routes: [PairingRoute] {
+        // With no gateway, neither route reaches anything.
+        if let tailnet, tailnet.port == nil { return [] }
+        guard case .route(let host) = tailnet?.0 else { return PairingRoute.routes(remote: remoteHostname, tailscale: nil) }
+        return PairingRoute.routes(remote: remoteHostname, tailscale: host)
+    }
+
+    /// Why the tailnet, or every route, is out, once looked for.
+    private var blocker: (String, String)? {
+        guard let (found, port) = tailnet else { return nil }
+        guard let port else {
+            return ("The gateway is off", "obid's configuration has no gateway, so no phone can reach this Mac. Add \"gateway\": \"127.0.0.1:8810\" to \(PairingRoute.configFile.path), then turn Settings › Runner › This Mac off and on again.")
+        }
+        if found == .funnel {
+            return ("The gateway is public through Tailscale Funnel", "Turn Funnel off for it first: Oby never pairs a phone over the internet.")
+        }
+        guard routes.isEmpty else { return nil }
+        return ("No way to reach this Mac yet", "Turn on Remote access, or publish the gateway on your tailnet: \(PairingRoute.serveCommand(port: port))")
+    }
 
     /// The one the user picked while it's still there, else the first.
     private var route: PairingRoute? { chosen.flatMap { routes.contains($0) ? $0 : nil } ?? routes.first }
 
     private func findTailscale() async {
-        tailscale = .some(await PairingRoute.tailnetHost(port: PairingRoute.gatewayPort()))
+        if let port = PairingRoute.gatewayPort() {
+            tailnet = (await PairingRoute.tailnet(port: port), port)
+        } else {
+            tailnet = (.nothing, nil)
+        }
     }
 
     private func create() async {
@@ -195,45 +218,73 @@ nonisolated enum PairingRoute: Hashable, Sendable {
 
     static func serveCommand(port: Int) -> String { "tailscale serve --bg --https=8443 http://127.0.0.1:\(port)" }
 
-    /// The gateway's port in obid's configuration (`"gateway": "127.0.0.1:8810"`), else 8810.
-    static func gatewayPort(config: Data? = try? Data(contentsOf: FileManager.default.homeDirectoryForCurrentUser
-        .appending(path: "Library/Application Support/Oby/obid/config.json"))) -> Int {
-        guard let config, let object = try? JSONSerialization.jsonObject(with: config) as? [String: Any],
-              let gateway = object["gateway"] as? String, let port = gateway.split(separator: ":").last.flatMap({ Int($0) })
-        else { return 8810 }
+    static let configFile = FileManager.default.homeDirectoryForCurrentUser
+        .appending(path: "Library/Application Support/Oby/obid/config.json")
+
+    /// The gateway's port in obid's configuration (`"gateway": "127.0.0.1:8810"`): 8810 with no
+    /// configuration yet (obid writes that one), nil when it has no gateway or a port that isn't one.
+    static func gatewayPort(config: Data? = try? Data(contentsOf: configFile)) -> Int? {
+        guard let config else { return 8810 }
+        guard let object = try? JSONSerialization.jsonObject(with: config) as? [String: Any],
+              let gateway = object["gateway"] as? String,
+              let port = gateway.split(separator: ":").last.flatMap({ Int($0) }), (1...65535).contains(port)
+        else { return nil }
         return port
     }
 
-    static let tailscaleCLIs = ["/usr/local/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]
+    static let tailscaleCLIs = ["/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale",
+                                "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]
+
+    /// What the tailnet offers for pairing.
+    nonisolated enum Tailnet: Equatable, Sendable {
+        /// `host:port`, tailnet only.
+        case route(String)
+        /// The gateway is public through Funnel, somewhere: no route until that's off.
+        case funnel
+        /// No Tailscale, or nothing on it proxies to the gateway.
+        case nothing
+    }
 
     /// The tailnet route to the gateway on `port`, from the first Tailscale CLI there is. Only
-    /// `status` runs: Oby never changes Tailscale's configuration.
-    static func tailnetHost(port: Int, clis: [String] = tailscaleCLIs) async -> String? {
+    /// `status` runs: Oby never changes Tailscale's configuration. The app's own binary acts as the
+    /// CLI only with `TAILSCALE_BE_CLI` when no shell started it.
+    static func tailnet(port: Int, clis: [String] = tailscaleCLIs) async -> Tailnet {
         guard let cli = clis.first(where: FileManager.default.isExecutableFile(atPath:)),
-              let output = try? await Shell.run([cli, "serve", "status", "--json"], timeout: 5),
-              output.status == 0 else { return nil }
-        return tailnetHost(serveStatus: output.out, port: port)
+              let output = try? await LimitedCommand.run([cli, "serve", "status", "--json"], outputLimit: 1 << 20, timeout: 5,
+                                                         environment: ["PATH": "/usr/bin:/bin", "TAILSCALE_BE_CLI": "1"]),
+              output.status == 0 else { return .nothing }
+        return tailnet(serveStatus: output.out, port: port)
     }
 
     /// The `host:port` in `tailscale serve status --json` whose root proxies to the gateway on
-    /// 127.0.0.1:`port` (an HTTPS handler, or a TCP forward that ends TLS), tailnet only: one
-    /// that also allows Funnel is left out.
-    static func tailnetHost(serveStatus: Data, port: Int) -> String? {
-        guard let status = try? JSONDecoder().decode(ServeStatus.self, from: serveStatus) else { return nil }
-        let funnel = Set((status.AllowFunnel ?? [:]).filter(\.value).keys)
+    /// 127.0.0.1:`port` (an HTTPS handler, or a TCP forward that ends TLS), tailnet only. When any
+    /// Funnel `host:port` (in the background config or a foreground session's) reaches the gateway,
+    /// on any path, there's no route: pairing would advertise a gateway that's on the internet.
+    static func tailnet(serveStatus: Data, port: Int) -> Tailnet {
+        guard let status = try? JSONDecoder().decode(ServeStatus.self, from: serveStatus) else { return .nothing }
         let gateway = { (target: String?) in
             guard var target else { return false }
             if let scheme = target.firstRange(of: "://") {
-                guard target.hasPrefix("http://") else { return false }
+                guard target.hasPrefix("http://") || target.hasPrefix("tcp://") else { return false }
                 target = String(target[scheme.upperBound...])
             }
             return target == "127.0.0.1:\(port)" || target == "localhost:\(port)"
         }
+        let configs = [status] + (status.Foreground ?? [:]).values
+        let funnel = Set(configs.flatMap { ($0.AllowFunnel ?? [:]).filter(\.value).keys })
+        let exposed = configs.contains { config in
+            funnel.contains { hostPort in
+                let tcpPort = hostPort.split(separator: ":").last.map(String.init) ?? ""
+                return config.Web?[hostPort]?.Handlers?.values.contains { gateway($0.Proxy) } == true
+                    || gateway(config.TCP?[tcpPort]?.TCPForward)
+            }
+        }
+        if exposed { return .funnel }
         let web = (status.Web ?? [:]).filter { gateway($0.value.Handlers?["/"]?.Proxy) }.keys
         let tcp = (status.TCP ?? [:]).compactMap { tcpPort, handler in
             gateway(handler.TCPForward) ? handler.TerminateTLS.map { "\($0):\(tcpPort)" } : nil
         }
-        return (Array(web) + tcp).filter { !funnel.contains($0) && MacLink.isHostname($0) }.sorted().first
+        return (Array(web) + tcp).filter(MacLink.isHostname).sorted().first.map(Tailnet.route) ?? .nothing
     }
 
     /// The parts of Tailscale's ServeConfig that say where a port goes.
@@ -244,6 +295,8 @@ nonisolated enum PairingRoute: Hashable, Sendable {
         var TCP: [String: TCPHandler]?
         var Web: [String: Web]?
         var AllowFunnel: [String: Bool]?
+        /// `tailscale serve` or `funnel` run without `--bg`, by session.
+        var Foreground: [String: ServeStatus]?
     }
 }
 

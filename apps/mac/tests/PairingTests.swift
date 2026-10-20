@@ -31,32 +31,63 @@ struct PairingTests {
      "AllowFunnel": {"mac.tail0000.ts.net:443": true}}
     """#
 
+    static func tailnet(_ json: String, port: Int = 8810) -> PairingRoute.Tailnet {
+        PairingRoute.tailnet(serveStatus: Data(json.utf8), port: port)
+    }
+
+    /// Funnel on :443 goes to another server there, not the gateway: the tailnet route stands.
     @Test func theTailnetRouteIsTheServeURLThatProxiesToTheGateway() {
-        #expect(PairingRoute.tailnetHost(serveStatus: Data(Self.serve.utf8), port: 8810) == "mac.tail0000.ts.net:8443")
+        #expect(Self.tailnet(Self.serve) == .route("mac.tail0000.ts.net:8443"))
     }
 
     @Test func aFunnelURLIsNeverTheRoute() {
         let json = #"{"Web": {"mac.tail0000.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8810"}}}}, "AllowFunnel": {"mac.tail0000.ts.net:443": true}}"#
-        #expect(PairingRoute.tailnetHost(serveStatus: Data(json.utf8), port: 8810) == nil)
+        #expect(Self.tailnet(json) == .funnel)
+    }
+
+    @Test func aFunnelToTheGatewayOnAnyPathRulesOutTheTailnetRoute() {
+        let json = #"""
+        {"Web": {"mac.tail0000.ts.net:443": {"Handlers": {"/oby": {"Proxy": "http://127.0.0.1:8810"}}},
+                 "mac.tail0000.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8810"}}}},
+         "AllowFunnel": {"mac.tail0000.ts.net:443": true}}
+        """#
+        #expect(Self.tailnet(json) == .funnel)
+    }
+
+    @Test func aForegroundFunnelToTheGatewayRulesOutTheTailnetRoute() {
+        let json = #"""
+        {"Web": {"mac.tail0000.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8810"}}}},
+         "Foreground": {"session-1": {"TCP": {"443": {"HTTPS": true}},
+                                      "Web": {"mac.tail0000.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8810"}}}},
+                                      "AllowFunnel": {"mac.tail0000.ts.net:443": true}}}}
+        """#
+        #expect(Self.tailnet(json) == .funnel)
+    }
+
+    @Test func aTCPFunnelToTheGatewayRulesOutTheTailnetRoute() {
+        let json = #"""
+        {"TCP": {"10000": {"TCPForward": "127.0.0.1:8810"}},
+         "Web": {"mac.tail0000.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8810"}}}},
+         "AllowFunnel": {"mac.tail0000.ts.net:10000": true}}
+        """#
+        #expect(Self.tailnet(json) == .funnel)
     }
 
     @Test func aServeURLForAnotherPortOrPathIsNotTheRoute() {
-        #expect(PairingRoute.tailnetHost(serveStatus: Data(Self.serve.utf8), port: 9999) == nil)
-        let path = #"{"Web": {"mac.tail0000.ts.net:8443": {"Handlers": {"/oby": {"Proxy": "http://127.0.0.1:8810"}}}}}"#
-        #expect(PairingRoute.tailnetHost(serveStatus: Data(path.utf8), port: 8810) == nil)
+        #expect(Self.tailnet(Self.serve, port: 9999) == .nothing)
+        #expect(Self.tailnet(#"{"Web": {"mac.tail0000.ts.net:8443": {"Handlers": {"/oby": {"Proxy": "http://127.0.0.1:8810"}}}}}"#) == .nothing)
     }
 
     @Test func aTCPForwardThatEndsTLSIsARoute() {
-        let json = #"{"TCP": {"8443": {"TCPForward": "127.0.0.1:8810", "TerminateTLS": "mac.tail0000.ts.net"}}}"#
-        #expect(PairingRoute.tailnetHost(serveStatus: Data(json.utf8), port: 8810) == "mac.tail0000.ts.net:8443")
-        let plain = #"{"TCP": {"8443": {"TCPForward": "127.0.0.1:8810"}}}"#
-        #expect(PairingRoute.tailnetHost(serveStatus: Data(plain.utf8), port: 8810) == nil)
+        #expect(Self.tailnet(#"{"TCP": {"8443": {"TCPForward": "127.0.0.1:8810", "TerminateTLS": "mac.tail0000.ts.net"}}}"#)
+            == .route("mac.tail0000.ts.net:8443"))
+        #expect(Self.tailnet(#"{"TCP": {"8443": {"TCPForward": "127.0.0.1:8810"}}}"#) == .nothing)
     }
 
     @Test func noTailscaleMeansNoTailnetRoute() async {
-        #expect(await PairingRoute.tailnetHost(port: 8810, clis: ["/nonexistent/tailscale"]) == nil)
-        #expect(PairingRoute.tailnetHost(serveStatus: Data("{}".utf8), port: 8810) == nil)
-        #expect(PairingRoute.tailnetHost(serveStatus: Data("not json".utf8), port: 8810) == nil)
+        #expect(await PairingRoute.tailnet(port: 8810, clis: ["/nonexistent/tailscale"]) == .nothing)
+        #expect(Self.tailnet("{}") == .nothing)
+        #expect(Self.tailnet("not json") == .nothing)
     }
 
     @Test func remoteAccessComesFirstThenTheTailnet() {
@@ -67,9 +98,11 @@ struct PairingTests {
         #expect(PairingRoute.tailscale("mac.tail0000.ts.net:8443").label == "Over Tailscale: mac.tail0000.ts.net:8443")
     }
 
-    @Test func theGatewayPortIsObidsOrTheDefault() {
+    @Test func theGatewayPortIsObidsOrNoneWhenItHasNoGateway() {
         #expect(PairingRoute.gatewayPort(config: Data(#"{"gateway": "127.0.0.1:9910"}"#.utf8)) == 9910)
-        #expect(PairingRoute.gatewayPort(config: Data("{}".utf8)) == 8810)
         #expect(PairingRoute.gatewayPort(config: nil) == 8810)
+        #expect(PairingRoute.gatewayPort(config: Data("{}".utf8)) == nil)
+        #expect(PairingRoute.gatewayPort(config: Data(#"{"gateway": "127.0.0.1:70000"}"#.utf8)) == nil)
+        #expect(PairingRoute.gatewayPort(config: Data(#"{"gateway": "127.0.0.1:0"}"#.utf8)) == nil)
     }
 }
