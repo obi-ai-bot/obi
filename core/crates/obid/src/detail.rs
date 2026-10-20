@@ -113,7 +113,19 @@ pub fn masked(text: &str) -> String {
     if text.len() <= TEXT_BYTES {
         return mask(text);
     }
-    capped(&mask(prefix(text, TEXT_BYTES + MARGIN)))
+    // Up to the last line break (or space) in reach: masking can shrink the text enough to bring
+    // a piece cut off at the end under the cap, and what's left of a secret there isn't one.
+    let reach = prefix(text, TEXT_BYTES + MARGIN);
+    let whole = reach
+        .rfind('\n')
+        .or_else(|| reach.rfind(char::is_whitespace))
+        .map_or(reach, |at| &reach[..at]);
+    let kept = capped(&mask(whole));
+    if kept.ends_with('…') {
+        kept
+    } else {
+        format!("{kept}…")
+    }
 }
 
 /// The first `bytes` of `text` at most, at a character.
@@ -454,5 +466,24 @@ mod tests {
             "{text}"
         );
         assert!(text.ends_with("\nok"));
+    }
+
+    #[test]
+    fn a_piece_cut_off_never_slips_under_the_cap() {
+        // Text that masking shrinks a lot, then a token the first cut falls inside.
+        let value = ["shrink-", "secret/"].concat() + &"Q7m2+a=b".repeat(12);
+        crate::secrets::known().learn("vault shrink-test", &value);
+        let mut text = String::new();
+        while text.len() + value.len() + 1 < TEXT_BYTES + MARGIN - 10 {
+            text.push_str(&value);
+            text.push('\n');
+        }
+        text.push_str(&["ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"].concat());
+        text.push_str(" and the rest\n");
+        let kept = masked(&text);
+        crate::secrets::known().forget("vault shrink-test");
+        assert!(kept.len() < TEXT_BYTES, "it shrank: {}", kept.len());
+        assert!(!kept.contains("ghp_"), "{}", &kept[kept.len() - 60..]);
+        assert!(kept.ends_with('…'));
     }
 }
