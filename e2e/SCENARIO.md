@@ -36,7 +36,7 @@ The harness is [`e2e/run.mjs`](run.mjs). It runs five **preflight** checks (Node
 
 ```sh
 SPHERE_OPERATOR_TOKEN="$(security find-generic-password -s obi-sphere-operator-token -w)" \
-OBI_SPHERE_URL=https://obi-sphere.well0cp.workers.dev OBI_E2E_REMOTE=1 make e2e
+OBI_SPHERE_URL=https://obysphere.deskree.com OBI_E2E_REMOTE=1 make e2e
 ```
 
 Three things must all be set, or the run refuses before it starts anything (exit 2): `OBI_SPHERE_URL`, `SPHERE_OPERATOR_TOKEN`, and `OBI_E2E_REMOTE=1` or `--remote` (`node e2e/run.mjs --remote`). With `CI` set, only `OBI_E2E_REMOTE=1` is accepted. Only the URL's origin is printed.
