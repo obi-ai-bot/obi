@@ -809,7 +809,7 @@ pub async fn plan(
             {
                 Ok(data) => data,
                 Err(Failure::Halted) => return planned,
-                Err(Failure::Failed(why)) => {
+                Err(Failure::Failed(why) | Failure::TimedOut(why)) => {
                     planned
                         .refused
                         .push(format!("{} failed: {why}", adapter.name()));

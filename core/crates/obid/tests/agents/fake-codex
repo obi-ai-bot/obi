@@ -26,7 +26,8 @@
 //                    more, reported in `thread/tokenUsage/updated` twice
 // It answers `account/read` (once the turn starts) as a ChatGPT (plan) login, or an API key's when
 // the task says APIKEY.
-//   a brain's prompt answers one plan: a reply "From Codex.", with work.md's first line
+//   a brain's prompt answers one plan: a reply "From Codex.", with work.md's first line; one
+//                    whose words hold STALL never answers
 //   anything else    "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable, or
 // obid's token, and when obid starts a thread anywhere but in a sandbox it has to ask about.
@@ -77,6 +78,8 @@ async function runTurn(turnId, prompt) {
   const task = state.task;
   // Oby's brain (`CodexBrain`): one plan, read from work.md when there is one.
   if (task.includes("Return exactly one JSON object matching this JSON schema")) {
+    // Words with STALL in them: it never answers, as a Codex on a Mac too busy to think.
+    if (task.includes("STALL")) return;
     const read = existsSync("work.md") ? ` It read work.md: ${readFileSync("work.md", "utf8").split("\n")[0]}` : "";
     return complete(turnId, `The plan: {"action":"reply_only","reply":"From Codex.${read}","dispatches":[],"question":null}`);
   }

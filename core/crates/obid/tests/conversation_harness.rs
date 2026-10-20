@@ -665,6 +665,52 @@ fn oby_dispatch_starts_a_job_whose_card_is_on_the_turn() {
     assert!(started < answered, "{seen:?}");
 }
 
+/// The check the owner named ("Check: …") goes on the job exactly, so obid runs it before it
+/// publishes; one the owner's words don't hold leaves the repository's own; one that isn't one
+/// line is refused.
+#[test]
+fn oby_dispatch_carries_the_check_the_owner_named() {
+    let (_folder, obid) = obid("harness-dispatch-check", true);
+    let answer = said(
+        &obid,
+        json!({"said": concat!("Check: cd core && cargo test -p obid --lib brain::supervisor\n",
+               r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "fix", "check": " cd core && cargo test -p obid --lib brain::supervisor "}"#),
+               "new": true}),
+    );
+    let jobs = answer.body["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1, "{}", answer.text);
+    let id = jobs[0]["id"].as_str().unwrap();
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None);
+    assert_eq!(
+        job.body["check"], "cd core && cargo test -p obid --lib brain::supervisor",
+        "{}",
+        job.text
+    );
+    // The agent's own `true`, which the owner's words hold but never name as the check, can't
+    // replace the fixture's `node --test`.
+    let weaker = said(
+        &obid,
+        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "fix", "check": "true"}"#,
+               "new": true}),
+    );
+    let id = weaker.body["jobs"][0]["id"].as_str().unwrap();
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None);
+    assert_eq!(job.body["check"], "node --test", "{}", job.text);
+    let refused = said(
+        &obid,
+        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "check": "true\nrm -rf x"}"#,
+               "new": true}),
+    );
+    assert!(
+        refused.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("check must be one line"),
+        "{}",
+        refused.text
+    );
+}
+
 /// What widens trust is the owner's alone: a Bypass job waits for their Confirm, and the agent
 /// can't answer a confirm item.
 #[test]

@@ -398,6 +398,7 @@ mod tests {
             by: "rules".into(),
             refused: vec![],
             calls: vec![],
+            failed: None,
         };
         assert_eq!(
             acting_refusal(&planned, 0),
@@ -417,6 +418,7 @@ mod tests {
             by: "rules".into(),
             refused: vec![],
             calls: vec![],
+            failed: None,
         };
         assert_eq!(acting_refusal(&asked, 0), None);
         let brain = Planned {
@@ -462,6 +464,7 @@ mod tests {
             by: "claude".into(),
             refused: vec![],
             calls: vec![],
+            failed: None,
         };
         let line =
             super::super::planner::Record::new("finish oby #19 from PR #124", &planned).line();
