@@ -151,7 +151,9 @@ struct WorkGroupsTests {
         #expect(WorkList.counts(done, toDo: 57) == [.todo: 57, .running: 0, .done: 1])
         #expect(WorkList.counts(done, toDo: nil, upcoming: 2) == [.running: 2, .done: 1])
         #expect(WorkList.firstTab(done, toDo: true) == .todo)
-        #expect(WorkList.firstTab([WorkList.Item<String>](), toDo: true) == .todo)
+        // With nothing to do (and GitHub connected), it never opens on an empty To do.
+        #expect(WorkList.firstTab(done, toDo: false) == .done)
+        #expect(WorkList.firstTab([WorkList.Item<String>](), toDo: false) == .running)
         #expect(WorkList.firstTab(done + [item("n", .issues, .needs)], toDo: true) == .running)
         #expect(WorkList.firstTab(done + [item("r", .issues, .running)], toDo: true) == .running)
     }

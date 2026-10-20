@@ -80,9 +80,11 @@ struct GitHubToDo: View {
     var body: some View {
         if let connect { connect }
         let named = columns.contains { $0.name != nil }
+        // Two projects' boards: each column says whose it is.
+        let projects = Set(columns.compactMap(\.project)).count > 1
         ForEach(columns) { column in
             if named {
-                Text(verbatim: column.name ?? "Not on a board").font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.muted)
+                Text(verbatim: column.name.map { name in projects ? column.project.map { "\(name) · \($0)" } ?? name : name } ?? "Not on a board").font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.muted)
                     .padding(.horizontal, 4).padding(.top, 8).accessibilityAddTraits(.isHeader)
             }
             ForEach(column.items) { item in

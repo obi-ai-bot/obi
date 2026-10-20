@@ -58,6 +58,17 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
             var project: String?
             /// Its column there, "Todo" or "In progress".
             var column: String?
+
+            private enum Keys: String, CodingKey { case project, column }
+
+            init(project: String? = nil, column: String? = nil) { (self.project, self.column) = (project, column) }
+
+            /// Each field on its own: one this app can't read is left out, not the whole board.
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: Keys.self)
+                project = (try? c.decodeIfPresent(String.self, forKey: .project)) ?? nil
+                column = (try? c.decodeIfPresent(String.self, forKey: .column)) ?? nil
+            }
         }
 
         private enum Keys: String, CodingKey { case id, list, repo, number, title, url, author, updated, draft, reviewDecision, checks, known, job, board }
@@ -249,23 +260,35 @@ extension GitHubWork {
             .sorted { ($0.updated ?? .distantPast) > ($1.updated ?? .distantPast) }
     }
 
-    /// One group of a kind's To do tab: the waiting items in one board column (`name`), or on no
-    /// board (`nil`).
+    /// One group of a kind's To do tab: the waiting items in one board column (`name`) of one
+    /// project (`project`), or on no board (`name` nil).
     nonisolated struct Column: Identifiable, Equatable, Sendable {
         var name: String?
+        var project: String?
         var items: [Item]
-        var id: String { name ?? "" }
+        var id: String { "\(project ?? "")\u{1F}\(name ?? "")" }
+
+        /// Where a column goes on the tab: the work under way first, then what's next, the rest
+        /// by name, items on no board last.
+        static func rank(_ name: String?) -> Int {
+            guard let name else { return 5 }
+            return ["in progress", "in review", "todo", "backlog"].firstIndex(of: name.lowercased()) ?? 4
+        }
     }
 
-    /// A kind's To do tab: its waiting items (`waiting`) by board column, the columns in the order
-    /// their newest item comes, the items on no board last. Without boards, one group with no name.
-    /// ponytail: the feed doesn't say the board's own column order; use it once obid sends it.
+    /// A kind's To do tab: its waiting items (`waiting`, newest first) by project and board column,
+    /// the columns in a fixed order (`Column.rank`, then by name and project), the items on no
+    /// board last. Without boards, one group with no name.
     func toDo(_ kind: WorkType, later: Set<String> = []) -> [Column] {
         var columns: [Column] = []
         for item in waiting(kind, later: later) {
-            if let at = columns.firstIndex(where: { $0.name == item.column }) { columns[at].items.append(item) } else { columns.append(Column(name: item.column, items: [item])) }
+            let project = item.column == nil ? nil : item.board?.project.map(GitHubWork.plain)
+            if let at = columns.firstIndex(where: { $0.name == item.column && $0.project == project }) { columns[at].items.append(item) }
+            else { columns.append(Column(name: item.column, project: project, items: [item])) }
         }
-        return columns.filter { $0.name != nil } + columns.filter { $0.name == nil }
+        return columns.sorted {
+            (Column.rank($0.name), $0.name?.lowercased() ?? "", $0.project ?? "") < (Column.rank($1.name), $1.name?.lowercased() ?? "", $1.project ?? "")
+        }
     }
 
     /// A GitHub page to open: `https://github.com/…` and nothing else (no other host, no login in

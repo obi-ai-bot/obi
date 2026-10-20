@@ -303,6 +303,9 @@ struct KindPage: View {
     private var connect: GitHubWork.Connect { gitHub ? .init(phone.gitHubWork) : .unknown }
     /// Routines only: each routine's next run.
     private var upcoming: [RunnerRoutine] { kind == .routines ? RunnerRoutine.upcoming(phone.routines) : [] }
+    /// To do is where the page opens, unless a job runs or needs you, only when it has something:
+    /// GitHub's items, or Connect GitHub.
+    private var opensOnToDo: Bool { gitHub && (!toDo.isEmpty || connect == .signedOut) }
     private var toDo: [GitHubWork.Column] { gitHub ? phone.gitHubWork?.toDo(kind, later: phone.gitHubLater) ?? [] : [] }
 
     /// GitHub's sign-in is the Mac's alone: a paired phone never signs the Mac in to someone's GitHub.
@@ -310,7 +313,7 @@ struct KindPage: View {
 
     var body: some View {
         let items = WorkList.ranked(phone.work.filter { $0.type == kind })
-        let tab = picked ?? WorkList.firstTab(items, toDo: gitHub)
+        let tab = picked ?? WorkList.firstTab(items, toDo: opensOnToDo)
         let columns = toDo
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
@@ -344,7 +347,9 @@ struct KindPage: View {
         .obyPage()
         .navigationBarTitleDisplayMode(.inline)
         // The tab it opens on stays put while you're on it, so a task arriving doesn't switch it.
-        .onAppear { picked = picked ?? WorkList.firstTab(items, toDo: gitHub) }
+        // On Review PR and Issues it waits for GitHub's list, so it doesn't settle on an empty Running first.
+        .onAppear { if !gitHub || phone.gitHubWork != nil { picked = picked ?? WorkList.firstTab(items, toDo: opensOnToDo) } }
+        .onChange(of: phone.gitHubWork == nil) { if picked == nil { picked = WorkList.firstTab(items, toDo: opensOnToDo) } }
         .refreshable { await phone.reload() }
         // Opening Review PR or Issues looks at GitHub again; the list arrives as an event.
         .task { if gitHub { await phone.refreshGitHubWork() } }
