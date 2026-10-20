@@ -15,7 +15,7 @@
 
 import { CloudflareError, CloudflareSetupError, type TunnelAPI, type TunnelStatus } from "./cloudflare";
 import type { Env } from "./env";
-import { type Limit, takeOne } from "./limits";
+import { counted as countedSoFar, type Limit, takeOne } from "./limits";
 import { type KeyCache, sha256Hex, TokenError, verifyAppleToken, verifyGoogleToken } from "./signin";
 import { addressBucket, canonicalKey, networkBucket, newId, opaqueLabel, randomBytes, registrableDomain, tunnelSecret, verifyP256 } from "./tokens";
 
@@ -53,14 +53,29 @@ export const STATUS_BATCH = 8;
 export const UNCONNECTED_PER_NETWORK = 20;
 /// What one account (Apple or Google) may have: live installations and live endpoints.
 export const PER_ACCOUNT = { installations: 5, endpoints: 5 };
-/// What every Google account under one domain may have together: live endpoints, and Macs set up
-/// a day (LIMITS.registrationsPerDomain). Google accounts are cheap in bulk (a domain on free Cloud
-/// Identity, or a catch-all domain, gives hundreds), so per-account limits alone wouldn't keep
-/// one domain from filling MAX_ENDPOINTS. The domain is the Workspace's (`hd`), else the verified
-/// email's; shared mail domains, which say nothing about who owns an account, aren't limited
-/// together, and Apple accounts have no domain.
-export const PER_DOMAIN = { endpoints: 25 };
-export const SHARED_MAIL_DOMAINS = new Set(["gmail.com", "googlemail.com"]);
+/// What every Google account under one registrable domain (`users.limit_domain`) may have
+/// together: live endpoints, and Macs set up a day. Google accounts are cheap in bulk (a domain on
+/// free Cloud Identity, or a catch-all domain, gives hundreds, and subdomains as many as you like),
+/// so per-account limits alone wouldn't keep one domain from filling MAX_ENDPOINTS. A Workspace
+/// account (`hd`) is counted under its Workspace's domain, with the allowance in wrangler.jsonc
+/// (WORKSPACE_DOMAIN_*); any other under its email's, with the fixed one here. Public mail
+/// providers say nothing about who owns an account, and one shared bucket would let a stranger
+/// lock their users out, so their accounts aren't limited together; Apple accounts have no domain.
+export const PER_DOMAIN = { endpoints: 25, registrations: 20 };
+/// Free mail providers whose addresses a Google account may use: exact registrable domains, never
+/// a pattern, so a look-alike (`yahoo.xyz`) isn't exempt. Small ones not here share a bucket per
+/// domain: a residual risk of lock-out for their users, not of abuse.
+export const PUBLIC_MAIL_DOMAINS = new Set([
+  "gmail.com", "googlemail.com",
+  "outlook.com", "hotmail.com", "live.com", "msn.com", "hotmail.co.uk", "outlook.fr", "hotmail.fr", "live.co.uk",
+  "yahoo.com", "ymail.com", "rocketmail.com", "yahoo.co.uk", "yahoo.co.jp", "yahoo.fr", "yahoo.de", "yahoo.it", "yahoo.es", "yahoo.ca", "yahoo.co.in", "yahoo.com.br", "yahoo.com.au", "yahoo.com.mx", "yahoo.com.ar",
+  "icloud.com", "me.com", "mac.com",
+  "proton.me", "protonmail.com", "pm.me",
+  "aol.com",
+  "gmx.com", "gmx.net", "gmx.de", "gmx.at", "gmx.ch",
+  "yandex.ru", "yandex.com", "ya.ru",
+  "mail.ru", "qq.com", "163.com", "126.com",
+]);
 /// How long a sign-in started on a Mac has to finish at Apple or Google and be used to register.
 export const SIGN_IN_MINUTES = 10;
 /// Sign-ins started, and new installations, per account (`users.sub`) and, as a generous backstop,
@@ -72,7 +87,6 @@ export const LIMITS = {
   signInsPerAddress: { max: 30, windowSeconds: 60 * 60 } satisfies Limit,
   signInCallbacksPerAddress: { max: 60, windowSeconds: 60 * 60 } satisfies Limit,
   registrationsPerAccount: { max: 10, windowSeconds: 24 * 60 * 60 } satisfies Limit,
-  registrationsPerDomain: { max: 20, windowSeconds: 24 * 60 * 60 } satisfies Limit,
   registrationsPerAddress: { max: 20, windowSeconds: 60 * 60 } satisfies Limit,
   registrationsPerNetwork: { max: 100, windowSeconds: 60 * 60 } satisfies Limit,
   endpointChangesPerInstallation: { max: 5, windowSeconds: 60 * 60 } satisfies Limit,
@@ -239,13 +253,13 @@ async function finishSignIn(request: Request, env: Env, deps: Deps, now: () => D
   // Cancelled at the provider (`error`), or no such sign-in, or used already: back to the Mac, which says so.
   if (!pending || !token) return back("failed", state);
   let account: string;
-  let domains: { workspace: string | null; email: string | null } = { workspace: null, email: null };
+  let domains: { workspace: string | null; email: string | null; limit: string | null } = { workspace: null, email: null, limit: null };
   try {
     const audience = setting(env, provider, "client");
     if (provider === "google") {
       const google = await verifyGoogleToken(token, deps.google, audience, pending.nonce_hash, now());
       account = `google:${google.sub}`;
-      domains = { workspace: google.workspaceDomain, email: google.emailDomain };
+      domains = { workspace: google.workspaceDomain, email: google.emailDomain, limit: limitDomain(google.workspaceDomain, google.emailDomain) };
     } else {
       account = await verifyAppleToken(token, deps.apple, audience, pending.nonce_hash, now());
     }
@@ -257,22 +271,31 @@ async function finishSignIn(request: Request, env: Env, deps: Deps, now: () => D
   const code = base64url(randomBytes(32));
   await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO users (sub, provider, workspace_domain, email_domain, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
-       ON CONFLICT (sub) DO UPDATE SET workspace_domain = excluded.workspace_domain, email_domain = excluded.email_domain`,
-    ).bind(account, provider, domains.workspace, domains.email, iso(now())),
+      `INSERT INTO users (sub, provider, workspace_domain, email_domain, limit_domain, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+       ON CONFLICT (sub) DO UPDATE SET workspace_domain = excluded.workspace_domain, email_domain = excluded.email_domain, limit_domain = excluded.limit_domain`,
+    ).bind(account, provider, domains.workspace, domains.email, domains.limit, iso(now())),
     env.DB.prepare("UPDATE sign_ins SET sub = ?2, code_hash = ?3 WHERE state = ?1 AND sub IS NULL").bind(state, account, await sha256Hex(code)),
   ]);
   return back("done", state, code);
 }
 
-/// An account's domain for the limits, in SQL over `users u`: the Workspace's, else the email's
-/// (`users_by_domain` indexes it).
-const DOMAIN = "COALESCE(u.workspace_domain, u.email_domain)";
+/// The registrable domain a Google account's limits are shared under (`users.limit_domain`): its
+/// Workspace's, so `a.evil.com` and `b.evil.com` are one; else its email's, unless that's a public
+/// mail provider (null). A domain the short suffix list can't reduce is kept whole: never no limit.
+function limitDomain(workspace: string | null, email: string): string | null {
+  if (workspace) return registrableDomain(workspace) ?? workspace;
+  const domain = registrableDomain(email) ?? email;
+  return PUBLIC_MAIL_DOMAINS.has(domain) ? null : domain;
+}
 
-/// The domain an account's limits are shared under, or null: none for Apple, or a shared mail
-/// domain.
-function limitedDomain(domain: string | null): string | null {
-  return domain && !SHARED_MAIL_DOMAINS.has(domain) ? domain : null;
+/// What an account's domain may have together (PER_DOMAIN): a Workspace's allowance from
+/// wrangler.jsonc, or the fixed one for an email domain.
+function domainAllowance(env: Env, workspace: boolean): { endpoints: number; registrations: number } {
+  if (!workspace) return PER_DOMAIN;
+  return {
+    endpoints: whole(env.WORKSPACE_DOMAIN_ENDPOINTS, "WORKSPACE_DOMAIN_ENDPOINTS", 1, 100_000),
+    registrations: whole(env.WORKSPACE_DOMAIN_REGISTRATIONS, "WORKSPACE_DOMAIN_REGISTRATIONS", 1, 100_000),
+  };
 }
 
 /// A provider's setting from wrangler.jsonc, or the control plane says it isn't set up.
@@ -309,11 +332,11 @@ async function register(request: Request, env: Env, deps: Deps, now: () => Date)
   const code = typeof call.body.signInCode === "string" ? call.body.signInCode : "";
   const seconds = Math.floor(now().getTime() / 1000);
   const signIn = await env.DB.prepare(
-    `SELECT s.sub, s.code_hash, ${DOMAIN} AS domain FROM sign_ins s JOIN users u ON u.sub = s.sub
+    `SELECT s.sub, s.code_hash, u.limit_domain, u.workspace_domain IS NOT NULL AS workspace FROM sign_ins s JOIN users u ON u.sub = s.sub
      WHERE s.state = ?1 AND s.public_key = ?2 AND s.used_at IS NULL AND s.expires_at > ?3`,
   )
     .bind(state, call.key, seconds)
-    .first<{ sub: string; code_hash: string; domain: string | null }>();
+    .first<{ sub: string; code_hash: string; limit_domain: string | null; workspace: number }>();
   if (!signIn || !code || (await sha256Hex(code)) !== signIn.code_hash) throw new Reply(403, "Sign in with Apple or Google first.");
   await spend(env.DB, call);
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
@@ -321,10 +344,14 @@ async function register(request: Request, env: Env, deps: Deps, now: () => Date)
   await limit(env.DB, counted[0]!, LIMITS.registrationsPerAccount, now(), "This account set up too many Macs today.");
   await limit(env.DB, counted[1]!, LIMITS.registrationsPerAddress, now(), "Too many Macs were set up from this network lately.");
   await limit(env.DB, counted[2]!, LIMITS.registrationsPerNetwork, now(), "Too many Macs were set up from this network lately.");
-  const domain = limitedDomain(signIn.domain);
+  const domain = signIn.limit_domain;
   if (domain) {
     counted.push(`registrations:domain:${domain}`);
-    await limit(env.DB, counted[3]!, LIMITS.registrationsPerDomain, now(), `Accounts at ${domain} set up too many Macs today.`);
+    const allowance = { max: domainAllowance(env, !!signIn.workspace).registrations, windowSeconds: 24 * 60 * 60 };
+    // Looked at before it's taken: a refused try (a personal account on a Workspace's addresses,
+    // past the smaller allowance) doesn't spend what the Workspace's own accounts may use.
+    if ((await countedSoFar(env.DB, counted[3]!, allowance, now())) >= allowance.max) throw new Reply(429, `Accounts at ${domain} set up too many Macs today. Try again tomorrow.`);
+    await limit(env.DB, counted[3]!, allowance, now(), `Accounts at ${domain} set up too many Macs today.`);
   }
   // ponytail: counted, then inserted: two registrations at once for one account can both find
   // room and leave it a Mac over PER_ACCOUNT.installations; registrationsPerAccount bounds that.
@@ -395,16 +422,22 @@ async function createEndpoint(request: Request, env: Env, deps: Deps, now: () =>
   {
     const theirs = (await env.DB.prepare("SELECT count(*) AS n FROM endpoints e JOIN installations i ON i.id = e.installation_id WHERE i.user_sub = ?1").bind(row.user_sub).first<{ n: number }>())?.n ?? 0;
     if (theirs >= PER_ACCOUNT.endpoints) throw new Reply(409, `This account has ${PER_ACCOUNT.endpoints} Macs with remote access on already. Forget one first.`);
-    const owner = await env.DB.prepare(`SELECT ${DOMAIN} AS domain FROM users u WHERE u.sub = ?1`).bind(row.user_sub).first<{ domain: string | null }>();
-    const domain = limitedDomain(owner?.domain ?? null);
+    const owner = await env.DB.prepare("SELECT limit_domain, workspace_domain IS NOT NULL AS workspace FROM users WHERE sub = ?1")
+      .bind(row.user_sub)
+      .first<{ limit_domain: string | null; workspace: number }>();
+    const domain = owner?.limit_domain;
     if (domain) {
+      // A Workspace account counts against its Workspace's allowance, any other against the email
+      // domain's, over every endpoint under the domain: someone with personal accounts on a
+      // company's addresses can't push past the smaller one.
+      const allowed = domainAllowance(env, !!owner.workspace).endpoints;
       const shared =
         (
-          await env.DB.prepare(`SELECT count(*) AS n FROM endpoints e JOIN installations i ON i.id = e.installation_id JOIN users u ON u.sub = i.user_sub WHERE ${DOMAIN} = ?1`)
+          await env.DB.prepare("SELECT count(*) AS n FROM endpoints e JOIN installations i ON i.id = e.installation_id JOIN users u ON u.sub = i.user_sub WHERE u.limit_domain = ?1")
             .bind(domain)
             .first<{ n: number }>()
         )?.n ?? 0;
-      if (shared >= PER_DOMAIN.endpoints) throw new Reply(409, `Accounts at ${domain} have ${PER_DOMAIN.endpoints} Macs with remote access on already. Forget one first.`);
+      if (shared >= allowed) throw new Reply(409, `Accounts at ${domain} have ${allowed} Macs with remote access on already. Forget one first.`);
     }
   }
   await limitEndpointChanges(env.DB, row, now());

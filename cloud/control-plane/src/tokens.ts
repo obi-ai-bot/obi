@@ -96,11 +96,15 @@ export function networkBucket(address: string): string {
   return octets.length === 4 ? `${octets.slice(0, 3).join(".")}.0/24` : address;
 }
 
-// ponytail: a handful of two-level public suffixes, not the Public Suffix List; load the list if
-// a device or product domain ever sits under one not here.
+// ponytail: a few dozen two-level public suffixes, not the Public Suffix List. Under one not here
+// (say `example.com.xx`), the "registrable domain" comes out as the suffix itself: for the device
+// and product domains that refuses too much, and for Google accounts' per-domain limits (src/app.ts,
+// PER_DOMAIN) it puts every company under that suffix in one bucket. Load the list if either bites.
 const TWO_LEVEL_SUFFIXES = new Set([
-  "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp", "ne.jp", "or.jp",
-  "com.br", "net.br", "com.cn", "com.hk", "com.sg", "co.in", "co.za", "com.mx", "com.tr", "co.kr", "com.tw", "com.ar",
+  "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "edu.au", "gov.au", "co.nz", "co.jp", "ne.jp", "or.jp", "ac.jp",
+  "com.br", "net.br", "org.br", "edu.br", "gov.br", "com.cn", "com.hk", "com.sg", "co.in", "co.za", "com.mx", "com.tr", "co.kr", "com.tw", "com.ar",
+  "com.co", "com.pe", "com.ve", "com.ec", "com.uy", "com.py", "com.bo", "co.il", "co.id", "com.my", "com.ph", "com.vn", "com.pk", "com.ng",
+  "com.eg", "com.sa", "co.th", "com.ua",
 ]);
 
 /// The registrable domain `domain` is under (eTLD+1): `devices.example.co.uk` is `example.co.uk`.

@@ -12,10 +12,13 @@ ALTER TABLE users ADD COLUMN provider TEXT NOT NULL DEFAULT 'apple';
 ALTER TABLE users ADD COLUMN workspace_domain TEXT;
 -- `email_domain` is the domain of the email Google verified. It shows only that the address was
 -- reachable once (a personal Google account made on alice@deskree.com keeps it after Alice
--- leaves), so it never grants membership. Remote access uses COALESCE(workspace_domain,
--- email_domain) only to limit how much one domain's accounts can hold (src/app.ts, PER_DOMAIN).
+-- leaves), so it never grants membership.
 ALTER TABLE users ADD COLUMN email_domain TEXT;
-CREATE INDEX users_by_domain ON users (COALESCE(workspace_domain, email_domain));
+-- The registrable domain whose accounts share remote access's per-domain limits (src/app.ts,
+-- PER_DOMAIN): the Workspace's, else the email's; null for Apple and for public mail providers.
+-- Never membership.
+ALTER TABLE users ADD COLUMN limit_domain TEXT;
+CREATE INDEX users_by_limit_domain ON users (limit_domain);
 
 -- Which provider a sign-in was started for: only that provider's callback finishes it.
 ALTER TABLE sign_ins ADD COLUMN provider TEXT NOT NULL DEFAULT 'apple';

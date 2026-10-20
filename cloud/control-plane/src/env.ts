@@ -19,6 +19,10 @@ export interface Env {
   /// /v1/auth/google/callback. Public: the ID token flow needs no client secret.
   GOOGLE_CLIENT_ID: string;
   GOOGLE_REDIRECT_URI: string;
+  /// What every Google account of one Workspace (`hd`, by registrable domain) may have together:
+  /// live endpoints, and Macs set up a day (src/app.ts, PER_DOMAIN). Whole numbers.
+  WORKSPACE_DOMAIN_ENDPOINTS: string;
+  WORKSPACE_DOMAIN_REGISTRATIONS: string;
   /// The most endpoints (tunnels and hostnames) alive at once.
   MAX_ENDPOINTS: string;
   /// What every tunnel routes to on the Mac: the gateway, http://127.0.0.1:8810.

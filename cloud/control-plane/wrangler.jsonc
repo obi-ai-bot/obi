@@ -26,6 +26,11 @@
     // client secret. Empty until the owner makes the client: Sign in with Google answers 503.
     "GOOGLE_CLIENT_ID": "",
     "GOOGLE_REDIRECT_URI": "https://oby-control.tetrix.pro/v1/auth/google/callback",
+    // What one Google Workspace's accounts may have together (src/app.ts, PER_DOMAIN): live
+    // endpoints, and Macs set up a day. Raise them for a bigger company; other email domains get
+    // 25 and 20, fixed.
+    "WORKSPACE_DOMAIN_ENDPOINTS": "100",
+    "WORKSPACE_DOMAIN_REGISTRATIONS": "50",
     // The most endpoints alive at once: under Cloudflare's tunnel limit for the account.
     "MAX_ENDPOINTS": "500",
     // What every tunnel routes to on the Mac: the gateway (#284). Nothing else is reachable.

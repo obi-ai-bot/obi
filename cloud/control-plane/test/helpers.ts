@@ -235,6 +235,16 @@ export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env
     return { signIn: state, signInCode: location.searchParams.get("code") ?? "" };
   }
 
+  /// A Google account straight in D1, under `limitDomain` (null: none, as for outlook.com), a
+  /// Workspace's or not; returns its key.
+  async function googleUser(sub: string, limitDomain: string | null, workspace = false): Promise<string> {
+    const key = `google:${sub}`;
+    await env.DB.prepare("INSERT INTO users (sub, provider, workspace_domain, email_domain, limit_domain, created_at) VALUES (?1, 'google', ?2, ?3, ?4, ?5)")
+      .bind(key, workspace ? limitDomain : null, limitDomain ?? "outlook.com", limitDomain, time.now().toISOString())
+      .run();
+    return key;
+  }
+
   /// Registers `mac`, signed in with Google as `sub` first (with that email and `hd`), from `ip`.
   async function registerWithGoogle(mac: Mac, sub: string, email: string, hd: string | null, ip = "198.51.100.1"): Promise<Answer> {
     const headers = { "CF-Connecting-IP": ip };
@@ -271,7 +281,7 @@ export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env
       .run();
   }
 
-  return { raw, call, register, registerWithGoogle, signIn, startSignIn, callback, claims, googleClaims, fill, counted, apple, google, deps, tunnels, time };
+  return { raw, call, register, registerWithGoogle, googleUser, signIn, startSignIn, callback, claims, googleClaims, fill, counted, apple, google, deps, tunnels, time };
 }
 
 export const MINUTE = 60_000;
