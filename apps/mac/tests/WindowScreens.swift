@@ -378,7 +378,6 @@ struct WindowScreens {
         suite.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
         let root = FileManager.default.temporaryDirectory.appending(path: "oby-screens-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
         let mac = [Account(id: "default", agent: "claude", name: "Personal", payer: "", home: nil),
                    Account(id: "32203c5b", agent: "claude", name: "Deskree", payer: "", home: root.appending(path: "accounts/32203c5b").path),
                    Account(id: "codex-default", agent: "codex", name: "Deskree", payer: "", home: nil)]

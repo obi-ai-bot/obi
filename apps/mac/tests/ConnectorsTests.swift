@@ -3,9 +3,9 @@ import Foundation
 import Testing
 @testable import Oby
 
-/// Settings › Connectors (#498): every connection that exists today, each with how it's signed in
-/// and how to disconnect it, and a search by name or by what it does. Connected is said only of
-/// what was checked, and nothing listed is a placeholder.
+/// Settings › Connectors (#498), as Sangam's design: one row per service in his order, Connected then
+/// Available, and a search by name or by what it does. Connected is said only of what was checked,
+/// and a service Oby can't connect yet is listed as coming, never as connected.
 @MainActor
 struct ConnectorsTests {
     let personal = AccountState(account: Account(id: "default", agent: "claude", name: "Personal", payer: "", home: nil),
@@ -31,17 +31,47 @@ struct ConnectorsTests {
         groups.first { $0.title == title }?.items.map(\.id) ?? []
     }
 
-    /// This Mac's signed-in accounts are connected, with how they signed in (the plan, never the
-    /// email) and a Disconnect that removes them; a signed-out one is available, with Sign In.
-    @Test func thisMacsAccounts() throws {
-        let list = Connectors.list(mac: [personal, deskree, cursor], runner: nil)
-        let claude = try #require(list.first { $0.id == "account-This Mac-default" })
-        #expect(claude.name == "Claude Code · Personal" && claude.about == "Runs jobs in Claude Code" && claude.place == "This Mac")
-        #expect(claude.state == .connected && claude.how == "Signed in with Claude Code's own login · Max")
-        #expect(claude.way == .button("Disconnect…", .removeAccount(personal.account)))
+    /// A coding tool is one row, the design's name for it: connected while one of its accounts is
+    /// signed in, saying which by name (never the email the label carries); Connect, or Manage
+    /// Accounts… once connected, opens Settings › Accounts.
+    @Test func oneRowPerTool() throws {
+        let list = Connectors.list(accounts: [personal, deskree, cursor], runner: nil)
+        let claude = try #require(list.first { $0.id == "claude" })
+        #expect(claude.name == "Claude" && claude.about == "Run jobs in Claude Code" && claude.brand == "claude")
+        #expect(claude.state == .connected && claude.how == "Signed in with Claude Code's own login: Personal")
+        #expect(claude.way == .button("Manage Accounts…", .accounts))
+        let chatGPT = try #require(list.first { $0.id == "codex" })
+        #expect(chatGPT.name == "ChatGPT" && chatGPT.about == "Run jobs in Codex, ask ChatGPT" && chatGPT.brand == "openai" && chatGPT.connected)
         #expect(!list.contains { $0.how.contains("someone@example.com") })
-        let signedOut = try #require(list.first { $0.id == "account-This Mac-c5r" })
-        #expect(signedOut.state == .available && signedOut.how == "Not signed in" && signedOut.way == .button("Sign In", .signIn(cursor.account)))
+        let signedOut = try #require(list.first { $0.id == "cursor" })
+        #expect(signedOut.state == .available && signedOut.how == "Not signed in: Cursor" && signedOut.way == .button("Connect", .accounts))
+        #expect(Connectors.list(accounts: [], runner: nil).first { $0.id == "claude" }?.how == "No Claude Code account yet")
+    }
+
+    /// The design's ten services, in its order, each with its own mark; then what the runner adds.
+    @Test func theDesignsServicesInItsOrder() {
+        let mail = ConnectedApp(name: "mail", mcp: "https://mcp.example.com/mcp", api: nil, secret: "mail-token", header: nil, secretSaved: true, lastUsed: nil)
+        let list = Connectors.list(accounts: [personal], runner: lab(connections: [mail]))
+        #expect(list.map(\.name) == ["Deskree Ops", "Tetrix", "GitHub", "Claude", "ChatGPT", "Cursor", "Slack", "Gmail", "Google Meet", "Zoom", "mail"])
+        #expect(list.prefix(10).map(\.brand) == ["deskree", "tetrix", "github", "claude", "openai", "cursor", "slack", "gmail", "meet", "zoom"])
+        #expect(list.last?.brand == nil && list.last?.symbol == "link")
+    }
+
+    /// With obid on this Mac, the accounts are obid's alone, as Settings › Accounts lists them: this
+    /// Mac's own accounts.json names the same logins under other ids (Claude Code's Deskree as
+    /// `32203c5b…` beside obid's `deskree`, Codex's default as `codex-default` beside `codex`), and
+    /// listing both showed "Claude Code · Deskree" twice. A remote runner adds its own to this Mac's.
+    @Test func theAccountsJobsRunOnOnce() {
+        func claude(_ id: String, _ name: String) -> AccountState {
+            AccountState(account: Account(id: id, agent: "claude", name: name, payer: "", home: nil), label: "Max")
+        }
+        let mac = [claude("default", "Personal"), claude("32203c5b", "Deskree")]
+        let obid = [claude("default", "Personal"), claude("deskree", "Deskree")]
+        #expect(Connectors.accounts(mac: mac, runner: obid, local: true, hasRunner: true).map(\.account.id) == ["default", "deskree"])
+        #expect(Connectors.accounts(mac: mac, runner: obid, local: false, hasRunner: true).count == 4)
+        #expect(Connectors.accounts(mac: mac, runner: [], local: false, hasRunner: false).map(\.account.id) == ["default", "32203c5b"])
+        let row = Connectors.list(accounts: Connectors.accounts(mac: mac, runner: obid, local: true, hasRunner: true), runner: nil).first { $0.id == "claude" }
+        #expect(row?.how == "Signed in with Claude Code's own login: Personal, Deskree")
     }
 
     let dogfood = TetrixStatus.Server(preset: "dogfood", name: "Tetrix Dogfood", url: URL(string: "https://mcp.tetrix.dev/mcp")!)
@@ -52,10 +82,10 @@ struct ConnectorsTests {
     @Test func tetrixOnceForEveryAgent() throws {
         var runner = Connectors.RunnerState(name: "This Mac", local: true, accounts: [], plugins: [plugin("tetrix", enabled: false, state: "disabled")])
         runner.tetrix = TetrixStatus(presets: [dogfood])
-        let list = Connectors.list(mac: [personal, deskree], runner: runner)
+        let list = Connectors.list(accounts: [personal, deskree], runner: runner)
         #expect(list.filter { $0.about == Connectors.tetrixAbout }.map(\.id) == ["tetrix"])
         let ready = try #require(list.first { $0.id == "tetrix" })
-        #expect(ready.name == "Tetrix" && ready.state == .available && ready.place == "This Mac")
+        #expect(ready.name == "Tetrix" && ready.state == .available && ready.place == "This Mac" && ready.brand == "tetrix")
         #expect(ready.how == "Tetrix Dogfood: every agent on every account uses it. You sign in once, on Tetrix's own page.")
         #expect(ready.way == .button("Connect", .connectTetrix(dogfood)) && ready.also == .button("Another Tetrix…", .connectOtherTetrix))
 
@@ -84,21 +114,18 @@ struct ConnectorsTests {
                        TetrixStatus(url: dogfood.url, preset: "dogfood", signIn: TetrixSignIn(url: URL(string: "https://mcp.tetrix.dev/a")!, server: dogfood.url)),
                        TetrixStatus(connected: true, url: dogfood.url, preset: "dogfood")] {
             runner.tetrix = status
-            let row = try #require(Connectors.list(mac: [], runner: runner).first { $0.id == "tetrix" })
+            let row = try #require(Connectors.list(accounts: [], runner: runner).first { $0.id == "tetrix" })
             #expect(row.way == .steps("Connect or disconnect it on tetrix-lab itself, with Oby there: Tetrix's sign-in comes back to that machine.") && row.also == nil)
         }
     }
 
-    /// The runner's accounts, Tetrix, GitHub, plug-ins and connections are listed under its name;
-    /// what only its machine can change says how, with no button.
+    /// Tetrix (obid's older plug-in, from a runner without obid's own Tetrix), the runner's other
+    /// plug-ins and its connections are listed under its name.
     @Test func theRunnersConnections() throws {
         let plugins = [plugin("tetrix", enabled: true, state: "ready"), RunnerPlugin(id: "notes", name: "Notes", version: nil, kinds: ["context", "events"], enabled: false, state: "disabled", lastError: nil)]
         let mail = ConnectedApp(name: "mail", mcp: "https://mcp.example.com/mcp", api: nil, secret: "mail-token", header: nil, secretSaved: true, lastUsed: nil)
-        let list = Connectors.list(mac: [personal], runner: lab(plugins: plugins, connections: [mail]))
-        let account = try #require(list.first { $0.id == "account-tetrix-lab-lab-1" })
-        #expect(account.place == "tetrix-lab" && account.state == .connected)
-        guard case .steps(let steps) = account.way else { Issue.record("The runner's account has no button"); return }
-        #expect(steps.contains("tetrix-lab") && steps.contains("accounts.json"))
+        let list = Connectors.list(accounts: [personal], runner: lab(plugins: plugins, connections: [mail]))
+        #expect(list.filter { $0.name == "Tetrix" }.count == 1)
 
         let tetrix = try #require(list.first { $0.id == "plugin-tetrix" })
         #expect(tetrix.state == .connected && tetrix.how == "A plug-in of obid's (0.1.0) · Ready" && tetrix.way == .button("Disconnect", .disablePlugin("tetrix")))
@@ -115,18 +142,18 @@ struct ConnectorsTests {
     /// GitHub as the app is checked (its last token request worked); as the owner's gh login it's
     /// only who the calls act as: the runner never asks gh (#517), so it's not said to be connected.
     @Test func gitHubIsConnectedOnlyWhenChecked() throws {
-        let app = try #require(Connectors.list(mac: [], runner: lab()).first { $0.id == "github" })
+        let app = try #require(Connectors.list(accounts: [], runner: lab()).first { $0.id == "github" })
         #expect(app.state == .connected && app.place == "tetrix-lab")
         #expect(app.how.hasPrefix("Oby's GitHub app, whose last token request worked") && app.how.hasSuffix("Check runs reach pull requests."))
         guard case .steps(let unset) = app.way else { Issue.record("GitHub has no steps"); return }
         #expect(unset.contains("OBY_GITHUB_APP_ID") && unset.contains("tetrix-lab"))
 
-        let list = Connectors.list(mac: [], runner: Connectors.RunnerState(name: "This Mac", local: true, accounts: [], github: "owner", checks: "no app"))
+        let list = Connectors.list(accounts: [], runner: Connectors.RunnerState(name: "This Mac", local: true, accounts: [], github: "owner", checks: "no app"))
         let owner = try #require(list.first { $0.id == "github" })
         #expect(owner.state == .unconfirmed && !owner.connected)
         #expect(owner.how == "Acts as your gh login on this Mac. The runner doesn't check that it's signed in. No check runs: they need the GitHub app.")
         #expect(owner.way == .steps("To disconnect it, run gh auth logout on this Mac. Oby can't clone, push or open pull requests until you sign in again with gh auth login."))
-        #expect(ids(Connectors.groups(list, query: ""), "Not confirmed") == ["github"])
+        #expect(ids(Connectors.groups(list, query: "github"), "Available") == ["github"])
         #expect(ids(Connectors.groups(list, query: ""), "Connected").isEmpty)
     }
 
@@ -135,7 +162,7 @@ struct ConnectorsTests {
     @Test func gitHubFollowsObidsGhLogin() throws {
         func row(_ login: GitHubLogin) throws -> Connector {
             let runner = Connectors.RunnerState(name: "This Mac", local: true, accounts: [], github: "owner", checks: "no app", gitHubLogin: login)
-            return try #require(Connectors.list(mac: [], runner: runner).first { $0.id == "github" })
+            return try #require(Connectors.list(accounts: [], runner: runner).first { $0.id == "github" })
         }
         let signed = try row(GitHubLogin(gh: true, signedIn: true, user: "octo-cat", signIn: nil))
         #expect(signed.state == .connected && signed.how.contains("as octo-cat"))
@@ -182,52 +209,49 @@ struct ConnectorsTests {
         let starting = Connectors.plugin(plugin("tetrix", enabled: true, state: "starting"), place: "This Mac")
         #expect(starting.state == .unconfirmed && starting.how.hasSuffix("Starting"))
 
+        // The design's two groups: what isn't connected is Available, saying what it needs on its row.
         let groups = Connectors.groups([missing, failed, starting], query: "")
-        #expect(groups.map(\.title) == ["Needs attention", "Not confirmed"])
-        #expect(ids(groups, "Needs attention") == ["connection-linear", "plugin-tetrix"])
+        #expect(groups.map(\.title) == ["Available"] && ids(groups, "Available") == ["connection-linear", "plugin-tetrix", "plugin-tetrix"])
     }
 
-    /// The runner on this Mac shares this Mac's accounts: each is listed once, with this Mac's buttons.
-    @Test func theRunnerOnThisMacListsEachAccountOnce() {
-        let local = Connectors.RunnerState(name: "This Mac", local: true, accounts: [personal, deskree])
-        let list = Connectors.list(mac: [personal, deskree], runner: local)
-        #expect(list.filter { $0.name == "Claude Code · Personal" }.count == 1)
-        #expect(!list.contains { if case .steps = $0.way { true } else { false } })
-    }
-
-    /// What the runner doesn't say isn't listed: an older runner sends no `github`, and the Swift
-    /// runner has no plug-ins while obid lists no connections yet (#444).
-    @Test func onlyWhatTheRunnerSays() {
-        let list = Connectors.list(mac: [], runner: lab(github: nil))
-        #expect(list.map(\.id) == ["account-tetrix-lab-lab-1"])
-        #expect(Connectors.list(mac: [], runner: nil).isEmpty)
-    }
-
-    /// No placeholders: the services the design shows that don't exist yet (Slack #26, Gmail #501,
-    /// Deskree Ops #502, Google Meet #503, Zoom #504) are nowhere on the page.
-    @Test func noPlaceholderServices() {
-        let everything = Connectors.list(mac: [personal, deskree, cursor], runner: lab())
-        for name in ["Slack", "Gmail", "Deskree Ops", "Google Meet", "Zoom"] {
-            #expect(!everything.contains { $0.name.localizedCaseInsensitiveContains(name) || $0.about.localizedCaseInsensitiveContains(name) },
-                    "\(name) is listed")
+    /// While the runner doesn't answer (or there's none), Tetrix and GitHub, which it holds, say they
+    /// wait for it, never connected; the runner's plug-ins and connections aren't listed.
+    @Test func whatTheRunnerHoldsWaitsForIt() throws {
+        let list = Connectors.list(accounts: [personal], runner: nil)
+        for id in ["tetrix", "github"] {
+            let row = try #require(list.first { $0.id == id })
+            #expect(row.state == .available && row.way == .steps("Shows here once Oby's runner answers (Settings › Runner)."))
         }
+        #expect(list.count == 10)
+        #expect(Connectors.list(accounts: [], runner: lab(github: nil)).first { $0.id == "github" }?.way
+                == .steps("tetrix-lab doesn't say: it needs a newer runner."))
     }
 
-    /// Search finds a connector by its name or by what it does, whatever the case and accents,
-    /// every word anywhere in it; an empty search shows everything, in its groups.
+    /// The design's services Oby can't connect yet (Deskree Ops #502, Slack #26, Gmail #501, Google
+    /// Meet #503, Zoom #504) are listed under Available, as coming, with no button: never connected.
+    @Test func servicesNotYetConnectableAreComing() {
+        let everything = Connectors.list(accounts: [personal, deskree, cursor], runner: lab())
+        let coming = everything.filter(\.soon)
+        #expect(coming.map(\.name) == ["Deskree Ops", "Slack", "Gmail", "Google Meet", "Zoom"])
+        #expect(coming.allSatisfy { $0.state == .available && $0.way == nil && $0.also == nil })
+        #expect(coming.map(\.about) == ["Projects, deploys and incidents", "Read and send messages", "Read and manage your email",
+                                        "Join meetings and keep the notes", "Join meetings and keep the notes"])
+    }
+
+    /// Search finds a service by its name or by what it does, whatever the case and accents, every
+    /// word anywhere in it; an empty search shows everything, Connected then Available.
     @Test func searchByNameOrWhatItDoes() {
-        let list = Connectors.list(mac: [personal, deskree, cursor], runner: lab())
-        #expect(ids(Connectors.groups(list, query: "codex"), "Connected") == ["account-This Mac-c0de"])
+        let list = Connectors.list(accounts: [personal, deskree, cursor], runner: lab())
+        #expect(ids(Connectors.groups(list, query: "codex"), "Connected") == ["codex"])
         #expect(ids(Connectors.groups(list, query: "  PULL requests "), "Connected") == ["github"])
-        let blast = Connectors.groups(list, query: "blast radius")
-        #expect(blast.isEmpty)
-        #expect(ids(Connectors.groups(list, query: "runs jobs lab"), "Connected") == ["account-tetrix-lab-lab-1"])
-        #expect(ids(Connectors.groups(list, query: "CLÁUDE"), "Connected").count == 2)
+        #expect(ids(Connectors.groups(list, query: "CLÁUDE"), "Connected") == ["claude"])
+        #expect(ids(Connectors.groups(list, query: "meetings notes"), "Available") == ["meet", "zoom"])
         let all = Connectors.groups(list, query: "")
         #expect(all.map(\.title) == ["Connected", "Available"])
         #expect(all.map(\.items.count).reduce(0, +) == list.count)
-        #expect(ids(all, "Available") == ["account-This Mac-c5r"])
-        #expect(Connectors.groups(list, query: "zoom").isEmpty)
+        #expect(ids(all, "Connected") == ["github", "claude", "codex"])
+        #expect(ids(all, "Available") == ["deskree", "tetrix", "cursor", "slack", "gmail", "meet", "zoom"])
+        #expect(Connectors.groups(list, query: "nothing like it").isEmpty)
     }
 
     /// While the runner doesn't answer its rows are left out, and the page says why; the Tetrix
