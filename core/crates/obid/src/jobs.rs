@@ -59,6 +59,16 @@ const WIP_MESSAGE: &str = "wip: work left uncommitted when the job ended\n\nobid
 const FAILS_AS_ASKED: &str = "FAILS AS ASKED";
 /// Claude Code's own turn limit for a round.
 const MAX_TURNS: &str = "200";
+/// How long after a usage limit's reset obid tries a job again: the tool's clock and the Mac's
+/// may differ.
+const RESET_SLACK: i64 = 60;
+/// The longest obid waits for a reset: a weekly window's, and a day more.
+const RESET_MOST: i64 = 8 * 86_400;
+/// What a job tried again after its reset says, and keeps in its notes: Oby's, not the owner's.
+const RESET_STEP: &str = "Oby: trying again after the usage reset";
+const RESET_NOTE: &str = "Oby tried again after the usage reset.";
+/// How often obid looks for a job whose reset came.
+const RESET_TICK: Duration = Duration::from_secs(15);
 /// How often obid lets git tidy a clone.
 const TIDY_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The agent's MCP configuration (`--mcp-config`), in the job's own folder (its `HOME`), written
@@ -276,6 +286,8 @@ enum End {
     NeedsYou {
         reason: String,
         next: Option<&'static str>,
+        /// When obid tries it again by itself: after its account's usage limit resets.
+        resumes: Option<i64>,
     },
 }
 
@@ -296,6 +308,7 @@ impl End {
         End::NeedsYou {
             reason: reason.into(),
             next,
+            resumes: None,
         }
     }
 }
@@ -804,6 +817,80 @@ impl Jobs {
         tokio::spawn(async move { jobs.follow_pull_requests().await });
         let jobs = self.clone();
         tokio::spawn(async move { jobs.tidy_clones().await });
+        let jobs = self.clone();
+        tokio::spawn(async move { jobs.resume_after_resets().await });
+    }
+
+    /// Tries again each job a usage limit stopped, once its `resumes_at` comes (#725's follow-up,
+    /// Sangam's "Wait for the reset"): as Try again does, from the job's own session. Kept with
+    /// the job, so a restart keeps waiting; looked at every [`RESET_TICK`], so a Mac that slept
+    /// through it tries on waking.
+    async fn resume_after_resets(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(RESET_TICK).await;
+            if self
+                .shutting_down
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return;
+            }
+            let now = obi_protocol::time::now();
+            let due: Vec<String> = self
+                .lock()
+                .jobs
+                .values()
+                .filter(|j| {
+                    j.status == Status::Interrupted && j.resumes_at.is_some_and(|at| at <= now)
+                })
+                .map(|j| j.id.clone())
+                .collect();
+            for id in due {
+                self.resume_after_reset(&id);
+            }
+        }
+    }
+
+    /// One job's reset came: Try again, unless its owner let it go or took it on in a follow-up.
+    fn resume_after_reset(self: &Arc<Self>, id: &str) {
+        let Some(job) = self.get(id) else { return };
+        let followed = self
+            .lock()
+            .jobs
+            .values()
+            .any(|j| j.follow_up_of.as_deref() == Some(id));
+        let tried = if job.dismissed.is_some() {
+            Err("it was dismissed".to_owned())
+        } else if followed {
+            Err("a follow-up took it on".to_owned())
+        } else {
+            match self.message(id, crate::brain::actions::TRY_AGAIN, Source::Event) {
+                Some(Ok(_)) => Ok(()),
+                Some(Err(refused)) => Err(refused.0),
+                None => return,
+            }
+        };
+        match tried {
+            Ok(()) => {
+                tracing::info!("job {id}: its usage limit reset, so it's tried again");
+                // Oby's own retry, never words the owner said: so its step and note say.
+                self.update(id, |job| {
+                    if let Some(notes) = job.notes.as_mut()
+                        && notes.last().map(String::as_str)
+                            == Some(crate::brain::actions::TRY_AGAIN)
+                    {
+                        notes.pop();
+                        notes.push(RESET_NOTE.into());
+                    }
+                    if job.step.starts_with("You: ") {
+                        job.step = RESET_STEP.into();
+                    }
+                });
+            }
+            Err(why) => {
+                tracing::info!("job {id}: not tried again after its reset: {why}");
+                self.update(id, |job| job.resumes_at = None);
+            }
+        }
     }
 
     /// Lets git tidy each clone once a day ([`Jobs::tidy_clone`]).
@@ -2283,6 +2370,7 @@ impl Jobs {
             job.limit = None;
             job.reason = None;
             job.next_step = None;
+            job.resumes_at = None;
             job.stalled = None;
             job.waiting = None;
             job.asked = true;
@@ -2808,6 +2896,8 @@ impl Jobs {
                 )));
             }
             job.dismissed = Some(obi_protocol::time::now());
+            // Let go, it isn't tried again after its reset either.
+            job.resumes_at = None;
             job.clone()
         };
         if let Err(e) = self.store.save(&dismissed) {
@@ -3461,9 +3551,13 @@ impl Jobs {
                     self.review_ended(id, false).await;
                 }
                 self.update(id, |job| {
-                    let (reason, next) = match &end {
-                        End::Failed(why) => (why.clone(), None),
-                        End::NeedsYou { reason, next } => (reason.clone(), *next),
+                    let (reason, next, resumes) = match &end {
+                        End::Failed(why) => (why.clone(), None, None),
+                        End::NeedsYou {
+                            reason,
+                            next,
+                            resumes,
+                        } => (reason.clone(), *next, *resumes),
                     };
                     // Needing the owner, with a session to pick up: the agent's own summary stays
                     // (`summaries` has every round's), and why it stopped is said apart. A dead end,
@@ -3475,10 +3569,12 @@ impl Jobs {
                             job.summary = reason.clone();
                         }
                         job.next_step = next.map(str::to_owned);
+                        job.resumes_at = resumes;
                     } else {
                         job.status = Status::Failed;
                         job.summary = reason.clone();
                         job.next_step = None;
+                        job.resumes_at = None;
                     }
                     job.reason = Some(reason);
                     job.asked = false;
@@ -5211,21 +5307,48 @@ impl Jobs {
                         }
                         continue;
                     }
+                    let mut reason = if first.is_empty() {
+                        format!(
+                            "{} stopped without finishing ({}).{}",
+                            tool.name(),
+                            turn.exit,
+                            self.agent_note(id)
+                        )
+                    } else {
+                        first
+                    };
                     // A usage limit, a login, a crash: what's done is kept, and Try again picks the
-                    // session up (after the reset, the sign-in).
-                    return Err(End::needs_you(
-                        if first.is_empty() {
-                            format!(
-                                "{} stopped without finishing ({}).{}",
-                                tool.name(),
-                                turn.exit,
-                                self.agent_note(id)
-                            )
-                        } else {
-                            first
-                        },
-                        Some(crate::job::TRY_AGAIN),
-                    ));
+                    // session up (after the reset, the sign-in). Past a usage limit's reset, obid
+                    // tries again by itself; a reset already gone by is a stale one, and arms
+                    // nothing that could loop. Not a stall: #773's budget and ceiling still hold,
+                    // since the Try-again words go through `Jobs::message` as the owner's would.
+                    let now = obi_protocol::time::now();
+                    let resumes = turn
+                        .resets
+                        .or_else(|| {
+                            crate::limits::is_limit(&reason)
+                                .then(|| crate::limits::reset_in(&reason, now))
+                                .flatten()
+                        })
+                        // Else when the account's own usage says it's full until (#745).
+                        .or_else(|| {
+                            (full || crate::limits::is_limit(&reason))
+                                .then_some(usage.full_until)
+                                .flatten()
+                        })
+                        .map(|at| {
+                            at.saturating_add(RESET_SLACK)
+                                .min(now.saturating_add(RESET_MOST))
+                        })
+                        .filter(|at| *at > now);
+                    if resumes.is_some() {
+                        reason.push_str(" Oby tries again by itself after the reset.");
+                    }
+                    return Err(End::NeedsYou {
+                        reason,
+                        next: Some(crate::job::TRY_AGAIN),
+                        resumes,
+                    });
                 }
                 retries = 0;
                 self.update(id, |job| {

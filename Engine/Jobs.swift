@@ -188,6 +188,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Interrupted on obid: its one next step, as its button says it ("One more round", "Try
     /// again"), or nil.
     var nextStep: String?
+    /// When obid tries it again by itself, after its account's usage limit resets, or nil.
+    var resumesAt: Date?
+    /// `resumesAt`, as the iPhone's `Job` reads it.
+    var resumes: Date? { resumesAt }
     /// A stalled job's why and handoff note (obid only, #773), or nil.
     var stalled: Stalled?
     /// The handoff note a stalled job left, or nil.

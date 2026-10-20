@@ -148,6 +148,9 @@ pub struct Turn {
     /// obid ended the turn for something trying again won't mend (a conversation's Codex ran a
     /// command), and why.
     pub fatal: Option<String>,
+    /// When the account resets, in seconds since the epoch, if the tool said this turn it's full
+    /// (crate::limits).
+    pub resets: Option<i64>,
     /// The last words the agent wrote this turn: its `result` carries none when its last message
     /// was a tool call (#764).
     pub last_words: String,
@@ -327,6 +330,11 @@ pub async fn turn_on(
                     && let Some(text) = event["delta"]["text"].as_str()
                 {
                     on_event(Event::Delta(text.to_owned()));
+                }
+            }
+            Some("rate_limit_event") => {
+                if let Some(at) = crate::limits::claude_full_until(&message) {
+                    turn.resets = Some(at);
                 }
             }
             Some("result") => {

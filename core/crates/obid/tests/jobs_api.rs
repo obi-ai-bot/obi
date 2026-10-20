@@ -771,6 +771,51 @@ fn a_check_that_keeps_failing_stops_at_a_limit() {
     assert_eq!(publish["detail"], "Dismissed");
 }
 
+/// A usage limit stops the round: it needs you with Try again, and obid tries it again by itself
+/// a minute after the reset Claude Code named, from the same session. A reset already a minute
+/// gone by (a stale one) arms nothing, so nothing loops.
+#[test]
+fn a_usage_limit_is_tried_again_after_its_reset() {
+    let folder = Folder::new("reset");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let post = |task: &str| {
+        post_job(
+            &obid,
+            json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": task}),
+        )
+        .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // Reset 55 seconds ago: obid tries again 5 seconds from now.
+    let id = post("LIMITED: -55");
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "interrupted", "{job}");
+    assert_eq!(job["nextStep"], "Try again", "{job}");
+    assert_eq!(
+        job["reason"],
+        "Claude AI usage limit reached. Oby tries again by itself after the reset."
+    );
+    assert!(job["resumesAt"].as_str().unwrap().ends_with('Z'), "{job}");
+    let session = job["session"].clone();
+    let again = until(&obid, &id, |j| {
+        j["round"] == 2 && j["status"] != "queued" && j["status"] != "running"
+    });
+    assert_eq!(again["status"], "done", "{again}");
+    assert_eq!(again["session"], session, "{again}");
+    assert_eq!(again["resumesAt"], Value::Null, "{again}");
+    assert_eq!(again["reason"], Value::Null, "{again}");
+
+    let stale = post("LIMITED: -120");
+    let job = wait(&obid, &stale);
+    assert_eq!(job["status"], "interrupted", "{job}");
+    assert_eq!(job["nextStep"], "Try again", "{job}");
+    assert_eq!(job["resumesAt"], Value::Null, "{job}");
+    assert_eq!(job["reason"], "Claude AI usage limit reached.");
+}
+
 /// A job stopped at a limit after committing keeps its commits and counts them (#757): words told
 /// to it start a follow-up from its branch, whose worktree has them.
 #[test]

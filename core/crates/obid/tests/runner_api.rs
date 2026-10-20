@@ -222,6 +222,7 @@ fn jobs_have_iso_dates_and_every_key() {
                 "nextStep",
                 "obi",
                 "reason",
+                "resumesAt",
                 "routine",
                 "stalled",
                 "supervised",
@@ -231,7 +232,7 @@ fn jobs_have_iso_dates_and_every_key() {
             "{body}"
         );
         let known = keys.keys().filter(|k| page.contains(&k.as_str())).count();
-        assert_eq!(keys.len(), 81 + known);
+        assert_eq!(keys.len(), 82 + known);
         // POST /v1/jobs: no turn of a conversation started it.
         assert!(body["turn"].is_null(), "{body}");
         // What obid never sets is there, as null.

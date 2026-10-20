@@ -126,7 +126,7 @@ struct TaskDecision: View {
                     hint: box ? "Or answer in your own words below" : nil, onChoose: { option in run { try await actions.message(option.answer) } })
                 .id(question.text)
         } else if let next = job.nextStepOffered {
-            AskCard(kind: job.needsYouKind, title: job.line, options: CardOption.of([next], recommended: 0), busy: busy,
+            AskCard(kind: job.needsYouKind, title: job.line, happened: job.resumesLine, options: CardOption.of([next], recommended: 0), busy: busy,
                     onChoose: { _ in run { try await actions.message(Job.tryAgainWords) } })
                 .id("\(job.id)-\(job.finished?.timeIntervalSince1970 ?? 0)")
         }

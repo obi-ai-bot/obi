@@ -97,6 +97,11 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Interrupted on obid: its one next step, as its button says it ("One more round", "Try
     /// again"), or nil.
     var nextStep: String?
+    /// When obid tries it again by itself, after its account's usage limit resets, or nil; one
+    /// this phone can't read is left out, never failing the job.
+    var resumesAt: Lenient<Date>?
+    /// `resumesAt`, read.
+    var resumes: Date? { resumesAt?.value }
     /// A stalled job's why and handoff note (obid only, #773), or nil; one this phone can't read
     /// is left out, never failing the job.
     var stalled: Lenient<Stalled>?
@@ -163,7 +168,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
              conversation, turn, artifacts, followUpOf, tetrix, activity, usage, windowShare, estimate, checks, scan, diff, context,
-             reason, nextStep, stalled
+             reason, nextStep, resumesAt, stalled
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -874,6 +879,13 @@ extension Job {
 
     /// The one next step of a job that stopped part way and needs you (obid's `interrupted`), or nil.
     nonisolated var nextStepOffered: String? { status == .interrupted && dismissed == nil ? nextStep : nil }
+
+    /// When obid tries it again by itself, as its decision card says it: "At 3:04 PM, or now with
+    /// Try again.", or nil.
+    nonisolated var resumesLine: String? {
+        guard nextStepOffered != nil, let resumes else { return nil }
+        return "At \(resumes.formatted(date: .omitted, time: .shortened)), or now with \(nextStep ?? "Try again")."
+    }
 
     /// Its decision card's kind (Sangam's labels): Out of usage when its agent hit a usage limit.
     nonisolated var needsYouKind: String {

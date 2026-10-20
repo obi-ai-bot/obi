@@ -294,6 +294,10 @@ pub struct Job {
     /// own words, or Dismiss, can take it on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
+    /// When obid tries a job its account's usage limit stopped again by itself (`interrupted`),
+    /// in seconds since the epoch: a minute after the reset its tool named. None otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumes_at: Option<i64>,
     /// What the job it follows up did, for its first prompt, quoted there. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub earlier: Option<String>,
@@ -493,6 +497,7 @@ impl Job {
             context: None,
             reason: None,
             next_step: None,
+            resumes_at: None,
             earlier: None,
             start_from: None,
             supervised: Vec::new(),
@@ -795,6 +800,7 @@ impl Job {
         // limit.
         value["reason"] = json!(self.reason);
         value["nextStep"] = json!(self.next_step);
+        value["resumesAt"] = json!(date(self.resumes_at));
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
         }
@@ -1241,12 +1247,13 @@ mod tests {
             "followUpOf",
             "reason",
             "nextStep",
+            "resumesAt",
             "routine",
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, obid's fifteen, and `supervised`.
-        assert_eq!(object.len(), 81);
+        // The Swift runner's 65 keys, obid's sixteen, and `supervised`.
+        assert_eq!(object.len(), 82);
         assert_eq!(value["supervised"], json!([]));
         assert_eq!(value["archived"], Value::Null);
         assert_eq!(value["changes"], json!([]));
