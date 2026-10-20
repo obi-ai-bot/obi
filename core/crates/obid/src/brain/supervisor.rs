@@ -182,7 +182,7 @@ pub fn allowed(
 /// Why a supervisor turn can't call Oby's `tool` with `args`, when it can't: nobody watches it,
 /// so it reads only its own stalled job (never other jobs, the inbox, past conversations or the
 /// room's files or the conversation's task list, which carry the owner's other work), runs no
-/// commands and archives nothing.
+/// commands, answers nothing in the inbox and archives nothing.
 pub fn refused(session: &Session, tool: &str, args: &serde_json::Value) -> Option<&'static str> {
     let watch = session.supervising.as_ref()?;
     match tool {
@@ -194,6 +194,8 @@ pub fn refused(session: &Session, tool: &str, args: &serde_json::Value) -> Optio
         "oby_shell" | "oby_shell_output" | "oby_shell_stop" => {
             Some("A turn nobody watches runs no commands.")
         }
+        // The inbox is what waits for the owner: an unattended turn answers none of it.
+        "oby_answer" => Some("A turn nobody watches answers nothing in the inbox."),
         "oby_job" if args["id"].as_str() != Some(watch.job.as_str()) => {
             Some("A turn nobody watches reads only the job it's about.")
         }
@@ -572,12 +574,10 @@ fn ask_owner(
 mod tests {
     use super::*;
 
-    /// A turn nobody watches reads only its own job and archives nothing; the owner's turns are
-    /// as they were.
-    #[test]
-    fn an_unattended_turn_reads_only_its_job() {
+    /// A turn's session, supervising `supervising` (or the owner's, with none).
+    fn session(supervising: Option<Arc<Watch>>) -> Session {
         use std::sync::atomic::{AtomicBool, AtomicUsize};
-        let session = |supervising| Session {
+        Session {
             conversation: "c1".into(),
             said: String::new(),
             attachments: vec![],
@@ -593,7 +593,13 @@ mod tests {
             artifacts: Mutex::new(vec![]),
             supervising,
             shell_out: Mutex::default(),
-        };
+        }
+    }
+
+    /// A turn nobody watches reads only its own job and archives nothing; the owner's turns are
+    /// as they were.
+    #[test]
+    fn an_unattended_turn_reads_only_its_job() {
         let unattended = session(Some(Arc::new(Watch::new("j1", "t1"))));
         for tool in [
             "oby_jobs",
@@ -621,6 +627,18 @@ mod tests {
         assert!(refused(&owners, "oby_inbox", &serde_json::json!({})).is_none());
         assert!(refused(&owners, "oby_shell", &serde_json::json!({})).is_none());
         assert!(refused(&owners, "oby_job", &other).is_none());
+    }
+
+    /// A turn nobody watches answers nothing in the inbox, whatever it's about; the owner's turn
+    /// still answers what Oby may.
+    #[test]
+    fn an_unattended_turn_answers_nothing() {
+        let unattended = session(Some(Arc::new(Watch::new("j1", "t1"))));
+        let answer = serde_json::json!({"id": "i1", "answer": "Deny"});
+        assert!(refused(&unattended, "oby_answer", &answer).is_some());
+        let own_job = serde_json::json!({"id": "j1", "answer": "Deny"});
+        assert!(refused(&unattended, "oby_answer", &own_job).is_some());
+        assert!(refused(&session(None), "oby_answer", &answer).is_none());
     }
 
     /// A stall at a limit on cost is the owner's; one that only went quiet or looped is Oby's.
