@@ -134,6 +134,12 @@ pub struct Turn {
     pub exit: String,
     /// The turn ran past its time and obid ended it.
     pub timed_out: bool,
+    /// What timed it out was a quiet spell (`conn::Limit::quiet`): no progress for so long.
+    pub quiet: bool,
+    /// obid ended it for making the same failing call again and again (crate::jobs).
+    pub looped: bool,
+    /// obid ended it at the job's token budget (crate::jobs).
+    pub over_budget: bool,
     /// obid was told to stop it.
     pub stopped: bool,
     /// What the agent should hear at the start of its next prompt: what obid declined this turn
@@ -142,6 +148,9 @@ pub struct Turn {
     /// obid ended the turn for something trying again won't mend (a conversation's Codex ran a
     /// command), and why.
     pub fatal: Option<String>,
+    /// The last words the agent wrote this turn: its `result` carries none when its last message
+    /// was a tool call (#764).
+    pub last_words: String,
 }
 
 impl Turn {
@@ -163,6 +172,18 @@ impl Turn {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned()
+    }
+
+    /// What the agent said last: [`Turn::text`], or when that has no words (its last message was
+    /// a tool call), the last words it wrote this turn (#764). A conversation shows what it
+    /// streamed instead.
+    pub fn last_said(&self) -> String {
+        let said = self.text();
+        if said.trim().is_empty() {
+            self.last_words.clone()
+        } else {
+            said
+        }
     }
 }
 
@@ -189,7 +210,7 @@ pub const AFTER_RESULT: Duration = Duration::from_secs(3);
 pub async fn run_turn(
     launch: Launch,
     prompt: &str,
-    limit: Duration,
+    limit: impl Into<crate::conn::Limit>,
     stop: watch::Receiver<process::Signal>,
     decide: impl Fn(&str, &Value) -> Ruling,
     on_event: impl FnMut(Event),
@@ -256,13 +277,20 @@ pub async fn turn_on(
                 api_key_source = message["apiKeySource"].as_str().map(str::to_owned);
             }
             Some("assistant") => {
+                // A subagent's (Task's) messages carry the tool call they answer: their words are
+                // never the agent's own last ones.
+                let own = message.get("parent_tool_use_id").is_none_or(Value::is_null);
                 for block in message["message"]["content"]
                     .as_array()
                     .into_iter()
                     .flatten()
                 {
                     if block.get("type").and_then(Value::as_str) == Some("text") {
-                        on_event(Event::Said(text_of(block, "text")));
+                        let text = text_of(block, "text");
+                        if own && !text.trim().is_empty() {
+                            turn.last_words = text.clone();
+                        }
+                        on_event(Event::Said(text));
                     }
                     if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                         let name = block.get("name").and_then(Value::as_str).unwrap_or("");
@@ -320,6 +348,7 @@ pub async fn turn_on(
         }
     }
     turn.timed_out = conn.timed_out;
+    turn.quiet = conn.quiet_out;
     turn.stopped = conn.stopped;
     if keep && turn.result.is_some() && !turn.timed_out && !turn.stopped {
         turn.exit = "still running".into();
@@ -387,6 +416,16 @@ mod tests {
     /// Runs one turn of a fake Claude Code that reads the prompt, prints its result, then runs
     /// `after`: the turn, how long it took, and the fake's folder.
     async fn fake_turn(name: &str, after: &str) -> (Turn, Duration, PathBuf) {
+        let done = r#"{"type":"result","subtype":"success","is_error":false,"result":"Done.","session_id":"s1"}"#;
+        fake_turn_saying(name, &[done], after).await
+    }
+
+    /// As [`fake_turn`], with the fake printing `lines` (JSON, without a `'`) after the prompt.
+    async fn fake_turn_saying(
+        name: &str,
+        lines: &[&str],
+        after: &str,
+    ) -> (Turn, Duration, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("obid-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -395,7 +434,12 @@ mod tests {
         std::fs::write(
             &bin,
             format!(
-                "#!/bin/sh\nread line\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Done.\",\"session_id\":\"s1\"}}'\n{after}\n"
+                "#!/bin/sh\nread line\n{}\n{after}\n",
+                lines
+                    .iter()
+                    .map(|l| format!("echo '{l}'"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             ),
         )
         .unwrap();
@@ -430,6 +474,27 @@ mod tests {
         assert_eq!(turn.text(), "Done.");
         assert!(root.join("session-end").exists(), "cut after {took:?}");
         assert!(took < AFTER_RESULT, "{took:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A turn whose last message was a tool call has a `result` with no words: its text is the
+    /// last words the agent wrote (#764), never a subagent's.
+    #[tokio::test]
+    async fn a_result_with_no_words_keeps_the_last_ones_written() {
+        let (turn, _, root) = fake_turn_saying(
+            "last-words",
+            &[
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed it; the tests pass."}]}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":" "},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a"}}]}}"#,
+                r#"{"type":"assistant","parent_tool_use_id":"t0","message":{"content":[{"type":"text","text":"A subagent wrote this."}]}}"#,
+                r#"{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"s1"}"#,
+            ],
+            "",
+        )
+        .await;
+        assert!(turn.succeeded());
+        assert_eq!(turn.text(), "");
+        assert_eq!(turn.last_said(), "Fixed it; the tests pass.");
         let _ = std::fs::remove_dir_all(&root);
     }
 

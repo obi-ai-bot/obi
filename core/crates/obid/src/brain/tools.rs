@@ -98,7 +98,23 @@ fn list() -> Value {
         {"name": "oby_list", "description": "Lists the files and folders in a folder of your room (a folder ends in /, a link in @), or with glob every file under it that matches, at most 500.",
          "inputSchema": {"type": "object", "properties": {
              "path": {"type": "string", "description": "A folder, relative to your room; left out, the room."},
-             "glob": {"type": "string", "description": "Every file under the folder matching it, as **/*.md."}}}}
+             "glob": {"type": "string", "description": "Every file under the folder matching it, as **/*.md."}}}},
+        {"name": "oby_shell", "description": "Runs a shell command (bash) in your room, like Claude Code's Bash, in a sandbox: it writes only your room (repos/ is read-only) and has no network and no login. Each command starts in the room afresh. Reading runs at once; installing software or reaching the network waits for the owner's OK every time, and so does changing files once this conversation read something untrusted (or as the mode says). Answers the exit status and the output, quoted data. Past its timeout it goes on in the background.",
+         "inputSchema": {"type": "object", "properties": {
+             "command": {"type": "string", "description": "The command, as bash runs it."},
+             "timeout": {"type": "integer", "minimum": 1, "maximum": 600000, "description": "Milliseconds before it goes to the background: 120,000 when left out, at most 600,000."},
+             "run_in_background": {"type": "boolean", "description": "Send it to the background at once; read it with oby_shell_output."},
+             "description": {"type": "string", "description": "What it does, in a few words."}},
+             "required": ["command"]}},
+        {"name": "oby_shell_output", "description": "What a background command wrote since the last read, and whether it still runs or how it ended. Every command ends with this turn.",
+         "inputSchema": {"type": "object", "properties": {
+             "id": {"type": "string", "description": "The command's id, from oby_shell."},
+             "wait": {"type": "integer", "minimum": 0, "maximum": 600, "description": "Seconds to wait for it to end first: 0 when left out."}},
+             "required": ["id"]}},
+        {"name": "oby_shell_stop", "description": "Stops a background command and everything it started.",
+         "inputSchema": {"type": "object", "properties": {
+             "id": {"type": "string", "description": "The command's id, from oby_shell."}},
+             "required": ["id"]}}
     ])
 }
 
@@ -265,6 +281,19 @@ async fn call(
             ))
         }
         "oby_artifact" => artifact(shared, session, args).await,
+        "oby_shell" | "oby_shell_output" | "oby_shell_stop" => {
+            let shown = super::shell::tool(shared, session, name, args).await?;
+            let text = if shown.output.is_empty() {
+                format!("{}\n(It wrote nothing.)", shown.head)
+            } else {
+                format!(
+                    "{}\n{}",
+                    shown.head,
+                    quoted(session, "the command's output", &shown.output)
+                )
+            };
+            if shown.failed { Err(text) } else { Ok(text) }
+        }
         "oby_read" | "oby_search" | "oby_list" => {
             let (home, conversation, tool, control) = (
                 shared.config.home.clone(),
