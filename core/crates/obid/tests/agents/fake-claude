@@ -53,6 +53,9 @@
 //   a handoff note   asked for one (obid's prompt when a job stalls): ends the turn with the note,
 //                    "Done: … Left: … Failed: …", or says nothing when the task said NO NOTE
 //   ON PURPOSE       in a fix round's quoted task: ends the turn with "FAILS AS ASKED: …"
+//   AGAIN: <words>   keeps the words (maybe none) in .obi/again, then goes on with the rest of the
+//                    prompt; a later "Try again, …" that finds them writes .obi/tried and ends the
+//                    turn with them
 //   anything else    ends the turn with "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
 
@@ -156,7 +159,15 @@ rl.on("line", (line) => {
     appendFileSync(edit[1], "// edited\n");
     execFileSync("git", ["add", edit[1]]);
   }
-  if (commit) {
+  const again = prompt.match(/AGAIN:(.*)/);
+  if (again) {
+    mkdirSync(".obi", { recursive: true });
+    writeFileSync(".obi/again", again[1].trim());
+  }
+  if (prompt.startsWith("Try again") && existsSync(".obi/again")) {
+    writeFileSync(".obi/tried", "");
+    result(readFileSync(".obi/again", "utf8"));
+  } else if (commit) {
     writeFileSync(commit[1], "hello\n");
     execFileSync("git", ["add", commit[1]]);
     execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add ${commit[1]}`]);

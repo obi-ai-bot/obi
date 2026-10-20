@@ -663,10 +663,41 @@ impl Link {
                 Some(at) => item.later = Some(at),
                 None => item.done = Some(now),
             }
+            // Done without an answer: a shell command waiting for it doesn't run.
+            if item.done.is_some() && crate::brain::shell::is_item(&item) {
+                crate::brain::shell::answered(&item.id, None);
+            }
             self.lock().inbox.insert(item.id.clone(), item.clone());
             self.save_item(&item);
             return Ok(item.to_json());
         };
+        // A command of a conversation's shell: the owner's answer goes to it, and only once.
+        if crate::brain::shell::is_item(&item) {
+            if answer == crate::permissions::ALWAYS_ALLOW
+                && !item
+                    .options
+                    .iter()
+                    .any(|o| o == crate::permissions::ALWAYS_ALLOW)
+            {
+                return Err(api(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "It has no rule to save: allow it once instead.",
+                ));
+            }
+            if !crate::brain::shell::answered(&item.id, Some(answer.clone())) {
+                self.settle(&item.id);
+                return Err(api(
+                    StatusCode::CONFLICT,
+                    "Its command isn't waiting any more: its turn ended.",
+                ));
+            }
+            let mut item = item;
+            item.answer = Some(answer);
+            item.done = Some(now);
+            self.lock().inbox.insert(item.id.clone(), item.clone());
+            self.save_item(&item);
+            return Ok(item.to_json());
+        }
         let permission = item
             .id
             .strip_prefix(&format!("{}-permission-", item.job))
@@ -2500,6 +2531,25 @@ impl Link {
         Value::Array(items.into_iter().map(Item::to_json).collect())
     }
 
+    /// Settles an open item with no answer: what it asked about is gone (a shell command whose
+    /// turn ended). Nothing for an item that's done already.
+    pub fn settle(&self, id: &str) {
+        let settled = {
+            let mut state = self.lock();
+            state
+                .inbox
+                .get_mut(id)
+                .filter(|i| i.done.is_none())
+                .map(|item| {
+                    item.done = Some(time::now());
+                    item.clone()
+                })
+        };
+        if let Some(item) = settled {
+            self.save_item(&item);
+        }
+    }
+
     /// The open items of a job that's gone are done, with no answer.
     pub fn settle_job(&self, job: &str) {
         let now = time::now();
@@ -2521,7 +2571,8 @@ impl Link {
     }
 
     /// Something Oby's brain planned that persists or widens trust waits in the inbox for the
-    /// owner's own `Confirm` (#546): the brain never carries it out itself.
+    /// owner's own `Confirm` (#546): the brain never carries it out itself. A conversation's shell
+    /// keeps its `permission` items here too.
     pub fn add_confirm(&self, item: Item) -> Item {
         self.lock().inbox.insert(item.id.clone(), item.clone());
         self.save_item(&item);
