@@ -65,6 +65,8 @@ nonisolated struct ControlPlane: Sendable {
     struct Failure: LocalizedError, Equatable {
         let message: String
         let status: Int
+        /// A registration refused for its proof of work says how many bits it needs now.
+        var workBits: Int? = nil
         var errorDescription: String? { message }
     }
 
@@ -155,8 +157,8 @@ nonisolated struct ControlPlane: Sendable {
 
     /// The control plane's own line (`{"error": …}`), or one about the status.
     static func failure(_ data: Data, status: Int) -> Failure {
-        struct Said: Decodable { var error: String }
-        if let said = try? JSONDecoder().decode(Said.self, from: data) { return Failure(message: said.error, status: status) }
+        struct Said: Decodable { var error: String; var workBits: Int? }
+        if let said = try? JSONDecoder().decode(Said.self, from: data) { return Failure(message: said.error, status: status, workBits: said.workBits) }
         return Failure(message: status == 0 ? "The control plane didn't answer." : "The control plane answered \(status).", status: status)
     }
 

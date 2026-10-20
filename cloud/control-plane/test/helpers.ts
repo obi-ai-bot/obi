@@ -4,7 +4,7 @@
 
 import { env } from "cloudflare:test";
 import { type Deps, handle, SIGNED_PREFIX, WORK_PREFIX } from "../src/app";
-import { CloudflareError, type Ingress, type TunnelAPI } from "../src/cloudflare";
+import { CloudflareError, type Ingress, type TunnelAPI, type TunnelStatus } from "../src/cloudflare";
 import type { Env } from "../src/env";
 import { leadingZeroBits } from "../src/tokens";
 
@@ -12,9 +12,22 @@ export class FakeTunnels implements TunnelAPI {
   calls: { op: string; args: unknown[] }[] = [];
   tunnels = new Map<string, { name: string; secret: string; ingress?: Ingress[] }>();
   records = new Map<string, { name: string; target: string }>();
+  /// Each tunnel's status; one not here never connected.
+  status = new Map<string, TunnelStatus>();
+  /// The zone CF_ZONE_ID names.
+  zone = "oby-devices.test";
   /// What the next call of that kind answers with, as Cloudflare refusing.
   refuse: Partial<Record<keyof TunnelAPI, string>> = {};
   private count = 0;
+
+  /// Reads of a tunnel's status and the zone, apart from `calls`.
+  reads: { op: string; args: unknown[] }[] = [];
+
+  private read(op: keyof TunnelAPI, args: unknown[]): void {
+    this.reads.push({ op, args });
+    const said = this.refuse[op];
+    if (said) throw new CloudflareError(`Couldn't ${op}: ${said}`);
+  }
 
   private check(op: keyof TunnelAPI, args: unknown[]): void {
     this.calls.push({ op, args });
@@ -47,6 +60,16 @@ export class FakeTunnels implements TunnelAPI {
     return `token-for-${id}`;
   }
 
+  async tunnelStatus(id: string): Promise<TunnelStatus> {
+    this.read("tunnelStatus", [id]);
+    return this.status.get(id) ?? { connected: false, activeAt: null, inactiveAt: null };
+  }
+
+  async zoneName(): Promise<string> {
+    this.read("zoneName", []);
+    return this.zone;
+  }
+
   async createCNAME(name: string, target: string): Promise<{ id: string }> {
     this.check("createCNAME", [name, target]);
     const id = `record-${++this.count}`;
@@ -57,6 +80,11 @@ export class FakeTunnels implements TunnelAPI {
   async deleteDNSRecord(id: string): Promise<void> {
     this.check("deleteDNSRecord", [id]);
     this.records.delete(id);
+  }
+
+  /// Every tunnel there is now, connected by cloudflared.
+  connectAll(at = "2026-10-12T12:00:00.000Z"): void {
+    for (const id of this.tunnels.keys()) this.status.set(id, { connected: true, activeAt: at, inactiveAt: null });
   }
 
   ops(): string[] {
@@ -100,18 +128,18 @@ export function base64url(bytes: Uint8Array): string {
 }
 
 /// A proof of work for `key` at `at`, as the Mac makes one (apps/mac/app/RemoteAccess.swift,
-/// `MacKey.work`): the first answer whose hash starts with the Worker's zero bits; with `valid`
-/// false, the first answer that doesn't.
-export async function work(key: string, at: number, valid = true): Promise<string> {
+/// `MacKey.work`): the first answer whose hash starts with `bits` zero bits (the Worker's base
+/// by default); with `valid` false, the first answer that doesn't.
+export async function work(key: string, at: number, valid = true, bits = Number(env.REGISTRATION_WORK_BITS)): Promise<string> {
   for (let answer = 0; ; answer++) {
-    if ((await checks(key, at, String(answer))) === valid) return String(answer);
+    if ((await checks(key, at, String(answer), bits)) === valid) return String(answer);
   }
 }
 
-/// Whether `answer` is a proof of work for `key` at `at`, at the Worker's bits.
-export async function checks(key: string, at: number, answer: string): Promise<boolean> {
+/// Whether `answer` is a proof of work for `key` at `at` with `bits` zero bits.
+export async function checks(key: string, at: number, answer: string, bits = Number(env.REGISTRATION_WORK_BITS)): Promise<boolean> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${WORK_PREFIX}\n${key}\n${at}\n${answer}`));
-  return leadingZeroBits(new Uint8Array(digest)) >= Number(env.REGISTRATION_WORK_BITS);
+  return leadingZeroBits(new Uint8Array(digest)) >= bits;
 }
 
 export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env> = {}) {
@@ -144,13 +172,29 @@ export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env
     return raw(method, path, text, { ...signed, ...headers });
   }
 
-  /// Registers `mac`, with its proof of work, and returns the answer: `installation`.
+  /// Registers `mac`, with its proof of work, and returns the answer: `installation`. Asked for
+  /// more bits (`workBits` in a 403), it works them out and tries once more, as the Mac does.
   async function register(mac: Mac, name = "Wellington's MacBook Pro", headers: Record<string, string> = {}): Promise<Answer> {
     const at = Math.floor(time.now().getTime() / 1000);
-    return call(mac, "POST", "/v1/installations", { name, platform: "macos", proofAt: String(at), proof: await work(mac.publicKey, at) }, headers);
+    const send = async (bits: number) =>
+      call(mac, "POST", "/v1/installations", { name, platform: "macos", proofAt: String(at), proof: await work(mac.publicKey, at, true, bits) }, headers);
+    const first = await send(Number(env.REGISTRATION_WORK_BITS));
+    return first.status === 403 && first.body.workBits > Number(env.REGISTRATION_WORK_BITS) ? send(first.body.workBits) : first;
   }
 
-  return { raw, call, register, tunnels, time };
+  /// `count` live endpoints made straight in D1 (no Cloudflare), from `network`.
+  async function fill(count: number, network = "fill") {
+    for (let i = 0; i < count; i++) {
+      const id = crypto.randomUUID();
+      const at = time.now().toISOString();
+      await env.DB.batch([
+        env.DB.prepare("INSERT INTO installations (id, public_key, name, platform, created_at, last_seen_at) VALUES (?1, ?1, 'Mac', 'macos', ?2, ?2)").bind(id, at),
+        env.DB.prepare("INSERT INTO endpoints (installation_id, tunnel_id, hostname, dns_record_id, created_at, network) VALUES (?1, ?1, ?1, ?1, ?2, ?3)").bind(id, at, network),
+      ]);
+    }
+  }
+
+  return { raw, call, register, fill, tunnels, time };
 }
 
 export const MINUTE = 60_000;

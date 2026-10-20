@@ -115,21 +115,27 @@ final class RemoteAccess {
     }
 
     /// A signed call keeps the installation. When the control plane no longer knows this Mac (idle
-    /// for 30 days, or forgotten), it's registered again: on, at once, with a new hostname.
+    /// for 30 days, or forgotten), or took its tunnel back (not connected for days), the hostname
+    /// here goes; on, it's set up again at once, with a new hostname.
     func checkIn() async {
         do {
-            _ = try await plane.installation(try signer())
+            let mine = try await plane.installation(try signer())
+            if mine.endpoint?.hostname != hostname { await lost() }
         } catch let failure as ControlPlane.Failure where failure.status == 410 {
-            hostname = nil
-            defaults.removeObject(forKey: "remote.hostname")
-            guard on else { return }
-            // The old tunnel is gone at Cloudflare: its cloudflared ends, and the new one runs.
-            runner.stop()
-            await turnOn()
+            await lost()
         } catch {
             // Offline, or the control plane is down: the next check-in tries again.
             Logger.remote.error("remote access check-in: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    private func lost() async {
+        hostname = nil
+        defaults.removeObject(forKey: "remote.hostname")
+        guard on else { return }
+        // The old tunnel is gone at Cloudflare: its cloudflared ends, and the new one runs.
+        runner.stop()
+        await turnOn()
     }
 
     // MARK: On and off
@@ -140,11 +146,14 @@ final class RemoteAccess {
     func turnOn() async {
         await attempt {
             let signer = try signer()
-            // A new Mac's proof of work, off the main thread: a second or two.
-            let at = Int(plane.now().timeIntervalSince1970)
-            let key = ControlPlane.base64url(signer.publicKey), bits = workBits
-            let proof = await Task.detached(priority: .userInitiated) { MacKey.work(key: key, at: at, bits: bits) }.value
-            _ = try await plane.register(signer, name: Host.current().localizedName ?? "Mac", proofAt: at, proof: proof)
+            do {
+                try await register(signer, bits: workBits)
+            } catch let failure as ControlPlane.Failure where failure.status == 403 {
+                // Busy, or nearly full: the control plane asks for more work. Once, and not past
+                // Self.mostWorkBits, so a Mac isn't kept hashing for minutes.
+                guard let bits = failure.workBits, bits > workBits, bits <= Self.mostWorkBits else { throw failure }
+                try await register(signer, bits: bits)
+            }
             let endpoint = try await plane.createEndpoint(signer)
             let token = try await plane.tunnelToken(signer)
             try secrets.save(token.token, as: Self.tokenKey)
@@ -185,6 +194,18 @@ final class RemoteAccess {
             hostname = nil
             on = false
         }
+    }
+
+    /// The most work a Mac does when asked for more: 28 bits is about a minute.
+    static let mostWorkBits = 28
+
+    /// Registers this Mac, with a proof of work worked out off the main thread (a second or two at
+    /// 22 bits).
+    private func register(_ signer: ControlPlane.Signer, bits: Int) async throws {
+        let at = Int(plane.now().timeIntervalSince1970)
+        let key = ControlPlane.base64url(signer.publicKey)
+        let proof = await Task.detached(priority: .userInitiated) { MacKey.work(key: key, at: at, bits: bits) }.value
+        _ = try await plane.register(signer, name: Host.current().localizedName ?? "Mac", proofAt: at, proof: proof)
     }
 
     /// This Mac's key, made the first time it's needed.

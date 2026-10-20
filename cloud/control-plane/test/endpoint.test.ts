@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { tunnelsFromEnv } from "../src/cloudflare";
 import type { Env } from "../src/env";
 import { HOUR, Mac, testApp } from "./helpers";
@@ -103,7 +103,7 @@ describe("the installation's tunnel", () => {
 
 describe("what a tunnel may cost", () => {
   it("makes no hostname until the devices have a domain of their own", async () => {
-    for (const domain of ["", "tetrix.pro", "devices.tetrix.pro", "pro"]) {
+    for (const domain of ["", "tetrix.pro", "devices.tetrix.pro", "pro", "co.uk"]) {
       const app = testApp({}, { DEVICE_DOMAIN: domain });
       const mac = await registered(app);
       const refused = await app.call(mac.mac, "POST", "/v1/installations/self/endpoint");
@@ -158,5 +158,82 @@ describe("what a tunnel may cost", () => {
     expect(busy.status).toBe(429);
     expect(busy.body.error).toMatch(/^Too many Macs are turning remote access on right now\./);
     expect(app.tunnels.calls).toEqual([]);
+  });
+
+  it("compares registrable domains, fails closed with no product domain, and checks the zone", async () => {
+    const ukProduct = testApp({}, { PRODUCT_DOMAIN: "example.co.uk", DEVICE_DOMAIN: "devices.example.co.uk" });
+    const sharing = await ukProduct.call((await registered(ukProduct)).mac, "POST", "/v1/installations/self/endpoint");
+    expect(sharing.status).toBe(503);
+    expect(sharing.body.error).toMatch(/registrable domain/);
+
+    const noProduct = testApp({}, { PRODUCT_DOMAIN: "" });
+    const open = await noProduct.call((await registered(noProduct)).mac, "POST", "/v1/installations/self/endpoint");
+    expect(open.status).toBe(503);
+    expect(open.body.error).toMatch(/^PRODUCT_DOMAIN isn't set/);
+
+    const wrongZone = testApp({}, { DEVICE_DOMAIN: "zone-mismatch.test" });
+    const mismatch = await wrongZone.call((await registered(wrongZone)).mac, "POST", "/v1/installations/self/endpoint");
+    expect(mismatch.status).toBe(503);
+    expect(mismatch.body.error).toBe("CF_ZONE_ID isn't DEVICE_DOMAIN's zone: set it to that zone's id.");
+    expect(wrongZone.tunnels.calls).toEqual([]);
+
+    // A UK device domain of its own is fine, its zone checked once.
+    const apart = testApp({}, { PRODUCT_DOMAIN: "example.co.uk", DEVICE_DOMAIN: "obydevices.co.uk" });
+    apart.tunnels.zone = "obydevices.co.uk";
+    for (let i = 0; i < 2; i++) {
+      const mac = await registered(apart);
+      expect((await apart.call(mac.mac, "POST", "/v1/installations/self/endpoint", undefined, { "CF-Connecting-IP": `192.0.2.${i}` })).status).toBe(201);
+    }
+    expect(apart.tunnels.reads.filter((read) => read.op === "zoneName")).toHaveLength(1);
+  });
+
+  it("fails closed on a cap that isn't a number", async () => {
+    for (const cap of ["", "abc", "500x", "0"]) {
+      const app = testApp({}, { MAX_ENDPOINTS: cap });
+      const mac = await Mac.make();
+      // Registering reads the cap too.
+      const answer = await app.register(mac);
+      expect(answer.status, cap).toBe(503);
+      expect(answer.body.error).toMatch(/^MAX_ENDPOINTS in wrangler\.jsonc isn't a whole number/);
+    }
+  });
+
+  it("caps the endpoints made from one network, and warns past 80% of the cap", async () => {
+    const app = testApp({}, { MAX_ENDPOINTS: "5" });
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    for (let i = 0; i < 3; i++) {
+      const mac = await registered(app);
+      expect((await app.call(mac.mac, "POST", "/v1/installations/self/endpoint", undefined, { "CF-Connecting-IP": `2001:db8:5:${i}::1` })).status).toBe(201);
+    }
+    const fourth = await registered(app);
+    const sameNetwork = await app.call(fourth.mac, "POST", "/v1/installations/self/endpoint", undefined, { "CF-Connecting-IP": "2001:db8:5:ff::1" });
+    expect(sameNetwork.status).toBe(429);
+    expect(sameNetwork.body.error).toBe("This network has 3 Macs with remote access on already.");
+    expect(warned).not.toHaveBeenCalled();
+    expect((await app.call(fourth.mac, "POST", "/v1/installations/self/endpoint", undefined, { "CF-Connecting-IP": "2001:db8:6::1" })).status).toBe(201);
+    expect(warned).toHaveBeenCalledWith("endpoints: 4 of 5 alive, past 80% of MAX_ENDPOINTS");
+    warned.mockRestore();
+  });
+
+  it("limits token reads and endpoint removals over everyone", async () => {
+    const app = testApp();
+    const mac = await registered(app);
+    await app.call(mac.mac, "POST", "/v1/installations/self/endpoint");
+    const window = Math.floor(app.time.now().getTime() / 1000);
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO rate_limits (key, window_start, count) VALUES ('tokens:everywhere', ?1, 300)").bind(window),
+      env.DB.prepare("INSERT INTO rate_limits (key, window_start, count) VALUES ('removals:everywhere', ?1, 120)").bind(window),
+    ]);
+    const token = await app.call(mac.mac, "GET", "/v1/installations/self/endpoint/token");
+    expect(token.status).toBe(429);
+    expect(token.body.error).toMatch(/^Too many Macs are asking for their tunnels right now\./);
+    const removal = await app.call(mac.mac, "DELETE", "/v1/installations/self/endpoint");
+    expect(removal.status).toBe(429);
+    expect(removal.body.error).toMatch(/^Too many Macs are turning remote access off right now\./);
+    const forget = await app.call(mac.mac, "DELETE", "/v1/installations/self");
+    expect(forget.status).toBe(429);
+    app.time.advance(HOUR);
+    expect((await app.call(mac.mac, "GET", "/v1/installations/self/endpoint/token")).status).toBe(200);
+    expect((await app.call(mac.mac, "DELETE", "/v1/installations/self")).status).toBe(204);
   });
 });

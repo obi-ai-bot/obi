@@ -93,6 +93,7 @@ struct ControlPlaneTests {
 
     @Test func saysWhatTheControlPlaneSaid() async throws {
         let exchange = Exchange([
+            (403, #"{"error": "That proof of work doesn't check out.", "workBits": 26}"#),
             (410, #"{"error": "This Mac isn't registered. Turn remote access on again."}"#),
             (502, "<html>bad gateway</html>"),
             (0, ""),
@@ -100,6 +101,9 @@ struct ControlPlaneTests {
         ])
         let plane = exchange.plane()
         let key = Signed().signer
+        await #expect(throws: ControlPlane.Failure(message: "That proof of work doesn't check out.", status: 403, workBits: 26)) {
+            try await plane.register(key, name: "Mac", proofAt: 1, proof: "0")
+        }
         await #expect(throws: ControlPlane.Failure(message: "This Mac isn't registered. Turn remote access on again.", status: 410)) { try await plane.installation(key) }
         await #expect(throws: ControlPlane.Failure(message: "The control plane answered 502.", status: 502)) { try await plane.installation(key) }
         await #expect(throws: ControlPlane.Failure(message: "The control plane didn't answer.", status: 0)) { try await plane.installation(key) }

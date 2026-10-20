@@ -29,3 +29,10 @@ export async function takeOne(db: D1Database, key: string, limit: Limit, now: Da
   const allowed = row.count <= limit.max;
   return { allowed, retryAfterSeconds: allowed ? 0 : Math.max(1, row.window_start + limit.windowSeconds - at) };
 }
+
+/// How many requests `key`'s current window has counted, without counting one.
+export async function counted(db: D1Database, key: string, limit: Limit, now: Date): Promise<number> {
+  const at = Math.floor(now.getTime() / 1000);
+  const row = await db.prepare("SELECT count, window_start FROM rate_limits WHERE key = ?1").bind(key).first<{ count: number; window_start: number }>();
+  return row && row.window_start + limit.windowSeconds > at ? row.count : 0;
+}
