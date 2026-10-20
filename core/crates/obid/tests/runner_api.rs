@@ -1193,8 +1193,9 @@ fn messages_reach_only_jobs_that_can_take_them() {
 }
 
 /// A follow-up of a job whose commits aren't merged (here not published: this obid has no `gh`)
-/// starts from that job's branch head, on a branch of its own: its agent sees that work, and only
-/// its own commits count as its. A job takes one follow-up at a time: while one works, more words
+/// starts from that job's branch head, on a branch of its own: its agent sees that work, and its
+/// commits are what it publishes beyond what that job pushed (only its pull request failed here),
+/// its own (#770). A job takes one follow-up at a time: while one works, more words
 /// for the first job go to it, never a second.
 #[test]
 fn a_follow_up_starts_from_the_first_jobs_unmerged_work() {
@@ -1230,6 +1231,7 @@ fn a_follow_up_starts_from_the_first_jobs_unmerged_work() {
     assert_eq!(followed.body["branch"], format!("oby/build-{next}"));
     let after = ended(&obid, &next);
     assert_eq!(after["startCommit"], head.as_str(), "{after}");
+    assert_eq!(done["pushed"], 1, "{done}");
     assert_eq!(after["commits"], 1, "{after}");
     let worktree = std::path::Path::new(after["worktree"].as_str().unwrap());
     assert!(worktree.join("one.txt").is_file() && worktree.join("two.txt").is_file());

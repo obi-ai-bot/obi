@@ -385,15 +385,17 @@ fn dispatch_takes_only_whole_jobs() {
 }
 
 /// A stand-in `gh` in `folder/bin` that keeps its arguments (`folder/gh-calls`) and environment
-/// (`folder/gh-env`), and opens pull request 7.
+/// (`folder/gh-env`), opens pull request 7, and answers `gh pr view` with `folder/pr-view.json`
+/// when there's one.
 fn fake_gh(folder: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = folder.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\nenv >> '{env}'\ncase \"$1 $2\" in\n  \"pr list\") exit 0 ;;\n  \"pr create\") echo https://github.com/obi-e2e/fixture-app/pull/7 ;;\n  *) exit 1 ;;\nesac\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\nenv >> '{env}'\ncase \"$1 $2\" in\n  \"pr list\") exit 0 ;;\n  \"pr create\") echo https://github.com/obi-e2e/fixture-app/pull/7 ;;\n  \"pr view\") exec cat '{view}' ;;\n  *) exit 1 ;;\nesac\n",
         calls = folder.join("gh-calls").display(),
-        env = folder.join("gh-env").display()
+        env = folder.join("gh-env").display(),
+        view = folder.join("pr-view.json").display()
     );
     std::fs::write(bin.join("gh"), script).unwrap();
     std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1073,6 +1075,177 @@ fn a_job_stopped_at_a_limit_counts_its_commits_for_a_follow_up() {
     assert_eq!(follow["startCommit"], head.as_str(), "{follow}");
     let worktree = obid.home.join("worktrees").join(&next);
     assert!(worktree.join("a.txt").exists(), "{follow}");
+}
+
+/// A follow-up that commits nothing still publishes the first job's commits it started from: it
+/// ends done with them counted, pushed and in a pull request (#770). A follow-up of that one starts
+/// on its branch with them, and, adding nothing to a branch that's out, publishes nothing.
+#[test]
+fn a_follow_up_publishes_the_first_jobs_commits() {
+    let folder = Folder::new("follow-publish");
+    let remote = fixture(&folder.0.join("fixture"));
+    let bin = fake_gh(&folder.0);
+    let obid = start_with(&folder.0, &config(&folder.0, &remote), Some(&bin));
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt", "request": "Add a.txt", "title": "Add a.txt", "check": "test -e b.txt", "rounds": 1}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "interrupted", "{job}");
+    assert_eq!(job["commits"], 1, "{job}");
+    let head = git(&clone, &["rev-parse", &format!("oby/build-{id}")]);
+    let tell = |id: &str, text: &str| {
+        let told = request(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/messages"),
+            Some(&json!({ "text": text }).to_string()),
+        );
+        assert_eq!(told.status, 201, "{}", told.text);
+        told.body["id"].as_str().unwrap().to_owned()
+    };
+
+    // Its agent leaves b.txt for the check and commits nothing.
+    let next = tell(&id, "DRAFT: b.txt");
+    let follow = wait(&obid, &next);
+    assert_eq!(follow["status"], "done", "{follow}");
+    assert_eq!(follow["startCommit"], head.as_str(), "{follow}");
+    assert_eq!(follow["commits"], 1, "{follow}");
+    assert_eq!(follow["reason"], Value::Null, "{follow}");
+    assert_eq!(
+        follow["published"], "https://github.com/obi-e2e/fixture-app/pull/7",
+        "{follow}"
+    );
+    assert_eq!(follow["pushed"], 1, "{follow}");
+    assert_eq!(
+        git(
+            &remote,
+            &["rev-parse", &format!("refs/heads/oby/build-{next}")]
+        ),
+        head
+    );
+
+    let last = tell(&next, "DRAFT: b.txt");
+    let again = wait(&obid, &last);
+    assert_eq!(again["branch"], format!("oby/build-{next}"), "{again}");
+    assert!(
+        obid.home
+            .join("worktrees")
+            .join(&last)
+            .join("a.txt")
+            .exists(),
+        "{again}"
+    );
+    assert_eq!(again["status"], "done", "{again}");
+    assert_eq!(again["commits"], 0, "{again}");
+    assert_eq!(
+        again["reason"], "Nothing committed, so nothing was published.",
+        "{again}"
+    );
+}
+
+/// A follow-up of a job whose pull request was closed without merging doesn't send those commits
+/// again by itself when it adds none: it ends done, saying so, with Publish the owner's (#770).
+#[test]
+fn a_follow_up_doesnt_republish_a_closed_pull_requests_commits() {
+    let folder = Folder::new("follow-closed");
+    let remote = fixture(&folder.0.join("fixture"));
+    let bin = fake_gh(&folder.0);
+    std::fs::write(
+        folder.0.join("pr-view.json"),
+        json!({"state": "CLOSED", "reviewDecision": null, "mergedAt": null, "baseRefName": "main"})
+            .to_string(),
+    )
+    .unwrap();
+    let obid = start_with(&folder.0, &config(&folder.0, &remote), Some(&bin));
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt", "request": "Add a.txt", "title": "Add a.txt", "check": "test -f a.txt"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = until(&obid, &id, |j| j["pullRequest"]["state"] == "CLOSED");
+    assert_eq!(job["status"], "done", "{job}");
+    let told = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "Why was it closed?"}).to_string()),
+    );
+    assert_eq!(told.status, 201, "{}", told.text);
+    let next = told.body["id"].as_str().unwrap().to_owned();
+    let follow = wait(&obid, &next);
+    assert_eq!(follow["status"], "done", "{follow}");
+    assert_eq!(follow["branch"], format!("oby/build-{next}"), "{follow}");
+    assert_eq!(follow["commits"], 1, "{follow}");
+    assert_eq!(follow["published"], Value::Null, "{follow}");
+    assert_eq!(follow["outgoing"], json!([]), "{follow}");
+    let turned_down = "The pull request of Add a.txt was closed without merging, so Oby didn't publish its commits again: Publish opens a new pull request with them.";
+    assert_eq!(follow["reason"], turned_down, "{follow}");
+
+    // A follow-up of that follow-up carries the same turned-down commits: nor does it.
+    let told = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{next}/messages"),
+        Some(&json!({"text": "And now?"}).to_string()),
+    );
+    assert_eq!(told.status, 201, "{}", told.text);
+    let last = told.body["id"].as_str().unwrap().to_owned();
+    let again = wait(&obid, &last);
+    assert_eq!(again["status"], "done", "{again}");
+    assert_eq!(again["branch"], format!("oby/build-{last}"), "{again}");
+    assert_eq!(again["commits"], 1, "{again}");
+    assert_eq!(again["published"], Value::Null, "{again}");
+    assert_eq!(again["outgoing"], json!([]), "{again}");
+    assert_eq!(again["reason"], turned_down, "{again}");
+}
+
+/// A follow-up of a job that pushed with no pull request (a remote without them) doesn't push
+/// those commits again to a branch of its own when it adds none: they're out (#770).
+#[test]
+fn a_follow_up_doesnt_repush_its_first_jobs_pushed_commits() {
+    let folder = Folder::new("follow-pushed");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote);
+    config["repos"][0]["pullRequests"] = json!(false);
+    let obid = start(&folder.0, &config);
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt", "request": "Add a.txt", "title": "Add a.txt", "check": "test -f a.txt"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["pushed"], 1, "{job}");
+    assert_eq!(job["published"], Value::Null, "{job}");
+    let told = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "Anything left?"}).to_string()),
+    );
+    assert_eq!(told.status, 201, "{}", told.text);
+    let next = told.body["id"].as_str().unwrap().to_owned();
+    let follow = wait(&obid, &next);
+    assert_eq!(follow["status"], "done", "{follow}");
+    assert_eq!(follow["branch"], format!("oby/build-{next}"), "{follow}");
+    assert_eq!(follow["commits"], 0, "{follow}");
+    assert_eq!(follow["outgoing"], json!([]), "{follow}");
+    assert_eq!(
+        follow["reason"], "Nothing committed, so nothing was published.",
+        "{follow}"
+    );
 }
 
 /// A job stopped at a limit, tried again: the round's final words are its summary and its last
