@@ -37,6 +37,29 @@ struct GitHubWorkTests {
         #expect(!out.signedIn && out.items.isEmpty)
     }
 
+    /// To do groups an issue by its board column, newest column first, the ones on no board last;
+    /// a board this app can't read, or none, falls back to one group with no name.
+    @Test func toDoGroupsByBoardColumn() throws {
+        func issue(_ id: String, _ board: String, _ hour: String, job: String = "null") -> String {
+            #"{"id": "\#(id)", "list": "assigned", "repo": "o/r", "number": 1, "title": "t", "url": "https://github.com/o/r/issues/1", "updated": "2026-10-18T\#(hour):00:00Z", "known": true, "job": \#(job), "board": \#(board)}"#
+        }
+        let todo = #"{"project": "Oby — Roadmap", "column": "Todo"}"#
+        let assigned = [issue("a", todo, "10"), issue("b", #"{"project": "Oby — Roadmap", "column": "In progress"}"#, "11"), issue("c", "null", "12"),
+                        issue("d", todo, "09"), issue("e", #""a newer shape""#, "08"), issue("f", todo, "13", job: #""ab12cd34""#)]
+        let json = #"{"signedIn": true, "reviews": [], "mine": [], "assigned": ["# + assigned.joined(separator: ", ") + "]}"
+        let work = try Runner.decoder.decode(GitHubWork.self, from: Data(json.utf8))
+        #expect(work.items.count == 6)
+        let columns = work.toDo(.issues)
+        // "f" has a job: it's listed as the job, under Running, never here too.
+        #expect(columns.map(\.name) == ["In progress", "Todo", nil])
+        #expect(columns.map { $0.items.map(\.id) } == [["b"], ["a", "d"], ["c", "e"]])
+        #expect(work.items[0].column == "Todo" && work.items[0].board?.project == "Oby — Roadmap" && work.items[2].column == nil)
+        // An older obid sends no board: one group, no name.
+        let older = try Runner.decoder.decode(GitHubWork.self, from: Data(self.json.utf8))
+        #expect(older.toDo(.review).map(\.name) == [nil] && older.toDo(.review)[0].items.map(\.id) == ["a", "c"])
+        #expect(older.toDo(.issues, later: ["b"]).isEmpty)
+    }
+
     @Test func groupsByKindLeavingStartedAndPutOffOnesOut() throws {
         let work = try Runner.decoder.decode(GitHubWork.self, from: Data(json.utf8))
         // Your own pull requests go under Review PR; "d" has a job on it, which is listed instead.

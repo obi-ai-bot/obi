@@ -50,14 +50,23 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
         var known: Bool = true
         /// The queued or running job on it: the job is listed instead.
         var job: String?
+        /// Where it sits on a GitHub project board, when it's on one (a newer obid's; older ones leave it out).
+        var board: Board?
 
-        private enum Keys: String, CodingKey { case id, list, repo, number, title, url, author, updated, draft, reviewDecision, checks, known, job }
+        nonisolated struct Board: Decodable, Equatable, Sendable {
+            /// The project's name, "Oby — Roadmap".
+            var project: String?
+            /// Its column there, "Todo" or "In progress".
+            var column: String?
+        }
+
+        private enum Keys: String, CodingKey { case id, list, repo, number, title, url, author, updated, draft, reviewDecision, checks, known, job, board }
 
         init(id: String, list: List, repo: String, number: Int, title: String, url: String, author: String? = nil, updated: Date? = nil,
-             draft: Bool = false, reviewDecision: String? = nil, checks: String? = nil, known: Bool = true, job: String? = nil) {
+             draft: Bool = false, reviewDecision: String? = nil, checks: String? = nil, known: Bool = true, job: String? = nil, board: Board? = nil) {
             (self.id, self.list, self.repo, self.number, self.title, self.url, self.author, self.updated) = (id, list, repo, number, title, url, author, updated)
             self.draft = draft
-            (self.reviewDecision, self.checks, self.known, self.job) = (reviewDecision, checks, known, job)
+            (self.reviewDecision, self.checks, self.known, self.job, self.board) = (reviewDecision, checks, known, job, board)
         }
 
         init(from decoder: Decoder) throws {
@@ -75,6 +84,8 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
             checks = try c.decodeIfPresent(String.self, forKey: .checks)
             known = try c.decodeIfPresent(Bool.self, forKey: .known) ?? true
             job = try c.decodeIfPresent(String.self, forKey: .job)
+            // A board this app can't read is no board: the item still shows, under To do.
+            board = (try? c.decodeIfPresent(Board.self, forKey: .board)) ?? nil
         }
     }
 
@@ -180,6 +191,9 @@ extension GitHubWork.Item {
         return draft ? "It's a draft: Oby can review it once it's ready for review." : nil
     }
 
+    /// Its board column as one plain line ("Todo"), the small label on its card; nil off a board.
+    var column: String? { board?.column.map(GitHubWork.plain).flatMap { $0.isEmpty ? nil : $0 } }
+
     /// Its page on GitHub, only when it's one (`GitHubWork.page`).
     var page: URL? { GitHubWork.page(url) }
 }
@@ -233,6 +247,25 @@ extension GitHubWork {
     func waiting(_ kind: WorkType, later: Set<String> = []) -> [Item] {
         items.filter { $0.type == kind && $0.job == nil && !later.contains($0.id) }
             .sorted { ($0.updated ?? .distantPast) > ($1.updated ?? .distantPast) }
+    }
+
+    /// One group of a kind's To do tab: the waiting items in one board column (`name`), or on no
+    /// board (`nil`).
+    nonisolated struct Column: Identifiable, Equatable, Sendable {
+        var name: String?
+        var items: [Item]
+        var id: String { name ?? "" }
+    }
+
+    /// A kind's To do tab: its waiting items (`waiting`) by board column, the columns in the order
+    /// their newest item comes, the items on no board last. Without boards, one group with no name.
+    /// ponytail: the feed doesn't say the board's own column order; use it once obid sends it.
+    func toDo(_ kind: WorkType, later: Set<String> = []) -> [Column] {
+        var columns: [Column] = []
+        for item in waiting(kind, later: later) {
+            if let at = columns.firstIndex(where: { $0.name == item.column }) { columns[at].items.append(item) } else { columns.append(Column(name: item.column, items: [item])) }
+        }
+        return columns.filter { $0.name != nil } + columns.filter { $0.name == nil }
     }
 
     /// A GitHub page to open: `https://github.com/…` and nothing else (no other host, no login in
