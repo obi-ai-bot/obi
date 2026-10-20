@@ -605,18 +605,19 @@ nonisolated struct ModelOptions: Codable, Equatable, Sendable {
 typealias RunnerAccount = Account
 #else
 /// On the Mac the runner's accounts are read into Engine's own AccountState (the runner keeps
-/// their `payer` and `home` to itself), so the brain can tell their usage too (Engine/Conversation.swift).
+/// their `home` to itself; obid sends `payer`), so the brain can tell their usage too (Engine/Conversation.swift).
 typealias RunnerAccount = AccountState
 
 extension AccountState: Decodable {
     private enum Keys: String, CodingKey {
-        case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed, reserveLiftedUntil
+        case id, agent, name, payer, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed, reserveLiftedUntil
     }
 
     init(from decoder: any Decoder) throws {
         let keys = try decoder.container(keyedBy: Keys.self)
         self.init(account: Account(id: try keys.decode(String.self, forKey: .id), agent: try keys.decode(String.self, forKey: .agent),
-                                   name: try keys.decode(String.self, forKey: .name), payer: "", home: nil),
+                                   name: try keys.decode(String.self, forKey: .name),
+                                   payer: try keys.decodeIfPresent(String.self, forKey: .payer) ?? "", home: nil),
                   label: try keys.decodeIfPresent(String.self, forKey: .label),
                   fiveHour: try keys.decodeIfPresent(Double.self, forKey: .fiveHour),
                   sevenDay: try keys.decodeIfPresent(Double.self, forKey: .sevenDay),
@@ -1416,6 +1417,37 @@ nonisolated struct Runner: Sendable {
     func endGitHubSignIn() async throws {
         _ = try await send("DELETE", "v1/github/sign-in")
     }
+
+    // MARK: obid's accounts (docs/runner-api.md, "obid only: accounts"): loopback only, so only obid on this Mac
+
+    /// Adds an account: obid makes its folder, and it's signed in with `startAccountSignIn`.
+    func addAccount(agent: String, name: String, payer: String) async throws -> RunnerAccount {
+        struct Body: Encodable { var agent: String; var name: String; var payer: String? }
+        return try await call("POST", "v1/accounts", body: Body(agent: agent, name: name, payer: payer.isEmpty ? nil : payer))
+    }
+
+    /// Takes the account out of Oby. The tool's own login, and the account with its provider, stay.
+    func removeAccount(_ id: String) async throws {
+        _ = try await send("DELETE", "v1/accounts/\(Self.segment(id))")
+    }
+
+    /// Runs the tool's own login for the account on obid (or answers the one under way).
+    func startAccountSignIn(_ id: String) async throws -> AccountSignIn {
+        try await call("GET", "v1/accounts/\(Self.segment(id))/sign-in")
+    }
+
+    /// The code Claude Code's page showed, for its login on obid: once.
+    func sendAccountCode(_ id: String, _ code: String) async throws -> RunnerAccount {
+        struct Body: Encodable { var code: String }
+        return try await call("POST", "v1/accounts/\(Self.segment(id))/sign-in", body: Body(code: code), timeout: 75)
+    }
+
+    /// Ends the account's sign-in under way, if any.
+    func endAccountSignIn(_ id: String) async throws {
+        _ = try await send("DELETE", "v1/accounts/\(Self.segment(id))/sign-in")
+    }
+
+    private static func segment(_ id: String) -> String { id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id }
     #endif
 
     /// Server-Sent Events until the connection drops; the caller reconnects.
@@ -1646,6 +1678,28 @@ nonisolated struct GitHubLogin: Decodable, Equatable, Sendable {
     var signedIn: Bool
     var user: String?
     var signIn: GitHubSignIn?
+}
+
+/// A tool's own login for one of obid's accounts, under way (`GET /v1/accounts/{id}/sign-in`): its
+/// page, the one-time code to type there (Codex), or whether the page ends with a code to send back
+/// (Claude Code).
+nonisolated struct AccountSignIn: Decodable, Equatable, Sendable {
+    var account: String
+    var url: URL
+    var userCode: String?
+    var pasteCode: Bool
+    var expiresAt: String?
+
+    /// The tool's own sites, as obid takes the link from its login: the Mac opens nothing else.
+    static let sites = ["claude": ["claude.com", "claude.ai", "anthropic.com"], "codex": ["openai.com", "chatgpt.com"],
+                        "cursor": ["cursor.com", "cursor.sh"]]
+
+    /// Whether it's a page the Mac opens for `agent`: https on the tool's own site, with no login or port.
+    func opens(for agent: String) -> Bool {
+        guard url.scheme == "https", url.user == nil, url.password == nil, url.port == nil,
+              let host = url.host()?.lowercased() else { return false }
+        return (Self.sites[agent] ?? []).contains { host == $0 || host.hasSuffix("." + $0) }
+    }
 }
 
 /// gh's own sign-in under way: GitHub's device page, the code to type there, when it runs out.
