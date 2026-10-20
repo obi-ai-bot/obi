@@ -191,10 +191,21 @@ fn jobs_have_iso_dates_and_every_key() {
         for key in SWIFT_JOB_KEYS {
             assert!(keys.contains_key(key), "{key} is missing: {body}");
         }
+        // The job page's facts (#739) are there only once obid knows them.
+        let page = [
+            "activity",
+            "checks",
+            "context",
+            "diff",
+            "estimate",
+            "scan",
+            "usage",
+            "windowShare",
+        ];
         let mut extra: Vec<&str> = keys
             .keys()
             .map(String::as_str)
-            .filter(|k| !SWIFT_JOB_KEYS.contains(k))
+            .filter(|k| !SWIFT_JOB_KEYS.contains(k) && !page.contains(k))
             .collect();
         extra.sort_unstable();
         assert_eq!(
@@ -202,16 +213,28 @@ fn jobs_have_iso_dates_and_every_key() {
             [
                 "answered",
                 "answeredCount",
+                "archived",
                 "artifactProblems",
                 "artifacts",
+                "changes",
                 "conversation",
                 "followUpOf",
+                "nextStep",
                 "obi",
+                "reason",
+                "resumesAt",
+                "routine",
+                "stalled",
+                "supervised",
+                "turn",
                 "worktree"
             ],
             "{body}"
         );
-        assert_eq!(keys.len(), 73);
+        let known = keys.keys().filter(|k| page.contains(&k.as_str())).count();
+        assert_eq!(keys.len(), 82 + known);
+        // POST /v1/jobs: no turn of a conversation started it.
+        assert!(body["turn"].is_null(), "{body}");
         // What obid never sets is there, as null.
         for key in [
             "published",
@@ -1170,9 +1193,10 @@ fn messages_reach_only_jobs_that_can_take_them() {
 }
 
 /// A follow-up of a job whose commits aren't merged (here not published: this obid has no `gh`)
-/// starts from that job's branch head, on a branch of its own: its agent sees that work, and only
-/// its own commits count as its. A job takes one follow-up at a time: while one works, more words
-/// for the first job are refused, pointing at it.
+/// starts from that job's branch head, on a branch of its own: its agent sees that work, and its
+/// commits are what it publishes beyond what that job pushed (only its pull request failed here),
+/// its own (#770). A job takes one follow-up at a time: while one works, more words
+/// for the first job go to it, never a second.
 #[test]
 fn a_follow_up_starts_from_the_first_jobs_unmerged_work() {
     let folder = Folder::new("follow-up-work");
@@ -1207,6 +1231,7 @@ fn a_follow_up_starts_from_the_first_jobs_unmerged_work() {
     assert_eq!(followed.body["branch"], format!("oby/build-{next}"));
     let after = ended(&obid, &next);
     assert_eq!(after["startCommit"], head.as_str(), "{after}");
+    assert_eq!(done["pushed"], 1, "{done}");
     assert_eq!(after["commits"], 1, "{after}");
     let worktree = std::path::Path::new(after["worktree"].as_str().unwrap());
     assert!(worktree.join("one.txt").is_file() && worktree.join("two.txt").is_file());
@@ -1222,16 +1247,17 @@ fn a_follow_up_starts_from_the_first_jobs_unmerged_work() {
     ended(&obid, &looked);
     let pausing = post(&looked, "PAUSE: 3000");
     assert_eq!(pausing.status, 201, "{}", pausing.text);
+    let follow = pausing.body["id"].as_str().unwrap().to_owned();
+    assert_eq!(pausing.body["title"], "Follow-up: Look around");
+    within(60, "its follow-up is at work", || {
+        let body = job(&obid, &follow);
+        (body["status"] == "running" && body["step"] == "Starting Claude Code").then_some(())
+    });
     let busy = post(&looked, "and one more");
-    assert_eq!(busy.status, 422, "{}", busy.text);
-    assert!(
-        busy.body["error"]
-            .as_str()
-            .unwrap()
-            .contains("is following it up already"),
-        "{}",
-        busy.text
-    );
+    assert_eq!(busy.status, 200, "{}", busy.text);
+    assert_eq!(busy.body["id"], follow.as_str());
+    assert_eq!(busy.body["step"], "You: and one more");
+    assert_eq!(ended(&obid, &follow)["status"], "done");
 }
 
 fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
@@ -1292,7 +1318,8 @@ fn a_running_job_hears_the_words_next_and_the_owners_round_may_commit_nothing() 
     // The turn only the words started keeps the work's summary (#699).
     assert_eq!(done["summary"], "Paused.");
 
-    // A fix that commits nothing fails; the owner's round after it may end done without a commit.
+    // A fix that commits nothing is done, saying so; the owner's round after it may end done
+    // without a commit too.
     let fix = dispatch(
         &obid,
         json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "Look around"}),
@@ -1300,9 +1327,13 @@ fn a_running_job_hears_the_words_next_and_the_owners_round_may_commit_nothing() 
         .as_str()
         .unwrap()
         .to_owned();
-    let failed = ended(&obid, &fix);
-    assert_eq!(failed["status"], "failed");
-    assert_eq!(failed["summary"], "Nothing committed: Nothing to do.");
+    let nothing = ended(&obid, &fix);
+    assert_eq!(nothing["status"], "done");
+    assert_eq!(nothing["summary"], "Nothing to do.");
+    assert_eq!(
+        nothing["reason"],
+        "Nothing committed, so nothing was published."
+    );
     assert_eq!(post(&fix, TRY_AGAIN).status, 200);
     let left = ended(&obid, &fix);
     assert_eq!(left["status"], "done", "{left}");
@@ -1319,12 +1350,12 @@ fn publish_by_hand_is_off_a_dismissed_job() {
     let (obid, _) = obid(&folder);
     let id = dispatch(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "Look around"}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "FAIL"}),
     )["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    assert_eq!(ended(&obid, &id)["status"], "failed");
+    assert_eq!(ended(&obid, &id)["status"], "interrupted");
     assert_eq!(
         call(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None).status,
         200

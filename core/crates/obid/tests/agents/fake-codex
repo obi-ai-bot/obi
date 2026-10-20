@@ -13,7 +13,21 @@
 //   FAIL             the turn fails with the API's error inside its message
 //   TWICE            round one says it isn't done; round two (a resumed thread) writes .obi/twice
 //   ENV              says its CODEX_HOME and HOME
-//   a brain's prompt answers one plan: a reply "From Codex.", with work.md's first line
+//   TOOLS            a session of items, each started and completed (tests/transcript_api.rs): its
+//                    words, 5 reads, a plan, 2 file changes and a failing run of the check
+//                    (node --test)
+//   READ: <json>     answers the `account/rateLimits/read` obid sent at start with the JSON (a
+//                    snapshot); without it, that request is answered as unknown when the turn starts
+//   LIMITS: <json>   sends the JSON as an `account/rateLimits/updated` snapshot
+//   WAITS            says it'll continue when the build is done, with nothing running; told to
+//                    wait in the foreground, says "Built in the foreground.", or with WAITS
+//                    ALWAYS that it's waiting again
+//   TOKENS           its thread uses 1000 input tokens (600 of them cached) and 100 output tokens
+//                    more, reported in `thread/tokenUsage/updated` twice
+// It answers `account/read` (once the turn starts) as a ChatGPT (plan) login, or an API key's when
+// the task says APIKEY.
+//   a brain's prompt answers one plan: a reply "From Codex.", with work.md's first line; one
+//                    whose words hold STALL never answers
 //   anything else    "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable, or
 // obid's token, and when obid starts a thread anywhere but in a sandbox it has to ask about.
@@ -64,6 +78,8 @@ async function runTurn(turnId, prompt) {
   const task = state.task;
   // Oby's brain (`CodexBrain`): one plan, read from work.md when there is one.
   if (task.includes("Return exactly one JSON object matching this JSON schema")) {
+    // Words with STALL in them: it never answers, as a Codex on a Mac too busy to think.
+    if (task.includes("STALL")) return;
     const read = existsSync("work.md") ? ` It read work.md: ${readFileSync("work.md", "utf8").split("\n")[0]}` : "";
     return complete(turnId, `The plan: {"action":"reply_only","reply":"From Codex.${read}","dispatches":[],"question":null}`);
   }
@@ -128,6 +144,10 @@ async function runTurn(turnId, prompt) {
       return complete(turnId, `escape: ${error.code}`);
     }
   }
+  if (task.includes("WAITS")) {
+    if (!prompt.includes("end of your turn is the end of your work")) return complete(turnId, "The build is still going. I'll continue when the monitor reports it's done.");
+    return complete(turnId, task.includes("WAITS ALWAYS") ? "Still building. I'll continue when it's done." : "Built in the foreground.");
+  }
   if (task.includes("FAIL")) return complete(turnId, null, "failed", { message: JSON.stringify({ error: { message: "it broke" } }) });
   if (task.includes("TWICE")) {
     state.rounds = (state.rounds || 0) + 1;
@@ -137,12 +157,39 @@ async function runTurn(turnId, prompt) {
     writeFileSync(".obi/twice", "");
     return complete(turnId, `Round ${state.rounds} on thread ${thread}, which remembers: ${task}\nGOAL MET`);
   }
+  if (task.includes("TOKENS")) {
+    const last = { inputTokens: 1000, cachedInputTokens: 600, outputTokens: 100 };
+    const was = state.tokens ?? { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+    state.tokens = Object.fromEntries(Object.entries(was).map(([k, v]) => [k, v + last[k]]));
+    save();
+    for (let i = 0; i < 2; i++) send({ method: "thread/tokenUsage/updated", params: { threadId: thread, turnId, tokenUsage: { total: state.tokens, last } } });
+  }
+  const limits = task.match(/LIMITS: (\{.*\})/);
+  if (limits) send({ method: "account/rateLimits/updated", params: { rateLimits: JSON.parse(limits[1]) } });
+  if (task.includes("TOOLS")) {
+    const done = (fields) => {
+      const it = item(fields.type, fields);
+      send({ method: "item/started", params: { threadId: thread, turnId, item: { ...it, status: "inProgress" } } });
+      send({ method: "item/completed", params: { threadId: thread, turnId, item: { ...it, status: fields.status ?? "completed" } } });
+    };
+    send({ method: "item/completed", params: { threadId: thread, turnId, item: { type: "agentMessage", id: "m1", text: "Looking for where a blocked scan ends the job." } } });
+    for (const file of ["scan.rs", "jobs.rs", "publish.rs", "git.rs", "lib.rs"])
+      done({ type: "commandExecution", command: `/bin/zsh -lc 'cat src/${file}'`, commandActions: [{ type: "read", path: `src/${file}` }], exitCode: 0, aggregatedOutput: "raw output that never leaves obid" });
+    send({ method: "turn/plan/updated", params: { threadId: thread, turnId, plan: [{ step: "Find it", status: "completed" }, { step: "Fix it", status: "inProgress" }] } });
+    send({ method: "item/completed", params: { threadId: thread, turnId, item: { type: "agentMessage", id: "m2", text: "Found it. Fixing it." } } });
+    done({ type: "fileChange", changes: [{ path: resolve("src/scan.rs"), kind: { type: "update" }, diff: "@@ -1,2 +1,3 @@\n-a\n-b\n+c\n+d\n+e\n" }] });
+    done({ type: "fileChange", changes: [{ path: resolve("src/jobs.rs"), kind: { type: "update" }, diff: "@@ -1 +1 @@\n-x\n+y\n" }] });
+    done({ type: "commandExecution", command: "/bin/zsh -lc 'node --test'", commandActions: [], exitCode: 101, status: "failed", aggregatedOutput: "raw output that never leaves obid" });
+    return complete(turnId, "Fixed it.");
+  }
   if (task.includes("ENV")) return complete(turnId, `CODEX_HOME=${process.env.CODEX_HOME}\nHOME=${process.env.HOME}`);
   // Only `item/completed` carries the words: Codex's newer turns leave `items` empty.
   send({ method: "item/completed", params: { threadId: thread, turnId, item: { type: "agentMessage", id: "m0", text: "Nothing to do." } } });
   return complete(turnId, null);
 }
 
+let limitsRead = null;
+let accountRead = null;
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", (line) => {
   let message;
@@ -162,6 +209,12 @@ rl.on("line", (line) => {
     case "initialize":
       return send({ id, result: { userAgent: "fake-codex/0.0.0" } });
     case "initialized":
+      return;
+    case "account/read":
+      accountRead = id;
+      return;
+    case "account/rateLimits/read":
+      limitsRead = id;
       return;
     case "thread/start":
     case "thread/resume": {
@@ -184,6 +237,18 @@ rl.on("line", (line) => {
       const turnId = randomUUID();
       const text = params.input.map((i) => i.text).join("\n");
       if (state.task === null) state.task = text;
+      if (accountRead !== null) {
+        const account = text.includes("APIKEY") ? { type: "apiKey" } : { type: "chatgpt", email: "owner@example.com", planType: "plus" };
+        send({ id: accountRead, result: { account, requiresOpenaiAuth: true } });
+        accountRead = null;
+      }
+      // The usage read obid sent at start, answered now that the task says what to answer.
+      if (limitsRead !== null) {
+        const read = text.match(/READ: (\{.*\})/);
+        send(read ? { id: limitsRead, result: { rateLimits: JSON.parse(read[1]) } }
+          : { id: limitsRead, error: { code: -32601, message: "fake-codex doesn't know account/rateLimits/read" } });
+        limitsRead = null;
+      }
       state.model = params.model ?? null;
       save();
       send({ id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });

@@ -19,7 +19,7 @@ use super::actions::{self, Asked, Outcome, Talk};
 use super::find::{self, Finds};
 use super::orchestrator::{self, Orchestration};
 use super::plan::{Action, Plan};
-use super::planner::{LEAST, Planner, Record, Room};
+use super::planner::{Planner, Record, Room, Unanswered};
 use super::read::{self, JobReads};
 use super::research;
 use super::rules::{self, Number};
@@ -132,6 +132,23 @@ impl Turns {
         control
     }
 
+    /// A turn in `conversation` only when none is under way there, checked as it begins: a
+    /// supervisor turn (super::supervisor) never replaces the owner's.
+    pub fn begin_if_idle(&self, turn: &str, conversation: &str) -> Option<Arc<Control>> {
+        let mut underway = self.lock();
+        if underway.iter().any(|c| c.conversation == conversation) {
+            return None;
+        }
+        let control = Arc::new(Control {
+            turn: turn.into(),
+            conversation: conversation.into(),
+            stopped: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+        });
+        underway.push(control.clone());
+        Some(control)
+    }
+
     pub fn end(&self, control: &Arc<Control>) {
         self.lock().retain(|c| !Arc::ptr_eq(c, control));
     }
@@ -165,6 +182,11 @@ impl Turns {
         self.lock()
             .iter()
             .any(|c| c.conversation != super::orchestrator::CONVERSATION)
+    }
+
+    /// Whether a turn is under way in `conversation`: a supervisor turn waits for it to end.
+    pub fn underway_in(&self, conversation: &str) -> bool {
+        self.lock().iter().any(|c| c.conversation == conversation)
     }
 
     /// The conversation of the latest turn under way.
@@ -282,6 +304,28 @@ fn finish(end: &End, done: &[String], looked: &[String]) -> Talk {
     } else {
         Talk::reply(words)
     }
+}
+
+/// What a turn says when no brain answered: which brain and how, what the turn did or looked
+/// at first, and what the owner can do.
+fn unanswered(failed: &Unanswered, done: &[String], looked: &[String]) -> Talk {
+    let why = failed.why();
+    Talk::reply(if !done.is_empty() {
+        format!(
+            "{} Then Oby's brain couldn't answer: {why}. Say “continue” for the rest.",
+            done.join(" ")
+        )
+    } else if !looked.is_empty() {
+        format!(
+            "Oby {}, then its brain couldn't answer: {why}. Say “continue” to pick up from there.",
+            listed(looked)
+        )
+    } else {
+        format!(
+            "Oby's brain couldn't answer: {why}, so nothing was started. {}",
+            failed.advice()
+        )
+    })
 }
 
 /// Adds what the turn looked at, once; an event turn, which `speaks` to no one, keeps none.
@@ -815,6 +859,7 @@ async fn run_with(
                 // Rules never stand in for an event turn: they read a person's words.
                 falls_back_to_rules: step == 0 && orchestration.is_none(),
                 deadline: Some(deadline),
+                least: shared.config.least_think,
             };
             if named.is_none() {
                 named = Some(asked_for(shared, said, &context));
@@ -840,8 +885,9 @@ async fn run_with(
                 }
                 break 'step (End::Stopped, finish(&End::Stopped, &done, &looked));
             }
-            // The turn's budget ran out while the brain thought: its plan does nothing.
-            if Instant::now() >= deadline {
+            // The turn's budget ran out while the brain thought: its plan does nothing. A brain
+            // that failed meanwhile says so instead.
+            if Instant::now() >= deadline && planned.failed.is_none() {
                 planned
                     .refused
                     .push("the plan came after the turn's budget: nothing done".into());
@@ -849,6 +895,24 @@ async fn run_with(
                 break 'step (End::BudgetSpent, finish(&End::BudgetSpent, &done, &looked));
             }
             Record::new(&request, &planned).of(control, step).keep(home);
+            // No brain answered: the owner hears which and how, and an event waits for them.
+            if let Some(failed) = &planned.failed {
+                if let Some(orchestration) = orchestration {
+                    let escalation = orchestrator::Escalation {
+                        why: format!(
+                            "Oby's brain couldn't answer this event: {}. Oby recommends reviewing the job.",
+                            failed.why()
+                        ),
+                        reply: "My brain couldn't answer, so I left that event for you.",
+                    };
+                    orchestration.escalate(shared, &escalation);
+                    break 'step (
+                        End::BrainFailed,
+                        after(&done, Talk::reply(escalation.reply)),
+                    );
+                }
+                break 'step (End::BrainFailed, unanswered(failed, &done, &looked));
+            }
             if let Some(refusal) = super::rules::acting_refusal(&planned, step) {
                 break 'step (End::BrainFailed, after(&done, Talk::reply(refusal)));
             }
@@ -862,7 +926,9 @@ async fn run_with(
             // is a guess. With too little time left for any brain to think, it's the budget that
             // ended the turn, not the brain (#615).
             if step > 0 && planned.by == "rules" {
-                let end = if deadline.saturating_duration_since(Instant::now()) <= LEAST {
+                let end = if deadline.saturating_duration_since(Instant::now())
+                    <= shared.config.least_think
+                {
                     End::BudgetSpent
                 } else {
                     End::BrainFailed
@@ -1151,7 +1217,15 @@ async fn act(
 ) -> Outcome {
     let text = actions::step_text(shared, plan);
     step_event(shared, control, index, plan.action, &text, State::Running);
-    let outcome = actions::act(shared, plan, said, source, &control.conversation).await;
+    let outcome = actions::act(
+        shared,
+        plan,
+        said,
+        source,
+        &control.conversation,
+        &control.turn,
+    )
+    .await;
     step_event(
         shared,
         control,
@@ -1183,6 +1257,20 @@ pub fn step_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A supervisor turn begins only where no turn is under way, and never cancels the owner's.
+    #[test]
+    fn a_supervisor_turn_never_replaces_the_owners() {
+        let turns = Turns::default();
+        let owner = turns.begin("t1", "c1");
+        assert!(turns.begin_if_idle("s1", "c1").is_none());
+        assert!(owner.live());
+        let elsewhere = turns.begin_if_idle("s2", "c2").unwrap();
+        assert!(turns.underway_in("c2"));
+        turns.end(&elsewhere);
+        turns.end(&owner);
+        assert!(turns.begin_if_idle("s3", "c1").is_some());
+    }
 
     /// ConversationTests.wordsThatCancelAreKnown
     #[test]

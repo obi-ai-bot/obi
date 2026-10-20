@@ -153,14 +153,16 @@ nonisolated enum WorkMark: String, Sendable {
 }
 
 /// A kind of work (#496), in Home's order: pull requests to review, issues' work, a group per
-/// teammate whose Oby asked for something, and the tasks asked in Oby. Routines join with #395.
+/// teammate whose Oby asked for something, the tasks asked in Oby, and the routines' runs (#395).
 nonisolated enum WorkType: Hashable, Sendable {
-    case review, issues, teammate(String), tasks
+    case review, issues, teammate(String), tasks, routines
 
-    /// A request from a teammate's Oby goes under them, whatever it asks for; then a review, then
-    /// work on an issue; anything else is a task asked in Oby.
-    static func of(review: Bool, issue: Int?, requester: String?) -> WorkType {
+    /// A request from a teammate's Oby goes under them, whatever it asks for; then a routine's
+    /// run, whatever it does (Sangam's tasks.ts); then a review, then work on an issue; anything
+    /// else is a task asked in Oby.
+    static func of(review: Bool, issue: Int?, requester: String?, routine: Bool = false) -> WorkType {
         if let name = requester?.trimmingCharacters(in: .whitespaces), !name.isEmpty { return .teammate(name) }
+        if routine { return .routines }
         if review { return .review }
         return issue == nil ? .tasks : .issues
     }
@@ -171,6 +173,7 @@ nonisolated enum WorkType: Hashable, Sendable {
         case .issues: "issues"
         case .teammate(let name): "teammate:\(name)"
         case .tasks: "tasks"
+        case .routines: "routines"
         }
     }
 
@@ -180,6 +183,7 @@ nonisolated enum WorkType: Hashable, Sendable {
         case .issues: "Issues"
         case .teammate(let name): name
         case .tasks: "Tasks"
+        case .routines: "Routines"
         }
     }
 
@@ -190,6 +194,7 @@ nonisolated enum WorkType: Hashable, Sendable {
         case .issues: (1, "")
         case .teammate(let name): (2, name)
         case .tasks: (3, "")
+        case .routines: (4, "")
         }
     }
 }
@@ -258,7 +263,7 @@ nonisolated enum WorkList {
     /// order, whatever's in it; a teammate's once their Oby has asked for something.
     static func kinds<J>(_ items: [Item<J>]) -> [Group<J>] {
         let held = groups(items, by: .type)
-        let always: [WorkType] = [.review, .issues, .tasks]
+        let always: [WorkType] = [.review, .issues, .tasks, .routines]
         let kinds = Set(always + held.compactMap(\.type)).sorted { $0.order < $1.order }
         return kinds.map { kind in
             held.first { $0.type == kind }

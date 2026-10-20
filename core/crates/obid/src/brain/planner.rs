@@ -46,6 +46,8 @@ pub enum Failure {
     /// The turn ended meanwhile: nothing more is asked.
     Halted,
     Failed(String),
+    /// It took too long: no answer within its time.
+    TimedOut(String),
 }
 
 /// One way to reach a model. Adapters only move bytes; the planner checks what comes back.
@@ -227,16 +229,7 @@ impl ClaudeBrain {
             std::fs::write(folder.0.join(QUOTED_FILE), secrets.redact(quoted)).map_err(|e| {
                 Failure::Failed(format!("the quoted file couldn't be written: {e}"))
             })?;
-            for flag in [
-                "--tools",
-                "Read",
-                "--allowedTools",
-                "Read",
-                "--max-turns",
-                READ_TURNS,
-            ] {
-                flags.push(flag.into());
-            }
+            flags.extend(read_flags().into_iter().map(OsString::from));
         } else {
             flags.extend(["--tools".into(), "".into()]);
         }
@@ -289,6 +282,8 @@ impl ClaudeBrain {
         let input = secrets.redact(user);
         let deadline = Instant::now() + timeout;
         let mut failures: Vec<String> = vec![];
+        // Whether every process that ended had run out of time (none ran: there was none left).
+        let mut slow = true;
         let attempts = if foreground { 2 } else { 1 };
         // The first process, still thinking when the retry started beside it.
         let mut thinking = None;
@@ -413,6 +408,7 @@ impl ClaudeBrain {
                     chars[chars.len().saturating_sub(1000)..].iter().collect()
                 };
                 failures.push(format!("attempt {attempt}: {reason}, stderr: {err}"));
+                slow &= result.timed_out;
                 // One retry covers empty answers, Claude's exit 15, and a process that timed out.
                 retry = attempt < attempts
                     && (text.is_empty() || result.status == Some(15) || result.timed_out);
@@ -421,15 +417,39 @@ impl ClaudeBrain {
                 break;
             }
         }
-        Err(Failure::Failed(if foreground {
+        let why = if foreground {
             format!(
                 "claude returned no plan after retry: {}",
                 failures.join("; ")
             )
         } else {
             format!("claude returned no answer: {}", failures.join("; "))
-        }))
+        };
+        Err(if slow {
+            Failure::TimedOut(why)
+        } else {
+            Failure::Failed(why)
+        })
     }
+}
+
+/// Claude's brain's tools when it has a quoted file (#642): Read, allowed on that file alone, and
+/// denied on its box's login and home ([`crate::jobs::Jobs::brain_launch`] copies the login into
+/// its working folder, where Claude Code reads without asking) and on any login file, so text
+/// quoted in the file can't have it read the login into a plan. A deny rule wins over any allow.
+fn read_flags() -> Vec<String> {
+    vec![
+        "--tools".into(),
+        "Read".into(),
+        "--allowedTools".into(),
+        format!("Read(./{QUOTED_FILE})"),
+        "--disallowedTools".into(),
+        "Read(./login/**)".into(),
+        "Read(./home/**)".into(),
+        "Read(//**/.credentials.json)".into(),
+        "--max-turns".into(),
+        READ_TURNS.into(),
+    ]
 }
 
 /// The brain's environment when it runs unboxed, from `get` (obid's own environment): what a job
@@ -625,6 +645,8 @@ impl CodexBrain {
             plan: true,
             instructions: None,
             no_commands: false,
+            usage: false,
+            priced: None,
         };
         let turn = crate::codex::run_turn(
             launch,
@@ -677,11 +699,8 @@ impl CodexBrain {
         calls.push(call);
         match found {
             Some(plan) => Ok(plan),
-            None => Err(Failure::Failed(if turn.timed_out {
-                "Codex took too long.".into()
-            } else {
-                "Codex returned no plan.".into()
-            })),
+            None if turn.timed_out => Err(Failure::TimedOut("Codex took too long.".into())),
+            None => Err(Failure::Failed("Codex returned no plan.".into())),
         }
     }
 }
@@ -696,9 +715,100 @@ pub struct Planned {
     pub refused: Vec<String>,
     /// Every model call it took, in order (#533).
     pub calls: Vec<Call>,
+    /// Why no brain answered, when every one asked failed: the turn says so, and rules don't
+    /// guess.
+    pub failed: Option<Unanswered>,
 }
 
-/// The least time an adapter is asked to think in: with less left, none is (#615).
+/// Every brain asked failed, and none sent a plan obid refused.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unanswered {
+    /// Each brain asked, and whether it took too long (else it failed), in order.
+    pub brains: Vec<(String, bool)>,
+    /// The Mac's 1-minute load average, when it was [`BUSY`].
+    pub load: Option<f64>,
+}
+
+impl Unanswered {
+    /// "Claude Code and Codex both took too long", "Claude Code failed, then Codex took too long".
+    pub fn why(&self) -> String {
+        let name = |brain: &str| match brain {
+            "claude" => "Claude Code".to_owned(),
+            "codex" => "Codex".to_owned(),
+            other => other.to_owned(),
+        };
+        if let [(a, true), (b, true)] = self.brains.as_slice() {
+            return format!("{} and {} both took too long", name(a), name(b));
+        }
+        self.brains
+            .iter()
+            .map(|(brain, slow)| {
+                let ended = if *slow { "took too long" } else { "failed" };
+                format!("{} {ended}", name(brain))
+            })
+            .collect::<Vec<_>>()
+            .join(", then ")
+    }
+
+    /// What the owner can do: try again, once the Mac calms down when it's very busy.
+    pub fn advice(&self) -> String {
+        match self.load {
+            Some(load) => {
+                format!("The Mac is very busy (load {load:.0}): try again once it calms down.")
+            }
+            None => "Try again.".to_owned(),
+        }
+    }
+}
+
+/// The load average per CPU from which the Mac counts as very busy: brains get half as long
+/// again, and once one has taken too long the next isn't asked, as it would crawl too.
+pub const BUSY: f64 = 3.0;
+
+/// The 1-minute load average, when it's [`BUSY`]; none when it isn't, or can't be read.
+pub async fn overloaded() -> Option<f64> {
+    // macOS says "{ 2.15 2.03 1.98 }", Linux "2.15 2.03 1.98 3/412 5121". Tests set
+    // `OBID_LOAD` instead, so the machine running them doesn't choose.
+    let text = if let Ok(load) = std::env::var("OBID_LOAD") {
+        load
+    } else if cfg!(target_os = "macos") {
+        // A Mac too busy to answer in a second counts as not known to be busy.
+        let read = tokio::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "vm.loadavg"])
+            .kill_on_drop(true)
+            .output();
+        let out = tokio::time::timeout(Duration::from_secs(1), read)
+            .await
+            .ok()?
+            .ok()?;
+        String::from_utf8(out.stdout).ok()?
+    } else {
+        std::fs::read_to_string("/proc/loadavg").ok()?
+    };
+    let load: f64 = text.split_whitespace().find(|w| *w != "{")?.parse().ok()?;
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
+    (load / cpus >= BUSY).then_some(load)
+}
+
+/// How long one brain may think: `quick` (20 seconds), twice that for a deep plan, half as long
+/// again when the Mac is very busy.
+pub fn budget(quick: Duration, deep: bool, busy: bool) -> Duration {
+    let budget = if deep { quick * 2 } else { quick };
+    if busy { budget * 3 / 2 } else { budget }
+}
+
+/// A quick plan's time: 20 seconds, or what tests set in `OBID_BRAIN_SECONDS`, so a brain can
+/// run out of its own time well before the turn does.
+fn quick_budget() -> Duration {
+    let seconds = std::env::var("OBID_BRAIN_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    Duration::from_secs(seconds)
+}
+
+/// The least time an adapter is asked to think in: with less left, none is (#615). Tests may set
+/// more with `leastThink` (#763).
 pub const LEAST: Duration = Duration::from_secs(1);
 
 /// The adapters and whether rules stand in.
@@ -710,6 +820,8 @@ pub struct Planner {
     pub falls_back_to_rules: bool,
     /// When the turn's budget ends, if it has one: no adapter thinks past it.
     pub deadline: Option<Instant>,
+    /// The least time an adapter is asked to think in: [`LEAST`], or the config's `leastThink`.
+    pub least: Duration,
 }
 
 impl Planner {
@@ -776,6 +888,7 @@ impl Planner {
                     by: "none".into(),
                     refused: vec![format!("the vault can't be read: {why}")],
                     calls: vec![],
+                    failed: None,
                 };
             }
         };
@@ -784,8 +897,15 @@ impl Planner {
         let deep = context.turn_step > 0
             || context.turn_length.unwrap_or_else(|| said.chars().count()) > 600;
         // Claude keeps half of this for its one process retry: Sonnet gets enough for each try.
-        let budget = Duration::from_secs(if deep { 40 } else { 20 });
+        let load = overloaded().await;
+        let budget = budget(quick_budget(), deep, load.is_some());
         let model = if deep { DEEP_MODEL } else { QUICK_MODEL };
+        // Each brain asked that failed, and whether it took too long; and whether one sent a plan.
+        let mut unanswered: Vec<(String, bool)> = vec![];
+        let mut planned = false;
+        // Whether a brain took too long only because the turn's own time ran out: then it's the
+        // turn's budget that ended it (`budget_spent`), not the brain.
+        let mut cut_short = false;
         for (i, adapter) in self.adapters.iter().enumerate() {
             // A read runs boxed: an adapter that can't goes unasked when another one follows.
             if quoted.is_some()
@@ -796,12 +916,30 @@ impl Planner {
                 tracing::warn!("brain: {}", refused.last().unwrap_or(&String::new()));
                 continue;
             }
-            let own = Instant::now() + budget;
-            let deadline = self.deadline.map_or(own, |turn| own.min(turn));
+            // On a very busy Mac, a brain that took too long means the next would too: the owner
+            // hears now instead.
+            if load.is_some()
+                && let Some((brain, true)) = unanswered.last()
+            {
+                refused.push(format!(
+                    "{} skipped: the Mac is very busy and {brain} took too long",
+                    adapter.name()
+                ));
+                tracing::warn!("brain: {}", refused.last().unwrap_or(&String::new()));
+                continue;
+            }
+            // Each brain still to ask gets its share of what's left of the turn.
+            let now = Instant::now();
+            let own = now + budget;
+            let deadline = self.deadline.map_or(own, |turn| {
+                let share = turn.saturating_duration_since(now) / (self.adapters.len() - i) as u32;
+                own.min(now + share)
+            });
             let mut message = user.clone();
+            let mut failed = None;
             for _ in 0..2 {
                 let left = deadline.saturating_duration_since(Instant::now());
-                if left <= LEAST {
+                if left <= self.least {
                     break;
                 }
                 let before = calls.len();
@@ -825,8 +963,8 @@ impl Planner {
                         .count();
                     calls[i].attempt = earlier as u32 + 1;
                 }
-                let data = match answer {
-                    Ok(data) => data,
+                let answer = match answer {
+                    Ok(data) => Ok(data),
                     Err(Failure::Halted) => {
                         refused.push(format!("{} stopped: the turn ended", adapter.name()));
                         return Planned {
@@ -834,19 +972,28 @@ impl Planner {
                             by: "none".into(),
                             refused,
                             calls,
+                            failed: None,
                         };
                     }
-                    Err(Failure::Failed(why)) => {
+                    Err(Failure::Failed(why)) => Err((why, false)),
+                    Err(Failure::TimedOut(why)) => Err((why, true)),
+                };
+                let data = match answer {
+                    Ok(data) => data,
+                    Err((why, slow)) => {
                         // Other adapters get the same one retry here, so one transient failure
                         // doesn't send the turn to rules.
                         refused.push(format!("{} failed: {why}", adapter.name()));
                         tracing::warn!("brain: {}", refused.last().unwrap_or(&String::new()));
+                        failed = Some(slow);
                         if adapter.retries_itself() {
                             break;
                         }
                         continue;
                     }
                 };
+                failed = None;
+                planned = true;
                 let problems = match Plan::decode(data.as_bytes()) {
                     Some(plan) => {
                         let problems = plan.problems(context, &canary);
@@ -856,6 +1003,7 @@ impl Planner {
                                 by: adapter.name().into(),
                                 refused,
                                 calls,
+                                failed: None,
                             };
                         }
                         problems
@@ -879,6 +1027,23 @@ impl Planner {
                     problems.join("; ")
                 );
             }
+            if let Some(slow) = failed {
+                cut_short = slow && self.deadline.is_some_and(|turn| deadline >= turn);
+                unanswered.push((adapter.name().to_owned(), slow));
+            }
+        }
+        // Every brain asked failed: rules would only guess, so the turn says why instead.
+        if !planned && !cut_short && !unanswered.is_empty() {
+            return Planned {
+                plan: Plan::of(Action::Ignore, ""),
+                by: "none".into(),
+                refused,
+                calls,
+                failed: Some(Unanswered {
+                    brains: unanswered,
+                    load,
+                }),
+            };
         }
         if !self.falls_back_to_rules {
             return Planned {
@@ -886,6 +1051,7 @@ impl Planner {
                 by: "rules".into(),
                 refused,
                 calls,
+                failed: None,
             };
         }
         Planned {
@@ -893,6 +1059,7 @@ impl Planner {
             by: "rules".into(),
             refused,
             calls,
+            failed: None,
         }
     }
 }
@@ -1305,12 +1472,43 @@ pub mod tests {
         }
     }
 
+    /// #642: a quoted file asking Claude's brain to read its login gets nothing from it. Its Read
+    /// is allowed on work.md alone, and denied on the box's login and home, where obid copies
+    /// the login, and on any login file anywhere: a deny rule wins over Claude Code's own reads
+    /// in its working folder.
+    #[test]
+    fn the_claude_brain_may_read_its_quoted_file_and_never_the_login() {
+        let flags = read_flags();
+        let after = |flag: &str| -> Vec<String> {
+            flags
+                .iter()
+                .skip_while(|f| *f != flag)
+                .skip(1)
+                .take_while(|f| !f.starts_with("--"))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(after("--tools"), ["Read"]);
+        assert_eq!(after("--allowedTools"), [format!("Read(./{QUOTED_FILE})")]);
+        let denied = after("--disallowedTools");
+        for rule in [
+            "Read(./login/**)",
+            "Read(./home/**)",
+            "Read(//**/.credentials.json)",
+        ] {
+            assert!(denied.iter().any(|d| d == rule), "{rule} in {denied:?}");
+        }
+        assert!(!denied.iter().any(|rule| rule.contains(QUOTED_FILE)));
+    }
+
     /// A model-aware adapter that answers one plan, noting the model it was asked with; it can
     /// fail once first (BrainSteadyTests' `ModelFake`).
     #[derive(Default)]
     pub struct Fake {
         pub models: Mutex<Vec<String>>,
         pub fail_next: Mutex<bool>,
+        /// Whether every call takes too long.
+        pub too_slow: Mutex<bool>,
         /// What each call was sent: the system prompt, the schema and the user message.
         pub sent: Mutex<Vec<[String; 3]>>,
     }
@@ -1330,6 +1528,9 @@ pub mod tests {
                 .unwrap()
                 .push([system.into(), schema.into(), user.into()]);
             calls.push(Call::read("fake", Some(model), None, Instant::now()));
+            if *self.too_slow.lock().unwrap() {
+                return Err(Failure::TimedOut("timeout".into()));
+            }
             let mut fail = self.fail_next.lock().unwrap();
             if *fail {
                 *fail = false;
@@ -1352,11 +1553,56 @@ pub mod tests {
             adapters: vec![Adapter::Fake(fake.clone())],
             falls_back_to_rules: true,
             deadline: None,
+            least: LEAST,
         }
     }
 
     fn going() -> bool {
         false
+    }
+
+    /// A brain that only times out: rules don't guess, and the turn is told which brain and how.
+    #[tokio::test]
+    async fn a_brain_that_takes_too_long_is_said_not_guessed_around() {
+        let fake = Arc::new(Fake::default());
+        *fake.too_slow.lock().unwrap() = true;
+        let planned = planner(&fake)
+            .plan("fix deskree-inc/oby #18", &context(), &going)
+            .await;
+        assert_eq!(planned.by, "none");
+        assert_eq!(planned.plan.action, Action::Ignore);
+        let failed = planned.failed.unwrap();
+        assert_eq!(failed.brains, [("fake".to_owned(), true)]);
+    }
+
+    /// How the owner hears which brains failed, and what to do.
+    #[test]
+    fn unanswered_says_which_brain_and_how() {
+        let both = Unanswered {
+            brains: vec![("claude".into(), true), ("codex".into(), true)],
+            load: None,
+        };
+        assert_eq!(both.why(), "Claude Code and Codex both took too long");
+        assert_eq!(both.advice(), "Try again.");
+        let mixed = Unanswered {
+            brains: vec![("claude".into(), false), ("codex".into(), true)],
+            load: Some(512.4),
+        };
+        assert_eq!(mixed.why(), "Claude Code failed, then Codex took too long");
+        assert_eq!(
+            mixed.advice(),
+            "The Mac is very busy (load 512): try again once it calms down."
+        );
+    }
+
+    /// The normal path keeps its time; a very busy Mac gives each brain half as long again.
+    #[test]
+    fn a_busy_mac_gives_the_brain_longer() {
+        let quick = Duration::from_secs(20);
+        assert_eq!(budget(quick, false, false), Duration::from_secs(20));
+        assert_eq!(budget(quick, true, false), Duration::from_secs(40));
+        assert_eq!(budget(quick, false, true), Duration::from_secs(30));
+        assert_eq!(budget(quick, true, true), Duration::from_secs(60));
     }
 
     /// BrainSteadyTests.aLongRequestUsesSonnet
@@ -1510,9 +1756,11 @@ pub mod tests {
             adapters: vec![Adapter::Claude(brain)],
             falls_back_to_rules: true,
             deadline: None,
+            least: LEAST,
         };
         let planned = turn.plan("hello", &context(), &going).await;
-        assert_eq!(planned.by, "rules");
+        assert_eq!(planned.by, "none");
+        assert!(planned.failed.is_some());
         assert_eq!(launches(&file), 2);
         assert_eq!(planned.calls.len(), 2);
 

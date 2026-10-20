@@ -81,11 +81,63 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var waiting: Waiting?
     /// The conversation whose words started it (obid only, #493), or nil.
     var conversation: String?
+    /// The user's turn whose words started it (obid only): its card shows under them as it starts.
+    var turn: String?
     /// What it made to be looked at (obid only, its `.obi/artifacts/`), or nil.
     var artifacts: [ArtifactRef]?
     /// The job this one follows up (obid only): the owner told that one something after it ended,
     /// and its page lists this one (Sangam's design). Nil otherwise.
     var followUpOf: String?
+    /// obid only (#395): the routine whose run started it, or nil.
+    var routine: RoutineMark?
+    /// What its agent asked Tetrix, the session it saved and where the graph fell short, or nil.
+    var tetrix: TetrixJobReport?
+    /// Why it stopped without ending done, apart from its agent's summary (obid only), or nil.
+    var reason: String?
+    /// Interrupted on obid: its one next step, as its button says it ("One more round", "Try
+    /// again"), or nil.
+    var nextStep: String?
+    /// When obid tries it again by itself, after its account's usage limit resets, or nil; one
+    /// this phone can't read is left out, never failing the job.
+    var resumesAt: Lenient<Date>?
+    /// `resumesAt`, read.
+    var resumes: Date? { resumesAt?.value }
+    /// A stalled job's why and handoff note (obid only, #773), or nil; one this phone can't read
+    /// is left out, never failing the job.
+    var stalled: Lenient<Stalled>?
+    /// The handoff note a stalled job left, or nil.
+    var handoffNote: String? { stalled?.value?.note.flatMap { $0.isEmpty ? nil : $0 } }
+
+    /// Why and where a stalled job stopped (obid's `stalled`, #773), as far as the apps show it:
+    /// its handoff note. Every key optional, so a newer obid's object still decodes.
+    struct Stalled: Codable, Equatable, Sendable {
+        var why: String?
+        var note: String?
+    }
+    /// The job page's facts (#739), each nil until obid serves it: its tools, tokens, share of the
+    /// limit windows, the estimate, the check's commands, the secret scan, the diff and what the
+    /// current stage is doing (`JobFacts`). Each is `Lenient`: one this phone can't read is left
+    /// out, never failing the job (or the list it's in).
+    var activity: Lenient<JobActivity>?
+    var usage: Lenient<JobUsage>?
+    var windowShare: Lenient<WindowShare>?
+    var estimate: Lenient<JobEstimate>?
+    var checks: Lenient<[CheckRound]>?
+    var scan: Lenient<JobScan>?
+    var diff: Lenient<JobDiff>?
+    var context: Lenient<String>?
+
+    /// The same facts as the Mac reads them, with each stage's times.
+    var facts: JobFacts {
+        var stages: [String: StageTiming] = [:]
+        for stage in pipeline?.stages ?? [] {
+            let timing = StageTiming(started: stage.started?.value, finished: stage.finished?.value, waited: stage.waited?.value,
+                                     estimate: stage.estimate?.value)
+            if timing != StageTiming() { stages[stage.id] = timing }
+        }
+        return JobFacts(activity: activity?.value, usage: usage?.value, windowShare: windowShare?.value, estimate: estimate?.value,
+                        checks: checks?.value, scan: scan?.value, diff: diff?.value, context: context?.value, stages: stages)
+    }
 
     /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
     /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
@@ -115,7 +167,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
-             conversation, artifacts, followUpOf
+             conversation, turn, artifacts, followUpOf, tetrix, activity, usage, windowShare, estimate, checks, scan, diff, context,
+             reason, nextStep, resumesAt, stalled
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -165,7 +218,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         return switch status {
         case .queued, .running: step
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
-        case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
+        case .interrupted: reason ?? summary.split(separator: "\n").first.map(String.init) ?? "Needs you"
+        case .failed, .stopped: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
         }
     }
 
@@ -174,7 +228,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Not once the user dismissed it, never on Oby's own review jobs, and never once its pull
     /// request was merged or closed (as Engine's `Job.canPublish`).
     var canPublish: Bool {
-        status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
+        status == .done && kind != "research" && kind != "review" && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
             && (pullRequest?.state ?? "OPEN") == "OPEN"
     }
 
@@ -212,6 +266,11 @@ nonisolated struct JobStage: Codable, Equatable, Identifiable, Sendable {
     var state: State
     var detail: String?
     var reason: String?
+    /// Its times (#733), nil until obid serves them; one that can't be read is left out (`Lenient`).
+    var started: Lenient<Date>?
+    var finished: Lenient<Date>?
+    var waited: Lenient<Double>?
+    var estimate: Lenient<Span>?
 }
 
 nonisolated struct JobPipeline: Codable, Equatable, Sendable {
@@ -640,6 +699,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     #if os(macOS)
     /// A merge check was queued, taken or ended (Engine/Checks.swift): a Mac that runs them asks for one.
     case check(MacCheck)
+    /// obid's Tetrix changed: connected, signed out, a sign-in started or ended (obid only).
+    case tetrix(TetrixStatus)
     #endif
     /// A turn of the conversation was added, from any app, or changed (a job dispatched from it):
     /// the Mac window's and the iPhone's thread replace it by id, or add it by time (#11).
@@ -654,6 +715,11 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     case delta(TurnDelta)
     /// An artifact was made, got a version, or was deleted (obid only).
     case artifact(ArtifactEvent)
+    /// A routine was made, changed, paused, run or deleted (obid only, #395): Settings › Routines
+    /// reads them again.
+    case routine
+    /// Your work on GitHub changed, or obid's gh signed in or out (obid only): the whole list.
+    case github(GitHubWork)
 }
 
 #if os(iOS) || os(watchOS)
@@ -801,10 +867,31 @@ extension Job {
         return switch status {
         case .queued, .running: step
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
-        case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
+        case .interrupted: reason ?? summary.split(separator: "\n").first.map(String.init) ?? "Needs you"
+        case .failed, .stopped: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
         }
     }
     #endif
+
+    /// What One more round and Try again send (docs/runner-api.md, `POST /v1/jobs/{id}/messages`):
+    /// the agent's session picks up where it stopped, in the same worktree and branch.
+    nonisolated static let tryAgainWords = "Try again, picking up where you left off. Finish with a short summary as asked."
+
+    /// The one next step of a job that stopped part way and needs you (obid's `interrupted`), or nil.
+    nonisolated var nextStepOffered: String? { status == .interrupted && dismissed == nil ? nextStep : nil }
+
+    /// When obid tries it again by itself, as its decision card says it: "At 3:04 PM, or now with
+    /// Try again.", or nil.
+    nonisolated var resumesLine: String? {
+        guard nextStepOffered != nil, let resumes else { return nil }
+        return "At \(resumes.formatted(date: .omitted, time: .shortened)), or now with \(nextStep ?? "Try again")."
+    }
+
+    /// Its decision card's kind (Sangam's labels): Out of usage when its agent hit a usage limit.
+    nonisolated var needsYouKind: String {
+        (reason ?? "").range(of: #"(?i)\b(usage|rate)[ -]?limit|hit your limit|limit (reached|exceeded)\b"#, options: .regularExpression) == nil
+            ? "Needs you" : "Out of usage"
+    }
 
     /// A finished job can run again for the user's words: it has a session to pick up, or it was
     /// moved since its last round and starts a new one where it went (docs/runner-api.md).
@@ -862,7 +949,7 @@ extension Job {
         case .done: return JobBadge(text: "Ready", tone: .green)
         case .failed: return JobBadge(text: "Failed", tone: .red)
         case .stopped: return JobBadge(text: "Stopped", tone: .gray)
-        case .interrupted: return JobBadge(text: "Blocked", tone: .gray)
+        case .interrupted: return JobBadge(text: "Needs you", tone: .orange)
         }
     }
 
@@ -885,7 +972,7 @@ nonisolated enum NeedsYou {
         let parts = [
             count(needing.count(where: \.canPublish), "is ready to publish", "are ready to publish"),
             count(needing.count { $0.status == .failed }, "failed", "failed"),
-            count(needing.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
+            count(needing.count { $0.status == .interrupted }, "needs you", "need you"),
             count(needing.count(where: \.reviewNeedsYou), "needs your review", "need your review"),
             count(needing.count(where: \.stranded), "wasn't published", "weren't published"),
             count(needing.count(where: \.mergeNeedsYou), "wasn't merged", "weren't merged"),
@@ -982,7 +1069,31 @@ nonisolated struct Runner: Sendable {
 
     /// One job, however old: the list has only the latest 50.
     func job(_ id: String) async throws -> Job { try await call("GET", "v1/jobs/\(id)") }
+
+    /// Your work on GitHub as obid's gh finds it (docs/runner-api.md, "obid only: GitHub work"),
+    /// or nil from a runner that doesn't list it.
+    func gitHubWork() async throws -> GitHubWork? {
+        do {
+            return try await call("GET", "v1/github/work")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// Has obid read GitHub now; answers the feed once the read ends (up to 2 minutes).
+    func refreshGitHubWork() async throws -> GitHubWork { try await call("POST", "v1/github/work/refresh", timeout: 150) }
+
+    /// Starts Oby's job on a GitHub item, a review or a fix: the new job, or the one already on it.
+    @discardableResult
+    func startGitHubWork(_ id: String) async throws -> Job {
+        try await call("POST", "v1/github/work/\(id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id)/start")
+    }
     func report(_ id: String) async throws -> ResearchDocument { try await call("GET", "v1/jobs/\(id)/report") }
+
+    /// The job's raw session after line `after` (#381), oldest first: a list, or `{entries: […]}`.
+    func transcript(_ id: String, after: Int? = nil) async throws -> TranscriptPage {
+        try TranscriptPage.read(await send("GET", "v1/jobs/\(id)/transcript" + (after.map { "?after=\($0)" } ?? "")))
+    }
     func fileProposal(_ id: String, index: Int, start: Bool) async throws -> FileProposalResult {
         try await call("POST", "v1/jobs/\(id)/proposals/\(index)/file", body: FileProposalBody(start: start))
     }
@@ -1039,13 +1150,42 @@ nonisolated struct Runner: Sendable {
     /// The same, in one of obid's conversations (#493): `conversation` names the one the words
     /// join, `new` starts one; neither, the latest. The answer says which they joined (nil from a
     /// runner with one thread).
+    /// `id`: the id the app gave the words (its echo's, a lower-case UUID), which obid's turn of them
+    /// takes; sent again with it (Try again after a lost answer), obid adds nothing (obid only).
     func planned(_ said: String, answer: (question: String, option: String)? = nil, attachments: [String] = [],
-                 conversation: String? = nil, new: Bool = false) async throws -> PlannedTurn {
+                 conversation: String? = nil, new: Bool = false, id: String? = nil) async throws -> PlannedTurn {
         struct Answer: Encodable { var question: String; var option: String }
-        struct Body: Encodable { var said: String; var answer: Answer?; var attachments: [String]; var conversation: String?; var new: Bool? }
+        struct Body: Encodable { var said: String; var answer: Answer?; var attachments: [String]; var conversation: String?; var new: Bool?; var id: String? }
         let body = Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }, attachments: attachments,
-                        conversation: conversation, new: new ? true : nil)
+                        conversation: conversation, new: new ? true : nil, id: id)
         return try await call("POST", "v1/plans", body: body, timeout: Self.planTimeout)
+    }
+
+    // MARK: Routines (obid only, #395)
+
+    /// obid's routines, by name, or nil from a runner that has none (the Swift runner).
+    func routines() async throws -> [RunnerRoutine]? {
+        do {
+            return try await call("GET", "v1/routines")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// Pauses (false) or resumes (true) a routine; obid answers with it.
+    func setRoutine(_ id: String, enabled: Bool) async throws -> RunnerRoutine {
+        struct Body: Encodable { var enabled: Bool }
+        return try await call("PATCH", "v1/routines/\(id)", body: Body(enabled: enabled))
+    }
+
+    /// Run now: its job starts, and its next time stays as it was.
+    func runRoutine(_ id: String) async throws {
+        try await send("POST", "v1/routines/\(id)/run")
+    }
+
+    /// Forgets a routine; the jobs its runs started stay.
+    func deleteRoutine(_ id: String) async throws {
+        try await send("DELETE", "v1/routines/\(id)")
     }
 
     // MARK: Conversations (obid only, #493)
@@ -1329,13 +1469,13 @@ nonisolated struct Runner: Sendable {
     private static func hex(_ token: Data) -> String { token.map { String(format: "%02x", $0) }.joined() }
     #endif
 
-    private func call<Answer: Decodable>(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Answer {
+    func call<Answer: Decodable>(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Answer {
         try Self.decoder.decode(Answer.self, from: try await send(method, path, body: body, timeout: timeout))
     }
 
     /// The answer's body, unread: for a call whose answer says nothing the app needs.
     @discardableResult
-    private func send(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Data {
+    func send(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Data {
         var request = URLRequest(url: URL(string: path, relativeTo: base.appending(path: "/"))!)
         request.httpMethod = method
         request.timeoutInterval = timeout
@@ -1364,6 +1504,12 @@ nonisolated struct Runner: Sendable {
     func jobsWithExtras() async throws -> ([Job], [String: RunnerJobExtras]) {
         let data = try await send("GET", "v1/jobs?limit=50")
         return (try Self.decoder.decode([Job].self, from: data), RunnerJobExtras.of(data))
+    }
+
+    /// One job, with what Engine's Job doesn't read yet.
+    func jobWithExtras(_ id: String) async throws -> (Job, RunnerJobExtras?) {
+        let data = try await send("GET", "v1/jobs/\(id)")
+        return (try Self.decoder.decode(Job.self, from: data), try? Self.decoder.decode(RunnerJobExtras.self, from: data))
     }
 
     #endif
@@ -1581,17 +1727,109 @@ nonisolated struct EventParser {
             #endif
             #if os(macOS)
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
+            case "tetrix": return (try? Runner.decoder.decode(TetrixStatus.self, from: json)).map(RunnerEvent.tetrix)
             #endif
             case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn, $0.extras) }
             case "step": return (try? Runner.decoder.decode(TurnStep.self, from: json)).map(RunnerEvent.step)
             case "conversation": return (try? Runner.decoder.decode(RunnerConversation.self, from: json)).map(RunnerEvent.conversation)
             case "delta": return (try? Runner.decoder.decode(TurnDelta.self, from: json)).map(RunnerEvent.delta)
             case "artifact": return (try? Runner.decoder.decode(ArtifactEvent.self, from: json)).map(RunnerEvent.artifact)
+            case "routine": return .routine
+            case "github": return (try? Runner.decoder.decode(GitHubWork.self, from: json)).map(RunnerEvent.github)
             default: return nil
             }
         }
         if line.hasPrefix("event:") { name = line.dropFirst(6).trimmingCharacters(in: .whitespaces) }
         if line.hasPrefix("data:") { data += (data.isEmpty ? "" : "\n") + line.dropFirst(5).trimmingCharacters(in: .whitespaces) }
         return nil
+    }
+}
+
+/// Which routine's run a job is (docs/runner-api.md, "obid only: routines (#395)").
+nonisolated struct RoutineMark: Codable, Equatable, Sendable {
+    var id: String
+    var name: String
+    var scheduled: Date?
+    var catchUp: Bool?
+
+    /// What a job's card and page say: "From routine: Review open PRs" (Sangam's design).
+    var line: String { "From routine: \(name)" }
+}
+
+/// A routine as obid lists it: a saved request it runs on a schedule, a job each time.
+nonisolated struct RunnerRoutine: Codable, Identifiable, Equatable, Sendable {
+    struct Run: Codable, Equatable, Sendable {
+        var scheduled: Date
+        var at: Date
+        /// `started`, `skipped`, `missed` or `failed`.
+        var outcome: String
+        var reason: String?
+        var job: String?
+        var catchUp: Bool?
+        /// Its job's end once it ended: `done`, `failed`, `stopped`, `interrupted`.
+        var ended: String?
+    }
+
+    var id: String
+    var name: String
+    var repo: String
+    var kind: String
+    var task: String
+    /// obid's words for its schedule: "Weekdays at 9:00".
+    var when: String
+    var zone: String
+    var enabled: Bool
+    var nextRun: Date?
+    var failuresInARow: Int?
+    var lastRun: Run?
+    var conversation: String?
+
+    var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
+
+    /// Under its name: the schedule and repository, then when it runs next (Sangam's "Starts
+    /// Monday at 9") or that it's paused, then how the last run went.
+    func about(now: Date = .now) -> String {
+        var parts = ["\(when) · \(repoName)"]
+        if let next = nextRun, enabled {
+            parts.append("Next " + Self.day(next, now: now))
+        } else {
+            parts.append("Paused")
+        }
+        if let last = lastRun {
+            switch (last.outcome, last.ended) {
+            case ("started", nil): parts.append("Running now")
+            case ("started", "done"): parts.append("Last run done")
+            case ("started", "failed"): parts.append("Last run failed")
+            case ("started", let end?): parts.append("Last run \(end)")
+            case ("skipped", _): parts.append("Last run skipped")
+            case ("missed", _): parts.append("Missed a run")
+            default: parts.append("Last run couldn't start")
+            }
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Its next run as Home's Routines page says it (Sangam's "Starts Monday at 9"), or nil while
+    /// paused.
+    func starts(now: Date = .now) -> String? {
+        guard enabled, let next = nextRun else { return nil }
+        let day = Self.day(next, now: now)
+        return "Starts " + day
+    }
+
+    /// The routines waiting for their next run, soonest first.
+    static func upcoming(_ routines: [RunnerRoutine]) -> [RunnerRoutine] {
+        routines.filter { $0.enabled && $0.nextRun != nil }.sorted { ($0.nextRun ?? .distantFuture) < ($1.nextRun ?? .distantFuture) }
+    }
+
+    /// "today at 9:00", "tomorrow at 9:00", "Monday at 9:00", or "Oct 30 at 9:00", in this device's zone.
+    static func day(_ date: Date, now: Date = .now, calendar: Calendar = .current) -> String {
+        let time = date.formatted(.dateTime.hour().minute())
+        if calendar.isDate(date, inSameDayAs: now) { return "today at \(time)" }
+        if let tomorrow = calendar.date(byAdding: .day, value: 1, to: now), calendar.isDate(date, inSameDayAs: tomorrow) {
+            return "tomorrow at \(time)"
+        }
+        if date.timeIntervalSince(now) < 6 * 24 * 3600 { return "\(date.formatted(.dateTime.weekday(.wide))) at \(time)" }
+        return "\(date.formatted(.dateTime.month(.abbreviated).day())) at \(time)"
     }
 }

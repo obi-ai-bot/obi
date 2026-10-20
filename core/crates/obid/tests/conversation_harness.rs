@@ -22,6 +22,16 @@ fn obid(name: &str, signed_in: bool) -> (Folder, Obid) {
 
 /// [`obid`], with `conversation` as the configuration's.
 fn obid_with(name: &str, signed_in: bool, conversation: Value) -> (Folder, Obid) {
+    obid_env(name, signed_in, conversation, &[])
+}
+
+/// [`obid_with`], with `env` over a test obid's.
+fn obid_env(
+    name: &str,
+    signed_in: bool,
+    conversation: Value,
+    env: &[(&str, &str)],
+) -> (Folder, Obid) {
     let folder = Folder::new(name);
     let remote = fixture(&folder.0.join("fixture"));
     let mut config = config(&folder.0, &remote, &harness());
@@ -31,7 +41,7 @@ fn obid_with(name: &str, signed_in: bool, conversation: Value) -> (Folder, Obid)
     if signed_in {
         std::fs::write(account.join(".credentials.json"), "{}").unwrap();
     }
-    let obid = start(&folder.0, &config, None);
+    let obid = start_with(&folder.0, &config, None, env);
     (folder, obid)
 }
 
@@ -233,6 +243,357 @@ fn a_conversation_resumes_its_session() {
     assert_eq!(other.body["text"], "resume=none", "{}", other.text);
 }
 
+/// A conversation's Claude Code waits for its next turn (docs/fast-replies.md): the turn after
+/// goes to the same process, with only the owner's words, and it ends when the conversation goes.
+#[test]
+fn the_next_turn_goes_to_the_waiting_claude_code() {
+    let (_folder, obid) = obid("harness-warm", true);
+    let first = said(&obid, json!({"said": "HELLO", "new": true}));
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    let kept: Value = serde_json::from_slice(
+        &std::fs::read(
+            obid.home
+                .join(format!("conversations/{conversation}/session.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let again = said(
+        &obid,
+        json!({"said": "REMEMBER", "conversation": conversation}),
+    );
+    assert_eq!(
+        again.body["text"],
+        format!("resume={}", kept["session"].as_str().unwrap()),
+        "{}",
+        again.text
+    );
+    let recorded = turns(&obid);
+    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    assert_eq!(recorded[0]["pid"], recorded[1]["pid"], "{recorded:?}");
+    assert_eq!(recorded[1]["prompt"], "REMEMBER");
+    let pid = recorded[0]["pid"].to_string();
+    assert!(alive(&pid), "it waits for the next turn");
+    let gone = call(
+        &obid,
+        "DELETE",
+        &format!("/v1/conversations/{conversation}"),
+        None,
+    );
+    assert_eq!(gone.status, 204, "{}", gone.text);
+    assert!(ends_soon(&pid), "it ends with its conversation");
+}
+
+/// After the owner's turn, the next new conversation's Claude Code starts and waits (docs/
+/// fast-replies.md): it connects to Oby's tools but can call none before its turn, and the new
+/// conversation's first turn goes to it.
+#[test]
+fn a_new_conversation_finds_its_claude_code_started() {
+    let (_folder, obid) = obid_env(
+        "harness-prestart",
+        true,
+        json!({"agent": "claude"}),
+        &[("OBID_PRESTART", "on")],
+    );
+    let first = said(&obid, json!({"said": "SAY hi", "new": true}));
+    let one = first.body["conversation"].as_str().unwrap().to_owned();
+    let conversations = obid.home.join("conversations");
+    let started = || -> Option<(String, Value)> {
+        std::fs::read_dir(&conversations)
+            .ok()?
+            .flatten()
+            .filter(|e| e.path().is_dir() && e.file_name().to_string_lossy() != one)
+            .find_map(|e| {
+                let line = std::fs::read_to_string(e.path().join("config/started.jsonl")).ok()?;
+                let record = serde_json::from_str(line.lines().next()?).ok()?;
+                Some((e.file_name().to_string_lossy().into_owned(), record))
+            })
+    };
+    let give_up_at = Instant::now() + Duration::from_secs(30);
+    while started().is_none() && Instant::now() < give_up_at {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (next, record) = started().expect("the next conversation's Claude Code started");
+    let pid = record["pid"].to_string();
+    assert!(alive(&pid));
+    assert_eq!(
+        std::fs::read_to_string(conversations.join("next-id")).unwrap(),
+        next
+    );
+
+    // Its token connects and lists the tools, and calls none; another token is refused.
+    let config: Value = serde_json::from_slice(
+        &std::fs::read(conversations.join(format!("{next}/home/oby-mcp.json"))).unwrap(),
+    )
+    .unwrap();
+    let token = config["mcpServers"]["oby"]["headers"]["Authorization"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .unwrap()
+        .to_owned();
+    let endpoint = format!("/v1/agent/mcp/conversation-{next}");
+    let mcp = |token: &str, method: &str| {
+        call_with_token(
+            &obid,
+            token,
+            "POST",
+            &endpoint,
+            Some(&json!({"jsonrpc": "2.0", "id": 1, "method": method,
+                         "params": {"name": "oby_jobs", "arguments": {}}})),
+        )
+    };
+    let hello = mcp(&token, "initialize");
+    assert_eq!(hello.status, 200, "{}", hello.text);
+    assert_eq!(hello.body["result"]["serverInfo"]["name"], "oby");
+    let listed = mcp(&token, "tools/list");
+    assert!(listed.body["result"]["tools"].as_array().unwrap().len() > 3);
+    let called = mcp(&token, "tools/call");
+    assert!(
+        called.body["error"]["message"].is_string(),
+        "{}",
+        called.text
+    );
+    assert_eq!(mcp("not-its-token", "initialize").status, 401);
+
+    // The new conversation is that one, and its first turn goes to it, with Oby's tools.
+    let second = said(&obid, json!({"said": "OBY oby_jobs {}", "new": true}));
+    assert_eq!(
+        second.body["conversation"],
+        next.as_str(),
+        "{}",
+        second.text
+    );
+    assert!(
+        second.body["text"].as_str().unwrap().starts_with("oby: "),
+        "{}",
+        second.text
+    );
+    assert!(!second.body["text"].as_str().unwrap().contains("refused"));
+    let recorded = recorded(&conversations.join(format!("{next}/config/turns.jsonl")));
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["pid"].to_string(), pid);
+    assert!(
+        !conversations.join("next-id").exists() || {
+            std::fs::read_to_string(conversations.join("next-id")).unwrap() != next
+        }
+    );
+}
+
+/// A waiting Claude Code that wrote a line while it waited isn't given the next turn (the line
+/// would be taken for the turn's): a new one answers it.
+#[test]
+fn a_claude_code_that_wrote_while_it_waited_starts_anew() {
+    let (_folder, obid) = obid("harness-warm-stray", true);
+    let first = said(&obid, json!({"said": "SAYLATE early", "new": true}));
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    std::thread::sleep(Duration::from_millis(1000));
+    let next = said(
+        &obid,
+        json!({"said": "SAY later", "conversation": conversation}),
+    );
+    assert_eq!(next.body["text"], "later", "{}", next.text);
+    let recorded = turns(&obid);
+    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    assert_ne!(recorded[0]["pid"], recorded[1]["pid"]);
+    assert!(ends_soon(&recorded[0]["pid"].to_string()));
+}
+
+/// A login copy a crash left in a conversation's folder is gone once obid has started.
+#[test]
+fn login_copies_left_in_conversations_go_at_start() {
+    let folder = Folder::new("harness-left-logins");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &harness());
+    config["conversation"] = json!({"agent": "claude"});
+    std::fs::create_dir_all(folder.0.join("home/accounts/stub")).unwrap();
+    let place = folder
+        .0
+        .join("home/conversations/c0000000-0000-4000-8000-000000000042");
+    let left = [
+        place.join("login/.claude/.credentials.json"),
+        place.join("config/.credentials.json"),
+    ];
+    for file in &left {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, r#"{"claudeAiOauth": {"accessToken": "left"}}"#).unwrap();
+    }
+    let _obid = start(&folder.0, &config, None);
+    for file in &left {
+        assert!(!file.exists(), "{} is still there", file.display());
+    }
+}
+
+/// Whether the process `pid` runs.
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// Whether the process `pid` ends within 15 seconds.
+fn ends_soon(pid: &str) -> bool {
+    let give_up_at = Instant::now() + Duration::from_secs(15);
+    while alive(pid) && Instant::now() < give_up_at {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    !alive(pid)
+}
+
+/// A turn stopped or out of time keeps no Claude Code waiting: the next starts a new one.
+#[test]
+fn nothing_waits_after_a_stop_or_the_budget() {
+    let (_folder, obid) = obid_with(
+        "harness-warm-ends",
+        true,
+        json!({"agent": "claude", "budget": 10}),
+    );
+    let first = said(&obid, json!({"said": "SAY hi", "new": true}));
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    let pid = |n: usize| turns(&obid)[n]["pid"].to_string();
+    let late = said(
+        &obid,
+        json!({"said": "LINGER 15000", "conversation": conversation}),
+    );
+    assert!(
+        late.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("as far as Oby got"),
+        "{}",
+        late.text
+    );
+    assert_eq!(pid(0), pid(1), "the turn went to the waiting one");
+    assert!(ends_soon(&pid(1)), "the budget ended it");
+    said(
+        &obid,
+        json!({"said": "SAY again", "conversation": conversation}),
+    );
+    assert_ne!(pid(2), pid(1));
+    std::thread::scope(|scope| {
+        let slow = scope.spawn(|| {
+            said(
+                &obid,
+                json!({"said": "LINGER 20000", "conversation": conversation}),
+            )
+        });
+        let give_up_at = Instant::now() + Duration::from_secs(15);
+        while turns(&obid).len() < 4 && Instant::now() < give_up_at {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let stopped = call(
+            &obid,
+            "POST",
+            "/v1/conversation/stop",
+            Some(&json!({"conversation": conversation})),
+        );
+        assert_eq!(stopped.status, 200, "{}", stopped.text);
+        slow.join().unwrap();
+    });
+    assert_eq!(pid(3), pid(2));
+    assert!(ends_soon(&pid(3)), "the stop ended it");
+    said(
+        &obid,
+        json!({"said": "SAY last", "conversation": conversation}),
+    );
+    assert_ne!(pid(4), pid(3));
+}
+
+/// obid's stop ends every waiting Claude Code.
+#[test]
+fn obids_stop_ends_the_waiting_claude_code() {
+    let (_folder, mut obid) = obid("harness-warm-stop", true);
+    said(&obid, json!({"said": "SAY hi", "new": true}));
+    let pid = turns(&obid)[0]["pid"].to_string();
+    assert!(alive(&pid));
+    obid.stop();
+    assert!(ends_soon(&pid));
+}
+
+/// A new room takes the spare tree obid keeps ready (a rename, nothing extracted while the turn
+/// waits), and a room whose branch moved keeps its checkout for the turn while the new one is made
+/// and swapped in (docs/fast-replies.md).
+#[test]
+fn rooms_never_wait_for_a_checkout_obid_could_keep_ready() {
+    use std::os::unix::fs::MetadataExt;
+    let (_folder, obid) = obid("harness-spares", true);
+    let first = said(&obid, json!({"said": "HELLO", "new": true}));
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    let spares = obid.home.join("checkouts/obi-e2e/fixture-app");
+    let spare = || {
+        std::fs::read_dir(&spares)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().starts_with("spare-"))
+            .map(|e| e.path())
+    };
+    let give_up_at = Instant::now() + Duration::from_secs(30);
+    while spare().is_none() && Instant::now() < give_up_at {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let ready = spare().expect("a spare tree is made after the first room's");
+    let inode = std::fs::metadata(&ready).unwrap().ino();
+    let other = said(&obid, json!({"said": "HELLO", "new": true}));
+    let other = other.body["conversation"].as_str().unwrap().to_owned();
+    let taken = obid.home.join(format!(
+        "conversations/{other}/room/repos/obi-e2e/fixture-app"
+    ));
+    assert_eq!(std::fs::metadata(&taken).unwrap().ino(), inode);
+    assert!(taken.join("package.json").is_file());
+
+    // The branch moves in obid's clone: the next turn doesn't wait, and the new tree comes in.
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&clone)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    let tree = git(&["rev-parse", "refs/remotes/origin/main^{tree}"]);
+    let parent = git(&["rev-parse", "refs/remotes/origin/main"]);
+    let moved = git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit-tree",
+        &tree,
+        "-p",
+        &parent,
+        "-m",
+        "moved",
+    ]);
+    git(&["update-ref", "refs/remotes/origin/main", &moved]);
+    said(
+        &obid,
+        json!({"said": "HELLO", "conversation": conversation}),
+    );
+    let marks = obid
+        .home
+        .join(format!("conversations/{conversation}/repos.json"));
+    let at = || -> Value { serde_json::from_slice(&std::fs::read(&marks).unwrap()).unwrap() };
+    let give_up_at = Instant::now() + Duration::from_secs(30);
+    while at()["obi-e2e/fixture-app"] != moved.as_str() && Instant::now() < give_up_at {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(at()["obi-e2e/fixture-app"], moved.as_str());
+    assert!(
+        obid.home
+            .join(format!(
+                "conversations/{conversation}/room/repos/obi-e2e/fixture-app/package.json"
+            ))
+            .is_file()
+    );
+}
+
 /// oby_dispatch starts a job from the conversation, with the plan loop's checks: the job names the
 /// conversation, and its card is on the turn. A tool's list is Oby's own.
 #[test]
@@ -243,7 +604,7 @@ fn oby_dispatch_starts_a_job_whose_card_is_on_the_turn() {
     let conversation = tools.body["conversation"].as_str().unwrap().to_owned();
     assert_eq!(
         tools.body["text"],
-        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_inbox,oby_answer,oby_conversations,oby_artifact,oby_read,oby_search,oby_list",
+        "tools: oby_jobs,oby_job,oby_dispatch,oby_tell_job,oby_stop_job,oby_continue_job,oby_archive_job,oby_delete_job,oby_change_job,oby_tasks,oby_inbox,oby_answer,oby_routines,oby_routine,oby_change_routine,oby_conversations,oby_artifact,oby_read,oby_search,oby_list,oby_shell,oby_shell_output,oby_shell_stop",
         "{}",
         tools.text
     );
@@ -284,6 +645,69 @@ fn oby_dispatch_starts_a_job_whose_card_is_on_the_turn() {
         seen.iter()
             .any(|(n, d)| n == "step" && d["tool"] == "oby_dispatch"),
         "{seen:?}"
+    );
+    // The job names the words that started it, and says so as it starts, before Oby's answer
+    // lists it: the conversation shows its card at once.
+    let user = seen
+        .iter()
+        .find(|(n, d)| n == "turn" && d["who"] == "user")
+        .map(|(_, d)| d["id"].clone())
+        .expect("the user's turn");
+    assert_eq!(job.body["turn"], user, "{}", job.text);
+    let started = seen
+        .iter()
+        .position(|(n, d)| n == "job" && d["id"] == id && d["turn"] == user)
+        .expect("the job's event with its turn");
+    let answered = seen
+        .iter()
+        .position(|(n, d)| n == "turn" && d["who"] == "oby" && d["jobs"] == json!([id]))
+        .expect("Oby's answer listing the job");
+    assert!(started < answered, "{seen:?}");
+}
+
+/// The check the owner named ("Check: …") goes on the job exactly, so obid runs it before it
+/// publishes; one the owner's words don't hold leaves the repository's own; one that isn't one
+/// line is refused.
+#[test]
+fn oby_dispatch_carries_the_check_the_owner_named() {
+    let (_folder, obid) = obid("harness-dispatch-check", true);
+    let answer = said(
+        &obid,
+        json!({"said": concat!("Check: cd core && cargo test -p obid --lib brain::supervisor\n",
+               r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "fix", "check": " cd core && cargo test -p obid --lib brain::supervisor "}"#),
+               "new": true}),
+    );
+    let jobs = answer.body["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1, "{}", answer.text);
+    let id = jobs[0]["id"].as_str().unwrap();
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None);
+    assert_eq!(
+        job.body["check"], "cd core && cargo test -p obid --lib brain::supervisor",
+        "{}",
+        job.text
+    );
+    // The agent's own `true`, which the owner's words hold but never name as the check, can't
+    // replace the fixture's `node --test`.
+    let weaker = said(
+        &obid,
+        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "fix", "check": "true"}"#,
+               "new": true}),
+    );
+    let id = weaker.body["jobs"][0]["id"].as_str().unwrap();
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None);
+    assert_eq!(job.body["check"], "node --test", "{}", job.text);
+    let refused = said(
+        &obid,
+        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "check": "true\nrm -rf x"}"#,
+               "new": true}),
+    );
+    assert!(
+        refused.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("check must be one line"),
+        "{}",
+        refused.text
     );
 }
 
@@ -349,6 +773,181 @@ fn owner_only_answers_become_confirm_items() {
             .any(|i| i["id"] == item && i["done"].is_null()),
         "{}",
         inbox.text
+    );
+}
+
+/// A routine said in chat (#395) is only proposed: a confirm item whose Confirm, the owner's own,
+/// saves it. Then the owner's words pause it; after the turn read the repositories, they don't.
+#[test]
+fn a_routine_said_in_chat_waits_for_the_owners_confirm() {
+    let (_folder, obid) = obid("harness-routine", true);
+    // The owner's Confirm of the open confirm item whose title starts with `title`.
+    let confirm = |title: &str| {
+        let item = inbox(&obid)
+            .into_iter()
+            .find(|i| {
+                i["kind"] == "confirm"
+                    && i["done"].is_null()
+                    && i["title"].as_str().unwrap().starts_with(title)
+            })
+            .unwrap_or_else(|| panic!("a confirm item {title}: {:?}", inbox(&obid)));
+        let confirmed = call(
+            &obid,
+            "POST",
+            &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
+            Some(&json!({"answer": "Confirm"})),
+        );
+        assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+        item
+    };
+    let routine = r#"OBY oby_routine {"name": "Readme check", "repo": "obi-e2e/fixture-app", "task": "Add a line to the README.", "kind": "build", "mode": "bypass", "schedule": {"every": "weekdays", "at": "09:00"}, "zone": "America/Sao_Paulo"}"#;
+    let answer = said(&obid, json!({"said": routine, "new": true}));
+    let conversation = answer.body["conversation"].as_str().unwrap().to_owned();
+    assert!(
+        answer.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("waits for the owner's OK"),
+        "{}",
+        answer.text
+    );
+    let routines = call(&obid, "GET", "/v1/routines", None);
+    assert_eq!(
+        routines.body,
+        json!([]),
+        "nothing saved yet: {}",
+        routines.text
+    );
+    // The card names the job each run starts, its mode and where it runs, and says plainly that
+    // a Bypass routine never asks.
+    let item = confirm("Make the routine ");
+    assert_eq!(
+        item["title"],
+        "Make the routine Readme check (Weekdays at 9:00, build fixture-app in Bypass mode, on auto · auto)"
+    );
+    assert!(
+        item["text"]
+            .as_str()
+            .unwrap()
+            .contains("every run's job never asks you anything"),
+        "{item}"
+    );
+    let routines = call(&obid, "GET", "/v1/routines", None).body;
+    let made = &routines[0];
+    assert_eq!(made["name"], "Readme check", "{routines}");
+    assert_eq!(made["createdBy"], "chat");
+    assert_eq!(made["mode"], "bypass");
+    assert_eq!(made["conversation"], conversation.as_str());
+    let id = made["id"].as_str().unwrap().to_owned();
+    let routine_now = || call(&obid, "GET", &format!("/v1/routines/{id}"), None).body;
+    let change = |action: &str| {
+        let words = format!(r#"OBY oby_change_routine {{"id": "{id}", "action": "{action}"}}"#);
+        said(&obid, json!({"said": words, "conversation": conversation}))
+    };
+
+    let listed = said(
+        &obid,
+        json!({"said": "OBY oby_routines {}", "conversation": conversation}),
+    );
+    assert!(
+        listed.body["text"].as_str().unwrap().contains(&id),
+        "{}",
+        listed.text
+    );
+    // Pausing is the owner's words alone.
+    let paused = change("pause");
+    assert!(
+        paused.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("Paused Readme check"),
+        "{}",
+        paused.text
+    );
+    assert_eq!(routine_now()["enabled"], false);
+
+    // After reading what others wrote, the turn's words change no routine.
+    let resume = format!(r#"READREPO OBY oby_change_routine {{"id": "{id}", "action": "resume"}}"#);
+    let refused = said(&obid, json!({"said": resume, "new": true}));
+    assert!(
+        refused.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("only when the owner says it again"),
+        "{}",
+        refused.text
+    );
+    assert_eq!(routine_now()["enabled"], false);
+
+    // Resuming, running now and deleting wait for the owner's Confirm.
+    let resumed = change("resume");
+    assert!(
+        resumed.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("waits for the owner's OK"),
+        "{}",
+        resumed.text
+    );
+    assert_eq!(routine_now()["enabled"], false);
+    // The card named Bypass: once the mode changed, its Confirm does nothing, and says why.
+    let set_mode = |mode: &str| {
+        let changed = call(
+            &obid,
+            "PATCH",
+            &format!("/v1/routines/{id}"),
+            Some(&json!({ "mode": mode })),
+        );
+        assert_eq!(changed.status, 200, "{}", changed.text);
+    };
+    set_mode("ask");
+    let stale = inbox(&obid)
+        .into_iter()
+        .find(|i| i["kind"] == "confirm" && i["done"].is_null())
+        .expect("the resume card");
+    let refused = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{}/answer", stale["id"].as_str().unwrap()),
+        Some(&json!({"answer": "Confirm"})),
+    );
+    assert_eq!(refused.status, 409, "{}", refused.text);
+    assert!(
+        refused.text.contains("changed since Oby asked"),
+        "{}",
+        refused.text
+    );
+    assert_eq!(routine_now()["enabled"], false);
+    set_mode("bypass");
+    change("resume");
+    confirm("Resume the routine Readme check");
+    assert_eq!(routine_now()["enabled"], true);
+
+    change("run");
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs, json!([]), "no Bypass job before the Confirm");
+    let run = confirm("Run the routine Readme check (");
+    assert!(
+        run["text"]
+            .as_str()
+            .unwrap()
+            .contains("never asks you anything"),
+        "{run}"
+    );
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs[0]["routine"]["id"], id.as_str(), "{jobs}");
+    assert_eq!(jobs[0]["mode"], "bypass");
+
+    change("delete");
+    assert_eq!(
+        routine_now()["id"],
+        id.as_str(),
+        "not deleted before the Confirm"
+    );
+    confirm("Delete the routine Readme check");
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/routines/{id}"), None).status,
+        404
     );
 }
 
@@ -524,6 +1123,21 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
     let follow = ended(&obid, &next);
     assert_eq!(follow["followUpOf"], id.as_str());
     assert_eq!(follow["conversation"], conversation.as_str());
+    // Started by these words in its parent's conversation: its card shows under them at once.
+    let words = call(
+        &obid,
+        "GET",
+        &format!("/v1/conversation?id={conversation}"),
+        None,
+    )
+    .body
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|t| t["who"] == "user" && t["text"] == tell.as_str())
+    .map(|t| t["id"].clone())
+    .expect("the user's turn");
+    assert_eq!(follow["turn"], words, "{follow}");
     assert_eq!(follow["request"], tell.as_str());
     assert_eq!(follow["kind"], first["kind"]);
     let heard = within(30, "the follow-up's agent hears it", || {
@@ -560,10 +1174,19 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
         .into_iter()
         .find(|i| i["kind"] == "start")
         .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
+    // The card reads as the owner wrote it: their words, then the agent's, never the fences the
+    // agent's prompt keeps.
+    let text = start["text"].as_str().unwrap();
     assert!(
-        start["text"].as_str().unwrap().contains("AGENT-WORDS-2"),
+        text.contains(&format!("Your words:\n{web}"))
+            && text.ends_with("What Oby adds for its agent:\nAGENT-WORDS-2"),
         "{start}"
     );
+    assert!(
+        !text.contains("quoted-") && !text.contains("Everything between"),
+        "{start}"
+    );
+    assert_eq!(start["title"], "Follow-up: Add a greeting");
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(
         call(&obid, "GET", "/v1/jobs", None)
@@ -574,6 +1197,109 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
         jobs,
         "nothing started"
     );
+
+    // A follow-up of the job working already takes the item's Start once it's at work: it hears
+    // the words, the item is done, and nothing else starts.
+    let pausing = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "PAUSE: 30000"})),
+    );
+    assert_eq!(pausing.status, 201, "{}", pausing.text);
+    let follow = pausing.body["id"].as_str().unwrap().to_owned();
+    // Still getting ready, it isn't at work: the item's words would wait for nothing, or answer
+    // what it asks next. Start is refused, naming it, and the item stays open.
+    let item = start["id"].as_str().unwrap();
+    let refused = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{item}/answer"),
+        Some(&json!({"answer": "Start"})),
+    );
+    assert_eq!(refused.status, 409, "{}", refused.text);
+    assert!(refused.text.contains(&follow), "{}", refused.text);
+    assert!(inbox(&obid).iter().any(|i| i["id"] == item), "still open");
+    within(60, "the follow-up is at work", || {
+        let body = call(&obid, "GET", &format!("/v1/jobs/{follow}"), None).body;
+        (body["status"] == "running" && body["step"] == "Starting Claude Code").then_some(())
+    });
+    let answered = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{item}/answer"),
+        Some(&json!({"answer": "Start"})),
+    );
+    assert_eq!(answered.status, 200, "{}", answered.text);
+    assert_eq!(answered.body["job"], follow.as_str());
+    assert!(answered.body["done"].is_string(), "{}", answered.text);
+    let heard = call(&obid, "GET", &format!("/v1/jobs/{follow}"), None).body;
+    assert!(
+        heard["notes"].to_string().contains("AGENT-WORDS-2"),
+        "{heard}"
+    );
+    // Its step shows the owner's words, not the agent's quoted after them.
+    assert_eq!(heard["step"], format!("You: {web}"), "{heard}");
+    assert_eq!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        jobs + 1,
+        "only the follow-up the owner started"
+    );
+
+    // Told again in the conversation, the job's working follow-up hears it: no second follow-up,
+    // and its card goes on the answer.
+    let again = format!(r#"OBY oby_tell_job {{"id": "{id}", "words": "AGENT-WORDS-3"}}"#);
+    let on_it = said(&obid, json!({"said": again, "conversation": conversation}));
+    assert!(
+        on_it.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("Already on it in"),
+        "{}",
+        on_it.text
+    );
+    assert_eq!(
+        on_it.body["jobs"][0]["id"],
+        follow.as_str(),
+        "{}",
+        on_it.text
+    );
+    ended(&obid, &follow);
+
+    // A proposal names the conversation it was made in (another than the job's here), which
+    // shows it; a later follow-up that ended, here done with nothing committed, leaves it open as
+    // it was.
+    let web = format!(r#"WEB OBY oby_tell_job {{"id": "{id}", "words": "AGENT-WORDS-4"}}"#);
+    let elsewhere = said(&obid, json!({"said": web, "new": true}));
+    let elsewhere = elsewhere.body["conversation"].as_str().unwrap().to_owned();
+    assert_ne!(elsewhere, conversation);
+    let proposed = inbox(&obid)
+        .into_iter()
+        .find(|i| i["kind"] == "start")
+        .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
+    assert_eq!(proposed["conversation"], elsewhere.as_str(), "{proposed}");
+    std::thread::sleep(Duration::from_millis(1100));
+    let other = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "and the docs"})),
+    );
+    assert_eq!(other.status, 201, "{}", other.text);
+    assert_eq!(
+        ended(&obid, other.body["id"].as_str().unwrap())["status"],
+        "done"
+    );
+    let still = inbox(&obid)
+        .into_iter()
+        .find(|i| i["id"] == proposed["id"])
+        .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
+    assert_eq!(still["text"], proposed["text"]);
+    assert_eq!(still["options"], json!(["Start", "Cancel"]));
 }
 
 /// One turn starts at most ten jobs and tells jobs at most ten times: past that a tool says why.
@@ -731,6 +1457,11 @@ fn the_taint_lasts_across_resumed_turns() {
         json!({"said": dispatch, "conversation": conversation}),
     );
     assert_eq!(answer.body["jobs"], json!([]), "{}", answer.text);
+    let recorded = turns(&obid);
+    assert_eq!(
+        recorded[0]["pid"], recorded[1]["pid"],
+        "the later turn went to the waiting Claude Code, and the taint with it"
+    );
     assert!(
         answer.body["text"]
             .as_str()
@@ -1101,4 +1832,583 @@ fn oby_artifact_publishes_from_the_room_onto_the_turn() {
         refused.text
     );
     assert!(refused.body.get("artifacts").is_none(), "{}", refused.text);
+}
+
+/// Oby's answer in a turn: what the stand-in said of its tool's answer.
+fn oby_said(answer: &Answer) -> String {
+    answer.body["text"].as_str().unwrap_or_default().to_owned()
+}
+
+/// A job dispatched in `conversation` (a new one when none), once it has ended needing the owner
+/// (its agent stopped mid-round, #725): its id and the conversation.
+fn ended_job(obid: &Obid, conversation: Option<&str>) -> (String, String) {
+    let mut body = json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting. JOB-FAILS", "title": "Add a greeting", "kind": "build"}"#});
+    match conversation {
+        Some(c) => body["conversation"] = json!(c),
+        None => body["new"] = json!(true),
+    }
+    let started = said(obid, body);
+    let id = started.body["jobs"][0]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}", started.text))
+        .to_owned();
+    ended(obid, &id);
+    (
+        id,
+        started.body["conversation"].as_str().unwrap().to_owned(),
+    )
+}
+
+/// The latest open confirm item about `job`, with its action.
+fn confirm_for(obid: &Obid, job: &str) -> Value {
+    inbox(obid)
+        .into_iter()
+        .rev()
+        .find(|i| i["kind"] == "confirm" && i["job"] == job)
+        .unwrap_or_else(|| panic!("no confirm for {job}: {:?}", inbox(obid)))
+}
+
+fn confirmed(obid: &Obid, item: &Value) -> Answer {
+    let id = item["id"].as_str().unwrap();
+    call(
+        obid,
+        "POST",
+        &format!("/v1/inbox/{id}/answer"),
+        Some(&json!({"answer": "Confirm"})),
+    )
+}
+
+/// oby_continue_job picks a job that ended up again in its own session, its agent hearing Try
+/// again's words and the conversation's quoted; another conversation's job, or a turn that read
+/// something untrusted, waits for the owner's Confirm, which then continues it.
+#[test]
+fn oby_continue_job_continues_a_job_in_its_session() {
+    let (_folder, obid) = obid("harness-continue", true);
+    let (id, conversation) = ended_job(&obid, None);
+    let first = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(first["status"], "interrupted", "{first}");
+    let before = job_turns(&obid).len();
+    let go = format!(r#"OBY oby_continue_job {{"id": "{id}", "words": "CONTINUE-WORDS"}}"#);
+    let answer = said(&obid, json!({"said": go, "conversation": conversation}));
+    assert!(
+        oby_said(&answer).contains("Continuing Add a greeting: round 2."),
+        "{}",
+        answer.text
+    );
+    let again = ended(&obid, &id);
+    assert_eq!(again["round"], 2, "{again}");
+    let heard = within(30, "the job's agent hears it", || {
+        job_turns(&obid).get(before).cloned()
+    });
+    let prompt = heard["prompt"].as_str().unwrap();
+    assert!(
+        prompt.starts_with("Try again, picking up where you left off."),
+        "{prompt}"
+    );
+    let quoted = prompt
+        .find("<<<quoted-")
+        .unwrap_or_else(|| panic!("{prompt}"));
+    assert!(prompt[quoted..].contains("CONTINUE-WORDS"), "{prompt}");
+    assert!(!prompt[..quoted].contains("CONTINUE-WORDS\n"), "{prompt}");
+    assert!(
+        again["changes"]
+            .to_string()
+            .contains("Continued by Oby, in a conversation"),
+        "{again}"
+    );
+
+    // A round the owner asked for may end done: a done job gets a follow-up instead.
+    assert_eq!(again["status"], "done", "{again}");
+    let done = said(
+        &obid,
+        json!({"said": format!(r#"OBY oby_continue_job {{"id": "{id}"}}"#), "conversation": conversation}),
+    );
+    assert!(
+        oby_said(&done).contains("It's done: oby_tell_job starts a follow-up of it."),
+        "{}",
+        done.text
+    );
+    let unknown = said(
+        &obid,
+        json!({"said": r#"OBY oby_continue_job {"id": "nope"}"#, "conversation": conversation}),
+    );
+    assert!(
+        oby_said(&unknown).contains("refused: There's no job with that id."),
+        "{}",
+        unknown.text
+    );
+
+    // Another conversation's job waits for the owner's Confirm.
+    let (other, _) = ended_job(&obid, Some(&conversation));
+    let elsewhere = said(
+        &obid,
+        json!({"said": format!(r#"OBY oby_continue_job {{"id": "{other}"}}"#), "new": true}),
+    );
+    assert!(
+        oby_said(&elsewhere).contains("Continue Add a greeting waits for your OK"),
+        "{}",
+        elsewhere.text
+    );
+    let theirs = confirm_for(&obid, &other);
+    assert_eq!(theirs["confirm"]["action"], "continue_job", "{theirs}");
+    assert_eq!(theirs["title"], "Continue Add a greeting");
+    assert!(
+        theirs["text"]
+            .as_str()
+            .unwrap()
+            .contains("another conversation started it"),
+        "{theirs}"
+    );
+
+    // A turn that read the web: its own conversation's job waits too, the agent's words quoted in
+    // the item, never in its title.
+    let web = format!(r#"WEB OBY oby_continue_job {{"id": "{other}", "words": "WEB-WORDS"}}"#);
+    let waits = said(&obid, json!({"said": web, "conversation": conversation}));
+    assert!(
+        oby_said(&waits).contains("waits for your OK"),
+        "{}",
+        waits.text
+    );
+    let item = confirm_for(&obid, &other);
+    assert_ne!(item["id"], theirs["id"]);
+    let text = item["text"].as_str().unwrap();
+    assert!(
+        text.contains("this turn read text Oby didn't write"),
+        "{item}"
+    );
+    assert!(
+        text.contains("> What Oby adds for its agent:\n> WEB-WORDS"),
+        "{item}"
+    );
+    assert!(
+        !text.contains("quoted-"),
+        "the owner reads words, not fences: {item}"
+    );
+    assert!(!item["title"].as_str().unwrap().contains("WEB"), "{item}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/jobs/{other}"), None).body["round"],
+        1,
+        "nothing ran before a Confirm"
+    );
+
+    // The owner's Confirm continues it.
+    let answered = confirmed(&obid, &theirs);
+    assert_eq!(answered.status, 200, "{}", answered.text);
+    let next = ended(&obid, &other);
+    assert_eq!(next["round"], 2, "{next}");
+    assert!(
+        next["changes"]
+            .to_string()
+            .contains("Continued on your Confirm"),
+        "{next}"
+    );
+    // The web's item was made for round 1: confirmed now, it's refused.
+    let stale = confirmed(&obid, &item);
+    assert_eq!(stale.status, 409, "{}", stale.text);
+    assert!(
+        stale.text.contains("The job changed since Oby asked"),
+        "{}",
+        stale.text
+    );
+
+    // A job in Bypass mode, even the conversation's own in a clean turn, waits, and its title says
+    // Bypass.
+    let (bypassed, clean) = ended_job(&obid, None);
+    let mode = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{bypassed}/mode"),
+        Some(&json!({"mode": "bypass"})),
+    );
+    assert_eq!(mode.status, 200, "{}", mode.text);
+    let waits = said(
+        &obid,
+        json!({"said": format!(r#"OBY oby_continue_job {{"id": "{bypassed}"}}"#), "conversation": clean}),
+    );
+    assert!(
+        oby_said(&waits).contains("waits for your OK"),
+        "{}",
+        waits.text
+    );
+    let item = confirm_for(&obid, &bypassed);
+    assert_eq!(
+        item["title"], "Continue Add a greeting in Bypass mode",
+        "{item}"
+    );
+    assert!(
+        item["text"].as_str().unwrap().contains("Bypass mode"),
+        "{item}"
+    );
+}
+
+/// oby_archive_job hides a job that ended and needs nothing, reversibly, at once even after the
+/// web; oby_delete_job always waits for the owner's Confirm, which removes the job, its worktree
+/// and its open items, and the REST routes do the same for the apps.
+#[test]
+fn archive_is_at_once_and_delete_waits_for_confirm() {
+    let (_folder, obid) = obid("harness-archive", true);
+    let (id, conversation) = ended_job(&obid, None);
+    let archive = format!(r#"OBY oby_archive_job {{"id": "{id}"}}"#);
+    let needs = said(
+        &obid,
+        json!({"said": archive, "conversation": conversation}),
+    );
+    assert!(
+        oby_said(&needs).contains("It still needs you: dismiss it first"),
+        "{}",
+        needs.text
+    );
+    assert_eq!(
+        call(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None).status,
+        200
+    );
+    let done = said(
+        &obid,
+        json!({"said": format!("WEB {archive}"), "conversation": conversation}),
+    );
+    assert!(
+        oby_said(&done).contains("Archived Add a greeting."),
+        "{}",
+        done.text
+    );
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert!(job["archived"].is_string(), "{job}");
+    assert!(
+        job["changes"][0]["what"]
+            .as_str()
+            .unwrap()
+            .starts_with("Archived by Oby"),
+        "{job}"
+    );
+    let listed = said(
+        &obid,
+        json!({"said": "OBY oby_jobs {}", "conversation": conversation}),
+    );
+    assert!(!oby_said(&listed).contains(&id), "{}", listed.text);
+    let archived = said(
+        &obid,
+        json!({"said": r#"OBY oby_jobs {"archived": true}"#, "conversation": conversation}),
+    );
+    assert!(oby_said(&archived).contains(&id), "{}", archived.text);
+    let back = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/archive"),
+        Some(&json!({"archived": false})),
+    );
+    assert_eq!(back.status, 200, "{}", back.text);
+    assert!(back.body["archived"].is_null(), "{}", back.text);
+    assert_eq!(
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/archive"),
+            Some(&json!({"x": 1}))
+        )
+        .status,
+        422
+    );
+
+    let worktree = PathBuf::from(job["worktree"].as_str().unwrap());
+    assert!(worktree.is_dir());
+    let branch = job["branch"].as_str().unwrap().to_owned();
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    let has_branch = |name: &str| {
+        let out = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&clone)
+            .args(["branch", "--all", "--list", name])
+            .output()
+            .unwrap();
+        !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+    };
+    let delete = format!(r#"OBY oby_delete_job {{"id": "{id}"}}"#);
+    let waits = said(&obid, json!({"said": delete, "conversation": conversation}));
+    assert!(
+        oby_said(&waits).contains("waits for your OK"),
+        "{}",
+        waits.text
+    );
+    let item = confirm_for(&obid, &id);
+    assert_eq!(item["confirm"]["action"], "delete_job", "{item}");
+    assert_eq!(
+        item["title"],
+        "Delete Add a greeting (its worktree and local branch go)"
+    );
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/jobs/{id}"), None).status,
+        200,
+        "nothing yet"
+    );
+    let done = confirmed(&obid, &item);
+    assert_eq!(done.status, 200, "{}", done.text);
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/jobs/{id}"), None).status,
+        404
+    );
+    assert!(!worktree.exists());
+    assert!(!has_branch(&branch), "its own branch goes");
+    assert!(has_branch("origin/main"), "nothing else does");
+    assert!(!inbox(&obid).iter().any(|i| i["job"] == id.as_str()));
+
+    // The apps' own route: a running job is refused, one that ended goes.
+    // (A new conversation: this one read the web, so its dispatch would wait for a Start.)
+    let (other, _) = ended_job(&obid, None);
+    assert_eq!(
+        call(&obid, "DELETE", &format!("/v1/jobs/{other}"), None).status,
+        204
+    );
+    assert_eq!(
+        call(&obid, "DELETE", &format!("/v1/jobs/{other}"), None).status,
+        404
+    );
+}
+
+/// oby_change_job narrows a job's mode at once; Bypass, a mode that asks less, and anything after
+/// the web wait for the owner's Confirm. Moving needs a job that ended and a tool obid has.
+#[test]
+fn oby_change_job_widens_only_on_confirm() {
+    let (_folder, obid) = obid("harness-change", true);
+    let (id, conversation) = ended_job(&obid, None);
+    let change = |args: &str| {
+        let words = format!(r#"OBY oby_change_job {{"id": "{id}", {args}}}"#);
+        oby_said(&said(
+            &obid,
+            json!({"said": words, "conversation": conversation}),
+        ))
+    };
+    assert!(change(r#""mode": "plan""#).contains("is in Plan mode now."));
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["mode"], "plan", "{job}");
+    assert!(
+        job["changes"]
+            .to_string()
+            .contains("Mode changed from Sandbox to Plan by Oby"),
+        "{job}"
+    );
+    let mut asked = vec![];
+    for widened in ["ask", "bypass"] {
+        let waits = change(&format!(r#""mode": "{widened}""#));
+        assert!(waits.contains("waits for your OK"), "{waits}");
+        let item = confirm_for(&obid, &id);
+        assert_eq!(item["confirm"]["action"], "change_job", "{item}");
+        assert_eq!(item["confirm"]["payload"]["mode"], widened, "{item}");
+        asked.push(item.clone());
+        assert!(
+            item["text"]
+                .as_str()
+                .unwrap()
+                .contains("lets the job do more"),
+            "{item}"
+        );
+        assert_eq!(
+            call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["mode"],
+            "plan"
+        );
+    }
+    let item = confirm_for(&obid, &id);
+    assert_eq!(item["title"], "Put Add a greeting in Bypass mode");
+    assert_eq!(confirmed(&obid, &item).status, 200);
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["mode"],
+        "bypass"
+    );
+    // Ask was asked of a job in Plan: confirmed once it's in Bypass, it's refused.
+    let stale = confirmed(&obid, &asked[0]);
+    assert_eq!(stale.status, 409, "{}", stale.text);
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["mode"],
+        "bypass"
+    );
+
+    // Another conversation's job: even a narrower mode waits.
+    let theirs = said(
+        &obid,
+        json!({"said": format!(r#"OBY oby_change_job {{"id": "{id}", "mode": "plan"}}"#), "new": true}),
+    );
+    assert!(
+        oby_said(&theirs).contains("waits for your OK"),
+        "{}",
+        theirs.text
+    );
+    assert!(
+        confirm_for(&obid, &id)["text"]
+            .as_str()
+            .unwrap()
+            .contains("another conversation started it")
+    );
+
+    assert!(change(r#""agent": "codex""#).contains("obid has no Codex set up"));
+    assert!(change(r#""account": "Stub""#).contains("It's on Claude Code · Stub already."));
+    assert!(change(r#""mode": "nope""#).contains("mode is ask, acceptEdits"));
+
+    // After the web even a narrower mode waits.
+    let web = format!(r#"WEB OBY oby_change_job {{"id": "{id}", "mode": "plan"}}"#);
+    let waits = oby_said(&said(
+        &obid,
+        json!({"said": web, "conversation": conversation}),
+    ));
+    assert!(waits.contains("waits for your OK"), "{waits}");
+    assert!(
+        confirm_for(&obid, &id)["text"]
+            .as_str()
+            .unwrap()
+            .contains("this turn read text")
+    );
+}
+
+/// oby_tasks keeps the conversation's own list in its file, shown in the API, and every later
+/// turn's prompt starts with it while a task is still to do.
+#[test]
+fn oby_tasks_keeps_a_list_that_reaches_every_turn() {
+    let (_folder, obid) = obid("harness-tasks", true);
+    let write = r#"OBY oby_tasks {"tasks": [{"title": "Fix the login test", "status": "in_progress"}, {"id": "docs", "title": "Update the docs", "status": "pending", "note": "after the fix"}]}"#;
+    let answer = said(&obid, json!({"said": write, "new": true}));
+    let conversation = answer.body["conversation"].as_str().unwrap().to_owned();
+    assert!(
+        oby_said(&answer).contains(r#""id": "t1""#),
+        "{}",
+        answer.text
+    );
+    let listed = call(&obid, "GET", "/v1/conversations", None).body;
+    let kept = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == conversation.as_str())
+        .unwrap();
+    assert_eq!(kept["tasks"][0]["id"], "t1", "{kept}");
+    assert_eq!(kept["tasks"][1]["id"], "docs", "{kept}");
+    assert_eq!(kept["tasks"][1]["note"], "after the fix", "{kept}");
+    let read = said(
+        &obid,
+        json!({"said": "OBY oby_tasks {}", "conversation": conversation}),
+    );
+    assert!(oby_said(&read).contains("Update the docs"), "{}", read.text);
+    let prompt = turns(&obid).last().unwrap()["prompt"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        prompt.starts_with("Your task list for this conversation"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("- t1 [in_progress] Fix the login test"),
+        "{prompt}"
+    );
+    let bad = said(
+        &obid,
+        json!({"said": r#"OBY oby_tasks {"tasks": [{"title": "x", "status": "maybe"}]}"#, "conversation": conversation}),
+    );
+    assert!(
+        oby_said(&bad).contains("A task's status is pending"),
+        "{}",
+        bad.text
+    );
+    let all_done = r#"OBY oby_tasks {"tasks": [{"id": "t1", "title": "Fix the login test", "status": "completed"}]}"#;
+    said(
+        &obid,
+        json!({"said": all_done, "conversation": conversation}),
+    );
+    said(
+        &obid,
+        json!({"said": "SAY hi", "conversation": conversation}),
+    );
+    let prompt = turns(&obid).last().unwrap()["prompt"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!prompt.contains("Your task list"), "{prompt}");
+}
+
+/// oby_change_job moves a job that ended to another account; continued, it starts a new session
+/// there that hears its task and where it was moved from, and the move is on the job.
+#[test]
+fn a_moved_job_continues_in_a_new_session() {
+    let folder = Folder::new("harness-move");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &harness());
+    config["conversation"] = json!({"agent": "claude"});
+    let second = folder.0.join("home/accounts/second");
+    config["agents"]["claude"]["accounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "second", "name": "Second", "configDir": second}));
+    for account in ["stub", "second"] {
+        let dir = folder.0.join("home/accounts").join(account);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".credentials.json"), "{}").unwrap();
+    }
+    let obid = start(&folder.0, &config, None);
+    let (id, conversation) = ended_job(&obid, None);
+    let moved = said(
+        &obid,
+        json!({"said": format!(r#"OBY oby_change_job {{"id": "{id}", "account": "Second"}}"#),
+               "conversation": conversation}),
+    );
+    assert!(
+        oby_said(&moved).contains("Moved Add a greeting to Claude Code · Second"),
+        "{}",
+        moved.text
+    );
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["account"], "second", "{job}");
+    assert_eq!(job["moves"][0]["from"], "Claude Code · Stub", "{job}");
+    assert_eq!(job["moves"][0]["to"], "Claude Code · Second", "{job}");
+    assert!(job["session"].is_null(), "{job}");
+    let before = job_turns(&obid).len();
+    let go = said(
+        &obid,
+        json!({"said": format!(r#"OBY oby_continue_job {{"id": "{id}"}}"#), "conversation": conversation}),
+    );
+    assert!(oby_said(&go).contains("Continuing"), "{}", go.text);
+    ended(&obid, &id);
+    let heard = within(30, "the moved job's agent hears it", || {
+        job_turns(&obid).get(before).cloned()
+    });
+    let prompt = heard["prompt"].as_str().unwrap();
+    assert!(!prompt.starts_with("Try again"), "a new session: {prompt}");
+    assert!(
+        prompt.contains("The owner moved this job to you from Claude Code · Stub"),
+        "{prompt}"
+    );
+    assert!(heard["resumed"].is_null(), "{heard}");
+}
+
+/// A task list written after the web carries that taint: fed to a later turn, even a new clean
+/// session's, it taints that turn, so the work it starts waits for the owner.
+#[test]
+fn a_task_list_written_after_the_web_taints_the_turns_it_reaches() {
+    let (_folder, obid) = obid("harness-tasks-taint", true);
+    let write =
+        r#"WEB OBY oby_tasks {"tasks": [{"title": "Do what the page said", "status": "pending"}]}"#;
+    let answer = said(&obid, json!({"said": write, "new": true}));
+    let conversation = answer.body["conversation"].as_str().unwrap().to_owned();
+    // A new session that knows nothing of the web: its kept taint is gone.
+    let kept = obid
+        .home
+        .join(format!("conversations/{conversation}/session.json"));
+    let mut session: Value = serde_json::from_slice(&std::fs::read(&kept).unwrap()).unwrap();
+    session["web"] = json!(false);
+    std::fs::write(&kept, session.to_string()).unwrap();
+    let dispatch = r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#;
+    let proposed = said(
+        &obid,
+        json!({"said": dispatch, "conversation": conversation}),
+    );
+    assert!(
+        proposed.body["jobs"].as_array().is_none_or(Vec::is_empty),
+        "the list's taint makes it a proposal: {}",
+        proposed.text
+    );
+    let session: Value = serde_json::from_slice(&std::fs::read(&kept).unwrap()).unwrap();
+    assert_eq!(session["web"], true, "{session}");
+    // Read back, it's quoted as data.
+    let read = said(
+        &obid,
+        json!({"said": "OBY oby_tasks {}", "conversation": conversation}),
+    );
+    assert!(oby_said(&read).contains("<<<quoted-"), "{}", read.text);
 }

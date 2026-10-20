@@ -175,7 +175,7 @@ enum JobStatus {
         case .done: ("Done", .green)
         case .failed: ("Failed", .red)
         case .stopped: ("Stopped", .gray)
-        case .interrupted: ("Interrupted", .gray)
+        case .interrupted: ("Needs you", .orange)
         }
     }
 }

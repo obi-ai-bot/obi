@@ -245,6 +245,13 @@ impl Briefing {
                     "the plan is quoted in {FILE}. Options: {}.",
                     item.options.join(" | ")
                 ),
+                // What a start item would run is the agent's (or the owner's) own words: only
+                // obid's first paragraph is here, the rest in the quoted file.
+                "start" => format!(
+                    "{} What it would run is quoted in {FILE}. Options: {}.",
+                    line(item.text.split("\n\n").next().unwrap_or_default(), 160),
+                    item.options.join(" | ")
+                ),
                 // Other Obis' requests and plug-ins' events: obid's words from their typed
                 // fields; their data is quoted on the item, never here.
                 _ => format!(
@@ -1062,6 +1069,7 @@ mod tests {
             conversation: String::new(),
             ended: false,
             artifacts: vec![],
+            routine: None,
         };
         Briefing {
             turns: vec![turn("user", "how is it going?"), turn("oby", "Fine.")],
@@ -1409,13 +1417,14 @@ mod tests {
     /// both causes and quotes both records, and the system prompt and schema stay the same (#534).
     #[tokio::test]
     async fn the_brain_is_sent_both_causes_and_the_same_system_prompt() {
-        use super::super::planner::{Adapter, Planner, tests::Fake};
+        use super::super::planner::{Adapter, LEAST, Planner, tests::Fake};
         use std::sync::Arc;
         let fake = Arc::new(Fake::default());
         let planner = Planner {
             adapters: vec![Adapter::Fake(fake.clone())],
             falls_back_to_rules: true,
             deadline: None,
+            least: LEAST,
         };
         let context = |briefing: &Briefing| super::super::plan::Context {
             accounts: std::collections::BTreeMap::from([("claude".into(), vec!["default".into()])]),
@@ -1466,6 +1475,7 @@ mod tests {
                 conversation: String::new(),
                 ended: false,
                 artifacts: vec![],
+                routine: None,
             })
             .collect();
         let text = briefing.text();

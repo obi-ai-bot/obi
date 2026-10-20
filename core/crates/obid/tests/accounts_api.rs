@@ -596,3 +596,36 @@ fn the_default_login_is_never_signed_in_by_obid() {
             .contains("own login")
     );
 }
+
+/// A fresh sign-in may be another kind of login: obid forgets how the account paid (`priced`, kept
+/// with its usage), so its next Codex job asks again; its windows stay.
+#[test]
+fn a_new_sign_in_forgets_how_the_account_paid() {
+    let folder = Folder::new("accounts-priced");
+    let config = accounts_config(&folder.0);
+    let mut obid = start(&folder.0, &config, None);
+    let id = add(&obid, json!({"agent": "codex", "name": "Work"})).body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    obid.stop();
+    let usage = folder.0.join("home/usage.json");
+    std::fs::write(
+        &usage,
+        json!({&id: {"fiveHour": 0.3, "priced": "plan"}}).to_string(),
+    )
+    .unwrap();
+    let obid = start(&folder.0, &config, None);
+    assert_eq!(account(&obid, &id).unwrap()["fiveHour"], 0.3);
+    let started = call(&obid, "GET", &format!("/v1/accounts/{id}/sign-in"), None);
+    assert_eq!(started.status, 200, "{}", started.text);
+    within(15, "the account signed in", || {
+        (account(&obid, &id)?["signedIn"] == true).then_some(())
+    });
+    // signedIn can show before the sign-in's own end forgets `priced`: wait for the file.
+    let kept = within(15, "the sign-in forgot how the account paid", || {
+        let kept: Value = serde_json::from_slice(&std::fs::read(&usage).ok()?).ok()?;
+        kept[&id]["priced"].is_null().then_some(kept)
+    });
+    assert_eq!(kept[&id]["fiveHour"], 0.3);
+}

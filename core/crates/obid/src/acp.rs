@@ -14,7 +14,6 @@
 //! `notes`, which the next prompt starts with.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -39,6 +38,9 @@ pub struct Options {
     /// The tool's mode ids for Plan and for everything else.
     pub plan_mode: String,
     pub agent_mode: String,
+    /// The MCP servers `session/new` (or `session/load`) gives it, when it takes HTTP ones: Oby's
+    /// Tetrix server only (crate::tetrix).
+    pub mcp: Vec<Value>,
 }
 
 /// Runs one turn: starts the agent, sends `prompt`, answers its requests with `decide`, reports with
@@ -48,7 +50,7 @@ pub async fn run_turn(
     launch: Launch,
     prompt: &str,
     options: &Options,
-    limit: Duration,
+    limit: impl Into<crate::conn::Limit>,
     stop: watch::Receiver<process::Signal>,
     decide: impl Fn(&str, &Value) -> Ruling,
     on_event: impl FnMut(Event),
@@ -68,6 +70,7 @@ pub async fn run_turn(
         before: String::new(),
         notes: Vec::new(),
         plan_approved: false,
+        tokens: crate::usage::Tokens::default(),
     };
     let mut turn = Turn::default();
     let ended = match run.turn(prompt).await {
@@ -93,6 +96,7 @@ pub async fn run_turn(
         run.conn.drain().await;
     }
     turn.timed_out = run.conn.timed_out;
+    turn.quiet = run.conn.quiet_out;
     turn.stopped = run.conn.stopped;
     turn.exit = run.conn.finish().await;
     Ok(turn)
@@ -333,6 +337,45 @@ impl ToolCall {
     }
 }
 
+impl ToolCall {
+    /// The Claude Code tool call it is, for a job's transcript, by its `kind` only: never by its
+    /// title, which the agent writes. A kind obid doesn't know is `Tool`.
+    fn named(&self) -> (String, Value) {
+        let path = json!({"file_path": self.paths.first()});
+        match self.kind.as_deref() {
+            Some("execute") => ("Bash".into(), json!({"command": self.command})),
+            Some("read") => ("Read".into(), path),
+            Some("search") => ("Grep".into(), json!({"pattern": self.pattern})),
+            Some("edit" | "delete" | "move") => ("Edit".into(), path),
+            Some("fetch") => ("WebFetch".into(), json!({"url": self.url})),
+            _ => ("Tool".into(), json!({})),
+        }
+    }
+}
+
+/// The lines an update's diffs add and remove, when it has any.
+fn diff_lines(content: &Value) -> Option<(u64, u64)> {
+    let count = |v: &Value| v.as_str().map_or(0, |s| s.lines().count() as u64);
+    content
+        .as_array()?
+        .iter()
+        .filter(|b| b["type"] == "diff")
+        .map(|b| (count(&b["newText"]), count(&b["oldText"])))
+        .reduce(|(a, r), (a2, r2)| (a + a2, r + r2))
+}
+
+/// A to-do list as ACP's `plan` entries or Cursor's todos say it.
+fn todos(list: &Value) -> Vec<crate::transcript::Todo> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .map(|t| crate::transcript::Todo {
+            text: t["content"].as_str().unwrap_or("").to_owned(),
+            state: crate::transcript::todo_state(t["status"].as_str().unwrap_or("")).into(),
+        })
+        .collect()
+}
+
 /// `mcp__tetrix__get_entity`, `mcp:tetrix:get_entity` or `mcp.tetrix.get_entity` as the first form.
 pub fn mcp_name(title: &str) -> Option<String> {
     static MCP: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -424,6 +467,8 @@ struct Run<D, E> {
     notes: Vec<String>,
     /// The tool's plan was approved while it was in plan mode: it goes ahead in its agent mode.
     plan_approved: bool,
+    /// What this turn's prompts used, when the agent reports it (crate::usage::acp_tokens).
+    tokens: crate::usage::Tokens,
 }
 
 impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
@@ -456,13 +501,19 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         };
         let load = init["agentCapabilities"]["loadSession"] == json!(true);
         let cwd = self.cwd.clone();
-        // No MCP servers: obid gives agents none, as its Claude Code runs with --strict-mcp-config.
+        // Only the servers obid gives (as its Claude Code runs with --strict-mcp-config), and those
+        // only when the tool takes HTTP servers.
+        let servers = if init["agentCapabilities"]["mcpCapabilities"]["http"] == json!(true) {
+            json!(self.options.mcp)
+        } else {
+            json!([])
+        };
         let (method, params) = match &self.options.resume {
             Some(session) if load => (
                 "session/load",
-                json!({"sessionId": session, "cwd": cwd, "mcpServers": []}),
+                json!({"sessionId": session, "cwd": cwd, "mcpServers": servers}),
             ),
-            _ => ("session/new", json!({"cwd": cwd, "mcpServers": []})),
+            _ => ("session/new", json!({"cwd": cwd, "mcpServers": servers})),
         };
         let answer = match self.call(method, params).await? {
             Ok(answer) => answer,
@@ -582,9 +633,14 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             .await?;
         match answer {
             Ok(answer) => {
+                if let Some(tokens) = crate::usage::acp_tokens(&answer) {
+                    self.tokens = self.tokens.plus(&tokens);
+                    (self.on_event)(Event::Tokens(self.tokens.clone()));
+                }
                 let said = if self.current.trim().is_empty() {
                     self.before.clone()
                 } else {
+                    (self.on_event)(Event::Said(self.current.clone()));
                     self.current.clone()
                 };
                 let reason = answer["stopReason"]
@@ -630,10 +686,12 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                         // A tool call ends the message before it: that one is what it said last.
                         if kind == "tool_call" && !self.current.is_empty() {
                             self.before = std::mem::take(&mut self.current);
+                            (self.on_event)(Event::Said(self.before.clone()));
                         }
                         let Some(id) = update["toolCallId"].as_str() else {
                             return;
                         };
+                        let new = !self.tools.contains_key(id);
                         let call = self.tools.entry(id.to_owned()).or_default();
                         call.merge(update);
                         let step = call.step();
@@ -641,12 +699,32 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                             call.said = Some(step.clone());
                             (self.on_event)(Event::Step(step));
                         }
+                        let (name, input) = call.named();
+                        if new {
+                            (self.on_event)(Event::Tool {
+                                id: id.to_owned(),
+                                name,
+                                input,
+                            });
+                        }
+                        if let Some(status @ ("completed" | "failed")) = update["status"].as_str() {
+                            (self.on_event)(Event::ToolDone {
+                                id: id.to_owned(),
+                                failed: status == "failed",
+                                exit: update["rawOutput"]["exitCode"].as_i64(),
+                                lines: diff_lines(&update["content"]),
+                            });
+                        }
                     }
-                    Some("plan") => (self.on_event)(Event::Step("Planning the work".into())),
+                    Some("plan") => {
+                        (self.on_event)(Event::Step("Planning the work".into()));
+                        (self.on_event)(Event::Plan(todos(&update["entries"])));
+                    }
                     _ => {}
                 }
             }
             Some("cursor/update_todos") => {
+                (self.on_event)(Event::Plan(todos(&params["todos"])));
                 let doing = params["todos"]
                     .as_array()
                     .into_iter()
@@ -821,18 +899,31 @@ pub mod cursor {
     /// allowlist). Cursor's own keys (`authInfo`, `version`, …) stay as they are.
     ///
     /// The folder is a job's own, which the job can write: obid never reads or writes through a
-    /// link it left there (the file is opened without following one, and the new one is made
-    /// with `O_EXCL`, then renamed over the old, which replaces a link rather than following it).
+    /// link it left there. The folder is opened once without following a link, and everything
+    /// after happens in that very folder (as [`crate::jobs::write_login`]; #645: another job on
+    /// the account could swap a link in after a check by name): the file is opened without
+    /// following one, and the new one is made with `O_EXCL`, then renamed over the old, which
+    /// replaces a link rather than following it.
     pub fn rewrite_config(home: &Path) -> std::io::Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
+        use nix::fcntl::{OFlag, open, openat, renameat};
+        use nix::sys::stat::Mode;
         std::fs::create_dir_all(home)?;
-        let file = home.join("cli-config.json");
+        let dir = open(
+            home,
+            OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_RDONLY | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+        let file = "cli-config.json";
         let read = || -> Option<Vec<u8>> {
-            let mut opened = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NOFOLLOW)
-                .open(&file)
-                .ok()?;
+            let opened = openat(
+                &dir,
+                file,
+                OFlag::O_NOFOLLOW | OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .ok()?;
+            let mut opened = std::fs::File::from(opened);
             opened.metadata().ok().filter(|m| m.is_file())?;
             let mut bytes = Vec::new();
             std::io::Read::read_to_end(&mut opened, &mut bytes).ok()?;
@@ -849,16 +940,21 @@ pub mod cursor {
         // must never take the other's file away.
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let temporary = home.join(format!(".cli-config.json.obid-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_file(&temporary);
-        let mut new = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(nix::libc::O_NOFOLLOW)
-            .open(&temporary)?;
-        std::io::Write::write_all(&mut new, &text)?;
-        std::fs::rename(&temporary, &file)
+        let temporary = format!(".cli-config.json.obid-{}-{n}", std::process::id());
+        let _ = nix::unistd::unlinkat(
+            &dir,
+            temporary.as_str(),
+            nix::unistd::UnlinkatFlags::NoRemoveDir,
+        );
+        let new = openat(
+            &dir,
+            temporary.as_str(),
+            OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_WRONLY | OFlag::O_CLOEXEC,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(std::io::Error::from)?;
+        std::io::Write::write_all(&mut std::fs::File::from(new), &text)?;
+        renameat(&dir, temporary.as_str(), &dir, file).map_err(std::io::Error::from)
     }
 
     /// What the worktree's `.cursor/cli.json` lets through without asking (`permissions.allow`).
@@ -877,6 +973,22 @@ pub mod cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_calls_name_comes_from_its_kind_never_its_title() {
+        let call = |fields: Value| {
+            let mut call = ToolCall::default();
+            call.merge(&fields);
+            call.named().0
+        };
+        assert_eq!(
+            call(json!({"kind": "other", "title": "mcp__tetrix__get_entity"})),
+            "Tool"
+        );
+        assert_eq!(call(json!({"title": "rm -rf / and a secret"})), "Tool");
+        assert_eq!(call(json!({"kind": "execute", "title": "Read"})), "Bash");
+        assert_eq!(call(json!({"kind": "search", "title": "x"})), "Grep");
+    }
 
     #[test]
     fn a_session_names_its_modes_and_options() {
@@ -1017,6 +1129,21 @@ mod tests {
             std::fs::read_to_string(&elsewhere).unwrap(),
             r#"{"secret": "not for the job"}"#
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A link put in place of the folder itself (#645: another job on the account swaps it in
+    /// after obid's check) is never written through: the rewrite fails, the other folder untouched.
+    #[test]
+    fn cursor_settings_never_follow_a_linked_folder() {
+        let root = std::env::temp_dir().join(format!("obid-cursor-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let home = root.join("home");
+        std::os::unix::fs::symlink(&elsewhere, &home).unwrap();
+        assert!(cursor::rewrite_config(&home).is_err());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 

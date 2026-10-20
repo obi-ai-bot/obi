@@ -49,6 +49,10 @@ pub struct Turn {
     /// section 4). Left out when it made none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<Value>,
+    /// On the turn a routine's run adds (crate::routines): `{id, name, outcome, scheduled,
+    /// catchUp}`. Left out on every other turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine: Option<Value>,
 }
 
 /// One conversation as obid keeps it.
@@ -64,6 +68,100 @@ struct Thread {
     /// two conversations share one.
     sequence: u64,
     turns: Vec<Turn>,
+    /// The task list its agent keeps for itself (`oby_tasks`), in its order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tasks: Vec<Task>,
+    /// The list was written in a turn that read something untrusted: every turn it's fed back to
+    /// is treated as having read it too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    tasks_tainted: bool,
+}
+
+/// The most tasks a conversation's list holds.
+pub const TASKS: usize = 50;
+/// A task's statuses, as Gemini CLI's `write_todos` names them.
+pub const TASK_STATUSES: [&str; 5] = [
+    "pending",
+    "in_progress",
+    "completed",
+    "cancelled",
+    "blocked",
+];
+
+/// One task of a conversation's own list (docs/runner-api.md, "obid only: the conversation
+/// manages its own work").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Task {
+    #[serde(default)]
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    #[serde(default)]
+    pub job: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+impl Task {
+    /// Still to do: neither completed nor cancelled.
+    pub fn open(&self) -> bool {
+        self.status != "completed" && self.status != "cancelled"
+    }
+}
+
+/// `tasks` as a list may hold them, ids given to those without (`t1`, `t2`, …, never one taken),
+/// or why not.
+pub fn checked_tasks(mut tasks: Vec<Task>) -> Result<Vec<Task>, String> {
+    if tasks.len() > TASKS {
+        return Err(format!("A task list holds at most {TASKS} tasks."));
+    }
+    for task in &mut tasks {
+        task.title = task.title.trim().to_owned();
+        if task.title.is_empty()
+            || task.title.chars().count() > 200
+            || task.title.chars().any(|c| c.is_control() || breaks_line(c))
+        {
+            return Err("A task's title is one line of 1 to 200 characters.".into());
+        }
+        if !TASK_STATUSES.contains(&task.status.as_str()) {
+            return Err(format!(
+                "A task's status is {}, not {}.",
+                TASK_STATUSES.join(", "),
+                task.status
+            ));
+        }
+        if task.note.as_ref().is_some_and(|n| n.chars().count() > 500) {
+            return Err("A task's note is at most 500 characters.".into());
+        }
+        if task.id.chars().count() > 40 || task.id.chars().any(|c| c.is_control() || breaks_line(c))
+        {
+            return Err("A task's id is at most 40 characters, on one line.".into());
+        }
+        if task.job.as_ref().is_some_and(|j| {
+            j.is_empty()
+                || j.chars().count() > 40
+                || j.chars().any(|c| c.is_control() || breaks_line(c))
+        }) {
+            return Err("A task's job is a job's id: 1 to 40 characters, on one line.".into());
+        }
+    }
+    let mut next = 1;
+    let given: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
+    for task in &mut tasks {
+        while task.id.is_empty() {
+            let id = format!("t{next}");
+            next += 1;
+            if !given.contains(&id) {
+                task.id = id;
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    if let Some(twice) = tasks.iter().find(|t| !seen.insert(t.id.as_str())) {
+        return Err(format!("Two tasks have the id {}.", twice.id));
+    }
+    Ok(tasks)
 }
 
 impl Thread {
@@ -88,6 +186,7 @@ impl Thread {
             "created": self.created,
             "lastActivity": self.last_activity(),
             "cursor": self.key().to_string(),
+            "tasks": self.tasks,
         })
     }
 }
@@ -155,6 +254,9 @@ pub struct Begun {
     pub before: Vec<Turn>,
     /// True when the words started it.
     pub started: bool,
+    /// The turn's id was there already: the same words sent again (an app's Try again after an
+    /// answer it lost), and nothing was added.
+    pub repeated: bool,
 }
 
 #[derive(Debug)]
@@ -163,6 +265,8 @@ pub enum Error {
     NoConversation,
     /// The turn isn't in the conversation (pruned since).
     NoTurn,
+    /// The words' id belongs to another turn: other words, or another conversation.
+    IdTaken,
     /// It couldn't be written.
     Io(std::io::Error),
 }
@@ -178,6 +282,10 @@ impl From<Error> for ApiError {
                 StatusCode::NOT_FOUND,
                 "That conversation turn isn't in the thread.",
             ),
+            Error::IdTaken => ApiError::new(
+                StatusCode::CONFLICT,
+                "That id is another turn's: other words, or another conversation. Send these with an id of their own.",
+            ),
             Error::Io(_) => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "The conversation couldn't be kept.",
@@ -190,7 +298,14 @@ pub struct Conversations {
     dir: PathBuf,
     threads: Mutex<Vec<Thread>>,
     events: Events,
+    /// The id the next new conversation gets once obid named it ([`Conversations::next_id`]):
+    /// its folder may hold a Claude Code started for it already (crate::brain::harness). Kept in
+    /// `next-id`, so the folder is found again after obid restarts.
+    next: Mutex<Option<String>>,
 }
+
+/// Where the next new conversation's id is kept.
+const NEXT: &str = "next-id";
 
 impl Conversations {
     /// The conversations in `home/conversations`, after moving the single thread of obid before
@@ -214,10 +329,15 @@ impl Conversations {
                 named
             })
             .collect();
+        let next = std::fs::read_to_string(dir.join(NEXT))
+            .ok()
+            .map(|id| id.trim().to_owned())
+            .filter(|id| is_id(id) && !threads.iter().any(|t| &t.id == id));
         let conversations = Conversations {
             dir,
             threads: Mutex::new(threads),
             events,
+            next: Mutex::new(next),
         };
         conversations.migrate(home);
         conversations.prune(&mut conversations.lock());
@@ -260,6 +380,8 @@ impl Conversations {
                     pinned: false,
                     id,
                     turns,
+                    tasks: vec![],
+                    tasks_tainted: false,
                 };
                 // The conversation's name in its folder must be on disk before the old file goes.
                 if let Err(e) = self.write(&thread).and_then(|()| sync_dir(&self.dir)) {
@@ -290,9 +412,38 @@ impl Conversations {
         )
     }
 
-    /// The user's words join `target` (made first when it's new).
-    pub fn begin(&self, target: Target, said: String) -> Result<Begun, Error> {
+    /// The user's words join `target` (made first when it's new). `id`: the id the app gave the
+    /// words (a lower-case UUID). The user's turn of that id with the same words, in `target` (the
+    /// conversation named, the latest, or for a new one the one those words started), is the same
+    /// words sent again: `repeated`, and nothing is added. Any other turn of that id is `IdTaken`.
+    pub fn begin(&self, target: Target, said: String, id: Option<String>) -> Result<Begun, Error> {
         let mut threads = self.lock();
+        if let Some(id) = id.as_deref()
+            && let Some(at) = threads
+                .iter()
+                .position(|t| t.turns.iter().any(|turn| turn.id == id))
+        {
+            let thread = &threads[at];
+            let in_target = match &target {
+                Target::Id(named) => thread.id == *named,
+                Target::Latest => latest(&threads) == Some(at),
+                Target::New => thread.turns.first().is_some_and(|t| t.id == id),
+            };
+            let same = thread
+                .turns
+                .iter()
+                .any(|t| t.id == id && t.who == "user" && t.text == said);
+            if !(in_target && same) {
+                return Err(Error::IdTaken);
+            }
+            return Ok(Begun {
+                conversation: thread.id.clone(),
+                turn: id.to_owned(),
+                before: vec![],
+                started: false,
+                repeated: true,
+            });
+        }
         let found = match target {
             Target::Id(id) => Some(
                 threads
@@ -305,17 +456,30 @@ impl Conversations {
         };
         let index = found.unwrap_or_else(|| {
             threads.push(Thread {
-                id: new_id(),
+                id: self.take_next().unwrap_or_else(new_id),
                 title: titled(&said),
                 pinned: false,
                 created: obi_protocol::time::format(obi_protocol::time::now()),
                 sequence: 0,
                 turns: vec![],
+                tasks: vec![],
+                tasks_tainted: false,
             });
             threads.len() - 1
         });
         let before = threads[index].turns.clone();
-        let turn = match self.add(&mut threads, index, "user", said, vec![], false, vec![]) {
+        let added = self.add(
+            &mut threads,
+            index,
+            "user",
+            said,
+            vec![],
+            false,
+            vec![],
+            id,
+            None,
+        );
+        let turn = match added {
             Ok(turn) => turn.id,
             Err(e) => {
                 if found.is_none() {
@@ -333,6 +497,7 @@ impl Conversations {
             turn,
             before,
             started: found.is_none(),
+            repeated: false,
         })
     }
 
@@ -350,7 +515,7 @@ impl Conversations {
         text: String,
         jobs: Vec<String>,
     ) -> Result<Turn, Error> {
-        self.append_as(id, who, text, jobs, false, vec![])
+        self.append_as(id, who, text, jobs, false, vec![], None)
     }
 
     /// Oby's turn in the conversation `id`, with the artifacts it made (`{id, version}` each).
@@ -361,14 +526,54 @@ impl Conversations {
         jobs: Vec<String>,
         artifacts: Vec<Value>,
     ) -> Result<Turn, Error> {
-        self.append_as(id, "oby", text, jobs, false, artifacts)
+        self.append_as(id, "oby", text, jobs, false, artifacts, None)
     }
 
     /// Oby's turn telling the conversation `id` how the job `job` ended ([`job_report`], #351).
     pub fn job_ended(&self, id: &str, text: String, job: String) -> Result<Turn, Error> {
-        self.append_as(id, "oby", text, vec![job], true, vec![])
+        self.append_as(id, "oby", text, vec![job], true, vec![], None)
     }
 
+    /// A new conversation titled `title`, with no turn yet: the one a routine's runs go to
+    /// (crate::routines). Its first turn follows at once.
+    pub fn start_for(&self, title: &str) -> Result<String, Error> {
+        let mut threads = self.lock();
+        let thread = Thread {
+            id: new_id(),
+            title: titled(title),
+            pinned: false,
+            created: obi_protocol::time::format(obi_protocol::time::now()),
+            sequence: next_sequence(&threads),
+            turns: vec![],
+            tasks: vec![],
+            tasks_tainted: false,
+        };
+        self.write(&thread).map_err(Error::Io)?;
+        self.events.send("conversation", thread.summary());
+        let id = thread.id.clone();
+        threads.push(thread);
+        self.prune(&mut threads);
+        Ok(id)
+    }
+
+    /// Oby's turn in the conversation `id` for a routine's run (crate::routines): `routine` is
+    /// `{id, name, outcome, scheduled, catchUp}`, and `jobs` the job it started, if it did.
+    pub fn routine_turn(
+        &self,
+        id: &str,
+        text: String,
+        jobs: Vec<String>,
+        routine: Value,
+    ) -> Result<Turn, Error> {
+        self.append_as(id, "oby", text, jobs, false, vec![], Some(routine))
+    }
+
+    /// Whether the conversation `id` is kept.
+    pub fn has(&self, id: &str) -> bool {
+        self.lock().iter().any(|t| t.id == id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn append_as(
         &self,
         id: &str,
@@ -377,13 +582,24 @@ impl Conversations {
         jobs: Vec<String>,
         ended: bool,
         artifacts: Vec<Value>,
+        routine: Option<Value>,
     ) -> Result<Turn, Error> {
         let mut threads = self.lock();
         let index = threads
             .iter()
             .position(|t| t.id == id)
             .ok_or(Error::NoConversation)?;
-        self.add(&mut threads, index, who, text, jobs, ended, artifacts)
+        self.add(
+            &mut threads,
+            index,
+            who,
+            text,
+            jobs,
+            ended,
+            artifacts,
+            None,
+            routine,
+        )
     }
 
     /// The turn, kept, written and announced: the conversation as it is now, then the turn.
@@ -397,12 +613,14 @@ impl Conversations {
         jobs: Vec<String>,
         ended: bool,
         artifacts: Vec<Value>,
+        id: Option<String>,
+        routine: Option<Value>,
     ) -> Result<Turn, Error> {
         let sequence = next_sequence(threads);
         let thread = &mut threads[index];
         let kept = thread.clone();
         let turn = Turn {
-            id: new_id(),
+            id: id.unwrap_or_else(new_id),
             who: who.into(),
             text,
             at: obi_protocol::time::format(obi_protocol::time::now()),
@@ -410,6 +628,7 @@ impl Conversations {
             conversation: thread.id.clone(),
             ended,
             artifacts,
+            routine,
         };
         thread.turns.push(turn.clone());
         let excess = thread.turns.len().saturating_sub(KEPT);
@@ -564,6 +783,77 @@ impl Conversations {
         Ok(summary)
     }
 
+    /// The task list of the conversation `id`, and whether a turn that read something untrusted
+    /// wrote it.
+    pub fn tasks(&self, id: &str) -> Result<(Vec<Task>, bool), Error> {
+        let threads = self.lock();
+        let thread = threads
+            .iter()
+            .find(|t| t.id == id)
+            .ok_or(Error::NoConversation)?;
+        Ok((thread.tasks.clone(), thread.tasks_tainted))
+    }
+
+    /// Replaces the task list of the conversation `id` (`tainted`: written in a turn that read
+    /// something untrusted), kept, written and announced.
+    pub fn set_tasks(&self, id: &str, tasks: Vec<Task>, tainted: bool) -> Result<(), Error> {
+        let mut threads = self.lock();
+        let thread = threads
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or(Error::NoConversation)?;
+        let kept = (
+            std::mem::replace(&mut thread.tasks, tasks),
+            std::mem::replace(&mut thread.tasks_tainted, tainted),
+        );
+        if let Err(e) = self.write(thread) {
+            (thread.tasks, thread.tasks_tainted) = kept;
+            return Err(Error::Io(e));
+        }
+        self.events.send("conversation", thread.summary());
+        Ok(())
+    }
+
+    /// The id the next new conversation will get, named now and kept until one takes it.
+    pub fn next_id(&self) -> String {
+        let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(id) = &*next {
+            return id.clone();
+        }
+        let id = new_id();
+        if let Err(e) = crate::store::write_private(&self.dir.join(NEXT), id.as_bytes()) {
+            tracing::warn!("the next conversation's id isn't kept: {e}");
+        }
+        *next = Some(id.clone());
+        id
+    }
+
+    /// The next new conversation's id, when obid named one and none took it yet.
+    pub fn peek_next(&self) -> Option<String> {
+        self.next.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Whether `id` is the next new conversation's, not taken yet.
+    pub fn is_next(&self, id: &str) -> bool {
+        self.next
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+            == Some(id)
+    }
+
+    /// The next new conversation's id, taken by the conversation beginning now.
+    fn take_next(&self) -> Option<String> {
+        let id = self.next.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+        let _ = std::fs::remove_file(self.dir.join(NEXT));
+        Some(id)
+    }
+
+    /// Whether the conversation `id` is there.
+    pub fn exists(&self, id: &str) -> bool {
+        self.lock().iter().any(|t| t.id == id)
+    }
+
     /// Forgets the conversation `id` and its turns. The jobs it started stay, with its id.
     pub fn delete(&self, id: &str) -> Result<(), Error> {
         let mut threads = self.lock();
@@ -609,8 +899,15 @@ pub fn job_report(job: &Value) -> Option<(String, String)> {
             .map(|l| crate::brain::briefing::line(l, 300))
     };
     let title = crate::brain::briefing::line(job["title"].as_str().unwrap_or("A job"), 80);
-    let said = match job["status"].as_str()? {
-        "done" => match (job["published"].as_str(), first_line("publishError")) {
+    let status = job["status"].as_str()?;
+    let said = match (status, job["stalled"]["text"].as_str()) {
+        // A stall says why in obid's words (`stalled.text`), whatever status it ended in, and its
+        // conversation decides next.
+        ("failed" | "interrupted", Some(why)) => format!(
+            "{title} stalled: {}. Its branch is kept and nothing was pushed.",
+            crate::brain::briefing::line(why, 120)
+        ),
+        ("done", _) => match (job["published"].as_str(), first_line("publishError")) {
             (Some(url), _) => format!("{title} is done: {url}"),
             // The push went out; only its pull request failed (#627).
             (None, Some(why)) if why.starts_with(crate::publish::PUSHED_BUT) => {
@@ -620,14 +917,21 @@ pub fn job_report(job: &Value) -> Option<(String, String)> {
             (None, None) if job["pushed"].as_u64().is_some_and(|n| n > 0) => {
                 format!("{title} is done and pushed.")
             }
-            (None, None) => format!("{title} is done."),
+            (None, None) => match first_line("reason") {
+                Some(why) => format!("{title} is done. {why}"),
+                None => format!("{title} is done."),
+            },
         },
-        "failed" => format!("{title} failed."),
-        "stopped" => format!("{title} was stopped."),
-        "interrupted" => format!("{title} was interrupted."),
+        ("failed", _) => format!("{title} failed."),
+        ("stopped", _) => format!("{title} was stopped."),
+        ("interrupted", _) => match first_line("reason") {
+            Some(why) => format!("{title} needs you: {why}"),
+            None => format!("{title} needs you."),
+        },
         _ => return None,
     };
-    let text = match first_line("summary") {
+    // A stalled job's summary starts with the same stall in other words: obid says it once.
+    let text = match first_line("summary").filter(|_| job["stalled"].is_null()) {
         Some(summary) => format!("{said}\n{summary}"),
         None => said,
     };
@@ -747,7 +1051,7 @@ fn new_id() -> String {
 }
 
 /// An id obid made (a lower-case UUID), so a file name of its own.
-fn is_id(id: &str) -> bool {
+pub fn is_id(id: &str) -> bool {
     id.len() == 36
         && id
             .bytes()
@@ -930,8 +1234,39 @@ pub async fn remove(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cursor, job_report, titled};
+    use super::{Cursor, Task, checked_tasks, job_report, titled};
     use serde_json::json;
+
+    /// A task list is at most 50 one-line tasks with a known status; ids are given to those left
+    /// without, never one another task has, and no two share one.
+    #[test]
+    fn a_task_list_is_checked_and_its_ids_given() {
+        let task = |id: &str, title: &str, status: &str| Task {
+            id: id.into(),
+            title: title.into(),
+            status: status.into(),
+            job: None,
+            note: None,
+        };
+        let checked = checked_tasks(vec![
+            task("", " Fix it ", "pending"),
+            task("t1", "Taken", "blocked"),
+            task("", "Next", "in_progress"),
+        ])
+        .unwrap();
+        let ids: Vec<&str> = checked.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["t2", "t1", "t3"]);
+        assert_eq!(checked[0].title, "Fix it");
+        assert!(checked_tasks(vec![task("", "a\nb", "pending")]).is_err());
+        assert!(checked_tasks(vec![task("", "", "pending")]).is_err());
+        assert!(checked_tasks(vec![task("", "x", "done")]).is_err());
+        assert!(checked_tasks(vec![task("a", "x", "pending"), task("a", "y", "pending")]).is_err());
+        assert!(checked_tasks(vec![task("", "x", "pending"); 51]).is_err());
+        let mut noted = task("", "x", "blocked");
+        noted.note = Some("n".repeat(501));
+        assert!(checked_tasks(vec![noted]).is_err());
+        assert!(!task("", "x", "cancelled").open() && task("", "x", "blocked").open());
+    }
 
     /// A job a conversation started says how it ended, in obid's words first: its title, the
     /// outcome, the pull request or why it wasn't published; its summary's first line, which its
@@ -987,7 +1322,32 @@ mod tests {
         );
         assert_eq!(
             job_report(&job("interrupted")).unwrap().1,
-            "Fix oby #351 was interrupted."
+            "Fix oby #351 needs you."
+        );
+        let mut needs_you = job("interrupted");
+        needs_you["reason"] = json!("Stopped at a limit: the round ran past 45 minutes.");
+        assert_eq!(
+            job_report(&needs_you).unwrap().1,
+            "Fix oby #351 needs you: Stopped at a limit: the round ran past 45 minutes."
+        );
+        let mut nothing = job("done");
+        nothing["reason"] = json!("Nothing committed, so nothing was published.");
+        assert_eq!(
+            job_report(&nothing).unwrap().1,
+            "Fix oby #351 is done. Nothing committed, so nothing was published."
+        );
+        // A stall says why in obid's words; its conversation decides what comes next.
+        let mut stalled = job("failed");
+        stalled["stalled"] = json!({"text": "no progress for 15 minutes", "note": "Left: tests"});
+        assert_eq!(
+            job_report(&stalled).unwrap().1,
+            "Fix oby #351 stalled: no progress for 15 minutes. Its branch is kept and nothing was pushed."
+        );
+        // As #725 ends it: interrupted, `stalled` kept.
+        stalled["status"] = json!("interrupted");
+        assert_eq!(
+            job_report(&stalled).unwrap().1,
+            "Fix oby #351 stalled: no progress for 15 minutes. Its branch is kept and nothing was pushed."
         );
         // Nothing for a job still under way, one no conversation started, or one let go.
         assert_eq!(job_report(&job("running")), None);
@@ -1035,7 +1395,7 @@ mod tests {
         let events = crate::events::Events::new();
         let conversations = super::Conversations::open(&home, events.clone());
         let id = conversations
-            .begin(super::Target::New, "first".into())
+            .begin(super::Target::New, "first".into(), None)
             .unwrap()
             .conversation;
         {

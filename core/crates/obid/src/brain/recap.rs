@@ -65,6 +65,8 @@ pub struct Facts {
     pub done: Vec<String>,
     pub merged: Vec<String>,
     pub failed: Vec<String>,
+    /// Jobs that stopped part way and need the owner, their work kept (`interrupted`).
+    pub needs_you: Vec<String>,
     /// The accounts a job found out of usage: `codex · deskree`.
     pub limited: Vec<String>,
 }
@@ -75,6 +77,7 @@ impl Facts {
             && self.done.is_empty()
             && self.merged.is_empty()
             && self.failed.is_empty()
+            && self.needs_you.is_empty()
             && self.limited.is_empty()
     }
 
@@ -88,6 +91,10 @@ impl Facts {
             ("Waiting for the owner in the inbox", &self.waiting),
             ("Jobs done", &self.done),
             ("Pull requests merged", &self.merged),
+            (
+                "Jobs that need the owner, their work kept on their branch",
+                &self.needs_you,
+            ),
             ("Jobs that failed or stopped", &self.failed),
             ("Accounts that hit their usage limits", &self.limited),
         ] {
@@ -115,7 +122,8 @@ fn named(job: &Job) -> String {
 
 /// Whether a job ended on its account's usage limit, as the agent said it.
 fn out_of_usage(job: &Job) -> bool {
-    let summary = job.summary.to_lowercase();
+    // Why it stopped is `reason` on obid now; the summary stays the agent's.
+    let summary = format!("{} {}", job.summary, job.reason.as_deref().unwrap_or("")).to_lowercase();
     ["usage limit", "rate limit", "limit reached", "out of usage"]
         .iter()
         .any(|words| summary.contains(words))
@@ -140,7 +148,11 @@ pub fn facts(jobs: &[Job], inbox: &[Item], since: i64) -> Facts {
         match job.status {
             Status::Done => facts.done.push(named(job)),
             Status::Failed | Status::Stopped | Status::Interrupted => {
-                facts.failed.push(named(job));
+                if job.status == Status::Interrupted {
+                    facts.needs_you.push(named(job));
+                } else {
+                    facts.failed.push(named(job));
+                }
                 let account = format!("{} · {}", job.agent, job.account);
                 if out_of_usage(job) && !facts.limited.contains(&account) {
                     facts.limited.push(account);
@@ -469,7 +481,7 @@ mod tests {
             checked_at: T0 + 3 * MIN,
             head: None,
         });
-        let mut limited = job("l1", "Port the parser", Status::Failed, T0 + 4 * MIN);
+        let mut limited = job("l1", "Port the parser", Status::Interrupted, T0 + 4 * MIN);
         limited.summary = "Codex hit an error: You've hit your usage limit.".into();
         limited.agent = "codex".into();
         limited.account = "deskree".into();
@@ -491,7 +503,8 @@ mod tests {
         assert!(facts.done[0].contains("Fix the login redirect"));
         assert_eq!(facts.merged.len(), 1, "{facts:?}");
         assert!(facts.merged[0].contains("Bump the SDK"));
-        assert_eq!(facts.failed.len(), 2, "{facts:?}");
+        assert_eq!(facts.failed.len(), 1, "{facts:?}");
+        assert_eq!(facts.needs_you.len(), 1, "{facts:?}");
         assert_eq!(facts.limited, vec!["codex · deskree".to_owned()]);
         assert!(!facts.is_empty());
         assert!(super::facts(&[], &[], since).is_empty());

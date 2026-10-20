@@ -139,6 +139,34 @@ impl std::fmt::Display for Found {
     }
 }
 
+/// The secret scan's result as the job keeps it (`scan`, #735): whether it ran, what it read, and
+/// where it found something, never what. `reason` says why it didn't run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Scanned {
+    pub ran: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<ScanFinding>,
+}
+
+/// Where the scan found something: the file (or `commit message`, `pull request title`…), the
+/// line when it has one, and the rule. Never the matched text.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScanFinding {
+    pub file: String,
+    pub line: Option<usize>,
+    pub rule: String,
+}
+
 /// Why nothing (more) went out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
@@ -214,7 +242,7 @@ pub fn action(job: &Job, base: &str) -> String {
     }
 }
 
-/// Why a review that made commits failed, and why obid won't publish one.
+/// Why a review that made commits published nothing, and why obid won't publish one.
 pub const REVIEW_COMMITTED: &str = "A review made commits; nothing was published.";
 
 /// Why obid won't publish this job, or none to go ahead: never a review, only its own `oby/`
@@ -261,23 +289,33 @@ pub fn has_login(remote: &str) -> bool {
 }
 
 /// The pull request's title in Conventional Commits form, ending with `(#issue)` when there is
-/// one: the first commit subject already in that form, else the job's kind and the agent's first
-/// line. At most 100 characters.
+/// one: the first commit subject already in that form that changes the code (`fix`, `feat`,
+/// `perf` or `refactor`, the job's own kind first), else the first in that form, else the job's
+/// kind and the agent's first line. At most 100 characters.
 pub fn title(job: &Job, subjects: &[String]) -> String {
     let conventional =
-        regex::Regex::new(r"^[a-z]+(\([^()]+\))?!?: \S.*$").expect("the title pattern compiles");
-    let mut title = subjects
+        regex::Regex::new(r"^([a-z]+)(\([^()]+\))?!?: \S.*$").expect("the title pattern compiles");
+    let kind = match job.kind.as_str() {
+        "build" => "feat",
+        "fix" => "fix",
+        "test" => "test",
+        _ => "chore",
+    };
+    let typed: Vec<(&str, &str)> = subjects
         .iter()
         .map(|s| s.trim())
-        .find(|s| conventional.is_match(s))
-        .map(str::to_owned);
+        // A subject with a control character (an escape, a carriage return) never titles one.
+        .filter(|s| !s.chars().any(char::is_control))
+        .filter_map(|s| Some((conventional.captures(s)?.get(1)?.as_str(), s)))
+        .collect();
+    let changes = |t: &str| ["fix", "feat", "perf", "refactor"].contains(&t);
+    let mut title = typed
+        .iter()
+        .find(|(t, _)| *t == kind && changes(t))
+        .or_else(|| typed.iter().find(|(t, _)| changes(t)))
+        .or(typed.first())
+        .map(|(_, s)| (*s).to_owned());
     if title.is_none() {
-        let kind = match job.kind.as_str() {
-            "build" => "feat",
-            "fix" => "fix",
-            "test" => "test",
-            _ => "chore",
-        };
         let said = job
             .summaries
             .as_ref()
@@ -384,8 +422,16 @@ pub fn body(job: &Job, closes: bool) -> String {
         .issue
         .map(|n| format!("\n\n{} #{n}", if closes { "Closes" } else { "Part of" }))
         .unwrap_or_default();
+    // A follow-up that started from its first job's work publishes that job's commits too (#770).
+    let jobs = match (&job.follow_up_of, &job.start_from) {
+        (Some(first), Some(_)) => format!(
+            "\n- Jobs: Oby job {} follows up job {first} and carries its commits.",
+            job.id
+        ),
+        _ => String::new(),
+    };
     format!(
-        "{}\n\nWhat the user asked for:\n\n{request}\n\n{check}\n- Secret scan: clean.{issue}\n\nby Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby never merges it: a person does.",
+        "{}\n\nWhat the user asked for:\n\n{request}\n\n{check}\n- Secret scan: clean.{jobs}{issue}\n\nby Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby never merges it: a person does.",
         rounds.join("\n\n")
     )
 }
@@ -439,6 +485,8 @@ pub trait Hooks: Send + Sync {
     fn proceed(&self) -> bool;
     /// Something just went out, for `outgoing` and the log.
     fn sent(&self, outgoing: Outgoing);
+    /// How the secret scan went, once it ended or couldn't run (#735).
+    fn scanned(&self, _scanned: Scanned) {}
 }
 
 /// Where a job publishes from and to.
@@ -626,7 +674,8 @@ pub async fn publish(
         .ok_or_else(|| Failure::Failed(format!("Not published: can't read {base}.")))?
     };
     let range = format!("{since}..{head}");
-    if git_in(clone, &["rev-list", "--count", &range]).await.ok() == Some("0".into()) {
+    let count = git_in(clone, &["rev-list", "--count", &range]).await.ok();
+    if count.as_deref() == Some("0") {
         return Err(Failure::Failed(format!(
             "Nothing to publish: {} has no commits that aren't on {base}.",
             job.branch
@@ -642,8 +691,46 @@ pub async fn publish(
         Some(0) => return Err(Failure::AlreadyOnBase(base.to_owned())),
         Some(_) => {}
     }
-    let found = scan_changes(clone, &since, &head, &target.scratch).await?;
+    // What the scan read and how it went, for the job (#735).
+    let started = std::time::Instant::now();
+    let files = git_in(
+        clone,
+        &["diff", "--name-only", "-z", "--no-renames", &since, &head],
+    )
+    .await
+    .ok()
+    .map(|names| names.split('\0').filter(|n| !n.is_empty()).count() as u64);
+    let scanned = |result: Result<&[Found], &Failure>| {
+        let (clean, reason, found) = match result {
+            Ok(found) => (Some(found.is_empty()), None, found),
+            Err(failure) => (None, Some(failure.line()), &[][..]),
+        };
+        let ran = reason.is_none();
+        hooks.scanned(Scanned {
+            ran,
+            clean,
+            commits: count
+                .as_deref()
+                .and_then(|n| n.parse().ok())
+                .filter(|_| ran),
+            files: files.filter(|_| ran),
+            seconds: ran.then(|| started.elapsed().as_secs()),
+            reason,
+            findings: found
+                .iter()
+                .map(|f| ScanFinding {
+                    file: f.file.clone(),
+                    line: f.line,
+                    rule: f.rule.clone(),
+                })
+                .collect(),
+        });
+    };
+    let found = scan_changes(clone, &since, &head, &target.scratch)
+        .await
+        .inspect_err(|failure| scanned(Err(failure)))?;
     if !found.is_empty() {
+        scanned(Ok(&found));
         return Err(Failure::Blocked(found));
     }
     // Everything else that goes out: every commit's message, and the pull request's title and
@@ -657,7 +744,8 @@ pub async fn publish(
         Failure::Failed(format!(
             "Not published: the secret scan couldn't read the commit messages ({e})."
         ))
-    })?;
+    })
+    .inspect_err(|failure| scanned(Err(failure)))?;
     let subjects: Vec<String> = subjects.lines().map(str::to_owned).collect();
     let title = title(job, &subjects);
     // Read once: the scan checks the very description the pull request gets.
@@ -678,9 +766,18 @@ pub async fn publish(
     let mut said: Vec<Found> = match scan::scan(&texts, &target.scratch).await {
         Verdict::Clean => Vec::new(),
         Verdict::Found(found) => found.into_iter().map(|f| Found::of(f, None)).collect(),
-        Verdict::CouldNotRun(why) => return Err(could_not_run(&why)),
+        Verdict::CouldNotRun(why) => {
+            let failure = could_not_run(&why);
+            scanned(Err(&failure));
+            return Err(failure);
+        }
     };
-    said.extend(scan_commits(clone, &range, &target.scratch).await?);
+    said.extend(
+        scan_commits(clone, &range, &target.scratch)
+            .await
+            .inspect_err(|failure| scanned(Err(failure)))?,
+    );
+    scanned(Ok(&said));
     if !said.is_empty() {
         return Err(Failure::Blocked(said));
     }
@@ -744,6 +841,16 @@ fn git_said(error: &git::GitError, remote: &str) -> String {
         .rsplit_once(" failed: ")
         .map_or("no reason given", |(_, said)| said);
     github::said(&said.replace(remote, "the remote"))
+}
+
+/// Runs a scan's own work off the runtime that serves the API: on a big change it takes minutes,
+/// and obid has to keep answering meanwhile (#749).
+async fn off_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Failure> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| could_not_run(&e.to_string()))
 }
 
 fn could_not_run(why: &str) -> Failure {
@@ -851,10 +958,20 @@ async fn scan_changes(
     let mut diff_args = vec!["diff"];
     diff_args.extend_from_slice(DIFF);
     diff_args.push(&tip_range);
-    let at_tip = scan::in_diff(&git_in(clone, &diff_args).await.map_err(unreadable)?);
+    let tip = git_in(clone, &diff_args).await.map_err(unreadable)?;
+    let at_tip = off_runtime(move || scan::in_diff(&tip)).await?;
     for (commit, lines) in &commits {
         let diff = lines.join("\n");
-        for finding in scan::in_diff(&diff) {
+        let (in_commit, added) = off_runtime(move || {
+            let added: Vec<(String, usize, String)> = scan::parse_diff(&diff)
+                .1
+                .into_iter()
+                .map(|a| (a.file, a.number, a.text))
+                .collect();
+            (scan::in_diff(&diff), added)
+        })
+        .await?;
+        for finding in in_commit {
             let mut finding = Found::of(finding, Some(commit));
             finding.history_only = !at_tip
                 .iter()
@@ -864,11 +981,6 @@ async fn scan_changes(
             }
             found.push(finding);
         }
-        let added: Vec<(String, usize, String)> = scan::parse_diff(&diff)
-            .1
-            .into_iter()
-            .map(|a| (a.file, a.number, a.text))
-            .collect();
         if !added.is_empty() {
             let leaked = scan::gitleaks_lines(&added, scratch)
                 .await
@@ -879,15 +991,22 @@ async fn scan_changes(
             }));
         }
     }
-    for (path, bytes) in &pushed.files {
-        found.extend(
-            scan::known_secrets_in_file(&String::from_utf8_lossy(bytes), path)
-                .into_iter()
-                .map(|mut f| {
-                    f.name = shown(path);
-                    Found::of(f, None)
-                }),
-        );
+    let files = pushed.files;
+    let in_files = off_runtime(move || {
+        files
+            .iter()
+            .map(|(path, bytes)| {
+                let text = String::from_utf8_lossy(bytes);
+                (path.clone(), scan::known_secrets_in_file(&text, path))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await?;
+    for (path, findings) in in_files {
+        found.extend(findings.into_iter().map(|mut f| {
+            f.name = shown(&path);
+            Found::of(f, None)
+        }));
     }
     found.extend(pushed.too_big.iter().map(|path| {
         Found::of(
@@ -1386,6 +1505,36 @@ mod tests {
         assert!(long.ends_with("… (#75)"));
     }
 
+    /// A test-first fix goes out titled by its fix, not by the test that came first (#765).
+    #[test]
+    fn titles_prefer_the_change_over_its_test() {
+        let mut job = job();
+        job.issue = Some(7);
+        let subjects = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            title(
+                &job,
+                &subjects(&["test(obid): x fails", "fix(obid): x works", "docs: x"])
+            ),
+            "fix(obid): x works (#7)"
+        );
+        assert_eq!(
+            title(&job, &subjects(&["feat: y", "fix: x"])),
+            "fix: x (#7)"
+        );
+        assert_eq!(
+            title(&job, &subjects(&["test(obid): x fails", "test: y"])),
+            "test(obid): x fails (#7)"
+        );
+        assert_eq!(
+            title(
+                &job,
+                &subjects(&["fix: \u{1b}[2Jlooks fine", "fix(obid): x works"])
+            ),
+            "fix(obid): x works (#7)"
+        );
+    }
+
     #[test]
     fn descriptions_quote_the_agent_and_never_promise_a_merge() {
         let mut job = job();
@@ -1401,6 +1550,14 @@ mod tests {
         assert!(text.contains("Closes #75"));
         assert!(text.contains("never merges"));
         assert!(body(&job, false).contains("Part of #75"));
+        assert!(!text.contains("- Jobs:"));
+        // A follow-up from its first job's work names both jobs (#770).
+        job.follow_up_of = Some("f1257000".into());
+        job.start_from = Some("oby/fix-f1257000".into());
+        assert!(body(&job, true).contains(&format!(
+            "- Secret scan: clean.\n- Jobs: Oby job {} follows up job f1257000 and carries its commits.",
+            job.id
+        )));
         assert!(closes("A bug.\n"));
         assert!(!closes("Tests:\n  - [ ] it works\n"));
     }

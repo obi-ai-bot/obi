@@ -55,9 +55,11 @@ struct ConversationPage: View {
 
     // MARK: The thread
 
-    /// Whether a runner job's decision shows in this conversation: only its own jobs' (C3).
-    private func own(_ job: String, _ turns: [Turn]) -> Bool {
+    /// Whether a runner job's decision shows in this conversation: only its own jobs' (C3), and an
+    /// item with no job only in the conversation it came from (`InboxWords.conversation`).
+    private func own(_ job: String, _ turns: [Turn], item: String? = nil) -> Bool {
         ConversationModel.shows(decisionOf: job, startedIn: feed.extras[job]?.conversation,
+                                from: item.flatMap { feed.inboxWords[$0]?.conversation },
                                 served: feed.conversations.served, shown: feed.conversations.shown, turns: turns)
     }
 
@@ -68,7 +70,7 @@ struct ConversationPage: View {
             let entries = (desk.inbox.map { IslandInbox.Entry(item: $0, local: true) }
                 + (feed.inbox + feed.inboxHistory).map { IslandInbox.Entry(item: $0, local: false) })
                 .filter { $0.item.isDecision && ($0.item.later == nil || $0.item.later! <= context.date) }
-                .filter { $0.local || own($0.item.job, turns) }
+                .filter { $0.local || own($0.item.job, turns, item: $0.item.id) }
                 .sorted { $0.item.created < $1.item.created }
             let waiting = entries.filter { $0.item.isOpen }
             let permissions = feed.chatPermissions.filter { ($0.done != nil || $0.waits(at: context.date)) && own($0.job, turns) }
@@ -78,6 +80,13 @@ struct ConversationPage: View {
                 ($0.id, ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns))
             })
             let rows = ChatRuns.rows(turns)
+            // Every job a card may show, which words started each (obid's `turn`), and those shown where they started.
+            let all = desk.jobs + feed.jobs
+            let startedBy = { (job: Job) in
+                ThreadTaskLine.startedBy(turn: feed.extras[job.id]?.turn, in: feed.extras[job.id]?.conversation,
+                                         showing: feed.conversations.shown)
+            }
+            let shown = ThreadTaskLine.shown(in: turns, jobs: all, startedBy: startedBy, ended: conversation.endedTurn)
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
                     if feed.down { RunnerOfflineNotice(name: feed.name) }
@@ -108,14 +117,17 @@ struct ConversationPage: View {
                             }
                             ForEach(Array(rows.enumerated()), id: \.element.turn.id) { index, row in
                                 MessageRow(row: row, first: index == 0, now: context.date,
-                                           jobs: ConversationModel.jobs(of: row.turn, among: desk.jobs + feed.jobs),
+                                           jobs: ThreadTaskLine.cards(under: row.turn, in: turns, jobs: all, startedBy: startedBy),
+                                           followUps: { conversation.endedTurn(row.turn) ? [] : ThreadTaskLine.attached(to: $0, in: all, shown: shown) },
                                            account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
                                            isLocal: { id in desk.jobs.contains { $0.id == id } },
                                            steps: conversation.steps(under: row.turn, in: turns),
                                            arrived: conversation.arrived[row.turn.id],
                                            streamed: conversation.streamed(under: row.turn, in: turns),
                                            conversation: conversation, feed: feed,
-                                           onOpenJob: onOpenJob, onStopJob: { model.stopChatJob($0, local: $1) })
+                                           onOpenJob: onOpenJob, onStopJob: { model.stopChatJob($0, local: $1) },
+                                           onRetry: { feed.retryEcho(row.turn.id); desk.ask(row.turn.text) },
+                                           onEdit: { feed.dropEcho(row.turn.id); text = row.turn.text; typing = true })
                                     .task(id: row.turn.jobs ?? []) {
                                         // A runner's job older than its list: fetched, so its card shows.
                                         for id in ConversationModel.missing(of: row.turn, among: desk.jobs + feed.jobs) { try? await feed.fetch(id) }
@@ -215,6 +227,7 @@ struct ConversationPage: View {
                        voice: model.voice, talkKeyListening: model.listening,
                        onStopTurn: stop, working: thinking || conversation.working)
                 .disabled(sendingAnswer)
+                .keepsDraft($text, as: Drafts.conversation(feed.conversations.shown))
         }
     }
 
@@ -268,6 +281,8 @@ private struct MessageRow: View {
     let first: Bool
     let now: Date
     let jobs: [Job]
+    /// The follow-ups that go with a job's card, told somewhere the thread doesn't show.
+    let followUps: (Job) -> [Job]
     let account: (_ job: Job, _ local: Bool) -> String
     let isLocal: (_ id: String) -> Bool
     let steps: [TurnStep]
@@ -279,6 +294,10 @@ private struct MessageRow: View {
     let feed: RunnerFeed
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
     let onStopJob: (_ job: String, _ local: Bool) -> Void
+    /// On words that didn't reach the runner (`RunnerFeed.Echo`): send them again, or take them back
+    /// into the box.
+    let onRetry: () -> Void
+    let onEdit: () -> Void
 
     private var turn: Turn { row.turn }
     private var yours: Bool { turn.who == .user }
@@ -291,6 +310,15 @@ private struct MessageRow: View {
                     SaidText(text: turn.text, color: Tokens.ink, plain: true)
                         .padding(.horizontal, 14).padding(.vertical, 9)
                         .background(Tokens.bubble, in: RoundedRectangle(cornerRadius: Tokens.bubbleRadius, style: .continuous))
+                }
+                if let problem = feed.echoProblem(turn.id) {
+                    Text("Didn't reach Oby: \(problem)").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger)
+                        .multilineTextAlignment(.trailing).padding(.top, -9)
+                    HStack(spacing: 16) {
+                        Button("Try again", action: onRetry)
+                        Button("Edit", action: onEdit)
+                    }
+                    .buttonStyle(.plain).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.ink)
                 }
             } else {
                 if !turn.text.isEmpty { ArrivingSaid(text: turn.text, color: Tokens.item, since: arrived) }
@@ -308,6 +336,14 @@ private struct MessageRow: View {
                 ThreadTask(job: job, account: account(job, local),
                            onOpen: { onOpenJob(job.id, local) }, onStop: { onStopJob(job.id, local) })
                 if !local { ForEach(feed.extras[job.id]?.artifacts ?? [], id: \.self) { artifact($0) } }
+                ForEach(followUps(job)) { next in
+                    let local = isLocal(next.id)
+                    Text(ThreadTaskLine.followUp(next, account: account(next, local))).font(Tokens.font(Tokens.textMd))
+                        .foregroundStyle(Tokens.muted).fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    ThreadTask(job: next, account: account(next, local),
+                               onOpen: { onOpenJob(next.id, local) }, onStop: { onStopJob(next.id, local) })
+                }
             }
             if row.endsRun {
                 Text(ChatRuns.clock(turn.date, now: now)).font(Tokens.font(11)).monospacedDigit().foregroundStyle(Tokens.muted)

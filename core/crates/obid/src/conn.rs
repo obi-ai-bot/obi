@@ -1,11 +1,13 @@
 //! One agent process speaking newline-delimited JSON over its stdio, in its own process group: what
 //! every adapter runs on (Claude Code's stream-json, Codex's app-server, ACP). obid writes lines to
 //! its stdin and reads its stdout split on `\n` only (a JSON string may hold U+2028), sends its
-//! stderr to the job's log, and ends it with everything it started. A turn has a time limit and a
-//! stop signal: [`Conn::next`] returns [`Cut::TimedOut`] or [`Cut::Stopped`] when one comes first.
+//! stderr to the job's log, and ends it with everything it started. A turn has a time limit (a
+//! [`Limit`]: at most so long, and, for a job's turn, no longer than so long without progress) and
+//! a stop signal: [`Conn::next`] returns [`Cut::TimedOut`] or [`Cut::Stopped`] when one comes first.
 
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -26,6 +28,63 @@ pub enum Cut {
     Stopped,
 }
 
+/// How many quiet windows in a row a change in the worktree, or a background task still running
+/// (`Conn::holding`), alone stands for progress: a quiet build is, a loop touching a file or a
+/// server that never ends isn't.
+pub const FILE_WINDOWS: u32 = 4;
+
+/// Something outside the agent the turn waits on (an Apple check on a Mac): while it says so, the
+/// turn isn't quiet, as while it waits for the owner.
+pub type Waiting = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// How long a turn may take: `most` at all, and, with `quiet`, no longer than that without a line
+/// from the agent, a wait (`waiting`) or, for [`FILE_WINDOWS`] windows at most, a change in `watch`
+/// (a job's worktree): a job runs as long as it makes progress (docs/runner-api.md, `limit`). A
+/// plain `Duration` is a fixed limit.
+#[derive(Clone)]
+pub struct Limit {
+    pub most: Duration,
+    pub quiet: Option<Duration>,
+    pub watch: Option<PathBuf>,
+    pub waiting: Option<Waiting>,
+}
+
+impl From<Duration> for Limit {
+    fn from(most: Duration) -> Limit {
+        Limit {
+            most,
+            quiet: None,
+            watch: None,
+            waiting: None,
+        }
+    }
+}
+
+/// Something in `dir` (files, folders, its git folder too) changed after `since`, and not after
+/// now (a file dated ahead is no progress): what the agent did without a word, like a quiet build
+/// writing its output. Links aren't followed.
+// ponytail: a full walk, once per quiet window and stopping at the first change; a file watcher if
+// worktrees get too big for that.
+pub fn changed_since(dir: &Path, since: SystemTime) -> bool {
+    let now = SystemTime::now();
+    let mut folders = vec![dir.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.modified().is_ok_and(|m| m > since && m <= now) {
+                return true;
+            }
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                folders.push(entry.path());
+            }
+        }
+    }
+    false
+}
+
 /// A JSON-RPC error the agent answered with.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RpcError {
@@ -42,6 +101,15 @@ pub struct Conn {
     copying: Option<tokio::task::JoinHandle<()>>,
     stop: watch::Receiver<process::Signal>,
     give_up_at: std::pin::Pin<Box<tokio::time::Sleep>>,
+    /// When the turn is quiet for too long (`Limit::quiet`), and what else counts as progress.
+    quiet: Option<Duration>,
+    quiet_at: std::pin::Pin<Box<tokio::time::Sleep>>,
+    watch: Option<PathBuf>,
+    waiting: Option<Waiting>,
+    /// The last sign of progress, and the quiet windows since the agent's last line that only a
+    /// change in `watch` filled.
+    heard_at: SystemTime,
+    file_windows: u32,
     buffer: Vec<u8>,
     next_id: u64,
     /// Every message obid writes carries `"jsonrpc": "2.0"` (ACP does; Codex's app-server leaves
@@ -49,6 +117,12 @@ pub struct Conn {
     jsonrpc: bool,
     pub stopped: bool,
     pub timed_out: bool,
+    /// It timed out for being quiet (`Limit::quiet`), not at its most.
+    pub quiet_out: bool,
+    /// The agent ended its turn and waits for a background task of its own that is still running
+    /// (crate::agent): the task stands for progress as a change in `watch` does, for
+    /// [`FILE_WINDOWS`] windows at most without a line (a server or a `--watch` never ends).
+    pub holding: bool,
 }
 
 impl Conn {
@@ -56,7 +130,7 @@ impl Conn {
     /// own. `limit` is how long the turn may take from now.
     pub async fn spawn(
         launch: &Launch,
-        limit: Duration,
+        limit: impl Into<Limit>,
         stop: watch::Receiver<process::Signal>,
         jsonrpc: bool,
     ) -> std::io::Result<Conn> {
@@ -96,6 +170,7 @@ impl Conn {
             .take()
             .ok_or_else(|| std::io::Error::other("no stdout"))?;
         let stopped = *stop.borrow() != process::Signal::Run;
+        let limit = limit.into();
         Ok(Conn {
             child,
             pgid,
@@ -103,13 +178,69 @@ impl Conn {
             lines: BufReader::new(stdout),
             copying,
             stop,
-            give_up_at: Box::pin(tokio::time::sleep(limit)),
+            give_up_at: Box::pin(tokio::time::sleep(limit.most)),
+            quiet: limit.quiet,
+            quiet_at: Box::pin(tokio::time::sleep(limit.quiet.unwrap_or(limit.most))),
+            watch: limit.watch,
+            waiting: limit.waiting,
+            heard_at: SystemTime::now(),
+            file_windows: 0,
             buffer: Vec::new(),
             next_id: 0,
             jsonrpc,
             stopped,
             timed_out: false,
+            quiet_out: false,
+            holding: false,
         })
+    }
+
+    /// The agent's process id.
+    pub fn pid(&self) -> u32 {
+        self.pgid
+    }
+
+    /// A running agent's next turn: `limit` from now, and `stop` its stop signal.
+    pub fn renew(&mut self, limit: impl Into<Limit>, stop: watch::Receiver<process::Signal>) {
+        let limit = limit.into();
+        self.give_up_at
+            .as_mut()
+            .reset(tokio::time::Instant::now() + limit.most);
+        self.quiet = limit.quiet;
+        self.watch = limit.watch;
+        self.waiting = limit.waiting;
+        self.heard();
+        self.stopped = *stop.borrow() != process::Signal::Run;
+        self.stop = stop;
+        self.timed_out = false;
+        self.quiet_out = false;
+        self.holding = false;
+    }
+
+    /// A sign of progress from the agent (or a wait): the quiet window starts again.
+    fn heard(&mut self) {
+        self.file_windows = 0;
+        self.rearm();
+    }
+
+    /// The quiet window starts again.
+    fn rearm(&mut self) {
+        self.heard_at = SystemTime::now();
+        if let Some(quiet) = self.quiet {
+            self.quiet_at
+                .as_mut()
+                .reset(tokio::time::Instant::now() + quiet);
+        }
+    }
+
+    /// Nothing waits to be read and the agent hasn't closed its output, which is how a running
+    /// agent stays between turns: looked at without waiting. A line it wrote while idle would be
+    /// taken for the next turn's.
+    pub async fn quiet(&mut self) -> bool {
+        self.lines.buffer().is_empty()
+            && tokio::time::timeout(Duration::ZERO, self.lines.fill_buf())
+                .await
+                .is_err()
     }
 
     /// The next JSON message, or why none comes. Lines that aren't JSON are skipped.
@@ -126,7 +257,7 @@ impl Conn {
                 read = self.lines.read_until(b'\n', &mut self.buffer) => {
                     match read {
                         Ok(0) | Err(_) => return Err(Cut::Closed),
-                        Ok(_) => {}
+                        Ok(_) => self.heard(),
                     }
                     if let Ok(message) = serde_json::from_slice::<Value>(&self.buffer) {
                         return Ok(message);
@@ -134,6 +265,26 @@ impl Conn {
                 }
                 () = &mut self.give_up_at => {
                     self.timed_out = true;
+                }
+                () = &mut self.quiet_at, if self.quiet.is_some() => {
+                    let since = self.heard_at;
+                    let changed = match self.watch.clone() {
+                        Some(dir) if self.file_windows < FILE_WINDOWS => {
+                            tokio::task::spawn_blocking(move || changed_since(&dir, since))
+                                .await
+                                .unwrap_or(false)
+                        }
+                        _ => false,
+                    };
+                    if self.waiting.as_ref().is_some_and(|waiting| waiting()) {
+                        self.heard();
+                    } else if changed || (self.holding && self.file_windows < FILE_WINDOWS) {
+                        self.file_windows += 1;
+                        self.rearm();
+                    } else {
+                        self.timed_out = true;
+                        self.quiet_out = true;
+                    }
                 }
                 changed = self.stop.changed() => {
                     if changed.is_err() || *self.stop.borrow() != process::Signal::Run {
@@ -176,6 +327,8 @@ impl Conn {
             }
         };
         self.give_up_at.as_mut().reset(deadline + since.elapsed());
+        // Waiting for the owner isn't being quiet.
+        self.heard();
         Ok(answer)
     }
 
@@ -300,6 +453,30 @@ pub fn request_id(message: &Value) -> Option<&Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file written in the folder, however deep, is progress; nothing written isn't.
+    #[test]
+    fn a_change_in_the_worktree_is_progress() {
+        let dir = std::env::temp_dir().join(format!("obid-changed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        let since = SystemTime::now();
+        assert!(!changed_since(&dir, since + Duration::from_secs(1)));
+        std::thread::sleep(Duration::from_millis(20));
+        let since = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!changed_since(&dir, since));
+        std::fs::write(dir.join("target/debug/out.o"), "x").unwrap();
+        assert!(changed_since(&dir, since));
+        // A file dated ahead (a `touch -d` loop) is no progress.
+        let since = SystemTime::now() + Duration::from_secs(1);
+        let ahead = std::fs::File::create(dir.join("ahead")).unwrap();
+        ahead
+            .set_modified(SystemTime::now() + Duration::from_secs(3600))
+            .unwrap();
+        assert!(!changed_since(&dir, since));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn answers_and_requests() {

@@ -192,6 +192,16 @@ pub fn stub_agent() -> PathBuf {
 
 /// Starts obid with `config`, `PATH` the test's own with `path_first` before it.
 pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
+    start_with(folder, config, path_first, &[])
+}
+
+/// [`start`], with `env` set over what a test's obid is given.
+pub fn start_with(
+    folder: &Path,
+    config: &Value,
+    path_first: Option<&Path>,
+    env: &[(&str, &str)],
+) -> Obid {
     let path = folder.join("config.json");
     put_token(config, TOKEN);
     std::fs::write(&path, config.to_string()).unwrap();
@@ -234,6 +244,12 @@ pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
             "OBID_SECURITY_BIN",
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-security"),
         )
+        // No conversation's Claude Code started ahead (crate::brain::harness::prestart), but in the
+        // tests of it: its processes would weigh on every other test's time.
+        .env("OBID_PRESTART", "off")
+        // The brains' time never depends on how busy the machine running the tests is.
+        .env("OBID_LOAD", "0")
+        .envs(env.iter().copied())
         .stdout(Stdio::piped())
         .stderr(
             std::fs::OpenOptions::new()
@@ -686,6 +702,33 @@ impl TestObi {
             self.client.ack(&self.token, &ids).await.unwrap();
         }
         got
+    }
+
+    /// Waits for deliveries until the reply to `request` comes, acknowledging each: that reply.
+    /// Whatever else comes first is passed over.
+    pub async fn receive_reply_to(&self, request: &Value, seconds: u64) -> Value {
+        let give_up_at = Instant::now() + Duration::from_secs(seconds);
+        let mut passed = Vec::new();
+        loop {
+            assert!(
+                Instant::now() < give_up_at,
+                "{} got no reply to {} within {seconds} seconds, only: {passed:?}",
+                self.id,
+                request["id"]
+            );
+            let list = self.client.deliveries(&self.token, 50, 1).await.unwrap();
+            if list.is_empty() {
+                continue;
+            }
+            let ids: Vec<String> = list.iter().map(|d| d.delivery_id.clone()).collect();
+            self.client.ack(&self.token, &ids).await.unwrap();
+            for envelope in list.into_iter().map(|d| d.envelope) {
+                if envelope["in_reply_to"] == request["id"] {
+                    return envelope;
+                }
+                passed.push(envelope);
+            }
+        }
     }
 
     /// Whatever is waiting now, after `seconds`, acknowledged.

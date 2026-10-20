@@ -154,6 +154,7 @@ mod tests {
                         conversation: "c1".into(),
                         ended: false,
                         artifacts: vec![],
+                        routine: None,
                     },
                 )
             })

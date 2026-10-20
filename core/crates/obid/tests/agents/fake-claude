@@ -2,10 +2,19 @@
 // A stand-in for Claude Code in obid's tests: stream-json in and out, as obid runs `claude`. What
 // it does comes from the prompt (the job's task):
 //   COMMIT: <file>   writes the file in the worktree and commits it
+//   EDIT: <file>     adds a line to the file and stages it, for COMMIT to commit with its own
 //   DRAFT: <file>    writes the file in the worktree and leaves it uncommitted, then goes on with
 //                    the rest of the prompt
 //   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is ended
 //   FAIL             ends the turn with an error result
+//   LIMITED: <s>     says the account is full (a rate_limit_event whose 5-hour window resets <s>
+//                    seconds from now), then ends the turn with Claude Code's usage-limit error
+//   USAGE: <json>    first sends a rate_limit_event whose rate_limit_info is the JSON
+//   TOKENS           its result line reports usage, modelUsage (two models) and a cost; like
+//                    Claude Code's after --resume, modelUsage and the cost are the session's so
+//                    far (its turns counted in .obi/tokens-turn), usage the turn's own
+//   USAGES: <json>   a list: like USAGE with its first entry on the first turn, the next on the
+//                    next (counted in .obi/usage-turn)
 //   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
 //   ASKS: <json>     asks for each of a list of {"tool", "input"} in turn, then ends the turn with
 //                    "answers: allow, deny: <why>, …"
@@ -15,6 +24,8 @@
 //                    settings.json and .claude.json, tries the same in <dir> (its account's own
 //                    folder) and to read <dir>'s login; says whether its config folder is <dir> and
 //                    whether its login kept a refresh token
+//   REACH: <dir> …   tries to list each folder and to write .obid-reached in it, and ends the turn
+//                    with "<dir> read=ok|no write=ok|no; …"
 //   ECHO             ends the turn with "heard: <the prompt> resume=<the session it resumed, or none>"
 //   PAUSE: <ms>      waits that long, then ends the turn with "Paused."
 //   ARTIFACTS        writes .obi/artifacts/ in the worktree: a page (a folder with index.html,
@@ -29,8 +40,31 @@
 //                    the files in .obi/context/; then ends the turn with "Reported." With
 //                    MCP_CALL, MCP_WRITE, MCP_API or MCP_PROBE it also calls the `oby` broker's
 //                    tools (MCP_CALL's search with its prompt as the query), and MCP_PROBE tries
-//                    the broker's token on the runner's other routes
+//                    the broker's token on the runner's other routes. With TETRIX_CALL it calls
+//                    the `tetrix` server's search_entities, get_entity, save_session and
+//                    resume_session, and commits tetrix.txt with a Tetrix-Session trailer naming
+//                    the session save_session answered
+//   QUIET            says nothing and writes nothing until it is ended (a stalled job)
+//   CHATTY: <ms>     streams a word every 100 ms for that long, then ends the turn with "Chatted."
+//   LOOP             runs the same failing command 6 times, then waits until it is ended
+//   MAXTURNS         ends the turn as Claude Code's --max-turns does (error_max_turns)
+//   TRANSIENT        ends the turn with an overloaded API's error; TRANSIENT ALWAYS every turn after
+//                    too
+//   SPEND: <n>       ends the turn saying it used n input tokens
+//   BACKGROUND: <ms> starts a background task (Bash's run_in_background) and ends the turn waiting
+//                    on it; <ms> later the task ends (a task_notification, and an empty
+//                    background_tasks_changed) and, as Claude Code does, it wakes by itself: a turn
+//                    of its own that ends with "Built." With SILENT, the task ends and it never
+//                    wakes; with FOREVER, it never ends; with EXIT, it exits at once instead,
+//                    the task still running. Told to wait in the foreground, it ends with "Built in
+//                    the foreground.", or with EXIT ALWAYS exits the same way again
+//   COMMIT … QUIET   commits, then says nothing until it is ended
+//   a handoff note   asked for one (obid's prompt when a job stalls): ends the turn with the note,
+//                    "Done: … Left: … Failed: …", or says nothing when the task said NO NOTE
 //   ON PURPOSE       in a fix round's quoted task: ends the turn with "FAILS AS ASKED: …"
+//   AGAIN: <words>   keeps the words (maybe none) in .obi/again, then goes on with the rest of the
+//                    prompt; a later "Try again, …" that finds them writes .obi/tried and ends the
+//                    turn with them
 //   anything else    ends the turn with "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
 
@@ -45,8 +79,22 @@ if (process.argv[2] === "auth" && process.argv[3] === "login") {
 
 const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
 const session = "00000000-0000-4000-8000-000000000001";
+let tokens = 0;
 const result = (text, error = false) =>
-  emit({ type: "result", subtype: error ? "error_during_execution" : "success", is_error: error, num_turns: 1, result: text, session_id: session, total_cost_usd: 0 });
+  emit({ type: "result", subtype: error ? "error_during_execution" : "success", is_error: error, num_turns: 1, result: text, session_id: session, total_cost_usd: 0.25 * tokens,
+    ...(tokens && { usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 1000, cache_creation_input_tokens: 50 },
+      modelUsage: { "fake-opus": { inputTokens: 100 * tokens, outputTokens: 20 * tokens, cacheReadInputTokens: 1000 * tokens, cacheCreationInputTokens: 50 * tokens, costUSD: 0.2 * tokens },
+        "fake-haiku": { inputTokens: 10 * tokens, outputTokens: 5 * tokens, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.05 * tokens } } }) });
+
+// Starts a background build, as Claude Code's Bash with run_in_background, and ends the turn
+// waiting on it: a housekeeping task (`ambient`) is listed too, and waits for nothing.
+const background = () => {
+  emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: "b1", name: "Bash", input: { command: "npm run build", run_in_background: true } }] } });
+  emit({ type: "system", subtype: "task_started", task_id: "bg1", tool_use_id: "b1", description: "npm run build", task_type: "local_bash", is_backgrounded: true, session_id: session });
+  emit({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "bg1", task_type: "local_bash", description: "npm run build" }, { task_id: "h1", task_type: "local_agent", description: "Tidying memory", ambient: true }], session_id: session });
+  emit({ type: "user", session_id: session, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "b1", content: "Command running in background with ID: bg1." }] } });
+  result("The build is still going. I'll continue when the monitor reports it's done.");
+};
 
 const leaked = Object.keys(process.env).filter((name) =>
   name === "CLAUDECODE" || (name.startsWith("CLAUDE_CODE_") && name !== "CLAUDE_CODE_TMPDIR") || name.startsWith("ANTHROPIC_") || name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN");
@@ -83,6 +131,21 @@ rl.on("line", (line) => {
   let prompt = typeof message.message.content === "string" ? message.message.content : "";
   emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Bash", "Read", "Edit"], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
   if (leaked.length) return result(`leaked: ${leaked.join(", ")}`, true);
+  if (prompt.includes("TOKENS")) {
+    mkdirSync(".obi", { recursive: true });
+    tokens = (existsSync(".obi/tokens-turn") ? Number(readFileSync(".obi/tokens-turn", "utf8")) : 0) + 1;
+    writeFileSync(".obi/tokens-turn", String(tokens));
+  }
+  const usage = prompt.match(/USAGE: (\{.*\})/);
+  if (usage) emit({ type: "rate_limit_event", session_id: session, rate_limit_info: JSON.parse(usage[1]) });
+  const usages = prompt.match(/USAGES: (\[.*\])/);
+  if (usages) {
+    mkdirSync(".obi", { recursive: true });
+    const turn = existsSync(".obi/usage-turn") ? Number(readFileSync(".obi/usage-turn", "utf8")) : 0;
+    writeFileSync(".obi/usage-turn", String(turn + 1));
+    const info = JSON.parse(usages[1])[turn];
+    if (info) emit({ type: "rate_limit_event", session_id: session, rate_limit_info: info });
+  }
   // A fix round quotes the task after the check's output: it says the failure is intended when the
   // task asked for one (ON PURPOSE), and otherwise reads only the part before the quote.
   const quote = prompt.indexOf("\n\nThe task, as the owner wrote it:");
@@ -90,19 +153,63 @@ rl.on("line", (line) => {
     if (prompt.slice(quote).includes("ON PURPOSE")) return result("FAILS AS ASKED: the test fails on purpose, as the task says.");
     prompt = prompt.slice(0, quote);
   }
+  if (prompt.includes("write a handoff note")) {
+    if (existsSync(".obi/no-note")) return setInterval(() => {}, 1000);
+    return result("Done: the parser.\nLeft: the tests.\nFailed: npm test, three times: a missing fixture.");
+  }
+  if (prompt.includes("end of your turn is the end of your work")) {
+    if (!existsSync(".obi/exit-always")) return result("Built in the foreground.");
+    background();
+    process.stdout.end(() => process.exit(0));
+  }
+  if (prompt.includes("TRANSIENT ALWAYS")) {
+    mkdirSync(".obi", { recursive: true });
+    writeFileSync(".obi/always-transient", "");
+  }
+  if (existsSync(".obi/always-transient")) return result('API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', true);
+  const spend = prompt.match(/SPEND: (\d+)/);
+  if (spend) {
+    return emit({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: "Spent.", session_id: session, total_cost_usd: 0, usage: { input_tokens: Number(spend[1]), output_tokens: 0 } });
+  }
   const commit = prompt.match(/COMMIT: (\S+)/);
   const ask = prompt.match(/ASK: (\{.*\})/);
   const asks = prompt.match(/ASKS: (\[.*\])/);
   const login = prompt.match(/LOGIN: (\S+)/);
+  const reach = prompt.match(/REACH: (.+)/);
   const plant = prompt.match(/PLANT: (\S+)/);
   const draft = prompt.match(/DRAFT: (\S+)/);
   if (draft) writeFileSync(draft[1], "draft\n");
-  if (commit) {
+  const edit = prompt.match(/EDIT: (\S+)/);
+  if (edit) {
+    appendFileSync(edit[1], "// edited\n");
+    execFileSync("git", ["add", edit[1]]);
+  }
+  const again = prompt.match(/AGAIN:(.*)/);
+  if (again) {
+    mkdirSync(".obi", { recursive: true });
+    writeFileSync(".obi/again", again[1].trim());
+  }
+  if (prompt.startsWith("Try again") && existsSync(".obi/again")) {
+    writeFileSync(".obi/tried", "");
+    result(readFileSync(".obi/again", "utf8"));
+  } else if (commit) {
     writeFileSync(commit[1], "hello\n");
     execFileSync("git", ["add", commit[1]]);
     execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add ${commit[1]}`]);
     emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Write", input: { file_path: commit[1] } }] } });
+    if (prompt.includes("QUIET")) return setInterval(() => {}, 1000);
     result(`Added ${commit[1]}.`);
+  } else if (reach) {
+    const tries = (f) => {
+      try {
+        f();
+        return "ok";
+      } catch {
+        return "no";
+      }
+    };
+    const dirs = reach[1].trim().split(/\s+/);
+    result(dirs.map((d) => `${d} read=${tries(() => readdirSync(d))} write=${tries(() => writeFileSync(`${d}/.obid-reached`, "x"))}`).join("; "));
   } else if (login) {
     const tries = (f) => {
       try {
@@ -179,6 +286,45 @@ rl.on("line", (line) => {
     let beats = 0;
     writeFileSync(".obi/beat", String(beats));
     setInterval(() => writeFileSync(".obi/beat", String(++beats)), 50);
+  } else if (prompt.match(/LIMITED: (-?\d+)/)) {
+    const resetsAt = Math.floor(Date.now() / 1000) + Number(prompt.match(/LIMITED: (-?\d+)/)[1]);
+    emit({ type: "rate_limit_event", session_id: session, rate_limit_info: { status: "rejected", resetsAt,
+      unifiedWindows: { five_hour: { utilization: 1.0, resetsAt }, seven_day: { utilization: 0.5, resetsAt: resetsAt + 86400 } } } });
+    result("Claude AI usage limit reached.", true);
+  } else if (prompt.includes("QUIET")) {
+    if (prompt.includes("NO NOTE")) {
+      mkdirSync(".obi", { recursive: true });
+      writeFileSync(".obi/no-note", "");
+    }
+    setInterval(() => {}, 1000);
+  } else if (prompt.match(/CHATTY: (\d+)/)) {
+    const tick = setInterval(() => emit({ type: "stream_event", session_id: session, event: { type: "content_block_delta", delta: { type: "text_delta", text: "working " } } }), 100);
+    setTimeout(() => (clearInterval(tick), result("Chatted.")), Number(prompt.match(/CHATTY: (\d+)/)[1]));
+  } else if (prompt.includes("LOOP")) {
+    for (let i = 1; i <= 6; i++) {
+      emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: `l${i}`, name: "Bash", input: { command: "npm test" } }] } });
+      emit({ type: "user", session_id: session, message: { role: "user", content: [{ type: "tool_result", tool_use_id: `l${i}`, is_error: true, content: "npm ERR! missing fixture" }] } });
+    }
+    setInterval(() => {}, 1000);
+  } else if (prompt.match(/BACKGROUND: (\d+)/)) {
+    if (prompt.includes("EXIT ALWAYS")) {
+      mkdirSync(".obi", { recursive: true });
+      writeFileSync(".obi/exit-always", "");
+    }
+    background();
+    if (prompt.includes("EXIT")) return process.stdout.end(() => process.exit(0));
+    if (prompt.includes("FOREVER")) return;
+    setTimeout(() => {
+      emit({ type: "system", subtype: "task_notification", task_id: "bg1", tool_use_id: "b1", status: "completed", summary: 'Background command "npm run build" completed (exit code 0)', output_file: "", session_id: session });
+      emit({ type: "system", subtype: "background_tasks_changed", tasks: [], session_id: session });
+      if (prompt.includes("SILENT")) return setInterval(() => {}, 1000);
+      emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Bash"], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
+      result("Built.");
+    }, Number(prompt.match(/BACKGROUND: (\d+)/)[1]));
+  } else if (prompt.includes("MAXTURNS")) {
+    emit({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 200, session_id: session, total_cost_usd: 0 });
+  } else if (prompt.includes("TRANSIENT")) {
+    result('API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', true);
   } else if (prompt.includes("FAIL")) {
     result("it broke", true);
   } else if (asks) {
@@ -252,6 +398,22 @@ async function report(prompt) {
           toolCalls[`${name}_api`] = await read.json();
         }
       }
+      if (prompt.includes("TETRIX_CALL") && name === "tetrix") {
+        const call = async (id, tool, args) => {
+          const answer = await fetch(server.url, {
+            method: "POST",
+            headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(server.headers ?? {}) },
+            body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: tool, arguments: args } }),
+          });
+          return answer.json();
+        };
+        toolCalls.search = await call(21, "search_entities", { query: "where is the nothing" });
+        toolCalls.entity = await call(22, "get_entity", { id: "repo:acme/legacy" });
+        toolCalls.saved = await call(23, "save_session", { client: "claude-code", state: { did: "tetrix.txt" } });
+        toolCalls.resume = await call(24, "resume_session", { session_id: "someone-elses" });
+        // Put together here, so this file holds no key a scanner flags.
+        toolCalls.leak = await call(25, "save_session", { client: "claude-code", state: { key: "AKIA" + "QWERTYUIOPASDFGH" } });
+      }
       if (prompt.includes("MCP_PROBE") && name === "oby") {
         // More broker calls, then the broker token everywhere else on the runner.
         const call = async (id, tool, args) => {
@@ -285,6 +447,12 @@ async function report(prompt) {
     } catch (e) {
       answers[name] = { error: String(e) };
     }
+  }
+  if (prompt.includes("TETRIX_CALL")) {
+    const session = JSON.parse(toolCalls.saved?.result?.content?.[0]?.text ?? "{}").session_id ?? "none";
+    writeFileSync("tetrix.txt", "made with Tetrix\n");
+    execFileSync("git", ["add", "tetrix.txt"]);
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add tetrix.txt\n\nTetrix-Session: ${session}`]);
   }
   const context = existsSync(".obi/context") ? readdirSync(".obi/context").sort() : [];
   mkdirSync(".obi", { recursive: true });

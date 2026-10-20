@@ -61,8 +61,15 @@ final class RunnerFeed {
     var briefingInbox: [InboxItem] { inbox.filter { !isConfirm($0) } }
     /// The runner's accounts and their usage, as it last said: the brain tells them too.
     private(set) var accounts: [AccountState] = []
+    /// obid's Tetrix, held once for every agent: read on connecting, then kept by its `tetrix`
+    /// event and by Settings › Connectors' own reads; nil from a runner that doesn't hold one.
+    var tetrix: TetrixStatus?
     /// What each job carries that Engine's Job doesn't read yet (its mode, the permission it waits
     /// on, its question's recommended option and plan), by job id.
+    /// Counts the `routine` events (#395): Settings › Routines reads the routines again on each.
+    private(set) var routineChanges = 0
+    /// obid's routines (#395), for the next runs on Home's Routines page; none from a runner without.
+    private(set) var routines: [RunnerRoutine] = []
     private(set) var extras: [String: RunnerJobExtras] = [:] {
         didSet { capturePermissions() }
     }
@@ -122,6 +129,38 @@ final class RunnerFeed {
     /// pull requests, as it last said (Settings › Connectors); nil from older runners.
     private(set) var github: String?
     private(set) var checkRuns: String?
+    /// Your work on GitHub as obid's gh finds it (Review PR and Issues), nil from a runner that doesn't list it.
+    private(set) var gitHubWork: GitHubWork?
+    /// The GitHub items put off with Later, until Oby quits.
+    var gitHubLater: Set<String> = []
+
+    /// obid's GitHub work, as the `github` event or a refresh brings it: the whole feed.
+    func apply(_ work: GitHubWork) { gitHubWork = work }
+
+    /// Has obid read GitHub again (opening Review PR or Issues); the feed it answers replaces this one.
+    func refreshGitHubWork() async {
+        guard let runner else { return }
+        #if DEBUG
+        if GitHubWork.sample != nil { return }
+        #endif
+        await readGitHub { try await runner.refreshGitHubWork() }
+    }
+
+    /// Applies obid's answer about GitHub to the feed as it is by then, unless the runner changed meanwhile.
+    private func readGitHub(_ ask: () async throws -> GitHubWork?) async {
+        let asked = runnerChanges
+        let answer = await GitHubWork.ask(ask)
+        guard runnerChanges == asked else { return }
+        gitHubWork = answer.applied(to: gitHubWork)
+    }
+
+    /// One click on a GitHub item: Oby's job on it, which joins the list as the runner's job.
+    func startGitHubWork(_ id: String) async throws {
+        guard let runner else { throw RunnerError(message: "Oby isn't following a runner.") }
+        let asked = runnerChanges
+        let job = try await runner.startGitHubWork(id)
+        if runnerChanges == asked { apply(job) }
+    }
     /// Merge checks this Mac runs for the runner (Settings › Runner, on by default).
     let checks = MacChecks()
     /// This Mac's Touch ID key, registered on every connection: with it, the runner's jobs publish from here.
@@ -200,6 +239,14 @@ final class RunnerFeed {
         stagedOptions = options
         connection = .live
     }
+
+    /// Settings › Connectors' lists and obid's Tetrix, and jobs' extras, for the pictures of them.
+    @ObservationIgnored var stagedLists: Connectors.Lists?
+    func stage(tetrix: TetrixStatus?, lists: Connectors.Lists = .init(), extras: [String: RunnerJobExtras] = [:]) {
+        self.tetrix = tetrix
+        stagedLists = lists
+        self.extras.merge(extras) { $1 }
+    }
     #endif
 
     func start() {
@@ -251,6 +298,7 @@ final class RunnerFeed {
         inboxHistory = []
         inboxWords = [:]
         accounts = []
+        tetrix = nil
         models = nil
         extras = [:]
         permissionHistory = []
@@ -259,10 +307,13 @@ final class RunnerFeed {
         version = nil
         github = nil
         checkRuns = nil
+        gitHubWork = nil
+        gitHubLater = []
         clearedAt = nil
         notified = nil
         conversation.forget()
         conversations.reset()
+        echoes = []
         device.reset()
     }
 
@@ -289,16 +340,24 @@ final class RunnerFeed {
                         let (items, words) = try await runner.inboxWithWords()
                         // History is an enhancement: an older runner or failed history request must not take chat offline.
                         let history = try? await runner.inboxWithWords(state: "done")
+                        let tetrix = try? await runner.tetrix()
+                        let routines = try? await runner.routines()
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
                         host = status.runner.host
                         version = status.runner.version
+                        if let routines { self.routines = routines ?? [] }
                         clearedAt = status.clearedAt
                         accounts = status.accounts
+                        self.tetrix = tetrix
                         models = status.models
                         cleanup = status.cleanup
                         github = status.github
                         checkRuns = status.checks
+                        await readGitHub { try await runner.gitHubWork() }
+                        #if DEBUG
+                        if let sample = GitHubWork.sample { gitHubWork = sample }
+                        #endif
                         defaultMode = RunnerMode(status.permissions?.mode)
                         self.extras = extras
                         await take(list, from: runner)
@@ -320,20 +379,25 @@ final class RunnerFeed {
                         Self.ask()
                         checks.look(runner)
                         register(runner)
-                    case .job(let job, let extras):
-                        if let extras { self.extras[job.id] = extras }
-                        apply(job)
+                    case .job(let job, let extras): apply(job, extras: extras)
                     case .cleared(let date): clearedAt = date
                     case .inbox(let item, let words):
                         apply(item, words: words)
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
+                    case .tetrix(let status): tetrix = status
                     // obid names each turn's, step's and word's conversation: the window shows one (#493).
-                    case .turn(let turn, let extras): if conversations.shows(turn.conversation) { conversation.apply(turn, extras) }
+                    case .turn(let turn, let extras):
+                        if conversations.shows(turn.conversation) { conversation.apply(turn, extras) }
+                        settleEchoes(turn)
                     case .step(let step): if conversations.shows(step.conversation) { conversation.apply(step) }
                     case .delta(let delta): if conversations.shows(delta.conversation) { conversation.apply(delta) }
                     case .artifact(let artifact): conversation.apply(artifact)
+                    case .github(let work): apply(work)
                     case .conversation(let change): conversations.apply(change)
+                    case .routine:
+                        routineChanges += 1
+                        Task { if let routines = try? await runner.routines() { self.routines = routines ?? [] } }
                     }
                 }
             } catch {
@@ -371,18 +435,85 @@ final class RunnerFeed {
 
     // MARK: Planning through the runner on this Mac (#283)
 
+    /// Words this Mac sent to obid that its thread doesn't list yet (the iPhone's echoes): in the
+    /// thread the instant Send is pressed, Oby's Thinking under them, until obid's own turn with
+    /// the same words takes their place in the same update (`ChatThread.pending`), so nothing
+    /// shows twice. `problem`: why they didn't reach obid, with Try again and Edit.
+    struct Echo: Equatable {
+        var turn: Turn
+        /// The conversation shown when they went, nil for a new one.
+        var conversation: String?
+        var problem: String?
+        /// `plan` sends them: an echo made at Send waits for it (`echo`).
+        var sending = false
+    }
+    private(set) var echoes: [Echo] = []
+
+    /// The echoes the conversation shown lists: its own, and a new one's while it starts. One that
+    /// failed gives way only to obid's turn of its id (they reached obid after all).
+    var shownEchoes: [Turn] {
+        let mine = echoes.filter { $0.conversation == conversations.shown || ($0.conversation == nil && (conversations.shown == nil || conversations.creating)) }
+        return mine.filter { echo in
+            !conversation.runnerTurns.contains { echo.problem == nil ? ChatThread.lists($0, echo.turn) : $0.id == echo.turn.id }
+        }.map(\.turn)
+    }
+
+    func echoProblem(_ id: String) -> String? { echoes.first { $0.turn.id == id }?.problem }
+
+    /// Lets go of an echo: listed by obid, given up or edited.
+    func dropEcho(_ id: String) { echoes.removeAll { $0.turn.id == id } }
+
+    /// Try again on words that didn't reach obid: the same echo goes again, with its id, so obid
+    /// keeps them once even if the first request did reach it (`Runner.planned`'s `id`).
+    func retryEcho(_ id: String) {
+        guard let at = echoes.firstIndex(where: { $0.turn.id == id }) else { return }
+        echoes[at].problem = nil
+        echoes[at].sending = false
+    }
+
+    /// The runner listed the user's `turn`: the echo it lists has done its job (obid's: the one of
+    /// its id; a failed one only so, never by its words).
+    func settleEchoes(_ turn: Turn) {
+        echoes.removeAll { $0.turn.id == turn.id || ($0.problem == nil && $0.conversation == turn.conversation && ChatThread.lists(turn, $0.turn)) }
+    }
+
+    /// Send was pressed: the words show now. `Desk.ask` may first wait for the turn they replace to
+    /// let go, and `plan` then takes this echo up. Words that only stop a turn never plan.
+    func echo(_ said: String) {
+        let said = said.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !said.isEmpty, !Conversation.cancels(said) else { return }
+        echoes.append(Echo(turn: Turn(who: .user, text: said), conversation: conversations.shown))
+    }
+
     /// The runner's brain's answer to the user's words, as the window's cards
     /// show it (`Desk.planElsewhere`): the drafts are its, and Dispatch sends them back to it.
-    func plan(_ said: String, answer: (question: String, option: String)?, attachments: [String] = []) async throws -> Desk.Talk {
-        guard let runner else { throw RunnerError(message: "The runner on this Mac isn't running yet.") }
+    /// Tests give their own `runner`.
+    func plan(_ said: String, answer: (question: String, option: String)?, attachments: [String] = [], on given: Runner? = nil) async throws -> Desk.Talk {
+        guard let runner = given ?? runner else { throw RunnerError(message: "The runner on this Mac isn't running yet.") }
+        // Shown at once (or since Send), as obid will list them: an answer is its option.
+        let text = answer?.option ?? said
+        let echo: String
+        if let made = echoes.firstIndex(where: { !$0.sending && $0.problem == nil && $0.turn.text == text }) {
+            echoes[made].sending = true
+            echo = echoes[made].turn.id
+        } else {
+            let made = Echo(turn: Turn(who: .user, text: text), conversation: conversations.shown, sending: true)
+            echoes.append(made)
+            echo = made.turn.id
+        }
         // In the conversation shown, or a new one (obid keeps many, #493); neither for one thread.
         let planned: PlannedTurn
         do {
-            planned = try await runner.planned(said, answer: answer, attachments: attachments, in: conversations.target(said))
+            planned = try await runner.planned(said, answer: answer, attachments: attachments, in: conversations.target(said), id: echo)
         } catch {
             conversations.failed()
+            // Given up (Stop, or other words in their place): they leave the thread. Else they stay, failed.
+            if Task.isCancelled || (error as? URLError)?.code == .cancelled { dropEcho(echo) }
+            else if let at = echoes.firstIndex(where: { $0.turn.id == echo }) { echoes[at].problem = error.localizedDescription }
             throw error
         }
+        // obid listed them before it answered: whatever its event missed, they're its now.
+        dropEcho(echo)
         await conversations.joined(planned.conversation)
         switch planned.result {
         case .question(let said, let question):
@@ -513,6 +644,12 @@ final class RunnerFeed {
     }
 
     /// The runner's answer to Stop or a message, or one of its events: the job with that id.
+    /// A `job` event: what obid adds to the job (its decision, conversation, turn…), then the job.
+    func apply(_ job: Job, extras: RunnerJobExtras?) {
+        if let extras { self.extras[job.id] = extras }
+        apply(job)
+    }
+
     func apply(_ job: Job) {
         if let index = jobs.firstIndex(where: { $0.id == job.id }) { jobs[index] = job } else { jobs.insert(job, at: 0) }
         noticeChanges()
@@ -573,14 +710,15 @@ final class RunnerFeed {
         guard !jobs.contains(where: { $0.id == id }) else { return }
         guard let runner = runner ?? self.runner else { throw RunnerError(message: "Set the runner's URL in Settings to open it.") }
         let asked = runnerChanges
-        let job: Job
-        do { job = try await runner.job(id) } catch let error as RunnerError {
+        let job: Job, more: RunnerJobExtras?
+        do { (job, more) = try await runner.jobWithExtras(id) } catch let error as RunnerError {
             if runnerChanges == asked { gone(id, error.status) }
             throw error
         }
         // Settings › Runner changed while it was on its way: it's the other runner's job.
         guard runnerChanges == asked, !jobs.contains(where: { $0.id == id }) else { return }
         jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
+        if let more { extras[id] = more }
         noticeChanges()
     }
 
@@ -591,11 +729,14 @@ final class RunnerFeed {
         jobs = list
         let asked = runnerChanges
         for id in refetch {
-            let job: Job?
-            do { job = try await runner.job(id) } catch { job = nil; if runnerChanges == asked { gone(id, (error as? RunnerError)?.status) } }
+            let fetched: (Job, RunnerJobExtras?)?
+            do { fetched = try await runner.jobWithExtras(id) } catch { fetched = nil; if runnerChanges == asked { gone(id, (error as? RunnerError)?.status) } }
             // Settings › Runner changed meanwhile: these are the other runner's.
             guard runnerChanges == asked, !Task.isCancelled else { return }
-            if let job { jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created) }
+            if let (job, more) = fetched {
+                jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
+                if let more { extras[id] = more }
+            }
         }
         noticeChanges()
         // Alerts left in Notification Center, from before a drop or a restart, whose job needs nothing now.
@@ -656,7 +797,7 @@ final class RunnerFeed {
         switch notice {
         case .ready: "\(job.publishError == nil ? "Ready to publish" : "Couldn't publish"): \(job.heading)"
         case .failed: "Failed: \(job.heading)"
-        case .interrupted: "Interrupted: \(job.heading)"
+        case .interrupted: "Needs you: \(job.heading)"
         case .review: "Changes requested: \(job.heading)"
         case .question: "Question: \(job.heading)"
         case .merge: "Not merged: \(job.heading)"
@@ -672,6 +813,7 @@ final class RunnerFeed {
         if notice == .question, let question = job.question { return question.text }
         if notice == .permission, let permission = job.permission { return permission.title }
         if notice == .merge { return job.mergeError ?? job.macCheck.map { $0.problem ?? $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? "Not merged" }
+        if notice == .interrupted, let reason = job.reason { return reason }
         return line ?? job.status.rawValue.capitalized
     }
 

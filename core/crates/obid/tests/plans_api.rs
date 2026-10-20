@@ -280,14 +280,17 @@ fn exhausted_retries_keep_exit_and_stderr_in_fallback_evidence() {
         &obid,
         &["EXIT 15 failure 1".into(), "EXIT 15 failure 2".into()],
     );
-    // Rules stand in: "hello" names no repository, so they ask.
+    // Rules don't guess: the turn says the brain failed.
     let answer = said(&obid, "hello");
-    assert_eq!(answer["kind"], "question", "{answer}");
-    assert_eq!(answer["question"]["text"], "Which repository?");
+    assert_eq!(
+        answer["text"],
+        "Oby's brain couldn't answer: Claude Code failed, so nothing was started. Try again.",
+        "{answer}"
+    );
     assert_eq!(calls(&obid).len(), 2);
     assert_eq!(ends(&obid), ["brain_failed"]);
     let record = records(&obid).pop().unwrap();
-    assert_eq!(record["by"], "rules");
+    assert_eq!(record["by"], "none");
     let refused = record["refused"].as_array().unwrap();
     assert_eq!(refused.len(), 1, "{refused:?}");
     for attempt in 1..=2 {
@@ -306,7 +309,10 @@ fn retries_are_limited_to_transient_empty_failures() {
     let folder = Folder::new("brain-retries");
     let obid = started(&folder);
     queue(&obid, &["EXIT 0".into(), "EXIT 0".into()]);
-    assert_eq!(said(&obid, "hello")["kind"], "question");
+    // No brain answered: the turn says so, and rules don't guess.
+    let failed =
+        "Oby's brain couldn't answer: Claude Code failed, so nothing was started. Try again.";
+    assert_eq!(said(&obid, "hello")["text"], failed);
     assert_eq!(calls(&obid).len(), 2);
     let refused = records(&obid).pop().unwrap()["refused"].to_string();
     assert!(
@@ -318,7 +324,7 @@ fn retries_are_limited_to_transient_empty_failures() {
         &obid,
         &["FAIL 1 Please sign in".into(), reply("Never asked.")],
     );
-    assert_eq!(said(&obid, "hello")["kind"], "question");
+    assert_eq!(said(&obid, "hello")["text"], failed);
     assert_eq!(calls(&obid).len(), 3);
     let refused = records(&obid).pop().unwrap()["refused"].to_string();
     assert!(
@@ -425,6 +431,80 @@ fn codex_plans_when_claude_cannot() {
     );
 }
 
+/// When both brains take too long, the reply says which and that nothing started, and is kept in
+/// the conversation.
+#[test]
+fn both_brains_taking_too_long_say_so_and_start_nothing() {
+    let folder = Folder::new("brain-both-slow");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    let agents = planner().parent().unwrap().to_path_buf();
+    config["agents"]["codex"] = json!({"bin": agents.join("fake-codex"), "accounts": []});
+    // Each brain thinks for 2 seconds of its own, well inside the turn: Claude's two tries outlast
+    // them, and fake-codex never answers words with STALL in them.
+    let obid = start_with(
+        &folder.0,
+        &config,
+        Some(&agents),
+        &[("OBID_BRAIN_SECONDS", "2")],
+    );
+    let slow = format!("SLEEP 30 {}", fixes(&[18]));
+    queue(&obid, &[slow.clone(), slow]);
+    let answer = said(&obid, "fix fixture-app #18 STALL");
+    let words = "Oby's brain couldn't answer: Claude Code and Codex both took too long, so nothing was started. Try again.";
+    assert_eq!(answer["text"], words, "{answer}");
+    assert_eq!(answer["jobs"], json!([]));
+    assert!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(last_oby_turn(&obid)["text"], words);
+    assert_eq!(ends(&obid), ["brain_failed"]);
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["by"], "none");
+    let refused = record["refused"].to_string();
+    assert!(refused.contains("attempt 1: timeout"), "{refused}");
+    assert!(
+        refused.contains("codex failed: Codex took too long."),
+        "{refused}"
+    );
+}
+
+/// On a very busy Mac, once Claude has taken too long Codex isn't asked: it would crawl too, and
+/// the owner hears now, told why.
+#[test]
+fn a_very_busy_mac_says_so_after_one_slow_brain() {
+    let folder = Folder::new("brain-busy");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    let agents = planner().parent().unwrap().to_path_buf();
+    config["agents"]["codex"] = json!({"bin": agents.join("fake-codex"), "accounts": []});
+    let obid = start_with(
+        &folder.0,
+        &config,
+        Some(&agents),
+        &[("OBID_LOAD", "512.3"), ("OBID_BRAIN_SECONDS", "2")],
+    );
+    let slow = format!("SLEEP 30 {}", reply("Late."));
+    queue(&obid, &[slow.clone(), slow]);
+    let answer = said(&obid, "how is it going?");
+    assert_eq!(
+        answer["text"],
+        "Oby's brain couldn't answer: Claude Code took too long, so nothing was started. The Mac is very busy (load 512): try again once it calms down.",
+        "{answer}"
+    );
+    let record = records(&obid).pop().unwrap();
+    let refused = record["refused"].to_string();
+    assert!(
+        refused.contains("codex skipped: the Mac is very busy"),
+        "{refused}"
+    );
+    assert_eq!(record["calls"].as_array().unwrap().len(), 2, "{record}");
+}
+
 // ---------------------------------------------------------------------------------------------
 // What each brain turn spent (#533): one entry per model call in the turn's record.
 
@@ -515,10 +595,13 @@ fn a_run_out_of_turns_is_a_failed_call_with_its_subtype() {
         &obid,
         &[result_line("error_max_turns", serde_json::Value::Null)],
     );
-    // Rules stand in: "hello" names no repository, so they ask.
-    assert_eq!(said(&obid, "hello")["kind"], "question");
+    // No brain answered: the turn says so, and rules don't guess.
+    assert_eq!(
+        said(&obid, "hello")["text"],
+        "Oby's brain couldn't answer: Claude Code failed, so nothing was started. Try again."
+    );
     let record = records(&obid).pop().unwrap();
-    assert_eq!(record["by"], "rules");
+    assert_eq!(record["by"], "none");
     let calls = record["calls"].as_array().unwrap();
     assert_eq!(calls.len(), 1, "{record}");
     assert_eq!(calls[0]["outcome"], "failed");
@@ -725,7 +808,12 @@ fn the_brain_reads_the_conversation_and_may_stop_one_job() {
     );
     let args = read(calls[0].join("args"));
     assert!(
-        args.contains("--tools\nRead\n--allowedTools\nRead\n--max-turns\n6\n"),
+        args.contains("--tools\nRead\n--allowedTools\nRead(./work.md)\n"),
+        "{args}"
+    );
+    assert!(args.contains("--max-turns\n6\n"), "{args}");
+    assert!(
+        args.contains("--disallowedTools\nRead(./login/**)\n"),
         "{args}"
     );
     assert!(args.contains("quoted in the file work.md"));
@@ -844,7 +932,7 @@ fn a_brain_that_may_read_is_boxed() {
     running(&obid, "Vault secrets");
     queue(&obid, &[peek]);
     assert_eq!(said(&obid, "anything to read?")["text"], "hidden");
-    assert!(read(calls(&obid)[1].join("args")).contains("--allowedTools\nRead\n"));
+    assert!(read(calls(&obid)[1].join("args")).contains("--allowedTools\nRead(./work.md)\n"));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1471,6 +1559,31 @@ fn stop_reaches_only_its_own_conversation() {
     assert_eq!(second["text"], "Second.", "{second}");
 }
 
+/// A planned check replaces the repository's own only when the owner names it as the check:
+/// words that hold it in passing leave `node --test`.
+#[test]
+fn a_planned_check_replaces_the_repositorys_only_when_the_owner_said_it() {
+    let folder = Folder::new("brain-check-kept");
+    let obid = started(&folder);
+    let dispatch = |check: &str| {
+        json!({"action": "dispatch", "reply": "On it.", "question": null, "jobs": [], "dispatches": [
+            {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "fix", "title": "Greeting fix",
+             "task": "Fix the greeting", "rounds": 1, "check": check}]})
+        .to_string()
+    };
+    let check_of = |answer: &serde_json::Value| {
+        let id = answer["jobs"][0]["id"].as_str().unwrap().to_owned();
+        call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["check"].clone()
+    };
+    queue(&obid, &[dispatch("true")]);
+    let weaker = said(&obid, "fix the greeting so isAdmin returns true for owners");
+    assert_eq!(check_of(&weaker), "node --test", "{weaker}");
+    let named = "node --test --test-name-pattern=greet";
+    queue(&obid, &[dispatch(named)]);
+    let owners = said(&obid, &format!("fix the greeting. Check: {named}"));
+    assert_eq!(check_of(&owners), named, "{owners}");
+}
+
 /// A brain dispatch can't start a job in Bypass mode: it waits as a confirm item whose title,
 /// made by obid from the job, says so; the owner's Confirm starts it (review on #551, N1).
 #[test]
@@ -1771,8 +1884,8 @@ fn get_job(obid: &Obid, id: &str) -> serde_json::Value {
 fn one_message_tries_a_failed_job_again_and_dismisses_the_old_one() {
     let folder = Folder::new("brain-try-again");
     let obid = started(&folder);
-    let notch = job_that(&obid, "Notch three screens", "FAIL", None, "failed");
-    let old = job_that(&obid, "Old PR job", "FAIL", None, "failed");
+    let notch = job_that(&obid, "Notch three screens", "FAIL", None, "interrupted");
+    let old = job_that(&obid, "Old PR job", "FAIL", None, "interrupted");
     let (notch, old) = (notch["id"].as_str().unwrap(), old["id"].as_str().unwrap());
     let events = follow_events(&obid);
     queue(
@@ -1851,8 +1964,8 @@ fn work_a_failed_job_left_goes_on_in_it_unless_the_user_starts_over() {
         answer.text
     );
     let vault = answer.body["id"].as_str().unwrap().to_owned();
-    within(30, "the vault job failed", || {
-        (get_job(&obid, &vault)["status"] == "failed").then_some(())
+    within(30, "the vault job needs you", || {
+        (get_job(&obid, &vault)["status"] == "interrupted").then_some(())
     });
     queue(
         &obid,
@@ -1959,7 +2072,7 @@ fn the_user_tells_a_running_job_something() {
 fn a_dismissed_job_gets_a_follow_up_too() {
     let folder = Folder::new("brain-message-dismissed");
     let obid = started(&folder);
-    let job = job_that(&obid, "Docs line", "FAIL", None, "failed");
+    let job = job_that(&obid, "Docs line", "FAIL", None, "interrupted");
     let id = job["id"].as_str().unwrap().to_owned();
     let dismissed = call(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None);
     assert_eq!(dismissed.status, 200, "{}", dismissed.text);
@@ -1971,7 +2084,7 @@ fn a_dismissed_job_gets_a_follow_up_too() {
     assert_eq!(next["followUpOf"], json!(id));
     assert_eq!(next["request"], "Tell the docs job to add one more line");
     let first = get_job(&obid, &id);
-    assert_eq!(first["status"], "failed");
+    assert_eq!(first["status"], "interrupted");
     assert!(first["dismissed"].is_string(), "{first}");
     assert!(items_of(&obid, "confirm").is_empty());
 }
@@ -1997,12 +2110,9 @@ fn telling_a_finished_job_something_starts_a_follow_up() {
     assert_eq!(cards.len(), 1, "{answer}");
     let next = cards[0]["id"].as_str().unwrap().to_owned();
     assert_ne!(next, id);
+    // Titled as a follow-up, never with the words themselves.
     let title = cards[0]["title"].as_str().unwrap();
-    assert!(
-        title.starts_with("One more thing for the vault job: REPORT, and [redacted: ")
-            && !title.contains(token),
-        "{title}"
-    );
+    assert_eq!(title, "Follow-up: Vault secrets");
     assert_eq!(
         answer["text"],
         format!(
@@ -2016,6 +2126,8 @@ fn telling_a_finished_job_something_starts_a_follow_up() {
         (job["status"] == "done").then_some(job)
     });
     assert_eq!(follow["followUpOf"], json!(id));
+    // Its parent isn't this conversation's (POST /v1/jobs), so neither is it: no turn here names it.
+    assert!(follow["turn"].is_null(), "{follow}");
     for key in [
         "kind",
         "agent",
@@ -2280,6 +2392,9 @@ fn a_plan_starts_its_jobs_and_links_them_to_the_turn() {
         turns.as_array().unwrap().last().unwrap()["jobs"],
         json!(ids)
     );
+    // Each names the words that started it, so its card shows under them as it starts.
+    let user = turn_of(&obid, "fix fixture-app #176 and review PR 33");
+    assert!(jobs.iter().all(|j| j["turn"] == user.as_str()), "{jobs:?}");
     assert_eq!(call(&obid, "GET", "/v1/inbox", None).body, json!([]));
     assert_eq!(ends(&obid), ["started_jobs"]);
 }
@@ -2683,6 +2798,8 @@ fn research_then_dispatch_waits_for_start() {
     assert_eq!(jobs.as_array().unwrap().len(), 1);
     assert_eq!(jobs[0]["title"], "Greeting fix");
     assert_eq!(started.body["job"], jobs[0]["id"]);
+    // Started by the Start, not by the words: no turn of the conversation started it.
+    assert!(jobs[0]["turn"].is_null(), "{jobs}");
 }
 
 /// A dispatch after research, with what the turn found (#540).
@@ -3716,13 +3833,17 @@ fn clone_fixture(folder: &Folder, obid: &Obid) -> PathBuf {
     clone
 }
 
-/// #543's acceptance: "run the tests in fixture-app", with its AGENTS.md naming its test command,
-/// dispatches a job whose check is that command; the brain read it in work.md, never in its
-/// prompt, with the vault's secrets taken out.
+/// #543's acceptance: "run the tests in fixture-app", with its AGENTS.md naming its test command
+/// and no check configured for it, dispatches a job whose check is that command; the brain read
+/// it in work.md, never in its prompt, with the vault's secrets taken out. (A configured check
+/// stands over it: `a_planned_check_replaces_the_repositorys_only_when_the_owner_said_it`.)
 #[test]
 fn run_the_tests_takes_the_check_from_the_repositorys_own_instructions() {
     let folder = Folder::new("brain-own-check");
-    let obid = started(&folder);
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    config["repos"][0]["check"] = serde_json::Value::Null;
+    let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
     commit_to_remote(&folder, &[("AGENTS.md", &rules())]);
     clone_fixture(&folder, &obid);
     queue(&obid, &["CHECK obi-e2e/fixture-app".into()]);
@@ -3973,7 +4094,10 @@ fn no_extra_step_after_a_brain_failure() {
         &obid,
         "ask before anything on Vault secrets, then fix fixture-app #18",
     );
-    assert_eq!(answer["text"], "Vault secrets is in Ask mode now.");
+    assert_eq!(
+        answer["text"],
+        "Vault secrets is in Ask mode now. Then Oby's brain couldn't answer: Claude Code failed. Say “continue” for the rest."
+    );
     assert!(!checked(&obid));
     assert_eq!(calls(&obid).len(), 3);
     assert_eq!(ends(&obid), ["brain_failed"]);
@@ -4185,19 +4309,22 @@ fn a_later_step_with_no_time_left_to_think_ends_budget_spent() {
     let folder = Folder::new("brain-no-time-left");
     let remote = fixture(&folder.0.join("fixture"));
     let mut config = config(&folder.0, &remote, &planner());
-    config["turnBudget"] = json!(3);
+    config["turnBudget"] = json!(20);
+    config["leastThink"] = json!(10);
     let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
     let id = running(&obid, "Vault secrets")["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    // Step 0's first try times out at half the budget; its retry plans with under a second left
-    // for step 1, which no adapter starts.
+    // Step 0's first try outlasts the budget, so its retry starts beside it at half the budget
+    // and plans with under 10 seconds left for step 1, which no adapter starts. Starting
+    // processes on a busy machine only takes from what's left, and has 9 seconds before the plan
+    // comes after the budget (#763).
     queue(
         &obid,
         &[
-            format!("SLEEP 5 {}", reply("")),
-            format!("SLEEP 0.9 {}", set_mode(&id, "ask")),
+            format!("SLEEP 25 {}", reply("")),
+            format!("SLEEP 0.6 {}", set_mode(&id, "ask")),
         ],
     );
     let answer = said(&obid, "ask before anything on Vault secrets");
@@ -4219,7 +4346,7 @@ fn a_brain_failure_after_research_says_what_was_looked_at() {
         &[search("Hello"), "EXIT 15".into(), "EXIT 15".into()],
     );
     let answer = said(&obid, "where does the app say hello?");
-    let words = "Oby searched obi-e2e/fixture-app for “Hello”, then couldn't think it through: say “continue” to pick up from there.";
+    let words = "Oby searched obi-e2e/fixture-app for “Hello”, then its brain couldn't answer: Claude Code failed. Say “continue” to pick up from there.";
     assert_eq!(answer["text"], words, "{answer}");
     assert_eq!(last_oby_turn(&obid)["text"], words);
     assert_eq!(ends(&obid), ["brain_failed"]);
@@ -4328,4 +4455,163 @@ fn reading_the_same_job_again_and_again_ends_the_turn() {
     );
     assert_eq!(calls(&obid).len(), 3);
     assert_eq!(ends(&obid), ["repeated"]);
+}
+
+/// An app's Try again, after an answer it lost, sends the same words with the same `id`: obid has
+/// them, adds nothing and starts nothing, wherever the app sends them. The user's turn takes the
+/// id the app gave it, so the app's own copy of the words gives way to it; an id that isn't a
+/// lower-case UUID is refused.
+#[test]
+fn the_same_words_sent_again_with_their_id_are_kept_once() {
+    let folder = Folder::new("brain-repeat-id");
+    let obid = started(&folder);
+    queue(&obid, &[reply("Ready"), reply("Again")]);
+    let id = "0b1e0c0a-0000-4000-8000-000000000001";
+    let first = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "hello", "id": id})),
+    );
+    assert_eq!(first.status, 200, "{}", first.text);
+    assert_eq!(first.body["text"], "Ready");
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    let again = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "hello", "id": id, "new": true})),
+    );
+    assert_eq!(again.status, 200, "{}", again.text);
+    assert_eq!(
+        (
+            &again.body["kind"],
+            &again.body["repeated"],
+            &again.body["conversation"]
+        ),
+        (&json!("none"), &json!(true), &json!(conversation)),
+        "{}",
+        again.text
+    );
+    assert_eq!(calls(&obid).len(), 1, "the brain ran once");
+    let page = call(
+        &obid,
+        "GET",
+        &format!("/v1/conversation?id={conversation}"),
+        None,
+    )
+    .body;
+    let users: Vec<&serde_json::Value> = page
+        .as_array()
+        .unwrap_or_else(|| panic!("{page}"))
+        .iter()
+        .filter(|t| t["who"] == "user")
+        .collect();
+    assert_eq!(users.len(), 1, "{page}");
+    assert_eq!(users[0]["id"], id);
+    let bad = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "hello", "id": "not-a-uuid"})),
+    );
+    assert_eq!(bad.status, 422, "{}", bad.text);
+    // The id with other words, or in another conversation, isn't these words again: refused.
+    let other = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "goodbye", "id": id, "conversation": conversation})),
+    );
+    assert_eq!(other.status, 409, "{}", other.text);
+    let elsewhere = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "elsewhere", "new": true})),
+    );
+    assert_eq!(elsewhere.status, 200, "{}", elsewhere.text);
+    let elsewhere = elsewhere.body["conversation"].as_str().unwrap().to_owned();
+    let moved = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "hello", "id": id, "conversation": elsewhere})),
+    );
+    assert_eq!(moved.status, 409, "{}", moved.text);
+    assert_eq!(
+        calls(&obid).len(),
+        2,
+        "only the new conversation's words ran"
+    );
+}
+
+/// A follow-up's proposal closes by itself once that work merged after it was proposed: the
+/// reason above the owner's words, no options, nothing started.
+#[test]
+fn a_follow_ups_proposal_closes_once_its_work_merged() {
+    let folder = Folder::new("brain-proposal-merged");
+    let mut done = ended(
+        "a7e4a6e1",
+        "Average helper empty lists",
+        obid::job::Status::Done,
+        1,
+        None,
+    );
+    // Its pull request merged an hour from now: after any proposal made in this test.
+    let later = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 3600;
+    done.published = Some("https://github.com/obi-e2e/fixture-app/pull/9".into());
+    done.pull_request = Some(obid::github::PullRequest {
+        state: "MERGED".into(),
+        review_decision: None,
+        base: "main".into(),
+        merged_at: Some(later),
+        checked_at: later,
+        head: None,
+    });
+    let obid = started_with(&folder, &[done]);
+    queue(
+        &obid,
+        &[
+            research(vec![lookup(
+                "list_files",
+                json!({"repo": "obi-e2e/fixture-app"}),
+            )]),
+            message_plan("a7e4a6e1"),
+            reply(""),
+        ],
+    );
+    said(&obid, "and skip the Watch target there");
+    let done_items = call(&obid, "GET", "/v1/inbox?state=done", None).body;
+    let closed = done_items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "start")
+        .unwrap_or_else(|| {
+            panic!(
+                "{done_items} / {}",
+                call(&obid, "GET", "/v1/inbox", None).text
+            )
+        });
+    let text = closed["text"].as_str().unwrap();
+    assert!(
+        text.starts_with(
+            "Closed by Oby: Average helper empty lists's work merged after this was proposed.\n\nOby looked into it first."
+        ) && text.contains("Your words:\nand skip the Watch target there"),
+        "{closed}"
+    );
+    assert_eq!(closed["options"], json!([]));
+    assert_eq!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }

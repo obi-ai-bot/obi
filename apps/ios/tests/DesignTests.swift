@@ -91,9 +91,9 @@ struct DesignTests {
         let since = ISO8601DateFormatter().date(from: "2026-10-09T23:00:00Z")!
         let items = PhoneWork.items([needs, running, queued, done], since: since, seen: [])
         // Only Tasks hold anything, yet Review PR and Issues are chips too, in Home's order.
-        #expect(WorkList.kinds(items).map(\.label) == ["Review PR", "Issues", "Tasks"])
-        #expect(WorkList.kinds(items).map(\.needs) == [0, 0, 1])
-        #expect(WorkList.kinds([] as [WorkList.Item<Job>]).map(\.label) == ["Review PR", "Issues", "Tasks"])
+        #expect(WorkList.kinds(items).map(\.label) == ["Review PR", "Issues", "Tasks", "Routines"])
+        #expect(WorkList.kinds(items).map(\.needs) == [0, 0, 1, 0])
+        #expect(WorkList.kinds([] as [WorkList.Item<Job>]).map(\.label) == ["Review PR", "Issues", "Tasks", "Routines"])
         // Running: up to three open tasks, what needs you before the rest; each says what it's on.
         let rows = PhoneWork.running(items)
         #expect(rows.map(\.id) == ["n", "q", "r"])
@@ -235,6 +235,35 @@ struct DesignTests {
         #expect(TaskFacts.facts(done).map(\.name) == ["Repository", "Branch", "Base", "Model"])
         let running = try job("r", "running", extra: #", "rounds": 4, "round": 2"#)
         #expect(running.maxRounds == 4 && running.currentRound == 2)
-        #expect(TaskFacts.box(running) == "Tell Claude Code…")
+        #expect(TaskFacts.box(running) == "Tell Oby about this task…")
+    }
+
+    /// The job page's facts (#739) read into the phone's Job from each of the canvas's states, the
+    /// stages' times with them, and a job from today's obid, without them, still reads.
+    @Test func theJobPagesFactsRead() throws {
+        let now = Date(timeIntervalSince1970: 1_791_582_173)
+        for fixture in JobPageFixture.allCases {
+            let job = try Runner.decoder.decode(Job.self, from: fixture.json(now: now))
+            #expect(job.facts.estimate != nil && job.facts.usage?.tokens != nil, "\(fixture)")
+            #expect(job.facts.stages["prepare"]?.finished != nil, "\(fixture)")
+            #expect(try Runner.decoder.decode(Job.self, from: Runner.encoder.encode(job)) == job, "\(fixture)")
+            let bare = try Runner.decoder.decode(Job.self, from: fixture.json(now: now, bare: true))
+            #expect(bare.facts == JobFacts(), "\(fixture)")
+        }
+        // One part this phone can't read is left out: the job, and the list it's in, still read.
+        var odd = try #require(JSONSerialization.jsonObject(with: JobPageFixture.working.json(now: now)) as? [String: Any])
+        odd["estimate"] = ["low": 60]
+        odd["checks"] = "x"
+        var pipeline = try #require(odd["pipeline"] as? [String: Any])
+        var stages = try #require(pipeline["stages"] as? [[String: Any]])
+        stages[0]["started"] = "nope"
+        pipeline["stages"] = stages
+        odd["pipeline"] = pipeline
+        let list = try Runner.decoder.decode([Job].self, from: JSONSerialization.data(withJSONObject: [odd, odd]))
+        #expect(list.count == 2 && list[0].facts.estimate == nil && list[0].facts.checks == nil)
+        #expect(list[0].facts.stages["prepare"]?.started == nil && list[0].facts.usage?.tokens != nil)
+        let needs = try Runner.decoder.decode(Job.self, from: JobPageFixture.needs.json(now: now))
+        #expect(needs.facts.waited == 120)
+        #expect(JobClock.of(needs, facts: needs.facts, mode: needs.mode, needs: true, now: now).aside(compact: true) == "Paused · then 9–13m")
     }
 }

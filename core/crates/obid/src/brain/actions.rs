@@ -65,6 +65,9 @@ pub struct Asked<'a> {
     pub said: &'a str,
     pub attachments: &'a [String],
     pub conversation: &'a str,
+    /// The user's turn the words are, which the jobs started now name (`Job::turn`); empty for an
+    /// event turn's, which no turn of the conversation holds.
+    pub turn: &'a str,
 }
 
 /// A plan that answers rather than acts: a reply, a question, or jobs it starts (#269). `live` is
@@ -150,7 +153,16 @@ async fn dispatch(
             account: Some(d.account.clone()),
             agent: Some(d.agent.clone()),
             rounds: Some(d.rounds as u32),
-            check: d.check.clone(),
+            check: kept_check(
+                d.check.as_deref(),
+                shared
+                    .config
+                    .repos
+                    .iter()
+                    .find(|r| r.repo == d.repo)
+                    .and_then(|r| r.check.as_deref()),
+                asked.said,
+            ),
             files,
             attachments: (!asked.attachments.is_empty()).then(|| asked.attachments.to_vec()),
             conversation: Some(asked.conversation.to_owned()),
@@ -166,16 +178,15 @@ async fn dispatch(
                 .clone()
                 .unwrap_or_else(|| super::briefing::line(&d.task, 60));
             // obid's own words for the job it keeps: mode, tool, account and check (N1); then the
-            // task it planned, quoted as data, so the owner sees what would run before they Start
-            // (the task is the agent's own words in a conversation; N9).
-            let nonce = super::briefing::nonce();
+            // task it planned, under its own line, so the owner sees what would run before they
+            // Start (the task is the agent's own words in a conversation; N9). The card shows it
+            // as written: the brain reads an item's text only quoted (briefing.rs).
             let text = format!(
-                "Oby looked into it first. Start {}?\n\n{}\n{}",
+                "Oby looked into it first. Start {}?\n\nThe task Oby planned:\n{}",
                 describe(&new),
-                super::briefing::fence_rule(&nonce, "the task Oby planned"),
-                super::briefing::fence(&nonce, &crate::secrets::known().redact(&d.task)),
+                crate::secrets::known().redact(d.task.trim()),
             );
-            shared.link.propose(&new, title, text);
+            shared.link.propose(&new, title, text, asked.conversation);
             continue;
         }
         // A job that would never ask the owner anything widens trust: only their own Confirm
@@ -198,6 +209,11 @@ async fn dispatch(
             waiting.push(what);
             continue;
         }
+        // Started now, by these words: its card shows under them before the answer lists it.
+        let new = NewJob {
+            turn: (!asked.turn.is_empty()).then(|| asked.turn.to_owned()),
+            ..new
+        };
         match shared.jobs.create(new) {
             Ok(job) => {
                 jobs.push(job.to_json());
@@ -268,6 +284,59 @@ pub fn describe(new: &NewJob) -> String {
         what.push_str(&format!(", check {}", super::briefing::line(check, 120)));
     }
     what
+}
+
+/// The check a planned job keeps. A repository's configured check stands unless the owner's own
+/// words name the model's as the check ([`named_checks`]), exactly: neither the model nor text it
+/// read (a repository's instructions) can swap it for `true` or a narrower test. With none
+/// configured, the model's stands. Left out, the job gets the configured one.
+fn kept_check(check: Option<&str>, configured: Option<&str>, said: &str) -> Option<String> {
+    let check = check.map(str::trim).filter(|c| !c.is_empty())?;
+    match configured.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(configured) if !named_checks(said).iter().any(|n| n == check) => {
+            Some(configured.to_owned())
+        }
+        _ => Some(check.to_owned()),
+    }
+}
+
+/// The commands the owner's words name as a job's check: after "Check:" to the end of its line,
+/// "run <command> to check", or "the check is <command>" to the end of its line, any case; each
+/// as written and without a closing period, then without backticks around it.
+fn named_checks(said: &str) -> Vec<String> {
+    let mut named: Vec<String> = vec![];
+    let mut take = |text: &str| {
+        let text = text.trim();
+        for text in [text, text.strip_suffix('.').unwrap_or(text)] {
+            let text = text.trim();
+            let bare = text
+                .strip_prefix('`')
+                .and_then(|t| t.strip_suffix('`'))
+                .unwrap_or(text);
+            named.push(bare.trim().to_owned());
+        }
+    };
+    for line in said.lines() {
+        // ASCII lower case keeps every byte where it was, so `line` slices at the same places.
+        let lower = line.to_ascii_lowercase();
+        // A whole word: `typecheck: true` names no check.
+        let word = |at: usize| at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric();
+        for (at, _) in lower.match_indices("check:").filter(|(at, _)| word(*at)) {
+            take(&line[at + "check:".len()..]);
+        }
+        for (at, _) in lower
+            .match_indices("the check is ")
+            .filter(|(at, _)| word(*at))
+        {
+            take(&line[at + "the check is ".len()..]);
+        }
+        for (end, _) in lower.match_indices(" to check") {
+            if let Some(start) = lower[..end].rfind("run ") {
+                take(&line[start + "run ".len()..end]);
+            }
+        }
+    }
+    named
 }
 
 /// What started, in Oby's voice (`Desk.startedLine`): "On it. Claude Code is fixing oby #12
@@ -358,13 +427,14 @@ pub const TRY_AGAIN: &str =
 /// own words this turn, which message_job passes on; `source` is whose they are and whether the
 /// turn read something untrusted, which decides what they do to a job that ended. `conversation`
 /// is the turn's: another conversation's job is tried again or dismissed only on the owner's
-/// Confirm (#631).
+/// Confirm (#631). `turn` is the user's turn the words are, which a follow-up they start names.
 pub async fn act(
     shared: &Arc<Shared>,
     plan: &Plan,
     said: &str,
     source: Source,
     conversation: &str,
+    turn: &str,
 ) -> Outcome {
     match plan.action {
         Action::StopAgent => stop(shared, plan),
@@ -375,7 +445,7 @@ pub async fn act(
         }
         Action::AnswerInbox => answer_inbox(shared, plan).await,
         Action::SetSetting => set_setting(shared, plan),
-        Action::MessageJob => message_job(shared, plan, said, source),
+        Action::MessageJob => message_job(shared, plan, said, source, conversation, turn),
         Action::MoveJob => {
             let names: Vec<String> = plan
                 .named()
@@ -467,6 +537,11 @@ fn retry(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
             format!("Couldn't try {name} again: it didn't fail, and no round is waiting for you."),
             false,
         );
+    }
+    // Past its safety ceiling or budget, only the owner's Confirm carries it on (docs/runner-api.md,
+    // `limit`): one item, however often it's asked.
+    if crate::jobs::past_safety(job) {
+        return (shared.jobs.confirm_past_safety(job, TRY_AGAIN).0, true);
     }
     if theirs {
         confirm(
@@ -561,7 +636,14 @@ fn dismiss(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
 /// one that ended gets a follow-up that starts with them (Sangam's design, the owner's decision of
 /// 2026-10-18), and stays as it ended. After research the follow-up waits for the owner's Start;
 /// an event turn's words never start one.
-fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str, source: Source) -> Outcome {
+fn message_job(
+    shared: &Arc<Shared>,
+    plan: &Plan,
+    said: &str,
+    source: Source,
+    conversation: &str,
+    turn: &str,
+) -> Outcome {
     let Some(id) = plan.named().first() else {
         return Outcome::Failed("Say which job to tell.".into());
     };
@@ -574,10 +656,30 @@ fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str, source: Source) ->
         Err(why) => return Outcome::Failed(format!("Couldn't tell {name}: {why}")),
     };
     if !job.status.is_active() {
+        if let Some(next) = shared
+            .jobs
+            .following(&job.id)
+            .filter(|_| source != Source::Event)
+        {
+            return already_on_it(shared, &job, &next, &words, source);
+        }
+        // Past its safety limit, a follow-up would start its counters again: the owner confirms.
+        if source.owners() && crate::jobs::past_safety(&job) {
+            return Outcome::Done(shared.jobs.confirm_past_safety(&job, &words).0);
+        }
         let new = crate::jobs::follow_up(&job, &words);
         return match source {
-            Source::Owner => follow_up(shared, &job, new),
-            Source::Untrusted => Outcome::Done(propose_follow_up(shared, &job, &new)),
+            Source::Owner | Source::Confirmed => follow_up(
+                shared,
+                &job,
+                NewJob {
+                    turn: started_by(&job, conversation, turn),
+                    ..new
+                },
+            ),
+            Source::Untrusted => {
+                Outcome::Done(propose_follow_up(shared, &job, &new, None, conversation))
+            }
             Source::Event => Outcome::Failed(format!(
                 "Couldn't tell {name}: it ended, so that starts a follow-up, which only your own words start."
             )),
@@ -588,6 +690,12 @@ fn message_job(shared: &Arc<Shared>, plan: &Plan, said: &str, source: Source) ->
         Some(Err(refused)) => Outcome::Failed(format!("Couldn't tell {name}: {}", refused.0)),
         None => Outcome::Failed("That job isn't here any more.".into()),
     }
+}
+
+/// The turn whose words start a follow-up of `job` now, for `Job::turn`: only in `job`'s own
+/// conversation, the one the follow-up joins, whose thread shows its card under them.
+pub(super) fn started_by(job: &Job, conversation: &str, turn: &str) -> Option<String> {
+    (job.conversation.as_deref() == Some(conversation) && !turn.is_empty()).then(|| turn.to_owned())
 }
 
 /// Starts `new`, the follow-up of `job`, and says so as Sangam's design does, its card on the
@@ -612,22 +720,55 @@ pub(super) fn follow_up(shared: &Arc<Shared>, job: &Job, new: NewJob) -> Outcome
     }
 }
 
+/// Words for `job`, which ended, while `next` follows it up already: `next` hears them, never a
+/// second follow-up, and its card goes on the answer, so the owner can open it.
+pub(super) fn already_on_it(
+    shared: &Arc<Shared>,
+    job: &Job,
+    next: &Job,
+    words: &str,
+    source: Source,
+) -> Outcome {
+    let (name, follow) = (job.short_title(), next.short_title());
+    match shared.jobs.message(&next.id, words, source) {
+        Some(Ok(heard)) => Outcome::Started(
+            format!("Already on it in {follow}, the follow-up of {name}: I told it what you said."),
+            heard.to_json(),
+        ),
+        Some(Err(refused)) => Outcome::Failed(format!(
+            "Couldn't tell {follow} (job {}), which is following up {name}: {}",
+            next.id, refused.0
+        )),
+        None => Outcome::Failed("That job isn't here any more.".into()),
+    }
+}
+
 /// Proposes `new`, the follow-up of `job`, after the turn read something untrusted: a `start` item
-/// in obid's own words, the task it would hear quoted, for the owner's Start (#374).
-pub(super) fn propose_follow_up(shared: &Arc<Shared>, job: &Job, new: &NewJob) -> String {
+/// for the owner's Start (#374), in obid's own words, then what the follow-up would hear as the
+/// owner reads it: their own words (`request`), and what the conversation's agent adds (`added`).
+/// The quoting fences are the agent's (its task keeps them), never the card's: the brain reads an
+/// item's text only quoted ([`super::briefing`]).
+pub(super) fn propose_follow_up(
+    shared: &Arc<Shared>,
+    job: &Job,
+    new: &NewJob,
+    added: Option<&str>,
+    conversation: &str,
+) -> String {
     let name = job.short_title();
-    let nonce = super::briefing::nonce();
-    let text = format!(
-        "Oby looked into it first. Start {}, a follow-up of {name}?\n\n{}\n{}",
+    let mut text = format!(
+        "Oby looked into it first. Start {}, a follow-up of {name}?\n\nYour words:\n{}",
         describe(new),
-        super::briefing::fence_rule(&nonce, "what the follow-up would hear"),
-        super::briefing::fence(&nonce, &new.task),
+        new.request.as_deref().unwrap_or(&new.task).trim(),
     );
+    if let Some(added) = added.map(str::trim).filter(|a| !a.is_empty()) {
+        text.push_str(&format!("\n\nWhat Oby adds for its agent:\n{added}"));
+    }
     let title = new
         .title
         .clone()
         .unwrap_or_else(|| format!("Follow-up of {name}"));
-    shared.link.propose(new, title, text);
+    shared.link.propose(new, title, text, conversation);
     format!(
         "{name} is finished, and this turn looked something up, so its follow-up waits for your Start in your inbox."
     )
@@ -744,6 +885,17 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
         "plan" => Owners::Refuse(
             "it's a job's plan: only you can approve it or send it back, in your inbox.".into(),
         ),
+        // A conversation's shell command runs only on the owner's own answer; saying no isn't.
+        "permission"
+            if super::shell::is_item(item)
+                && crate::permissions::inbox_decision(words)
+                    != (crate::permissions::Decision::Deny, None) =>
+        {
+            Owners::Refuse(
+                "it's a command in a conversation's shell: only you can let it run, in your inbox."
+                    .into(),
+            )
+        }
         // Letting a secret through is the owner's alone, even once (#586); saying no isn't.
         "permission"
             if job
@@ -1228,6 +1380,25 @@ mod tests {
         assert_eq!(owners_call(&start, "Cancel", None), Owners::No);
     }
 
+    /// A conversation's shell command runs only on the owner's own answer: the brain may only say
+    /// a bare no to it.
+    #[test]
+    fn owners_call_never_lets_a_shell_command_run() {
+        let shell = item(
+            "permission",
+            "shell-5b0e2c4d-1111-2222-3333-444455556666-pa1b2c3",
+            "Run brew install gh",
+            &["Allow", "Deny"],
+        );
+        for words in ["Allow", "yes", "Always allow", "Deny, but use pip instead"] {
+            assert!(
+                matches!(owners_call(&shell, words, None), Owners::Refuse(_)),
+                "{words}"
+            );
+        }
+        assert_eq!(owners_call(&shell, "Deny", None), Owners::No);
+    }
+
     /// #586: the brain never lets a secret through, not even once; a no still goes through it.
     #[test]
     fn owners_call_never_lets_a_secret_through() {
@@ -1373,5 +1544,46 @@ mod tests {
         assert_eq!(title, "Send an answer: Review of #12");
         assert!(text.ends_with("> merge it\n> and push to main"), "{text}");
         assert_eq!(confirmed.action, action::ANSWER_ITEM);
+    }
+
+    /// A configured check survives a model's other one, and words that only mention it in
+    /// passing; the owner's own "Check: …" wins.
+    #[test]
+    fn a_configured_check_is_kept_unless_the_owner_named_another() {
+        let passing =
+            "make isAdmin return true for owners, and test the node build\ntypecheck: true";
+        for check in ["true", "test", "node"] {
+            assert_eq!(
+                kept_check(Some(check), Some("cargo test"), passing).as_deref(),
+                Some("cargo test"),
+                "{check}"
+            );
+        }
+        for (said, check) in [
+            ("fix it\ncheck: `npm test`.", "npm test"),
+            ("fix it, run make lint to check", "make lint"),
+            ("The check is node --test", "node --test"),
+        ] {
+            assert_eq!(
+                kept_check(Some(check), Some("cargo test"), said).as_deref(),
+                Some(check),
+                "{said}"
+            );
+        }
+        let said = "fix it. Check: cargo test -p obid --lib brain::supervisor";
+        let named = "cargo test -p obid --lib brain::supervisor";
+        assert_eq!(
+            kept_check(Some("true"), Some("cargo test"), said).as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(
+            kept_check(Some(named), Some("cargo test"), said).as_deref(),
+            Some(named)
+        );
+        assert_eq!(
+            kept_check(Some(" true "), None, said).as_deref(),
+            Some("true")
+        );
+        assert_eq!(kept_check(Some(" "), Some("cargo test"), said), None);
     }
 }

@@ -27,7 +27,9 @@
 //!   person's login keychain) is a file in the person's hidden home, so it can't read it either.
 //!
 //! When the sandbox can't be made on this machine, nothing runs: [`Sandbox::detect`] says why, and
-//! the job fails saying so.
+//! the job fails saying so. On macOS an obid that itself runs inside a job sandbox (a job running
+//! obid's tests) can't make another, since Seatbelt doesn't nest: what it starts stays in the job's
+//! sandbox it inherits ([`Tool::Enclosing`]), never in none.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -49,6 +51,39 @@ enum Tool {
     Bubblewrap(PathBuf),
     /// `/usr/bin/sandbox-exec`.
     Seatbelt(PathBuf),
+    /// macOS, when obid itself runs inside a job sandbox (a job running obid's tests): Seatbelt
+    /// can't nest, so what obid starts stays in the sandbox it was started in, which every
+    /// process inherits and none can leave ([`inside_a_job_sandbox`]).
+    Enclosing,
+}
+
+/// Whether this process is inside obid's own job sandbox. Asked only once `sandbox-exec` was
+/// refused, which happens only inside a sandbox; inside any other (an App Sandbox, a sandboxed
+/// launcher) obid makes none and runs nothing. The job profile's fingerprint, each part probed
+/// without a side effect (libsandbox's `sandbox_check` would need `unsafe`, which this workspace
+/// forbids): the person's home (from the password database, not `HOME`) can't be listed; a Unix
+/// socket that isn't the resolver's can't be connected to (syslog's: connected, nothing sent); and
+/// the pasteboard server can't be reached (`pbpaste` of the ruler pasteboard, its output
+/// discarded).
+fn inside_a_job_sandbox() -> bool {
+    let denied = |e: std::io::Error| e.kind() == std::io::ErrorKind::PermissionDenied;
+    let Ok(Some(user)) = nix::unistd::User::from_uid(nix::unistd::getuid()) else {
+        return false;
+    };
+    let home_hidden = user.dir.is_absolute()
+        && user.dir != Path::new("/")
+        && std::fs::read_dir(&user.dir).is_err_and(denied);
+    let sockets_denied = std::os::unix::net::UnixDatagram::unbound()
+        .and_then(|socket| socket.connect("/var/run/syslog"))
+        .is_err_and(denied);
+    let pasteboard_denied = std::process::Command::new("/usr/bin/pbpaste")
+        .args(["-pboard", "ruler"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| !status.success());
+    home_hidden && sockets_denied && pasteboard_denied
 }
 
 /// obid's argument that runs the rest of its command line in a session of its own:
@@ -71,7 +106,8 @@ exec "$@"
 /// it and the guest still reaches the host (10.0.2.2) and the rest of the network.
 const NET_LAUNCH: &str = r#"
 ready=$1
-shift
+loopback=$2
+shift 2
 rm -f "$ready" "$ready.log"
 # An explicit stdin redirect: a background command otherwise gets /dev/null, and the
 # program inside the sandbox would see its stdin close. bash would also hand the
@@ -100,7 +136,10 @@ if [ -z "$child" ]; then
   wait "$bpid" 2>/dev/null
   exit 1
 fi
-slirp4netns --configure --mtu=65520 --userns-path="/proc/$child/ns/user" "$child" tap0 >"$ready.log" 2>&1 &
+# A conversation's shell command never reaches this machine's own services (obid's API).
+host_loopback=
+if [ "$loopback" = no ]; then host_loopback=--disable-host-loopback; fi
+slirp4netns --configure --mtu=65520 $host_loopback --userns-path="/proc/$child/ns/user" "$child" tap0 >"$ready.log" 2>&1 &
 slirp=$!
 i=0
 while [ "$i" -lt 50 ]; do
@@ -166,16 +205,44 @@ impl Sandbox {
         let session = obid.to_path_buf();
         if cfg!(target_os = "macos") {
             let path = PathBuf::from("/usr/bin/sandbox-exec");
-            if path.exists() {
-                return Ok(Sandbox {
+            if !path.exists() {
+                return Err(
+                    "/usr/bin/sandbox-exec isn't on this Mac, so obid can't make the job sandbox."
+                        .into(),
+                );
+            }
+            // A trial run, as on Linux. Seatbelt doesn't nest: inside a sandbox (a job's, running
+            // obid's own tests) `sandbox_apply` is refused for any profile.
+            let tried = std::process::Command::new(&path)
+                .args([
+                    "-p",
+                    "(version 1)(allow default)(deny file-write* (literal \"/obid-trial\"))",
+                    "/usr/bin/true",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .output();
+            return match tried {
+                Ok(output) if output.status.success() => Ok(Sandbox {
                     tool: Tool::Seatbelt(path),
                     session,
-                });
-            }
-            return Err(
-                "/usr/bin/sandbox-exec isn't on this Mac, so obid can't make the job sandbox."
-                    .into(),
-            );
+                }),
+                Ok(output)
+                    if String::from_utf8_lossy(&output.stderr).contains("sandbox_apply")
+                        && inside_a_job_sandbox() =>
+                {
+                    Ok(Sandbox {
+                        tool: Tool::Enclosing,
+                        session,
+                    })
+                }
+                Ok(output) => Err(format!(
+                    "sandbox-exec can't make a sandbox on this Mac: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+                Err(e) => Err(format!("sandbox-exec can't run: {e}")),
+            };
         }
         if cfg!(target_os = "linux") {
             let Some(bwrap) = find_on_path("bwrap") else {
@@ -217,13 +284,18 @@ impl Sandbox {
         Err("obid makes the job sandbox only on Linux and macOS.".into())
     }
 
+    /// Whether what obid starts stays in the job sandbox obid itself runs in ([`Tool::Enclosing`]).
+    pub fn encloses(&self) -> bool {
+        self.tool == Tool::Enclosing
+    }
+
     /// The command line that runs `argv` inside the sandbox `spec` describes: the program, then its
     /// arguments. The caller sets the working directory to `spec.worktree` and the environment, and
     /// starts it as it is, in obid's own process group: the first program (obid, [`SESSION`]) makes
     /// a session of its own, whose process group's id is the started process's id, so signalling
     /// that group reaches everything it starts.
     pub fn wrap(&self, spec: &Spec, argv: &[OsString]) -> Vec<OsString> {
-        self.wrap_reading(spec, argv, false)
+        self.wrap_reading(spec, argv, false, true)
     }
 
     /// [`Sandbox::wrap`], for a process that reads nothing of the machine's but the system's
@@ -232,10 +304,24 @@ impl Sandbox {
     /// `/mnt`, `/srv`), whether or not it is hidden. On macOS every path's metadata stays
     /// readable (paths resolve), never its contents.
     pub fn wrap_reading_only_its_own(&self, spec: &Spec, argv: &[OsString]) -> Vec<OsString> {
-        self.wrap_reading(spec, argv, true)
+        self.wrap_reading(spec, argv, true, true)
     }
 
-    fn wrap_reading(&self, spec: &Spec, argv: &[OsString], confined: bool) -> Vec<OsString> {
+    /// [`Sandbox::wrap_reading_only_its_own`], for a conversation's shell command: given the
+    /// network, it still never reaches this machine's own loopback, where obid's API and its MCP
+    /// endpoints listen (Seatbelt denies `localhost`; slirp4netns runs with
+    /// `--disable-host-loopback`).
+    pub fn wrap_command(&self, spec: &Spec, argv: &[OsString]) -> Vec<OsString> {
+        self.wrap_reading(spec, argv, true, false)
+    }
+
+    fn wrap_reading(
+        &self,
+        spec: &Spec,
+        argv: &[OsString],
+        confined: bool,
+        loopback: bool,
+    ) -> Vec<OsString> {
         let spec = spec.canonical();
         let mut out: Vec<OsString> = vec![self.session.clone().into(), SESSION.into(), "--".into()];
         match &self.tool {
@@ -262,6 +348,7 @@ impl Sandbox {
                         NET_LAUNCH.into(),
                         "net-launch".into(),
                         ready.into(),
+                        if loopback { "yes" } else { "no" }.into(),
                     ]);
                     out.extend(bwrap_argv);
                 } else {
@@ -271,7 +358,7 @@ impl Sandbox {
             Tool::Seatbelt(sandbox_exec) => {
                 out.push(sandbox_exec.clone().into());
                 out.push("-p".into());
-                out.push(seatbelt_profile_reading(&spec, confined).into());
+                out.push(seatbelt_profile_reading(&spec, confined, loopback).into());
                 // The watcher is the session leader. When the job's program exits, or obid
                 // signals the group, it kills every process in the sandbox, including one
                 // that called setsid and left the group. kill -1 is safe only because the
@@ -288,6 +375,18 @@ impl Sandbox {
                         .unwrap_or_else(|| PathBuf::from("/"))
                         .into(),
                 );
+            }
+            Tool::Enclosing => {
+                // The same watcher, but it never reaps: `/` is readable, and `kill -1` would
+                // reach everything in the enclosing job sandbox, the job's own agent included.
+                // A process that called setsid ends with that job instead.
+                out.extend([
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    WATCHER.into(),
+                    "watcher".into(),
+                    "/".into(),
+                ]);
             }
         }
         out.extend(argv.iter().cloned());
@@ -563,13 +662,13 @@ fn bubblewrap_args_reading(
 /// another process run or write something for it; no network for the check.
 #[cfg(test)]
 fn seatbelt_profile(spec: &Spec) -> String {
-    seatbelt_profile_reading(spec, false)
+    seatbelt_profile_reading(spec, false, true)
 }
 
 /// [`seatbelt_profile`]; `confined`, it reads no file's contents but the system's
 /// ([`SYSTEM_READS_MACOS`]) and the spec's own, before the hidden folders' rules (which still
 /// apply on top).
-fn seatbelt_profile_reading(spec: &Spec, confined: bool) -> String {
+fn seatbelt_profile_reading(spec: &Spec, confined: bool, loopback: bool) -> String {
     let mut profile =
         String::from("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*");
     for path in spec.writable() {
@@ -689,6 +788,8 @@ fn seatbelt_profile_reading(spec: &Spec, confined: bool) -> String {
     profile.push_str(")\n");
     if !spec.network {
         profile.push_str("(deny network*)\n");
+    } else if !loopback {
+        profile.push_str("(deny network-outbound (remote ip \"localhost:*\"))\n");
     }
     // A process signals only others in this sandbox. The watcher's `kill -1` then reaches a
     // descendant that called setsid, and nothing of the person's outside the sandbox.
@@ -1372,7 +1473,7 @@ mod tests {
         };
         let plain = seatbelt_profile(&spec);
         assert!(!plain.contains("(deny file-read*)\n"), "{plain}");
-        let profile = seatbelt_profile_reading(&spec, true);
+        let profile = seatbelt_profile_reading(&spec, true, true);
         let deny_all = profile
             .find("(deny file-read*)\n(allow file-read-metadata)\n")
             .unwrap();
@@ -1573,5 +1674,40 @@ mod tests {
         );
         assert_eq!(maskable_socket(&real).unwrap(), real);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A conversation's shell command with the network never reaches this machine's loopback,
+    /// where obid listens: Seatbelt denies localhost, slirp4netns runs without the host's loopback.
+    /// An agent's box keeps it (its MCP server is there) (#774's review, 4).
+    #[test]
+    fn a_shell_command_never_reaches_this_machines_loopback() {
+        let spec = Spec {
+            worktree: "/w".into(),
+            temp: "/t".into(),
+            network: true,
+            ..Spec::default()
+        };
+        let deny = "(deny network-outbound (remote ip \"localhost:*\"))";
+        assert!(seatbelt_profile_reading(&spec, true, false).contains(deny));
+        assert!(!seatbelt_profile_reading(&spec, true, true).contains(deny));
+        let offline = Spec {
+            network: false,
+            ..spec.clone()
+        };
+        assert!(seatbelt_profile_reading(&offline, true, false).contains("(deny network*)"));
+        let bwrap = Sandbox {
+            tool: Tool::Bubblewrap("/usr/bin/bwrap".into()),
+            session: "/obid".into(),
+        };
+        let given = |argv: Vec<OsString>| {
+            let at = argv.iter().position(|a| a == "net-launch").unwrap();
+            argv[at + 2].clone()
+        };
+        assert_eq!(given(bwrap.wrap_command(&spec, &["true".into()])), "no");
+        assert_eq!(
+            given(bwrap.wrap_reading_only_its_own(&spec, &["true".into()])),
+            "yes"
+        );
+        assert!(NET_LAUNCH.contains("--disable-host-loopback"));
     }
 }

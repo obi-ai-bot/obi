@@ -334,6 +334,12 @@ impl Link {
             }
         }));
         let hook = Arc::downgrade(&link);
+        link.jobs.on_confirm(Arc::new(move |item| {
+            if let Some(link) = hook.upgrade() {
+                link.add_confirm_once(item);
+            }
+        }));
+        let hook = Arc::downgrade(&link);
         link.jobs.on_review_end(Arc::new(move |job, done| {
             let link = hook.upgrade();
             Box::pin(async move {
@@ -657,10 +663,41 @@ impl Link {
                 Some(at) => item.later = Some(at),
                 None => item.done = Some(now),
             }
+            // Done without an answer: a shell command waiting for it doesn't run.
+            if item.done.is_some() && crate::brain::shell::is_item(&item) {
+                crate::brain::shell::answered(&item.id, None);
+            }
             self.lock().inbox.insert(item.id.clone(), item.clone());
             self.save_item(&item);
             return Ok(item.to_json());
         };
+        // A command of a conversation's shell: the owner's answer goes to it, and only once.
+        if crate::brain::shell::is_item(&item) {
+            if answer == crate::permissions::ALWAYS_ALLOW
+                && !item
+                    .options
+                    .iter()
+                    .any(|o| o == crate::permissions::ALWAYS_ALLOW)
+            {
+                return Err(api(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "It has no rule to save: allow it once instead.",
+                ));
+            }
+            if !crate::brain::shell::answered(&item.id, Some(answer.clone())) {
+                self.settle(&item.id);
+                return Err(api(
+                    StatusCode::CONFLICT,
+                    "Its command isn't waiting any more: its turn ended.",
+                ));
+            }
+            let mut item = item;
+            item.answer = Some(answer);
+            item.done = Some(now);
+            self.lock().inbox.insert(item.id.clone(), item.clone());
+            self.save_item(&item);
+            return Ok(item.to_json());
+        }
         let permission = item
             .id
             .strip_prefix(&format!("{}-permission-", item.job))
@@ -2473,6 +2510,7 @@ impl Link {
     /// `GET /v1/inbox` (`done` false: open and put off, the longest-waiting first) or
     /// `?state=done` (the latest settled first, at most `limit`).
     pub fn inbox_json(&self, done: bool, limit: usize) -> Value {
+        self.settle_stale_starts();
         let state = self.lock();
         let mut items: Vec<&Item> = state
             .inbox
@@ -2493,12 +2531,71 @@ impl Link {
         Value::Array(items.into_iter().map(Item::to_json).collect())
     }
 
+    /// Settles an open item with no answer: what it asked about is gone (a shell command whose
+    /// turn ended). Nothing for an item that's done already.
+    pub fn settle(&self, id: &str) {
+        let settled = {
+            let mut state = self.lock();
+            state
+                .inbox
+                .get_mut(id)
+                .filter(|i| i.done.is_none())
+                .map(|item| {
+                    item.done = Some(time::now());
+                    item.clone()
+                })
+        };
+        if let Some(item) = settled {
+            self.save_item(&item);
+        }
+    }
+
+    /// The open items of a job that's gone are done, with no answer.
+    pub fn settle_job(&self, job: &str) {
+        let now = time::now();
+        let settled: Vec<Item> = {
+            let mut state = self.lock();
+            state
+                .inbox
+                .values_mut()
+                .filter(|i| i.job == job && i.done.is_none())
+                .map(|i| {
+                    i.done = Some(now);
+                    i.clone()
+                })
+                .collect()
+        };
+        for item in &settled {
+            self.save_item(item);
+        }
+    }
+
     /// Something Oby's brain planned that persists or widens trust waits in the inbox for the
-    /// owner's own `Confirm` (#546): the brain never carries it out itself.
+    /// owner's own `Confirm` (#546): the brain never carries it out itself. A conversation's shell
+    /// keeps its `permission` items here too.
     pub fn add_confirm(&self, item: Item) -> Item {
         self.lock().inbox.insert(item.id.clone(), item.clone());
         self.save_item(&item);
         item
+    }
+
+    /// [`Link::add_confirm`], unless a `confirm` item for the same job and action is still open:
+    /// that one stands, so a caller asking again and again adds nothing (crate::jobs,
+    /// `confirm_past_safety`).
+    pub fn add_confirm_once(&self, item: Item) -> Item {
+        let action = |i: &Item| i.confirm.as_ref().map(|c| c.action.clone());
+        {
+            let state = self.lock();
+            if let Some(open) = state.inbox.values().find(|i| {
+                i.kind == "confirm"
+                    && i.done.is_none()
+                    && i.job == item.job
+                    && action(i) == action(&item)
+            }) {
+                return open.clone();
+            }
+        }
+        self.add_confirm(item)
     }
 
     /// `POST /v1/inbox/{id}/answer` on a `confirm` item: `Confirm` carries out what its title
@@ -2592,7 +2689,10 @@ impl Link {
             // words for a job that ended do.
             inbox::action::MESSAGE_JOB => {
                 let words = confirmed.payload["words"].as_str().unwrap_or("");
-                match self.jobs.message(target, words, crate::jobs::Source::Owner) {
+                match self
+                    .jobs
+                    .message(target, words, crate::jobs::Source::Confirmed)
+                {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
                     None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
@@ -2603,6 +2703,82 @@ impl Link {
                 Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
                 None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
             },
+            inbox::action::CREATE_ROUTINE => {
+                let draft: crate::routines::Draft =
+                    serde_json::from_value(confirmed.payload["routine"].clone())
+                        .map_err(|_| api(StatusCode::CONFLICT, "That routine's plan was lost."))?;
+                let routines = self
+                    .jobs
+                    .routines()
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "obid keeps no routines."))?;
+                routines
+                    .create(&self.jobs, draft, time::now())
+                    .map(|_| ())
+                    .map_err(|why| api(StatusCode::UNPROCESSABLE_ENTITY, why))
+            }
+            inbox::action::CHANGE_ROUTINE => {
+                use crate::routines::{Change, NotRun};
+                let routines = self
+                    .jobs
+                    .routines()
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "obid keeps no routines."))?;
+                let gone = || api(StatusCode::CONFLICT, "That routine is gone.");
+                // The card named its mode, tool, account and check: one changed since is a routine
+                // the owner didn't see.
+                let current = routines.get(target).ok_or_else(gone)?;
+                let payload = &confirmed.payload;
+                if payload["mode"] != serde_json::json!(current.mode)
+                    || payload["agent"] != serde_json::json!(current.agent)
+                    || payload["account"] != serde_json::json!(current.account)
+                    || payload["check"] != serde_json::json!(current.check)
+                {
+                    return Err(api(
+                        StatusCode::CONFLICT,
+                        "The routine's mode, tool, account or check changed since Oby asked: ask again.",
+                    ));
+                }
+                let now = time::now();
+                let change = |change: Change| match routines.change(&self.jobs, target, change, now)
+                {
+                    None => Err(gone()),
+                    Some(Err(why)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, why)),
+                    Some(Ok(_)) => Ok(()),
+                };
+                match confirmed.payload["action"].as_str() {
+                    Some("resume") => change(Change {
+                        enabled: Some(true),
+                        ..Default::default()
+                    }),
+                    Some("reschedule") => change(Change {
+                        schedule: serde_json::from_value(confirmed.payload["schedule"].clone())
+                            .ok(),
+                        zone: confirmed.payload["zone"].as_str().map(str::to_owned),
+                        ..Default::default()
+                    }),
+                    Some("delete") => routines.delete(target).then_some(()).ok_or_else(gone),
+                    Some("run") => {
+                        // Off the async threads: a run takes the routines' firing lock.
+                        let (routines, target) = (routines.clone(), target.to_owned());
+                        let ran = tokio::task::spawn_blocking(move || routines.run(&target, now))
+                            .await
+                            .map_err(|_| {
+                                api(StatusCode::INTERNAL_SERVER_ERROR, "The run stopped.")
+                            })?;
+                        match ran {
+                            Ok(_) => Ok(()),
+                            Err(NotRun::NoRoutine) => Err(gone()),
+                            Err(NotRun::Busy) => Err(api(
+                                StatusCode::CONFLICT,
+                                "Its previous run is still going.",
+                            )),
+                            Err(NotRun::Refused(why)) => {
+                                Err(api(StatusCode::UNPROCESSABLE_ENTITY, why))
+                            }
+                        }
+                    }
+                    _ => Err(api(StatusCode::CONFLICT, "That change was lost.")),
+                }
+            }
             inbox::action::RETRY_JOB => {
                 if self.jobs.get(target).is_some_and(|j| j.status.is_active()) {
                     return Err(api(StatusCode::CONFLICT, "That job is running again."));
@@ -2610,12 +2786,68 @@ impl Link {
                 match self.jobs.message(
                     target,
                     crate::brain::actions::TRY_AGAIN,
-                    crate::jobs::Source::Owner,
+                    crate::jobs::Source::Confirmed,
                 ) {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(refused)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
                     None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
                 }
+            }
+            // Proposed against the job as it was: after another round, a move or a new mode,
+            // the title no longer says what Confirm would do.
+            inbox::action::CONTINUE_JOB | inbox::action::DELETE_JOB | inbox::action::CHANGE_JOB
+                if self
+                    .jobs
+                    .get(target)
+                    .is_some_and(|j| j.snapshot() != confirmed.payload["snapshot"]) =>
+            {
+                Err(api(
+                    StatusCode::CONFLICT,
+                    "The job changed since Oby asked (another round, a move or a new mode): ask Oby again.",
+                ))
+            }
+            inbox::action::CONTINUE_JOB => {
+                let words = confirmed.payload["words"].as_str();
+                match self.jobs.continue_job(target, words, "on your Confirm") {
+                    Some(Ok(_)) => Ok(()),
+                    Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
+                    None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
+                }
+            }
+            inbox::action::DELETE_JOB => match self.jobs.delete(target).await {
+                Some(Ok(_)) => {
+                    self.settle_job(target);
+                    Ok(())
+                }
+                Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
+                None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
+            },
+            inbox::action::CHANGE_JOB => {
+                let text = |key: &str| confirmed.payload[key].as_str();
+                if let Some(mode) = text("mode") {
+                    let mode = crate::permissions::Mode::parse(mode)
+                        .ok_or_else(|| api(StatusCode::CONFLICT, "That mode isn't one."))?;
+                    self.jobs
+                        .set_mode(target, mode)
+                        .ok_or_else(|| api(StatusCode::CONFLICT, "That job is gone."))?;
+                    self.jobs.note_change(
+                        target,
+                        format!("Mode changed to {} on your Confirm", mode.title()),
+                    );
+                }
+                if text("agent").is_some() || text("account").is_some() {
+                    match self.jobs.change(
+                        target,
+                        text("agent"),
+                        text("account"),
+                        "on your Confirm",
+                    ) {
+                        Some(Ok(_)) => {}
+                        Some(Err(refused)) => return Err(api(StatusCode::CONFLICT, refused.0)),
+                        None => return Err(api(StatusCode::CONFLICT, "That job is gone.")),
+                    }
+                }
+                Ok(())
             }
             // The ones that answer an inbox item, as the owner would have.
             inbox::action::ACCEPT
@@ -2658,9 +2890,79 @@ impl Link {
         }
     }
 
+    /// A `start` item for a follow-up whose work merged after it was proposed (the first job's pull
+    /// request or a follow-up's) is done by itself, with no options, its text saying so above the
+    /// owner's words. Checked whenever the inbox is read; nothing starts.
+    fn settle_stale_starts(&self) {
+        let open: Vec<Item> = self
+            .lock()
+            .inbox
+            .values()
+            .filter(|i| i.kind == "start" && i.done.is_none())
+            .cloned()
+            .collect();
+        if open.is_empty() {
+            return;
+        }
+        let jobs = self.jobs.list(usize::MAX);
+        let now = time::now();
+        let mut closed = Vec::new();
+        for mut item in open {
+            let Some(of) = item.start.as_ref().and_then(|s| s["follow_up_of"].as_str()) else {
+                continue;
+            };
+            // The work it would follow up merged after it was proposed: the first job's pull
+            // request, or one of its follow-ups'. Anything else (a follow-up that ended, even
+            // failed) leaves it open, its words and Start as they were.
+            let Some(merged) = jobs
+                .iter()
+                .filter(|j| j.id == of || j.follow_up_of.as_deref() == Some(of))
+                .find(|j| {
+                    j.pull_request
+                        .as_ref()
+                        .and_then(|pr| pr.merged_at)
+                        .is_some_and(|at| at > item.created)
+                })
+            else {
+                continue;
+            };
+            item.text = format!(
+                "Closed by Oby: {}'s work merged after this was proposed.\n\n{}",
+                merged.short_title(),
+                inbox::unfenced(&item.text)
+            );
+            item.options = vec![];
+            item.details = None;
+            item.recommended = None;
+            item.done = Some(now);
+            closed.push(item);
+        }
+        {
+            let mut state = self.lock();
+            for item in &closed {
+                // Answered meanwhile: the owner's answer stands.
+                if state.inbox.get(&item.id).is_some_and(|i| i.done.is_none()) {
+                    state.inbox.insert(item.id.clone(), item.clone());
+                }
+            }
+        }
+        for item in &closed {
+            self.save_item(item);
+        }
+    }
+
     /// Work the brain planned after looking things up waits for the owner's Start, as a `start`
     /// item (Engine/Inbox.swift, `Inbox.proposal`): nothing starts until they say so.
-    pub fn propose(&self, new: &crate::jobs::NewJob, title: String, text: String) -> Item {
+    /// `conversation`: the one it was proposed in, which shows it (`Item::conversation`).
+    pub fn propose(
+        &self,
+        new: &crate::jobs::NewJob,
+        title: String,
+        text: String,
+        conversation: &str,
+    ) -> Item {
+        let mut start = serde_json::to_value(new).unwrap_or_default();
+        start["proposedIn"] = json!(conversation);
         let item = Item {
             id: format!("start-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
             kind: "start".into(),
@@ -2681,7 +2983,7 @@ impl Link {
             plugin: None,
             arrived: Some(inbox::arrival()),
             confirm: None,
-            start: serde_json::to_value(new).ok().map(Box::new),
+            start: Some(Box::new(start)),
             github: None,
         };
         self.lock().inbox.insert(item.id.clone(), item.clone());
@@ -2720,10 +3022,41 @@ impl Link {
                         .ok_or_else(|| {
                             open_again(api(StatusCode::CONFLICT, "That plan was lost."))
                         })?;
-                    let job = self
-                        .jobs
-                        .create(new)
-                        .map_err(|e| open_again(api(StatusCode::UNPROCESSABLE_ENTITY, e.0)))?;
+                    // A follow-up of a job whose follow-up is working already: that one hears
+                    // it (the owner's own Start), and the item is done, never a second. Only
+                    // while it's at work with nothing waiting, checked as the words are taken
+                    // (`hear_at_work`): a permission or plan would take them as its answer, so
+                    // the item stays open until then.
+                    let following = new
+                        .follow_up_of
+                        .as_deref()
+                        .and_then(|of| self.jobs.following(of));
+                    let job = match following {
+                        Some(next) => match self.jobs.hear_at_work(&next.id, &new.task) {
+                            Some(Ok(job)) => job,
+                            Some(Err(e)) => {
+                                return Err(open_again(api(
+                                    StatusCode::CONFLICT,
+                                    format!(
+                                        "{} (job {}) is following it up already. {} Start it again once it's at work, or tell that job.",
+                                        next.short_title(),
+                                        next.id,
+                                        e.0
+                                    ),
+                                )));
+                            }
+                            None => {
+                                return Err(open_again(api(
+                                    StatusCode::CONFLICT,
+                                    "That job is gone.",
+                                )));
+                            }
+                        },
+                        None => self
+                            .jobs
+                            .create(new)
+                            .map_err(|e| open_again(api(StatusCode::UNPROCESSABLE_ENTITY, e.0)))?,
+                    };
                     item.job = job.id;
                 }
             }
@@ -2743,6 +3076,7 @@ impl Link {
     /// The items waiting for the owner now (not done, and not put off past `now`), in the order
     /// they came: what the brain is told about the inbox (#546).
     pub fn waiting_items(&self, now: i64) -> Vec<Item> {
+        self.settle_stale_starts();
         let state = self.lock();
         let mut items: Vec<Item> = state
             .inbox

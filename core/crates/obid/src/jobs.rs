@@ -12,6 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,7 +30,10 @@ use crate::sandbox::{self, Sandbox, Spec};
 use crate::store::{self, Store};
 use crate::{acp, codex, git, policy, review};
 
-/// How long one round's turn may take (docs/runner-api.md, "limit").
+/// How often, at most, a working job's `activity` and `context` are saved and sent.
+const ACTIVITY_EVERY: Duration = Duration::from_secs(1);
+/// How long a review another Obi asked for may take. The owner's own jobs have no such clock: they
+/// stall when they stop making progress (docs/runner-api.md, `limit`; [`Stall`]).
 pub const ROUND_LIMIT: Duration = Duration::from_secs(45 * 60);
 /// How long one run of the check may take.
 pub const CHECK_LIMIT: Duration = Duration::from_secs(20 * 60);
@@ -37,19 +41,313 @@ pub const CHECK_LIMIT: Duration = Duration::from_secs(20 * 60);
 pub const CHECK_TOO_LONG: &str = "obid stopped it after 20 minutes, the most a test run may take.";
 /// How much of a check's output obid keeps: its end.
 const CHECK_OUTPUT_MAX: usize = 64 * 1024;
+/// Why a job that commits ended done with nothing to publish.
+const NOTHING_COMMITTED: &str = "Nothing committed, so nothing was published.";
+/// How long git in a job's sandbox may take.
+const SANDBOXED_GIT_LIMIT: Duration = Duration::from_secs(600);
+/// How much of what git in a job's sandbox says on stderr obid keeps: its end.
+const SANDBOXED_GIT_STDERR_MAX: usize = 64 * 1024;
+/// How long reading a round's diff stat may take, and how much it may print (#736): a round goes
+/// on without its stat rather than wait on it.
+const DIFF_LIMIT: Duration = Duration::from_secs(60);
+const DIFF_OUTPUT_MAX: usize = 2 * 1024 * 1024;
+/// How often a running check's record is brought up to date on its job (#734).
+const CHECK_TICK: Duration = Duration::from_secs(2);
 /// The commit obid keeps a job's uncommitted work in when it ends without commits to publish.
 const WIP_MESSAGE: &str = "wip: work left uncommitted when the job ended\n\nobid committed what the agent left uncommitted, to keep it on the job's branch. It is never published by itself, and the job's next run takes it back out.";
 /// What a round's summary starts with when the check's failure is what the task asked for.
 const FAILS_AS_ASKED: &str = "FAILS AS ASKED";
 /// Claude Code's own turn limit for a round.
 const MAX_TURNS: &str = "200";
+/// How long after a usage limit's reset obid tries a job again: the tool's clock and the Mac's
+/// may differ.
+const RESET_SLACK: i64 = 60;
+/// The longest obid waits for a reset: a weekly window's, and a day more.
+const RESET_MOST: i64 = 8 * 86_400;
+/// What a job tried again after its reset says, and keeps in its notes: Oby's, not the owner's.
+const RESET_STEP: &str = "Oby: trying again after the usage reset";
+const RESET_NOTE: &str = "Oby tried again after the usage reset.";
+/// How often obid looks for a job whose reset came.
+const RESET_TICK: Duration = Duration::from_secs(15);
 /// How often obid lets git tidy a clone.
 const TIDY_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The agent's MCP configuration (`--mcp-config`), in the job's own folder (its `HOME`), written
 /// before each turn: the `agent-mcp` plug-ins' servers.
 pub const MCP_CONFIG_FILE: &str = "obi-mcp.json";
-/// The kinds whose work is commits: one that ends with none committed failed.
+/// The kinds whose work is commits: one that ends with none committed says so.
 const COMMITTING: [&str; 3] = ["build", "fix", "test"];
+/// How many times in a row the same call may fail before the job stalls as looping.
+pub const LOOP_REPEATS: u32 = 5;
+/// How long the agent has to write its handoff note when its job stalls.
+const HANDOFF_LIMIT: Duration = Duration::from_secs(3 * 60);
+/// The waits before each try again of a round that ended on a transient error.
+const RETRY_WAITS: [Duration; 3] = [
+    Duration::from_secs(30),
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(5 * 60),
+];
+
+/// How much of a handoff note obid keeps.
+const NOTE_MAX: usize = 4 * 1024;
+/// The tools whose calls change the work: one of them in between makes a failing call new again.
+const EDITS: [&str; 4] = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+
+/// The same call (its tool and input, numbers and spacing aside) failing again and again with no
+/// edit in between: a loop (as OpenHands and OpenCode detect one). That call succeeding, or any
+/// edit (an edit tool, or a command that changed the `worktree`, like `sed -i`), starts it over;
+/// reads and other calls in between don't.
+#[derive(Default)]
+struct Looping {
+    worktree: Option<PathBuf>,
+    calls: HashMap<String, (String, std::time::SystemTime)>,
+    failures: HashMap<String, u32>,
+}
+
+impl Looping {
+    fn in_worktree(worktree: PathBuf) -> Looping {
+        Looping {
+            worktree: Some(worktree),
+            ..Looping::default()
+        }
+    }
+
+    fn called(&mut self, id: String, name: String, input: Value) {
+        if EDITS.contains(&name.as_str()) {
+            self.failures.clear();
+        }
+        let mut key = String::new();
+        for c in format!("{name} {input}").to_lowercase().chars() {
+            let c = if c.is_ascii_digit() { '#' } else { c };
+            if !(c.is_whitespace() && key.ends_with(' ')) {
+                key.push(if c.is_whitespace() { ' ' } else { c });
+            }
+        }
+        self.calls.insert(id, (key, std::time::SystemTime::now()));
+    }
+
+    /// The call `id` ended: true once the same call failed [`LOOP_REPEATS`] times.
+    fn done(&mut self, id: &str, failed: bool) -> bool {
+        let Some((key, began)) = self.calls.remove(id) else {
+            return false;
+        };
+        if !failed {
+            self.failures.remove(&key);
+            // ponytail: a walk of the worktree after a passing call, only while a failure is
+            // counted; keep it off the worker thread if worktrees grow too big for that.
+            if !self.failures.is_empty()
+                && self
+                    .worktree
+                    .as_deref()
+                    .is_some_and(|dir| crate::conn::changed_since(dir, began))
+            {
+                self.failures.clear();
+            }
+            return false;
+        }
+        let failures = self.failures.entry(key).or_default();
+        *failures += 1;
+        *failures >= LOOP_REPEATS
+    }
+}
+
+/// Why a job stalled (docs/runner-api.md, `limit` and `stalled`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stall {
+    /// No progress for `stallAfter`.
+    Quiet,
+    /// The same failing call [`LOOP_REPEATS`] times.
+    Loop,
+    /// Claude Code's `--max-turns` ended the round.
+    Turns,
+    /// The job ran `jobCeilingHours`.
+    Ceiling,
+    /// The job used `jobTokenBudget` tokens.
+    Budget,
+}
+
+impl Stall {
+    fn id(self) -> &'static str {
+        match self {
+            Stall::Quiet => "quiet",
+            Stall::Loop => "loop",
+            Stall::Turns => "turns",
+            Stall::Ceiling => "ceiling",
+            Stall::Budget => "budget",
+        }
+    }
+
+    fn text(self, config: &Config) -> String {
+        match self {
+            Stall::Quiet => format!("no progress for {}", spell(config.stall_after)),
+            Stall::Loop => format!("the same failing call {LOOP_REPEATS} times"),
+            Stall::Turns => format!("{MAX_TURNS} turns in one round"),
+            Stall::Ceiling => format!("the job ran {}", spell(config.job_ceiling)),
+            Stall::Budget => format!("the job used {} tokens", config.job_token_budget),
+        }
+    }
+}
+
+/// A safety stall (the ceiling or the budget): only the owner carries the job on past it.
+pub fn past_safety(job: &Job) -> bool {
+    job.stalled
+        .as_ref()
+        .is_some_and(|s| s.why == "ceiling" || s.why == "budget")
+}
+
+/// What a job spent against its budget: every token its tool counted but cache reads.
+fn spent(job: &Job) -> u64 {
+    job.usage.as_ref().map_or(0, |t| {
+        [t.input, t.output, t.cache_write]
+            .into_iter()
+            .flatten()
+            .sum()
+    })
+}
+
+/// "15 minutes", "12 hours", "1 minute", "90 seconds".
+fn spell(time: Duration) -> String {
+    let secs = time.as_secs();
+    let (n, unit) = if secs >= 3600 && secs.is_multiple_of(3600) {
+        (secs / 3600, "hour")
+    } else if secs >= 60 && secs.is_multiple_of(60) {
+        (secs / 60, "minute")
+    } else {
+        (secs, "second")
+    };
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
+}
+
+/// What obid tells an agent that ended its turn to wait for something still running.
+const WAIT_HERE: &str = "Your turn ended while you wait for something still running, but in a job the end of your turn is the end of your work: nothing wakes you later, and what you left running is ended. Run it again in the foreground and wait for it (or poll it with a foreground command until it's done), then carry on and finish with a short summary.";
+
+/// The agent ended its turn to wait for something still running ("The build is still going. I'll
+/// continue when the monitor reports it's done."): in its last lines, the words of one that means
+/// to come back. Codex and Cursor only: their background commands wake nothing, and obid can't see
+/// them (Claude Code's own say so, crate::agent).
+// ponytail: a word list over the last 3 lines, first-person only ("CI is still running upstream"
+// is a summary's); a tool's own "still running" signal where one has it.
+fn waits_for_later(said: &str) -> bool {
+    let lines: Vec<String> = said
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.to_lowercase().replace('\u{2019}', "'"))
+        .collect();
+    let last = lines[lines.len().saturating_sub(3)..].join(" ");
+    [
+        "i'll continue when",
+        "i'll continue once",
+        "i will continue when",
+        "i will continue once",
+        "i'll check back",
+        "i'll check on it",
+        "i'll report back when",
+        "i'll report back once",
+        "i'll resume when",
+        "i'll resume once",
+        "i'll pick this up when",
+        "i'll pick it up when",
+        "when the monitor reports",
+        "once the monitor reports",
+    ]
+    .iter()
+    .any(|w| last.contains(w))
+}
+
+/// An error a turn ended on that trying again mends (docs/runner-api.md, `limit`): Claude Code's
+/// `API Error: <5xx or 429>`, an overloaded API, a dropped connection or stream. Never an account's
+/// usage limit (its words, or `full`: its usage says so).
+fn transient(error: &str, full: bool) -> bool {
+    let error = error.to_lowercase();
+    if [
+        "usage limit",
+        "hit your limit",
+        "limit reached",
+        "out of credits",
+        "quota",
+    ]
+    .iter()
+    .any(|w| error.contains(w))
+    {
+        return false;
+    }
+    let status = error
+        .split("api error: ")
+        .nth(1)
+        .and_then(|rest| rest.get(..3))
+        .and_then(|code| code.parse::<u16>().ok());
+    match status {
+        Some(429) => return !full,
+        Some(500..=599) => return true,
+        Some(_) => return false,
+        None => {}
+    }
+    if full && error.contains("429") {
+        return false;
+    }
+    [
+        "overloaded",
+        "connection error",
+        "connection reset",
+        "econnreset",
+        "socket hang up",
+        "stream disconnected",
+        "request timed out",
+        "exceeded retry limit",
+    ]
+    .iter()
+    .any(|w| error.contains(w))
+}
+
+/// The agent's handoff note as obid keeps it: quoted data, without vault secrets, at most
+/// [`NOTE_MAX`]. A note the secret scan flags anywhere (a key's body spans lines) isn't kept at
+/// all: obid writes its own.
+fn clean_note(text: &str) -> Option<String> {
+    let text = crate::secrets::known().redact(text.trim());
+    let flagged = !crate::scan::matches(&text).is_empty()
+        || text
+            .lines()
+            .any(|line| !crate::scan::matches(line).is_empty());
+    (!flagged).then(|| crate::brain::read::clamp(&text, NOTE_MAX))
+}
+
+/// How an owner's job that didn't end done ends. Like Claude Code, which ends only at a limit, a
+/// crash or a stop, obid calls few things failed: a job stopped part way with a session to pick up
+/// needs its owner (`interrupted`), its work kept on its branch.
+#[derive(Debug)]
+enum End {
+    /// A dead end: nothing ran, or there's no session to pick up.
+    Failed(String),
+    /// It needs the owner: why, and the one next step (`job::ONE_MORE_ROUND`, `job::TRY_AGAIN`),
+    /// or none when only their words or Dismiss take it on.
+    NeedsYou {
+        reason: String,
+        next: Option<&'static str>,
+        /// When obid tries it again by itself: after its account's usage limit resets.
+        resumes: Option<i64>,
+    },
+}
+
+impl From<String> for End {
+    fn from(why: String) -> End {
+        End::Failed(why)
+    }
+}
+
+impl From<&str> for End {
+    fn from(why: &str) -> End {
+        End::Failed(why.to_owned())
+    }
+}
+
+impl End {
+    fn needs_you(reason: impl Into<String>, next: Option<&'static str>) -> End {
+        End::NeedsYou {
+            reason: reason.into(),
+            next,
+            resumes: None,
+        }
+    }
+}
 
 /// Which of obid's rules a turn's permission prompts meet.
 #[derive(Clone, Copy)]
@@ -103,6 +401,9 @@ pub struct NewJob {
     pub mode: Option<String>,
     /// The conversation whose plan started it (#493).
     pub conversation: Option<String>,
+    /// The user's turn whose words started it ([`Job::turn`]).
+    #[serde(default)]
+    pub turn: Option<String>,
     /// What the brain found before it planned the job, and what done means (#540).
     #[serde(default)]
     pub brief: Option<crate::job::Brief>,
@@ -114,6 +415,13 @@ pub struct NewJob {
     pub earlier: Option<String>,
     #[serde(default)]
     pub start_from: Option<String>,
+    /// The routine whose run it is (crate::routines).
+    #[serde(default)]
+    pub routine: Option<crate::job::RoutineMark>,
+    /// One part of a stalled job's split (crate::brain::supervisor): its parts follow it up side
+    /// by side, each on a branch of its own. Never from the API, never kept.
+    #[serde(skip)]
+    pub split: bool,
 }
 
 /// Who tells a job something, which decides what words for one that ended do (the owner's
@@ -125,7 +433,20 @@ pub enum Source {
     Owner,
     Untrusted,
     Event,
+    /// The owner's Confirm of an inbox item (crate::sphere::link): their words as surely as
+    /// [`Source::Owner`], and the only ones that carry a job on past its safety limit.
+    Confirmed,
 }
+
+impl Source {
+    /// The owner's own words.
+    pub fn owners(self) -> bool {
+        matches!(self, Source::Owner | Source::Confirmed)
+    }
+}
+
+/// Who adds the inbox's Confirm items (crate::sphere::link).
+pub type ConfirmHook = Arc<dyn Fn(crate::sphere::inbox::Item) + Send + Sync>;
 
 /// A review another Obi asked for, once the owner or a remembered decision accepted it.
 #[derive(Debug, Clone)]
@@ -235,6 +556,8 @@ pub struct Jobs {
     sandbox: Result<Sandbox, String>,
     state: Mutex<State>,
     changed: Notify,
+    /// Each job's transcript (`home/jobs/<id>/transcript.jsonl`).
+    transcripts: crate::transcript::Transcripts,
     /// How many jobs run at once (Settings, `home/settings.json`).
     max_running: std::sync::atomic::AtomicUsize,
     shutting_down: std::sync::atomic::AtomicBool,
@@ -246,12 +569,17 @@ pub struct Jobs {
     review_hook: std::sync::OnceLock<ReviewHook>,
     /// Told when a permission waits for the owner, and when it stops waiting.
     permission_hook: std::sync::OnceLock<PermissionHook>,
+    confirm_hook: std::sync::OnceLock<ConfirmHook>,
     /// Settings › Permissions' default mode and the saved rules (`home/permissions.json`).
     permissions: Mutex<permissions::Kept>,
     /// The plug-in host: context for the agent, and `agent-mcp` plug-ins' servers.
     plugins: std::sync::OnceLock<Arc<crate::plugins::Plugins>>,
     /// The connected-app broker: job-scoped MCP config and use records.
     connections: std::sync::OnceLock<Arc<crate::connections::Connections>>,
+    /// The routines, for the owner's Confirm of one the brain planned (crate::routines).
+    routines: std::sync::OnceLock<Arc<crate::routines::Routines>>,
+    /// Oby's Tetrix login: every owner's job's agent gets Tetrix through obid (crate::tetrix).
+    tetrix: std::sync::OnceLock<Arc<crate::tetrix::Tetrix>>,
     /// Where a job's `.obi/artifacts/` is published when it ends.
     artifacts: std::sync::OnceLock<Arc<crate::artifacts::Artifacts>>,
     /// Loopback endpoint given to agents for `oby-check apple`.
@@ -260,6 +588,10 @@ pub struct Jobs {
     approvals: crate::approval::Approvals,
     /// Wakes the pull request follower: a job just published.
     follow: Notify,
+    /// Each account's usage and weekly reserve (crate::usage).
+    pub usage: crate::usage::Usages,
+    /// Told when an account's usage changed: the `accounts` event goes out (crate::lib).
+    pub usage_changed: Notify,
 }
 
 impl Jobs {
@@ -288,6 +620,15 @@ impl Jobs {
         let kept = permissions::load(&config.home);
         let api_url = format!("http://{}", config.listen);
         let approvals = crate::approval::Approvals::open(&config.home);
+        let transcripts = crate::transcript::Transcripts::new(&config.home);
+        let now = obi_protocol::time::now();
+        transcripts.sweep(|id| {
+            jobs.get(id).is_some_and(|job: &Job| {
+                job.finished
+                    .is_none_or(|f| now - f < crate::transcript::KEPT_DAYS * 86_400)
+            })
+        });
+        let usage = crate::usage::Usages::open(&config.home);
         Ok(Arc::new(Jobs {
             config,
             store,
@@ -304,19 +645,25 @@ impl Jobs {
                 changing: std::collections::HashSet::new(),
             }),
             changed: Notify::new(),
+            transcripts,
             max_running: std::sync::atomic::AtomicUsize::new(max_running),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             identity,
             preparing: Mutex::new(HashMap::new()),
             review_hook: std::sync::OnceLock::new(),
             permission_hook: std::sync::OnceLock::new(),
+            confirm_hook: std::sync::OnceLock::new(),
             permissions: Mutex::new(kept),
             plugins: std::sync::OnceLock::new(),
             connections: std::sync::OnceLock::new(),
+            routines: std::sync::OnceLock::new(),
+            tetrix: std::sync::OnceLock::new(),
             artifacts: std::sync::OnceLock::new(),
             api_url: Mutex::new(api_url),
             approvals,
             follow: Notify::new(),
+            usage,
+            usage_changed: Notify::new(),
         }))
     }
 
@@ -334,7 +681,73 @@ impl Jobs {
         let _ = self.connections.set(connections);
     }
 
+    pub fn use_tetrix(&self, tetrix: Arc<crate::tetrix::Tetrix>) {
+        let _ = self.tetrix.set(tetrix);
+    }
+
+    /// Oby's Tetrix, when `job` is the owner's own and Oby is signed in to Tetrix.
+    fn tetrix_for(&self, job: &Job) -> Option<&Arc<crate::tetrix::Tetrix>> {
+        self.tetrix
+            .get()
+            .filter(|t| job.obi.is_none() && t.connected())
+    }
+
+    /// Oby's Tetrix server for `job`'s agent (URL and the job's token), when it gets one.
+    fn tetrix_mcp(&self, job: &Job) -> Option<(String, String)> {
+        self.tetrix_for(job)?;
+        Some(self.connections.get()?.open_tetrix(&job.id))
+    }
+
+    /// Notes what the agent of job `id` got from Tetrix through obid.
+    pub fn tetrix_used(&self, id: &str, change: impl FnOnce(&mut crate::tetrix::Use)) {
+        self.update(id, |job| {
+            change(job.tetrix.get_or_insert_with(Default::default))
+        });
+    }
+
+    /// The session job `id`'s agent saved in Tetrix, in its outgoing actions.
+    pub fn sent_to_tetrix(&self, id: &str, session: &str) {
+        self.update(id, |job| {
+            let sent = crate::publish::Outgoing::new("tetrixSession", &job.repo, session, None);
+            if !job
+                .outgoing
+                .iter()
+                .any(|o| o.action == sent.action && o.id == sent.id)
+            {
+                job.outgoing.push(sent);
+            }
+        });
+    }
+
+    /// Of `account`'s latest 50 ended jobs that had Tetrix through obid: how many, and how many
+    /// of them called it.
+    pub fn tetrix_counts(&self, account: &str) -> (u32, u32) {
+        let state = self.lock();
+        let mut ended: Vec<&Job> = state
+            .jobs
+            .values()
+            .filter(|j| j.account == account && j.tetrix.as_ref().is_some_and(|t| t.ended))
+            .collect();
+        ended.sort_by_key(|j| std::cmp::Reverse(j.finished));
+        let recent = &ended[..ended.len().min(50)];
+        (
+            recent.len() as u32,
+            recent
+                .iter()
+                .filter(|j| j.tetrix.as_ref().is_some_and(crate::tetrix::Use::used))
+                .count() as u32,
+        )
+    }
+
     /// Where jobs' artifacts go (once; without it, a job publishes none).
+    pub fn use_routines(&self, routines: Arc<crate::routines::Routines>) {
+        let _ = self.routines.set(routines);
+    }
+
+    pub fn routines(&self) -> Option<&Arc<crate::routines::Routines>> {
+        self.routines.get()
+    }
+
     pub fn use_artifacts(&self, artifacts: Arc<crate::artifacts::Artifacts>) {
         let _ = self.artifacts.set(artifacts);
     }
@@ -395,9 +808,15 @@ impl Jobs {
         purpose: obi_plugin_api::Purpose,
         job: obi_plugin_api::ContextJob,
         worktree: &Path,
+        more: Vec<(obi_plugin_api::PluginId, Vec<obi_plugin_api::ContextItem>)>,
     ) -> Option<String> {
-        let plugins = self.plugins.get()?;
-        let answers = plugins.context(purpose, job).await;
+        let mut answers = match self.plugins.get() {
+            Some(plugins) => plugins.context(purpose, job).await,
+            None => Vec::new(),
+        };
+        // obid's own (Tetrix's) in place of a plug-in's of the same name.
+        answers.retain(|(plugin, _)| !more.iter().any(|(own, _)| own == plugin));
+        answers.extend(more);
         match crate::plugins::write_context(worktree, &answers) {
             Ok(files) => crate::plugins::context_note(&files),
             Err(e) => {
@@ -434,6 +853,80 @@ impl Jobs {
         tokio::spawn(async move { jobs.follow_pull_requests().await });
         let jobs = self.clone();
         tokio::spawn(async move { jobs.tidy_clones().await });
+        let jobs = self.clone();
+        tokio::spawn(async move { jobs.resume_after_resets().await });
+    }
+
+    /// Tries again each job a usage limit stopped, once its `resumes_at` comes (#725's follow-up,
+    /// Sangam's "Wait for the reset"): as Try again does, from the job's own session. Kept with
+    /// the job, so a restart keeps waiting; looked at every [`RESET_TICK`], so a Mac that slept
+    /// through it tries on waking.
+    async fn resume_after_resets(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(RESET_TICK).await;
+            if self
+                .shutting_down
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return;
+            }
+            let now = obi_protocol::time::now();
+            let due: Vec<String> = self
+                .lock()
+                .jobs
+                .values()
+                .filter(|j| {
+                    j.status == Status::Interrupted && j.resumes_at.is_some_and(|at| at <= now)
+                })
+                .map(|j| j.id.clone())
+                .collect();
+            for id in due {
+                self.resume_after_reset(&id);
+            }
+        }
+    }
+
+    /// One job's reset came: Try again, unless its owner let it go or took it on in a follow-up.
+    fn resume_after_reset(self: &Arc<Self>, id: &str) {
+        let Some(job) = self.get(id) else { return };
+        let followed = self
+            .lock()
+            .jobs
+            .values()
+            .any(|j| j.follow_up_of.as_deref() == Some(id));
+        let tried = if job.dismissed.is_some() {
+            Err("it was dismissed".to_owned())
+        } else if followed {
+            Err("a follow-up took it on".to_owned())
+        } else {
+            match self.message(id, crate::brain::actions::TRY_AGAIN, Source::Event) {
+                Some(Ok(_)) => Ok(()),
+                Some(Err(refused)) => Err(refused.0),
+                None => return,
+            }
+        };
+        match tried {
+            Ok(()) => {
+                tracing::info!("job {id}: its usage limit reset, so it's tried again");
+                // Oby's own retry, never words the owner said: so its step and note say.
+                self.update(id, |job| {
+                    if let Some(notes) = job.notes.as_mut()
+                        && notes.last().map(String::as_str)
+                            == Some(crate::brain::actions::TRY_AGAIN)
+                    {
+                        notes.pop();
+                        notes.push(RESET_NOTE.into());
+                    }
+                    if job.step.starts_with("You: ") {
+                        job.step = RESET_STEP.into();
+                    }
+                });
+            }
+            Err(why) => {
+                tracing::info!("job {id}: not tried again after its reset: {why}");
+                self.update(id, |job| job.resumes_at = None);
+            }
+        }
     }
 
     /// Lets git tidy each clone once a day ([`Jobs::tidy_clone`]).
@@ -495,6 +988,52 @@ impl Jobs {
         self.lock().jobs.get(id).cloned()
     }
 
+    /// The follow-up of `id` that's queued or running, if any: a job has one at a time, and words
+    /// for `id` once it ended go to it.
+    pub fn following(&self, id: &str) -> Option<Job> {
+        self.lock()
+            .jobs
+            .values()
+            .find(|j| j.status.is_active() && j.follow_up_of.as_deref() == Some(id))
+            .cloned()
+    }
+
+    /// Words for job `id` as words, never as an answer: taken only while it's at work in a turn
+    /// with no permission or plan waiting, all checked under the one lock that takes them (a
+    /// proposal's Start, link.rs: its words must never become the "no" of something the job asks
+    /// meanwhile). Otherwise refused, and nothing changes.
+    pub fn hear_at_work(&self, id: &str, text: &str) -> Option<Result<Job, Refused>> {
+        let text = text.trim();
+        if text.is_empty() || text.chars().count() > 2000 {
+            return Some(Err(Refused(
+                "Tell the agent something of 1 to 2,000 characters.".into(),
+            )));
+        }
+        let taken = {
+            let mut state = self.lock();
+            let free = state.workers.contains_key(id)
+                && !state.wrapping.contains(id)
+                && state.asks.get(id).is_none_or(VecDeque::is_empty);
+            let job = state.jobs.get_mut(id)?;
+            (free && job.status == Status::Running && job.phase == Some(Phase::Work)).then(|| {
+                hear(job, text);
+                job.clone()
+            })
+        };
+        let Some(job) = taken else {
+            return Some(Err(Refused(
+                "It can't take words now: it's getting ready, waiting for your answer or wrapping up."
+                    .into(),
+            )));
+        };
+        if let Err(e) = self.store.save(&job) {
+            tracing::error!("can't keep job {id}: {e}");
+        }
+        self.events.send("job", job.to_json());
+        self.changed.notify_waiters();
+        Some(Ok(job))
+    }
+
     /// The latest `limit` jobs, newest first.
     pub fn list(&self, limit: usize) -> Vec<Job> {
         let mut jobs: Vec<Job> = self.lock().jobs.values().cloned().collect();
@@ -547,7 +1086,7 @@ impl Jobs {
         })
     }
 
-    fn being_changed(&self, account: &str) -> bool {
+    pub(crate) fn being_changed(&self, account: &str) -> bool {
         self.lock().changing.contains(account)
     }
 
@@ -561,6 +1100,46 @@ impl Jobs {
             .count()
     }
 
+    /// Divides each rise of `account`'s windows, from `was` to `now`, among the jobs that were
+    /// running on it at its last report too, by their tokens since (#732), and marks where each
+    /// running job's tokens stand. A job's first report only marks it: what rose before it ran
+    /// (another job, the owner's own use) isn't its.
+    fn share_rise(&self, account: &str, was: &crate::usage::Usage, now: &crate::usage::Usage) {
+        let rises = crate::usage::rises(was, now, obi_protocol::time::now());
+        let running: Vec<(String, u64, Option<u64>)> = {
+            let state = self.lock();
+            state
+                .workers
+                .keys()
+                .filter_map(|id| state.jobs.get(id).filter(|j| j.account == account))
+                .map(|job| {
+                    let total = job.usage.as_ref().map_or(0, crate::usage::Tokens::total);
+                    let mark = job.window_share.as_ref().and_then(|s| s.mark);
+                    (job.id.clone(), total, mark.map(|m| total.saturating_sub(m)))
+                })
+                .collect()
+        };
+        let weights: Vec<u64> = running.iter().filter_map(|(_, _, since)| *since).collect();
+        let parts = rises.map(|rise| {
+            rise.filter(|_| !weights.is_empty())
+                .map(|(points, resets)| (crate::usage::split(points, &weights), resets))
+        });
+        let mut marked = 0;
+        for (id, total, since) in &running {
+            let share_of = since.map(|_| marked);
+            marked += usize::from(since.is_some());
+            self.update(id, |job| {
+                let share = job.window_share.get_or_insert_with(Default::default);
+                for (window, part) in parts.iter().enumerate() {
+                    if let (Some((parts, resets)), Some(i)) = (part, share_of) {
+                        share.add(window, parts[i], *resets);
+                    }
+                }
+                share.mark = Some(*total);
+            });
+        }
+    }
+
     /// Changes the job `id` with `change`, keeps it and tells the apps. `None` for a job obid
     /// doesn't have.
     fn update(&self, id: &str, change: impl FnOnce(&mut Job)) -> Option<Job> {
@@ -568,7 +1147,18 @@ impl Jobs {
             let mut state = self.lock();
             let job = state.jobs.get_mut(id)?;
             change(job);
-            job.clone()
+            // Its stages' times, and its estimate again when a stage started or ended (#733).
+            // ponytail: reads every job kept; an index by repository if that ever shows.
+            if job.stamp(obi_protocol::time::now()) && job.status.is_active() {
+                let job = state.jobs.get(id)?;
+                let estimate =
+                    crate::facts::estimate(job, state.jobs.values(), job.estimate.as_ref());
+                let job = state.jobs.get_mut(id)?;
+                if estimate.is_some() {
+                    job.estimate = estimate;
+                }
+            }
+            state.jobs.get(id)?.clone()
         };
         if let Err(e) = self.store.save(&job) {
             tracing::error!("can't keep job {id}: {e}");
@@ -1229,7 +1819,9 @@ impl Jobs {
             .map(str::trim)
             .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("auto"));
         let home = login_home();
+        let now = obi_protocol::time::now();
         let mut first = None;
+        let mut held = Vec::new();
         for tool in &tools {
             let mut accounts = self.accounts(*tool);
             if let Some(changing) = named.and_then(|named| {
@@ -1245,13 +1837,17 @@ impl Jobs {
             // Routing skips an account being signed in or removed.
             accounts.retain(|a| !self.being_changed(&a.id));
             match named {
-                // Routing skips an account that isn't signed in (#626).
+                // Routing skips an account that isn't signed in (#626), and one without room
+                // (crate::usage): full, at 95% of a window, or in its weekly reserve.
                 None => {
                     for account in accounts {
-                        if signed_in(*tool, &account, home.as_deref()) {
+                        if !signed_in(*tool, &account, home.as_deref()) {
+                            first.get_or_insert((*tool, account));
+                        } else if let Some(why) = self.usage.get(&account.id).held(now) {
+                            held.push(format!("{} {why}", account.name));
+                        } else {
                             return Ok((*tool, account));
                         }
-                        first.get_or_insert((*tool, account));
                     }
                 }
                 Some(named) => {
@@ -1263,6 +1859,12 @@ impl Jobs {
                     }
                 }
             }
+        }
+        if !held.is_empty() {
+            return Err(Refused(format!(
+                "No account has room: {}.",
+                held.join("; ")
+            )));
         }
         // None is signed in: the first, whose tool then says why it can't run.
         if let Some(found) = first {
@@ -1292,7 +1894,18 @@ impl Jobs {
     }
 
     /// Makes a job the owner described whole, queued.
-    pub fn create(self: &Arc<Self>, new: NewJob) -> Result<Job, Refused> {
+    /// Whether `create` would take `new`, without making it: its repository, kind, task, title,
+    /// tool and account, rounds, check, mode, files, base and model, as `create` checks them.
+    /// A routine is checked so when it's saved (crate::routines).
+    pub fn vet(&self, new: &NewJob) -> Result<(), Refused> {
+        self.vetted(new).map(|_| ())
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn vetted(
+        &self,
+        new: &NewJob,
+    ) -> Result<(Repo, Tool, crate::config::Account, Option<Vec<String>>), Refused> {
         let repo = self
             .repo(&new.repo)
             .ok_or_else(|| Refused(format!("{} isn't a repository obid knows.", new.repo)))?
@@ -1347,6 +1960,11 @@ impl Jobs {
                 tool.name()
             )));
         }
+        Ok((repo, tool, account, files))
+    }
+
+    pub fn create(self: &Arc<Self>, new: NewJob) -> Result<Job, Refused> {
+        let (repo, tool, account, files) = self.vetted(&new)?;
         let id = self.new_id();
         let mut job = Job::new(
             id.clone(),
@@ -1374,6 +1992,7 @@ impl Jobs {
         job.files = files;
         job.attachments = new.attachments;
         job.conversation = new.conversation;
+        job.turn = new.turn.filter(|_| job.conversation.is_some());
         job.brief = new
             .brief
             .filter(|b| !b.findings.is_empty() || b.done.is_some());
@@ -1382,6 +2001,7 @@ impl Jobs {
             .start_from
             .filter(|b| new.follow_up_of.is_some() && git::is_branch_name(b));
         job.follow_up_of = new.follow_up_of;
+        job.routine = new.routine;
         job.mode = Some(if job.read_only() {
             Mode::Plan.as_str().to_owned()
         } else {
@@ -1413,10 +2033,14 @@ impl Jobs {
                 .values()
                 .filter(|j| j.status.is_active())
                 .collect();
-            if let Some(other) = active.iter().find(|j| j.follow_up_of == job.follow_up_of) {
+            if let Some(other) = active
+                .iter()
+                .find(|j| !new.split && j.follow_up_of == job.follow_up_of)
+            {
                 return Err(Refused(format!(
-                    "{} is following it up already: tell that one instead.",
-                    other.short_title()
+                    "{} (job {}) is following it up already: tell that one instead.",
+                    other.short_title(),
+                    other.id
                 )));
             }
             if let Some(other) = active
@@ -1634,9 +2258,20 @@ impl Jobs {
                 "This is a review another Oby asked for: its answer goes back to that Oby, so it takes no words of yours.".into(),
             )));
         }
-        if !job.status.is_active() && text != crate::brain::actions::TRY_AGAIN {
+        // Try again's words, and more after them (oby_continue_job's), pick its session up.
+        if !job.status.is_active() && !text.starts_with(crate::brain::actions::TRY_AGAIN) {
+            // Its follow-up is working already: the words go to that one, never a second.
+            if source != Source::Event
+                && let Some(next) = self.following(id)
+            {
+                return Some(self.message(&next.id, text, source)?.map_err(|why| {
+                    Refused(format!("{} ({}): {}", next.short_title(), next.id, why.0))
+                }));
+            }
             return Some(match source {
-                Source::Owner => self.create(follow_up(&job, text)),
+                // Past its safety limit, a follow-up would start its counters again.
+                Source::Owner if past_safety(&job) => Err(self.confirm_past_safety(&job, text)),
+                Source::Owner | Source::Confirmed => self.create(follow_up(&job, text)),
                 Source::Untrusted | Source::Event => Err(Refused(
                     "It ended, so these words would start a follow-up: only the owner's own words start one, where Oby read nothing untrusted.".into(),
                 )),
@@ -1658,7 +2293,7 @@ impl Jobs {
             .get(id)
             .and_then(|asks| asks.front().map(|a| a.permission.clone()));
         // A plan goes back only on the owner's own words (#609).
-        if waiting.as_ref().is_some_and(Permission::is_plan) && source != Source::Owner {
+        if waiting.as_ref().is_some_and(Permission::is_plan) && !source.owners() {
             return Some(Err(Refused(
                 "It waits for the owner to approve its plan or send it back, in their inbox."
                     .into(),
@@ -1675,11 +2310,7 @@ impl Jobs {
                     }),
             );
         }
-        let heard = |job: &mut Job| {
-            job.notes.get_or_insert_with(Vec::new).push(text.to_owned());
-            job.heard.push(text.to_owned());
-            job.step = format!("You: {text}");
-        };
+        let heard = |job: &mut Job| hear(job, text);
         if job.status.is_active() {
             // Checked and changed under one lock: a worker wrapping up takes no more words.
             let taken = {
@@ -1704,6 +2335,9 @@ impl Jobs {
                 tracing::error!("can't keep job {id}: {e}");
             }
             self.events.send("job", job.to_json());
+            if source == Source::Owner {
+                self.transcribed(id, self.transcripts.you(id, text));
+            }
             self.changed.notify_waiters();
             return Some(Ok(job));
         }
@@ -1719,11 +2353,32 @@ impl Jobs {
                 next.short_title()
             ))));
         }
-        if job.session.is_none() {
+        // A job moved since its last round starts a new session on its new choice.
+        if job.session.is_none() && job.moves.is_empty() {
             return Some(Err(Refused(
                 "This job never started, so there's no session to pick up.".into(),
             )));
         }
+        // Past its safety ceiling or budget, only the owner's Confirm carries it on, and gives it
+        // a new one: the owner's words anywhere else ask for that Confirm.
+        if past_safety(&job) && source != Source::Confirmed {
+            return Some(Err(if source == Source::Owner {
+                self.confirm_past_safety(&job, text)
+            } else {
+                Refused(format!(
+                    "It stopped at its safety limit ({}): only the owner carries it on past that.",
+                    job.limit.as_deref().unwrap_or("")
+                ))
+            }));
+        }
+        let moved = match job.moves.last() {
+            Some(last) if job.session.is_none() => format!(
+                "{text}\n\nThe owner moved this job to you from {}: what was done so far is on this branch.",
+                last.from
+            ),
+            _ => text.to_owned(),
+        };
+        let heard = |job: &mut Job| hear(job, &moved);
         // Checked and changed under one lock: a job being published by hand takes no words, and
         // one that took them can't be published by hand until it ends again.
         let resumed = {
@@ -1743,7 +2398,16 @@ impl Jobs {
             }
             job.finished = None;
             job.dismissed = None;
+            job.archived = None;
+            if past_safety(job) {
+                job.ran_secs = None;
+                job.budget_from = Some(spent(job));
+            }
             job.limit = None;
+            job.reason = None;
+            job.next_step = None;
+            job.resumes_at = None;
+            job.stalled = None;
             job.waiting = None;
             job.asked = true;
             job.clone()
@@ -1752,6 +2416,9 @@ impl Jobs {
             tracing::error!("can't keep job {id}: {e}");
         }
         self.events.send("job", resumed.to_json());
+        if source == Source::Owner {
+            self.transcribed(id, self.transcripts.you(id, text));
+        }
         self.changed.notify_waiters();
         self.schedule();
         Some(Ok(resumed))
@@ -1788,6 +2455,52 @@ impl Jobs {
     /// Who is told about permissions (once; a second call changes nothing).
     pub fn on_permission(&self, hook: PermissionHook) {
         let _ = self.permission_hook.set(hook);
+    }
+
+    /// Who adds Confirm items to the inbox (once; a second call changes nothing).
+    pub fn on_confirm(&self, hook: ConfirmHook) {
+        let _ = self.confirm_hook.set(hook);
+    }
+
+    /// Words for a job stopped at its safety limit (its ceiling or budget) carry it on only once
+    /// the owner confirms them in the inbox (docs/runner-api.md, `limit`), wherever they came
+    /// from: the API, oby-mcp, a conversation. Its Confirm item, and why nothing happened yet.
+    pub fn confirm_past_safety(&self, job: &Job, words: &str) -> Refused {
+        use crate::sphere::inbox::{Confirmed, action};
+        let limit = job.limit.as_deref().unwrap_or("");
+        let name = job.short_title();
+        let again = words.starts_with(crate::brain::actions::TRY_AGAIN);
+        let confirmed = if again {
+            Confirmed {
+                action: action::RETRY_JOB.into(),
+                target: job.id.clone(),
+                payload: Value::Null,
+            }
+        } else {
+            Confirmed {
+                action: action::MESSAGE_JOB.into(),
+                target: job.id.clone(),
+                payload: json!({"words": words}),
+            }
+        };
+        if let Some(hook) = self.confirm_hook.get() {
+            hook(crate::sphere::inbox::confirm_item(
+                &job.id,
+                if again {
+                    format!("Try {name} again")
+                } else {
+                    format!("Start a follow-up of {name}")
+                },
+                format!(
+                    "{name} stopped at its safety limit ({limit}). Carrying it on past that waits for your OK."
+                ),
+                confirmed,
+                obi_protocol::time::now(),
+            ));
+        }
+        Refused(format!(
+            "It stopped at its safety limit ({limit}): carrying it on waits for your Confirm in the inbox."
+        ))
     }
 
     fn note(&self, note: PermissionNote) {
@@ -1836,7 +2549,7 @@ impl Jobs {
     }
 
     /// Saves an allow rule for a repository, once; the prompts waiting now, in every job, follow it.
-    fn save_rule(&self, rule: &str, repo: &str) {
+    pub(crate) fn save_rule(&self, rule: &str, repo: &str) {
         {
             let mut kept = self.kept();
             if kept
@@ -1879,7 +2592,7 @@ impl Jobs {
     /// The job's mode, as it names it. A job from before modes is in Bypass; a mode this obid
     /// can't read (one a newer obid wrote) asks rather than allow. A review job is
     /// in Plan, whatever it says.
-    fn mode_of(job: &Job) -> Mode {
+    pub fn mode_of(job: &Job) -> Mode {
         if job.read_only() {
             return Mode::Plan;
         }
@@ -2219,6 +2932,8 @@ impl Jobs {
                 )));
             }
             job.dismissed = Some(obi_protocol::time::now());
+            // Let go, it isn't tried again after its reset either.
+            job.resumes_at = None;
             job.clone()
         };
         if let Err(e) = self.store.save(&dismissed) {
@@ -2227,6 +2942,220 @@ impl Jobs {
         self.events.send("job", dismissed.to_json());
         self.changed.notify_waiters();
         Some(Ok(dismissed))
+    }
+
+    /// Records what the conversation that owns the job did about it when it stalled
+    /// (crate::brain::supervisor): a second part of the same turn's split joins its entry.
+    pub fn supervised(&self, id: &str, entry: crate::job::Supervision) -> Option<Job> {
+        let job = {
+            let mut state = self.lock();
+            let job = state.jobs.get_mut(id)?;
+            match job
+                .supervised
+                .iter_mut()
+                .find(|s| s.turn == entry.turn && s.decision == entry.decision)
+            {
+                Some(same) => {
+                    same.jobs.extend(entry.jobs);
+                    same.count = entry.count;
+                }
+                None => job.supervised.push(entry),
+            }
+            job.clone()
+        };
+        if let Err(e) = self.store.save(&job) {
+            tracing::error!("can't keep job {id}: {e}");
+        }
+        self.events.send("job", job.to_json());
+        Some(job)
+    }
+
+    /// Archives a job that ended and needs nothing, or unarchives it (`archived` false), adding
+    /// `by` ("by you", "by Oby, in a conversation") to its changes. `Err` when it can't be.
+    pub fn archive(&self, id: &str, archived: bool, by: &str) -> Option<Result<Job, Refused>> {
+        let job = self.get(id)?;
+        if job.archived.is_some() == archived {
+            return Some(Ok(job));
+        }
+        if archived {
+            if job.status.is_active() {
+                return Some(Err(Refused(
+                    "It's still running: stop it first, or archive it once it ends.".into(),
+                )));
+            }
+            if job.needs_you() {
+                return Some(Err(Refused(
+                    "It still needs you: dismiss it first, or publish it.".into(),
+                )));
+            }
+        }
+        let (what, at) = if archived {
+            ("Archived", Some(obi_protocol::time::now()))
+        } else {
+            ("Unarchived", None)
+        };
+        Some(Ok(self.update(id, |job| {
+            job.archived = at;
+            job.changed(format!("{what} {by}"));
+        })?))
+    }
+
+    /// Why the job `id` can't be deleted now, when it can't (see [`undeletable_in`]).
+    pub fn undeletable(&self, id: &str) -> Option<Refused> {
+        let state = self.lock();
+        undeletable_in(&state.jobs, state.publishing.contains(id), id)
+            .map(|why| Refused(why.into()))
+    }
+
+    /// Whether deleting the job `id` would leave its branch, as another job uses it.
+    pub fn branch_stays(&self, id: &str) -> bool {
+        let state = self.lock();
+        state.jobs.get(id).is_some_and(|job| {
+            branch_shared(&state.jobs, job, self.default_branch(&job.repo).as_deref())
+        })
+    }
+
+    /// Deletes a job that ended, for good: its record, its worktree and its folders, and its
+    /// local branch in obid's clone unless another job uses it (then `Ok(true)`: it stays).
+    /// Nothing pushed is touched. `Err` with why when it can't be.
+    pub async fn delete(&self, id: &str) -> Option<Result<bool, Refused>> {
+        // Checked and taken out under one lock: nothing starts it, publishes it or takes up its
+        // branch meanwhile.
+        let (job, branch_stays) = {
+            let mut state = self.lock();
+            let job = state.jobs.get(id)?.clone();
+            if let Some(why) = undeletable_in(&state.jobs, state.publishing.contains(id), id) {
+                return Some(Err(Refused(why.into())));
+            }
+            let stays = branch_shared(&state.jobs, &job, self.default_branch(&job.repo).as_deref());
+            state.jobs.remove(id);
+            state.asks.remove(id);
+            state.followed.remove(id);
+            (job, stays)
+        };
+        if let Err(e) = self.store.remove(id) {
+            tracing::error!("can't forget job {id}: {e}");
+        }
+        let clone = git::clone_path(&self.config.home, &job.repo);
+        let worktree = self.worktree_path(id);
+        if worktree.exists() {
+            let _ = git::run(
+                &clone,
+                &[
+                    "worktree".as_ref(),
+                    "remove".as_ref(),
+                    "--force".as_ref(),
+                    worktree.as_os_str(),
+                ],
+                &[],
+            )
+            .await;
+            let _ = std::fs::remove_dir_all(&worktree);
+            let _ = git::git(&clone, &["worktree", "prune"]).await;
+        }
+        let _ = std::fs::remove_dir_all(self.temp_path(id));
+        let _ = std::fs::remove_dir_all(self.login_path(id));
+        // Only a branch no other job uses, and only the clone's: what was pushed stays on the
+        // remote.
+        if !branch_stays && git::is_branch_name(&job.branch) {
+            let _ = git::git(&clone, &["branch", "-D", "--", &job.branch]).await;
+        }
+        self.events.send("job", json!({"id": id, "deleted": true}));
+        self.changed.notify_waiters();
+        Some(Ok(branch_stays))
+    }
+
+    /// Moves a job that ended to another tool or account (each "auto" or left out to keep or pick
+    /// as a new job's), adding the move and `by` to it: its next round starts a new session there.
+    pub fn change(
+        &self,
+        id: &str,
+        agent: Option<&str>,
+        account: Option<&str>,
+        by: &str,
+    ) -> Option<Result<Job, Refused>> {
+        let job = self.get(id)?;
+        if job.status.is_active() {
+            return Some(Err(Refused(
+                "It's still running: stop it first, then change it and continue it.".into(),
+            )));
+        }
+        if job.obi.is_some() || job.read_only() {
+            return Some(Err(Refused(
+                "A review picks its own tool and account: it can't be moved.".into(),
+            )));
+        }
+        if agent.is_none() && account.is_none() {
+            return Some(Err(Refused("Say which tool or account.".into())));
+        }
+        let agent = agent.or(Some(job.agent.as_str()));
+        let (tool, chosen) = match self.pick(agent, account) {
+            Ok(picked) => picked,
+            Err(refused) => return Some(Err(refused)),
+        };
+        if tool.id() == job.agent && chosen.id == job.account {
+            return Some(Err(Refused(format!(
+                "It's on {} · {} already.",
+                tool.name(),
+                chosen.name
+            ))));
+        }
+        let place = |agent: &str, account: &str| {
+            let tool = Tool::from_id(agent).map_or(agent.to_owned(), |t| t.name().to_owned());
+            let account = self
+                .accounts(Tool::from_id(agent).unwrap_or(Tool::Claude))
+                .into_iter()
+                .find(|a| a.id == account)
+                .map_or(account.to_owned(), |a| a.name);
+            format!("{tool} · {account}")
+        };
+        let from = place(&job.agent, &job.account);
+        let to = format!("{} · {}", tool.name(), chosen.name);
+        let tool_changed = tool.id() != job.agent;
+        Some(Ok(self.update(id, |job| {
+            job.agent = tool.id().to_owned();
+            job.account = chosen.id.clone();
+            // A new session on the new choice; another tool runs its own model.
+            job.session = None;
+            if tool_changed {
+                job.model = None;
+            }
+            job.moves.push(crate::job::Move {
+                from: from.clone(),
+                to: to.clone(),
+                why: None,
+                date: obi_protocol::time::now(),
+            });
+            job.changed(format!("Moved from {from} to {to} {by}"));
+        })?))
+    }
+
+    /// Continues a job that failed, was stopped or was cut off in its own session, as Try again
+    /// does, with `words` after Try again's (`oby_continue_job`), adding `by` to its changes.
+    pub fn continue_job(
+        self: &Arc<Self>,
+        id: &str,
+        words: Option<&str>,
+        by: &str,
+    ) -> Option<Result<Job, Refused>> {
+        let job = self.get(id)?;
+        if let Some(why) = not_continuable(&job) {
+            return Some(Err(Refused(why.into())));
+        }
+        let text = match words.map(str::trim).filter(|w| !w.is_empty()) {
+            Some(words) => format!("{}\n\n{words}", crate::brain::actions::TRY_AGAIN),
+            None => crate::brain::actions::TRY_AGAIN.to_owned(),
+        };
+        let continued = self.message(id, &text, Source::Owner)?;
+        Some(continued.map(|job| {
+            self.note_change(id, format!("Continued {by}"))
+                .unwrap_or(job)
+        }))
+    }
+
+    /// Adds `what` to the job's changes.
+    pub fn note_change(&self, id: &str, what: String) -> Option<Job> {
+        self.update(id, |job| job.changed(what))
     }
 
     /// The job once it has ended (done, failed, stopped or interrupted), or `None` for one obid
@@ -2396,6 +3325,20 @@ impl Jobs {
         args: &[&str],
         input: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, String> {
+        self.sandboxed_git_within(id, args, input, SANDBOXED_GIT_LIMIT, usize::MAX)
+            .await
+    }
+
+    /// [`Self::sandboxed_git`], ended after `limit`, and refused when it prints more than `max`
+    /// bytes.
+    async fn sandboxed_git_within(
+        &self,
+        id: &str,
+        args: &[&str],
+        input: Option<Vec<u8>>,
+        limit: Duration,
+        max: usize,
+    ) -> Result<Vec<u8>, String> {
         let sandbox = self.sandbox.as_ref().map_err(String::clone)?;
         let worktree = self.worktree_path(id);
         let (admin, common) = git::worktree_dirs(&worktree)
@@ -2415,7 +3358,15 @@ impl Jobs {
         ];
         argv.extend(args.iter().map(OsString::from));
         let env = process::sandbox_env(&process::tools_path(), &temp, &spec.git_env());
-        sandboxed_output(&sandbox.wrap(&spec, &argv), &env, &worktree, input).await
+        sandboxed_output(
+            &sandbox.wrap(&spec, &argv),
+            &env,
+            &worktree,
+            input,
+            limit,
+            max,
+        )
+        .await
     }
 
     /// What the agent left uncommitted when its job ended without commits to publish (stopped, at
@@ -2454,6 +3405,38 @@ impl Jobs {
         )
         .await?;
         Ok(())
+    }
+
+    /// The job's change against `start_commit` after `round`, kept as that round's (#736): paths
+    /// and counts only, read in its sandbox as git shows it with nothing the repository set up.
+    /// ponytail: tracked files only; a new file counts once the agent commits it (it's told to).
+    async fn note_diff(&self, id: &str, start_commit: &str, round: u32) {
+        if !git::is_sha(start_commit) {
+            return;
+        }
+        let args = [
+            "--no-replace-objects",
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            start_commit,
+            "--",
+        ];
+        let Ok(out) = self
+            .sandboxed_git_within(id, &args, None, DIFF_LIMIT, DIFF_OUTPUT_MAX)
+            .await
+        else {
+            return;
+        };
+        let mut diff = crate::facts::numstat(&String::from_utf8_lossy(&out));
+        diff.round = Some(round);
+        self.update(id, |job| {
+            job.diffs.retain(|d| d.round != Some(round));
+            job.diffs.push(diff);
+        });
     }
 
     /// Takes obid's own `wip:` commit back out as the job runs again: what it held is uncommitted,
@@ -2518,8 +3501,12 @@ impl Jobs {
         let outcome = match prepare_folder(&temp).and_then(|()| {
             prepare_folder(self.log_path(id, "x").parent().expect("a log has a folder"))
         }) {
-            Err(e) => Err(format!("obid couldn't make the job's folders: {e}")),
-            Ok(()) if job.obi.is_some() => self.run_obi_review(id, &signal).await,
+            Err(e) => Err(End::Failed(format!(
+                "obid couldn't make the job's folders: {e}"
+            ))),
+            Ok(()) if job.obi.is_some() => {
+                self.run_obi_review(id, &signal).await.map_err(End::Failed)
+            }
             Ok(()) => {
                 let outcome = self.run_owner_job(id, &signal).await;
                 // A job that ends any other way than done (failed, stopped) shows what it made
@@ -2532,6 +3519,12 @@ impl Jobs {
                 let keeps_none = self.get(id).is_some_and(|j| {
                     j.kind == "review" || j.status == Status::Done && j.commits.unwrap_or(0) > 0
                 });
+                // What it committed itself ends here, before obid's `wip:` commit, which never
+                // counts: counted once keep_commits has its objects in the clone.
+                let worktree = self.worktree_path(id);
+                let own_head = git::git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
+                    .await
+                    .unwrap_or_default();
                 if *signal.borrow() != Signal::Shutdown
                     && !keeps_none
                     && let Err(e) = self.keep_wip(id).await
@@ -2539,10 +3532,34 @@ impl Jobs {
                     tracing::info!("job {id}: its uncommitted work stays in its worktree: {e}");
                 }
                 // Whatever ended it (a limit, a stop, a failure), what it committed is on its
-                // branch.
-                if let Err(e) = self.keep_commits(id).await {
-                    tracing::info!("job {id}: its commits stay in its worktree: {e}");
+                // branch, and counted, so a follow-up starts from them and Dismiss warns (#757).
+                // Done counted its own.
+                match self.keep_commits(id).await {
+                    Ok(_) => {
+                        let made = match self.get(id) {
+                            Some(job) => self.counted(&job, &worktree, &own_head).await,
+                            None => 0,
+                        };
+                        if made > 0 {
+                            self.update(id, |job| {
+                                if job.status != Status::Done {
+                                    job.commits = Some(made);
+                                }
+                            });
+                        }
+                    }
+                    Err(e) => tracing::info!("job {id}: its commits stay in its worktree: {e}"),
                 }
+                // A stalled job's note says where its branch is: its own last commit, under obid's
+                // `wip:` one when there is one.
+                self.update(id, |job| {
+                    let commits = job.commits.unwrap_or(0);
+                    let mine = job.start_commit.as_deref() != Some(own_head.as_str());
+                    if let Some(stalled) = job.stalled.as_mut() {
+                        stalled.commits = commits;
+                        stalled.commit = (!own_head.is_empty() && mine).then(|| own_head.clone());
+                    }
+                });
                 outcome
             }
         };
@@ -2558,7 +3575,7 @@ impl Jobs {
                 }
             }
             Ok(()) => {}
-            Err(why) => {
+            Err(end) => {
                 let review = self.get(id).and_then(|j| {
                     let body: ReviewRequest =
                         serde_json::from_value(j.obi_request?.get("body")?.clone()).ok()?;
@@ -2569,16 +3586,44 @@ impl Jobs {
                     self.review_ended(id, false).await;
                 }
                 self.update(id, |job| {
-                    job.status = Status::Failed;
+                    let (reason, next, resumes) = match &end {
+                        End::Failed(why) => (why.clone(), None, None),
+                        End::NeedsYou {
+                            reason,
+                            next,
+                            resumes,
+                        } => (reason.clone(), *next, *resumes),
+                    };
+                    // Needing the owner, with a session to pick up: the agent's own summary stays
+                    // (`summaries` has every round's), and why it stopped is said apart. A dead end,
+                    // or one with no session, failed, its summary why.
+                    let needs_you = matches!(end, End::NeedsYou { .. }) && job.session.is_some();
+                    if needs_you {
+                        job.status = Status::Interrupted;
+                        if job.summary.trim().is_empty() {
+                            job.summary = reason.clone();
+                        }
+                        job.next_step = next.map(str::to_owned);
+                        job.resumes_at = resumes;
+                    } else {
+                        job.status = Status::Failed;
+                        job.summary = reason.clone();
+                        job.next_step = None;
+                        job.resumes_at = None;
+                    }
+                    job.reason = Some(reason);
                     job.asked = false;
                     job.publish_step = None;
                     job.step = String::new();
-                    job.summary = why;
                     job.finished = Some(obi_protocol::time::now());
                     if job.obi.is_some() {
                         job.review_result = review;
                     }
                 });
+                // What the conversation supervises: continue, split or restart (docs/runner-api.md).
+                if let Some(job) = self.get(id).filter(|j| j.stalled.is_some()) {
+                    self.events.send("stalled", job.to_json());
+                }
             }
         }
     }
@@ -2669,11 +3714,16 @@ impl Jobs {
                     .clone()
                     .into(),
             ));
+            crate::secrets::known().learn(&format!("job {} check token", job.id), &token);
             extra.push(("OBY_CHECK_TOKEN", token.into()));
         }
+        let tetrix = self.tetrix_mcp(job);
         if tool == Tool::Codex
-            && let Some((_, token)) = broker
+            && let Some((_, token)) = broker.or(tetrix.as_ref())
         {
+            // Whatever repeats it (a conversation's shell that read another process's
+            // environment) is redacted.
+            crate::secrets::known().learn(&format!("job {} MCP token", job.id), token);
             extra.push(("OBY_MCP_TOKEN", token.into()));
         }
         match (&account.config_dir, tool) {
@@ -2754,6 +3804,7 @@ impl Jobs {
             Tool::Codex => codex::argv(
                 bin,
                 broker.map(|(url, token)| (url.as_str(), token.as_str())),
+                tetrix.as_ref().map(|(url, _)| url.as_str()),
             ),
             Tool::Cursor => acp::cursor::argv(bin),
         };
@@ -2857,6 +3908,72 @@ impl Jobs {
             flags,
             stderr,
             confined: true,
+        })
+    }
+
+    /// A command of a conversation's shell (docs/runner-api.md, "obid only: the conversation's
+    /// shell"): `bash -c` in the room, confined as the conversation's agent is, but with no account
+    /// and no login, its own temporary folder as `HOME` and `TMPDIR`, `frozen` read-only, and the
+    /// network only when the owner gave it to this command.
+    pub(crate) fn shell_launch(
+        &self,
+        room: &Path,
+        temp: &Path,
+        frozen: Vec<PathBuf>,
+        network: bool,
+        command: &str,
+    ) -> Result<Launch, String> {
+        let sandbox = self
+            .sandbox
+            .as_ref()
+            .map_err(|why| format!("obid can't box the command: {why}"))?;
+        let mut hidden = vec![self.config.home.clone()];
+        hidden.extend(person_homes());
+        hidden.extend(self.config.agents.hidden_folders(&self.config.home));
+        let mut read_only = sandbox::tool_roots(
+            &process::tools_path(),
+            &hidden,
+            std::slice::from_ref(&self.config.home),
+        );
+        read_only.extend(sandbox::path_software(&process::tools_path(), &hidden));
+        let spec = Spec {
+            worktree: room.to_path_buf(),
+            git_admin: None,
+            git_common: None,
+            commits: false,
+            temp: temp.to_path_buf(),
+            accounts: Vec::new(),
+            read_only,
+            hidden,
+            network,
+            frozen,
+        };
+        // No file it writes grows past 256 MB (bash's `ulimit -f` counts KB), then bash runs the
+        // command, which comes as an argument, never inside code. `oby-shell` names it, for the
+        // sweep of what an obid that crashed left running (crate::brain::shell::reap_leftovers).
+        let argv: Vec<OsString> = [
+            "/bin/bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            "ulimit -f 262144 || exit 1; exec /bin/bash --noprofile --norc -c \"$1\"",
+            crate::brain::shell::NAME,
+            command,
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        // git reads no settings but the room's own (and runs no program they name: git isn't one
+        // of the commands that run without asking).
+        let git = [
+            ("GIT_CONFIG_NOSYSTEM", OsString::from("1")),
+            ("GIT_CONFIG_GLOBAL", OsString::from("/dev/null")),
+        ];
+        Ok(Launch {
+            argv: sandbox.wrap_command(&spec, &argv),
+            env: process::sandbox_env(&process::tools_path(), temp, &git),
+            cwd: room.to_path_buf(),
+            stderr: temp.join("stderr.log"),
         })
     }
 
@@ -2995,7 +4112,10 @@ impl Jobs {
         })
     }
 
-    /// Runs one turn of the job's tool and follows it on the job: its session and steps.
+    /// Runs one turn of the job's tool and follows it on the job: its session and steps. An owner's
+    /// job's turn that makes the same failing call [`LOOP_REPEATS`] times in a row is ended, and
+    /// comes back `looped`.
+    #[allow(clippy::too_many_arguments)]
     async fn turn(
         &self,
         id: &str,
@@ -3004,6 +4124,8 @@ impl Jobs {
         prompt: &str,
         signal: &watch::Receiver<Signal>,
         gate: Gate<'_>,
+        limit: crate::conn::Limit,
+        ran_secs: Option<&(dyn Fn() -> u64 + Sync)>,
     ) -> Result<agent::Turn, String> {
         let prompt = &crate::vault::for_agent(prompt)?;
         let (obi_review, mcp_rules) = match gate {
@@ -3028,75 +4150,321 @@ impl Jobs {
                 Answer::Allow => jobs.rule_on(id, name, input, &worktree),
             }
         };
-        let on_event = |event| match event {
-            AgentEvent::Session(session) => {
-                jobs.update(id, |job| job.session = Some(session));
+        // The turn's own stop: the job's, and a loop's (an owner's job only).
+        let mut job_signal = signal.clone();
+        let (cut, signal) = watch::channel(*signal.borrow());
+        let cut = Arc::new(cut);
+        let forward = tokio::spawn({
+            let cut = cut.clone();
+            async move {
+                while job_signal.changed().await.is_ok() {
+                    let now = *job_signal.borrow();
+                    if cut.send(now).is_err() {
+                        break;
+                    }
+                }
             }
-            AgentEvent::Step(step) | AgentEvent::Denied(step) => {
-                jobs.update(id, |job| job.step = step);
+        });
+        let signal = &signal;
+        let mut looping = Looping::in_worktree(worktree.clone());
+        let looped = std::sync::atomic::AtomicBool::new(false);
+        // An owner's job's token budget (`jobTokenBudget`), counted from where the owner last let
+        // it past: a turn that reaches it is ended, and comes back `over_budget`.
+        let budget =
+            (!obi_review).then(|| job.budget_from.unwrap_or(0) + self.config.job_token_budget);
+        let over_budget = std::sync::atomic::AtomicBool::new(false);
+        // What the job used before this turn: each report of the turn's own counts goes on top.
+        let before = job.usage.clone().unwrap_or_default();
+        let on_event = |event: AgentEvent| {
+            let entries = jobs
+                .transcripts
+                .record(id, &event, &worktree, job.check.as_deref());
+            jobs.transcribed(id, entries);
+            match event {
+                AgentEvent::Tokens(tokens) => {
+                    jobs.update(id, |job| {
+                        // Claude Code's counts are its session's so far, the turns it resumed
+                        // included: this turn's own are what grew since the session's last ones.
+                        let own = if tool == Tool::Claude {
+                            let session = job.session.clone().unwrap_or_default();
+                            let own = match &job.usage_seen {
+                                Some((seen_in, seen)) if *seen_in == session => tokens.minus(seen),
+                                _ => tokens.clone(),
+                            };
+                            job.usage_seen = Some((session, tokens));
+                            own
+                        } else {
+                            tokens
+                        };
+                        job.usage = Some(before.plus(&own));
+                        if let Some(ran) = ran_secs {
+                            job.ran_secs = Some(ran());
+                        }
+                        if budget.is_some_and(|budget| spent(job) >= budget)
+                            && !over_budget.swap(true, Ordering::Relaxed)
+                        {
+                            let _ = cut.send(Signal::Stop);
+                        }
+                    });
+                }
+                AgentEvent::Usage(usage) => {
+                    let (was, now) = jobs.usage.record(&job.account, &usage);
+                    jobs.share_rise(&job.account, &was, &now);
+                    jobs.usage_changed.notify_one();
+                }
+                AgentEvent::Session(session) => {
+                    jobs.update(id, |job| job.session = Some(session));
+                }
+                AgentEvent::Step(step) | AgentEvent::Denied(step) => {
+                    jobs.update(id, |job| {
+                        job.step = step;
+                        // The run's time so far, kept as it goes: a crash loses little of it.
+                        if let Some(ran) = ran_secs {
+                            job.ran_secs = Some(ran());
+                        }
+                    });
+                }
+                // The calls are the transcript's too; obid watches them for a loop.
+                AgentEvent::Tool {
+                    id: call,
+                    name,
+                    input,
+                } => looping.called(call, name, input),
+                AgentEvent::ToolDone {
+                    id: call, failed, ..
+                } => {
+                    if looping.done(&call, failed)
+                        && !obi_review
+                        && !looped.swap(true, Ordering::Relaxed)
+                    {
+                        let _ = cut.send(Signal::Stop);
+                    }
+                }
+                // The words and to-do list are the transcript's.
+                AgentEvent::Delta(_) | AgentEvent::Said(_) | AgentEvent::Plan(_) => {}
             }
-            // A job shows its steps; the words and each call's id are a conversation's.
-            AgentEvent::Delta(_) | AgentEvent::Tool { .. } | AgentEvent::ToolDone { .. } => {}
         };
         let plan = Self::mode_of(&job) == Mode::Plan;
-        let ran = match tool {
-            Tool::Claude => {
-                agent::run_turn(
-                    launch,
-                    prompt,
-                    ROUND_LIMIT,
-                    signal.clone(),
-                    decide,
-                    on_event,
-                )
-                .await
-            }
-            Tool::Codex => {
-                let options = codex::Options {
-                    resume: job.session.clone(),
-                    model: job.model.clone(),
-                    plan,
-                    instructions: None,
-                    no_commands: false,
-                };
-                codex::run_turn(
-                    launch,
-                    prompt,
-                    &options,
-                    ROUND_LIMIT,
-                    signal.clone(),
-                    decide,
-                    on_event,
-                )
-                .await
-            }
-            Tool::Cursor => {
-                let account = self
-                    .job_account(&job)
-                    .map(|(_, a)| a.name)
-                    .unwrap_or_default();
-                let options = acp::Options {
-                    tool: tool.name().into(),
-                    account,
-                    resume: job.session.clone(),
-                    model: job.model.clone(),
-                    plan,
-                    plan_mode: "plan".into(),
-                    agent_mode: "agent".into(),
-                };
-                acp::run_turn(
-                    launch,
-                    prompt,
-                    &options,
-                    ROUND_LIMIT,
-                    signal.clone(),
-                    decide,
-                    on_event,
-                )
-                .await
+        // The job's activity and context follow the transcript, saved and sent at most once a
+        // second while the agent works (each call's start and end would be a `job` event).
+        let run = async {
+            match tool {
+                Tool::Claude => {
+                    agent::run_turn(
+                        launch,
+                        prompt,
+                        limit.clone(),
+                        signal.clone(),
+                        decide,
+                        on_event,
+                    )
+                    .await
+                }
+                Tool::Codex => {
+                    let options = codex::Options {
+                        resume: job.session.clone(),
+                        model: job.model.clone(),
+                        plan,
+                        instructions: None,
+                        no_commands: false,
+                        usage: true,
+                        priced: self.usage.get(&job.account).priced,
+                    };
+                    codex::run_turn(
+                        launch,
+                        prompt,
+                        &options,
+                        limit.clone(),
+                        signal.clone(),
+                        decide,
+                        on_event,
+                    )
+                    .await
+                }
+                Tool::Cursor => {
+                    let account = self
+                        .job_account(&job)
+                        .map(|(_, a)| a.name)
+                        .unwrap_or_default();
+                    let options = acp::Options {
+                        tool: tool.name().into(),
+                        account,
+                        resume: job.session.clone(),
+                        model: job.model.clone(),
+                        plan,
+                        plan_mode: "plan".into(),
+                        agent_mode: "agent".into(),
+                        // Oby's Tetrix server, the only one Cursor gets (crate::tetrix).
+                        mcp: self
+                            .tetrix_mcp(&job)
+                            .map(|(url, token)| vec![json!({"type": "http", "name": "tetrix", "url": url,
+                                "headers": [{"name": "Authorization", "value": format!("Bearer {token}")}]})])
+                            .unwrap_or_default(),
+                    };
+                    acp::run_turn(
+                        launch,
+                        prompt,
+                        &options,
+                        limit.clone(),
+                        signal.clone(),
+                        decide,
+                        on_event,
+                    )
+                    .await
+                }
             }
         };
-        ran.map_err(|e| format!("obid couldn't start {}: {e}", tool.name()))
+        tokio::pin!(run);
+        let ran = loop {
+            tokio::select! {
+                ran = &mut run => break ran,
+                () = tokio::time::sleep(ACTIVITY_EVERY) => self.glanced(id),
+            }
+        };
+        self.transcribed(id, self.transcripts.end_turn(id));
+        self.glanced(id);
+        self.transcripts.forget(id);
+        forward.abort();
+        let mut turn = ran.map_err(|e| format!("obid couldn't start {}: {e}", tool.name()))?;
+        turn.looped = looped.load(Ordering::Relaxed);
+        turn.over_budget = over_budget.load(Ordering::Relaxed);
+        Ok(turn)
+    }
+
+    /// The job stalled (`why`, docs/runner-api.md `stalled`): its agent writes a handoff note in one
+    /// short turn more of its session (or obid writes one from what it saw), the job keeps `limit`
+    /// and `stalled` (the note in it), and it ends needing the owner, `Stalled: <why>.` its reason.
+    /// Its branch and worktree stay; nothing is published.
+    #[allow(clippy::too_many_arguments)]
+    async fn stall(
+        &self,
+        id: &str,
+        why: Stall,
+        tool: Tool,
+        spec: &Spec,
+        mut flags: Vec<OsString>,
+        account: &crate::config::Account,
+        broker: Option<&(String, String)>,
+        signal: &watch::Receiver<Signal>,
+        mcp: &[String],
+    ) -> End {
+        let text = why.text(&self.config);
+        tracing::info!("job {id} stalled: {text}");
+        let before = self.get(id);
+        let step = before.as_ref().map(|j| j.step.clone()).unwrap_or_default();
+        self.update(id, |job| job.step = "Writing a handoff note".into());
+        let mut note = None;
+        if let Some(job) = self.get(id)
+            && let Some(session) = job.session.clone()
+            && *signal.borrow() == Signal::Run
+        {
+            if tool == Tool::Claude && !flags.iter().any(|f| f == "--resume") {
+                flags.splice(1..1, [OsString::from("--resume"), session.into()]);
+            }
+            let prompt = format!(
+                "obid stopped your work here: {text}. Don't carry on with the task. Commit what's worth keeping, then write a handoff note for whoever picks this up, as your whole reply, under three headings: Done (what works, and is committed), Left (what's still to do, in order), Failed (what went wrong and why, and what you tried). Keep it under 300 words."
+            );
+            if let Ok(launch) = self.launch(&job, spec, tool, flags, account, broker)
+                && let Ok(turn) = self
+                    .turn(
+                        id,
+                        tool,
+                        launch,
+                        &prompt,
+                        signal,
+                        Gate::Owner { mcp },
+                        crate::conn::Limit {
+                            most: HANDOFF_LIMIT,
+                            quiet: Some(self.config.stall_after),
+                            watch: None,
+                            waiting: None,
+                        },
+                        None,
+                    )
+                    .await
+                && turn.succeeded()
+                && !turn.text().trim().is_empty()
+            {
+                note = clean_note(&turn.text());
+            }
+        }
+        // It needs the owner (#725): Try again carries it on in its session (past a safety stall,
+        // only once they confirm), and the handoff note is in `stalled`, beside the agent's own
+        // summary.
+        let needs_you = || End::needs_you(format!("Stalled: {text}."), Some(crate::job::TRY_AGAIN));
+        let Some(job) = self.get(id).or(before) else {
+            return needs_you();
+        };
+        let (note, by) = match note {
+            Some(note) => (note, "agent"),
+            None => {
+                let note = |report: &str| {
+                    format!(
+                        "The agent couldn't write a note, so obid did.\nWhere it was: round {}, {}.\nIts last report: {report}\nWhat stopped it: {text}.",
+                        job.current_round(),
+                        if step.is_empty() {
+                            "no step yet"
+                        } else {
+                            &step
+                        },
+                    )
+                };
+                let report = job.summaries.as_deref().and_then(<[String]>::last);
+                let report = report.map_or("none".into(), |r| one_line(r, 600));
+                // Its last report is the agent's words: left out when the scan flags them.
+                let note = clean_note(&note(&report)).unwrap_or_else(|| note("left out"));
+                (note, "obid")
+            }
+        };
+        let stalled = crate::job::Stalled {
+            why: why.id().into(),
+            text: text.clone(),
+            at: obi_protocol::time::now(),
+            round: job.current_round(),
+            branch: job.branch.clone(),
+            commit: None,
+            commits: 0,
+            session: job.session.is_some(),
+            note: note.clone(),
+            note_by: by.into(),
+        };
+        self.update(id, |job| {
+            job.limit = Some(text.clone());
+            job.stalled = Some(stalled.clone());
+        });
+        needs_you()
+    }
+
+    /// Tells the apps about transcript entries that came or changed (`transcript` events).
+    fn transcribed(&self, id: &str, entries: Vec<crate::transcript::Entry>) {
+        for entry in entries {
+            self.events
+                .send("transcript", json!({"job": id, "entry": entry}));
+        }
+    }
+
+    /// Keeps the job's `activity` and `context` up to date with its transcript, when they changed.
+    fn glanced(&self, id: &str) {
+        let (activity, context) = self.transcripts.glance(id);
+        let job = self.get(id);
+        if job.is_some_and(|j| j.activity != activity || j.context != context) {
+            self.update(id, |job| {
+                job.activity = activity;
+                job.context = context;
+            });
+        }
+    }
+
+    /// The job's transcript entries that came or changed after entry `after`
+    /// (`GET /v1/jobs/{id}/transcript`); `None` for a job obid doesn't have.
+    pub fn transcript(
+        &self,
+        id: &str,
+        after: u64,
+        limit: usize,
+    ) -> Option<(Vec<crate::transcript::Entry>, Option<u64>)> {
+        self.get(id)?;
+        Some(self.transcripts.read(id, after, limit))
     }
 
     /// Runs the repository's check in the job sandbox, with no network at all.
@@ -3114,12 +4482,60 @@ impl Jobs {
         let mut spec = spec.clone();
         spec.network = false;
         spec.accounts.clear();
-        let argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), command.into()];
+        // Each step between its top-level `&&`s timed, its tests counted, live (#734).
+        let round = self.get(id).map_or(1, |job| job.current_round());
+        let marker = format!("obid-step-{}", random_check_id()?);
+        let watch = Arc::new(Mutex::new(crate::facts::CheckWatch::new(
+            marker,
+            crate::facts::steps(command),
+        )));
+        let record = |ended| {
+            let record = watch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record(round, ended);
+            // Sent only when something changed: a running step's time isn't in it.
+            if ended.is_none()
+                && self
+                    .get(id)
+                    .is_some_and(|job| job.checks.last() == Some(&record))
+            {
+                return;
+            }
+            self.update(id, |job| match job.checks.last_mut() {
+                Some(last) if ended.is_some() || last.steps.iter().any(|s| s.running) => {
+                    *last = record
+                }
+                _ => job.checks.push(record),
+            });
+        };
+        record(None);
+        let script = watch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .script();
+        let argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), script.into()];
         let argv = sandbox.wrap(&spec, &argv);
         let env = process::sandbox_env(&process::tools_path(), &spec.temp, &spec.git_env());
-        let run = run_check(&argv, &env, &spec.worktree, CHECK_LIMIT, signal.clone())
-            .await
-            .map_err(|e| format!("obid couldn't run the check: {e}"))?;
+        let running = run_check(
+            &argv,
+            &env,
+            &spec.worktree,
+            CHECK_LIMIT,
+            signal.clone(),
+            Some(watch.clone()),
+        );
+        tokio::pin!(running);
+        let mut tick = tokio::time::interval(CHECK_TICK);
+        tick.tick().await;
+        let run = loop {
+            tokio::select! {
+                run = &mut running => break run,
+                _ = tick.tick() => record(None),
+            }
+        };
+        record(Some(run.as_ref().is_ok_and(|run| run.passed)));
+        let run = run.map_err(|e| format!("obid couldn't run the check: {e}"))?;
         let _ = std::fs::write(self.log_path(id, "check.log"), &run.output);
         Ok(run)
     }
@@ -3304,6 +4720,7 @@ impl Jobs {
                     files: Vec::new(),
                 },
                 &worktree,
+                Vec::new(),
             )
             .await;
         let mut prompt = review::prompt(&request);
@@ -3356,7 +4773,16 @@ impl Jobs {
         });
         // A review another Obi asked for only reads: no plug-in's MCP server.
         let turn = self
-            .turn(id, tool, launch, &prompt, signal, Gate::ObiReview)
+            .turn(
+                id,
+                tool,
+                launch,
+                &prompt,
+                signal,
+                Gate::ObiReview,
+                ROUND_LIMIT.into(),
+                None,
+            )
             .await?;
         if *signal.borrow() != Signal::Run {
             return Ok(());
@@ -3443,12 +4869,12 @@ impl Jobs {
         self: &Arc<Self>,
         id: &str,
         signal: &watch::Receiver<Signal>,
-    ) -> Result<(), String> {
+    ) -> Result<(), End> {
         let job = self.get(id).ok_or("the job is gone")?;
         if let Err(why) = &self.sandbox {
-            return Err(format!(
+            return Err(End::Failed(format!(
                 "obid can't make the job sandbox on this machine, so it ran nothing: {why}"
-            ));
+            )));
         }
         let repo = self
             .repo(&job.repo)
@@ -3560,7 +4986,7 @@ impl Jobs {
                             .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("attachment")
-                    ));
+                    ).into());
                 }
                 let data = std::fs::read(&resolved)
                     .map_err(|e| format!("obid couldn't read attachment: {e}"))?;
@@ -3577,7 +5003,7 @@ impl Jobs {
                     if crate::secrets::known().redact(&lossy) != lossy {
                         return Err(format!(
                             "The attachment {name} holds a vault secret: it isn't handed to the agent."
-                        ));
+                        ).into());
                     }
                     crate::obi_dir::write_new(&inputs, name, &data)
                         .map_err(|e| format!("obid couldn't copy attachment: {e}"))?;
@@ -3620,7 +5046,7 @@ impl Jobs {
                 return Err(format!(
                     "Cursor didn't start: this repository's .cursor/cli.json lets it run {} without asking obid, and obid can't ask you about that yet.",
                     allowed.join(", ")
-                ));
+                ).into());
             }
         }
 
@@ -3637,11 +5063,34 @@ impl Jobs {
             } else {
                 obi_plugin_api::Purpose::Dispatch
             };
+            // What Tetrix knows about the job, asked with Oby's login (crate::tetrix).
+            let mut more = Vec::new();
+            if let (Some(tetrix), Some(connections)) =
+                (self.tetrix_for(&job), self.connections.get())
+            {
+                let (items, seen) = tetrix.context(connections, &job).await;
+                self.tetrix_used(id, |used| used.absorb(seen));
+                if !items.is_empty() {
+                    more.push((
+                        obi_plugin_api::PluginId::new("tetrix").expect("a plug-in id"),
+                        items,
+                    ));
+                }
+            }
             if let Some(note) = self
-                .plugin_context(id, purpose, crate::plugins::context_job(&job), &worktree)
+                .plugin_context(
+                    id,
+                    purpose,
+                    crate::plugins::context_job(&job),
+                    &worktree,
+                    more,
+                )
                 .await
             {
                 message = format!("{message}\n\n{note}");
+            }
+            if self.tetrix_for(&job).is_some() {
+                message = format!("{message}\n\n{}", crate::tetrix::PROMPT);
             }
             if job.session.is_some() {
                 message = format!(
@@ -3662,6 +5111,29 @@ impl Jobs {
         // The turn only the owner's words started after the work's: its reply leaves the job's
         // summary to the work (#699).
         let mut noted = false;
+        // No clock ends a job that makes progress: only the run's safety ceiling (`jobCeilingHours`).
+        // It counts every run's time, restarts and tries again included (`Job::ran_secs`), kept as
+        // each turn starts and ends.
+        // ponytail: a turn obid's own crash cuts off isn't counted; keep it every few minutes if
+        // crash loops show up.
+        let ran_before = Duration::from_secs(self.get(id).and_then(|j| j.ran_secs).unwrap_or(0));
+        let began = std::time::Instant::now();
+        let ran = || (ran_before + began.elapsed()).as_secs();
+        // Its Apple check, queued or running on a Mac, is a wait, as the owner's answers are.
+        let waiting: crate::conn::Waiting = {
+            let jobs = self.clone();
+            let id = id.to_owned();
+            Arc::new(move || {
+                jobs.get(&id)
+                    .and_then(|j| j.apple_check)
+                    .is_some_and(|c| c["state"] == "queued" || c["state"] == "running")
+            })
+        };
+        let mut retries = 0;
+        // obid told the agent once to wait for what it left running (`WAIT_HERE`).
+        let mut told_to_wait = false;
+        // How the transcript opens the next turn, when it's obid's words that start it.
+        let mut opening: Option<String> = None;
         'rounds: loop {
             loop {
                 let job = self.get(id).ok_or("the job is gone")?;
@@ -3699,7 +5171,14 @@ impl Jobs {
                 // The ready agent-mcp plug-ins' servers, from a file in the job's own folder, and
                 // one permission rule per tool each allows, each its own argument (last, since
                 // --allowedTools takes every argument after it).
-                let servers = self.agent_mcp(tool);
+                // Signed in to Tetrix, obid's own Tetrix server replaces the plug-in's: the same
+                // name, the same tools, Oby's login (crate::tetrix).
+                let tetrix = self.tetrix_mcp(&job);
+                let servers: Vec<_> = self
+                    .agent_mcp(tool)
+                    .into_iter()
+                    .filter(|s| tetrix.is_none() || s.plugin.as_str() != "tetrix")
+                    .collect();
                 let broker = if tool == Tool::Cursor {
                     None
                 } else {
@@ -3709,11 +5188,24 @@ impl Jobs {
                 if broker.is_some() && tool != Tool::Cursor {
                     mcp_rules.push(crate::connections::BROKER_RULE.into());
                 }
-                if !servers.is_empty() || broker.is_some() && tool == Tool::Claude {
+                if tetrix.is_some() {
+                    self.tetrix_used(id, |_| {});
+                    mcp_rules.extend(
+                        crate::tetrix::TOOLS
+                            .iter()
+                            .map(|tool| format!("mcp__tetrix__{tool}")),
+                    );
+                }
+                if !servers.is_empty()
+                    || (broker.is_some() || tetrix.is_some()) && tool == Tool::Claude
+                {
                     let file = spec.temp.join(MCP_CONFIG_FILE);
                     let mut config = crate::plugins::claude_mcp_config(&servers);
                     if let Some((url, token)) = broker.as_ref().filter(|_| tool == Tool::Claude) {
                         config["mcpServers"]["oby"] = json!({"type":"http","url":url,"headers":{"Authorization":format!("Bearer {token}")}});
+                    }
+                    if let Some((url, token)) = tetrix.as_ref().filter(|_| tool == Tool::Claude) {
+                        config["mcpServers"]["tetrix"] = json!({"type":"http","url":url,"headers":{"Authorization":format!("Bearer {token}")}});
                     }
                     let text = serde_json::to_vec(&config).map_err(|e| e.to_string())?;
                     let _ = std::fs::remove_file(&file);
@@ -3728,21 +5220,59 @@ impl Jobs {
                 if tool == Tool::Claude {
                     self.claude_login_ready(Some(&account)).await?;
                 }
-                let launch = self.launch(&job, &spec, tool, flags, &account, broker.as_ref())?;
+                let left = self
+                    .config
+                    .job_ceiling
+                    .saturating_sub(Duration::from_secs(ran()));
+                let stall = |why| {
+                    self.stall(
+                        id,
+                        why,
+                        tool,
+                        &spec,
+                        flags.clone(),
+                        &account,
+                        broker.as_ref(),
+                        signal,
+                        &mcp_rules,
+                    )
+                };
+                if left.is_zero() {
+                    return Err(stall(Stall::Ceiling).await);
+                }
+                if spent(&job) >= job.budget_from.unwrap_or(0) + self.config.job_token_budget {
+                    return Err(stall(Stall::Budget).await);
+                }
+                let launch =
+                    self.launch(&job, &spec, tool, flags.clone(), &account, broker.as_ref())?;
                 if *signal.borrow() != Signal::Run {
                     return Ok(());
                 }
                 self.update(id, |job| {
+                    job.stalled = None;
+                    job.ran_secs = Some(ran());
                     if job.status == Status::Queued {
                         job.status = Status::Running;
                     }
                     job.started.get_or_insert_with(obi_protocol::time::now);
                     job.phase = Some(Phase::Work);
-                    if !job.step.starts_with("You: ") {
+                    if told_to_wait && message == WAIT_HERE {
+                        job.step = "Oby: wait for it in the foreground".into();
+                    } else if !job.step.starts_with("You: ") {
                         job.step = format!("Starting {}", tool.name());
                     }
                 });
                 stages.begin(&format!("agent round {round}"));
+                self.transcribed(
+                    id,
+                    self.transcripts.start(
+                        id,
+                        &opening.take().unwrap_or_else(|| match round {
+                            1 => format!("Started on {}", tool.name()),
+                            n => format!("Round {n} on {}", tool.name()),
+                        }),
+                    ),
+                );
                 let turn = self
                     .turn(
                         id,
@@ -3751,21 +5281,74 @@ impl Jobs {
                         &message,
                         signal,
                         Gate::Owner { mcp: &mcp_rules },
+                        crate::conn::Limit {
+                            most: left,
+                            quiet: Some(self.config.stall_after),
+                            watch: Some(worktree.clone()),
+                            waiting: Some(waiting.clone()),
+                        },
+                        Some(&ran),
                     )
                     .await?;
+                self.update(id, |job| job.ran_secs = Some(ran()));
                 if *signal.borrow() != Signal::Run {
                     return Ok(());
                 }
-                if turn.timed_out {
-                    self.update(id, |job| {
-                        job.limit = Some("the round ran past 45 minutes".into())
-                    });
-                    return Err("Stopped at a limit: the round ran past 45 minutes. The branch is kept and nothing was pushed; one more round is possible.".into());
+                if turn.over_budget {
+                    return Err(stall(Stall::Budget).await);
                 }
-                let said = turn.text();
+                if turn.looped {
+                    return Err(stall(Stall::Loop).await);
+                }
+                if turn.timed_out {
+                    let why = if turn.quiet {
+                        Stall::Quiet
+                    } else {
+                        Stall::Ceiling
+                    };
+                    return Err(stall(why).await);
+                }
+                let said = turn.last_said();
                 if !turn.succeeded() {
+                    let subtype = turn.result.as_ref().and_then(|r| r.get("subtype"));
+                    if subtype.and_then(Value::as_str) == Some("error_max_turns") {
+                        return Err(stall(Stall::Turns).await);
+                    }
                     let first = said.lines().next().unwrap_or("").trim().to_owned();
-                    return Err(if first.is_empty() {
+                    // Claude Code and Codex retry these themselves first; one that still ends the
+                    // turn gets the round again in its session, after a wait.
+                    let usage = self.usage.get(&job.account);
+                    let full = usage
+                        .full_until
+                        .is_some_and(|t| t > obi_protocol::time::now())
+                        || [usage.five_hour, usage.seven_day]
+                            .into_iter()
+                            .flatten()
+                            .any(|share| share >= 1.0);
+                    if transient(&said, full) && retries < RETRY_WAITS.len() {
+                        let wait = RETRY_WAITS[retries].min(self.config.stall_after);
+                        retries += 1;
+                        let step = format!(
+                            "Retrying after {} ({retries} of {})",
+                            one_line(&first, 80),
+                            RETRY_WAITS.len()
+                        );
+                        tracing::info!("job {id}: {step}, in {wait:?}");
+                        self.update(id, |job| job.step = step.clone());
+                        let mut stop = signal.clone();
+                        tokio::select! {
+                            () = tokio::time::sleep(wait) => {}
+                            _ = stop.wait_for(|s| *s != Signal::Run) => return Ok(()),
+                        }
+                        if self.get(id).is_some_and(|j| j.session.is_some()) {
+                            message = format!(
+                                "Your last turn ended on an error ({}). Carry on, picking up where you left off.",
+                                one_line(&first, 200)
+                            );
+                        }
+                        continue;
+                    }
+                    let mut reason = if first.is_empty() {
                         format!(
                             "{} stopped without finishing ({}).{}",
                             tool.name(),
@@ -3774,9 +5357,55 @@ impl Jobs {
                         )
                     } else {
                         first
+                    };
+                    // A usage limit, a login, a crash: what's done is kept, and Try again picks the
+                    // session up (after the reset, the sign-in). Past a usage limit's reset, obid
+                    // tries again by itself; a reset already gone by is a stale one, and arms
+                    // nothing that could loop. Not a stall: #773's budget and ceiling still hold,
+                    // since the Try-again words go through `Jobs::message` as the owner's would.
+                    let now = obi_protocol::time::now();
+                    let resumes = turn
+                        .resets
+                        .or_else(|| {
+                            crate::limits::is_limit(&reason)
+                                .then(|| crate::limits::reset_in(&reason, now))
+                                .flatten()
+                        })
+                        // Else when the account's own usage says it's full until (#745).
+                        .or_else(|| {
+                            (full || crate::limits::is_limit(&reason))
+                                .then_some(usage.full_until)
+                                .flatten()
+                        })
+                        .map(|at| {
+                            at.saturating_add(RESET_SLACK)
+                                .min(now.saturating_add(RESET_MOST))
+                        })
+                        .filter(|at| *at > now);
+                    if resumes.is_some() {
+                        reason.push_str(" Oby tries again by itself after the reset.");
+                    }
+                    return Err(End::NeedsYou {
+                        reason,
+                        next: Some(crate::job::TRY_AGAIN),
+                        resumes,
                     });
                 }
+                retries = 0;
                 self.update(id, |job| {
+                    // A turn that said nothing (its last message a tool call, say) keeps the
+                    // earlier round's summary and adds no empty one to the rounds' (#764).
+                    if said.trim().is_empty() {
+                        if !noted {
+                            job.summary = job
+                                .summaries
+                                .as_ref()
+                                .and_then(|s| s.last())
+                                .cloned()
+                                .unwrap_or_default();
+                        }
+                        return;
+                    }
                     if !noted || job.summary.is_empty() {
                         job.summary = said.clone();
                     }
@@ -3785,6 +5414,7 @@ impl Jobs {
                         .push(said.clone());
                 });
                 noted = false;
+                self.note_diff(id, &start_commit, round).await;
                 // Words the owner sent while it worked: the agent hears them now, in another turn of
                 // this round, before the check.
                 let words = self.take_heard(id);
@@ -3792,6 +5422,37 @@ impl Jobs {
                     message = words.join("\n\n");
                     noted = true;
                     continue;
+                }
+                // It ended its turn to wait for something still running: once, it's told to wait
+                // in the foreground; again, it needs the owner, never "nothing committed".
+                let waits = if tool == Tool::Claude {
+                    turn.left_running
+                } else {
+                    waits_for_later(&said)
+                };
+                if waits {
+                    if !told_to_wait {
+                        told_to_wait = true;
+                        message = WAIT_HERE.into();
+                        opening = Some(format!(
+                            "Oby told {} to wait for its work in the foreground",
+                            tool.name()
+                        ));
+                        continue;
+                    }
+                    return Err(End::needs_you(
+                        format!(
+                            "Stopped waiting: {} The agent ended its turn to wait for work still running, and nothing wakes it once its turn is over. The branch is kept: Try again picks its session up.",
+                            one_line(
+                                said.lines()
+                                    .find(|l| !l.trim().is_empty())
+                                    .unwrap_or("")
+                                    .trim(),
+                                200
+                            )
+                        ),
+                        Some(crate::job::TRY_AGAIN),
+                    ));
                 }
                 let job = self.get(id).ok_or("the job is gone")?;
                 let more_rounds = round < job.max_rounds();
@@ -3808,10 +5469,13 @@ impl Jobs {
                     // A failure the agent says the task asked for (a test meant to fail) ends the
                     // rounds: another round would undo what the owner asked. It isn't a pass, so
                     // nothing goes out: only checks that pass publish (AGENTS.md), whatever the
-                    // agent says. The owner publishes it by hand if that's what they want.
+                    // agent says, and nothing publishes it by hand either: the owner's words decide.
                     if !run.passed && said.trim_start().starts_with(FAILS_AS_ASKED) {
-                        return Err(format!(
-                            "`{command}` fails, as the agent says the task asked for, so nothing was pushed. The branch is kept: publish it by hand if that's right."
+                        return Err(End::needs_you(
+                            format!(
+                                "`{command}` fails, as the agent says the task asked for, so nothing was pushed. The branch is kept: tell it what you want."
+                            ),
+                            None,
                         ));
                     }
                     if run.passed {
@@ -3827,8 +5491,11 @@ impl Jobs {
                     if !more_rounds {
                         let limit = format!("`{command}` still fails after {round} round(s)");
                         self.update(id, |job| job.limit = Some(limit.clone()));
-                        return Err(format!(
-                            "Stopped at a limit: {limit}. The branch is kept and nothing was pushed; one more round is possible."
+                        return Err(End::needs_you(
+                            format!(
+                                "Stopped at a limit: {limit}. The branch is kept and nothing was pushed."
+                            ),
+                            Some(crate::job::ONE_MORE_ROUND),
                         ));
                     }
                     let quoted: String = job.task.lines().map(|l| format!("> {l}\n")).collect();
@@ -3876,28 +5543,35 @@ impl Jobs {
             self.publish_artifacts(id).await;
             stages.begin("keep commits");
             let head = self.keep_commits(id).await?;
-            let commits = if start_commit.is_empty() || head == start_commit {
-                0
-            } else {
-                git::git(
-                    &worktree,
-                    &["rev-list", "--count", &format!("{start_commit}..HEAD")],
-                )
-                .await
-                .ok()
-                .and_then(|n| n.parse::<u64>().ok())
-                .unwrap_or(0)
-            };
+            self.tetrix_ended(id, &worktree, &start_commit).await;
             let job = self.get(id).ok_or("the job is gone")?;
-            let first_line = job.summary.lines().next().unwrap_or("").trim().to_owned();
-            // A round the owner asked for may end with nothing committed: their words decide.
+            let commits = self.counted(&job, &worktree, &head).await;
+            // Nothing committed: done, as Claude Code is when its model stops, and the agent's
+            // summary says why. A round the owner asked for says nothing of it: their words decide.
             if COMMITTING.contains(&job.kind.as_str()) && commits == 0 && !job.asked {
-                return Err(format!("Nothing committed: {first_line}"));
+                self.end_done(id, 0, job.pushed, |job| {
+                    job.reason = Some(NOTHING_COMMITTED.into());
+                });
+                return Ok(());
             }
-            // A review publishes nothing: one that committed fails, its commits counted.
+            // A review publishes nothing: one that committed is done, its review standing, its
+            // commits counted and kept on its branch, never published.
             if job.kind == "review" && commits > 0 {
-                self.update(id, |job| job.commits = Some(commits));
-                return Err(crate::publish::REVIEW_COMMITTED.into());
+                self.end_done(id, commits, job.pushed, |job| {
+                    job.reason = Some(crate::publish::REVIEW_COMMITTED.into());
+                });
+                return Ok(());
+            }
+            // Carrying only commits whose pull request was closed unmerged: Publish is the owner's.
+            if let Some(first) = self.first_turned_down(&job)
+                && count_commits(&worktree, &start_commit, &head).await == 0
+            {
+                self.end_done(id, commits, job.pushed, |job| {
+                    job.reason = Some(format!(
+                        "The pull request of {first} was closed without merging, so Oby didn't publish its commits again: Publish opens a new pull request with them."
+                    ));
+                });
+                return Ok(());
             }
             let pushed = self.still_pushed(&job, &head, commits).await;
             // The job as it would end, which is what gets published.
@@ -3985,10 +5659,12 @@ impl Jobs {
                         });
                         continue 'rounds;
                     }
-                    return Err(format!(
-                        "{}\n\n{}",
+                    // Its fix round couldn't clear it: the commits stay unpublished on the branch. Try
+                    // again rewrites them once more; a finding no round can fix is for a person.
+                    let fixable = found.iter().all(crate::publish::Found::fixable);
+                    return Err(End::needs_you(
                         crate::publish::blocked(&found),
-                        job.summary
+                        fixable.then_some(crate::job::TRY_AGAIN),
                     ));
                 }
                 Err(Failure::Stopped) => return Ok(()),
@@ -4075,6 +5751,40 @@ impl Jobs {
         }
     }
 
+    /// Job `id`'s Tetrix as it ends (crate::tetrix): its commits' stamps, its graph gaps sent to
+    /// Tetrix, and the summary's last line.
+    async fn tetrix_ended(&self, id: &str, worktree: &Path, start: &str) {
+        let Some(job) = self.get(id) else { return };
+        let (Some(seen), Some(tetrix), Some(connections)) = (
+            job.tetrix.clone(),
+            self.tetrix.get(),
+            self.connections.get(),
+        ) else {
+            return;
+        };
+        // Ended already, and a round came after (a push the secret scan blocked gets one): its
+        // gaps went once, and its summary gets the line again.
+        if seen.ended {
+            let line = seen.line();
+            self.update(id, |job| {
+                if job.kind != "review" && !job.summary.contains(&line) {
+                    job.summary = format!("{}\n\n{line}", job.summary.trim_end());
+                }
+            });
+            return;
+        }
+        let (ended, outgoing) = tetrix
+            .job_ended(connections, &job, &seen, worktree, start)
+            .await;
+        self.update(id, |job| {
+            if job.kind != "review" {
+                job.summary = format!("{}\n\n{}", job.summary.trim_end(), ended.line());
+            }
+            job.tetrix = Some(ended);
+            job.outgoing.extend(outgoing);
+        });
+    }
+
     /// Ends the job `id` done with `commits` (and `pushed` of them on its pull request), then
     /// `change`: unless it was stopped meanwhile.
     fn end_done(&self, id: &str, commits: u64, pushed: Option<u64>, change: impl FnOnce(&mut Job)) {
@@ -4091,6 +5801,87 @@ impl Jobs {
             job.finished = Some(obi_protocol::time::now());
             change(job);
         });
+    }
+
+    /// The commits `job` publishes, up to `head` in `worktree`: its own from `start_commit`, and,
+    /// for a follow-up that started from its first job's work, those it carries (#770): what its
+    /// branch has over the last commit any job pushed to that branch or to the one it started from
+    /// (unless that work's pull request was closed unmerged), or, when none is under `head` (a
+    /// branch of its own, or one rebased since), over its base or its pull request's head. A split
+    /// part counts only its own: its siblings carry the same commits.
+    async fn counted(&self, job: &Job, worktree: &Path, head: &str) -> u64 {
+        let start_commit = job.start_commit.as_deref().unwrap_or_default();
+        if job.start_from.is_none() || head.is_empty() || self.split_part(job) {
+            return count_commits(worktree, start_commit, head).await;
+        }
+        let from_out = self.first_turned_down(job).is_none();
+        let out = |branch: Option<&str>| {
+            branch == Some(job.branch.as_str()) || from_out && branch == job.start_from.as_deref()
+        };
+        let pushed: Vec<String> = self
+            .lock()
+            .jobs
+            .values()
+            .filter(|j| j.repo == job.repo)
+            .flat_map(|j| j.outgoing.iter())
+            .filter(|o| o.action == "push" && out(o.branch.as_deref()))
+            .map(|o| o.id.clone())
+            .collect();
+        let mut least: Option<u64> = None;
+        for there in pushed.iter().filter(|there| git::is_sha(there)) {
+            let under = git::git(worktree, &["merge-base", "--is-ancestor", there, head])
+                .await
+                .is_ok();
+            if under {
+                let count = count_commits(worktree, there, head).await;
+                least = Some(least.map_or(count, |least| least.min(count)));
+            }
+        }
+        if let Some(count) = least {
+            return count;
+        }
+        let from = match job.pr {
+            Some(pr) => format!("refs/remotes/origin/pr/{pr}"),
+            None => format!(
+                "refs/remotes/origin/{}",
+                job.base.as_deref().unwrap_or_default()
+            ),
+        };
+        count_commits(worktree, &from, head).await
+    }
+
+    /// Whether `job` is one part of its first job's split (crate::brain::supervisor).
+    fn split_part(&self, job: &Job) -> bool {
+        job.follow_up_of
+            .as_deref()
+            .and_then(|first| self.get(first))
+            .is_some_and(|first| {
+                first
+                    .supervised
+                    .iter()
+                    .any(|s| s.decision == "split" && s.jobs.contains(&job.id))
+            })
+    }
+
+    /// The title of the job whose work `job` carries, through the follow-ups between them, when
+    /// that one's pull request was closed without merging: the owner turned its commits down, so a
+    /// follow-up that adds none doesn't send them again by itself (#770).
+    fn first_turned_down(&self, job: &Job) -> Option<String> {
+        let mut job = job.clone();
+        // ponytail: a bounded walk; follow-up chains are short.
+        for _ in 0..64 {
+            job.start_from.as_ref()?;
+            let first = self.get(job.follow_up_of.as_deref()?)?;
+            if first.published.is_some() {
+                let closed = first
+                    .pull_request
+                    .as_ref()
+                    .is_some_and(|pr| pr.state == "CLOSED");
+                return closed.then(|| first.short_title());
+            }
+            job = first;
+        }
+        None
     }
 
     /// How many of `commits` (up to `head`) the remote has: those in the commit obid pushed last,
@@ -4410,8 +6201,17 @@ struct PublishHooks {
 impl crate::publish::Hooks for PublishHooks {
     fn progress(&self, step: crate::publish::Step) {
         self.stages.begin(step.as_str());
-        self.jobs
-            .update(&self.id, |job| job.publish_step = Some(step));
+        self.jobs.update(&self.id, |job| {
+            job.publish_step = Some(step);
+            // A new publish: the last one's scan no longer says how this one went.
+            if step == crate::publish::Step::Scan {
+                job.scan = None;
+            }
+        });
+    }
+
+    fn scanned(&self, scanned: crate::publish::Scanned) {
+        self.jobs.update(&self.id, |job| job.scan = Some(scanned));
     }
 
     fn proceed(&self) -> bool {
@@ -4518,9 +6318,11 @@ async fn sandboxed_output(
     env: &[(OsString, OsString)],
     dir: &Path,
     input: Option<Vec<u8>>,
+    limit: Duration,
+    max: usize,
 ) -> Result<Vec<u8>, String> {
     clear_recorded_exit(env);
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut child = tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
         .env_clear()
@@ -4541,12 +6343,56 @@ async fn sandboxed_output(
             let _ = stdin.write_all(&input).await;
         });
     }
-    let output = tokio::time::timeout(Duration::from_secs(600), child.wait_with_output())
+    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err("git in the job's sandbox has no output".into());
+    };
+    // Its output up to `max`, read alongside what it says on stderr; more than that ends it (the
+    // child is killed when dropped).
+    let run = async {
+        let (out, err) = tokio::try_join!(
+            async {
+                let mut out = Vec::new();
+                (&mut stdout)
+                    .take((max as u64).saturating_add(1))
+                    .read_to_end(&mut out)
+                    .await?;
+                if out.len() > max {
+                    return Err(std::io::Error::other(format!(
+                        "it printed more than {max} bytes"
+                    )));
+                }
+                Ok(out)
+            },
+            // Its end only, all of it read so git never waits on it: the last line is what's said.
+            async {
+                let mut err = Vec::new();
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let n = stderr.read(&mut buffer).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    err.extend_from_slice(&buffer[..n]);
+                    if err.len() > 2 * SANDBOXED_GIT_STDERR_MAX {
+                        err.drain(..err.len() - SANDBOXED_GIT_STDERR_MAX);
+                    }
+                }
+                Ok(err)
+            },
+        )?;
+        Ok::<_, std::io::Error>((child.wait().await?, out, err))
+    };
+    let (status, stdout, stderr) = tokio::time::timeout(limit, run)
         .await
-        .map_err(|_| "git in the job's sandbox took more than 600 seconds".to_owned())?
+        .map_err(|_| {
+            format!(
+                "git in the job's sandbox took more than {} seconds",
+                limit.as_secs()
+            )
+        })?
         .map_err(|e| format!("git in the job's sandbox failed: {e}"))?;
-    if !sandbox_succeeded(&output.status, env) {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !sandbox_succeeded(&status, env) {
+        let stderr = String::from_utf8_lossy(&stderr);
         let line = stderr
             .lines()
             .rfind(|l| !l.trim().is_empty())
@@ -4557,7 +6403,7 @@ async fn sandboxed_output(
             .unwrap_or_else(|| "it was killed".into());
         return Err(format!("git in the job's sandbox failed: {line}"));
     }
-    Ok(output.stdout)
+    Ok(stdout)
 }
 
 /// The macOS watcher writes the program's exit code, then kills the sandbox, itself included.
@@ -4979,6 +6825,27 @@ pub(crate) async fn keychain_ready(
 /// is good to copy: there is none (nothing is copied from it), or its token is far from its end.
 fn folder_login_ok(login: Option<&[u8]>, now: u64) -> bool {
     login.is_none_or(|login| far_from_end(expires_at(login), now))
+}
+
+/// Whether the login copy a run was given in `login` (its `.credentials.json`, or its
+/// `.claude/.credentials.json`) is good for one more turn: there is none (none was copied), or its
+/// token doesn't end within 5 minutes ([`file_login_ok`]). A conversation's Claude Code kept
+/// running between turns reads it.
+pub(crate) fn login_copy_lasts(login: &Path) -> bool {
+    match [".credentials.json", ".claude/.credentials.json"]
+        .iter()
+        .map(|name| login.join(name))
+        .find(|file| std::fs::symlink_metadata(file).is_ok())
+    {
+        None => true,
+        // A link in its place is never followed: the turn starts a Claude Code with a new copy.
+        Some(file) => {
+            std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file())
+                && std::fs::read(file)
+                    .ok()
+                    .is_some_and(|login| file_login_ok(Some(&login), now_ms()))
+        }
+    }
 }
 
 /// The issue for the Mac app's Swift engine still running agents unboxed on an account's folder,
@@ -5836,25 +7703,101 @@ fn tail(text: &str, max: usize) -> &str {
     &text[start..]
 }
 
+/// The commits in `worktree` from `start_commit` to `head`: none without either.
+async fn count_commits(worktree: &Path, start_commit: &str, head: &str) -> u64 {
+    if start_commit.is_empty() || head.is_empty() {
+        return 0;
+    }
+    git::git(
+        worktree,
+        &["rev-list", "--count", &format!("{start_commit}..{head}")],
+    )
+    .await
+    .ok()
+    .and_then(|n| n.parse::<u64>().ok())
+    .unwrap_or(0)
+}
+
+/// `job` hears `text`: its notes, what it heard, and its step.
+fn hear(job: &mut Job, text: &str) {
+    job.notes.get_or_insert_with(Vec::new).push(text.to_owned());
+    job.heard.push(text.to_owned());
+    // What the owner said; the agent's words quoted after it aren't theirs to show.
+    job.step = format!("You: {}", crate::sphere::inbox::owners_part(text));
+}
+
+/// Why the job `id` can't be deleted, when it can't, from every job obid has (`publishing`:
+/// whether it's being published): queued or running, being published, its pull request open as
+/// obid last read it (or published and never read), or a follow-up carries its branch on.
+fn undeletable_in(jobs: &HashMap<String, Job>, publishing: bool, id: &str) -> Option<&'static str> {
+    let Some(job) = jobs.get(id) else {
+        return Some("There's no such job.");
+    };
+    if job.status.is_active() {
+        Some("It's still running: stop it first.")
+    } else if publishing {
+        Some("obid is publishing it: delete it once that's done.")
+    } else if job.published.is_some()
+        && job
+            .pull_request
+            .as_ref()
+            .is_none_or(|pr| pr.state != "MERGED" && pr.state != "CLOSED")
+    {
+        Some("Its pull request is open: merge or close it first, or archive the job.")
+    } else if jobs
+        .values()
+        .any(|j| j.id != job.id && j.follow_up_of.as_deref() == Some(id) && j.branch == job.branch)
+    {
+        Some("Its follow-up carries its branch on: delete that one first.")
+    } else {
+        None
+    }
+}
+
+/// Whether `job`'s branch must stay when it's deleted: obid didn't make it (only `oby/…` are
+/// obid's; a pull request's head a review fetched is someone else's), another job of any status
+/// on its repository names it (a follow-up on its parent's branch, repeat jobs on one issue or
+/// pull request), or it's the base or the default branch.
+fn branch_shared(jobs: &HashMap<String, Job>, job: &Job, default: Option<&str>) -> bool {
+    !job.branch.starts_with("oby/")
+        || job.base.as_deref() == Some(job.branch.as_str())
+        || default == Some(job.branch.as_str())
+        || jobs
+            .values()
+            .any(|j| j.id != job.id && j.repo == job.repo && j.branch == job.branch)
+}
+
+/// Why `job` can't be continued in its session, when it can't: only one that failed, was
+/// stopped or was cut off can.
+pub fn not_continuable(job: &Job) -> Option<&'static str> {
+    match job.status {
+        Status::Failed | Status::Stopped | Status::Interrupted => None,
+        Status::Queued | Status::Running => {
+            Some("It's still running: tell it something with oby_tell_job.")
+        }
+        Status::Done => Some("It's done: oby_tell_job starts a follow-up of it."),
+    }
+}
+
 /// The first prompt of the owner's job (Engine/Jobs.swift, `Prompts.agent`, for what obid does).
 /// A follow-up of `job`, which ended, with the owner's `words` (Sangam's design, the owner's
 /// decision of 2026-10-18): the same kind, agent, account, repository, pull request or issue,
-/// base, check, model, mode and conversation, the words its request and task, titled by their
-/// first line, and what `job` did for its first prompt. Bypass isn't carried: only the owner's own
+/// base, check, model, mode and conversation, the words its request and task, titled
+/// `Follow-up: <job's title>` (never the words themselves, which may be long; the conversation
+/// may name it better, `oby_tell_job`'s `title`), and what `job` did for its first prompt. Bypass isn't carried: only the owner's own
 /// Confirm starts a job that never asks. When `job` has commits that aren't merged, the follow-up
 /// starts from its branch head, so its agent has that work: on that very branch while its pull
 /// request is open (publishing updates it), else on a branch of its own.
 pub fn follow_up(job: &Job, words: &str) -> NewJob {
     let unmerged = job.commits.unwrap_or(0) > 0 && !job.merged();
-    let line = words.trim().lines().next().unwrap_or("").trim();
-    let mut title: String = if line.chars().count() > 60 {
-        format!("{}…", line.chars().take(59).collect::<String>().trim_end())
-    } else {
-        line.to_owned()
-    };
-    if let Some(first) = title.get_mut(0..1) {
-        first.make_ascii_uppercase();
-    }
+    // A follow-up of a follow-up keeps one "Follow-up: ".
+    let title = crate::brain::briefing::line(
+        &format!(
+            "Follow-up: {}",
+            job.short_title().trim_start_matches("Follow-up: ")
+        ),
+        60,
+    );
     let commits = job.commits.unwrap_or(0);
     let mut did = vec![
         format!(
@@ -5880,7 +7823,7 @@ pub fn follow_up(job: &Job, words: &str) -> NewJob {
         repo: job.repo.clone(),
         kind: job.kind.clone(),
         task: words.to_owned(),
-        title: (!title.is_empty()).then_some(title),
+        title: Some(title),
         request: Some(words.to_owned()),
         pr: job.pr,
         issue: job.issue,
@@ -5964,7 +7907,13 @@ fn owner_prompt(job: &Job) -> String {
         lines.push("End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.".into());
     }
     lines.push("To show the user something to look at (a page, a document, a chart, an image, a PDF), put it in .obi/artifacts/: one file, or one folder with an index.html, per thing. obid shows each one when the job ends; keep secrets out, or it shows none of it.".into());
-    lines.push("Run checks in the foreground, and never end a turn waiting on a background command: obid takes the end of your turn as the end of your work.".into());
+    // Claude Code's own background tasks wake it when they end, and obid waits for them
+    // (crate::agent); nothing else that's left running when a turn ends does.
+    lines.push(if job.agent == Tool::Claude.id() {
+        "Run checks in the foreground. A command you start with run_in_background or Monitor is waited for: if your turn ends while one runs, obid waits and you go on when it ends, but only for one that ends by itself (never a server, a --watch, tail -f or a persistent Monitor), and a long wait with no word from you counts as no progress. Never leave anything else running when your turn ends (`&`, nohup): obid takes the end of your turn as the end of your work."
+    } else {
+        "Run checks in the foreground, and never end a turn waiting on a background command: obid takes the end of your turn as the end of your work."
+    }.into());
     lines.push("Change files with Edit or Write, never a script (sed -i, python -c, a heredoc into a file), and run commands from this worktree's root without cd, naming paths instead (`cargo test --manifest-path core/Cargo.toml`), and keep scratch files in your own $TMPDIR, never /tmp: obid can't see what a script writes or where a cd leads, and /tmp is outside the worktree, so each of these stops the job until the user says yes.".into());
     lines.push(
         "Finish with a short summary. Its first line is one sentence the user will see.".into(),
@@ -6017,6 +7966,7 @@ pub async fn run_check(
     cwd: &Path,
     limit: Duration,
     mut signal: watch::Receiver<Signal>,
+    watch: Option<Arc<Mutex<crate::facts::CheckWatch>>>,
 ) -> std::io::Result<CheckRun> {
     let (reader, writer) = std::io::pipe()?;
     clear_recorded_exit(env);
@@ -6039,14 +7989,24 @@ pub async fn run_check(
     // The writing ends live in the child now: the reader ends when it (and what it started) does.
     drop(command);
     let pgid = child.id().unwrap_or(0);
+    let fed = watch.clone();
     let reading = tokio::task::spawn_blocking(move || {
         let mut reader = reader;
+        let feed = |bytes: &[u8]| {
+            if let Some(watch) = &fed {
+                watch
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .feed(bytes);
+            }
+        };
         let mut kept: Vec<u8> = Vec::new();
         let mut buffer = [0u8; 8192];
         loop {
             match std::io::Read::read(&mut reader, &mut buffer) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    feed(&buffer[..n]);
                     kept.extend_from_slice(&buffer[..n]);
                     if kept.len() > 2 * CHECK_OUTPUT_MAX {
                         kept.drain(..kept.len() - CHECK_OUTPUT_MAX);
@@ -6054,6 +8014,8 @@ pub async fn run_check(
                 }
             }
         }
+        // The last line, when it has no newline of its own.
+        feed(b"\n");
         kept
     });
     let mut timed_out = false;
@@ -6077,6 +8039,15 @@ pub async fn run_check(
         .and_then(Result::ok)
         .unwrap_or_default();
     let mut output = String::from_utf8_lossy(&kept).into_owned();
+    if let Some(watch) = &watch {
+        let watch = watch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        output = output
+            .split_inclusive('\n')
+            .filter(|line| !watch.is_marker(line))
+            .collect();
+    }
     if output.len() > CHECK_OUTPUT_MAX {
         output = tail(&output, CHECK_OUTPUT_MAX).to_owned();
     }
@@ -6234,6 +8205,305 @@ fn tail_chars(text: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The same failing call 5 times is a loop, whatever is read in between or however its
+    /// numbers change; that call succeeding, or an edit, starts it over.
+    #[test]
+    fn the_same_failing_call_again_and_again_is_a_loop() {
+        use super::Looping;
+        let mut looping = Looping::default();
+        let mut n = 0;
+        let mut call = |l: &mut Looping, name: &str, command: &str, failed: bool| {
+            n += 1;
+            let id = format!("c{n}");
+            l.called(
+                id.clone(),
+                name.into(),
+                serde_json::json!({"command": command}),
+            );
+            l.done(&id, failed)
+        };
+        for i in 0..4 {
+            assert!(!call(
+                &mut looping,
+                "Bash",
+                &format!("npm test  --seed {i}"),
+                true
+            ));
+            assert!(!call(&mut looping, "Read", "package.json", false));
+            assert!(!call(&mut looping, "Bash", "npm install", true));
+        }
+        assert!(call(&mut looping, "Bash", "npm test --seed 9", true));
+
+        // An edit between failures is work, not a loop.
+        let mut looping = Looping::default();
+        for _ in 0..6 {
+            assert!(!call(&mut looping, "Bash", "npm test", true));
+            assert!(!call(&mut looping, "Edit", "src/a.js", false));
+        }
+        // The same call passing starts its count over.
+        for _ in 0..4 {
+            assert!(!call(&mut looping, "Bash", "npm test", true));
+        }
+        assert!(!call(&mut looping, "Bash", "npm test", false));
+        for _ in 0..4 {
+            assert!(!call(&mut looping, "Bash", "npm test", true));
+        }
+        assert!(call(&mut looping, "Bash", "npm test", true));
+    }
+
+    /// A command that changed the worktree (`sed -i`) is an edit too: the failures start over.
+    #[test]
+    fn a_command_that_edits_starts_the_loop_count_over() {
+        use super::Looping;
+        let dir = std::env::temp_dir().join(format!("obid-loop-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut looping = Looping::in_worktree(dir.clone());
+        let mut n = 0;
+        let mut call = |l: &mut Looping, command: &str, failed: bool, edit: bool| {
+            n += 1;
+            let id = format!("c{n}");
+            l.called(
+                id.clone(),
+                "Bash".into(),
+                serde_json::json!({"command": command}),
+            );
+            if edit {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                std::fs::write(dir.join("a.js"), format!("{n}")).unwrap();
+            }
+            l.done(&id, failed)
+        };
+        for _ in 0..4 {
+            assert!(!call(&mut looping, "npm test", true, false));
+        }
+        // A passing command that changes nothing isn't an edit.
+        assert!(!call(&mut looping, "ls", false, false));
+        assert!(!call(&mut looping, "sed -i s/a/b/ a.js", false, true));
+        for _ in 0..4 {
+            assert!(!call(&mut looping, "npm test", true, false));
+        }
+        assert!(call(&mut looping, "npm test", true, false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_turn_that_ends_to_wait_says_so_in_its_last_lines() {
+        use super::waits_for_later;
+        assert!(waits_for_later(
+            "Nothing committed: The build is still going. I\u{2019}ll continue when the monitor reports it's done."
+        ));
+        assert!(waits_for_later(
+            "Started the tests.\n\nI'll check back once they finish."
+        ));
+        // A finished job's summary.
+        for done in [
+            "Fixed the parser and committed it.\n\nGOAL MET",
+            "I'll continue when it's done.\nThen fixed it.\nRan the tests.\nAll pass.",
+            "Fixed the flaky test and pushed nothing. CI is still running upstream.",
+            "Committed the fix. The nightly job is still going on the main branch.",
+            "Added the retry. I'll let you know when the next release needs it.",
+            "Fixed it; the old server process is still running on the dev box.",
+        ] {
+            assert!(!waits_for_later(done), "{done}");
+        }
+    }
+
+    /// Overloaded, failing or dropped APIs are retried; an account's usage limit, an auth error,
+    /// and a number that only looks like a status aren't.
+    #[test]
+    fn transient_errors_are_the_ones_trying_again_mends() {
+        use super::transient;
+        for error in [
+            r#"API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}"#,
+            "API Error: 500 Internal server error",
+            "API Error: 503 upstream connect error",
+            "API Error: Connection error.",
+            "API Error: Request timed out.",
+            "Codex hit an error: stream disconnected before completion",
+            "API Error: 429 rate limit exceeded",
+        ] {
+            assert!(transient(error, false), "{error}");
+        }
+        for error in [
+            "Claude AI usage limit reached|1791582173",
+            "Codex hit an error: You've hit your usage limit.",
+            "it broke",
+            r#"API Error: 401 {"error":{"message":"invalid x-api-key","request_id":"req_500429"}}"#,
+            "Invalid API key · Please run /login (request 5004)",
+            "the tests timed out after 500 ms",
+        ] {
+            assert!(!transient(error, false), "{error}");
+        }
+        // A 429 while the account's usage says it is full is its limit, not a blip.
+        assert!(!transient("API Error: 429 rate limit exceeded", true));
+        assert!(transient("API Error: 529 overloaded", true));
+    }
+
+    #[test]
+    fn stall_times_are_spelled_out() {
+        use super::spell;
+        use std::time::Duration;
+        assert_eq!(spell(Duration::from_secs(900)), "15 minutes");
+        assert_eq!(spell(Duration::from_secs(12 * 3600)), "12 hours");
+        assert_eq!(spell(Duration::from_secs(60)), "1 minute");
+        assert_eq!(spell(Duration::from_secs(90)), "90 seconds");
+    }
+
+    /// A handoff note the secret scan flags anywhere isn't kept (a key's body spans lines, so a
+    /// line-by-line cut would keep it); a long one is cut to 4 KB.
+    #[test]
+    fn a_handoff_note_keeps_no_secret_and_stays_small() {
+        let key = format!("AKIA{}", "QWERTYUIOPASDFGH");
+        assert_eq!(
+            super::clean_note(&format!("Done: the parser.\nLeft: deploy with {key}\n")),
+            None
+        );
+        let pem = format!(
+            "Done: the parser.\n-----BEGIN {} PRIVATE KEY-----\nMIIEowIBAAKCAQEA1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6\n-----END {} PRIVATE KEY-----\n",
+            "RSA", "RSA"
+        );
+        assert_eq!(super::clean_note(&pem), None);
+        let note = super::clean_note("Done: the parser.\nLeft: the tests.").unwrap();
+        assert_eq!(note, "Done: the parser.\nLeft: the tests.");
+        let long = super::clean_note(&"Left: more. ".repeat(1000)).unwrap();
+        assert!(long.len() <= 4 * 1024, "{}", long.len());
+    }
+
+    fn job_on(id: &str, repo: &str, branch: &str) -> Job {
+        let mut job = Job::new(
+            id.into(),
+            repo.into(),
+            "fix".into(),
+            "x".into(),
+            "claude".into(),
+            "stub".into(),
+        );
+        job.branch = branch.into();
+        job.status = Status::Failed;
+        job
+    }
+
+    fn map(jobs: &[Job]) -> HashMap<String, Job> {
+        jobs.iter().map(|j| (j.id.clone(), j.clone())).collect()
+    }
+
+    /// A job is deleted only once it ended, isn't being published, has no open pull request and
+    /// no follow-up carries its branch on.
+    #[test]
+    fn what_keeps_a_job_from_being_deleted() {
+        let alone = job_on("a", "acme/app", "oby/fix-a");
+        assert_eq!(
+            undeletable_in(&map(std::slice::from_ref(&alone)), false, "a"),
+            None
+        );
+        assert!(
+            undeletable_in(&map(std::slice::from_ref(&alone)), true, "a")
+                .unwrap()
+                .contains("publishing")
+        );
+        assert!(
+            undeletable_in(&map(&[]), false, "a")
+                .unwrap()
+                .contains("no such job")
+        );
+        let mut running = alone.clone();
+        running.status = Status::Running;
+        assert!(
+            undeletable_in(&map(&[running]), false, "a")
+                .unwrap()
+                .contains("still running")
+        );
+        let mut published = alone.clone();
+        published.published = Some("https://github.com/acme/app/pull/1".into());
+        assert!(
+            undeletable_in(&map(&[published.clone()]), false, "a")
+                .unwrap()
+                .contains("pull request is open")
+        );
+        published.pull_request = Some(crate::github::PullRequest {
+            state: "MERGED".into(),
+            review_decision: None,
+            base: "main".into(),
+            merged_at: Some(1),
+            checked_at: 1,
+            head: None,
+        });
+        assert_eq!(undeletable_in(&map(&[published]), false, "a"), None);
+        let mut follow = job_on("b", "acme/app", "oby/fix-a");
+        follow.follow_up_of = Some("a".into());
+        assert!(
+            undeletable_in(&map(&[alone, follow]), false, "a")
+                .unwrap()
+                .contains("follow-up carries")
+        );
+    }
+
+    /// A deleted job's branch stays when another job on its repository names it, whatever its
+    /// status, or it's the base or default branch; another repository's same name doesn't count.
+    #[test]
+    fn a_shared_branch_stays() {
+        let job = job_on("a", "acme/app", "oby/fix-7");
+        assert!(!branch_shared(
+            &map(std::slice::from_ref(&job)),
+            &job,
+            Some("main")
+        ));
+        let mut done = job_on("b", "acme/app", "oby/fix-7");
+        done.status = Status::Done;
+        assert!(branch_shared(
+            &map(&[job.clone(), done]),
+            &job,
+            Some("main")
+        ));
+        let elsewhere = job_on("c", "acme/other", "oby/fix-7");
+        assert!(!branch_shared(
+            &map(&[job.clone(), elsewhere]),
+            &job,
+            Some("main")
+        ));
+        // A pull request's head a review fetched isn't obid's to remove, alone or not.
+        let head = job_on("f", "acme/app", "feature/login");
+        assert!(branch_shared(
+            &map(std::slice::from_ref(&head)),
+            &head,
+            Some("main")
+        ));
+        let on_main = job_on("d", "acme/app", "main");
+        assert!(branch_shared(
+            &map(std::slice::from_ref(&on_main)),
+            &on_main,
+            Some("main")
+        ));
+        let mut on_base = job_on("e", "acme/app", "dev");
+        on_base.base = Some("dev".into());
+        assert!(branch_shared(
+            &map(std::slice::from_ref(&on_base)),
+            &on_base,
+            Some("main")
+        ));
+    }
+
+    /// A Confirm's snapshot changes with another round, a commit, a new mode, tool or account.
+    #[test]
+    fn a_snapshot_changes_with_the_job() {
+        let job = job_on("a", "acme/app", "oby/fix-a");
+        let before = job.snapshot();
+        for change in [
+            (|j: &mut Job| j.round = Some(2)) as fn(&mut Job),
+            |j| j.commits = Some(1),
+            |j| j.mode = Some("bypass".into()),
+            |j| j.agent = "codex".into(),
+            |j| j.account = "other".into(),
+            |j| j.status = Status::Done,
+        ] {
+            let mut changed = job.clone();
+            change(&mut changed);
+            assert_ne!(changed.snapshot(), before, "{changed:?}");
+        }
+        assert_eq!(job.clone().snapshot(), before);
+    }
 
     /// N5: a copied `~/.claude.json` keeps only the keys a boxed run needs to stay signed in, never
     /// the person's projects, history or MCP state.
@@ -6467,6 +8737,38 @@ mod tests {
     /// (its file removed) is forgotten, never made again.
     /// A job queued while its account is signed in or removed waits (its account's change is
     /// under way), and starts once the change ends, instead of failing.
+    /// Git in a job's sandbox is held to its time and its output's size (#736).
+    #[tokio::test]
+    async fn sandboxed_output_is_held_to_its_limits() {
+        let sh =
+            |script: &str| -> Vec<OsString> { vec!["/bin/sh".into(), "-c".into(), script.into()] };
+        let dir = std::env::temp_dir();
+        let run = |script: &'static str, limit: u64, max: usize| {
+            let argv = sh(script);
+            let dir = dir.clone();
+            async move {
+                sandboxed_output(&argv, &[], &dir, None, Duration::from_secs(limit), max).await
+            }
+        };
+        assert_eq!(run("printf hello", 10, 5).await.unwrap(), b"hello");
+        let too_much = run("yes | head -c 100000", 10, 100).await.unwrap_err();
+        assert!(
+            too_much.contains("printed more than 100 bytes"),
+            "{too_much}"
+        );
+        // A failure's last line is said, however much came before it on stderr.
+        let said = run(
+            "yes noise | head -n 200000 >&2; echo the last line >&2; false",
+            10,
+            100,
+        )
+        .await
+        .unwrap_err();
+        assert!(said.ends_with("failed: the last line"), "{said}");
+        let too_long = run("sleep 30", 1, 100).await.unwrap_err();
+        assert!(too_long.contains("took more than 1 seconds"), "{too_long}");
+    }
+
     #[tokio::test]
     async fn a_job_queued_during_an_accounts_change_waits_for_it() {
         let root = std::env::temp_dir().join(format!("obid-changing-{}", std::process::id()));
@@ -6503,6 +8805,24 @@ mod tests {
                 || jobs.get("j").is_some_and(|j| j.status != Status::Queued)
         });
         assert!(started, "the job never started once the change ended");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_waiting_claude_code_runs_a_turn_only_on_a_copy_that_lasts() {
+        let root = std::env::temp_dir().join(format!("obid-lasts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        assert!(login_copy_lasts(&root), "no copy: nothing ends");
+        let ends = |ms: u64| format!(r#"{{"claudeAiOauth": {{"expiresAt": {ms}}}}}"#);
+        let file = root.join(".claude/.credentials.json");
+        std::fs::write(&file, ends(now_ms() + 60 * 60_000)).unwrap();
+        assert!(login_copy_lasts(&root));
+        std::fs::write(&file, ends(now_ms() + 60_000)).unwrap();
+        assert!(!login_copy_lasts(&root), "it ends within 5 minutes");
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), &file).unwrap();
+        assert!(!login_copy_lasts(&root), "a link isn't followed");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7325,7 +9645,7 @@ mod tests {
         let next = follow_up(&job, "and the docs");
         assert_eq!((next.branch, next.start_from), (None, None));
         assert_eq!(next.mode, None);
-        assert_eq!(next.title.as_deref(), Some("And the docs"));
+        assert_eq!(next.title.as_deref(), Some("Follow-up: Fix it"));
         job.commits = Some(2);
         let next = follow_up(&job, "and the docs");
         assert_eq!(
@@ -7395,6 +9715,193 @@ mod tests {
             );
         }
         assert_eq!(jobs.list(10).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A follow-up from its first job's work counts what it publishes (#770): over the last commit
+    /// pushed to its branch, a rebased one aside; else over its pull request's head, or its base. A
+    /// split part counts only its own commits.
+    #[tokio::test]
+    async fn a_follow_up_counts_what_it_publishes() {
+        let root = std::env::temp_dir().join(format!("obid-counted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        let commit = |name: &str| {
+            git(&["commit", "-q", "--allow-empty", "-m", name]);
+            git(&["rev-parse", "HEAD"])
+        };
+        let base = commit("base");
+        git(&["update-ref", "refs/remotes/origin/main", &base]);
+        let theirs = commit("theirs");
+        git(&["update-ref", "refs/remotes/origin/pr/5", &theirs]);
+        let first = commit("first");
+        let next = commit("next");
+        git(&["checkout", "-q", "--detach", &base]);
+        let rebased = commit("rebased");
+
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let new = |id: &str, branch: &str| {
+            let mut job = Job::new(
+                id.into(),
+                "o/r".into(),
+                "fix".into(),
+                "Fix it".into(),
+                "claude".into(),
+                "a".into(),
+            );
+            job.branch = branch.into();
+            job.base = Some("main".into());
+            job
+        };
+        let mut parent = new("p", "oby/fix-p");
+        parent.outgoing.push(crate::publish::Outgoing::new(
+            "push",
+            "o/r",
+            &rebased,
+            Some("oby/fix-p"),
+        ));
+        jobs.lock().jobs.insert("p".into(), parent.clone());
+        let mut follow = new("f", "oby/fix-f");
+        follow.follow_up_of = Some("p".into());
+        follow.start_from = Some("oby/fix-p".into());
+        follow.start_commit = Some(first.clone());
+        // A branch of its own: over its base, or its pull request's head.
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 2);
+        follow.pr = Some(5);
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 1);
+        follow.pr = None;
+        // A split part: its own alone.
+        let mut split = parent.clone();
+        split.supervised.push(crate::job::Supervision {
+            at: 0,
+            decision: "split".into(),
+            jobs: vec!["f".into()],
+            turn: "t".into(),
+            count: 1,
+        });
+        jobs.lock().jobs.insert("p".into(), split);
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 0);
+        assert_eq!(jobs.counted(&follow, &repo, &next).await, 1);
+        jobs.lock().jobs.insert("p".into(), parent.clone());
+        // Its first job's branch: over the last push under its head, never a rebased one.
+        follow.branch = "oby/fix-p".into();
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 2);
+        parent.outgoing.push(crate::publish::Outgoing::new(
+            "push",
+            "o/r",
+            &first,
+            Some("oby/fix-p"),
+        ));
+        jobs.lock().jobs.insert("p".into(), parent.clone());
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 0);
+        assert_eq!(jobs.counted(&follow, &repo, &next).await, 1);
+        // A branch of its own: what was pushed to the one it started from is out too, unless its
+        // pull request was closed unmerged.
+        follow.branch = "oby/fix-f".into();
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 0);
+        assert_eq!(jobs.counted(&follow, &repo, &next).await, 1);
+        parent.published = Some("https://github.com/o/r/pull/9".into());
+        parent.pull_request = Some(crate::github::PullRequest {
+            state: "CLOSED".into(),
+            review_decision: None,
+            base: "main".into(),
+            merged_at: None,
+            checked_at: 0,
+            head: None,
+        });
+        jobs.lock().jobs.insert("p".into(), parent);
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 2);
+        // Through a follow-up between them that published nothing.
+        let mut middle = new("m", "oby/fix-m");
+        middle.follow_up_of = Some("p".into());
+        middle.start_from = Some("oby/fix-p".into());
+        jobs.lock().jobs.insert("m".into(), middle);
+        follow.follow_up_of = Some("m".into());
+        follow.start_from = Some("oby/fix-m".into());
+        assert_eq!(jobs.first_turned_down(&follow).as_deref(), Some("Fix it"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A proposal's Start reaches a running follow-up only as words, never as the answer to what it
+    /// asks: taken while it's at work, refused once a plan (or permission) waits, even one that
+    /// arrived after it was free, and the plan stays unanswered.
+    #[tokio::test]
+    async fn words_at_work_never_answer_what_the_job_asks() {
+        let root = std::env::temp_dir().join(format!("obid-hear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let mut job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        job.status = Status::Running;
+        job.phase = Some(Phase::Work);
+        job.mode = Some("plan".into());
+        let (worker, _signals) = watch::channel(Signal::Run);
+        {
+            let mut state = jobs.lock();
+            state.jobs.insert("j".into(), job);
+            state.workers.insert("j".into(), worker);
+        }
+        let heard = jobs.hear_at_work("j", "and the docs").unwrap().unwrap();
+        assert_eq!(heard.step, "You: and the docs");
+        // A plan arrives: the next Start's words are refused, and the plan still waits.
+        let worktree = root.join("worktree");
+        let Ruling::Ask(_waiting) =
+            jobs.rule_on("j", "ExitPlanMode", &json!({"plan": "1. Fix"}), &worktree)
+        else {
+            panic!("the plan went through by itself");
+        };
+        let refused = jobs.hear_at_work("j", "from the web").unwrap();
+        assert!(refused.unwrap_err().0.contains("can't take words now"));
+        let job = jobs.get("j").unwrap();
+        assert!(job.permission.is_some(), "still waiting");
+        assert_eq!(job.heard, ["and the docs"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -7,6 +7,7 @@
 
 pub mod accounts;
 pub mod acp;
+pub mod activity;
 pub mod agent;
 pub mod api;
 pub mod app;
@@ -21,6 +22,7 @@ pub mod connections;
 pub mod conversation;
 pub mod devices;
 pub mod events;
+pub mod facts;
 pub mod failures;
 pub mod gateway;
 pub mod git;
@@ -29,6 +31,7 @@ pub mod github_login;
 pub mod github_work;
 pub mod job;
 pub mod jobs;
+pub mod limits;
 pub mod logs;
 pub mod obi_dir;
 pub mod permissions;
@@ -38,13 +41,17 @@ pub mod process;
 pub mod publish;
 pub mod review;
 pub mod routes;
+pub mod routines;
 pub mod sandbox;
 pub mod scan;
 pub mod secrets;
 pub mod settings;
 pub mod sphere;
 pub mod store;
+pub mod tetrix;
 pub mod token;
+pub mod transcript;
+pub mod usage;
 pub mod vault;
 pub mod web;
 
@@ -208,8 +215,12 @@ pub async fn serve(
     let sandbox = std::env::current_exe()
         .map_err(|e| format!("obid can't find its own executable: {e}"))
         .and_then(|obid| sandbox::Sandbox::detect(&obid));
-    if let Err(why) = &sandbox {
-        tracing::warn!("no job sandbox, so no job will run: {why}");
+    match &sandbox {
+        Err(why) => tracing::warn!("no job sandbox, so no job will run: {why}"),
+        Ok(boxed) if boxed.encloses() => tracing::warn!(
+            "obid runs inside a job sandbox, which Seatbelt can't nest in: what it starts stays in that sandbox"
+        ),
+        Ok(_) => {}
     }
     let jobs = jobs::Jobs::open(config.clone(), events.clone(), sandbox).map_err(|source| {
         StartError::Jobs {
@@ -243,6 +254,14 @@ pub async fn serve(
     };
     let connections = connections::Connections::open(&config.home, &jobs, broker_host);
     jobs.use_connections(connections.clone());
+    let tetrix = tetrix::Tetrix::open(
+        &config.home,
+        vault::shared().expect("the vault is installed first"),
+        events.clone(),
+    );
+    jobs.use_tetrix(tetrix.clone());
+    // A login copy a crash left in a conversation's folder goes before anything runs.
+    brain::harness::forget_logins_left(&config.home);
     let conversations = conversation::Conversations::open(&config.home, events.clone());
     let artifacts = artifacts::Artifacts::open(&config.home, events.clone()).map_err(|source| {
         StartError::Jobs {
@@ -251,6 +270,8 @@ pub async fn serve(
         }
     })?;
     jobs.use_artifacts(artifacts.clone());
+    let routines = Arc::new(routines::Routines::open(&config.home, events.clone()));
+    jobs.use_routines(routines.clone());
     let github =
         github_work::Feed::open(config.clone(), jobs.clone(), link.clone(), events.clone());
     let shared = Arc::new(api::Shared {
@@ -266,6 +287,7 @@ pub async fn serve(
         events,
         conversations,
         artifacts,
+        routines,
         turns: brain::turn::Turns::default(),
         harness: brain::harness::Sessions::default(),
         presence: brain::recap::Presence::default(),
@@ -273,6 +295,7 @@ pub async fn serve(
         plugins: plugins.clone(),
         sign_ins: accounts::SignIns::default(),
         github: github_login::GitHubLogin::default(),
+        tetrix,
         pages: web::Sessions::default(),
         github_work: github.clone(),
         stopping: stopping_rx.clone(),
@@ -311,10 +334,35 @@ pub async fn serve(
     jobs.resume();
     link.start();
     github.spawn(stopping_rx.clone());
+    // A tool reported an account's usage: every app hears the accounts as they are now.
+    {
+        let shared = shared.clone();
+        let mut stopping = stopping_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = shared.jobs.usage_changed.notified() => accounts::send_accounts(&shared).await,
+                    _ = stopping.changed() => return,
+                }
+            }
+        });
+    }
     // A job a conversation started tells it how it ended (#351).
     conversation::report_job_ends(shared.clone());
+    // Each repository's spare tree for the conversations' rooms, so a new one
+    // doesn't wait for one to be extracted (docs/fast-replies.md).
+    brain::harness::prepare_rooms(&shared);
+    // What a conversation's shell left running when obid last stopped without ending it.
+    brain::shell::reap_leftovers(&shared.config.home);
+    // A deleted conversation's waiting Claude Code ends with it.
+    brain::harness::end_warm_with_conversations(shared.clone());
+    // Routines run on their schedules (#395).
+    shared.routines.attach(&shared);
+    routines::spawn(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
     brain::orchestrator::spawn(shared.clone());
+    // A job a conversation started that stalls goes back to that conversation, which decides.
+    brain::supervisor::spawn(shared.clone());
     // Every event a plug-in emits becomes a `pluginEvent` inbox item. The receiver ends once
     // the host has shut down.
     if let Some(mut events) = plugins.take_events() {
@@ -344,6 +392,8 @@ pub async fn serve(
             let _ = stopped_at.set(tokio::time::Instant::now());
             shared.sign_ins.kill_all();
             shared.github.kill();
+            shared.harness.end_all_warm();
+            shared.harness.shell.end_all();
             tokio::join!(jobs.shutdown(JOBS_GRACE), plugins.shutdown());
         })
     };

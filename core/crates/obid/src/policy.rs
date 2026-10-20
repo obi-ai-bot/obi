@@ -331,8 +331,9 @@ pub fn fixed_denial(tool: &str, input: &Value, worktree: &Path, mcp: &[String]) 
             "obid's agents use only the MCP tools of the plug-ins the owner enabled, and only the ones each allows. Say in your summary what you'd have done with {tool}."
         ));
     }
+    // A background command is fine: Claude Code wakes when it ends, obid waits for that
+    // (crate::agent), and it ends with the turn. Background subagents stay refused.
     let background = match tool {
-        "Bash" => input.get("run_in_background").and_then(Value::as_bool) == Some(true),
         "Agent" | "Task" => {
             input.get("run_in_background").and_then(Value::as_bool) != Some(false)
                 || input.get("isolation").and_then(Value::as_str) == Some("remote")
@@ -340,7 +341,7 @@ pub fn fixed_denial(tool: &str, input: &Value, worktree: &Path, mcp: &[String]) 
         _ => false,
     };
     if background {
-        return Some("Run it in the foreground: obid ends the session when your turn ends, and background work can't ask for permissions.".into());
+        return Some("Run the helper in the foreground: a background helper's work can't ask for permissions.".into());
     }
     if tool == "Bash"
         && let Some(command) = input.get("command").and_then(Value::as_str)
@@ -682,7 +683,7 @@ mod tests {
             ),
             Answer::Allow
         );
-        assert!(matches!(
+        assert_eq!(
             decide(
                 "Bash",
                 &json!({"command": "sleep 9", "run_in_background": true}),
@@ -690,8 +691,8 @@ mod tests {
                 false,
                 &[]
             ),
-            Answer::Deny(_)
-        ));
+            Answer::Allow
+        );
         assert!(matches!(
             decide("Task", &json!({"description": "x"}), worktree, false, &[]),
             Answer::Deny(_)

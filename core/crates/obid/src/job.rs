@@ -5,7 +5,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// `queued`, `running`, `done`, `failed`, `stopped` or `interrupted`.
+/// `queued`, `running`, `done`, `failed`, `stopped` or `interrupted`. On obid, `interrupted` is a
+/// job that needs the owner: it stopped part way, its work kept on its branch (`reason`, `nextStep`);
+/// `failed` is a dead end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Status {
@@ -34,6 +36,11 @@ impl Status {
         matches!(self, Status::Queued | Status::Running)
     }
 }
+
+/// A next step: another round of a job that stopped at one of obid's limits.
+pub const ONE_MORE_ROUND: &str = "One more round";
+/// A next step: the agent's session picked up again where it stopped.
+pub const TRY_AGAIN: &str = "Try again";
 
 /// The kinds of work.
 pub const KINDS: [&str; 6] = ["review", "fix", "build", "test", "investigate", "research"];
@@ -108,6 +115,27 @@ pub struct Brief {
     pub done: Option<String>,
 }
 
+/// Why and where a stalled job stopped, with its handoff note (docs/runner-api.md, `stalled`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stalled {
+    /// `quiet`, `loop`, `turns`, `ceiling` or `budget`.
+    pub why: String,
+    /// The same as the job's `limit`.
+    pub text: String,
+    pub at: i64,
+    pub round: u32,
+    pub branch: String,
+    /// The branch's head when it stalled, and the job's own commits.
+    pub commit: Option<String>,
+    pub commits: u64,
+    /// A session is kept to carry on in (its id stays obid's).
+    pub session: bool,
+    /// The handoff note, quoted as data, secrets taken out; `agent` or `obid` wrote it.
+    pub note: String,
+    pub note_by: String,
+}
+
 /// A job as obid keeps it (`home/jobs/<id>.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,6 +195,8 @@ pub struct Job {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<String>>,
     pub limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled: Option<Stalled>,
     pub start_commit: Option<String>,
     pub mode: Option<String>,
     pub waiting: Option<Waiting>,
@@ -179,6 +209,11 @@ pub struct Job {
     /// conversation is deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
+    /// The user's turn of `conversation` whose words started it, so the conversation shows its
+    /// card under them the moment it starts, before Oby's answer lists it. None for a job no turn
+    /// started directly (a follow-up told from its page, a Start, an event turn's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<String>,
     /// What an Obi-to-Obi review job made: the result body for its exchange
     /// (runner-api.md, "obid only: Obi-to-Obi review jobs", step 7). Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,6 +242,9 @@ pub struct Job {
     pub answered: Vec<crate::permissions::Answered>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub answered_count: u32,
+    /// What obid saw of the agent and Tetrix, through obid's own Tetrix server (crate::tetrix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tetrix: Option<crate::tetrix::Use>,
     /// Calls an agent made through the user's connected apps; names only, never secret values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connection_uses: Vec<crate::connections::ConnectionUse>,
@@ -241,6 +279,25 @@ pub struct Job {
     /// design, the owner's decision of 2026-10-18).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up_of: Option<String>,
+    /// Its activity at a glance, from its transcript (`crate::activity`, #730).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Value>,
+    /// The agent's latest words, shortened: what it's doing now and why (#730).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// Why it stopped without ending done, in obid's words, apart from the agent's own summary;
+    /// or, ended done, what it didn't do (nothing committed). None while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The one next step of a job that needs the owner (`interrupted`), as its button says it:
+    /// [`ONE_MORE_ROUND`] or [`TRY_AGAIN`]; both send Try again's words. None when only the owner's
+    /// own words, or Dismiss, can take it on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+    /// When obid tries a job its account's usage limit stopped again by itself (`interrupted`),
+    /// in seconds since the epoch: a minute after the reset its tool named. None otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumes_at: Option<i64>,
     /// What the job it follows up did, for its first prompt, quoted there. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub earlier: Option<String>,
@@ -248,6 +305,99 @@ pub struct Job {
     /// for a follow-up of work that isn't merged. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_from: Option<String>,
+    /// What the conversation that owns it did by itself each time it stalled
+    /// (crate::brain::supervisor), oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supervised: Vec<Supervision>,
+    /// Its change against `start_commit` after each round, oldest first (#736): `diff` in the API.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diffs: Vec<crate::facts::Diff>,
+    /// Each run of its own check, oldest first, the running one live (#734).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<crate::facts::CheckRecord>,
+    /// How its last publish's secret scan went (#735).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<crate::publish::Scanned>,
+    /// Each stage's times, as the job went through it (#733). Finished jobs' are the history
+    /// estimates read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stage_times: Vec<crate::facts::StageTime>,
+    /// What it should take, from jobs like it (#733).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<crate::facts::Estimate>,
+    /// What its turns used, in tokens and cost, as its tool reported them (#731).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::usage::Tokens>,
+    /// Claude Code's session and its counts at its last result, which the next turn's resumed
+    /// counts include (crate::jobs). Never in the API's job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_seen: Option<(String, crate::usage::Tokens)>,
+    /// Its estimated share of its account's windows (#732).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_share: Option<crate::usage::WindowShare>,
+    /// How long its agent has run, in seconds, every run and restart included, since the owner
+    /// last let it past its ceiling: what `jobCeilingHours` holds (crate::jobs). Never in the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ran_secs: Option<u64>,
+    /// What it had spent (crate::jobs, `spent`) when the owner last let it past its token budget:
+    /// `jobTokenBudget` counts from there. Never in the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_from: Option<u64>,
+    /// When it was archived (`POST /v1/jobs/{id}/archive`, `oby_archive_job`), or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<i64>,
+    /// What Oby or the owner changed about it after it started, oldest first: its report's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<Change>,
+    /// Every time its tool or account was changed (`oby_change_job`), oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub moves: Vec<Move>,
+    /// The routine whose run started it (crate::routines), or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine: Option<RoutineMark>,
+}
+
+/// Which routine's run a job is (docs/runner-api.md, "obid only: routines"): the routine, its
+/// name when the run started, the time it was due, and whether it ran late.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineMark {
+    pub id: String,
+    pub name: String,
+    /// When the run was due, in seconds since the epoch.
+    pub scheduled: i64,
+    pub catch_up: bool,
+}
+
+/// One decision of the conversation about a job of its that stalled (crate::brain::supervisor).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Supervision {
+    pub at: i64,
+    /// `continue`, `restart` or `split`; `asked` when it left the next step to the owner.
+    pub decision: String,
+    /// The jobs it started: the restart, or the split's parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<String>,
+    /// Its turn in the conversation.
+    pub turn: String,
+    /// The automatic steps across the job's tree with this one; for `asked`, those taken before.
+    pub count: usize,
+}
+
+/// One thing changed about a job after it started, in obid's own words.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Change {
+    pub what: String,
+    pub date: i64,
+}
+
+/// A job moved to another tool or account: each "Claude Code · Personal".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Move {
+    pub from: String,
+    pub to: String,
+    pub why: Option<String>,
+    pub date: i64,
 }
 
 /// One artifact a job published: the entry of `.obi/artifacts/` it came from, so the job's next
@@ -314,6 +464,7 @@ impl Job {
             files: None,
             attachments: None,
             limit: None,
+            stalled: None,
             start_commit: None,
             mode: None,
             waiting: None,
@@ -322,6 +473,7 @@ impl Job {
             worktree: None,
             obi: None,
             conversation: None,
+            turn: None,
             review_result: None,
             obi_request: None,
             permission: None,
@@ -332,6 +484,7 @@ impl Job {
             answered: Vec::new(),
             answered_count: 0,
             connection_uses: Vec::new(),
+            tetrix: None,
             connections: None,
             heard: Vec::new(),
             offers: Vec::new(),
@@ -340,9 +493,45 @@ impl Job {
             artifacts: Vec::new(),
             artifact_problems: Vec::new(),
             follow_up_of: None,
+            activity: None,
+            context: None,
+            reason: None,
+            next_step: None,
+            resumes_at: None,
             earlier: None,
             start_from: None,
+            supervised: Vec::new(),
+            diffs: Vec::new(),
+            checks: Vec::new(),
+            scan: None,
+            stage_times: Vec::new(),
+            estimate: None,
+            archived: None,
+            changes: Vec::new(),
+            moves: Vec::new(),
+            usage: None,
+            usage_seen: None,
+            window_share: None,
+            routine: None,
+            ran_secs: None,
+            budget_from: None,
         }
+    }
+
+    /// What a Confirm about it is proposed against: its round, status, commits, mode, tool and
+    /// account. Confirmed after any of them changed, it's refused.
+    pub fn snapshot(&self) -> Value {
+        json!({"round": self.current_round(), "status": self.status.as_str(),
+               "commits": self.commits, "unpublished": self.unpublished(),
+               "mode": self.mode, "agent": self.agent, "account": self.account})
+    }
+
+    /// Adds `what` to its changes, dated now.
+    pub fn changed(&mut self, what: String) {
+        self.changes.push(Change {
+            what,
+            date: obi_protocol::time::now(),
+        });
     }
 
     /// obid said, at `now`, what publishing its latest run by hand would do.
@@ -501,6 +690,16 @@ impl Job {
     /// The job as the runner API shows it.
     pub fn to_json(&self) -> Value {
         let date = |t: Option<i64>| t.map(obi_protocol::time::format);
+        // Out of the object below, which is as big as json! takes.
+        let supervised: Vec<Value> = self
+            .supervised
+            .iter()
+            .map(|s| {
+                json!({"at": obi_protocol::time::format(s.at), "decision": s.decision,
+                       "jobs": s.jobs, "turn": s.turn, "count": s.count,
+                       "of": crate::brain::supervisor::MOST})
+            })
+            .collect();
         // `title` is the derived one, always a string, as the Swift runner sends it.
         let mut value = json!({
             "id": self.id,
@@ -547,6 +746,11 @@ impl Job {
             "outgoing": self.outgoing.iter().map(crate::publish::Outgoing::to_json).collect::<Vec<_>>(),
             "question": null,
             "limit": self.limit,
+            "stalled": self.stalled.as_ref().map(|s| json!({
+                "why": s.why, "text": s.text, "at": date(Some(s.at)), "round": s.round,
+                "branch": s.branch, "commit": s.commit, "commits": s.commits,
+                "session": s.session, "note": s.note, "noteBy": s.note_by,
+            })),
             "startCommit": self.start_commit,
             "firstSwiftBuildSeconds": null,
             "macCheck": mac_check_json(self.mac_check.clone(), "merge"),
@@ -554,8 +758,10 @@ impl Job {
             "mergeError": null,
             "appleCheck": mac_check_json(self.apple_check.clone(), "apple"),
             "appleRan": mac_check_json(self.apple_ran.clone(), "apple"),
-            "tetrix": null,
-            "moves": [],
+            "tetrix": self.tetrix.as_ref().map(crate::tetrix::Use::to_json),
+            "moves": self.moves.iter().map(|m| json!({"from": m.from, "to": m.to, "why": m.why, "date": obi_protocol::time::format(m.date)})).collect::<Vec<_>>(),
+            "archived": date(self.archived),
+            "changes": self.changes.iter().map(|c| json!({"what": c.what, "date": obi_protocol::time::format(c.date)})).collect::<Vec<_>>(),
             "xcodeCloud": null,
             "xcodeCloudError": null,
             "startWhen": null,
@@ -574,14 +780,113 @@ impl Job {
             "obi": self.obi,
             "worktree": self.worktree,
             "conversation": self.conversation,
+            "turn": self.turn,
             "artifacts": self.artifacts.iter().map(|a| json!({"id": a.id, "version": a.version})).collect::<Vec<_>>(),
             "artifactProblems": self.artifact_problems,
             "followUpOf": self.follow_up_of,
+            "routine": self.routine.as_ref().map(|r| json!({"id": r.id, "name": r.name,
+                "scheduled": obi_protocol::time::format(r.scheduled), "catchUp": r.catch_up})),
+            "supervised": supervised,
         });
+        if let Some(activity) = &self.activity {
+            value["activity"] = activity.clone();
+        }
+        if let Some(context) = &self.context {
+            value["context"] = json!(context);
+            // The agent's own words, quoted: never obid's.
+            value["contextBy"] = json!("agent");
+        }
+        // Why it stopped and its one next step (#725), out of the literal above: json!'s recursion
+        // limit.
+        value["reason"] = json!(self.reason);
+        value["nextStep"] = json!(self.next_step);
+        value["resumesAt"] = json!(date(self.resumes_at));
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
         }
+        if let Some(usage) = &self.usage {
+            value["usage"] = json!(usage);
+        }
+        if let Some(share) = self.window_share.as_ref().and_then(|s| s.to_json()) {
+            value["windowShare"] = share;
+        }
+        // The latest round's (#736); every round's is in `detail_json`. Absent before the first
+        // round ends.
+        if let Some(last) = self.diffs.last() {
+            value["diff"] = json!(last);
+        }
+        // The latest run only, on every event (#734); every run's is in `detail_json`.
+        if let Some(last) = self.checks.last() {
+            value["checks"] = json!([last]);
+        }
+        // The scan's own record; else why it never ran: its checks failed, or publishing stopped
+        // before it (#735).
+        // A check that never passed ends needing the owner (`interrupted`, #725) or failed.
+        let scan = if matches!(self.status, Status::Failed | Status::Interrupted)
+            && self.phase == Some(Phase::Check)
+        {
+            Some(json!({"ran": false, "reason": "checks failed"}))
+        } else if let Some(scan) = &self.scan {
+            Some(json!(scan))
+        } else {
+            self.publish_error
+                .as_ref()
+                .map(|why| json!({"ran": false, "reason": why}))
+        };
+        if let Some(scan) = scan {
+            value["scan"] = scan;
+        }
+        if let Some(estimate) = &self.estimate {
+            value["estimate"] = json!({
+                "low": estimate.low,
+                "high": estimate.high,
+                "basis": estimate.basis,
+                "samples": estimate.samples,
+                "firstGiven": estimate.first_given,
+            });
+        }
         value
+    }
+
+    /// The job as `GET /v1/jobs/{id}` shows it: [`Self::to_json`] with what's too big to send on
+    /// every event: each round's diff stat (`diff.rounds`, #736) and every check run (#734).
+    pub fn detail_json(&self) -> Value {
+        let mut value = self.to_json();
+        if value.get("diff").is_some() {
+            value["diff"]["rounds"] = json!(self.diffs);
+        }
+        if value.get("checks").is_some() {
+            value["checks"] = json!(self.checks);
+        }
+        value
+    }
+
+    /// Stamps its stages' times at `now` (#733): how the time since the last stamp counts follows
+    /// the job as it was then. Whether a stage started or finished.
+    pub fn stamp(&mut self, now: i64) -> bool {
+        let pipeline = self.pipeline();
+        let stages: Vec<(String, String)> = pipeline["stages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|s| {
+                (
+                    s["id"].as_str().unwrap_or("").to_owned(),
+                    s["state"].as_str().unwrap_or("").to_owned(),
+                )
+            })
+            .collect();
+        use crate::facts::Clock;
+        let clock = if self.permission.is_some() {
+            Clock::Owner
+        } else if self.status == Status::Queued && self.waiting.is_some() {
+            Clock::Idle
+        } else if self.mode.as_deref() == Some("plan") && !self.read_only() {
+            Clock::Planning
+        } else {
+            Clock::Running
+        };
+        crate::facts::stamp(&mut self.stage_times, &stages, clock, now)
     }
 
     /// The stages the apps draw (Engine/Pipeline.swift): prepare, work, the check, publish,
@@ -679,6 +984,10 @@ impl Job {
                     .map_or("Secret scan", crate::publish::Step::detail);
                 set(&mut stages, "publish", "current", Some(detail), None);
             }
+        } else if self.status == Status::Interrupted && self.dismissed.is_none() {
+            // It needs the owner where it stopped: the rest is still to come.
+            let reason = self.reason.as_deref().unwrap_or(&failure);
+            set(&mut stages, phase_id, "current", None, Some(reason));
         } else if stopped {
             set(&mut stages, phase_id, "failed", None, Some(&failure));
             for stage in stages.iter_mut().skip(phase_index + 1) {
@@ -813,6 +1122,29 @@ impl Job {
             })
             .unwrap_or(0);
         let total = stages.len();
+        for stage in stages.iter_mut() {
+            let id = stage["id"].as_str().unwrap_or("").to_owned();
+            if let Some(time) = self.stage_times.iter().find(|t| t.id == id) {
+                stage["started"] = json!(obi_protocol::time::format(time.started));
+                // Once it's no longer current: what a current one has taken changes every second,
+                // so the apps count it from `started`.
+                if let Some(finished) = time.finished.filter(|_| time.open.is_none()) {
+                    stage["finished"] = json!(obi_protocol::time::format(finished));
+                    stage["seconds"] = json!(time.seconds);
+                }
+                stage["waited"] = json!(time.waited);
+            }
+            let ahead = stage["state"] == "upcoming" || stage["state"] == "current";
+            if let Some((_, range)) = self
+                .estimate
+                .iter()
+                .flat_map(|e| e.stages.iter())
+                .find(|(s, _)| *s == id)
+                .filter(|_| ahead)
+            {
+                stage["estimate"] = json!(range);
+            }
+        }
         json!({"stages": stages, "number": position + 1, "total": total})
     }
 }
@@ -897,6 +1229,7 @@ mod tests {
             "claim",
             "question",
             "limit",
+            "stalled",
             "startCommit",
             "firstSwiftBuildSeconds",
             "macCheck",
@@ -910,12 +1243,20 @@ mod tests {
             "waiting",
             "permission",
             "conversation",
+            "turn",
             "followUpOf",
+            "reason",
+            "nextStep",
+            "resumesAt",
+            "routine",
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's eight.
-        assert_eq!(object.len(), 73);
+        // The Swift runner's 65 keys, obid's sixteen, and `supervised`.
+        assert_eq!(object.len(), 82);
+        assert_eq!(value["supervised"], json!([]));
+        assert_eq!(value["archived"], Value::Null);
+        assert_eq!(value["changes"], json!([]));
         assert_eq!(value["artifacts"], json!([]));
         assert_eq!(value["artifactProblems"], json!([]));
         assert_eq!(value["answered"], json!([]));
@@ -935,6 +1276,57 @@ mod tests {
         assert_eq!(value["status"], "queued");
         assert_eq!(value["obi"], Value::Null);
         assert_eq!(value["worktree"], Value::Null);
+    }
+
+    /// Each stage is timed as the job goes (#733): every round's time added up, and the time
+    /// it waited on the owner kept apart, not in its seconds.
+    #[test]
+    fn stages_are_timed_and_waiting_on_the_owner_isnt_counted() {
+        let mut job = job();
+        job.kind = "fix".into();
+        job.pr = None;
+        job.check = Some("node --test".into());
+        let t0 = job.created;
+        job.stamp(t0);
+        job.status = Status::Running;
+        job.started = Some(t0 + 10);
+        job.phase = Some(Phase::Work);
+        assert!(job.stamp(t0 + 10));
+        job.permission = Some(crate::permissions::Permission {
+            id: "p1".into(),
+            tool: "Bash".into(),
+            title: "Run it".into(),
+            detail: "it".into(),
+            rule: None,
+            always: None,
+            why: None,
+        });
+        assert!(!job.stamp(t0 + 20));
+        job.permission = None;
+        job.stamp(t0 + 50);
+        job.phase = Some(Phase::Check);
+        job.stamp(t0 + 70);
+        job.status = Status::Done;
+        job.finished = Some(t0 + 80);
+        job.stamp(t0 + 80);
+        let time = |id: &str| job.stage_times.iter().find(|t| t.id == id).unwrap();
+        assert_eq!((time("prepare").started, time("prepare").seconds), (t0, 10));
+        let work = time("work");
+        assert_eq!((work.started, work.finished), (t0 + 10, Some(t0 + 70)));
+        assert_eq!((work.seconds, work.waited), (30, 30));
+        assert_eq!(
+            (time("check").seconds, time("check").finished),
+            (10, Some(t0 + 80))
+        );
+        assert!(job.stage_times.iter().all(|t| t.id != "publish"));
+        let stages = job.pipeline()["stages"].clone();
+        assert_eq!(stages[1]["started"], obi_protocol::time::format(t0 + 10));
+        assert_eq!(stages[1]["finished"], obi_protocol::time::format(t0 + 70));
+        assert_eq!(
+            (stages[1]["seconds"].clone(), stages[1]["waited"].clone()),
+            (json!(30), json!(30))
+        );
+        assert!(stages[3].get("started").is_none());
     }
 
     #[test]
@@ -980,6 +1372,19 @@ mod tests {
         assert_eq!(failed["stages"][2]["state"], "failed");
         assert_eq!(failed["stages"][2]["reason"], "the check failed");
         assert_eq!(failed["number"], 3);
+        // Needing the owner, it waits where it stopped: why, and the rest still to come.
+        job.status = Status::Interrupted;
+        job.reason = Some("`node --test` still fails after 1 round(s)".into());
+        job.next_step = Some(ONE_MORE_ROUND.into());
+        let needs = job.pipeline();
+        assert_eq!(needs["stages"][2]["state"], "current");
+        assert_eq!(
+            needs["stages"][2]["reason"],
+            "`node --test` still fails after 1 round(s)"
+        );
+        assert_eq!(needs["stages"][3]["state"], "upcoming");
+        assert_eq!(job.to_json()["nextStep"], ONE_MORE_ROUND);
+        assert!(job.needs_you());
     }
 
     /// Engine/Pipeline.swift for a published job, with obid's own rule: the Merged stage is done

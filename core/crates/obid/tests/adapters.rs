@@ -163,6 +163,77 @@ fn codex_commits_with_obids_approval() {
     assert_eq!(accounts, [("work", "codex"), ("cursor", "cursor")]);
 }
 
+/// A Codex job's transcript (#381) has the same entries a Claude Code job's has: each item's start
+/// and end as one entry, its reads as reads, its file changes with their lines, a failed command
+/// with its exit code, and its plan as a to-do list. No command's output is in it.
+#[test]
+fn a_codex_jobs_transcript_matches_claudes() {
+    let folder = Folder::new("codex-transcript");
+    let obid = obid(&folder, false);
+    let id = dispatch(
+        &obid,
+        json!({"agent": "codex", "task": "TOOLS", "check": "node --test"}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript"), None);
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    assert_eq!(answer.body["next"], Value::Null, "{}", answer.text);
+    let entries = answer.body["entries"].as_array().unwrap().clone();
+    let shape: Vec<(&str, &str, &str)> = entries
+        .iter()
+        .map(|e| {
+            (
+                e["kind"].as_str().unwrap(),
+                e["tool"].as_str().unwrap_or(""),
+                e["state"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    let read = ("tool", "Read", "done");
+    assert_eq!(
+        shape,
+        [
+            ("start", "", ""),
+            ("said", "", ""),
+            read,
+            read,
+            read,
+            read,
+            read,
+            ("plan", "", ""),
+            ("said", "", ""),
+            ("tool", "Edit", "done"),
+            ("tool", "Edit", "done"),
+            ("tool", "Bash", "failed"),
+        ],
+        "{}",
+        answer.text
+    );
+    assert_eq!(entries[0]["summary"], "Started on Codex");
+    assert_eq!(entries[2]["summary"], "Reading scan.rs");
+    assert_eq!(entries[7]["summary"], "1 of 2 done");
+    assert_eq!(
+        entries[7]["todos"][1],
+        json!({"text": "Fix it", "state": "running"})
+    );
+    assert_eq!(
+        (&entries[9]["added"], &entries[9]["removed"]),
+        (&json!(3), &json!(2))
+    );
+    assert_eq!(entries[11]["summary"], "Running node --test");
+    assert_eq!(entries[11]["exit"], 101);
+    assert!(!answer.text.contains("raw output"), "{}", answer.text);
+    // The same kinds in its activity (#730).
+    assert_eq!(
+        job["activity"]["counts"],
+        json!({"read": 5, "search": 0, "edit": 2, "command": 0, "test": 1, "tetrix": 0, "web": 0, "mcp": 0}),
+        "{job}"
+    );
+    assert_eq!(job["activity"]["groups"][1]["title"], "Found it");
+    assert_eq!(job["context"], "Found it. Fixing it.");
+}
+
 /// obid's fixed denials hold for Codex: a push is declined, and since the decision carries no
 /// words, the turn hears why; a change outside the worktree is declined and nothing is written.
 /// A request obid doesn't answer is refused, so Codex never waits on it; a command that's fine is
@@ -211,12 +282,14 @@ fn codex_in_plan_mode_changes_no_file() {
         json!({"agent": "codex", "kind": "build", "task": "COMMIT: plan.txt", "mode": "plan"}),
     );
     let job = ended(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
-    assert_eq!(job["commits"], Value::Null);
-    assert!(
-        summary(&job).contains("Nothing committed: edit: decline"),
+    // Nothing committed: done, and the agent's summary says why.
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["commits"], 0);
+    assert_eq!(
+        job["reason"], "Nothing committed, so nothing was published.",
         "{job}"
     );
+    assert!(summary(&job).contains("edit: decline"), "{job}");
     assert!(
         !obid
             .home
@@ -264,10 +337,10 @@ fn codex_reviews_and_investigates_in_plan_mode() {
     }
 }
 
-/// A review on Codex that commits anyway (#630) fails: it publishes nothing, says so, and shows
-/// the commits it made.
+/// A review on Codex that commits anyway (#630) is done, its review standing: it publishes
+/// nothing, says so, and shows the commits it made.
 #[test]
-fn a_review_that_commits_fails() {
+fn a_review_that_commits_publishes_nothing() {
     let folder = Folder::new("codex-review-commits");
     let obid = obid(&folder, false);
     let id = dispatch(
@@ -275,10 +348,9 @@ fn a_review_that_commits_fails() {
         json!({"agent": "codex", "kind": "review", "task": "SNEAK: notes.txt"}),
     );
     let job = ended(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "done", "{job}");
     assert_eq!(
-        summary(&job),
-        "A review made commits; nothing was published.",
+        job["reason"], "A review made commits; nothing was published.",
         "{job}"
     );
     assert_eq!(job["commits"], 1, "{job}");
@@ -312,9 +384,12 @@ fn codex_resumes_fails_and_stops() {
             && second.ends_with("GOAL MET"),
         "{job}"
     );
+    // A turn that fails part way needs you: Try again picks its thread up.
     let job = ended(&obid, &fail);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert_eq!(summary(&job), "Codex hit an error: it broke");
+    assert_eq!(job["reason"], "Codex hit an error: it broke");
+    assert_eq!(job["nextStep"], "Try again");
 
     beats(&obid, &sleep);
     let started = std::time::Instant::now();
@@ -429,7 +504,7 @@ fn cursor_plans_then_goes_ahead() {
 }
 
 /// A signed-out Cursor account fails the job saying so; a prompt answered with an error, or a
-/// refusal, fails it with the tool's words; Stop cancels the prompt and ends Cursor.
+/// refusal, leaves it needing you with the tool's words; Stop cancels the prompt and ends Cursor.
 #[test]
 fn cursor_signed_out_failures_and_stop() {
     let folder = Folder::new("cursor-out");
@@ -453,7 +528,7 @@ fn cursor_signed_out_failures_and_stop() {
         "Cursor hit an error: it broke"
     );
     let job = ended(&obid, &refuse);
-    assert_eq!(job["status"], "failed");
+    assert_eq!(job["status"], "interrupted");
     assert_eq!(summary(&job), "The model refused to continue.");
     beats(&obid, &sleep);
     let started = std::time::Instant::now();
@@ -676,4 +751,94 @@ fn codex_cards_show_the_command_out_of_its_shell() {
     answer(&chained, &second);
     assert_eq!(summary(&ended(&obid, &simple)), "answer: accept");
     assert_eq!(summary(&ended(&obid, &chained)), "answer: accept");
+}
+
+/// Codex's usage reaches its Account: the `account/rateLimits/read` obid sends as the run starts,
+/// then an `account/rateLimits/updated` that changes one window and keeps the other.
+#[test]
+fn codex_reports_its_accounts_usage() {
+    let folder = Folder::new("codex-usage");
+    let obid = obid(&folder, false);
+    let reset = obi_protocol::time::now() + 86_400;
+    let read = json!({"limitId": "codex", "primary": {"windowDurationMins": 300, "usedPercent": 20, "resetsAt": reset - 3_600},
+        "secondary": {"windowDurationMins": 10080, "usedPercent": 40, "resetsAt": reset}});
+    let id = dispatch(
+        &obid,
+        json!({"agent": "codex", "task": format!("READ: {read}")}),
+    );
+    assert_eq!(ended(&obid, &id)["status"], "done");
+    let work = |obid: &Obid| call(obid, "GET", "/v1/status", None).body["accounts"][0].clone();
+    let account = work(&obid);
+    assert_eq!(account["id"], "work");
+    assert_eq!(account["fiveHour"], 0.2);
+    assert_eq!(account["sevenDay"], 0.4);
+    assert_eq!(
+        account["fiveHourResets"],
+        obi_protocol::time::format(reset - 3_600)
+    );
+    assert_eq!(account["sevenDayResets"], obi_protocol::time::format(reset));
+    assert_eq!(account["reserved"], false);
+
+    let update = json!({"primary": {"windowDurationMins": 300, "usedPercent": 100, "resetsAt": reset - 1_800}});
+    let id = dispatch(
+        &obid,
+        json!({"agent": "codex", "task": format!("LIMITS: {update}")}),
+    );
+    ended(&obid, &id);
+    let account = work(&obid);
+    assert_eq!(account["fiveHour"], 1.0);
+    assert_eq!(account["sevenDay"], 0.4);
+    assert_eq!(
+        account["fullUntil"],
+        obi_protocol::time::format(reset - 1_800)
+    );
+}
+
+/// A Codex job's tokens: each round's own, though its thread is resumed with the earlier round's
+/// total, and an update sent twice counts once; `account/read` says a plan pays (#731).
+#[test]
+fn codex_reports_a_jobs_tokens() {
+    let folder = Folder::new("codex-tokens");
+    let obid = obid(&folder, false);
+    let id = dispatch(
+        &obid,
+        json!({"agent": "codex", "kind": "build", "task": "TOKENS", "check": "false", "rounds": 2}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["round"], 2, "{job}");
+    assert_eq!(
+        job["usage"],
+        json!({"input": 800, "output": 200, "cacheRead": 1200, "priced": "plan"}),
+        "{job}"
+    );
+    // obid asks how the account pays once: a later job's answer, an API key's, isn't asked for.
+    let id = dispatch(&obid, json!({"agent": "codex", "task": "TOKENS APIKEY"}));
+    assert_eq!(ended(&obid, &id)["usage"]["priced"], "plan");
+}
+
+/// A Codex that ends its turn to wait for something still running (it wakes for nothing) is told
+/// once, in its thread, to wait in the foreground, and goes on; one that ends waiting again needs
+/// you, never "nothing committed".
+#[test]
+fn a_codex_turn_that_ends_waiting_goes_on_or_needs_you() {
+    let folder = Folder::new("adapters-waits");
+    let obid = obid(&folder, false);
+    let id = dispatch(&obid, json!({"agent": "codex", "task": "WAITS"}));
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(summary(&job), "Built in the foreground.", "{job}");
+
+    let again = dispatch(
+        &obid,
+        json!({"agent": "codex", "kind": "build", "task": "WAITS ALWAYS"}),
+    );
+    let job = ended(&obid, &again);
+    assert_eq!(job["status"], "interrupted", "{job}");
+    assert!(
+        job["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("Stopped waiting: Still building."),
+        "{job}"
+    );
 }

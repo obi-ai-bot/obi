@@ -107,7 +107,8 @@ fn conversations_are_listed_paged_renamed_pinned_and_deleted() {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys.len(), 6, "{conversation}");
+        assert_eq!(keys.len(), 7, "{conversation}");
+        assert_eq!(conversation["tasks"], json!([]));
         assert_eq!(conversation["pinned"], false);
         assert!(conversation["cursor"].as_str().unwrap().starts_with("0-"));
         assert!(conversation["created"].is_string() && conversation["lastActivity"].is_string());
@@ -358,23 +359,23 @@ fn jobs_and_their_events_land_in_the_conversation_that_started_them() {
             answer.body
         })
         .collect();
-    // The fake Claude Code fails as an agent: each job fails.
+    // The fake Claude Code commits nothing: each job is done, saying so.
     for job in &ended {
-        assert_eq!(job["status"], "failed", "{job}");
+        assert_eq!(job["status"], "done", "{job}");
         assert_eq!(job["conversation"], started.as_str(), "{job}");
     }
 
     // Every event of theirs, to the last (how each ended), carries its conversation, and so does
     // every turn.
-    let failed_at_last = |heard: &[(String, Value)], id: &str| {
+    let done_at_last = |heard: &[(String, Value)], id: &str| {
         heard
             .iter()
             .rev()
             .find(|(name, job)| name == "job" && job["id"] == id)
-            .is_some_and(|(_, job)| job["status"] == "failed")
+            .is_some_and(|(_, job)| job["status"] == "done")
     };
     let heard = heard_until(&events, 30, |heard| {
-        job_ids.iter().all(|id| failed_at_last(heard, id))
+        job_ids.iter().all(|id| done_at_last(heard, id))
             && heard.iter().filter(|(name, _)| name == "turn").count() == 8
     });
     let theirs: Vec<&Value> = heard
@@ -412,7 +413,12 @@ fn jobs_and_their_events_land_in_the_conversation_that_started_them() {
         assert_eq!(report["conversation"], started.as_str());
         let title = job["title"].as_str().unwrap();
         let text = report["text"].as_str().unwrap();
-        assert!(text.starts_with(&format!("{title} failed.")), "{text}");
+        assert!(
+            text.starts_with(&format!(
+                "{title} is done. Nothing committed, so nothing was published."
+            )),
+            "{text}"
+        );
     }
     let thread = turns(&obid, &format!("?id={started}"));
     assert_eq!(thread.len(), 4, "{thread:?}");
@@ -494,7 +500,7 @@ fn the_single_thread_from_before_becomes_the_first_conversation() {
         [
             json!({"id": id, "title": "Review oby PR #33", "pinned": false,
                 "created": "2026-10-11T09:12:00Z", "lastActivity": "2026-10-11T09:13:00Z",
-                "cursor": "0-1"})
+                "cursor": "0-1", "tasks": []})
         ]
     );
     let moved = turns(&obid, "");
