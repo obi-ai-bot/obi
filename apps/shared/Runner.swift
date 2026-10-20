@@ -1482,13 +1482,14 @@ nonisolated struct Runner: Sendable {
 
     /// The answer's body, unread: for a call whose answer says nothing the app needs.
     @discardableResult
-    func send(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Data {
+    /// `json`, when given, is the body as it is (an Obi-to-Obi object keeps its snake_case keys).
+    func send(_ method: String, _ path: String, body: (any Encodable)? = nil, json: Data? = nil, timeout: TimeInterval = 45) async throws -> Data {
         var request = URLRequest(url: URL(string: path, relativeTo: base.appending(path: "/"))!)
         request.httpMethod = method
         request.timeoutInterval = timeout
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        if let body {
-            request.httpBody = try Self.encoder.encode(body)
+        if let body = try json ?? body.map({ try Self.encoder.encode($0) }) {
+            request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         let (data, response) = try await URLSession.shared.data(for: signed(request))
