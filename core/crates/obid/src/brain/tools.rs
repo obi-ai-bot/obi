@@ -45,7 +45,8 @@ fn list() -> Value {
              "account": {"type": "string", "description": "An account by name, or auto."},
              "mode": {"type": "string", "enum": ["ask", "acceptEdits", "plan", "bypass"], "description": "Leave it out for the owner's default (Sandbox). Bypass waits for the owner's own OK."},
              "issue": {"type": "integer", "description": "The issue the work is about."},
-             "title": {"type": "string", "description": "A short title, 3 to 6 words."}},
+             "title": {"type": "string", "description": "A short title, 3 to 6 words."},
+             "check": {"type": "string", "maxLength": 200, "description": "Only when the owner named one (\"Check: …\", \"run … to check\"): that one-line shell command, exactly as they said it, which must pass before Oby publishes. Left out, the repository's own check applies."}},
              "required": ["repo", "task"]}},
         {"name": "oby_tell_job", "description": "Tells a job something: a running job hears it at its next turn; one that ended gets a follow-up job, with the same kind, agent, account and repository, that starts with the owner's words. Its card goes on your answer.",
          "inputSchema": {"type": "object", "properties": {"id": id, "words": {"type": "string"}, "title": {"type": "string", "description": "When the job ended: the follow-up's short title, 3 to 6 words."}}, "required": ["id", "words"]}},
@@ -1110,6 +1111,7 @@ struct Start {
     mode: Option<String>,
     issue: Option<i64>,
     title: Option<String>,
+    check: Option<String>,
 }
 
 fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, String> {
@@ -1401,7 +1403,10 @@ async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Resul
         task: start.task,
         inputs: vec![],
         rounds: 1,
-        check: None,
+        check: start
+            .check
+            .map(|c| c.trim().to_owned())
+            .filter(|c| !c.is_empty()),
         complexity: Default::default(),
         start_when: None,
         mode,
@@ -1418,6 +1423,7 @@ async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Resul
         by: "harness".into(),
         refused: vec![],
         calls: vec![],
+        failed: None,
     };
     let asked = Asked {
         said: &session.said,

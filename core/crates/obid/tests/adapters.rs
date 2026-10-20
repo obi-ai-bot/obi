@@ -829,3 +829,30 @@ fn codex_reports_a_jobs_tokens() {
     let id = dispatch(&obid, json!({"agent": "codex", "task": "TOKENS APIKEY"}));
     assert_eq!(ended(&obid, &id)["usage"]["priced"], "plan");
 }
+
+/// A Codex that ends its turn to wait for something still running (it wakes for nothing) is told
+/// once, in its thread, to wait in the foreground, and goes on; one that ends waiting again needs
+/// you, never "nothing committed".
+#[test]
+fn a_codex_turn_that_ends_waiting_goes_on_or_needs_you() {
+    let folder = Folder::new("adapters-waits");
+    let obid = obid(&folder, false);
+    let id = dispatch(&obid, json!({"agent": "codex", "task": "WAITS"}));
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(summary(&job), "Built in the foreground.", "{job}");
+
+    let again = dispatch(
+        &obid,
+        json!({"agent": "codex", "kind": "build", "task": "WAITS ALWAYS"}),
+    );
+    let job = ended(&obid, &again);
+    assert_eq!(job["status"], "interrupted", "{job}");
+    assert!(
+        job["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("Stopped waiting: Still building."),
+        "{job}"
+    );
+}

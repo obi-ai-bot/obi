@@ -422,8 +422,16 @@ pub fn body(job: &Job, closes: bool) -> String {
         .issue
         .map(|n| format!("\n\n{} #{n}", if closes { "Closes" } else { "Part of" }))
         .unwrap_or_default();
+    // A follow-up that started from its first job's work publishes that job's commits too (#770).
+    let jobs = match (&job.follow_up_of, &job.start_from) {
+        (Some(first), Some(_)) => format!(
+            "\n- Jobs: Oby job {} follows up job {first} and carries its commits.",
+            job.id
+        ),
+        _ => String::new(),
+    };
     format!(
-        "{}\n\nWhat the user asked for:\n\n{request}\n\n{check}\n- Secret scan: clean.{issue}\n\nby Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby never merges it: a person does.",
+        "{}\n\nWhat the user asked for:\n\n{request}\n\n{check}\n- Secret scan: clean.{jobs}{issue}\n\nby Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby never merges it: a person does.",
         rounds.join("\n\n")
     )
 }
@@ -1542,6 +1550,14 @@ mod tests {
         assert!(text.contains("Closes #75"));
         assert!(text.contains("never merges"));
         assert!(body(&job, false).contains("Part of #75"));
+        assert!(!text.contains("- Jobs:"));
+        // A follow-up from its first job's work names both jobs (#770).
+        job.follow_up_of = Some("f1257000".into());
+        job.start_from = Some("oby/fix-f1257000".into());
+        assert!(body(&job, true).contains(&format!(
+            "- Secret scan: clean.\n- Jobs: Oby job {} follows up job f1257000 and carries its commits.",
+            job.id
+        )));
         assert!(closes("A bug.\n"));
         assert!(!closes("Tests:\n  - [ ] it works\n"));
     }
