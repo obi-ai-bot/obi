@@ -57,17 +57,33 @@ enum Tool {
     Enclosing,
 }
 
-/// Whether this process is inside a sandbox that hides the person's home, as only a job sandbox
-/// does: their home (from the password database, not `HOME`) can't be listed. Asked only once
-/// `sandbox-exec` was refused, which happens only inside a sandbox.
+/// Whether this process is inside obid's own job sandbox. Asked only once `sandbox-exec` was
+/// refused, which happens only inside a sandbox; inside any other (an App Sandbox, a sandboxed
+/// launcher) obid makes none and runs nothing. The job profile's fingerprint, each part probed
+/// without a side effect (libsandbox's `sandbox_check` would need `unsafe`, which this workspace
+/// forbids): the person's home (from the password database, not `HOME`) can't be listed; a Unix
+/// socket that isn't the resolver's can't be connected to (syslog's: connected, nothing sent); and
+/// the pasteboard server can't be reached (`pbpaste` of the ruler pasteboard, its output
+/// discarded).
 fn inside_a_job_sandbox() -> bool {
+    let denied = |e: std::io::Error| e.kind() == std::io::ErrorKind::PermissionDenied;
     let Ok(Some(user)) = nix::unistd::User::from_uid(nix::unistd::getuid()) else {
         return false;
     };
-    user.dir.is_absolute()
+    let home_hidden = user.dir.is_absolute()
         && user.dir != Path::new("/")
-        && std::fs::read_dir(&user.dir)
-            .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+        && std::fs::read_dir(&user.dir).is_err_and(denied);
+    let sockets_denied = std::os::unix::net::UnixDatagram::unbound()
+        .and_then(|socket| socket.connect("/var/run/syslog"))
+        .is_err_and(denied);
+    let pasteboard_denied = std::process::Command::new("/usr/bin/pbpaste")
+        .args(["-pboard", "ruler"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| !status.success());
+    home_hidden && sockets_denied && pasteboard_denied
 }
 
 /// obid's argument that runs the rest of its command line in a session of its own:
@@ -266,6 +282,11 @@ impl Sandbox {
             };
         }
         Err("obid makes the job sandbox only on Linux and macOS.".into())
+    }
+
+    /// Whether what obid starts stays in the job sandbox obid itself runs in ([`Tool::Enclosing`]).
+    pub fn encloses(&self) -> bool {
+        self.tool == Tool::Enclosing
     }
 
     /// The command line that runs `argv` inside the sandbox `spec` describes: the program, then its
