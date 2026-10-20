@@ -225,7 +225,10 @@ pub async fn run_turn(
 /// [`run_turn`] on a Claude Code already running (`conn`). With `keep`, a turn that ends with its
 /// `result` leaves the agent running, waiting on its stdin for the next message (stream-json
 /// input takes one turn after another; `--max-turns` counts each on its own), and it comes back
-/// with the turn: a conversation's next turn skips starting it (docs/fast-replies.md).
+/// with the turn: a conversation's next turn skips starting it (docs/fast-replies.md). A `result`
+/// while a background task of the agent's still runs isn't the turn's end: it waits for the turn
+/// Claude Code starts by itself when the task ends, its quiet clock held meanwhile
+/// ([`Conn::holding`]), and the turn's `result` is that one's.
 pub async fn turn_on(
     mut conn: Conn,
     prompt: &str,
@@ -237,7 +240,13 @@ pub async fn turn_on(
 
     let mut turn = Turn::default();
     let mut api_key_source = None;
+    // The background tasks it started (Bash's `run_in_background`, Monitor, a background
+    // subagent), by id, with what each does, until Claude Code says each one ended.
+    let mut background: Vec<(String, String)> = Vec::new();
+    // Its turn ended with some of them still running: it waits for them.
+    let mut idle = false;
     loop {
+        conn.holding = idle && !background.is_empty();
         let message = match conn.next().await {
             Ok(message) => message,
             Err(_) => break,
@@ -272,7 +281,22 @@ pub async fn turn_on(
                                   "response": {"subtype": "success", "request_id": id, "response": response}}))
                     .await;
             }
+            Some("system")
+                if message.get("subtype").and_then(Value::as_str) == Some("task_started") =>
+            {
+                background.push((
+                    text_of(&message, "task_id"),
+                    text_of(&message, "description"),
+                ));
+            }
+            Some("system")
+                if message.get("subtype").and_then(Value::as_str) == Some("task_notification") =>
+            {
+                let ended = text_of(&message, "task_id");
+                background.retain(|(id, _)| *id != ended);
+            }
             Some("system") if message.get("subtype").and_then(Value::as_str) == Some("init") => {
+                idle = false;
                 if let Some(session) = message.get("session_id").and_then(Value::as_str) {
                     turn.session = Some(session.to_owned());
                     on_event(Event::Session(session.to_owned()));
@@ -346,6 +370,19 @@ pub async fn turn_on(
                     api_key_source.as_deref(),
                 )));
                 turn.result = Some(message);
+                // Headless Claude Code wakes itself when a background task ends, as it does in a
+                // terminal (claude 2.1.302, 2026-10-20): with its input still open, a
+                // `task_notification` and then a turn of its own, `init` to `result`. So a turn
+                // that ends waiting on one isn't the end: the agent goes on when it's done.
+                if let Some((_, what)) = background.last() {
+                    idle = true;
+                    on_event(Event::Step(if what.is_empty() {
+                        "Waiting for a background task".into()
+                    } else {
+                        format!("Waiting for {what}")
+                    }));
+                    continue;
+                }
                 // The turn is over: no more input (unless it's kept), and nothing more to read.
                 if !keep {
                     conn.close_input();

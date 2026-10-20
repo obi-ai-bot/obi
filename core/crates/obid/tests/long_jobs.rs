@@ -154,6 +154,59 @@ fn obid_writes_the_note_when_the_agent_cant() {
     );
 }
 
+/// A turn that ends while a background task of Claude Code's runs isn't the job's end (job b121d098:
+/// "The build is still going. I'll continue when the monitor reports it's done."): the job waits,
+/// past several quiet windows while the task is alive, says what it waits for, and goes on in the
+/// turn Claude Code wakes for when the task ends.
+#[test]
+fn a_job_waits_for_its_background_task() {
+    let (_folder, obid) = obid("long-background");
+    let id = post_job(&obid, "BACKGROUND: 8000");
+    within(30, "the job waits for its build", || {
+        (call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["step"]
+            == "Waiting for npm run build")
+            .then_some(())
+    });
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["summary"], "Built.", "{job}");
+    assert!(job["stalled"].is_null(), "{job}");
+}
+
+/// Waiting counts as progress only while the task is alive: once it ended and the agent doesn't
+/// go on, the job stalls as a quiet one does.
+#[test]
+fn a_finished_background_task_is_no_progress() {
+    let (_folder, obid) = obid("long-background-silent");
+    let id = post_job(&obid, "BACKGROUND: 1000 SILENT");
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "interrupted", "{job}");
+    assert_eq!(job["stalled"]["why"], "quiet", "{job}");
+}
+
+/// An agent that ends its turn to wait for something obid can't see running (a `&` in a shell, or
+/// Codex) is told once to wait in the foreground, and goes on; one that ends waiting again needs
+/// you, never "nothing committed".
+#[test]
+fn a_turn_that_ends_waiting_goes_on_or_needs_you() {
+    let (_folder, obid) = obid("long-waits");
+    let id = post_job(&obid, "WAITS");
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["summary"], "Built in the foreground.", "{job}");
+
+    let again = post_kind(&obid, "build", "WAITS ALWAYS");
+    let job = wait(&obid, &again);
+    assert_eq!(job["status"], "interrupted", "{job}");
+    let reason = job["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("Stopped waiting: The build is still going.")
+            && reason.contains("nothing wakes it"),
+        "{job}"
+    );
+    assert_eq!(job["nextStep"], "Try again", "{job}");
+}
+
 /// The same failing call 5 times in a row stalls the job as looping, with the agent's note.
 #[test]
 fn a_looping_job_stalls() {

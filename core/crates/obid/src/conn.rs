@@ -118,6 +118,9 @@ pub struct Conn {
     pub timed_out: bool,
     /// It timed out for being quiet (`Limit::quiet`), not at its most.
     pub quiet_out: bool,
+    /// The agent ended its turn and waits for a background task of its own that is still running
+    /// (crate::agent): the wait isn't being quiet, as long as the task is alive.
+    pub holding: bool,
 }
 
 impl Conn {
@@ -186,6 +189,7 @@ impl Conn {
             stopped,
             timed_out: false,
             quiet_out: false,
+            holding: false,
         })
     }
 
@@ -208,6 +212,7 @@ impl Conn {
         self.stop = stop;
         self.timed_out = false;
         self.quiet_out = false;
+        self.holding = false;
     }
 
     /// A sign of progress from the agent (or a wait): the quiet window starts again.
@@ -269,7 +274,7 @@ impl Conn {
                         }
                         _ => false,
                     };
-                    if self.waiting.as_ref().is_some_and(|waiting| waiting()) {
+                    if self.holding || self.waiting.as_ref().is_some_and(|waiting| waiting()) {
                         self.heard();
                     } else if changed {
                         self.file_windows += 1;

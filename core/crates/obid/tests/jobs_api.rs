@@ -1002,8 +1002,8 @@ fn a_failure_the_task_asked_for_ends_the_rounds() {
     );
 }
 
-/// obid answers the agent's permission prompts: publishing and leaving the worktree are refused,
-/// the rest of a bypass job's work is allowed; and none of obid's own secrets reach the agent.
+/// obid answers the agent's permission prompts: publishing, leaving the worktree and a background
+/// subagent are refused, the rest of a bypass job's work is allowed (a background command too); and none of obid's own secrets reach the agent.
 #[test]
 fn permission_prompts_are_answered_by_the_rules() {
     let folder = Folder::new("ask");
@@ -1019,8 +1019,13 @@ fn permission_prompts_are_answered_by_the_rules() {
             "answer: deny",
         ),
         (
-            json!({"tool": "Bash", "input": {"command": "sleep 1", "run_in_background": true}}),
+            json!({"tool": "Agent", "input": {"description": "x", "run_in_background": true}}),
             "answer: deny",
+        ),
+        // Waited for: Claude Code wakes when it ends (crate::agent).
+        (
+            json!({"tool": "Bash", "input": {"command": "sleep 1", "run_in_background": true}}),
+            "answer: allow",
         ),
         (
             json!({"tool": "mcp__github__create_pull_request", "input": {}}),

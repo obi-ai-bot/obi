@@ -217,6 +217,42 @@ fn spell(time: Duration) -> String {
     format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
+/// What obid tells an agent that ended its turn to wait for something still running.
+const WAIT_HERE: &str = "Your turn ended while you wait for something still running, but in a job the end of your turn is the end of your work: nothing wakes you later, and what you left running is ended. Run it again in the foreground and wait for it (or poll it with a foreground command until it's done), then carry on and finish with a short summary.";
+
+/// The agent ended its turn to wait for something still running ("The build is still going. I'll
+/// continue when the monitor reports it's done."): in its last lines, the words of one that means
+/// to come back. Claude Code's own background tasks don't end a turn (crate::agent); a `&` in a
+/// shell command, or Codex's and Cursor's, which wake nothing, do.
+// ponytail: a word list over the last 3 lines; a tool's own "still running" signal where one has it.
+fn waits_for_later(said: &str) -> bool {
+    let lines: Vec<String> = said
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.to_lowercase().replace('\u{2019}', "'"))
+        .collect();
+    let last = lines[lines.len().saturating_sub(3)..].join(" ");
+    [
+        "i'll continue",
+        "i will continue",
+        "i'll check back",
+        "i'll check on it",
+        "i'll report back",
+        "i'll wait for",
+        "i'll let you know when",
+        "i'll resume",
+        "i'll pick this up",
+        "i'll pick it up",
+        "when the monitor",
+        "once the monitor",
+        "is still running",
+        "is still going",
+        "are still running",
+    ]
+    .iter()
+    .any(|w| last.contains(w))
+}
+
 /// An error a turn ended on that trying again mends (docs/runner-api.md, `limit`): Claude Code's
 /// `API Error: <5xx or 429>`, an overloaded API, a dropped connection or stream. Never an account's
 /// usage limit (its words, or `full`: its usage says so).
@@ -5095,6 +5131,8 @@ impl Jobs {
             })
         };
         let mut retries = 0;
+        // obid told the agent once to wait for what it left running (`WAIT_HERE`).
+        let mut told_to_wait = false;
         'rounds: loop {
             loop {
                 let job = self.get(id).ok_or("the job is gone")?;
@@ -5381,6 +5419,28 @@ impl Jobs {
                     message = words.join("\n\n");
                     noted = true;
                     continue;
+                }
+                // It ended its turn to wait for something still running: once, it's told to wait
+                // in the foreground; again, it needs the owner, never "nothing committed".
+                if waits_for_later(&said) {
+                    if !told_to_wait {
+                        told_to_wait = true;
+                        message = WAIT_HERE.into();
+                        continue;
+                    }
+                    return Err(End::needs_you(
+                        format!(
+                            "Stopped waiting: {} The agent ended its turn to wait for work still running, and nothing wakes it once its turn is over. The branch is kept: Try again picks its session up.",
+                            one_line(
+                                said.lines()
+                                    .find(|l| !l.trim().is_empty())
+                                    .unwrap_or("")
+                                    .trim(),
+                                200
+                            )
+                        ),
+                        Some(crate::job::TRY_AGAIN),
+                    ));
                 }
                 let job = self.get(id).ok_or("the job is gone")?;
                 let more_rounds = round < job.max_rounds();
@@ -7747,7 +7807,13 @@ fn owner_prompt(job: &Job) -> String {
         lines.push("End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.".into());
     }
     lines.push("To show the user something to look at (a page, a document, a chart, an image, a PDF), put it in .obi/artifacts/: one file, or one folder with an index.html, per thing. obid shows each one when the job ends; keep secrets out, or it shows none of it.".into());
-    lines.push("Run checks in the foreground, and never end a turn waiting on a background command: obid takes the end of your turn as the end of your work.".into());
+    // Claude Code's own background tasks wake it when they end, and obid waits for them
+    // (crate::agent); nothing else that's left running when a turn ends does.
+    lines.push(if job.agent == Tool::Claude.id() {
+        "Run checks in the foreground. A command you start with run_in_background or Monitor is waited for: if your turn ends while one runs, obid waits and you go on when it ends. Never leave anything else running when your turn ends (`&`, nohup): obid takes the end of your turn as the end of your work."
+    } else {
+        "Run checks in the foreground, and never end a turn waiting on a background command: obid takes the end of your turn as the end of your work."
+    }.into());
     lines.push("Change files with Edit or Write, never a script (sed -i, python -c, a heredoc into a file), and run commands from this worktree's root without cd, naming paths instead (`cargo test --manifest-path core/Cargo.toml`), and keep scratch files in your own $TMPDIR, never /tmp: obid can't see what a script writes or where a cd leads, and /tmp is outside the worktree, so each of these stops the job until the user says yes.".into());
     lines.push(
         "Finish with a short summary. Its first line is one sentence the user will see.".into(),
@@ -8120,6 +8186,23 @@ mod tests {
         }
         assert!(call(&mut looping, "npm test", true, false));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_turn_that_ends_to_wait_says_so_in_its_last_lines() {
+        use super::waits_for_later;
+        assert!(waits_for_later(
+            "Nothing committed: The build is still going. I\u{2019}ll continue when the monitor reports it's done."
+        ));
+        assert!(waits_for_later(
+            "Started the tests.\n\nI'll check back once they finish."
+        ));
+        assert!(!waits_for_later(
+            "Fixed the parser and committed it.\n\nGOAL MET"
+        ));
+        assert!(!waits_for_later(
+            "I'll continue when it's done.\nThen fixed it.\nRan the tests.\nAll pass."
+        ));
     }
 
     /// Overloaded, failing or dropped APIs are retried; an account's usage limit, an auth error,
