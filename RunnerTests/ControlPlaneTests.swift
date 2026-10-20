@@ -93,12 +93,13 @@ struct ControlPlaneTests {
         #expect(key.messages[5] == Data("oby-control-v1\nDELETE\n/v1/installations/self\n1791806400\n\(last)\n".utf8))
     }
 
-    @Test func startsASignInWithApple() async throws {
-        let exchange = Exchange([(201, #"{"url": "https://appleid.apple.com/auth/authorize?state=s1", "state": "s1"}"#)])
+    @Test(arguments: ControlPlane.Provider.allCases)
+    func startsASignIn(with provider: ControlPlane.Provider) async throws {
+        let exchange = Exchange([(201, #"{"url": "https://example.com/authorize?state=s1", "state": "s1"}"#)])
         let key = Signed()
-        let started = try await exchange.plane().startAppleSignIn(key.signer)
-        #expect(started == ControlPlane.AppleSignIn(url: URL(string: "https://appleid.apple.com/auth/authorize?state=s1")!, state: "s1"))
-        #expect(exchange.requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == ["POST /v1/auth/apple/start"])
+        let started = try await exchange.plane().startSignIn(key.signer, with: provider)
+        #expect(started == ControlPlane.SignIn(url: URL(string: "https://example.com/authorize?state=s1")!, state: "s1"))
+        #expect(exchange.requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == ["POST /v1/auth/\(provider.rawValue)/start"])
         #expect(exchange.requests.first?.value(forHTTPHeaderField: "Oby-Signature") != nil)
     }
 
