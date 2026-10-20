@@ -190,6 +190,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var nextStep: String?
     /// When obid tries it again by itself, after its account's usage limit resets, or nil.
     var resumesAt: Date?
+    /// `resumesAt`, as the iPhone's `Job` reads it.
+    var resumes: Date? { resumesAt }
 
     /// What a queued job waits for, in the words every app shows after "Waiting": "a slot opens",
     /// "runner update". `job` is the job it waits behind, for `job` and `files`.

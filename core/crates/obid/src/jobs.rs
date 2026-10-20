@@ -62,6 +62,11 @@ const MAX_TURNS: &str = "200";
 /// How long after a usage limit's reset obid tries a job again: the tool's clock and the Mac's
 /// may differ.
 const RESET_SLACK: i64 = 60;
+/// The longest obid waits for a reset: a weekly window's, and a day more.
+const RESET_MOST: i64 = 8 * 86_400;
+/// What a job tried again after its reset says, and keeps in its notes: Oby's, not the owner's.
+const RESET_STEP: &str = "Oby: trying again after the usage reset";
+const RESET_NOTE: &str = "Oby tried again after the usage reset.";
 /// How often obid looks for a job whose reset came.
 const RESET_TICK: Duration = Duration::from_secs(15);
 /// How often obid lets git tidy a clone.
@@ -847,7 +852,21 @@ impl Jobs {
             }
         };
         match tried {
-            Ok(()) => tracing::info!("job {id}: its usage limit reset, so it's tried again"),
+            Ok(()) => {
+                tracing::info!("job {id}: its usage limit reset, so it's tried again");
+                // Oby's own retry, never words the owner said: so its step and note say.
+                self.update(id, |job| {
+                    if let Some(notes) = job.notes.as_mut()
+                        && notes.last().map(String::as_str) == Some(crate::brain::actions::TRY_AGAIN)
+                    {
+                        notes.pop();
+                        notes.push(RESET_NOTE.into());
+                    }
+                    if job.step.starts_with("You: ") {
+                        job.step = RESET_STEP.into();
+                    }
+                });
+            }
             Err(why) => {
                 tracing::info!("job {id}: not tried again after its reset: {why}");
                 self.update(id, |job| job.resumes_at = None);
@@ -5252,7 +5271,7 @@ impl Jobs {
                                 .then_some(usage.full_until)
                                 .flatten()
                         })
-                        .map(|at| at + RESET_SLACK)
+                        .map(|at| at.saturating_add(RESET_SLACK).min(now.saturating_add(RESET_MOST)))
                         .filter(|at| *at > now);
                     if resumes.is_some() {
                         reason.push_str(" Oby tries again by itself after the reset.");

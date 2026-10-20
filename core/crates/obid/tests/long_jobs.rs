@@ -258,6 +258,8 @@ fn the_token_budget_stalls_and_only_the_owners_confirm_carries_on() {
     assert_eq!(job["status"], "interrupted", "{job}");
     assert_eq!(job["limit"], "the job used 1000 tokens", "{job}");
     assert_eq!(job["stalled"]["why"], "budget");
+    // A safety stall is never tried again by itself, whatever any reset says (#740).
+    assert_eq!(job["resumesAt"], Value::Null, "{job}");
     let confirms = || -> Vec<Value> {
         let inbox = call(&obid, "GET", "/v1/inbox", None).body;
         inbox

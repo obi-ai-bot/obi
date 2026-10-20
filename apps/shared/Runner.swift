@@ -95,8 +95,11 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Interrupted on obid: its one next step, as its button says it ("One more round", "Try
     /// again"), or nil.
     var nextStep: String?
-    /// When obid tries it again by itself, after its account's usage limit resets, or nil.
-    var resumesAt: Date?
+    /// When obid tries it again by itself, after its account's usage limit resets, or nil; one
+    /// this phone can't read is left out, never failing the job.
+    var resumesAt: Lenient<Date>?
+    /// `resumesAt`, read.
+    var resumes: Date? { resumesAt?.value }
     /// The job page's facts (#739), each nil until obid serves it: its tools, tokens, share of the
     /// limit windows, the estimate, the check's commands, the secret scan, the diff and what the
     /// current stage is doing (`JobFacts`). Each is `Lenient`: one this phone can't read is left
@@ -863,8 +866,8 @@ extension Job {
     /// When obid tries it again by itself, as its decision card says it: "At 3:04 PM, or now with
     /// Try again.", or nil.
     nonisolated var resumesLine: String? {
-        guard nextStepOffered != nil, let resumesAt else { return nil }
-        return "At \(resumesAt.formatted(date: .omitted, time: .shortened)), or now with \(nextStep ?? "Try again")."
+        guard nextStepOffered != nil, let resumes else { return nil }
+        return "At \(resumes.formatted(date: .omitted, time: .shortened)), or now with \(nextStep ?? "Try again")."
     }
 
     /// Its decision card's kind (Sangam's labels): Out of usage when its agent hit a usage limit.

@@ -36,29 +36,34 @@ pub fn reset_in(text: &str, now: i64) -> Option<i64> {
     if !WAIT.is_match(text) {
         return None;
     }
-    let seconds: i64 = PART
+    // Saturating: a made-up number of hours never overflows (the caller bounds the wait).
+    let seconds = PART
         .captures_iter(text)
         .map(|part| {
             let n: i64 = part[1].parse().unwrap_or(0);
-            if part[2].to_lowercase().starts_with('h') {
-                n * 3600
+            n.saturating_mul(if part[2].to_lowercase().starts_with('h') {
+                3600
             } else {
-                n * 60
-            }
+                60
+            })
         })
-        .sum();
-    (seconds > 0).then_some(now + seconds)
+        .fold(0_i64, i64::saturating_add);
+    (seconds > 0).then_some(now.saturating_add(seconds))
 }
 
-/// An epoch in seconds, from seconds or milliseconds.
+/// The latest epoch obid takes from a tool: 2100-01-01. Anything past it is a bad value.
+const LATEST: f64 = 4_102_444_800.0;
+
+/// An epoch in seconds, from seconds or milliseconds, or none when it isn't a plausible one.
 fn epoch(value: &Value) -> Option<i64> {
     let n = value.as_f64()?;
     let seconds = if n > 1e12 { n / 1000.0 } else { n };
-    (seconds > 0.0).then_some(seconds as i64)
+    (seconds > 0.0 && seconds <= LATEST).then_some(seconds as i64)
 }
 
 /// Claude Code's `rate_limit_event`: when the account resets, if it's full (refused, or a window
-/// at 100%): the soonest full window's reset, else the event's own.
+/// at 100%): the latest full window's reset (it has room only once every full one resets), else
+/// the event's own.
 pub fn claude_full_until(message: &Value) -> Option<i64> {
     let info = &message["rate_limit_info"];
     let windows = &info["unifiedWindows"];
@@ -67,7 +72,7 @@ pub fn claude_full_until(message: &Value) -> Option<i64> {
         .filter(|w| windows[**w]["utilization"].as_f64().unwrap_or(0.0) >= 1.0)
         .filter_map(|w| epoch(&windows[*w]["resetsAt"]))
         .collect();
-    if let Some(at) = full.iter().min() {
+    if let Some(at) = full.iter().max() {
         return Some(*at);
     }
     (info["status"] == "rejected")
@@ -76,7 +81,7 @@ pub fn claude_full_until(message: &Value) -> Option<i64> {
 }
 
 /// Codex's `account/rateLimits/updated` (its `rateLimits`): when its own limit resets, if a window
-/// is at 100%.
+/// is at 100%: the latest full window's reset.
 pub fn codex_full_until(limits: &Value) -> Option<i64> {
     // Other limits (a model's reserve) come with their own id and say nothing about Codex's.
     if limits["limitId"].as_str().unwrap_or("codex") != "codex" {
@@ -86,7 +91,7 @@ pub fn codex_full_until(limits: &Value) -> Option<i64> {
         .iter()
         .filter(|w| limits[**w]["usedPercent"].as_f64().unwrap_or(0.0) >= 100.0)
         .filter_map(|w| epoch(&limits[*w]["resetsAt"]))
-        .min()
+        .max()
 }
 
 #[cfg(test)]
@@ -109,6 +114,11 @@ mod tests {
             Some(now + 2 * 3600 + 15 * 60)
         );
         assert_eq!(reset_in("You've hit your usage limit.", now), None);
+        // A made-up wait saturates instead of overflowing.
+        assert_eq!(
+            reset_in("in 9999999999999999999 hours and 99999999999999999 minutes", now),
+            Some(i64::MAX)
+        );
         assert_eq!(reset_in("Try again at 10:45 PM.", now), None);
     }
 
@@ -119,6 +129,14 @@ mod tests {
             "five_hour": {"utilization": 1.0, "resetsAt": 1_760_003_600},
             "seven_day": {"utilization": 0.4, "resetsAt": 1_760_500_000}}}));
         assert_eq!(claude_full_until(&full), Some(1_760_003_600));
+        // Both windows full: it has room only once the later one resets.
+        let both = claude(json!({"status": "rejected", "unifiedWindows": {
+            "five_hour": {"utilization": 1.0, "resetsAt": 1_760_003_600},
+            "seven_day": {"utilization": 1.0, "resetsAt": 1_760_500_000}}}));
+        assert_eq!(claude_full_until(&both), Some(1_760_500_000));
+        // A reset past 2100 is a bad value.
+        let far = claude(json!({"status": "rejected", "resetsAt": 9e15}));
+        assert_eq!(claude_full_until(&far), None);
         let refused = claude(json!({"status": "rejected", "resetsAt": 1_760_007_200_000_i64}));
         assert_eq!(claude_full_until(&refused), Some(1_760_007_200));
         let room = claude(json!({"status": "allowed", "unifiedWindows": {
