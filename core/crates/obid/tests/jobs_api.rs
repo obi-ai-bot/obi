@@ -829,7 +829,9 @@ fn try_again_after_a_limit_keeps_the_rounds_summary() {
             .unwrap()
             .to_owned();
         let job = wait(&obid, &id);
-        assert_eq!(job["status"], "failed", "{job}");
+        // At its limit it needs you (#725), One more round its next step.
+        assert_eq!(job["status"], "interrupted", "{job}");
+        assert_eq!(job["nextStep"], "One more round", "{job}");
         assert!(job["limit"].is_string(), "{job}");
         let more = request(
             &obid,
