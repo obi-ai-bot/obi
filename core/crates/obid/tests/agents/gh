@@ -10,6 +10,8 @@
 #   fail        when it exists, `gh api graphql` fails, saying what it holds on stderr
 #   partial     when it exists, `gh api graphql` answers work.json and fails, saying what it holds,
 #               as gh does on an answer with both data and errors
+#   no-board    when it exists, a query that reads boards fails as GitHub does when gh's login
+#               lacks read:project
 #   slow        when it exists, `gh issue view` and `gh pr view` take a second
 #   view.json   what `gh issue view` and `gh pr view` answer
 #   calls       one line per call: its first two arguments
@@ -19,6 +21,10 @@ if [ -d "$work" ]; then
   case "$1 $2" in
     "api graphql")
       if [ -f "$work/fail" ]; then cat "$work/fail" >&2; exit 1; fi
+      case "$4" in *projectItems*) if [ -f "$work/no-board" ]; then
+        echo '{"errors":[{"type":"INSUFFICIENT_SCOPES","message":"Your token has not been granted the required scopes to execute this query. The '"'projectItems'"' field requires one of the following scopes: ['"'read:project'"']."}]}'
+        echo "GraphQL: Your token has not been granted the required scopes to execute this query. The 'projectItems' field requires one of the following scopes: ['read:project']." >&2; exit 1
+      fi ;; esac
       cat "$work/work.json"
       if [ -f "$work/partial" ]; then cat "$work/partial" >&2; exit 1; fi
       exit 0 ;;
