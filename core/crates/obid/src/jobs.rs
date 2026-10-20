@@ -217,6 +217,42 @@ fn spell(time: Duration) -> String {
     format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
+/// What obid tells an agent that ended its turn to wait for something still running.
+const WAIT_HERE: &str = "Your turn ended while you wait for something still running, but in a job the end of your turn is the end of your work: nothing wakes you later, and what you left running is ended. Run it again in the foreground and wait for it (or poll it with a foreground command until it's done), then carry on and finish with a short summary.";
+
+/// The agent ended its turn to wait for something still running ("The build is still going. I'll
+/// continue when the monitor reports it's done."): in its last lines, the words of one that means
+/// to come back. Codex and Cursor only: their background commands wake nothing, and obid can't see
+/// them (Claude Code's own say so, crate::agent).
+// ponytail: a word list over the last 3 lines, first-person only ("CI is still running upstream"
+// is a summary's); a tool's own "still running" signal where one has it.
+fn waits_for_later(said: &str) -> bool {
+    let lines: Vec<String> = said
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.to_lowercase().replace('\u{2019}', "'"))
+        .collect();
+    let last = lines[lines.len().saturating_sub(3)..].join(" ");
+    [
+        "i'll continue when",
+        "i'll continue once",
+        "i will continue when",
+        "i will continue once",
+        "i'll check back",
+        "i'll check on it",
+        "i'll report back when",
+        "i'll report back once",
+        "i'll resume when",
+        "i'll resume once",
+        "i'll pick this up when",
+        "i'll pick it up when",
+        "when the monitor reports",
+        "once the monitor reports",
+    ]
+    .iter()
+    .any(|w| last.contains(w))
+}
+
 /// An error a turn ended on that trying again mends (docs/runner-api.md, `limit`): Claude Code's
 /// `API Error: <5xx or 429>`, an overloaded API, a dropped connection or stream. Never an account's
 /// usage limit (its words, or `full`: its usage says so).
@@ -3500,11 +3536,10 @@ impl Jobs {
                 // Done counted its own.
                 match self.keep_commits(id).await {
                     Ok(_) => {
-                        let start_commit = self
-                            .get(id)
-                            .and_then(|j| j.start_commit)
-                            .unwrap_or_default();
-                        let made = count_commits(&worktree, &start_commit, &own_head).await;
+                        let made = match self.get(id) {
+                            Some(job) => self.counted(&job, &worktree, &own_head).await,
+                            None => 0,
+                        };
                         if made > 0 {
                             self.update(id, |job| {
                                 if job.status != Status::Done {
@@ -5095,6 +5130,10 @@ impl Jobs {
             })
         };
         let mut retries = 0;
+        // obid told the agent once to wait for what it left running (`WAIT_HERE`).
+        let mut told_to_wait = false;
+        // How the transcript opens the next turn, when it's obid's words that start it.
+        let mut opening: Option<String> = None;
         'rounds: loop {
             loop {
                 let job = self.get(id).ok_or("the job is gone")?;
@@ -5217,7 +5256,9 @@ impl Jobs {
                     }
                     job.started.get_or_insert_with(obi_protocol::time::now);
                     job.phase = Some(Phase::Work);
-                    if !job.step.starts_with("You: ") {
+                    if told_to_wait && message == WAIT_HERE {
+                        job.step = "Oby: wait for it in the foreground".into();
+                    } else if !job.step.starts_with("You: ") {
                         job.step = format!("Starting {}", tool.name());
                     }
                 });
@@ -5226,10 +5267,10 @@ impl Jobs {
                     id,
                     self.transcripts.start(
                         id,
-                        &match round {
+                        &opening.take().unwrap_or_else(|| match round {
                             1 => format!("Started on {}", tool.name()),
                             n => format!("Round {n} on {}", tool.name()),
-                        },
+                        }),
                     ),
                 );
                 let turn = self
@@ -5382,6 +5423,37 @@ impl Jobs {
                     noted = true;
                     continue;
                 }
+                // It ended its turn to wait for something still running: once, it's told to wait
+                // in the foreground; again, it needs the owner, never "nothing committed".
+                let waits = if tool == Tool::Claude {
+                    turn.left_running
+                } else {
+                    waits_for_later(&said)
+                };
+                if waits {
+                    if !told_to_wait {
+                        told_to_wait = true;
+                        message = WAIT_HERE.into();
+                        opening = Some(format!(
+                            "Oby told {} to wait for its work in the foreground",
+                            tool.name()
+                        ));
+                        continue;
+                    }
+                    return Err(End::needs_you(
+                        format!(
+                            "Stopped waiting: {} The agent ended its turn to wait for work still running, and nothing wakes it once its turn is over. The branch is kept: Try again picks its session up.",
+                            one_line(
+                                said.lines()
+                                    .find(|l| !l.trim().is_empty())
+                                    .unwrap_or("")
+                                    .trim(),
+                                200
+                            )
+                        ),
+                        Some(crate::job::TRY_AGAIN),
+                    ));
+                }
                 let job = self.get(id).ok_or("the job is gone")?;
                 let more_rounds = round < job.max_rounds();
                 if let Some(command) = &job.check {
@@ -5472,12 +5544,8 @@ impl Jobs {
             stages.begin("keep commits");
             let head = self.keep_commits(id).await?;
             self.tetrix_ended(id, &worktree, &start_commit).await;
-            let commits = if head == start_commit {
-                0
-            } else {
-                count_commits(&worktree, &start_commit, "HEAD").await
-            };
             let job = self.get(id).ok_or("the job is gone")?;
+            let commits = self.counted(&job, &worktree, &head).await;
             // Nothing committed: done, as Claude Code is when its model stops, and the agent's
             // summary says why. A round the owner asked for says nothing of it: their words decide.
             if COMMITTING.contains(&job.kind.as_str()) && commits == 0 && !job.asked {
@@ -5491,6 +5559,17 @@ impl Jobs {
             if job.kind == "review" && commits > 0 {
                 self.end_done(id, commits, job.pushed, |job| {
                     job.reason = Some(crate::publish::REVIEW_COMMITTED.into());
+                });
+                return Ok(());
+            }
+            // Carrying only commits whose pull request was closed unmerged: Publish is the owner's.
+            if let Some(first) = self.first_turned_down(&job)
+                && count_commits(&worktree, &start_commit, &head).await == 0
+            {
+                self.end_done(id, commits, job.pushed, |job| {
+                    job.reason = Some(format!(
+                        "The pull request of {first} was closed without merging, so Oby didn't publish its commits again: Publish opens a new pull request with them."
+                    ));
                 });
                 return Ok(());
             }
@@ -5722,6 +5801,87 @@ impl Jobs {
             job.finished = Some(obi_protocol::time::now());
             change(job);
         });
+    }
+
+    /// The commits `job` publishes, up to `head` in `worktree`: its own from `start_commit`, and,
+    /// for a follow-up that started from its first job's work, those it carries (#770): what its
+    /// branch has over the last commit any job pushed to that branch or to the one it started from
+    /// (unless that work's pull request was closed unmerged), or, when none is under `head` (a
+    /// branch of its own, or one rebased since), over its base or its pull request's head. A split
+    /// part counts only its own: its siblings carry the same commits.
+    async fn counted(&self, job: &Job, worktree: &Path, head: &str) -> u64 {
+        let start_commit = job.start_commit.as_deref().unwrap_or_default();
+        if job.start_from.is_none() || head.is_empty() || self.split_part(job) {
+            return count_commits(worktree, start_commit, head).await;
+        }
+        let from_out = self.first_turned_down(job).is_none();
+        let out = |branch: Option<&str>| {
+            branch == Some(job.branch.as_str()) || from_out && branch == job.start_from.as_deref()
+        };
+        let pushed: Vec<String> = self
+            .lock()
+            .jobs
+            .values()
+            .filter(|j| j.repo == job.repo)
+            .flat_map(|j| j.outgoing.iter())
+            .filter(|o| o.action == "push" && out(o.branch.as_deref()))
+            .map(|o| o.id.clone())
+            .collect();
+        let mut least: Option<u64> = None;
+        for there in pushed.iter().filter(|there| git::is_sha(there)) {
+            let under = git::git(worktree, &["merge-base", "--is-ancestor", there, head])
+                .await
+                .is_ok();
+            if under {
+                let count = count_commits(worktree, there, head).await;
+                least = Some(least.map_or(count, |least| least.min(count)));
+            }
+        }
+        if let Some(count) = least {
+            return count;
+        }
+        let from = match job.pr {
+            Some(pr) => format!("refs/remotes/origin/pr/{pr}"),
+            None => format!(
+                "refs/remotes/origin/{}",
+                job.base.as_deref().unwrap_or_default()
+            ),
+        };
+        count_commits(worktree, &from, head).await
+    }
+
+    /// Whether `job` is one part of its first job's split (crate::brain::supervisor).
+    fn split_part(&self, job: &Job) -> bool {
+        job.follow_up_of
+            .as_deref()
+            .and_then(|first| self.get(first))
+            .is_some_and(|first| {
+                first
+                    .supervised
+                    .iter()
+                    .any(|s| s.decision == "split" && s.jobs.contains(&job.id))
+            })
+    }
+
+    /// The title of the job whose work `job` carries, through the follow-ups between them, when
+    /// that one's pull request was closed without merging: the owner turned its commits down, so a
+    /// follow-up that adds none doesn't send them again by itself (#770).
+    fn first_turned_down(&self, job: &Job) -> Option<String> {
+        let mut job = job.clone();
+        // ponytail: a bounded walk; follow-up chains are short.
+        for _ in 0..64 {
+            job.start_from.as_ref()?;
+            let first = self.get(job.follow_up_of.as_deref()?)?;
+            if first.published.is_some() {
+                let closed = first
+                    .pull_request
+                    .as_ref()
+                    .is_some_and(|pr| pr.state == "CLOSED");
+                return closed.then(|| first.short_title());
+            }
+            job = first;
+        }
+        None
     }
 
     /// How many of `commits` (up to `head`) the remote has: those in the commit obid pushed last,
@@ -7747,7 +7907,13 @@ fn owner_prompt(job: &Job) -> String {
         lines.push("End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.".into());
     }
     lines.push("To show the user something to look at (a page, a document, a chart, an image, a PDF), put it in .obi/artifacts/: one file, or one folder with an index.html, per thing. obid shows each one when the job ends; keep secrets out, or it shows none of it.".into());
-    lines.push("Run checks in the foreground, and never end a turn waiting on a background command: obid takes the end of your turn as the end of your work.".into());
+    // Claude Code's own background tasks wake it when they end, and obid waits for them
+    // (crate::agent); nothing else that's left running when a turn ends does.
+    lines.push(if job.agent == Tool::Claude.id() {
+        "Run checks in the foreground. A command you start with run_in_background or Monitor is waited for: if your turn ends while one runs, obid waits and you go on when it ends, but only for one that ends by itself (never a server, a --watch, tail -f or a persistent Monitor), and a long wait with no word from you counts as no progress. Never leave anything else running when your turn ends (`&`, nohup): obid takes the end of your turn as the end of your work."
+    } else {
+        "Run checks in the foreground, and never end a turn waiting on a background command: obid takes the end of your turn as the end of your work."
+    }.into());
     lines.push("Change files with Edit or Write, never a script (sed -i, python -c, a heredoc into a file), and run commands from this worktree's root without cd, naming paths instead (`cargo test --manifest-path core/Cargo.toml`), and keep scratch files in your own $TMPDIR, never /tmp: obid can't see what a script writes or where a cd leads, and /tmp is outside the worktree, so each of these stops the job until the user says yes.".into());
     lines.push(
         "Finish with a short summary. Its first line is one sentence the user will see.".into(),
@@ -8120,6 +8286,28 @@ mod tests {
         }
         assert!(call(&mut looping, "npm test", true, false));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_turn_that_ends_to_wait_says_so_in_its_last_lines() {
+        use super::waits_for_later;
+        assert!(waits_for_later(
+            "Nothing committed: The build is still going. I\u{2019}ll continue when the monitor reports it's done."
+        ));
+        assert!(waits_for_later(
+            "Started the tests.\n\nI'll check back once they finish."
+        ));
+        // A finished job's summary.
+        for done in [
+            "Fixed the parser and committed it.\n\nGOAL MET",
+            "I'll continue when it's done.\nThen fixed it.\nRan the tests.\nAll pass.",
+            "Fixed the flaky test and pushed nothing. CI is still running upstream.",
+            "Committed the fix. The nightly job is still going on the main branch.",
+            "Added the retry. I'll let you know when the next release needs it.",
+            "Fixed it; the old server process is still running on the dev box.",
+        ] {
+            assert!(!waits_for_later(done), "{done}");
+        }
     }
 
     /// Overloaded, failing or dropped APIs are retried; an account's usage limit, an auth error,
@@ -9527,6 +9715,140 @@ mod tests {
             );
         }
         assert_eq!(jobs.list(10).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A follow-up from its first job's work counts what it publishes (#770): over the last commit
+    /// pushed to its branch, a rebased one aside; else over its pull request's head, or its base. A
+    /// split part counts only its own commits.
+    #[tokio::test]
+    async fn a_follow_up_counts_what_it_publishes() {
+        let root = std::env::temp_dir().join(format!("obid-counted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        let commit = |name: &str| {
+            git(&["commit", "-q", "--allow-empty", "-m", name]);
+            git(&["rev-parse", "HEAD"])
+        };
+        let base = commit("base");
+        git(&["update-ref", "refs/remotes/origin/main", &base]);
+        let theirs = commit("theirs");
+        git(&["update-ref", "refs/remotes/origin/pr/5", &theirs]);
+        let first = commit("first");
+        let next = commit("next");
+        git(&["checkout", "-q", "--detach", &base]);
+        let rebased = commit("rebased");
+
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let new = |id: &str, branch: &str| {
+            let mut job = Job::new(
+                id.into(),
+                "o/r".into(),
+                "fix".into(),
+                "Fix it".into(),
+                "claude".into(),
+                "a".into(),
+            );
+            job.branch = branch.into();
+            job.base = Some("main".into());
+            job
+        };
+        let mut parent = new("p", "oby/fix-p");
+        parent.outgoing.push(crate::publish::Outgoing::new(
+            "push",
+            "o/r",
+            &rebased,
+            Some("oby/fix-p"),
+        ));
+        jobs.lock().jobs.insert("p".into(), parent.clone());
+        let mut follow = new("f", "oby/fix-f");
+        follow.follow_up_of = Some("p".into());
+        follow.start_from = Some("oby/fix-p".into());
+        follow.start_commit = Some(first.clone());
+        // A branch of its own: over its base, or its pull request's head.
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 2);
+        follow.pr = Some(5);
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 1);
+        follow.pr = None;
+        // A split part: its own alone.
+        let mut split = parent.clone();
+        split.supervised.push(crate::job::Supervision {
+            at: 0,
+            decision: "split".into(),
+            jobs: vec!["f".into()],
+            turn: "t".into(),
+            count: 1,
+        });
+        jobs.lock().jobs.insert("p".into(), split);
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 0);
+        assert_eq!(jobs.counted(&follow, &repo, &next).await, 1);
+        jobs.lock().jobs.insert("p".into(), parent.clone());
+        // Its first job's branch: over the last push under its head, never a rebased one.
+        follow.branch = "oby/fix-p".into();
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 2);
+        parent.outgoing.push(crate::publish::Outgoing::new(
+            "push",
+            "o/r",
+            &first,
+            Some("oby/fix-p"),
+        ));
+        jobs.lock().jobs.insert("p".into(), parent.clone());
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 0);
+        assert_eq!(jobs.counted(&follow, &repo, &next).await, 1);
+        // A branch of its own: what was pushed to the one it started from is out too, unless its
+        // pull request was closed unmerged.
+        follow.branch = "oby/fix-f".into();
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 0);
+        assert_eq!(jobs.counted(&follow, &repo, &next).await, 1);
+        parent.published = Some("https://github.com/o/r/pull/9".into());
+        parent.pull_request = Some(crate::github::PullRequest {
+            state: "CLOSED".into(),
+            review_decision: None,
+            base: "main".into(),
+            merged_at: None,
+            checked_at: 0,
+            head: None,
+        });
+        jobs.lock().jobs.insert("p".into(), parent);
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 2);
+        // Through a follow-up between them that published nothing.
+        let mut middle = new("m", "oby/fix-m");
+        middle.follow_up_of = Some("p".into());
+        middle.start_from = Some("oby/fix-p".into());
+        jobs.lock().jobs.insert("m".into(), middle);
+        follow.follow_up_of = Some("m".into());
+        follow.start_from = Some("oby/fix-m".into());
+        assert_eq!(jobs.first_turned_down(&follow).as_deref(), Some("Fix it"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

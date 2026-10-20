@@ -19,6 +19,9 @@
 //   READ: <json>     answers the `account/rateLimits/read` obid sent at start with the JSON (a
 //                    snapshot); without it, that request is answered as unknown when the turn starts
 //   LIMITS: <json>   sends the JSON as an `account/rateLimits/updated` snapshot
+//   WAITS            says it'll continue when the build is done, with nothing running; told to
+//                    wait in the foreground, says "Built in the foreground.", or with WAITS
+//                    ALWAYS that it's waiting again
 //   TOKENS           its thread uses 1000 input tokens (600 of them cached) and 100 output tokens
 //                    more, reported in `thread/tokenUsage/updated` twice
 // It answers `account/read` (once the turn starts) as a ChatGPT (plan) login, or an API key's when
@@ -140,6 +143,10 @@ async function runTurn(turnId, prompt) {
     } catch (error) {
       return complete(turnId, `escape: ${error.code}`);
     }
+  }
+  if (task.includes("WAITS")) {
+    if (!prompt.includes("end of your turn is the end of your work")) return complete(turnId, "The build is still going. I'll continue when the monitor reports it's done.");
+    return complete(turnId, task.includes("WAITS ALWAYS") ? "Still building. I'll continue when it's done." : "Built in the foreground.");
   }
   if (task.includes("FAIL")) return complete(turnId, null, "failed", { message: JSON.stringify({ error: { message: "it broke" } }) });
   if (task.includes("TWICE")) {

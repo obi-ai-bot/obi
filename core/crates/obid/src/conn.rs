@@ -28,8 +28,9 @@ pub enum Cut {
     Stopped,
 }
 
-/// How many quiet windows in a row a change in the worktree alone stands for progress: a quiet
-/// build is, a loop touching a file isn't.
+/// How many quiet windows in a row a change in the worktree, or a background task still running
+/// (`Conn::holding`), alone stands for progress: a quiet build is, a loop touching a file or a
+/// server that never ends isn't.
 pub const FILE_WINDOWS: u32 = 4;
 
 /// Something outside the agent the turn waits on (an Apple check on a Mac): while it says so, the
@@ -118,6 +119,10 @@ pub struct Conn {
     pub timed_out: bool,
     /// It timed out for being quiet (`Limit::quiet`), not at its most.
     pub quiet_out: bool,
+    /// The agent ended its turn and waits for a background task of its own that is still running
+    /// (crate::agent): the task stands for progress as a change in `watch` does, for
+    /// [`FILE_WINDOWS`] windows at most without a line (a server or a `--watch` never ends).
+    pub holding: bool,
 }
 
 impl Conn {
@@ -186,6 +191,7 @@ impl Conn {
             stopped,
             timed_out: false,
             quiet_out: false,
+            holding: false,
         })
     }
 
@@ -208,6 +214,7 @@ impl Conn {
         self.stop = stop;
         self.timed_out = false;
         self.quiet_out = false;
+        self.holding = false;
     }
 
     /// A sign of progress from the agent (or a wait): the quiet window starts again.
@@ -271,7 +278,7 @@ impl Conn {
                     };
                     if self.waiting.as_ref().is_some_and(|waiting| waiting()) {
                         self.heard();
-                    } else if changed {
+                    } else if changed || (self.holding && self.file_windows < FILE_WINDOWS) {
                         self.file_windows += 1;
                         self.rearm();
                     } else {
