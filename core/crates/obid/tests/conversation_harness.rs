@@ -1793,10 +1793,10 @@ fn oby_said(answer: &Answer) -> String {
     answer.body["text"].as_str().unwrap_or_default().to_owned()
 }
 
-/// A job dispatched in `conversation` (a new one when none), once it has ended: its id and the
-/// conversation.
+/// A job dispatched in `conversation` (a new one when none), once it has ended needing the owner
+/// (its agent stopped mid-round, #725): its id and the conversation.
 fn ended_job(obid: &Obid, conversation: Option<&str>) -> (String, String) {
-    let mut body = json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#});
+    let mut body = json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting. JOB-FAILS", "title": "Add a greeting", "kind": "build"}"#});
     match conversation {
         Some(c) => body["conversation"] = json!(c),
         None => body["new"] = json!(true),
@@ -1840,7 +1840,7 @@ fn oby_continue_job_continues_a_job_in_its_session() {
     let (_folder, obid) = obid("harness-continue", true);
     let (id, conversation) = ended_job(&obid, None);
     let first = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
-    assert_eq!(first["status"], "failed", "{first}");
+    assert_eq!(first["status"], "interrupted", "{first}");
     let before = job_turns(&obid).len();
     let go = format!(r#"OBY oby_continue_job {{"id": "{id}", "words": "CONTINUE-WORDS"}}"#);
     let answer = said(&obid, json!({"said": go, "conversation": conversation}));
