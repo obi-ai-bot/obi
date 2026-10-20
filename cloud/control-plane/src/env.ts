@@ -14,6 +14,11 @@ export interface Env {
   /// `aud`), and the return URL registered with it, this Worker's /v1/auth/apple/callback.
   APPLE_CLIENT_ID: string;
   APPLE_REDIRECT_URI: string;
+  /// Sign in with Google: the OAuth client's id (a Web application client in Deskree's Google
+  /// Cloud project; the ID token's `aud`), and its authorized redirect URI, this Worker's
+  /// /v1/auth/google/callback. Public: the ID token flow needs no client secret.
+  GOOGLE_CLIENT_ID: string;
+  GOOGLE_REDIRECT_URI: string;
   /// The most endpoints (tunnels and hostnames) alive at once.
   MAX_ENDPOINTS: string;
   /// What every tunnel routes to on the Mac: the gateway, http://127.0.0.1:8810.

@@ -4,8 +4,8 @@
 // call can't be sent again or changed on the way. `handle` takes the Cloudflare API as `deps`, so
 // the tests pass a fake.
 //
-// A new Mac signs in with Apple first (on the web: Oby is a Developer ID app), and each
-// installation belongs to that Apple Account's `sub`, with a few Macs and endpoints each. The
+// A new Mac signs in first, with Apple or Google on the web (Oby is a Developer ID app), and each
+// installation belongs to that account, with a few Macs and endpoints each. The
 // hostnames live on a domain of their own (DEVICE_DOMAIN, never the product's); per-network and
 // global limits are a backstop; live endpoints are capped; and unused, idle or unconnected
 // installations are swept.
@@ -16,13 +16,14 @@
 import { CloudflareError, CloudflareSetupError, type TunnelAPI, type TunnelStatus } from "./cloudflare";
 import type { Env } from "./env";
 import { type Limit, takeOne } from "./limits";
-import { type AppleKeyCache, AppleTokenError, sha256Hex, verifyAppleToken } from "./apple";
+import { type KeyCache, sha256Hex, TokenError, verifyAppleToken, verifyGoogleToken } from "./signin";
 import { addressBucket, canonicalKey, networkBucket, newId, opaqueLabel, randomBytes, registrableDomain, tunnelSecret, verifyP256 } from "./tokens";
 
 export interface Deps {
   tunnels: TunnelAPI;
-  /// Apple's public keys, for Sign in with Apple's identity tokens.
-  apple: AppleKeyCache;
+  /// Apple's and Google's public keys, for their identity tokens.
+  apple: KeyCache;
+  google: KeyCache;
   /// The clock, for tests of expiry.
   now?: () => Date;
 }
@@ -50,11 +51,11 @@ export const STATUS_BATCH = 8;
 /// connected yet: a generous backstop. Connected ones don't count, so offices, carrier-grade NAT
 /// and mobile networks can have many.
 export const UNCONNECTED_PER_NETWORK = 20;
-/// What one Apple Account may have: live installations and live endpoints.
+/// What one account (Apple or Google) may have: live installations and live endpoints.
 export const PER_ACCOUNT = { installations: 5, endpoints: 5 };
-/// How long a sign-in started on a Mac has to finish at Apple and be used to register.
+/// How long a sign-in started on a Mac has to finish at Apple or Google and be used to register.
 export const SIGN_IN_MINUTES = 10;
-/// Sign-ins started, and new installations, per Apple Account (`sub`) and, as a generous backstop,
+/// Sign-ins started, and new installations, per account (`users.sub`) and, as a generous backstop,
 /// per client (an IPv6 /64 is one) and per network (/24 or /48); a key is one installation, and
 /// registering the same key again isn't counted. Then endpoint creations per account,
 /// installation and network, and each installation's Cloudflare calls, and the same calls over
@@ -94,7 +95,7 @@ class Reply extends Error {
 interface InstallationRow {
   id: string;
   public_key: string;
-  /// The Apple Account it belongs to.
+  /// The account it belongs to (`users.sub`).
   user_sub: string | null;
   /// When it first made an endpoint.
   endpoint_at?: string | null;
@@ -145,8 +146,10 @@ async function route(request: Request, env: Env, deps: Deps, now: () => Date): P
   const path = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
   const method = request.method;
   if (path === "/v1/health" && method === "GET") return json({ ok: true });
-  if (path === "/v1/auth/apple/start" && method === "POST") return startSignIn(request, env, now);
-  if (path === "/v1/auth/apple/callback" && method === "POST") return finishSignIn(request, env, deps, now);
+  for (const provider of ["apple", "google"] as const) {
+    if (path === `/v1/auth/${provider}/start` && method === "POST") return startSignIn(request, env, now, provider);
+    if (path === `/v1/auth/${provider}/callback` && method === "POST") return finishSignIn(request, env, deps, now, provider);
+  }
   if (path === "/v1/installations" && method === "POST") return register(request, env, deps, now);
   if (path === "/v1/installations/self" && method === "GET") return showSelf(request, env, now);
   if (path === "/v1/installations/self" && method === "DELETE") return forget(request, env, deps, now);
@@ -156,38 +159,54 @@ async function route(request: Request, env: Env, deps: Deps, now: () => Date): P
   throw new Reply(404, "No such route.");
 }
 
-// MARK: Installations
+// MARK: Signing in: Apple and Google
 
-// MARK: Sign in with Apple
+/// Who an account signs in with, and what its sign-in needs: the authorization page, what's asked
+/// of it, the wrangler.jsonc settings, and how its token is checked. An account is (provider, the
+/// provider's `sub`), kept as one key (`account`): Apple's `sub` as it is, `google:<sub>` for Google.
+type Provider = "apple" | "google";
+const PROVIDERS: Record<Provider, { name: string; client: keyof Env; redirect: keyof Env; authorize: string; ask: Record<string, string> }> = {
+  // No scope: Apple sends no name and no email.
+  apple: { name: "Apple", client: "APPLE_CLIENT_ID", redirect: "APPLE_REDIRECT_URI", authorize: "https://appleid.apple.com/auth/authorize", ask: { response_type: "code id_token" } },
+  // The ID token alone (no code, so no client secret), and the email only so its domain is known.
+  google: {
+    name: "Google",
+    client: "GOOGLE_CLIENT_ID",
+    redirect: "GOOGLE_REDIRECT_URI",
+    authorize: "https://accounts.google.com/o/oauth2/v2/auth",
+    ask: { response_type: "id_token", scope: "openid email", prompt: "select_account" },
+  },
+};
 
 /// A Mac starts signing in, signed by its key: a single-use sign-in (`state`, and a nonce whose
-/// hash only is kept) bound to that key, and Apple's authorization URL for it. No scope is asked
-/// for, so Apple sends no name and no email.
-async function startSignIn(request: Request, env: Env, now: () => Date): Promise<Response> {
+/// hash only is kept) bound to that key and the provider, and the provider's authorization URL
+/// for it, answered with a form post to the callback.
+async function startSignIn(request: Request, env: Env, now: () => Date, provider: Provider): Promise<Response> {
   const call = await signed(request, env, now());
-  const client = appleSetting(env.APPLE_CLIENT_ID, "APPLE_CLIENT_ID");
-  const redirect = appleSetting(env.APPLE_REDIRECT_URI, "APPLE_REDIRECT_URI");
+  const client = setting(env, provider, "client");
+  const redirect = setting(env, provider, "redirect");
   const address = addressBucket(request.headers.get("CF-Connecting-IP") ?? "unknown");
   await limit(env.DB, `sign-ins:address:${address}`, LIMITS.signInsPerAddress, now(), "Too many sign-ins were started from this network lately.");
   await spend(env.DB, call);
   const state = base64url(randomBytes(32));
   const nonce = base64url(randomBytes(32));
   const at = now();
-  await env.DB.prepare("INSERT INTO sign_ins (state, public_key, nonce_hash, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)")
-    .bind(state, call.key, await sha256Hex(nonce), iso(at), Math.floor(at.getTime() / 1000) + SIGN_IN_MINUTES * 60)
+  await env.DB.prepare("INSERT INTO sign_ins (state, public_key, nonce_hash, created_at, expires_at, provider) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+    .bind(state, call.key, await sha256Hex(nonce), iso(at), Math.floor(at.getTime() / 1000) + SIGN_IN_MINUTES * 60, provider)
     .run();
-  const url = new URL("https://appleid.apple.com/auth/authorize");
-  url.search = new URLSearchParams({ client_id: client, redirect_uri: redirect, response_type: "code id_token", response_mode: "form_post", state, nonce }).toString();
+  const url = new URL(PROVIDERS[provider].authorize);
+  url.search = new URLSearchParams({ client_id: client, redirect_uri: redirect, ...PROVIDERS[provider].ask, response_mode: "form_post", state, nonce }).toString();
   return json({ url: url.toString(), state }, 201, noStore);
 }
 
-/// Apple posts the sign-in's result here (form_post): the identity token is checked against the
-/// sign-in it names (`state`), and its `sub` is bound to it with a one-time `code`, kept only as
-/// its hash. The browser is sent back to the Mac (`oby-signin://done?state=…&code=…`), which
-/// registers with both. The code goes only to the browser that signed in: someone who started the
-/// sign-in on their own Mac and got another person to finish it at Apple has the state, not the
-/// code, so the other person's account can't be bound to their Mac.
-async function finishSignIn(request: Request, env: Env, deps: Deps, now: () => Date): Promise<Response> {
+/// The provider posts the sign-in's result here (form_post): the identity token is checked against
+/// the sign-in it names (`state`), started for this provider, and the account is bound to it with
+/// a one-time `code`, kept only as its hash. The browser is sent back to the Mac
+/// (`oby-signin://done?state=…&code=…`), which registers with both. The code goes only to the
+/// browser that signed in: someone who started the sign-in on their own Mac and got another person
+/// to finish it at the provider has the state, not the code, so the other person's account can't
+/// be bound to their Mac.
+async function finishSignIn(request: Request, env: Env, deps: Deps, now: () => Date, provider: Provider): Promise<Response> {
   const back = (outcome: "done" | "failed", state: string, code?: string) =>
     new Response(null, {
       status: 303,
@@ -199,37 +218,51 @@ async function finishSignIn(request: Request, env: Env, deps: Deps, now: () => D
   try {
     form = await request.formData();
   } catch {
-    throw new Reply(400, "Send Apple's form.");
+    throw new Reply(400, `Send ${PROVIDERS[provider].name}'s form.`);
   }
   const state = String(form.get("state") ?? "");
   const token = String(form.get("id_token") ?? "");
   if (!/^[A-Za-z0-9_-]{43}$/.test(state)) throw new Reply(400, "That sign-in isn't Oby's.");
   const seconds = Math.floor(now().getTime() / 1000);
-  const pending = await env.DB.prepare("SELECT nonce_hash FROM sign_ins WHERE state = ?1 AND sub IS NULL AND used_at IS NULL AND expires_at > ?2")
-    .bind(state, seconds)
+  const pending = await env.DB.prepare("SELECT nonce_hash FROM sign_ins WHERE state = ?1 AND provider = ?2 AND sub IS NULL AND used_at IS NULL AND expires_at > ?3")
+    .bind(state, provider, seconds)
     .first<{ nonce_hash: string }>();
-  // Cancelled at Apple (`error`), or no such sign-in, or used already: back to the Mac, which says so.
+  // Cancelled at the provider (`error`), or no such sign-in, or used already: back to the Mac, which says so.
   if (!pending || !token) return back("failed", state);
-  let sub: string;
+  let account: string;
+  let domain: string | null = null;
   try {
-    sub = await verifyAppleToken(token, deps.apple, appleSetting(env.APPLE_CLIENT_ID, "APPLE_CLIENT_ID"), pending.nonce_hash, now());
+    const audience = setting(env, provider, "client");
+    if (provider === "google") {
+      const google = await verifyGoogleToken(token, deps.google, audience, pending.nonce_hash, now());
+      account = `google:${google.sub}`;
+      domain = google.domain;
+    } else {
+      account = await verifyAppleToken(token, deps.apple, audience, pending.nonce_hash, now());
+    }
   } catch (error) {
-    if (!(error instanceof AppleTokenError)) throw error;
-    console.warn(`sign in with apple: ${error.message}`);
+    if (!(error instanceof TokenError)) throw error;
+    console.warn(`sign in with ${provider}: ${error.message}`);
     return back("failed", state);
   }
   const code = base64url(randomBytes(32));
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO users (sub, created_at) VALUES (?1, ?2) ON CONFLICT (sub) DO NOTHING").bind(sub, iso(now())),
-    env.DB.prepare("UPDATE sign_ins SET sub = ?2, code_hash = ?3 WHERE state = ?1 AND sub IS NULL").bind(state, sub, await sha256Hex(code)),
+    env.DB.prepare("INSERT INTO users (sub, provider, domain, created_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (sub) DO UPDATE SET domain = excluded.domain").bind(
+      account,
+      provider,
+      domain,
+      iso(now()),
+    ),
+    env.DB.prepare("UPDATE sign_ins SET sub = ?2, code_hash = ?3 WHERE state = ?1 AND sub IS NULL").bind(state, account, await sha256Hex(code)),
   ]);
   return back("done", state, code);
 }
 
-/// An APPLE_* setting from wrangler.jsonc, or the control plane says it isn't set up.
-function appleSetting(value: string | undefined, name: string): string {
-  const text = (value ?? "").trim();
-  if (!text) throw new Reply(503, `Sign in with Apple isn't set up: set ${name} in wrangler.jsonc.`);
+/// A provider's setting from wrangler.jsonc, or the control plane says it isn't set up.
+function setting(env: Env, provider: Provider, which: "client" | "redirect"): string {
+  const name = PROVIDERS[provider][which];
+  const text = String(env[name] ?? "").trim();
+  if (!text) throw new Reply(503, `Sign in with ${PROVIDERS[provider].name} isn't set up: set ${name} in wrangler.jsonc.`);
   return text;
 }
 
@@ -237,11 +270,11 @@ function appleSetting(value: string | undefined, name: string): string {
 
 /// Registers the Mac whose key signed the call (201), or, the same key again, keeps its
 /// installation and its hostname (200). A new key brings `signIn` and `signInCode`: the state of a
-/// sign-in it started and the code its sheet came back with from Apple, used once; the
-/// installation belongs to that Apple Account. An account that has PER_ACCOUNT.installations Macs
+/// sign-in it started and the code its sheet came back with from Apple or Google, used once; the
+/// installation belongs to that account. An account that has PER_ACCOUNT.installations Macs
 /// already loses the one it used longest ago (`evicted`), so a person with a new Mac isn't stuck.
-/// This is no recovery from a stolen Apple Account: an attacker who keeps calling stays the most
-/// recently used, so the owner's own Macs go first. A stolen account is recovered at Apple; what
+/// This is no recovery from a stolen account: an attacker who keeps calling stays the most
+/// recently used, so the owner's own Macs go first. A stolen account is recovered at Apple or Google; what
 /// it can reach here is only remote access (a hostname to a gateway that needs a paired device's
 /// token), never a token or data.
 async function register(request: Request, env: Env, deps: Deps, now: () => Date): Promise<Response> {
@@ -263,11 +296,11 @@ async function register(request: Request, env: Env, deps: Deps, now: () => Date)
   )
     .bind(state, call.key, seconds)
     .first<{ sub: string; code_hash: string }>();
-  if (!signIn || !code || (await sha256Hex(code)) !== signIn.code_hash) throw new Reply(403, "Sign in with Apple first.");
+  if (!signIn || !code || (await sha256Hex(code)) !== signIn.code_hash) throw new Reply(403, "Sign in with Apple or Google first.");
   await spend(env.DB, call);
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
   const counted = [`registrations:account:${signIn.sub}`, `registrations:address:${addressBucket(address)}`, `registrations:network:${networkBucket(address)}`];
-  await limit(env.DB, counted[0]!, LIMITS.registrationsPerAccount, now(), "This Apple Account set up too many Macs today.");
+  await limit(env.DB, counted[0]!, LIMITS.registrationsPerAccount, now(), "This account set up too many Macs today.");
   await limit(env.DB, counted[1]!, LIMITS.registrationsPerAddress, now(), "Too many Macs were set up from this network lately.");
   await limit(env.DB, counted[2]!, LIMITS.registrationsPerNetwork, now(), "Too many Macs were set up from this network lately.");
   // ponytail: counted, then inserted: two registrations at once for one account can both find
@@ -288,7 +321,7 @@ async function register(request: Request, env: Env, deps: Deps, now: () => Date)
   }
   // Used once: a second registration with the same sign-in finds nothing.
   const claimed = await env.DB.prepare("UPDATE sign_ins SET used_at = ?2 WHERE state = ?1 AND used_at IS NULL RETURNING state").bind(state, at).first();
-  if (!claimed) throw new Reply(403, "Sign in with Apple first.");
+  if (!claimed) throw new Reply(403, "Sign in with Apple or Google first.");
   const row: InstallationRow = { id: newId(), public_key: call.key, user_sub: signIn.sub, name, platform, created_at: at, last_seen_at: at };
   // Two calls at once with one key: the first one's row stands, and both answer with it.
   await env.DB.prepare(
@@ -335,14 +368,14 @@ async function createEndpoint(request: Request, env: Env, deps: Deps, now: () =>
   // `endpointsEverywhere` for everyone.
   // Every installation has an account since Sign in with Apple; one without is refused, never
   // spared the account's limits.
-  if (!row.user_sub) throw new Reply(403, "Sign in with Apple again: turn remote access off and on.");
+  if (!row.user_sub) throw new Reply(403, "Sign in again: turn remote access off and on.");
   {
     const theirs = (await env.DB.prepare("SELECT count(*) AS n FROM endpoints e JOIN installations i ON i.id = e.installation_id WHERE i.user_sub = ?1").bind(row.user_sub).first<{ n: number }>())?.n ?? 0;
-    if (theirs >= PER_ACCOUNT.endpoints) throw new Reply(409, `This Apple Account has ${PER_ACCOUNT.endpoints} Macs with remote access on already. Forget one first.`);
+    if (theirs >= PER_ACCOUNT.endpoints) throw new Reply(409, `This account has ${PER_ACCOUNT.endpoints} Macs with remote access on already. Forget one first.`);
   }
   await limitEndpointChanges(env.DB, row, now());
   await limit(env.DB, `creations:installation:${row.id}`, LIMITS.creationsPerInstallation, now(), "This Mac turned remote access on too often today.");
-  await limit(env.DB, `creations:account:${row.user_sub}`, LIMITS.creationsPerAccount, now(), "This Apple Account turned remote access on too often today.");
+  await limit(env.DB, `creations:account:${row.user_sub}`, LIMITS.creationsPerAccount, now(), "This account turned remote access on too often today.");
   await limit(env.DB, `creations:network:${network}`, LIMITS.creationsPerNetworkHour, now(), "Too many Macs on this network turned remote access on lately.");
   await limit(env.DB, `creations:network-day:${network}`, LIMITS.creationsPerNetworkDay, now(), "Too many Macs on this network turned remote access on today.");
   await limit(env.DB, "endpoints:everywhere", LIMITS.endpointsEverywhere, now(), "Too many Macs are turning remote access on right now.");

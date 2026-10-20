@@ -165,13 +165,13 @@ describe("what a tunnel may cost", () => {
     await app.fill(1, "fill", "000444.drain");
     const sixth = await app.call(macs[4]!, "POST", path, undefined, { "CF-Connecting-IP": "10.4.0.1" });
     expect(sixth.status).toBe(409);
-    expect(sixth.body.error).toBe("This Apple Account has 5 Macs with remote access on already. Forget one first.");
+    expect(sixth.body.error).toBe("This account has 5 Macs with remote access on already. Forget one first.");
     // Make and remove, so nothing stays live: what a drain would do. Ten a day per account.
     await app.counted("creations:account:000444.drain", 10);
     expect((await app.call(macs[0]!, "DELETE", path)).status).toBe(204);
     const drain = await app.call(macs[0]!, "POST", path);
     expect(drain.status).toBe(429);
-    expect(drain.body.error).toMatch(/^This Apple Account turned remote access on too often today\./);
+    expect(drain.body.error).toMatch(/^This account turned remote access on too often today\./);
     // Another account isn't held back.
     expect((await app.call(macs[5]!, "POST", path, undefined, { "CF-Connecting-IP": "10.5.0.1" })).status).toBe(201);
     // Over everyone, 300 an hour: a drain needs 30 Apple Accounts.
@@ -238,7 +238,7 @@ describe("what a tunnel may cost", () => {
     await env.DB.prepare("UPDATE installations SET user_sub = NULL").run();
     const refused = await app.call(mac.mac, "POST", "/v1/installations/self/endpoint");
     expect(refused.status).toBe(403);
-    expect(refused.body.error).toBe("Sign in with Apple again: turn remote access off and on.");
+    expect(refused.body.error).toBe("Sign in again: turn remote access off and on.");
     expect(app.tunnels.calls).toEqual([]);
   });
 

@@ -53,7 +53,7 @@ describe("installations", () => {
     const register = (body: Record<string, unknown>, key = mac) => app.call(key, "POST", "/v1/installations", { name: "Mac", platform: "macos", ...body });
     const none = await register({});
     expect(none.status).toBe(403);
-    expect(none.body.error).toBe("Sign in with Apple first.");
+    expect(none.body.error).toBe("Sign in with Apple or Google first.");
     // Started but not finished at Apple: no account yet.
     const { state } = await app.startSignIn(mac);
     expect((await register({ signIn: state })).status).toBe(403);
@@ -67,8 +67,8 @@ describe("installations", () => {
     expect(made.status).toBe(201);
     const row = await env.DB.prepare("SELECT user_sub FROM installations").first<{ user_sub: string }>();
     expect(row?.user_sub).toBe("000111.owner");
-    // The account is kept by `sub` alone, and the code only as a hash.
-    expect((await env.DB.prepare("SELECT * FROM users").all()).results).toEqual([{ sub: "000111.owner", created_at: "2026-10-12T12:00:00.000Z" }]);
+    // An Apple account is kept by `sub` alone (no domain: Apple gives no email), and the code only as a hash.
+    expect((await env.DB.prepare("SELECT * FROM users").all()).results).toEqual([{ sub: "000111.owner", provider: "apple", domain: null, created_at: "2026-10-12T12:00:00.000Z" }]);
     expect(JSON.stringify((await env.DB.prepare("SELECT * FROM sign_ins").all()).results)).not.toContain(signedIn.signInCode);
     // Registered, the key needs no sign-in again.
     expect((await register({})).status).toBe(200);
@@ -127,7 +127,7 @@ describe("installations", () => {
     await app.counted("registrations:account:000333.other", 10);
     const tenth = await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "10.9.0.3" }, "000333.other");
     expect(tenth.status).toBe(429);
-    expect(tenth.body.error).toMatch(/^This Apple Account set up too many Macs today\./);
+    expect(tenth.body.error).toMatch(/^This account set up too many Macs today\./);
   });
 
   it("when the evicted Mac's teardown fails, nothing changes: not counted, and the sign-in works again", async () => {

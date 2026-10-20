@@ -4,7 +4,7 @@
 
 import { env } from "cloudflare:test";
 import { type Deps, handle, SIGNED_PREFIX } from "../src/app";
-import { AppleKeyCache, type AppleKeys } from "../src/apple";
+import { KeyCache, type KeySource } from "../src/signin";
 import { CloudflareError, type Ingress, type TunnelAPI, type TunnelStatus } from "../src/cloudflare";
 import type { Env } from "../src/env";
 
@@ -131,7 +131,7 @@ export function base64url(bytes: Uint8Array): string {
 
 /// Apple, as far as the control plane sees it: an RSA key that signs identity tokens, listed in
 /// a JWKS under `kid`. `fetches` counts how often the Worker asked for the keys.
-export class FakeApple implements AppleKeys {
+export class FakeIdP implements KeySource {
   fetches = 0;
   private constructor(
     readonly pair: CryptoKeyPair,
@@ -139,14 +139,14 @@ export class FakeApple implements AppleKeys {
     readonly kid: string,
   ) {}
 
-  static async make(kid = "apple-test-1"): Promise<FakeApple> {
+  static async make(kid = "apple-test-1"): Promise<FakeIdP> {
     const pair = (await crypto.subtle.generateKey(
       { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
       true,
       ["sign", "verify"],
     )) as CryptoKeyPair;
     const jwk = (await crypto.subtle.exportKey("jwk", pair.publicKey)) as JsonWebKey;
-    return new FakeApple(pair, jwk, kid);
+    return new FakeIdP(pair, jwk, kid);
   }
 
   async keys(): Promise<JsonWebKey[]> {
@@ -163,10 +163,11 @@ export class FakeApple implements AppleKeys {
   }
 }
 
-/// One fake Apple for every test: making an RSA key is slow.
-const sharedApple = await FakeApple.make();
+/// One fake Apple and one fake Google for every test: making an RSA key is slow.
+const sharedApple = await FakeIdP.make();
+const sharedGoogle = await FakeIdP.make("google-test-1");
 
-export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env> = {}, apple: FakeApple = sharedApple) {
+export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env> = {}, apple: FakeIdP = sharedApple, google: FakeIdP = sharedGoogle) {
   const tunnels = new FakeTunnels();
   let at = new Date("2026-10-12T12:00:00.000Z");
   const time = {
@@ -175,7 +176,7 @@ export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env
       at = new Date(at.getTime() + ms);
     },
   };
-  const deps: Deps = { tunnels, apple: new AppleKeyCache(apple, () => at), now: time.now, ...overrides };
+  const deps: Deps = { tunnels, apple: new KeyCache(apple, () => at), google: new KeyCache(google, () => at, "Google"), now: time.now, ...overrides };
   const settings = { ...env, ...envOverrides };
 
   /// A request as it reaches the Worker, with `headers` as they are (no signature added).
@@ -203,17 +204,24 @@ export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env
     return { iss: "https://appleid.apple.com", aud: settings.APPLE_CLIENT_ID, exp: seconds + 600, iat: seconds, sub, nonce, c_hash: "x", auth_time: seconds };
   };
 
+  /// What Google's ID token says by default: from Google, for this client, fresh, with `nonce`, a
+  /// verified email at `domain`, and `hd` for a Workspace domain.
+  const googleClaims = (nonce: string, sub: string, email = "someone@deskree.com", hd: string | null = "deskree.com") => {
+    const seconds = Math.floor(at.getTime() / 1000);
+    return { iss: "https://accounts.google.com", azp: settings.GOOGLE_CLIENT_ID, aud: settings.GOOGLE_CLIENT_ID, exp: seconds + 3600, iat: seconds, sub, nonce, email, email_verified: true, ...(hd ? { hd } : {}) };
+  };
+
   /// `mac` starts signing in: the state and the nonce from the authorization URL.
-  async function startSignIn(mac: Mac, headers: Record<string, string> = {}) {
-    const started = await call(mac, "POST", "/v1/auth/apple/start", undefined, headers);
+  async function startSignIn(mac: Mac, headers: Record<string, string> = {}, provider: "apple" | "google" = "apple") {
+    const started = await call(mac, "POST", `/v1/auth/${provider}/start`, undefined, headers);
     if (started.status !== 201) return { started, state: "", nonce: "" };
     const url = new URL(started.body.url);
     return { started, state: url.searchParams.get("state") ?? "", nonce: url.searchParams.get("nonce") ?? "" };
   }
 
-  /// Apple posts its form to the callback, as the browser does.
-  async function callback(fields: Record<string, string>, headers: Record<string, string> = {}): Promise<Answer> {
-    return raw("POST", "/v1/auth/apple/callback", new URLSearchParams(fields).toString(), { "Content-Type": "application/x-www-form-urlencoded", ...headers });
+  /// Apple (or Google) posts its form to the callback, as the browser does.
+  async function callback(fields: Record<string, string>, headers: Record<string, string> = {}, provider: "apple" | "google" = "apple"): Promise<Answer> {
+    return raw("POST", `/v1/auth/${provider}/callback`, new URLSearchParams(fields).toString(), { "Content-Type": "application/x-www-form-urlencoded", ...headers });
   }
 
   /// Signs `mac` in with Apple as account `sub`, the whole way: start, Apple's token, the
@@ -253,7 +261,7 @@ export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env
       .run();
   }
 
-  return { raw, call, register, signIn, startSignIn, callback, claims, fill, counted, apple, deps, tunnels, time };
+  return { raw, call, register, signIn, startSignIn, callback, claims, googleClaims, fill, counted, apple, google, deps, tunnels, time };
 }
 
 export const MINUTE = 60_000;

@@ -11,8 +11,9 @@ import OSLog
 /// the login item (TunnelRunner). The iPhone talks HTTPS to the hostname, and the tunnel routes
 /// only to the gateway (#284) on 127.0.0.1:8810.
 ///
-/// Turning it on the first time signs in with Apple (on the web: Oby is a Developer ID app, and
-/// Apple's native Sign in with Apple is App Store only), with no name or email, and this Mac makes
+/// Turning it on the first time signs in with Apple or Google (on the web: Oby is a Developer ID
+/// app, and Apple's native Sign in with Apple is App Store only); Apple is asked for no name or
+/// email, Google for the email only so the control plane knows its domain. This Mac makes
 /// a P-256 key (in the Secure Enclave when it has one) that signs every call to the control plane. What stays on this Mac: the key
 /// and the tunnel's run token, in the keychain under a service of their own (not the user's
 /// vault, which Settings › Vault lists); the hostname in the defaults.
@@ -52,13 +53,13 @@ final class RemoteAccess {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored let runner: TunnelRunner
     @ObservationIgnored private var checkIns: Task<Void, Never>?
-    /// Shows Apple's sign-in page and gives back the URL it ends at (`oby-signin://…`): the
+    /// Shows Apple's or Google's sign-in page and gives back the URL it ends at (`oby-signin://…`): the
     /// system's web sheet, or a test's stand-in.
     @ObservationIgnored private let authenticate: @MainActor (URL) async throws -> URL
 
     init(plane: ControlPlane = ControlPlane(), secrets: any VaultStore = KeychainVault(service: RemoteAccess.service),
          defaults: UserDefaults = .standard, runner: TunnelRunner = TunnelRunner(),
-         authenticate: @escaping @MainActor (URL) async throws -> URL = AppleWebSignIn.run) {
+         authenticate: @escaping @MainActor (URL) async throws -> URL = WebSignIn.run) {
         self.plane = plane
         self.authenticate = authenticate
         self.secrets = secrets
@@ -68,6 +69,13 @@ final class RemoteAccess {
         hostname = defaults.string(forKey: "remote.hostname")
         runner.onState = { [weak self] state in self?.tunnel = state }
     }
+
+    /// Turning on needs a sign-in first: this Mac has no hostname (never set up, forgotten, or
+    /// away 30 days), so Settings offers the providers' buttons instead of the switch.
+    var signsInFirst: Bool { !on && hostname == nil }
+
+    /// Settings' buttons when `signsInFirst`, in order: Apple's, then Google's.
+    static let signInButtons = ControlPlane.Provider.allCases.map { (title: "Sign in with \($0.name)", provider: $0) }
 
     /// Settings' one line about the tunnel.
     var status: String {
@@ -121,7 +129,7 @@ final class RemoteAccess {
     /// A signed call keeps the installation. When the control plane took the tunnel back (not
     /// connected for days), the hostname here goes and, on, a new one is set up at once. When it no
     /// longer knows this Mac (away 30 days, or forgotten), remote access is off until the user
-    /// turns it on and signs in with Apple again: never a sign-in sheet out of the blue.
+    /// turns it on and signs in again: never a sign-in sheet out of the blue.
     func checkIn() async {
         do {
             let mine = try await plane.installation(try signer())
@@ -131,7 +139,7 @@ final class RemoteAccess {
             hostname = nil
             on = false
             for key in ["remote.hostname", "remote.enabled"] { defaults.removeObject(forKey: key) }
-            problem = "This Mac was away from remote access for 30 days. Turn it on again to sign in with Apple."
+            problem = "This Mac was away from remote access for 30 days. Sign in again to turn it on."
         } catch {
             // Offline, or the control plane is down: the next check-in tries again.
             Logger.remote.error("remote access check-in: \(error.localizedDescription, privacy: .public)")
@@ -149,14 +157,15 @@ final class RemoteAccess {
 
     // MARK: On and off
 
-    /// Registers this Mac by its key, gets its hostname and tunnel token, and runs the tunnel.
-    /// Again later (after a reinstall, or the keychain lost the token) it's the same installation
-    /// and hostname, as long as the key is the same.
-    func turnOn() async {
+    /// Registers this Mac by its key, signing in with `provider` when the control plane doesn't
+    /// know the key, gets its hostname and tunnel token, and runs the tunnel. Again later (after a
+    /// reinstall, or the keychain lost the token) it's the same installation and hostname, as long
+    /// as the key is the same, with no sign-in.
+    func turnOn(with provider: ControlPlane.Provider = .apple) async {
         var evicted: String?
         await attempt {
             let signer = try signer()
-            evicted = try await registered(signer)
+            evicted = try await registered(signer, with: provider)
             let endpoint = try await plane.createEndpoint(signer)
             let token = try await plane.tunnelToken(signer)
             try secrets.save(token.token, as: Self.tokenKey)
@@ -169,7 +178,7 @@ final class RemoteAccess {
         }
         // Not a failure, but the user should know: another Mac of theirs lost remote access.
         if let evicted, problem == nil {
-            problem = "Your Apple Account had 5 Macs with remote access, so “\(evicted)”, the one used longest ago, was removed to make room."
+            problem = "Your account had 5 Macs with remote access, so “\(evicted)”, the one used longest ago, was removed to make room."
         }
         checkInDaily()
     }
@@ -203,21 +212,21 @@ final class RemoteAccess {
         }
     }
 
-    /// This Mac's installation: the one its key has, or a new one after signing in with Apple.
-    /// Returns the name of the Mac the account gave up to make room, if it did.
-    private func registered(_ signer: ControlPlane.Signer) async throws -> String? {
+    /// This Mac's installation: the one its key has, or a new one after signing in with
+    /// `provider`. Returns the name of the Mac the account gave up to make room, if it did.
+    private func registered(_ signer: ControlPlane.Signer, with provider: ControlPlane.Provider) async throws -> String? {
         do {
             _ = try await plane.installation(signer)
             return nil
         } catch let failure as ControlPlane.Failure where failure.status == 410 {
             // Not registered: sign in first.
         }
-        let signIn = try await plane.startAppleSignIn(signer)
+        let signIn = try await plane.startSignIn(signer, with: provider)
         let back = try await authenticate(signIn.url)
         let items = URLComponents(url: back, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let value = { (name: String) in items.first { $0.name == name }?.value }
         guard back.scheme == "oby-signin", back.host() == "done", value("state") == signIn.state, let code = value("code") else {
-            throw Shell.Failure(message: "Sign in with Apple didn't finish. Try again.")
+            throw Shell.Failure(message: "Sign in with \(provider.name) didn't finish. Try again.")
         }
         let registration = try await plane.register(signer, name: Host.current().localizedName ?? "Mac", signIn: (state: signIn.state, code: code))
         return registration.evicted?.name
@@ -273,11 +282,12 @@ nonisolated enum MacKey {
     }
 }
 
-/// Apple's sign-in page in the system's web sheet (ASWebAuthenticationSession, which needs no
-/// entitlement), sharing Safari's cookies so a signed-in Apple Account or a passkey is one step.
-/// Apple posts the result to the control plane, which sends the sheet on to `oby-signin://`.
+/// Apple's or Google's sign-in page in the system's web sheet (ASWebAuthenticationSession, which
+/// needs no entitlement), sharing Safari's cookies so an account already signed in or a passkey is
+/// one step. The provider posts the result to the control plane, which sends the sheet on to
+/// `oby-signin://`.
 @MainActor
-enum AppleWebSignIn {
+enum WebSignIn {
     /// The sheet showing now, and what it hangs off, kept until it ends.
     private static var session: ASWebAuthenticationSession?
     private static let anchor = Anchor()
@@ -288,14 +298,14 @@ enum AppleWebSignIn {
                 session = nil
                 if let callback { return continuation.resume(returning: callback) }
                 let cancelled = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
-                continuation.resume(throwing: Shell.Failure(message: cancelled ? "Sign in with Apple was cancelled." : "Sign in with Apple didn't finish. Try again."))
+                continuation.resume(throwing: Shell.Failure(message: cancelled ? "The sign-in was cancelled." : "The sign-in didn't finish. Try again."))
             }
             sheet.presentationContextProvider = anchor
             sheet.prefersEphemeralWebBrowserSession = false
             session = sheet
             if !sheet.start() {
                 session = nil
-                continuation.resume(throwing: Shell.Failure(message: "Sign in with Apple couldn't open."))
+                continuation.resume(throwing: Shell.Failure(message: "The sign-in page couldn't open."))
             }
         }
     }

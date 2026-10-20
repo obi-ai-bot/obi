@@ -31,7 +31,7 @@ What a person does now to go from a new Mac and iPhone to a working Oby on obid.
 **Reaching it from the iPhone**
 
 9. Either Tailscale on both devices, `tailscale serve --bg --https=8443 http://127.0.0.1:8810`, and an invitation made with `curl` against `POST /v1/pairing/invite` with the API token, pasted into the iPhone as JSON (docs/install.md, PR #638); the Mac's Pair a device won't make a QR code for a Tailscale address (`apps/mac/app/PairingView.swift:64-66`).
-10. Or Settings › Remote access: "Reach this Mac from anywhere", which signs in with Apple the first time (on the web, with no name or email) and registers the Mac by a key of its own (the control plane in `cloud/control-plane` must be deployed first, which is the owner's own Cloudflare setup, docs/remote-access.md), then Settings › Runner › Pair a device.
+10. Or Settings › Remote access: "Reach this Mac from anywhere", which signs in with Apple or Google the first time (on the web; no email is kept) and registers the Mac by a key of its own (the control plane in `cloud/control-plane` must be deployed first, which is the owner's own Cloudflare setup, docs/remote-access.md), then Settings › Runner › Pair a device.
 
 **On the iPhone**
 

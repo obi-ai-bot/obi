@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { AppleKeyCache, AppleTokenError, sha256Hex, verifyAppleToken } from "../src/apple";
-import { FakeApple, MINUTE, Mac, testApp } from "./helpers";
+import { KeyCache, TokenError, sha256Hex, verifyAppleToken } from "../src/signin";
+import { FakeIdP, MINUTE, Mac, testApp } from "./helpers";
 
 describe("Sign in with Apple", () => {
   it("starts with Apple's authorization URL: no scope, form_post, a state and a nonce kept only as a hash", async () => {
@@ -38,7 +38,7 @@ describe("Sign in with Apple", () => {
 
   it("refuses a token that doesn't check out, and the sign-in stays unusable", async () => {
     const app = testApp();
-    const other = await FakeApple.make();
+    const other = await FakeIdP.make();
     const cases: [string, (nonce: string) => Promise<string>][] = [
       ["bad signature", async (nonce) => app.apple.token(app.claims(nonce, "000777.me"), app.apple.kid, other.pair.privateKey)],
       ["wrong aud", async (nonce) => app.apple.token({ ...app.claims(nonce, "000777.me"), aud: "com.someone.else" })],
@@ -98,11 +98,129 @@ describe("Sign in with Apple", () => {
   });
 });
 
+describe("Sign in with Google", () => {
+  /// Signs `mac` in with Google with `token(nonce)`; the callback's Location and the state.
+  async function google(app: ReturnType<typeof testApp>, mac: Mac, token: (nonce: string) => Promise<string>, ip = "198.51.100.1") {
+    const { started, state, nonce } = await app.startSignIn(mac, { "CF-Connecting-IP": ip }, "google");
+    expect(started.status).toBe(201);
+    const back = await app.callback({ state, id_token: await token(nonce) }, { "CF-Connecting-IP": ip }, "google");
+    return { state, location: back.headers.get("Location") ?? "" };
+  }
+
+  it("starts with Google's authorization URL: the ID token by form_post, openid and email, a state and a nonce kept only as a hash", async () => {
+    const app = testApp();
+    const mac = await Mac.make();
+    const { started, state, nonce } = await app.startSignIn(mac, {}, "google");
+    expect(started.status).toBe(201);
+    const url = new URL(started.body.url);
+    expect(`${url.origin}${url.pathname}`).toBe("https://accounts.google.com/o/oauth2/v2/auth");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      client_id: "1234-oby.apps.googleusercontent.com",
+      redirect_uri: "https://oby-control.tetrix.pro/v1/auth/google/callback",
+      response_type: "id_token",
+      scope: "openid email",
+      prompt: "select_account",
+      response_mode: "form_post",
+      state,
+      nonce,
+    });
+    const row = await env.DB.prepare("SELECT * FROM sign_ins").first<{ public_key: string; nonce_hash: string; provider: string }>();
+    expect(row).toMatchObject({ public_key: mac.publicKey, nonce_hash: await sha256Hex(nonce), provider: "google" });
+  });
+
+  it("binds a Google account, apart from an Apple account with the same sub, keeping its Workspace domain and never its email", async () => {
+    const app = testApp();
+    const mac = await Mac.make();
+    const { state, location } = await google(app, mac, (nonce) => app.google.token(app.googleClaims(nonce, "000777.me")));
+    expect(location).toMatch(new RegExp(`^oby-signin://done\\?state=${state}&code=[A-Za-z0-9_-]{43}$`));
+    const code = new URL(location).searchParams.get("code") ?? "";
+    const registered = await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: state, signInCode: code });
+    expect(registered.status).toBe(201);
+    // The same sub at Apple is another account, with Macs of its own.
+    await app.register(await Mac.make(), "Apple Mac", {}, "000777.me");
+    const users = await env.DB.prepare("SELECT * FROM users ORDER BY provider").all<Record<string, unknown>>();
+    expect(users.results.map(({ created_at, ...user }) => user)).toEqual([
+      { sub: "000777.me", provider: "apple", domain: null },
+      { sub: "google:000777.me", provider: "google", domain: "deskree.com" },
+    ]);
+    expect(JSON.stringify(users.results)).not.toContain("someone@");
+    const owners = await env.DB.prepare("SELECT user_sub FROM installations ORDER BY name").all<{ user_sub: string }>();
+    expect(owners.results.map((row) => row.user_sub)).toEqual(["000777.me", "google:000777.me"]);
+  });
+
+  it("keeps a verified email's domain when there's no hd, and takes Google's other issuer spelling", async () => {
+    const app = testApp();
+    const { location } = await google(app, await Mac.make(), (nonce) => app.google.token({ ...app.googleClaims(nonce, "123456789", "me@gmail.com", null), iss: "accounts.google.com" }));
+    expect(location).toMatch(/^oby-signin:\/\/done\?/);
+    expect(await env.DB.prepare("SELECT domain FROM users WHERE sub = 'google:123456789'").first("domain")).toBe("gmail.com");
+  });
+
+  it("refuses a token that doesn't check out, and the sign-in stays unusable", async () => {
+    const app = testApp();
+    const other = await FakeIdP.make("google-test-1");
+    const claims = (nonce: string) => app.googleClaims(nonce, "000777.me");
+    const seconds = Math.floor(app.time.now().getTime() / 1000);
+    const cases: [string, (nonce: string) => Promise<string>][] = [
+      ["bad signature", async (nonce) => app.google.token(claims(nonce), app.google.kid, other.pair.privateKey)],
+      ["Apple's key", async (nonce) => app.apple.token(claims(nonce), app.google.kid)],
+      ["wrong aud", async (nonce) => app.google.token({ ...claims(nonce), aud: "someone-else.apps.googleusercontent.com" })],
+      ["Apple's aud", async (nonce) => app.google.token({ ...claims(nonce), aud: env.APPLE_CLIENT_ID })],
+      ["wrong iss", async (nonce) => app.google.token({ ...claims(nonce), iss: "https://appleid.apple.com" })],
+      ["expired", async (nonce) => app.google.token({ ...claims(nonce), exp: seconds - 1 })],
+      ["issued long ago", async (nonce) => app.google.token({ ...claims(nonce), iat: seconds - 3600 })],
+      ["another nonce", async () => app.google.token(claims("not-the-nonce"))],
+      ["unverified email", async (nonce) => app.google.token({ ...claims(nonce), email_verified: false })],
+      ["email_verified as text", async (nonce) => app.google.token({ ...claims(nonce), email_verified: "true" })],
+      ["no email", async (nonce) => app.google.token({ ...claims(nonce), email: undefined })],
+      ["no sub", async (nonce) => app.google.token({ ...claims(nonce), sub: undefined })],
+      ["a colon in sub", async (nonce) => app.google.token({ ...claims(nonce), sub: "google:1" })],
+      ["unknown kid", async (nonce) => app.google.token(claims(nonce), "not-googles-kid")],
+    ];
+    for (const [i, [what, token]] of cases.entries()) {
+      const mac = await Mac.make();
+      const { state, location } = await google(app, mac, token, `10.${i}.0.1`);
+      expect(location, what).toBe(`oby-signin://failed?state=${state}`);
+      expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: state })).status, what).toBe(403);
+    }
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM users").first("n")).toBe(0);
+  });
+
+  it("takes a sign-in's result once: a replayed callback fails", async () => {
+    const app = testApp();
+    const mac = await Mac.make();
+    const { state, nonce } = await app.startSignIn(mac, {}, "google");
+    const fields = { state, id_token: await app.google.token(app.googleClaims(nonce, "000777.me")) };
+    expect((await app.callback(fields, {}, "google")).headers.get("Location")).toMatch(new RegExp(`^oby-signin://done\\?state=${state}&code=`));
+    expect((await app.callback(fields, {}, "google")).headers.get("Location")).toBe(`oby-signin://failed?state=${state}`);
+    const replayed = { state, id_token: await app.google.token(app.googleClaims(nonce, "000888.attacker")) };
+    expect((await app.callback(replayed, {}, "google")).headers.get("Location")).toBe(`oby-signin://failed?state=${state}`);
+    expect(await env.DB.prepare("SELECT sub FROM sign_ins WHERE state = ?1").bind(state).first("sub")).toBe("google:000777.me");
+  });
+
+  it("finishes a sign-in only at the provider it was started for", async () => {
+    const app = testApp();
+    const mac = await Mac.make();
+    const atApple = await app.startSignIn(mac);
+    const googleToken = await app.google.token(app.googleClaims(atApple.nonce, "000777.me"));
+    expect((await app.callback({ state: atApple.state, id_token: googleToken }, {}, "google")).headers.get("Location")).toBe(`oby-signin://failed?state=${atApple.state}`);
+    const atGoogle = await app.startSignIn(mac, {}, "google");
+    const appleToken = await app.apple.token(app.claims(atGoogle.nonce, "000777.me"));
+    expect((await app.callback({ state: atGoogle.state, id_token: appleToken })).headers.get("Location")).toBe(`oby-signin://failed?state=${atGoogle.state}`);
+  });
+
+  it("says when Sign in with Google isn't set up", async () => {
+    const app = testApp({}, { GOOGLE_CLIENT_ID: "" });
+    const started = await app.call(await Mac.make(), "POST", "/v1/auth/google/start");
+    expect(started.status).toBe(503);
+    expect(started.body.error).toBe("Sign in with Google isn't set up: set GOOGLE_CLIENT_ID in wrangler.jsonc.");
+  });
+});
+
 describe("Apple's keys", () => {
   it("are kept, and fetched again for an unknown kid at most once a minute", async () => {
-    const apple = await FakeApple.make("k1");
+    const apple = await FakeIdP.make("k1");
     let now = new Date("2026-10-12T12:00:00.000Z");
-    const cache = new AppleKeyCache(apple, () => now);
+    const cache = new KeyCache(apple, () => now);
     expect((await cache.key("k1"))?.kid).toBe("k1");
     expect(await cache.key("k1")).toBeDefined();
     expect(apple.fetches).toBe(1);
@@ -119,7 +237,7 @@ describe("Apple's keys", () => {
   });
 
   it("aren't lost to a bad answer, and back off while Apple is down", async () => {
-    const apple = await FakeApple.make("k1");
+    const apple = await FakeIdP.make("k1");
     const good = await apple.keys();
     const answers: (() => Promise<JsonWebKey[]>)[] = [
       async () => good,
@@ -132,7 +250,7 @@ describe("Apple's keys", () => {
     ];
     let asked = 0;
     let now = new Date("2026-10-12T12:00:00.000Z");
-    const cache = new AppleKeyCache({ keys: () => answers[asked++]!() }, () => now);
+    const cache = new KeyCache({ keys: () => answers[asked++]!() }, () => now);
     const later = (seconds: number) => {
       now = new Date(now.getTime() + seconds * 1000);
     };
@@ -164,15 +282,15 @@ describe("Apple's keys", () => {
   });
 
   it("with none kept and Apple down, refuse the token", async () => {
-    const cache = new AppleKeyCache({ keys: async () => { throw new TypeError("network down"); } }, () => new Date());
+    const cache = new KeyCache({ keys: async () => { throw new TypeError("network down"); } }, () => new Date());
     expect(await cache.key("k1")).toBeUndefined();
   });
 
   it("refuse a token that isn't RS256", async () => {
-    const apple = await FakeApple.make("k1");
-    const cache = new AppleKeyCache(apple, () => new Date());
+    const apple = await FakeIdP.make("k1");
+    const cache = new KeyCache(apple, () => new Date());
     const encode = (value: unknown) => btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     const unsigned = `${encode({ alg: "none", kid: "k1" })}.${encode({ sub: "x" })}.`;
-    await expect(verifyAppleToken(unsigned, cache, "aud", "hash", new Date())).rejects.toThrow(AppleTokenError);
+    await expect(verifyAppleToken(unsigned, cache, "aud", "hash", new Date())).rejects.toThrow(TokenError);
   });
 });
