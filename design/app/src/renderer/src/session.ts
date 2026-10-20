@@ -50,8 +50,8 @@ export const SESSIONS: Record<string, Entry[]> = {
       output: 'Signing with team [vault: APPLE_TEAM_ID]\nTest Suite \'LivePanelTests\' started\nTest Case \'-[LivePanelTests testQueueOrder]\' passed (0.012 seconds)\nTest Case \'-[LivePanelTests testStableOrder]\' failed (0.009 seconds)\n    XCTAssertEqual failed: ("[b, a]") is not equal to ("[a, b]")\nTest Case \'-[LivePanelTests testNeedsYouFirst]\' failed (0.011 seconds)\n    XCTAssertEqual failed: ("info") is not equal to ("question")\nExecuted 9 tests, with 2 failures (0 unexpected) in 0.084 seconds\n** TEST FAILED **',
     } },
     { kind: 'thought', seconds: 9, text: 'Two failures. testStableOrder wants items created at the same second to keep inbox order, and Swift’s sort isn’t stable. testNeedsYouFirst wants questions above info items, which I filtered instead of sorting. Sort by (needs you, created, index in the inbox).' },
-    { kind: 'start', text: 'Round 2 · Cursor · Sonnet 5.5', at: '10:51 AM' },
     { kind: 'you', at: '10:50 AM', text: 'Also keep the items that need me above the rest.' },
+    { kind: 'start', text: 'Round 2 · Cursor · Sonnet 5.5', at: '10:51 AM' },
     { kind: 'said', at: '10:51 AM', text: 'Round 1 sorted the queue by created date, but the tests want a stable order with the items that need you first. I’ll sort by (needs you, created, index in the inbox) and run the tests again.' },
     { kind: 'plan', todos: [
       { text: 'Make the sort stable', state: 'done' },

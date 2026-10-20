@@ -92,7 +92,8 @@ export default function SessionView({ id, leaving, covered = false, onBack, onGo
   }, [onBack, covered]);
 
   const count = (f: string) => (f === 'all' ? entries.filter((e) => e.kind !== 'start').length : entries.filter((e) => filterOf(e) === f).length);
-  const visible = entries.filter((e) => filter === 'all' || e.kind === 'start' || filterOf(e) === filter);
+  // keyed by their place in the whole session, so an opened line stays open across filters
+  const visible = entries.map((e, n) => ({ e, n })).filter(({ e }) => filter === 'all' || e.kind === 'start' || filterOf(e) === filter);
   const agent = AGENTS[task.job.agent];
 
   return (
@@ -125,7 +126,7 @@ export default function SessionView({ id, leaving, covered = false, onBack, onGo
               </div>
             </header>
             <ol className="ss-entries">
-              {visible.map((e, i) => <Line key={i} entry={e} brand={agent.brand} live={{ shown: words.slice(0, shown).join(''), tick }} />)}
+              {visible.map(({ e, n }) => <Line key={n} entry={e} brand={agent.brand} live={{ shown: words.slice(0, shown).join(''), tick }} />)}
             </ol>
           </div>
         </section>
