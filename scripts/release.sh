@@ -163,7 +163,7 @@ secret_scan() {
     local target
     for target in "$app" "$appcast"; do
         status=0
-        gitleaks dir "$target" --no-banner --redact --exit-code=99 --report-format=json --report-path="$report" > "$out/gitleaks.log" 2>&1 || status=$?
+        gitleaks dir "$target" --config "$root/.gitleaks.toml" --no-banner --redact --exit-code=99 --report-format=json --report-path="$report" > "$out/gitleaks.log" 2>&1 || status=$?
         case "$status" in
             0) ;;
             99) die "possible secret in ${target#"$out/"}: build/release/gitleaks.json says where (redacted)" ;;
@@ -339,7 +339,20 @@ main() {
         create-dmg "${layout[@]}" "$dmg" "$staging" >/dev/null
     else
         [[ -f "$background" ]] && note "create-dmg isn't installed (brew install create-dmg): a plain DMG, without the background"
-        hdiutil create -volname "Oby" -srcfolder "$staging" -ov -format UDZO -fs HFS+ -quiet "$dmg"
+        # `hdiutil create -srcfolder` fails "Resource busy" when a system scanner still holds its
+        # scratch volume at unmount, so: a blank image, copy, a forced detach after sync, convert.
+        local rw="$out/dmg-rw.dmg" mnt
+        rm -f "$rw" "$dmg"
+        hdiutil create -quiet -size "$(( $(du -sm "$staging" | cut -f1) + 50 ))m" -fs HFS+ -volname "Oby" "$rw"
+        mnt="$(hdiutil attach -nobrowse -noverify -noautoopen "$rw" | awk -F'\t' '/\/Volumes\//{print $NF}')"
+        [[ -n "$mnt" ]] || die "couldn't attach $rw"
+        touch "$mnt/.metadata_never_index"
+        ditto "$staging" "$mnt"
+        sync
+        hdiutil detach "$mnt" -quiet || hdiutil detach "$mnt" -force -quiet
+        hdiutil convert -quiet "$rw" -format UDZO -o "$dmg"
+        rm -f "$rw"
+        hdiutil verify -quiet "$dmg"
     fi
     if $dry_run; then
         codesign --force --sign - "$dmg"

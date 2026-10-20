@@ -1,0 +1,8 @@
+# gitleaks' default rules, plus the false positives they find in Oby's own build output.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Minified Lexical in obid's web UI: `k=w.anchor.key,D=w.focus.key` reads as a key"
+regexTarget = "match"
+regexes = ['''^\w+\.anchor\.key,\w+=\w+\.focus\.key;?$''']

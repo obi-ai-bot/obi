@@ -1,0 +1,18 @@
+# Test fixtures and redaction tests in history that gitleaks reads as secrets (none is real); checked 2026-10-20.
+c1d55327217c06dc24812e8a1bfa684e70815c18:core/crates/obid/src/transcript.rs:private-key:1458
+c1d55327217c06dc24812e8a1bfa684e70815c18:core/crates/obid/src/detail.rs:private-key:371
+a26092040bc57501ac916367ea4fdeafa2632ebf:core/crates/obid/src/logs.rs:generic-api-key:127
+d9baf379e241e42fcba84b3c866c075607803554:core/crates/obi-plugin-api/tests/manifest.rs:curl-auth-user:424
+d9baf379e241e42fcba84b3c866c075607803554:core/crates/obi-plugin-api/tests/manifest.rs:curl-auth-user:452
+0d0202f4b2393b1cb870ce8a7332d8ea84016991:Shared/E2E.swift:generic-api-key:17
+009e427bfe4b3c0a283f1368db25d4acccd30c81:RunnerTests/SafeTests.swift:generic-api-key:85
+d070c4a427cf9472c1f5cdd11b8366e552ffa7e5:RunnerTests/PublishTests.swift:aws-access-token:160
+c493cea0768d760ad4fa62d604072eea60be1bc2:RunnerTests/RunnerTests.swift:generic-api-key:519
+c493cea0768d760ad4fa62d604072eea60be1bc2:RunnerTests/RunnerTests.swift:generic-api-key:520
+c493cea0768d760ad4fa62d604072eea60be1bc2:RunnerTests/RunnerTests.swift:generic-api-key:530
+3c73ffe22e4be83577e6b17a09a850b72e5a2b35:RunnerTests/RunnerTests.swift:generic-api-key:320
+3c73ffe22e4be83577e6b17a09a850b72e5a2b35:RunnerTests/RunnerTests.swift:generic-api-key:393
+3c73ffe22e4be83577e6b17a09a850b72e5a2b35:RunnerTests/RunnerTests.swift:generic-api-key:402
+3c73ffe22e4be83577e6b17a09a850b72e5a2b35:RunnerTests/RunnerTests.swift:generic-api-key:403
+3c73ffe22e4be83577e6b17a09a850b72e5a2b35:RunnerTests/RunnerTests.swift:generic-api-key:404
+3c73ffe22e4be83577e6b17a09a850b72e5a2b35:Runner/Push.swift:generic-api-key:59
