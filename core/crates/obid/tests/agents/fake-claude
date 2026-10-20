@@ -24,6 +24,8 @@
 //                    settings.json and .claude.json, tries the same in <dir> (its account's own
 //                    folder) and to read <dir>'s login; says whether its config folder is <dir> and
 //                    whether its login kept a refresh token
+//   REACH: <dir> …   tries to list each folder and to write .obid-reached in it, and ends the turn
+//                    with "<dir> read=ok|no write=ok|no; …"
 //   ECHO             ends the turn with "heard: <the prompt> resume=<the session it resumed, or none>"
 //   PAUSE: <ms>      waits that long, then ends the turn with "Paused."
 //   ARTIFACTS        writes .obi/artifacts/ in the worktree: a page (a folder with index.html,
@@ -173,6 +175,7 @@ rl.on("line", (line) => {
   const ask = prompt.match(/ASK: (\{.*\})/);
   const asks = prompt.match(/ASKS: (\[.*\])/);
   const login = prompt.match(/LOGIN: (\S+)/);
+  const reach = prompt.match(/REACH: (.+)/);
   const plant = prompt.match(/PLANT: (\S+)/);
   const draft = prompt.match(/DRAFT: (\S+)/);
   if (draft) writeFileSync(draft[1], "draft\n");
@@ -196,6 +199,17 @@ rl.on("line", (line) => {
     emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Write", input: { file_path: commit[1] } }] } });
     if (prompt.includes("QUIET")) return setInterval(() => {}, 1000);
     result(`Added ${commit[1]}.`);
+  } else if (reach) {
+    const tries = (f) => {
+      try {
+        f();
+        return "ok";
+      } catch {
+        return "no";
+      }
+    };
+    const dirs = reach[1].trim().split(/\s+/);
+    result(dirs.map((d) => `${d} read=${tries(() => readdirSync(d))} write=${tries(() => writeFileSync(`${d}/.obid-reached`, "x"))}`).join("; "));
   } else if (login) {
     const tries = (f) => {
       try {
