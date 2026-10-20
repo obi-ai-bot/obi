@@ -153,9 +153,10 @@ final class RemoteAccess {
     /// Again later (after a reinstall, or the keychain lost the token) it's the same installation
     /// and hostname, as long as the key is the same.
     func turnOn() async {
+        var evicted: String?
         await attempt {
             let signer = try signer()
-            try await registered(signer)
+            evicted = try await registered(signer)
             let endpoint = try await plane.createEndpoint(signer)
             let token = try await plane.tunnelToken(signer)
             try secrets.save(token.token, as: Self.tokenKey)
@@ -165,6 +166,10 @@ final class RemoteAccess {
             on = true
             runner.start(token: token.token)
             Logger.remote.notice("remote access on: \(endpoint.hostname, privacy: .public)")
+        }
+        // Not a failure, but the user should know: another Mac of theirs lost remote access.
+        if let evicted, problem == nil {
+            problem = "Your Apple Account had 5 Macs with remote access, so “\(evicted)”, the one used longest ago, was removed to make room."
         }
         checkInDaily()
     }
@@ -199,20 +204,23 @@ final class RemoteAccess {
     }
 
     /// This Mac's installation: the one its key has, or a new one after signing in with Apple.
-    private func registered(_ signer: ControlPlane.Signer) async throws {
+    /// Returns the name of the Mac the account gave up to make room, if it did.
+    private func registered(_ signer: ControlPlane.Signer) async throws -> String? {
         do {
             _ = try await plane.installation(signer)
-            return
+            return nil
         } catch let failure as ControlPlane.Failure where failure.status == 410 {
             // Not registered: sign in first.
         }
         let signIn = try await plane.startAppleSignIn(signer)
         let back = try await authenticate(signIn.url)
-        let state = URLComponents(url: back, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "state" }?.value
-        guard back.scheme == "oby-signin", back.host() == "done", state == signIn.state else {
+        let items = URLComponents(url: back, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let value = { (name: String) in items.first { $0.name == name }?.value }
+        guard back.scheme == "oby-signin", back.host() == "done", value("state") == signIn.state, let code = value("code") else {
             throw Shell.Failure(message: "Sign in with Apple didn't finish. Try again.")
         }
-        _ = try await plane.register(signer, name: Host.current().localizedName ?? "Mac", signIn: signIn.state)
+        let registration = try await plane.register(signer, name: Host.current().localizedName ?? "Mac", signIn: (state: signIn.state, code: code))
+        return registration.evicted?.name
     }
 
     /// This Mac's key, made the first time it's needed.

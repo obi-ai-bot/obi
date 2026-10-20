@@ -14,6 +14,7 @@ export const TOKEN_SKEW_SECONDS = 60;
 /// The keys are fetched again after this long, or for an unknown `kid` at most this often.
 export const KEYS_MAX_AGE_SECONDS = 24 * 60 * 60;
 export const KEYS_REFETCH_SECONDS = 60;
+export const KEYS_MAX_BACKOFF_SECONDS = 60 * 60;
 
 /// Why a token was refused, in a line for the log; never the token.
 export class AppleTokenError extends Error {}
@@ -22,9 +23,14 @@ type Jwk = JsonWebKey & { kid?: string };
 
 /// Apple's keys, kept for a day and fetched again for a `kid` not among them (Apple rotates
 /// them), at most once a minute so a stream of made-up kids can't make the Worker hammer Apple.
+/// A fetch that fails, or answers something that isn't a list of RSA keys, changes nothing: the
+/// keys kept stay, and the next try waits twice as long each time (up to an hour) while Apple is
+/// down.
 export class AppleKeyCache {
   private keys: Jwk[] = [];
   private fetchedAt = Number.NEGATIVE_INFINITY;
+  private failedAt = Number.NEGATIVE_INFINITY;
+  private failures = 0;
 
   constructor(
     private readonly source: AppleKeys,
@@ -35,12 +41,28 @@ export class AppleKeyCache {
     const seconds = this.now().getTime() / 1000;
     const stale = seconds - this.fetchedAt > KEYS_MAX_AGE_SECONDS;
     const unknown = !this.keys.some((key) => key.kid === kid);
-    if (stale || (unknown && seconds - this.fetchedAt > KEYS_REFETCH_SECONDS)) {
-      this.keys = (await this.source.keys()) as Jwk[];
-      this.fetchedAt = seconds;
+    // 1, 2, 4… minutes after the last failure, up to an hour.
+    const backingOff = this.failures > 0 && seconds - this.failedAt < Math.min(KEYS_MAX_BACKOFF_SECONDS, KEYS_REFETCH_SECONDS * 2 ** (this.failures - 1));
+    if ((stale || (unknown && seconds - this.fetchedAt > KEYS_REFETCH_SECONDS)) && !backingOff) {
+      try {
+        const keys = await this.source.keys();
+        if (!Array.isArray(keys) || !keys.length || !keys.every(isRSAKey)) throw new AppleTokenError("Apple's keys came back in a shape they never have");
+        this.keys = keys;
+        this.fetchedAt = seconds;
+        this.failures = 0;
+      } catch (error) {
+        this.failedAt = seconds;
+        this.failures++;
+        console.warn(`apple keys: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     return this.keys.find((key) => key.kid === kid);
   }
+}
+
+function isRSAKey(key: unknown): key is Jwk {
+  const jwk = key as Jwk | null;
+  return !!jwk && jwk.kty === "RSA" && typeof jwk.kid === "string" && typeof jwk.n === "string" && typeof jwk.e === "string";
 }
 
 /// Apple's keys over HTTPS.

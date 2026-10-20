@@ -47,7 +47,7 @@ struct ControlPlaneTests {
         let installation = #"{"id": "i1", "name": "MacBook", "platform": "macos", "createdAt": "2026-10-12T12:00:00.000Z", "lastSeenAt": null, "endpoint": null}"#
         let endpoint = #"{"hostname": "oby-abcdefghij0123456789.tetrix.pro", "tunnelId": "t1", "createdAt": "2026-10-12T12:00:01.000Z"}"#
         let exchange = Exchange([
-            (201, #"{"installation": \#(installation)}"#),
+            (201, #"{"installation": \#(installation), "evicted": {"name": "Old Mac"}}"#),
             (201, #"{"endpoint": \#(endpoint)}"#),
             (200, #"{"token": "eyJ-run-token", "hostname": "oby-abcdefghij0123456789.tetrix.pro"}"#),
             (200, #"{"installation": {"id": "i1", "name": "MacBook", "platform": "macos", "createdAt": "2026-10-12T12:00:00.000Z", "lastSeenAt": "2026-10-12T12:00:02Z", "endpoint": \#(endpoint)}}"#),
@@ -56,7 +56,9 @@ struct ControlPlaneTests {
         ])
         let plane = exchange.plane()
         let key = Signed()
-        let registered = try await plane.register(key.signer, name: "MacBook", signIn: "state-1")
+        let registration = try await plane.register(key.signer, name: "MacBook", signIn: (state: "state-1", code: "code-1"))
+        #expect(registration.evicted == ControlPlane.Registration.Evicted(name: "Old Mac"))
+        let registered = registration.installation
         #expect(registered.id == "i1")
         #expect(registered.endpoint == nil)
         let made = try await plane.createEndpoint(key.signer)
@@ -75,7 +77,7 @@ struct ControlPlaneTests {
             "GET /v1/installations/self", "DELETE /v1/installations/self/endpoint", "DELETE /v1/installations/self",
         ])
         let body = try #require(requests[0].httpBody)
-        #expect(try JSONDecoder().decode([String: String].self, from: body) == ["name": "MacBook", "platform": "macos", "signIn": "state-1"])
+        #expect(try JSONDecoder().decode([String: String].self, from: body) == ["name": "MacBook", "platform": "macos", "signIn": "state-1", "signInCode": "code-1"])
         // Every call is signed, never a bearer; each nonce is new.
         for request in requests {
             #expect(request.value(forHTTPHeaderField: "Authorization") == nil)

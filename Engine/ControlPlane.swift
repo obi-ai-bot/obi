@@ -82,14 +82,24 @@ nonisolated struct ControlPlane: Sendable {
         try await call("POST", "v1/auth/apple/start", signer: signer)
     }
 
+    /// What registering gives: the installation, and the Mac the account gave up to make room for
+    /// it, when it had as many as it may (the one it used longest ago).
+    struct Registration: Decodable, Equatable, Sendable {
+        struct Evicted: Decodable, Equatable, Sendable { var name: String }
+        var installation: Installation
+        var evicted: Evicted?
+    }
+
     /// Registers this Mac by its key; the same key again keeps its installation and hostname. A
-    /// new key brings `signIn`, the state of a sign-in with Apple it finished.
-    func register(_ signer: Signer, name: String, signIn: String? = nil, platform: String = "macos") async throws -> Installation {
-        struct Answer: Decodable { var installation: Installation }
+    /// new key brings the sign-in with Apple it finished: its `state`, and the `code` the sheet
+    /// came back with.
+    func register(_ signer: Signer, name: String, signIn: (state: String, code: String)? = nil, platform: String = "macos") async throws -> Registration {
         var body = ["name": name, "platform": platform]
-        if let signIn { body["signIn"] = signIn }
-        let answer: Answer = try await call("POST", "v1/installations", body: body, signer: signer)
-        return answer.installation
+        if let signIn {
+            body["signIn"] = signIn.state
+            body["signInCode"] = signIn.code
+        }
+        return try await call("POST", "v1/installations", body: body, signer: signer)
     }
 
     /// This installation, as the control plane has it. Any signed call keeps it from being

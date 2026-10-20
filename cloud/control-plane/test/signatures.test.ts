@@ -50,7 +50,7 @@ describe("signed calls", () => {
     expect(replayed.body.error).toBe("That call was made already.");
     // Another key may use the same nonce.
     const other = await Mac.make();
-    const body = JSON.stringify({ name: "Mac", platform: "macos", signIn: await app.signIn(other) });
+    const body = JSON.stringify({ name: "Mac", platform: "macos", ...(await app.signIn(other)) });
     expect((await app.raw("POST", "/v1/installations", body, await other.headers("POST", "/v1/installations", body, seconds, "the-same-nonce-0001"))).status).toBe(201);
     expect((await app.raw("GET", "/v1/installations/self", undefined, { ...signed, "Oby-Nonce": "short" })).status).toBe(401);
   });
@@ -84,7 +84,7 @@ describe("signed calls", () => {
     const app = testApp();
     const mac = await Mac.make();
     const seconds = Math.floor(app.time.now().getTime() / 1000);
-    const body = JSON.stringify({ name: "Mac", platform: "macos", signIn: await app.signIn(mac) });
+    const body = JSON.stringify({ name: "Mac", platform: "macos", ...(await app.signIn(mac)) });
     const signed = await mac.headers("POST", "/v1/installations", body, seconds);
     for (const key of [`${mac.publicKey}=`, mac.publicKey.slice(0, -2), `A${mac.publicKey.slice(1)}`, "not a key"]) {
       expect((await app.raw("POST", "/v1/installations", body, { ...signed, "Oby-Key": key })).status).toBe(401);

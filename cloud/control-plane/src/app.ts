@@ -33,9 +33,9 @@ export const SKEW_SECONDS = 5 * 60;
 export const IDLE_DAYS = 30;
 /// An installation that never made an endpoint is removed after this long.
 export const UNUSED_HOURS = 24;
-/// An endpoint whose tunnel never connected goes this long after it was made, its installation
-/// with it (a real Mac connects within seconds); one whose tunnel went down this long ago is
-/// reclaimed, the installation kept. A hostname is kept by running cloudflared, not by a signed
+/// An endpoint whose tunnel never connected is reclaimed this long after it was made (a real Mac
+/// connects within seconds), and one whose tunnel went down this long ago; the installation is
+/// kept either way, so a Mac behind a firewall that stops cloudflared keeps its sign-in. A hostname is kept by running cloudflared, not by a signed
 /// call now and then.
 export const NEVER_CONNECTED_HOURS = 1;
 export const DISCONNECTED_HOURS = 72;
@@ -96,6 +96,8 @@ interface InstallationRow {
   public_key: string;
   /// The Apple Account it belongs to.
   user_sub: string | null;
+  /// When it first made an endpoint.
+  endpoint_at?: string | null;
   name: string;
   platform: string;
   created_at: string;
@@ -145,7 +147,7 @@ async function route(request: Request, env: Env, deps: Deps, now: () => Date): P
   if (path === "/v1/health" && method === "GET") return json({ ok: true });
   if (path === "/v1/auth/apple/start" && method === "POST") return startSignIn(request, env, now);
   if (path === "/v1/auth/apple/callback" && method === "POST") return finishSignIn(request, env, deps, now);
-  if (path === "/v1/installations" && method === "POST") return register(request, env, now);
+  if (path === "/v1/installations" && method === "POST") return register(request, env, deps, now);
   if (path === "/v1/installations/self" && method === "GET") return showSelf(request, env, now);
   if (path === "/v1/installations/self" && method === "DELETE") return forget(request, env, deps, now);
   if (path === "/v1/installations/self/endpoint" && method === "POST") return createEndpoint(request, env, deps, now);
@@ -180,10 +182,17 @@ async function startSignIn(request: Request, env: Env, now: () => Date): Promise
 }
 
 /// Apple posts the sign-in's result here (form_post): the identity token is checked against the
-/// sign-in it names (`state`), and its `sub` is bound to it. The browser is sent back to the Mac
-/// (`oby-signin://`), which then registers with the state; nothing secret goes through it.
+/// sign-in it names (`state`), and its `sub` is bound to it with a one-time `code`, kept only as
+/// its hash. The browser is sent back to the Mac (`oby-signin://done?state=…&code=…`), which
+/// registers with both. The code goes only to the browser that signed in: someone who started the
+/// sign-in on their own Mac and got another person to finish it at Apple has the state, not the
+/// code, so the other person's account can't be bound to their Mac.
 async function finishSignIn(request: Request, env: Env, deps: Deps, now: () => Date): Promise<Response> {
-  const back = (outcome: "done" | "failed", state: string) => new Response(null, { status: 303, headers: { Location: `oby-signin://${outcome}?state=${encodeURIComponent(state)}`, ...noStore } });
+  const back = (outcome: "done" | "failed", state: string, code?: string) =>
+    new Response(null, {
+      status: 303,
+      headers: { Location: `oby-signin://${outcome}?state=${encodeURIComponent(state)}${code ? `&code=${code}` : ""}`, ...noStore },
+    });
   const address = addressBucket(request.headers.get("CF-Connecting-IP") ?? "unknown");
   await limit(env.DB, `sign-in-callbacks:address:${address}`, LIMITS.signInCallbacksPerAddress, now(), "Too many sign-ins from this network lately.");
   let form: FormData;
@@ -209,11 +218,12 @@ async function finishSignIn(request: Request, env: Env, deps: Deps, now: () => D
     console.warn(`sign in with apple: ${error.message}`);
     return back("failed", state);
   }
+  const code = base64url(randomBytes(32));
   await env.DB.batch([
     env.DB.prepare("INSERT INTO users (sub, created_at) VALUES (?1, ?2) ON CONFLICT (sub) DO NOTHING").bind(sub, iso(now())),
-    env.DB.prepare("UPDATE sign_ins SET sub = ?2 WHERE state = ?1 AND sub IS NULL").bind(state, sub),
+    env.DB.prepare("UPDATE sign_ins SET sub = ?2, code_hash = ?3 WHERE state = ?1 AND sub IS NULL").bind(state, sub, await sha256Hex(code)),
   ]);
-  return back("done", state);
+  return back("done", state, code);
 }
 
 /// An APPLE_* setting from wrangler.jsonc, or the control plane says it isn't set up.
@@ -226,9 +236,12 @@ function appleSetting(value: string | undefined, name: string): string {
 // MARK: Installations
 
 /// Registers the Mac whose key signed the call (201), or, the same key again, keeps its
-/// installation and its hostname (200). A new key brings `signIn`: the state of a sign-in it
-/// started and finished at Apple, used once; the installation belongs to that Apple Account.
-async function register(request: Request, env: Env, now: () => Date): Promise<Response> {
+/// installation and its hostname (200). A new key brings `signIn` and `signInCode`: the state of a
+/// sign-in it started and the code its sheet came back with from Apple, used once; the
+/// installation belongs to that Apple Account. An account that has PER_ACCOUNT.installations Macs
+/// already loses the one it used longest ago (`evicted`): a fresh sign-in is its owner, and so the
+/// owner of a stolen account can take its Macs back without their keys.
+async function register(request: Request, env: Env, deps: Deps, now: () => Date): Promise<Response> {
   const call = await signed(request, env, now());
   const name = field(typeof call.body.name === "string" ? call.body.name.trim() : call.body.name, "name", /^[^\n\r]{1,64}$/, "1 to 64 characters");
   const platform = field(call.body.platform, "platform", /^[a-z]{2,32}$/, "a lowercase word, like macos");
@@ -240,23 +253,31 @@ async function register(request: Request, env: Env, now: () => Date): Promise<Re
     return json({ installation: await publicInstallation(env.DB, { ...existing, name, platform, last_seen_at: at }) });
   }
   const state = typeof call.body.signIn === "string" ? call.body.signIn : "";
+  const code = typeof call.body.signInCode === "string" ? call.body.signInCode : "";
   const seconds = Math.floor(now().getTime() / 1000);
-  const signIn = await env.DB.prepare("SELECT sub FROM sign_ins WHERE state = ?1 AND public_key = ?2 AND sub IS NOT NULL AND used_at IS NULL AND expires_at > ?3")
+  const signIn = await env.DB.prepare(
+    "SELECT sub, code_hash FROM sign_ins WHERE state = ?1 AND public_key = ?2 AND sub IS NOT NULL AND used_at IS NULL AND expires_at > ?3",
+  )
     .bind(state, call.key, seconds)
-    .first<{ sub: string }>();
-  if (!signIn) throw new Reply(403, "Sign in with Apple first.");
+    .first<{ sub: string; code_hash: string }>();
+  if (!signIn || !code || (await sha256Hex(code)) !== signIn.code_hash) throw new Reply(403, "Sign in with Apple first.");
   await spend(env.DB, call);
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
   await limit(env.DB, `registrations:account:${signIn.sub}`, LIMITS.registrationsPerAccount, now(), "This Apple Account set up too many Macs today.");
   await limit(env.DB, `registrations:address:${addressBucket(address)}`, LIMITS.registrationsPerAddress, now(), "Too many Macs were set up from this network lately.");
   await limit(env.DB, `registrations:network:${networkBucket(address)}`, LIMITS.registrationsPerNetwork, now(), "Too many Macs were set up from this network lately.");
-  const mine = (await env.DB.prepare("SELECT count(*) AS n FROM installations WHERE user_sub = ?1").bind(signIn.sub).first<{ n: number }>())?.n ?? 0;
-  if (mine >= PER_ACCOUNT.installations) {
-    throw new Reply(409, `This Apple Account has ${PER_ACCOUNT.installations} Macs with remote access already. Forget one first.`);
-  }
   // Used once: a second registration with the same sign-in finds nothing.
   const claimed = await env.DB.prepare("UPDATE sign_ins SET used_at = ?2 WHERE state = ?1 AND used_at IS NULL RETURNING state").bind(state, at).first();
   if (!claimed) throw new Reply(403, "Sign in with Apple first.");
+  // ponytail: counted, then inserted: two registrations at once for one account can both find
+  // room and leave it a Mac over PER_ACCOUNT.installations; registrationsPerAccount bounds that.
+  const theirs = await env.DB.prepare("SELECT * FROM installations WHERE user_sub = ?1 ORDER BY last_seen_at").bind(signIn.sub).all<InstallationRow>();
+  let evicted: { name: string } | undefined;
+  if (theirs.results.length >= PER_ACCOUNT.installations) {
+    const oldest = theirs.results[0]!;
+    await remove(env.DB, deps.tunnels, oldest);
+    evicted = { name: oldest.name };
+  }
   const row: InstallationRow = { id: newId(), public_key: call.key, user_sub: signIn.sub, name, platform, created_at: at, last_seen_at: at };
   // Two calls at once with one key: the first one's row stands, and both answer with it.
   await env.DB.prepare(
@@ -266,7 +287,7 @@ async function register(request: Request, env: Env, now: () => Date): Promise<Re
     .run();
   const saved = await byKey(env.DB, call.key);
   if (!saved) throw new Error("The installation couldn't be saved.");
-  return json({ installation: await publicInstallation(env.DB, saved) }, saved.id === row.id ? 201 : 200);
+  return json({ installation: await publicInstallation(env.DB, saved), ...(evicted ? { evicted } : {}) }, saved.id === row.id ? 201 : 200);
 }
 
 async function showSelf(request: Request, env: Env, now: () => Date): Promise<Response> {
@@ -301,13 +322,16 @@ async function createEndpoint(request: Request, env: Env, deps: Deps, now: () =>
   // Creating, then removing, is what costs Cloudflare calls and the global limit: each
   // installation and each network may make only a few a day, so a few networks can't drain
   // `endpointsEverywhere` for everyone.
-  if (row.user_sub) {
+  // Every installation has an account since Sign in with Apple; one without is refused, never
+  // spared the account's limits.
+  if (!row.user_sub) throw new Reply(403, "Sign in with Apple again: turn remote access off and on.");
+  {
     const theirs = (await env.DB.prepare("SELECT count(*) AS n FROM endpoints e JOIN installations i ON i.id = e.installation_id WHERE i.user_sub = ?1").bind(row.user_sub).first<{ n: number }>())?.n ?? 0;
     if (theirs >= PER_ACCOUNT.endpoints) throw new Reply(409, `This Apple Account has ${PER_ACCOUNT.endpoints} Macs with remote access on already. Forget one first.`);
   }
   await limitEndpointChanges(env.DB, row, now());
   await limit(env.DB, `creations:installation:${row.id}`, LIMITS.creationsPerInstallation, now(), "This Mac turned remote access on too often today.");
-  if (row.user_sub) await limit(env.DB, `creations:account:${row.user_sub}`, LIMITS.creationsPerAccount, now(), "This Apple Account turned remote access on too often today.");
+  await limit(env.DB, `creations:account:${row.user_sub}`, LIMITS.creationsPerAccount, now(), "This Apple Account turned remote access on too often today.");
   await limit(env.DB, `creations:network:${network}`, LIMITS.creationsPerNetworkHour, now(), "Too many Macs on this network turned remote access on lately.");
   await limit(env.DB, `creations:network-day:${network}`, LIMITS.creationsPerNetworkDay, now(), "Too many Macs on this network turned remote access on today.");
   await limit(env.DB, "endpoints:everywhere", LIMITS.endpointsEverywhere, now(), "Too many Macs are turning remote access on right now.");
@@ -319,9 +343,17 @@ async function createEndpoint(request: Request, env: Env, deps: Deps, now: () =>
     const record = await deps.tunnels.createCNAME(hostname, `${tunnel.id}.cfargotunnel.com`);
     const endpoint: EndpointRow = { installation_id: row.id, tunnel_id: tunnel.id, hostname, dns_record_id: record.id, created_at: iso(now()), network, checked_at: null, connected_at: null };
     try {
-      await env.DB.prepare("INSERT INTO endpoints (installation_id, tunnel_id, hostname, dns_record_id, created_at, network) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
-        .bind(endpoint.installation_id, endpoint.tunnel_id, endpoint.hostname, endpoint.dns_record_id, endpoint.created_at, network)
-        .run();
+      await env.DB.batch([
+        env.DB.prepare("INSERT INTO endpoints (installation_id, tunnel_id, hostname, dns_record_id, created_at, network) VALUES (?1, ?2, ?3, ?4, ?5, ?6)").bind(
+          endpoint.installation_id,
+          endpoint.tunnel_id,
+          endpoint.hostname,
+          endpoint.dns_record_id,
+          endpoint.created_at,
+          network,
+        ),
+        env.DB.prepare("UPDATE installations SET endpoint_at = COALESCE(endpoint_at, ?2) WHERE id = ?1").bind(row.id, endpoint.created_at),
+      ]);
     } catch (error) {
       // Two calls at once: the first one's endpoint stands, this one's tunnel and record go.
       const theirs = await endpointOf(env.DB, row.id);
@@ -420,7 +452,7 @@ async function remove(db: D1Database, tunnels: TunnelAPI, row: InstallationRow):
 /// installations that never made an endpoint go after UNUSED_HOURS, in one statement; up to
 /// SWEEP_BATCH installations no Mac has signed a call for in IDLE_DAYS go with their tunnels and
 /// hostnames; and STATUS_BATCH endpoints, never-checked first, are asked about at Cloudflare:
-/// one never connected goes with its installation, one down for days is reclaimed
+/// one never connected within an hour or down for days is reclaimed
 /// (`reclaimable`). One that Cloudflare refuses is tried again next time.
 export async function sweep(env: Env, deps: Deps): Promise<{ removed: number; reclaimed: number; failed: number; unused: number }> {
   const now = (deps.now ?? (() => new Date()))();
@@ -431,7 +463,8 @@ export async function sweep(env: Env, deps: Deps): Promise<{ removed: number; re
     env.DB.prepare("DELETE FROM sign_ins WHERE expires_at < ?1").bind(seconds),
     // Every window is an hour or less: a day-old one counts nothing.
     env.DB.prepare("DELETE FROM rate_limits WHERE window_start < ?1").bind(seconds - 86_400),
-    env.DB.prepare("DELETE FROM installations WHERE created_at < ?1 AND NOT EXISTS (SELECT 1 FROM endpoints e WHERE e.installation_id = installations.id)").bind(unusedBefore),
+    // Never made an endpoint: one whose endpoint was reclaimed stays (`endpoint_at`).
+    env.DB.prepare("DELETE FROM installations WHERE created_at < ?1 AND endpoint_at IS NULL AND NOT EXISTS (SELECT 1 FROM endpoints e WHERE e.installation_id = installations.id)").bind(unusedBefore),
   ]);
   let removed = 0;
   let reclaimed = 0;
@@ -455,12 +488,7 @@ export async function sweep(env: Env, deps: Deps): Promise<{ removed: number; re
     await attempt(async () => {
       const status = await deps.tunnels.tunnelStatus(endpoint.tunnel_id);
       const verdict = reclaimable(endpoint, status, now);
-      if (verdict === "never") {
-        // Made and never used: the installation goes too, so the next try pays its work again.
-        const owner = await env.DB.prepare("SELECT * FROM installations WHERE id = ?1").bind(endpoint.installation_id).first<InstallationRow>();
-        if (owner) await remove(env.DB, deps.tunnels, owner);
-        reclaimed++;
-      } else if (verdict === "down") {
+      if (verdict) {
         await tearDown(env.DB, deps.tunnels, endpoint);
         reclaimed++;
       } else {

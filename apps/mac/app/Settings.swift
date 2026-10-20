@@ -255,7 +255,7 @@ struct RemoteAccessSettingsView: View {
     private var pointed: Bool { openSettings.spotlight == .remoteAccess }
 
     var body: some View {
-        SetGroup("Remote access", footer: "The first time, you sign in with Apple: Oby asks for no name or email, and one Apple Account can have up to 5 Macs. On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Off keeps the hostname for a while: after 3 days off, asleep or offline, this Mac gets a new one when it’s back, and your iPhone pairs again. Forget removes this Mac from Oby’s control plane, and the hostname stops answering.",
+        SetGroup("Remote access", footer: "The first time, you sign in with Apple: Oby asks for no name or email. One Apple Account has up to 5 Macs: a sixth takes the place of the one used longest ago. On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Off keeps the hostname for a while: after 3 days off, asleep or offline, this Mac gets a new one when it’s back, and your iPhone pairs again. Forget removes this Mac from Oby’s control plane, and the hostname stops answering.",
                  problem: remote.problem) {
             SetRow("Reach this Mac from anywhere") {
                 Toggle("Reach this Mac from anywhere", isOn: Binding(get: { remote.on }, set: { on in

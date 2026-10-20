@@ -217,19 +217,19 @@ export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env
   }
 
   /// Signs `mac` in with Apple as account `sub`, the whole way: start, Apple's token, the
-  /// callback. Returns the state to register with.
-  async function signIn(mac: Mac, sub = "001234.apple-account.0001", headers: Record<string, string> = {}): Promise<string> {
+  /// callback. Returns what to register with: the body's `signIn` and `signInCode`.
+  async function signIn(mac: Mac, sub = "001234.apple-account.0001", headers: Record<string, string> = {}): Promise<{ signIn: string; signInCode: string }> {
     const { started, state, nonce } = await startSignIn(mac, headers);
     if (started.status !== 201) throw new Error(`starting a sign-in: ${started.status} ${JSON.stringify(started.body)}`);
     const back = await callback({ state, code: "unused", id_token: await apple.token(claims(nonce, sub)) }, headers);
-    if (back.headers.get("Location") !== `oby-signin://done?state=${state}`) throw new Error(`the callback said ${back.headers.get("Location")}`);
-    return state;
+    const location = new URL(back.headers.get("Location") ?? "about:blank");
+    if (location.host !== "done" || location.searchParams.get("state") !== state) throw new Error(`the callback said ${location}`);
+    return { signIn: state, signInCode: location.searchParams.get("code") ?? "" };
   }
 
   /// Registers `mac`, signed in with Apple as `sub` first, and returns the answer: `installation`.
   async function register(mac: Mac, name = "Wellington's MacBook Pro", headers: Record<string, string> = {}, sub = "001234.apple-account.0001"): Promise<Answer> {
-    const state = await signIn(mac, sub, headers);
-    return call(mac, "POST", "/v1/installations", { name, platform: "macos", signIn: state }, headers);
+    return call(mac, "POST", "/v1/installations", { name, platform: "macos", ...(await signIn(mac, sub, headers)) }, headers);
   }
 
   /// `count` live endpoints made straight in D1 (no Cloudflare), from `network`, for account

@@ -58,7 +58,7 @@ struct RemoteAccessTests {
         let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
         let launched = Launched()
         let runner = TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) })
-        let sheet = Sheet("oby-signin://done?state=s1")
+        let sheet = Sheet("oby-signin://done?state=s1&code=c1")
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
                                   secrets: secrets, defaults: defaults, runner: runner, authenticate: sheet.run)
         defer { remote.stop() }
@@ -86,7 +86,7 @@ struct RemoteAccessTests {
         ])
         #expect(sheet.opened == [URL(string: "https://appleid.apple.com/auth/authorize?client_id=com.deskree.oby.signin&state=s1")!])
         let body = try JSONDecoder().decode([String: String].self, from: try #require(requests[2].httpBody))
-        #expect(body == ["name": Host.current().localizedName ?? "Mac", "platform": "macos", "signIn": "s1"])
+        #expect(body == ["name": Host.current().localizedName ?? "Mac", "platform": "macos", "signIn": "s1", "signInCode": "c1"])
         // Each call's signature checks out against the key's public half, as the Worker checks it.
         let publicKey = try MacKey.signer(saved).publicKey
         for request in requests {
@@ -120,8 +120,9 @@ struct RemoteAccessTests {
 
     /// Cancelled at Apple, or sent back with another state: no registration, and Settings says why.
     @Test @MainActor func aSignInThatDoesntFinishRegistersNothing() async throws {
-        for (back, said) in [(nil, "Sign in with Apple was cancelled."), ("oby-signin://done?state=someone-elses", "Sign in with Apple didn't finish. Try again."),
-                             ("oby-signin://failed?state=s1", "Sign in with Apple didn't finish. Try again.")] {
+        for (back, said) in [(nil, "Sign in with Apple was cancelled."), ("oby-signin://done?state=someone-elses&code=c1", "Sign in with Apple didn't finish. Try again."),
+                             ("oby-signin://failed?state=s1", "Sign in with Apple didn't finish. Try again."),
+                             ("oby-signin://done?state=s1", "Sign in with Apple didn't finish. Try again.")] {
             let exchange = Exchange([(410, Self.unregistered), (201, Self.signIn)])
             let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
             defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
@@ -134,6 +135,29 @@ struct RemoteAccessTests {
             #expect(remote.problem == said)
             #expect(exchange.requests.count == 2)
         }
+    }
+
+    /// The account had 5 Macs: the control plane removed the one used longest ago, and Settings
+    /// says which.
+    @Test @MainActor func turningOnSaysWhichMacMadeRoom() async throws {
+        let exchange = Exchange([
+            (410, Self.unregistered),
+            (201, Self.signIn),
+            (201, #"{"installation": \#(Self.installation), "evicted": {"name": "Old iMac"}}"#),
+            (201, #"{"endpoint": {"hostname": "oby-abcdefghij0123456789.oby-devices.test", "tunnelId": "t1", "createdAt": "2026-10-12T12:00:01.000Z"}}"#),
+            (200, #"{"token": "eyJ-run-token", "hostname": "oby-abcdefghij0123456789.oby-devices.test"}"#),
+        ])
+        let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
+        defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
+        let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
+        let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
+                                  secrets: secrets, defaults: defaults,
+                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }),
+                                  authenticate: Sheet("oby-signin://done?state=s1&code=c1").run)
+        defer { remote.stop() }
+        await remote.turnOn()
+        #expect(remote.on)
+        #expect(remote.problem == "Your Apple Account had 5 Macs with remote access, so “Old iMac”, the one used longest ago, was removed to make room.")
     }
 
     /// The control plane took the tunnel back (not connected for days): the check-in sees no

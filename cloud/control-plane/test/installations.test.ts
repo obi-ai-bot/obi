@@ -47,48 +47,82 @@ describe("installations", () => {
     expect((await app.raw("GET", "/v1/health")).body).toEqual({ ok: true });
   });
 
-  it("a new Mac signs in with Apple first, once per sign-in; the same key again doesn't", async () => {
+  it("a new Mac signs in with Apple first, with the code its sheet came back with; the same key again doesn't", async () => {
     const app = testApp();
     const mac = await Mac.make();
-    const none = await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos" });
+    const register = (body: Record<string, unknown>, key = mac) => app.call(key, "POST", "/v1/installations", { name: "Mac", platform: "macos", ...body });
+    const none = await register({});
     expect(none.status).toBe(403);
     expect(none.body.error).toBe("Sign in with Apple first.");
     // Started but not finished at Apple: no account yet.
     const { state } = await app.startSignIn(mac);
-    expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: state })).status).toBe(403);
+    expect((await register({ signIn: state })).status).toBe(403);
     const signedIn = await app.signIn(mac, "000111.owner");
-    // Another key can't use this Mac's sign-in.
-    const other = await Mac.make();
-    expect((await app.call(other, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: signedIn })).status).toBe(403);
-    const made = await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: signedIn });
+    expect(signedIn.signInCode).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    // Another key can't use this Mac's sign-in, and the state alone, or with another code, isn't enough.
+    expect((await register(signedIn, await Mac.make())).status).toBe(403);
+    expect((await register({ signIn: signedIn.signIn })).status).toBe(403);
+    expect((await register({ signIn: signedIn.signIn, signInCode: "A".repeat(43) })).status).toBe(403);
+    const made = await register(signedIn);
     expect(made.status).toBe(201);
     const row = await env.DB.prepare("SELECT user_sub FROM installations").first<{ user_sub: string }>();
     expect(row?.user_sub).toBe("000111.owner");
-    // The account is kept by `sub` alone.
+    // The account is kept by `sub` alone, and the code only as a hash.
     expect((await env.DB.prepare("SELECT * FROM users").all()).results).toEqual([{ sub: "000111.owner", created_at: "2026-10-12T12:00:00.000Z" }]);
+    expect(JSON.stringify((await env.DB.prepare("SELECT * FROM sign_ins").all()).results)).not.toContain(signedIn.signInCode);
     // Registered, the key needs no sign-in again.
-    expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos" })).status).toBe(200);
+    expect((await register({})).status).toBe(200);
+  });
+
+  it("someone who gets another person to finish their sign-in can't take that person's account", async () => {
+    const app = testApp();
+    const attackers = await Mac.make();
+    // The attacker's Mac starts a sign-in and sends the victim Apple's real URL.
+    const { state, nonce } = await app.startSignIn(attackers);
+    // The victim signs in at Apple; Apple posts to the control plane, and the victim's browser gets the code.
+    const back = await app.callback({ state, id_token: await app.apple.token(app.claims(nonce, "000999.victim")) });
+    const code = new URL(back.headers.get("Location")!).searchParams.get("code");
+    expect(code).toBeTruthy();
+    // The attacker has the key and the state, never the code.
+    const taken = await app.call(attackers, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: state });
+    expect(taken.status).toBe(403);
+    const guessed = await app.call(attackers, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: state, signInCode: "x".repeat(43) });
+    expect(guessed.status).toBe(403);
+    expect(await env.DB.prepare("SELECT * FROM installations").first()).toBeNull();
   });
 
   it("a sign-in is used once, and only within ten minutes", async () => {
     const app = testApp();
     const mac = await Mac.make();
-    const state = await app.signIn(mac);
+    const register = (body: Record<string, unknown>) => app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", ...body });
+    const stale = await app.signIn(mac);
     app.time.advance(11 * 60_000);
-    expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: state })).status).toBe(403);
+    expect((await register(stale)).status).toBe(403);
     const fresh = await app.signIn(mac);
-    expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: fresh })).status).toBe(201);
+    expect((await register(fresh)).status).toBe(201);
     await app.call(mac, "DELETE", "/v1/installations/self");
-    expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: fresh })).status).toBe(403);
+    expect((await register(fresh)).status).toBe(403);
   });
-
-  it("one Apple Account has at most 5 Macs, and sets up at most 10 a day", async () => {
+  it("one Apple Account has at most 5 Macs: a new sign-in takes the place of the one used longest ago", async () => {
     const app = testApp();
-    for (let i = 0; i < 5; i++) expect((await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": `10.${i}.0.1` }, "000222.busy")).status).toBe(201);
-    const sixth = await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "10.9.0.1" }, "000222.busy");
-    expect(sixth.status).toBe(409);
-    expect(sixth.body.error).toBe("This Apple Account has 5 Macs with remote access already. Forget one first.");
-    // Another account isn't held back.
+    const macs: Mac[] = [];
+    for (let i = 0; i < 5; i++) {
+      macs.push(await Mac.make());
+      expect((await app.register(macs[i]!, `Mac ${i}`, { "CF-Connecting-IP": `10.${i}.0.1` }, "000222.busy")).status).toBe(201);
+      app.time.advance(60_000);
+    }
+    await app.call(macs[0]!, "POST", "/v1/installations/self/endpoint", undefined, { "CF-Connecting-IP": "10.0.0.1" });
+    // Mac 0 is used again; Mac 1 is now the one used longest ago.
+    await app.call(macs[0]!, "GET", "/v1/installations/self");
+    // The owner of a stolen account signs in on their own Mac: it takes a place, with no other Mac's key.
+    const sixth = await app.register(await Mac.make(), "Mine", { "CF-Connecting-IP": "10.9.0.1" }, "000222.busy");
+    expect(sixth.status).toBe(201);
+    expect(sixth.body.evicted).toEqual({ name: "Mac 1" });
+    expect((await app.call(macs[1]!, "GET", "/v1/installations/self")).status).toBe(410);
+    expect((await env.DB.prepare("SELECT count(*) AS n FROM installations WHERE user_sub = '000222.busy'").first<{ n: number }>())?.n).toBe(5);
+    // Mac 0's tunnel stays; an evicted Mac's tunnel would go with it.
+    expect((await app.call(macs[0]!, "GET", "/v1/installations/self")).body.installation.endpoint).not.toBeNull();
+    // Another account isn't touched, and ten a day is the most one account sets up.
     expect((await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "10.9.0.2" }, "000333.other")).status).toBe(201);
     await app.counted("registrations:account:000333.other", 10);
     const tenth = await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "10.9.0.3" }, "000333.other");
@@ -96,6 +130,18 @@ describe("installations", () => {
     expect(tenth.body.error).toMatch(/^This Apple Account set up too many Macs today\./);
   });
 
+  it("evicting a Mac with a tunnel tears the tunnel down", async () => {
+    const app = testApp();
+    const first = await Mac.make();
+    await app.register(first, "First", { "CF-Connecting-IP": "10.0.0.1" }, "000444.full");
+    await app.call(first, "POST", "/v1/installations/self/endpoint", undefined, { "CF-Connecting-IP": "10.0.0.1" });
+    app.time.advance(60_000);
+    for (let i = 1; i < 5; i++) await app.register(await Mac.make(), `Mac ${i}`, { "CF-Connecting-IP": `10.${i}.0.1` }, "000444.full");
+    const made = await app.register(await Mac.make(), "New", { "CF-Connecting-IP": "10.9.0.1" }, "000444.full");
+    expect(made.body.evicted).toEqual({ name: "First" });
+    expect(app.tunnels.tunnels.size).toBe(0);
+    expect(app.tunnels.records.size).toBe(0);
+  });
   it("limits new Macs per network as a backstop, an IPv6 /64 as one client and a /48 as one network", async () => {
     const app = testApp();
     await app.counted("registrations:address:2001:db8:1:2::/64", 20);
@@ -202,7 +248,7 @@ describe("the sweep", () => {
     expect(await windows()).toBe(0);
   });
 
-  it("removes a Mac whose tunnel never connected in an hour, reclaims one down for three days, keeps a connected one", async () => {
+  it("reclaims a tunnel never connected in an hour, or down for three days, keeping the installation; keeps a connected one", async () => {
     const app = testApp();
     const never = await Mac.make();
     const down = await Mac.make();
@@ -222,13 +268,16 @@ describe("the sweep", () => {
     app.tunnels.status.set(ids.down!, { connected: false, activeAt: "2026-10-12T12:01:00.000Z", inactiveAt: app.time.now().toISOString() });
     expect(await sweep(env, app.deps)).toEqual({ removed: 0, reclaimed: 1, failed: 0, unused: 0 });
     expect(app.tunnels.tunnels.has(ids.never!)).toBe(false);
-    // Never used: the installation went too.
-    expect((await app.call(never, "GET", "/v1/installations/self")).status).toBe(410);
+    // A firewall that stops cloudflared costs the Mac its tunnel, not its sign-in: the installation stays.
+    expect((await app.call(never, "GET", "/v1/installations/self")).body.installation.endpoint).toBeNull();
     app.time.advance(3 * DAY);
     expect((await sweep(env, app.deps)).reclaimed).toBe(1);
     expect(app.tunnels.tunnels.has(ids.down!)).toBe(false);
     // Down for days: the installation stays, with no endpoint; turning on again makes a new hostname.
     expect((await app.call(down, "GET", "/v1/installations/self")).body.installation.endpoint).toBeNull();
+    // Days later, neither is swept as never used: they made endpoints once.
+    expect((await sweep(env, app.deps)).unused).toBe(0);
+    expect((await app.call(never, "GET", "/v1/installations/self")).status).toBe(200);
     expect(app.tunnels.tunnels.has(ids.up!)).toBe(true);
     expect((await app.call(up, "GET", "/v1/installations/self")).body.installation.endpoint).not.toBeNull();
   });

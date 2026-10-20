@@ -32,7 +32,7 @@ describe("Sign in with Apple", () => {
     const { state, nonce } = await app.startSignIn(mac);
     const back = await app.callback({ state, code: "c", id_token: await app.apple.token(app.claims(nonce, "000777.me")) });
     expect(back.status).toBe(303);
-    expect(back.headers.get("Location")).toBe(`oby-signin://done?state=${state}`);
+    expect(back.headers.get("Location")).toMatch(new RegExp(`^oby-signin://done\\?state=${state}&code=[A-Za-z0-9_-]{43}$`));
     expect((await env.DB.prepare("SELECT sub FROM sign_ins WHERE state = ?1").bind(state).first<{ sub: string }>())?.sub).toBe("000777.me");
   });
 
@@ -65,7 +65,7 @@ describe("Sign in with Apple", () => {
     const mac = await Mac.make();
     const { state, nonce } = await app.startSignIn(mac);
     const fields = { state, id_token: await app.apple.token(app.claims(nonce, "000777.me")) };
-    expect((await app.callback(fields)).headers.get("Location")).toBe(`oby-signin://done?state=${state}`);
+    expect((await app.callback(fields)).headers.get("Location")).toMatch(new RegExp(`^oby-signin://done\\?state=${state}&code=`));
     // The same token again, even for another account's sub, changes nothing.
     expect((await app.callback(fields)).headers.get("Location")).toBe(`oby-signin://failed?state=${state}`);
     const replayed = { state, id_token: await app.apple.token(app.claims(nonce, "000888.attacker")) };
@@ -116,6 +116,56 @@ describe("Apple's keys", () => {
     now = new Date(now.getTime() + 25 * 3_600_000);
     await cache.key("k1");
     expect(apple.fetches).toBe(3);
+  });
+
+  it("aren't lost to a bad answer, and back off while Apple is down", async () => {
+    const apple = await FakeApple.make("k1");
+    const good = await apple.keys();
+    const answers: (() => Promise<JsonWebKey[]>)[] = [
+      async () => good,
+      async () => ({ error: "maintenance" }) as unknown as JsonWebKey[],
+      async () => [{ kid: "k2", kty: "RSA" }],
+      async () => {
+        throw new TypeError("network down");
+      },
+      async () => good,
+    ];
+    let asked = 0;
+    let now = new Date("2026-10-12T12:00:00.000Z");
+    const cache = new AppleKeyCache({ keys: () => answers[asked++]!() }, () => now);
+    const later = (seconds: number) => {
+      now = new Date(now.getTime() + seconds * 1000);
+    };
+    expect((await cache.key("k1"))?.kid).toBe("k1");
+    // A day on, a 200 with no keys: the kept keys stay, and the next try waits.
+    later(25 * 3600);
+    expect((await cache.key("k1"))?.kid).toBe("k1");
+    expect(asked).toBe(2);
+    later(30);
+    await cache.key("k1");
+    expect(asked).toBe(2);
+    // A minute on, keys with no modulus: still the kept ones; then two minutes of waiting.
+    later(31);
+    expect((await cache.key("k1"))?.kid).toBe("k1");
+    expect(asked).toBe(3);
+    later(90);
+    await cache.key("k1");
+    expect(asked).toBe(3);
+    // The network fails: four minutes of waiting next.
+    later(31);
+    expect((await cache.key("k1"))?.kid).toBe("k1");
+    expect(asked).toBe(4);
+    later(200);
+    await cache.key("k1");
+    expect(asked).toBe(4);
+    later(41);
+    expect((await cache.key("k1"))?.kid).toBe("k1");
+    expect(asked).toBe(5);
+  });
+
+  it("with none kept and Apple down, refuse the token", async () => {
+    const cache = new AppleKeyCache({ keys: async () => { throw new TypeError("network down"); } }, () => new Date());
+    expect(await cache.key("k1")).toBeUndefined();
   });
 
   it("refuse a token that isn't RS256", async () => {

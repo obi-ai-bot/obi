@@ -232,6 +232,16 @@ describe("what a tunnel may cost", () => {
     expect(apart.tunnels.reads.filter((read) => read.op === "zoneName")).toHaveLength(1);
   });
 
+  it("refuses an installation with no Apple Account, never sparing it the account's limits", async () => {
+    const app = testApp();
+    const mac = await registered(app);
+    await env.DB.prepare("UPDATE installations SET user_sub = NULL").run();
+    const refused = await app.call(mac.mac, "POST", "/v1/installations/self/endpoint");
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe("Sign in with Apple again: turn remote access off and on.");
+    expect(app.tunnels.calls).toEqual([]);
+  });
+
   it("fails closed on a cap that isn't a number", async () => {
     for (const cap of ["", "abc", "500x", "0"]) {
       const app = testApp({}, { MAX_ENDPOINTS: cap });
