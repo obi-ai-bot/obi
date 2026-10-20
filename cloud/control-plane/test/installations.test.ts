@@ -121,7 +121,9 @@ describe("installations", () => {
     const bitsNow = async () => {
       const mac = await Mac.make();
       const at = Math.floor(app.time.now().getTime() / 1000);
-      const answer = await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", proofAt: String(at), proof: "0" });
+      // An answer that misses even the base bits, so every level refuses it and says what it needs.
+      const proof = await work(mac.publicKey, at, false);
+      const answer = await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", proofAt: String(at), proof });
       return answer.body.workBits as number;
     };
     await app.fill(4);
