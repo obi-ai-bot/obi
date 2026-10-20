@@ -590,6 +590,63 @@ fn nothing_committed_is_done_and_needs_nothing() {
     );
 }
 
+/// A job that changes obid runs obid's own tests inside its job sandbox, and they start obid's
+/// fake agent there: Seatbelt can't make a sandbox inside another, so the test's obid runs its
+/// agent in the job's sandbox it inherits ("The job sandbox"). The test above, run inside a
+/// sandbox made as a job's agent's is: obid's home and the person's home hidden, writes only to the
+/// worktree (this repository) and the job's temporary folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_fake_agent_test_runs_inside_a_jobs_sandbox() {
+    use obid::sandbox::{self, Sandbox, Spec};
+    let folder = Folder::new("inside-a-job");
+    let home = folder.0.join("obid-home");
+    let temp = folder.0.join("job-tmp");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&temp).unwrap();
+    let mut hidden = vec![home.clone()];
+    hidden.extend(obid::jobs::person_homes());
+    let path = obid::process::tools_path();
+    let this = std::env::current_exe().unwrap();
+    // The test binaries, wherever cargo built them.
+    let mut read_only = sandbox::tool_roots(&path, &hidden, std::slice::from_ref(&home));
+    read_only
+        .extend([this.parent().unwrap(), Path::new(OBID).parent().unwrap()].map(Path::to_path_buf));
+    let spec = Spec {
+        worktree: obi(),
+        temp: temp.clone(),
+        read_only,
+        hidden,
+        network: true,
+        ..Spec::default()
+    };
+    let sandbox = Sandbox::detect(Path::new(OBID)).unwrap();
+    let argv = [
+        this.into_os_string(),
+        "nothing_committed_is_done_and_needs_nothing".into(),
+        "--exact".into(),
+    ];
+    let wrapped = sandbox.wrap(&spec, &argv);
+    let output = Command::new(&wrapped[0])
+        .args(&wrapped[1..])
+        .current_dir(obi())
+        .env_clear()
+        .envs(obid::process::sandbox_env(&path, &temp, &[]))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The sandbox's first process ends killed (it reaps the sandbox); the test's own exit code is
+    // what it recorded, as obid reads a check's.
+    let status = std::fs::read_to_string(temp.join(".obid-status")).unwrap_or_default();
+    assert_eq!(status.trim(), "0", "{said}");
+    assert!(said.contains("1 passed"), "{said}");
+}
+
 /// #606: what the agent left uncommitted when its job ends without being done is one `wip:`
 /// commit on the job's branch, published by nothing; a round the owner asks for afterwards takes
 /// it back out, so it counts as none of the job's commits.
