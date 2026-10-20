@@ -1545,8 +1545,8 @@ fn stop_reaches_only_its_own_conversation() {
     assert_eq!(second["text"], "Second.", "{second}");
 }
 
-/// A brain dispatch can't start a job in Bypass mode: it waits as a confirm item whose title,
-/// made by obid from the job, says so; the owner's Confirm starts it (review on #551, N1).
+/// A planned check replaces the repository's own only when the owner names it as the check:
+/// words that hold it in passing leave `node --test`.
 #[test]
 fn a_planned_check_replaces_the_repositorys_only_when_the_owner_said_it() {
     let folder = Folder::new("brain-check-kept");
@@ -1562,7 +1562,7 @@ fn a_planned_check_replaces_the_repositorys_only_when_the_owner_said_it() {
         call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["check"].clone()
     };
     queue(&obid, &[dispatch("true")]);
-    let weaker = said(&obid, "fix the greeting");
+    let weaker = said(&obid, "fix the greeting so isAdmin returns true for owners");
     assert_eq!(check_of(&weaker), "node --test", "{weaker}");
     let named = "node --test --test-name-pattern=greet";
     queue(&obid, &[dispatch(named)]);
@@ -1570,6 +1570,8 @@ fn a_planned_check_replaces_the_repositorys_only_when_the_owner_said_it() {
     assert_eq!(check_of(&owners), named, "{owners}");
 }
 
+/// A brain dispatch can't start a job in Bypass mode: it waits as a confirm item whose title,
+/// made by obid from the job, says so; the owner's Confirm starts it (review on #551, N1).
 #[test]
 fn a_bypass_dispatch_waits_for_the_owners_confirm() {
     let folder = Folder::new("brain-confirm-dispatch");

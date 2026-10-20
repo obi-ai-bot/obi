@@ -673,7 +673,8 @@ fn oby_dispatch_carries_the_check_the_owner_named() {
     let (_folder, obid) = obid("harness-dispatch-check", true);
     let answer = said(
         &obid,
-        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "fix", "check": " cd core && cargo test -p obid --lib brain::supervisor "}"#,
+        json!({"said": concat!("Check: cd core && cargo test -p obid --lib brain::supervisor\n",
+               r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "fix", "check": " cd core && cargo test -p obid --lib brain::supervisor "}"#),
                "new": true}),
     );
     let jobs = answer.body["jobs"].as_array().unwrap();
@@ -685,11 +686,11 @@ fn oby_dispatch_carries_the_check_the_owner_named() {
         "{}",
         job.text
     );
-    // The agent's own `true` (escaped, so the owner's words never hold it) can't replace the
-    // fixture's `node --test`.
+    // The agent's own `true`, which the owner's words hold but never name as the check, can't
+    // replace the fixture's `node --test`.
     let weaker = said(
         &obid,
-        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "fix", "check": "tru\u0065"}"#,
+        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "fix", "check": "true"}"#,
                "new": true}),
     );
     let id = weaker.body["jobs"][0]["id"].as_str().unwrap();
