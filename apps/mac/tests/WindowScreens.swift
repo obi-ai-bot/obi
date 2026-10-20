@@ -256,15 +256,14 @@ struct WindowScreens {
 
     /// Each Settings page in the window (docs/mac-design.md A1), with the side panel on Settings.
     /// Nothing of this Mac's own shows: run it with `TEST_RUNNER_OBY_HOME` set to an empty folder (the
-    /// desk's accounts and rules), and the pages read a defaults suite of their own, a made-up Oby
-    /// account and a vault in a temporary folder.
+    /// desk's accounts and rules), and the pages read a defaults suite of their own, a made-up
+    /// hostname and a vault in a temporary folder.
     @Test(arguments: SettingsPage.allCases)
     func settings(_ page: SettingsPage) async throws {
         let suite = try #require(UserDefaults(suiteName: "oby-screens-\(UUID().uuidString)"))
         suite.set(true, forKey: "ObySidebarOpen")
         suite.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
         suite.set(true, forKey: RunnerFeed.thisMacKey)
-        suite.set("you@example.com", forKey: "remote.email")
         suite.set("oby-7f3k.example.com", forKey: "remote.hostname")
         let secrets = FileManager.default.temporaryDirectory.appending(path: "oby-screens-vault-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: secrets, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

@@ -4,16 +4,22 @@ import FoundationNetworking
 #endif
 
 /// Oby's control plane on Cloudflare (cloud/control-plane, #285), as the Mac talks to it: sign in
-/// with an email code, register this installation, and get its tunnel's hostname and run token.
-/// A call carries the user's session token or the installation's credential as a bearer; the
-/// control plane keeps only their hashes, and never the tunnel token.
+/// with Apple, register this installation, and get its tunnel's hostname and run token. The Mac is
+/// known by its P-256 key, and every call is signed with it (`Signer`), with a timestamp and a
+/// nonce, so nothing the Mac sends works for anyone else or works twice; a new installation also
+/// belongs to the Apple Account it signed in with. The control plane keeps the public key and the
+/// account's `sub`, and never the tunnel token.
 nonisolated struct ControlPlane: Sendable {
     var base: URL
     /// How a request goes out and what comes back (the body and the status): URLSession, or a
     /// test's stand-in.
     var transport: @Sendable (URLRequest) async throws -> (Data, Int)
+    /// The clock the calls' timestamps come from.
+    var now: @Sendable () -> Date = { Date() }
 
     static let defaultURL = URL(string: "https://oby-control.tetrix.pro")!
+    /// What's signed before the method, the path, the timestamp, the nonce and the body.
+    static let signedPrefix = "oby-control-v1"
 
     init(base: URL = defaultURL, transport: @escaping @Sendable (URLRequest) async throws -> (Data, Int) = ControlPlane.urlSession) {
         self.base = base
@@ -25,16 +31,13 @@ nonisolated struct ControlPlane: Sendable {
         return (data, (response as? HTTPURLResponse)?.statusCode ?? 0)
     }
 
-    struct User: Codable, Equatable, Sendable {
-        var id: String
-        var email: String
-    }
-
-    /// What signing in gives: the session's bearer token, shown once.
-    struct Session: Codable, Equatable, Sendable {
-        var token: String
-        var user: User
-        var expiresAt: Date
+    /// This Mac's key: its public half (an uncompressed P-256 point, X9.63, 65 bytes) and a way to
+    /// sign with the private half (ECDSA with SHA-256, the signature as r‖s, 64 bytes). The Mac
+    /// app's lives in the Secure Enclave when there is one (apps/mac/app/RemoteAccess.swift); this
+    /// file does no crypto, so it builds on Linux too.
+    struct Signer: Sendable {
+        var publicKey: Data
+        var sign: @Sendable (Data) throws -> Data
     }
 
     /// The installation's tunnel: its hostname is what the iPhone connects to.
@@ -46,18 +49,11 @@ nonisolated struct ControlPlane: Sendable {
 
     struct Installation: Codable, Equatable, Sendable {
         var id: String
-        var clientId: String
         var name: String
         var platform: String
         var createdAt: Date
         var lastSeenAt: Date?
         var endpoint: Endpoint?
-    }
-
-    /// An installation with a credential just made for it, shown once.
-    struct Registration: Codable, Equatable, Sendable {
-        var installation: Installation
-        var credential: String
     }
 
     /// What `cloudflared tunnel run` connects with, and the hostname it serves.
@@ -70,81 +66,74 @@ nonisolated struct ControlPlane: Sendable {
     struct Failure: LocalizedError, Equatable {
         let message: String
         let status: Int
-        var errorDescription: String? { message }
+            var errorDescription: String? { message }
     }
 
-    // MARK: Sign-in
+    // MARK: This installation, signed by its key
 
-    /// Emails a six-digit code to `email`.
-    func requestCode(email: String) async throws {
-        try await send("POST", "v1/auth/otp/request", body: ["email": email])
+    /// A sign-in with Apple this Mac starts: Apple's authorization page, and the state that names
+    /// it. Apple sends the result to the control plane, never to the Mac.
+    struct AppleSignIn: Codable, Equatable, Sendable {
+        var url: URL
+        var state: String
     }
 
-    func verify(email: String, code: String) async throws -> Session {
-        try await call("POST", "v1/auth/otp/verify", body: ["email": email, "code": code])
+    func startAppleSignIn(_ signer: Signer) async throws -> AppleSignIn {
+        try await call("POST", "v1/auth/apple/start", signer: signer)
     }
 
-    func me(session: String) async throws -> User {
-        struct Answer: Decodable { var user: User }
-        let answer: Answer = try await call("GET", "v1/me", bearer: session)
-        return answer.user
+    /// What registering gives: the installation, and the Mac the account gave up to make room for
+    /// it, when it had as many as it may (the one it used longest ago).
+    struct Registration: Decodable, Equatable, Sendable {
+        struct Evicted: Decodable, Equatable, Sendable { var name: String }
+        var installation: Installation
+        var evicted: Evicted?
     }
 
-    func signOut(session: String) async throws {
-        try await send("POST", "v1/auth/signout", bearer: session)
+    /// Registers this Mac by its key; the same key again keeps its installation and hostname. A
+    /// new key brings the sign-in with Apple it finished: its `state`, and the `code` the sheet
+    /// came back with.
+    func register(_ signer: Signer, name: String, signIn: (state: String, code: String)? = nil, platform: String = "macos") async throws -> Registration {
+        var body = ["name": name, "platform": platform]
+        if let signIn {
+            body["signIn"] = signIn.state
+            body["signInCode"] = signIn.code
+        }
+        return try await call("POST", "v1/installations", body: body, signer: signer)
     }
 
-    // MARK: Installations, with the user's session
-
-    func installations(session: String) async throws -> [Installation] {
-        struct Answer: Decodable { var installations: [Installation] }
-        let answer: Answer = try await call("GET", "v1/installations", bearer: session)
-        return answer.installations
-    }
-
-    /// Registers this Mac (its stable `clientID`) and gets its credential. The same Mac again
-    /// keeps its installation and gets a fresh credential.
-    func register(session: String, clientID: String, name: String, platform: String = "macos") async throws -> Registration {
-        try await call("POST", "v1/installations", body: ["clientId": clientID, "name": name, "platform": platform], bearer: session)
-    }
-
-    /// A new credential for the installation; the one before stops working.
-    func rotate(_ installation: String, session: String) async throws -> Registration {
-        try await call("POST", "v1/installations/\(installation)/credential", bearer: session)
-    }
-
-    /// Removes the installation: its tunnel, its credential, and the session it registered with.
-    func remove(_ installation: String, session: String) async throws {
-        try await send("DELETE", "v1/installations/\(installation)", bearer: session)
-    }
-
-    // MARK: This installation, with its credential
-
-    func installation(credential: String) async throws -> Installation {
+    /// This installation, as the control plane has it. Any signed call keeps it from being
+    /// removed as idle.
+    func installation(_ signer: Signer) async throws -> Installation {
         struct Answer: Decodable { var installation: Installation }
-        let answer: Answer = try await call("GET", "v1/installations/self", bearer: credential)
+        let answer: Answer = try await call("GET", "v1/installations/self", signer: signer)
         return answer.installation
     }
 
     /// The installation's tunnel and hostname, made on the first call and the same after.
-    func createEndpoint(credential: String) async throws -> Endpoint {
+    func createEndpoint(_ signer: Signer) async throws -> Endpoint {
         struct Answer: Decodable { var endpoint: Endpoint }
-        let answer: Answer = try await call("POST", "v1/installations/self/endpoint", bearer: credential)
+        let answer: Answer = try await call("POST", "v1/installations/self/endpoint", signer: signer)
         return answer.endpoint
     }
 
-    func tunnelToken(credential: String) async throws -> TunnelToken {
-        try await call("GET", "v1/installations/self/endpoint/token", bearer: credential)
+    func tunnelToken(_ signer: Signer) async throws -> TunnelToken {
+        try await call("GET", "v1/installations/self/endpoint/token", signer: signer)
     }
 
-    func removeEndpoint(credential: String) async throws {
-        try await send("DELETE", "v1/installations/self/endpoint", bearer: credential)
+    func removeEndpoint(_ signer: Signer) async throws {
+        try await send("DELETE", "v1/installations/self/endpoint", signer: signer)
+    }
+
+    /// Forget This Mac: the installation goes, its tunnel and hostname with it.
+    func forget(_ signer: Signer) async throws {
+        try await send("DELETE", "v1/installations/self", signer: signer)
     }
 
     // MARK: Calls
 
-    private func call<Answer: Decodable>(_ method: String, _ path: String, body: [String: String]? = nil, bearer: String? = nil) async throws -> Answer {
-        let data = try await send(method, path, body: body, bearer: bearer)
+    private func call<Answer: Decodable>(_ method: String, _ path: String, body: [String: String]? = nil, signer: Signer) async throws -> Answer {
+        let data = try await send(method, path, body: body, signer: signer)
         do {
             return try Self.decoder.decode(Answer.self, from: data)
         } catch {
@@ -153,7 +142,7 @@ nonisolated struct ControlPlane: Sendable {
     }
 
     @discardableResult
-    private func send(_ method: String, _ path: String, body: [String: String]? = nil, bearer: String? = nil) async throws -> Data {
+    private func send(_ method: String, _ path: String, body: [String: String]? = nil, signer: Signer) async throws -> Data {
         var request = URLRequest(url: base.appending(path: path))
         request.httpMethod = method
         request.timeoutInterval = 30
@@ -162,10 +151,28 @@ nonisolated struct ControlPlane: Sendable {
             request.httpBody = try JSONEncoder().encode(body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        if let bearer { request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
+        try sign(&request, with: signer)
         let (data, status) = try await transport(request)
         guard (200..<300).contains(status) else { throw Self.failure(data, status: status) }
         return data
+    }
+
+    /// The signature's headers (cloud/control-plane/src/app.ts, `signed`): the key, the time, a
+    /// nonce used once, and the signature of all that with the method, the path and the body.
+    func sign(_ request: inout URLRequest, with signer: Signer) throws {
+        let timestamp = String(Int(now().timeIntervalSince1970))
+        let nonce = UUID().uuidString
+        let head = [Self.signedPrefix, request.httpMethod ?? "GET", request.url?.path ?? "/", timestamp, nonce, ""].joined(separator: "\n")
+        let signature = try signer.sign(Data(head.utf8) + (request.httpBody ?? Data()))
+        request.setValue(Self.base64url(signer.publicKey), forHTTPHeaderField: "Oby-Key")
+        request.setValue(timestamp, forHTTPHeaderField: "Oby-Timestamp")
+        request.setValue(nonce, forHTTPHeaderField: "Oby-Nonce")
+        request.setValue(Self.base64url(signature), forHTTPHeaderField: "Oby-Signature")
+    }
+
+    static func base64url(_ data: Data) -> String {
+        data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 
     /// The control plane's own line (`{"error": …}`), or one about the status.

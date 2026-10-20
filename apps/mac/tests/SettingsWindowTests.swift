@@ -57,14 +57,6 @@ struct SettingsWindowTests {
         #expect(state.trail.isHome)
     }
 
-    /// The account menu's head: your name, then the Oby account's email once Remote access signed
-    /// in, else this Mac's name.
-    @Test func accountMenuSaysWhoYouAre() {
-        #expect(SidebarSections.accountLine(email: "you@example.com", mac: "Studio") == "you@example.com")
-        #expect(SidebarSections.accountLine(email: nil, mac: "Studio") == "Studio")
-        #expect(SidebarSections.accountLine(email: "", mac: nil) == "This Mac")
-    }
-
     /// The usage panel's gear opens Accounts in its own window; the action is equal for the same
     /// window, so the box doesn't redraw for a new closure on every update.
     @Test func usageGearOpensAccountsInItsWindow() {
