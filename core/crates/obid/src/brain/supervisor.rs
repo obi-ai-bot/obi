@@ -634,9 +634,9 @@ mod tests {
     #[test]
     fn an_unattended_turn_answers_nothing() {
         let unattended = session(Some(Arc::new(Watch::new("j1", "t1"))));
-        let answer = serde_json::json!({"id": "i1", "answer": "Deny"});
+        let answer = serde_json::json!({"item": "i1", "answer": "Deny"});
         assert!(refused(&unattended, "oby_answer", &answer).is_some());
-        let own_job = serde_json::json!({"id": "j1", "answer": "Deny"});
+        let own_job = serde_json::json!({"item": "j1", "answer": "Deny"});
         assert!(refused(&unattended, "oby_answer", &own_job).is_some());
         assert!(refused(&session(None), "oby_answer", &answer).is_none());
     }
