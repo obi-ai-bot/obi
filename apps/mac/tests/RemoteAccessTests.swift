@@ -124,7 +124,7 @@ struct RemoteAccessTests {
 
     /// Asked for more than a Mac should spend, it stops and says what the control plane said.
     @Test @MainActor func turningOnStopsWhenAskedForTooMuchWork() async throws {
-        let exchange = Exchange([(403, #"{"error": "That proof of work doesn't check out.", "workBits": 40}"#)])
+        let exchange = Exchange([(403, #"{"error": "That proof of work doesn't check out.", "workBits": 31}"#)])
         let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
         defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
         let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
@@ -233,6 +233,8 @@ struct RemoteAccessTests {
         #expect(MacKey.work(key: "k", at: 1, bits: 8) == "37")
         #expect(MacKey.work(key: "BKurq6s", at: 1_791_806_400, bits: 12) == "8876")
         #expect(MacKey.zeroBits([0, 0x0f]) == 12)
+        // The most the control plane asks for (MAX_WORK_BITS: 22, plus 4 nearly full and 4 busy).
+        #expect(RemoteAccess.mostWorkBits == 30)
     }
 
     /// The Worker's check (cloud/control-plane/src/app.ts, `signed`), in CryptoKit.

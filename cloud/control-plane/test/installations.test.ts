@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { reclaimable, STATUS_BATCH, sweep } from "../src/app";
+import { EXTRA_BITS, MAX_WORK_BITS, reclaimable, STATUS_BATCH, sweep } from "../src/app";
 import { checks, DAY, HOUR, Mac, testApp, work } from "./helpers";
 
 describe("installations", () => {
@@ -116,9 +116,8 @@ describe("installations", () => {
     expect((await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "198.51.100.200" })).status).toBe(429);
   });
 
-  it("asks for more work as endpoints near the cap", async () => {
-    const app = testApp({}, { MAX_ENDPOINTS: "10" });
-    const bitsNow = async () => {
+  it("asks for more work as endpoints near the cap and past the breaker, never past what a Mac does", async () => {
+    const bitsNow = async (app: ReturnType<typeof testApp>) => {
       const mac = await Mac.make();
       const at = Math.floor(app.time.now().getTime() / 1000);
       // An answer that misses even the base bits, so every level refuses it and says what it needs.
@@ -126,16 +125,28 @@ describe("installations", () => {
       const answer = await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", proofAt: String(at), proof });
       return answer.body.workBits as number;
     };
+    const app = testApp({}, { MAX_ENDPOINTS: "10" });
     await app.fill(4);
-    expect(await bitsNow()).toBe(8);
+    expect(await bitsNow(app)).toBe(8);
     await app.fill(1);
-    expect(await bitsNow()).toBe(10);
+    expect(await bitsNow(app)).toBe(10);
     await app.fill(3);
-    expect(await bitsNow()).toBe(12);
-  });
+    expect(await bitsNow(app)).toBe(12);
+    const window = Math.floor(app.time.now().getTime() / 1000);
+    await env.DB.prepare("INSERT INTO rate_limits (key, window_start, count) VALUES ('registrations:everywhere', ?1, 1000)").bind(window).run();
+    expect(await bitsNow(app)).toBe(16);
 
+    // The deployed base (wrangler.jsonc, 22) with every extra is exactly what a Mac does.
+    expect(22 + EXTRA_BITS.nearlyFull + EXTRA_BITS.busy).toBe(MAX_WORK_BITS);
+    expect(MAX_WORK_BITS).toBe(30);
+    // A higher base is held to it.
+    const high = testApp({}, { MAX_ENDPOINTS: "10", REGISTRATION_WORK_BITS: "26" });
+    await high.fill(8);
+    await env.DB.prepare("INSERT INTO rate_limits (key, window_start, count) VALUES ('registrations:everywhere', ?1, 1000) ON CONFLICT (key) DO UPDATE SET count = 1000").bind(window).run();
+    expect(await bitsNow(high)).toBe(MAX_WORK_BITS);
+  });
   it("fails closed on a work-bits setting that isn't a number", async () => {
-    for (const bits of ["", "x", "8x", "40"]) {
+    for (const bits of ["", "x", "8x", "31"]) {
       const app = testApp({}, { REGISTRATION_WORK_BITS: bits });
       const answer = await app.register(await Mac.make());
       expect(answer.status, bits).toBe(503);
@@ -236,7 +247,7 @@ describe("the sweep", () => {
     expect(await windows()).toBe(0);
   });
 
-  it("reclaims tunnels never connected in a day, or down for three days; a connected one stays", async () => {
+  it("removes a Mac whose tunnel never connected in an hour, reclaims one down for three days, keeps a connected one", async () => {
     const app = testApp();
     const never = await Mac.make();
     const down = await Mac.make();
@@ -246,35 +257,46 @@ describe("the sweep", () => {
       await app.register(mac, "Mac", { "CF-Connecting-IP": `192.0.2.${Object.keys(ids).length + 1}` });
       ids[name] = (await app.call(mac, "POST", "/v1/installations/self/endpoint")).body.endpoint.tunnelId;
     }
+    // As Cloudflare answers: a tunnel that never connected has conns_inactive_at, and no conns_active_at.
+    expect(await app.tunnels.tunnelStatus(ids.never!)).toEqual({ connected: false, activeAt: null, inactiveAt: "2026-10-12T12:00:00.000Z" });
     app.tunnels.status.set(ids.up!, { connected: true, activeAt: app.time.now().toISOString(), inactiveAt: null });
-    app.time.advance(23 * HOUR);
-    app.tunnels.status.set(ids.down!, { connected: false, activeAt: "2026-10-12T12:30:00.000Z", inactiveAt: app.time.now().toISOString() });
+    app.tunnels.status.set(ids.down!, { connected: true, activeAt: app.time.now().toISOString(), inactiveAt: null });
+    app.time.advance(59 * 60_000);
     expect(await sweep(env, { tunnels: app.tunnels, now: app.time.now })).toEqual({ removed: 0, reclaimed: 0, failed: 0, unused: 0 });
-    app.time.advance(2 * HOUR);
+    app.time.advance(2 * 60_000);
+    app.tunnels.status.set(ids.down!, { connected: false, activeAt: "2026-10-12T12:01:00.000Z", inactiveAt: app.time.now().toISOString() });
     expect(await sweep(env, { tunnels: app.tunnels, now: app.time.now })).toEqual({ removed: 0, reclaimed: 1, failed: 0, unused: 0 });
     expect(app.tunnels.tunnels.has(ids.never!)).toBe(false);
-    // Its installation stays; turning on again makes a new hostname.
-    expect((await app.call(never, "GET", "/v1/installations/self")).body.installation.endpoint).toBeNull();
+    // Never used: the installation went too.
+    expect((await app.call(never, "GET", "/v1/installations/self")).status).toBe(410);
     app.time.advance(3 * DAY);
     expect((await sweep(env, { tunnels: app.tunnels, now: app.time.now })).reclaimed).toBe(1);
     expect(app.tunnels.tunnels.has(ids.down!)).toBe(false);
+    // Down for days: the installation stays, with no endpoint; turning on again makes a new hostname.
+    expect((await app.call(down, "GET", "/v1/installations/self")).body.installation.endpoint).toBeNull();
     expect(app.tunnels.tunnels.has(ids.up!)).toBe(true);
     expect((await app.call(up, "GET", "/v1/installations/self")).body.installation.endpoint).not.toBeNull();
   });
-
-  it("asks about the endpoints checked longest ago, a batch at a time", async () => {
+  it("asks about never-checked endpoints first, oldest first, then the longest ago checked", async () => {
     const app = testApp();
     await app.fill(STATUS_BATCH + 3);
+    // Connected, so the sweep keeps them all and only marks them checked.
+    for (const row of (await env.DB.prepare("SELECT tunnel_id FROM endpoints").all<{ tunnel_id: string }>()).results) {
+      app.tunnels.status.set(row.tunnel_id, { connected: true, activeAt: "2026-10-12T12:00:00.000Z", inactiveAt: null });
+    }
     const asked = () => app.tunnels.reads.filter((read) => read.op === "tunnelStatus").map((read) => read.args[0]);
-    const first = { ...(await sweep(env, { tunnels: app.tunnels, now: app.time.now })) };
-    expect(first.reclaimed).toBe(0);
-    expect(asked()).toHaveLength(STATUS_BATCH);
-    app.time.advance(5 * 60_000);
+    app.time.advance(60_000);
+    await app.fill(1, "late");
+    const late = (await env.DB.prepare("SELECT tunnel_id FROM endpoints WHERE network = 'late'").first<{ tunnel_id: string }>())!.tunnel_id;
     await sweep(env, { tunnels: app.tunnels, now: app.time.now });
-    // The next run starts with the three never asked about.
-    const second = asked().slice(STATUS_BATCH);
-    expect(new Set(second.slice(0, 3)).size).toBe(3);
-    for (const id of second.slice(0, 3)) expect(asked().slice(0, STATUS_BATCH)).not.toContain(id);
+    expect(asked()).toHaveLength(STATUS_BATCH);
+    expect(asked()).not.toContain(late);
+    app.time.advance(60_000);
+    await sweep(env, { tunnels: app.tunnels, now: app.time.now });
+    // The next run starts with the four never asked about, the late one last of them.
+    const second = asked().slice(STATUS_BATCH, STATUS_BATCH + 4);
+    for (const id of second) expect(asked().slice(0, STATUS_BATCH)).not.toContain(id);
+    expect(second[3]).toBe(late);
   });
 });
 
@@ -282,16 +304,16 @@ describe("reclaimable", () => {
   const made = { created_at: "2026-10-12T00:00:00.000Z" };
   const at = (hours: number) => new Date(Date.parse(made.created_at) + hours * HOUR);
   it("keeps a connected tunnel whatever its times", () => {
-    expect(reclaimable(made, { connected: true, activeAt: null, inactiveAt: "2026-01-01T00:00:00.000Z" }, at(1000))).toBe(false);
+    expect(reclaimable(made, { connected: true, activeAt: null, inactiveAt: "2026-01-01T00:00:00.000Z" }, at(1000))).toBeNull();
   });
-  it("reclaims one never connected after a day", () => {
-    const never = { connected: false, activeAt: null, inactiveAt: null };
-    expect(reclaimable(made, never, at(23.9))).toBe(false);
-    expect(reclaimable(made, never, at(24))).toBe(true);
+  it("calls one with no conns_active_at never connected, even with conns_inactive_at set, after an hour", () => {
+    const never = { connected: false, activeAt: null, inactiveAt: "2026-10-12T00:00:00.000Z" };
+    expect(reclaimable(made, never, at(0.9))).toBeNull();
+    expect(reclaimable(made, never, at(1))).toBe("never");
   });
   it("reclaims one down for three days, counted from when it went down", () => {
     const down = { connected: false, activeAt: "2026-10-12T01:00:00.000Z", inactiveAt: "2026-10-13T00:00:00.000Z" };
-    expect(reclaimable(made, down, at(24 + 71))).toBe(false);
-    expect(reclaimable(made, down, at(24 + 72))).toBe(true);
+    expect(reclaimable(made, down, at(24 + 71))).toBeNull();
+    expect(reclaimable(made, down, at(24 + 72))).toBe("down");
   });
 });

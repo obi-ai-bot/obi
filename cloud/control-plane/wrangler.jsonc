@@ -25,10 +25,10 @@
     // What every tunnel routes to on the Mac: the gateway (#284). Nothing else is reachable.
     "GATEWAY": "http://127.0.0.1:8810"
   },
-  // Every 5 minutes: spent nonces and old rate-limit windows go, installations with no endpoint
+  // Every minute: spent nonces and old rate-limit windows go, installations with no endpoint
   // after a day, installations idle for 30 days with their tunnels, and tunnels not kept
   // connected (src/app.ts, `sweep`).
-  "triggers": { "crons": ["*/5 * * * *"] },
+  "triggers": { "crons": ["* * * * *"] },
   "d1_databases": [
     {
       "binding": "DB",

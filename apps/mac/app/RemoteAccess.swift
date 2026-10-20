@@ -196,8 +196,10 @@ final class RemoteAccess {
         }
     }
 
-    /// The most work a Mac does when asked for more: 28 bits is about a minute.
-    static let mostWorkBits = 28
+    /// The most work a Mac does when asked for more: the control plane's MAX_WORK_BITS
+    /// (cloud/control-plane/src/app.ts), its base and every extra together. 30 bits is a few
+    /// minutes, asked for only while the control plane is nearly full and busy.
+    static let mostWorkBits = 30
 
     /// Registers this Mac, with a proof of work worked out off the main thread (a second or two at
     /// 22 bits).

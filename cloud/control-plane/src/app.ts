@@ -28,20 +28,26 @@ export const SKEW_SECONDS = 5 * 60;
 export const IDLE_DAYS = 30;
 /// An installation that never made an endpoint is removed after this long.
 export const UNUSED_HOURS = 24;
-/// An endpoint whose tunnel never connected is reclaimed this long after it was made, and one
-/// whose tunnel went down this long ago: a hostname is kept by running cloudflared, not by a
-/// signed call now and then.
-export const NEVER_CONNECTED_HOURS = 24;
+/// An endpoint whose tunnel never connected goes this long after it was made, its installation
+/// with it (a real Mac connects within seconds); one whose tunnel went down this long ago is
+/// reclaimed, the installation kept. A hostname is kept by running cloudflared, not by a signed
+/// call now and then.
+export const NEVER_CONNECTED_HOURS = 1;
 export const DISCONNECTED_HOURS = 72;
 /// What one sweep does at Cloudflare, under the Workers free plan's 50 calls a run: up to
 /// SWEEP_BATCH idle installations removed (two calls each), and STATUS_BATCH tunnels asked
-/// whether they're connected (one call each, two more for each reclaimed). Every 5 minutes, 96
-/// of each an hour: more than `endpointsEverywhere` can make, and 500 endpoints checked in about
-/// 5 hours.
+/// whether they're connected (one call each, two more for each reclaimed): at most 40. Every
+/// minute, 480 of each an hour: more than `endpointsEverywhere` can make, and 500 endpoints
+/// checked about once an hour.
 export const SWEEP_BATCH = 8;
 export const STATUS_BATCH = 8;
-/// The most live endpoints made from one network (an IPv4 /24 or an IPv6 /48).
-export const ENDPOINTS_PER_NETWORK = 3;
+/// The most endpoints from one network (an IPv4 /24 or an IPv6 /48) whose tunnel hasn't
+/// connected yet. Connected ones don't count: offices, carrier-grade NAT and mobile networks
+/// put many real Macs behind one.
+export const UNCONNECTED_PER_NETWORK = 3;
+/// The most work the Mac app does (apps/mac/app/RemoteAccess.swift, `mostWorkBits`): the work
+/// asked for never goes past it, base and extras together.
+export const MAX_WORK_BITS = 30;
 /// New installations, per client (an IPv6 /64 is one) and per network (/24 or /48); a key is
 /// one installation, and registering the same key again isn't counted. Over everyone, past the
 /// breaker the proof of work gets harder instead of anyone being refused. Then each
@@ -52,8 +58,11 @@ export const LIMITS = {
   registrationsPerNetwork: { max: 20, windowSeconds: 60 * 60 } satisfies Limit,
   registrationsEverywhere: { max: 1000, windowSeconds: 60 * 60 } satisfies Limit,
   endpointChangesPerInstallation: { max: 5, windowSeconds: 60 * 60 } satisfies Limit,
-  tokenReadsPerInstallation: { max: 30, windowSeconds: 60 * 60 } satisfies Limit,
-  endpointsEverywhere: { max: 60, windowSeconds: 60 * 60 } satisfies Limit,
+  creationsPerInstallation: { max: 3, windowSeconds: 24 * 60 * 60 } satisfies Limit,
+  creationsPerNetworkHour: { max: 5, windowSeconds: 60 * 60 } satisfies Limit,
+  creationsPerNetworkDay: { max: 10, windowSeconds: 24 * 60 * 60 } satisfies Limit,
+  tokenReadsPerInstallation: { max: 4, windowSeconds: 60 * 60 } satisfies Limit,
+  endpointsEverywhere: { max: 300, windowSeconds: 60 * 60 } satisfies Limit,
   removalsEverywhere: { max: 120, windowSeconds: 60 * 60 } satisfies Limit,
   tokenReadsEverywhere: { max: 300, windowSeconds: 5 * 60 } satisfies Limit,
 };
@@ -97,6 +106,8 @@ interface EndpointRow {
   network: string;
   /// When the sweep last asked Cloudflare whether its tunnel is connected.
   checked_at: string | null;
+  /// When the sweep first saw its tunnel connected; null until then.
+  connected_at: string | null;
 }
 
 /// A call whose signature checked out: the key that signed it, its JSON body, and its nonce,
@@ -196,9 +207,15 @@ async function createEndpoint(request: Request, env: Env, deps: Deps, now: () =>
   const live = (await env.DB.prepare("SELECT count(*) AS n FROM endpoints").first<{ n: number }>())?.n ?? 0;
   if (live >= cap) throw new Reply(503, "Remote access is full right now. Try again later.");
   const network = networkBucket(request.headers.get("CF-Connecting-IP") ?? "unknown");
-  const mine = (await env.DB.prepare("SELECT count(*) AS n FROM endpoints WHERE network = ?1").bind(network).first<{ n: number }>())?.n ?? 0;
-  if (mine >= ENDPOINTS_PER_NETWORK) throw new Reply(429, `This network has ${ENDPOINTS_PER_NETWORK} Macs with remote access on already.`);
+  const waiting = (await env.DB.prepare("SELECT count(*) AS n FROM endpoints WHERE network = ?1 AND connected_at IS NULL").bind(network).first<{ n: number }>())?.n ?? 0;
+  if (waiting >= UNCONNECTED_PER_NETWORK) throw new Reply(429, "Too many Macs on this network are turning remote access on right now. Try again in an hour.");
+  // Creating, then removing, is what costs Cloudflare calls and the global limit: each
+  // installation and each network may make only a few a day, so a few networks can't drain
+  // `endpointsEverywhere` for everyone.
   await limitEndpointChanges(env.DB, row, now());
+  await limit(env.DB, `creations:installation:${row.id}`, LIMITS.creationsPerInstallation, now(), "This Mac turned remote access on too often today.");
+  await limit(env.DB, `creations:network:${network}`, LIMITS.creationsPerNetworkHour, now(), "Too many Macs on this network turned remote access on lately.");
+  await limit(env.DB, `creations:network-day:${network}`, LIMITS.creationsPerNetworkDay, now(), "Too many Macs on this network turned remote access on today.");
   await limit(env.DB, "endpoints:everywhere", LIMITS.endpointsEverywhere, now(), "Too many Macs are turning remote access on right now.");
   const hostname = `${env.HOSTNAME_PREFIX}${opaqueLabel()}.${domain}`;
   const tunnel = await deps.tunnels.createTunnel(`oby-${row.id}`, tunnelSecret());
@@ -206,7 +223,7 @@ async function createEndpoint(request: Request, env: Env, deps: Deps, now: () =>
     // Only the gateway, and nothing else on the Mac, is reachable through the tunnel.
     await deps.tunnels.configureTunnel(tunnel.id, [{ hostname, service: env.GATEWAY }, { service: "http_status:404" }]);
     const record = await deps.tunnels.createCNAME(hostname, `${tunnel.id}.cfargotunnel.com`);
-    const endpoint: EndpointRow = { installation_id: row.id, tunnel_id: tunnel.id, hostname, dns_record_id: record.id, created_at: iso(now()), network, checked_at: null };
+    const endpoint: EndpointRow = { installation_id: row.id, tunnel_id: tunnel.id, hostname, dns_record_id: record.id, created_at: iso(now()), network, checked_at: null, connected_at: null };
     try {
       await env.DB.prepare("INSERT INTO endpoints (installation_id, tunnel_id, hostname, dns_record_id, created_at, network) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
         .bind(endpoint.installation_id, endpoint.tunnel_id, endpoint.hostname, endpoint.dns_record_id, endpoint.created_at, network)
@@ -291,13 +308,14 @@ function whole(value: string | undefined, name: string, min: number, max: number
 /// The proof of work a new Mac needs now: REGISTRATION_WORK_BITS, more as endpoints near the
 /// cap and past the registration breaker.
 async function workBits(env: Env, now: Date): Promise<number> {
-  let bits = whole(env.REGISTRATION_WORK_BITS, "REGISTRATION_WORK_BITS", 1, 32);
+  let bits = whole(env.REGISTRATION_WORK_BITS, "REGISTRATION_WORK_BITS", 1, MAX_WORK_BITS);
   const cap = whole(env.MAX_ENDPOINTS, "MAX_ENDPOINTS", 1, 100_000);
   const live = (await env.DB.prepare("SELECT count(*) AS n FROM endpoints").first<{ n: number }>())?.n ?? 0;
   if (live >= cap * 0.8) bits += EXTRA_BITS.nearlyFull;
   else if (live >= cap * 0.5) bits += EXTRA_BITS.halfFull;
   if ((await counted(env.DB, "registrations:everywhere", LIMITS.registrationsEverywhere, now)) >= LIMITS.registrationsEverywhere.max) bits += EXTRA_BITS.busy;
-  return bits;
+  // Never more than the Mac does, or past the breaker everyone would be refused.
+  return Math.min(bits, MAX_WORK_BITS);
 }
 
 /// The DNS record and the tunnel go at Cloudflare first, then the row: if Cloudflare refuses,
@@ -317,12 +335,12 @@ async function remove(db: D1Database, tunnels: TunnelAPI, row: InstallationRow):
 
 // MARK: The sweep
 
-/// Cron's job, every 5 minutes (wrangler.jsonc): spent nonces and rate-limit windows a day old
-/// go; installations that never made an endpoint go after UNUSED_HOURS, in one statement; up to
+/// Cron's job, every minute (wrangler.jsonc): spent nonces and rate-limit windows a day old go;
+/// installations that never made an endpoint go after UNUSED_HOURS, in one statement; up to
 /// SWEEP_BATCH installations no Mac has signed a call for in IDLE_DAYS go with their tunnels and
-/// hostnames; and the STATUS_BATCH endpoints checked longest ago are asked about at Cloudflare,
-/// and reclaimed (`reclaimable`) when their tunnel isn't kept connected. One that Cloudflare
-/// refuses is tried again next time.
+/// hostnames; and STATUS_BATCH endpoints, never-checked first, are asked about at Cloudflare:
+/// one never connected goes with its installation, one down for days is reclaimed
+/// (`reclaimable`). One that Cloudflare refuses is tried again next time.
 export async function sweep(env: Env, deps: Deps): Promise<{ removed: number; reclaimed: number; failed: number; unused: number }> {
   const now = (deps.now ?? (() => new Date()))();
   const seconds = Math.floor(now.getTime() / 1000);
@@ -349,31 +367,39 @@ export async function sweep(env: Env, deps: Deps): Promise<{ removed: number; re
   const cutoff = iso(new Date(now.getTime() - IDLE_DAYS * 86_400_000));
   const idle = await env.DB.prepare("SELECT * FROM installations WHERE last_seen_at < ?1 ORDER BY last_seen_at LIMIT ?2").bind(cutoff, SWEEP_BATCH).all<InstallationRow>();
   for (const row of idle.results) if (await attempt(() => remove(env.DB, deps.tunnels, row))) removed++;
-  // Never-checked first (NULL sorts first), then the longest ago.
-  const due = await env.DB.prepare("SELECT * FROM endpoints ORDER BY checked_at LIMIT ?1").bind(STATUS_BATCH).all<EndpointRow>();
+  // Never-checked first, oldest made first; then the longest ago checked.
+  const due = await env.DB.prepare("SELECT * FROM endpoints ORDER BY checked_at IS NOT NULL, checked_at, created_at LIMIT ?1").bind(STATUS_BATCH).all<EndpointRow>();
   for (const endpoint of due.results) {
     await attempt(async () => {
       const status = await deps.tunnels.tunnelStatus(endpoint.tunnel_id);
-      if (reclaimable(endpoint, status, now)) {
+      const verdict = reclaimable(endpoint, status, now);
+      if (verdict === "never") {
+        // Made and never used: the installation goes too, so the next try pays its work again.
+        const owner = await env.DB.prepare("SELECT * FROM installations WHERE id = ?1").bind(endpoint.installation_id).first<InstallationRow>();
+        if (owner) await remove(env.DB, deps.tunnels, owner);
+        reclaimed++;
+      } else if (verdict === "down") {
         await tearDown(env.DB, deps.tunnels, endpoint);
         reclaimed++;
       } else {
-        await env.DB.prepare("UPDATE endpoints SET checked_at = ?2 WHERE installation_id = ?1").bind(endpoint.installation_id, iso(now)).run();
+        await env.DB.prepare("UPDATE endpoints SET checked_at = ?2, connected_at = COALESCE(connected_at, ?3) WHERE installation_id = ?1")
+          .bind(endpoint.installation_id, iso(now), status.activeAt ? iso(now) : null)
+          .run();
       }
     });
   }
   return { removed, reclaimed, failed, unused: unused?.meta.changes ?? 0 };
 }
 
-/// Whether an endpoint's tunnel isn't kept connected: it never came up NEVER_CONNECTED_HOURS
-/// after the endpoint was made, or it went down DISCONNECTED_HOURS ago. The installation stays,
-/// and a Mac that turns remote access on again gets a new hostname.
-export function reclaimable(endpoint: { created_at: string }, status: TunnelStatus, now: Date): boolean {
-  if (status.connected) return false;
+/// Whether an endpoint's tunnel isn't kept connected: "never" when it never came up (Cloudflare
+/// has no `conns_active_at`, though it sets `conns_inactive_at` from the start) by
+/// NEVER_CONNECTED_HOURS after the endpoint was made; "down" when it came up once and went down
+/// DISCONNECTED_HOURS ago; null to keep it.
+export function reclaimable(endpoint: { created_at: string }, status: TunnelStatus, now: Date): "never" | "down" | null {
+  if (status.connected) return null;
   const hoursSince = (time: string) => (now.getTime() - Date.parse(time)) / 3_600_000;
-  const down = status.inactiveAt ?? status.activeAt;
-  if (!down) return hoursSince(endpoint.created_at) >= NEVER_CONNECTED_HOURS;
-  return hoursSince(down) >= DISCONNECTED_HOURS;
+  if (!status.activeAt) return hoursSince(endpoint.created_at) >= NEVER_CONNECTED_HOURS ? "never" : null;
+  return hoursSince(status.inactiveAt ?? status.activeAt) >= DISCONNECTED_HOURS ? "down" : null;
 }
 
 // MARK: Who's asking

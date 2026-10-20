@@ -12,8 +12,10 @@ export class FakeTunnels implements TunnelAPI {
   calls: { op: string; args: unknown[] }[] = [];
   tunnels = new Map<string, { name: string; secret: string; ingress?: Ingress[] }>();
   records = new Map<string, { name: string; target: string }>();
-  /// Each tunnel's status; one not here never connected.
+  /// Each tunnel's status. One not here never connected, shaped as Cloudflare answers for one:
+  /// `conns_inactive_at` set from the start, `conns_active_at` null.
   status = new Map<string, TunnelStatus>();
+  static readonly neverConnected: TunnelStatus = { connected: false, activeAt: null, inactiveAt: "2026-10-12T12:00:00.000Z" };
   /// The zone CF_ZONE_ID names.
   zone = "oby-devices.test";
   /// What the next call of that kind answers with, as Cloudflare refusing.
@@ -62,7 +64,7 @@ export class FakeTunnels implements TunnelAPI {
 
   async tunnelStatus(id: string): Promise<TunnelStatus> {
     this.read("tunnelStatus", [id]);
-    return this.status.get(id) ?? { connected: false, activeAt: null, inactiveAt: null };
+    return this.status.get(id) ?? FakeTunnels.neverConnected;
   }
 
   async zoneName(): Promise<string> {
