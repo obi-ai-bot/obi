@@ -1,11 +1,12 @@
 import Foundation
 
-/// One page open over Home (Sangam's Home.tsx `Step`): a kind of work's cards, a task's page, the
-/// conversation with Oby, or a Settings page. The Swift runner keeps one conversation, so the
+/// One page open over Home (Sangam's Home.tsx `Step`): a kind of work's cards, a task's page, a
+/// runner job's live session (#785), the conversation with Oby, or a Settings page. The Swift runner keeps one conversation, so the
 /// conversation list (#493) shows only when the runner on this Mac is obid; there's no Obysphere yet.
 nonisolated enum WindowStep: Hashable, Sendable {
     case group(WorkType)
     case job(id: String, local: Bool)
+    case session(id: String)
     case talk
     case settings(SettingsPage)
 }

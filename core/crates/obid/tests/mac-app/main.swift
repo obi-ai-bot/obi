@@ -99,7 +99,7 @@ do {
             say("event inbox \(item.id)")
         case .accounts(let accounts):
             say("event accounts \(accounts.count)")
-        case .check, .turn, .step, .conversation, .delta, .artifact, .routine:
+        case .check, .turn, .step, .conversation, .delta, .artifact, .routine, .transcript:
             say("event other")
         case .tetrix(let status):
             say("event tetrix connected=\(status.connected)")

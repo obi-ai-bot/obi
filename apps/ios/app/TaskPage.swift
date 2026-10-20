@@ -305,16 +305,7 @@ struct TaskPage: View {
         .sheet(isPresented: $moving) {
             if let job { MoveSheet(job: job) }
         }
-        .sheet(isPresented: $showingSession) {
-            NavigationStack {
-                SessionLog(agent: job?.agentName ?? "The agent", load: { [runner = phone.runner, id] after in try await runner.transcript(id, after: after) }, live: job?.isActive ?? false, compact: true)
-                    .padding(.horizontal, Tokens.gutter).padding(.top, 10)
-                    .background(Tokens.bg)
-                    .navigationTitle("Session")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingSession = false } } }
-            }
-        }
+        .fullScreenCover(isPresented: $showingSession) { SessionSheet(id: id) }
         .sheet(isPresented: $showingReport) {
             if let researchReport {
                 NavigationStack {
@@ -618,6 +609,49 @@ struct JobPageBody<Decision: View, Result: View, Asked: View>: View {
                        })
             .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 16)
             .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
+    }
+}
+
+/// A job's live session, full screen (Sangam's SessionView, #786; #785): the same content as the
+/// Mac's, rows opening on a tap and code scrolling sideways, live from the phone's `transcript`
+/// events while it's open.
+private struct SessionSheet: View {
+    @Environment(Phone.self) private var phone
+    @Environment(\.dismiss) private var dismiss
+    let id: String
+    @State private var session: LiveSession?
+
+    private var job: Job? { phone.jobs.first { $0.id == id } }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let session, let job {
+                    SessionView(session: session, agent: job.agent, meta: meta(job), live: job.isActive, compact: true, title: false)
+                        .task(id: job.isActive) { await session.follow(live: job.isActive) }
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Tokens.bg)
+            .navigationTitle("Session")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+        .onAppear {
+            let runner = phone.runner
+            let session = LiveSession(job: id, load: { [id] after in try await runner.transcript(id, after: after) },
+                                      loadDetail: { [id] n in try await runner.transcriptDetail(id, n) })
+            self.session = session
+            phone.liveSession = session
+        }
+        .onDisappear { if phone.liveSession === session { phone.liveSession = nil } }
+    }
+
+    /// "Claude Code · Opus 5.5 · Personal".
+    private func meta(_ job: Job) -> String {
+        [job.agentName, job.model.map(ModelChoice.name), phone.accountName(job.account)].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 

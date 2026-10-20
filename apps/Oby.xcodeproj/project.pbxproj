@@ -182,6 +182,7 @@
 				Character.swift,
 				DesignViews.swift,
 				JobPageViews.swift,
+				SessionView.swift,
 				ObyFaceLive.swift,
 			);
 			target = 0B1E0C0A0000000000AD0007 /* ObyWatch */;
@@ -194,6 +195,7 @@
 				DecisionCard.swift,
 				DesignViews.swift,
 				JobPageViews.swift,
+				SessionView.swift,
 				ObyFaceLive.swift,
 			);
 			target = 0B1E0C0A0000000000AE0007 /* ObyWatchWidget */;

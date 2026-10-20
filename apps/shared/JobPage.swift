@@ -269,54 +269,200 @@ nonisolated struct JobFacts: Decodable, Equatable, Sendable {
     var waited: Double { stages.values.compactMap(\.waited).reduce(0, +) }
 }
 
-/// One line of the raw session (`GET /v1/jobs/{id}/transcript`): a tool call, what the agent
-/// said, what you said, its plan, or its start, as the agent sent them.
+/// One entry of a job's session (`GET /v1/jobs/{id}/transcript`, #755, #784): a round's start, the
+/// agent's words (in full once obid serves them, growing as `append` events come), its thinking,
+/// what you said, its to-do list, or a tool call, as the agent sent them. Values from the vault
+/// arrive masked as `[vault: NAME]`.
 nonisolated struct TranscriptEntry: Codable, Equatable, Identifiable, Sendable {
+    /// One item of its to-do list.
+    struct Todo: Codable, Equatable, Sendable {
+        var text: String
+        /// "pending", "running" or "done".
+        var state: String?
+    }
+
     var n: Int
     var at: Date?
-    /// "tool", "said", "you", "plan" or "start".
+    /// "start", "said", "thought", "you", "plan" or "tool"; a newer obid's other kinds show as their summary.
     var kind: String
     var tool: String?
     var summary: String?
+    /// The whole text of what the agent said or thought (#784); `summary` is at most 300 characters.
+    var text: String?
+    /// "running", then "done", "failed" or "declined".
     var state: String?
     var seconds: Double?
     var exit: Int?
     var added: Int?
     var removed: Int?
+    var todos: [Todo]?
+    /// What its call counts as: read, search, edit, command, test, tetrix, web, mcp or other.
+    var activity: String?
+    var file: String?
 
     var id: Int { n }
 
+    /// Its words: the whole text when obid serves it, else its summary.
+    var words: String { text ?? summary ?? "" }
+    var running: Bool { state == "running" }
+    var failed: Bool { state == "failed" || state == "declined" }
 
-    /// Words rather than a tool: set in the reading font.
-    var spoken: Bool { kind == "said" || kind == "you" }
-    /// Its tag in the log's second column: the tool's name, or the kind.
-    var tag: String { kind == "tool" ? (tool ?? "tool") : kind }
-
-    /// The line itself, with what it changed or how it ended.
-    var text: String {
-        var parts = [summary ?? ""]
-        if added != nil || removed != nil { parts.append("+\(added ?? 0) −\(removed ?? 0)") }
-        if let exit { parts.append("exit \(exit)") }
-        if let seconds { parts.append(JobPageText.seconds(seconds)) }
-        return parts.filter { !$0.isEmpty }.joined(separator: " · ")
+    /// What the tool row says at its right: how a command ended, what an edit changed.
+    var meta: String? {
+        if let exit, exit != 0 { return "exit \(exit)" }
+        if state == "declined" { return "declined" }
+        if added != nil || removed != nil { return "+\(added ?? 0) −\(removed ?? 0)" }
+        return nil
     }
 
-    /// The tabs over the log: kinds a filter takes.
+    /// The filters over the session (Sangam's #786), each with what it takes. A round's start shows
+    /// under every one, and isn't counted.
     enum Filter: String, CaseIterable, Sendable {
-        case all = "All", said = "Said", reads = "Reads", edits = "Edits", commands = "Commands", tetrix = "Tetrix", web = "Web"
+        case all = "All", said = "Said", commands = "Commands", edits = "Edits", reads = "Reads", tetrix = "Tetrix", web = "Web"
 
         func takes(_ entry: TranscriptEntry) -> Bool {
-            let tool = (entry.tool ?? "").lowercased()
             switch self {
-            case .all: return true
-            case .said: return entry.spoken
-            case .reads: return entry.kind == "tool" && ["read", "grep", "glob", "search", "ls"].contains(tool)
-            case .edits: return entry.kind == "tool" && ["edit", "write", "multiedit", "notebookedit", "apply_patch"].contains(tool)
-            case .commands: return entry.kind == "tool" && ["bash", "shell", "command"].contains(tool)
-            case .tetrix: return tool.contains("tetrix")
-            case .web: return entry.kind == "tool" && tool.hasPrefix("web")
+            case .all: return entry.kind != "start"
+            case .said: return ["said", "thought", "you"].contains(entry.kind)
+            default: return entry.kind == "tool" && Self.of(entry) == self
             }
         }
+
+        /// A call's filter, by obid's `activity` when it sends one, else by the tool's name.
+        static func of(_ entry: TranscriptEntry) -> Filter? {
+            switch entry.activity {
+            case "command", "test": return .commands
+            case "edit": return .edits
+            case "read", "search": return .reads
+            case "tetrix": return .tetrix
+            case "web": return .web
+            case .some: return nil
+            case nil: break
+            }
+            let tool = (entry.tool ?? "").lowercased()
+            if tool.contains("tetrix") { return .tetrix }
+            if ["bash", "shell", "command"].contains(tool) { return .commands }
+            if ["edit", "write", "multiedit", "notebookedit", "apply_patch"].contains(tool) { return .edits }
+            if ["read", "grep", "glob", "search", "ls"].contains(tool) { return .reads }
+            if tool.hasPrefix("web") { return .web }
+            return nil
+        }
+    }
+}
+
+/// What the event stream says about a job's session (#755, #784): an entry that came or changed,
+/// or more words for the one the agent is writing (`append`).
+nonisolated struct TranscriptEvent: Decodable, Equatable, Sendable {
+    var job: String
+    var entry: TranscriptEntry?
+    var n: Int?
+    var append: String?
+
+    private enum Keys: String, CodingKey { case job, entry, n, append }
+
+    init(job: String, entry: TranscriptEntry? = nil, n: Int? = nil, append: String? = nil) {
+        self.job = job
+        self.entry = entry
+        self.n = n
+        self.append = append
+    }
+
+    init(from decoder: any Decoder) throws {
+        let keys = try decoder.container(keyedBy: Keys.self)
+        job = try keys.decode(String.self, forKey: .job)
+        entry = (try? keys.decodeIfPresent(Lenient<TranscriptEntry>.self, forKey: .entry))?.value
+        n = try? keys.decodeIfPresent(Int.self, forKey: .n)
+        append = try? keys.decodeIfPresent(String.self, forKey: .append)
+    }
+}
+
+/// A JSON value as it came: a tool call's input is whatever the tool takes.
+nonisolated enum JSONValue: Decodable, Equatable, Sendable {
+    case string(String), number(Double), bool(Bool), array([JSONValue]), object([String: JSONValue]), null
+
+    init(from decoder: any Decoder) throws {
+        let value = try decoder.singleValueContainer()
+        if value.decodeNil() { self = .null }
+        else if let bool = try? value.decode(Bool.self) { self = .bool(bool) }
+        else if let number = try? value.decode(Double.self) { self = .number(number) }
+        else if let string = try? value.decode(String.self) { self = .string(string) }
+        else if let array = try? value.decode([JSONValue].self) { self = .array(array) }
+        else { self = .object(try value.decode([String: JSONValue].self)) }
+    }
+
+    /// As one line: a string as it is, a whole number without its decimals, the rest as JSON.
+    var text: String {
+        switch self {
+        case .string(let string): return string
+        case .number(let number): return number == number.rounded() && abs(number) < 1e15 ? String(Int(number)) : String(number)
+        case .bool(let bool): return bool ? "true" : "false"
+        case .null: return "null"
+        case .array(let items): return "[" + items.map(\.text).joined(separator: ", ") + "]"
+        case .object(let fields): return "{" + fields.keys.sorted().map { "\($0): \(fields[$0]!.text)" }.joined(separator: ", ") + "}"
+        }
+    }
+}
+
+/// An entry's detail (`GET /v1/jobs/{id}/transcript/{n}`, #784), read only when its row opens:
+/// what the call was given, the end of what it printed (the last 200 lines or 64 KB, masked line
+/// by line), and an edit's diff.
+nonisolated struct TranscriptDetail: Decodable, Equatable, Sendable {
+    struct Output: Decodable, Equatable, Sendable {
+        var text: String?
+        /// How many lines it printed in all.
+        var lines: Int?
+        var truncated: Bool?
+        var exit: Int?
+    }
+
+    struct FileDiff: Decodable, Equatable, Sendable {
+        var path: String?
+        var patch: String
+    }
+
+    var input: [String: JSONValue]?
+    var output: Output?
+    var diff: [FileDiff]?
+
+    private enum Keys: String, CodingKey { case input, output, diff }
+
+    init(input: [String: JSONValue]? = nil, output: Output? = nil, diff: [FileDiff]? = nil) {
+        self.input = input
+        self.output = output
+        self.diff = diff
+    }
+
+    /// A part that can't be read is left out, never the rest.
+    init(from decoder: any Decoder) throws {
+        let keys = try decoder.container(keyedBy: Keys.self)
+        input = try? keys.decodeIfPresent([String: JSONValue].self, forKey: .input)
+        output = try? keys.decodeIfPresent(Output.self, forKey: .output)
+        diff = try? keys.decodeIfPresent([FileDiff].self, forKey: .diff)
+    }
+
+    /// From the answer: the entry, with its `detail`.
+    static func read(_ data: Data) throws -> TranscriptDetail {
+        struct Answer: Decodable {
+            var detail: TranscriptDetail?
+            private enum Keys: String, CodingKey { case detail }
+            init(from decoder: any Decoder) throws {
+                detail = try? decoder.container(keyedBy: Keys.self).decodeIfPresent(TranscriptDetail.self, forKey: .detail)
+            }
+        }
+        return try Runner.decoder.decode(Answer.self, from: data).detail ?? TranscriptDetail()
+    }
+
+    /// The command a call ran, or nil.
+    var command: String? {
+        if case .string(let command) = input?["command"] ?? input?["cmd"] { return command }
+        return nil
+    }
+
+    /// What the call was given, as lines, the command and the edit's own text left out (they show
+    /// as the command and the diff).
+    var given: [String] {
+        let skipped: Set<String> = ["command", "cmd", "content", "old_string", "new_string", "new_source", "edits", "patch"]
+        return (input ?? [:]).keys.sorted().filter { !skipped.contains($0) }.map { "\($0): \(input![$0]!.text)" }
     }
 }
 
@@ -339,6 +485,15 @@ nonisolated struct TranscriptPage: Equatable, Sendable {
 
 /// How the page says times, counts and money.
 nonisolated enum JobPageText {
+    /// A call's time as the session says it (Sangam's #786): "0.2s", "41s", "3m 12s".
+    static func took(_ seconds: Double) -> String {
+        let seconds = max(0, seconds)
+        if seconds < 10 { return "\((seconds * 10).rounded() / 10)s".replacingOccurrences(of: ".0s", with: "s") }
+        if seconds < 60 { return "\(Int(seconds.rounded()))s" }
+        let whole = Int(seconds.rounded())
+        return "\(whole / 60)m \(whole % 60)s"
+    }
+
     /// "18s", "3m 19s" under 5 minutes, "11m", "1h 5m": a stage's or a command's time.
     static func seconds(_ value: Double) -> String {
         let total = max(0, Int(value.rounded()))
