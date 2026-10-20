@@ -24,6 +24,8 @@
 //                    settings.json and .claude.json, tries the same in <dir> (its account's own
 //                    folder) and to read <dir>'s login; says whether its config folder is <dir> and
 //                    whether its login kept a refresh token
+//   REACH: <dir> …   tries to list each folder and to write .obid-reached in it, and ends the turn
+//                    with "<dir> read=ok|no write=ok|no; …"
 //   ECHO             ends the turn with "heard: <the prompt> resume=<the session it resumed, or none>"
 //   PAUSE: <ms>      waits that long, then ends the turn with "Paused."
 //   ARTIFACTS        writes .obi/artifacts/ in the worktree: a page (a folder with index.html,
@@ -49,6 +51,13 @@
 //   TRANSIENT        ends the turn with an overloaded API's error; TRANSIENT ALWAYS every turn after
 //                    too
 //   SPEND: <n>       ends the turn saying it used n input tokens
+//   BACKGROUND: <ms> starts a background task (Bash's run_in_background) and ends the turn waiting
+//                    on it; <ms> later the task ends (a task_notification, and an empty
+//                    background_tasks_changed) and, as Claude Code does, it wakes by itself: a turn
+//                    of its own that ends with "Built." With SILENT, the task ends and it never
+//                    wakes; with FOREVER, it never ends; with EXIT, it exits at once instead,
+//                    the task still running. Told to wait in the foreground, it ends with "Built in
+//                    the foreground.", or with EXIT ALWAYS exits the same way again
 //   COMMIT … QUIET   commits, then says nothing until it is ended
 //   a handoff note   asked for one (obid's prompt when a job stalls): ends the turn with the note,
 //                    "Done: … Left: … Failed: …", or says nothing when the task said NO NOTE
@@ -76,6 +85,16 @@ const result = (text, error = false) =>
     ...(tokens && { usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 1000, cache_creation_input_tokens: 50 },
       modelUsage: { "fake-opus": { inputTokens: 100 * tokens, outputTokens: 20 * tokens, cacheReadInputTokens: 1000 * tokens, cacheCreationInputTokens: 50 * tokens, costUSD: 0.2 * tokens },
         "fake-haiku": { inputTokens: 10 * tokens, outputTokens: 5 * tokens, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.05 * tokens } } }) });
+
+// Starts a background build, as Claude Code's Bash with run_in_background, and ends the turn
+// waiting on it: a housekeeping task (`ambient`) is listed too, and waits for nothing.
+const background = () => {
+  emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: "b1", name: "Bash", input: { command: "npm run build", run_in_background: true } }] } });
+  emit({ type: "system", subtype: "task_started", task_id: "bg1", tool_use_id: "b1", description: "npm run build", task_type: "local_bash", is_backgrounded: true, session_id: session });
+  emit({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "bg1", task_type: "local_bash", description: "npm run build" }, { task_id: "h1", task_type: "local_agent", description: "Tidying memory", ambient: true }], session_id: session });
+  emit({ type: "user", session_id: session, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "b1", content: "Command running in background with ID: bg1." }] } });
+  result("The build is still going. I'll continue when the monitor reports it's done.");
+};
 
 const leaked = Object.keys(process.env).filter((name) =>
   name === "CLAUDECODE" || (name.startsWith("CLAUDE_CODE_") && name !== "CLAUDE_CODE_TMPDIR") || name.startsWith("ANTHROPIC_") || name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN");
@@ -138,6 +157,11 @@ rl.on("line", (line) => {
     if (existsSync(".obi/no-note")) return setInterval(() => {}, 1000);
     return result("Done: the parser.\nLeft: the tests.\nFailed: npm test, three times: a missing fixture.");
   }
+  if (prompt.includes("end of your turn is the end of your work")) {
+    if (!existsSync(".obi/exit-always")) return result("Built in the foreground.");
+    background();
+    process.stdout.end(() => process.exit(0));
+  }
   if (prompt.includes("TRANSIENT ALWAYS")) {
     mkdirSync(".obi", { recursive: true });
     writeFileSync(".obi/always-transient", "");
@@ -151,6 +175,7 @@ rl.on("line", (line) => {
   const ask = prompt.match(/ASK: (\{.*\})/);
   const asks = prompt.match(/ASKS: (\[.*\])/);
   const login = prompt.match(/LOGIN: (\S+)/);
+  const reach = prompt.match(/REACH: (.+)/);
   const plant = prompt.match(/PLANT: (\S+)/);
   const draft = prompt.match(/DRAFT: (\S+)/);
   if (draft) writeFileSync(draft[1], "draft\n");
@@ -174,6 +199,17 @@ rl.on("line", (line) => {
     emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Write", input: { file_path: commit[1] } }] } });
     if (prompt.includes("QUIET")) return setInterval(() => {}, 1000);
     result(`Added ${commit[1]}.`);
+  } else if (reach) {
+    const tries = (f) => {
+      try {
+        f();
+        return "ok";
+      } catch {
+        return "no";
+      }
+    };
+    const dirs = reach[1].trim().split(/\s+/);
+    result(dirs.map((d) => `${d} read=${tries(() => readdirSync(d))} write=${tries(() => writeFileSync(`${d}/.obid-reached`, "x"))}`).join("; "));
   } else if (login) {
     const tries = (f) => {
       try {
@@ -270,6 +306,21 @@ rl.on("line", (line) => {
       emit({ type: "user", session_id: session, message: { role: "user", content: [{ type: "tool_result", tool_use_id: `l${i}`, is_error: true, content: "npm ERR! missing fixture" }] } });
     }
     setInterval(() => {}, 1000);
+  } else if (prompt.match(/BACKGROUND: (\d+)/)) {
+    if (prompt.includes("EXIT ALWAYS")) {
+      mkdirSync(".obi", { recursive: true });
+      writeFileSync(".obi/exit-always", "");
+    }
+    background();
+    if (prompt.includes("EXIT")) return process.stdout.end(() => process.exit(0));
+    if (prompt.includes("FOREVER")) return;
+    setTimeout(() => {
+      emit({ type: "system", subtype: "task_notification", task_id: "bg1", tool_use_id: "b1", status: "completed", summary: 'Background command "npm run build" completed (exit code 0)', output_file: "", session_id: session });
+      emit({ type: "system", subtype: "background_tasks_changed", tasks: [], session_id: session });
+      if (prompt.includes("SILENT")) return setInterval(() => {}, 1000);
+      emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Bash"], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
+      result("Built.");
+    }, Number(prompt.match(/BACKGROUND: (\d+)/)[1]));
   } else if (prompt.includes("MAXTURNS")) {
     emit({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 200, session_id: session, total_cost_usd: 0 });
   } else if (prompt.includes("TRANSIENT")) {

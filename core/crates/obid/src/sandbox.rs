@@ -27,7 +27,9 @@
 //!   person's login keychain) is a file in the person's hidden home, so it can't read it either.
 //!
 //! When the sandbox can't be made on this machine, nothing runs: [`Sandbox::detect`] says why, and
-//! the job fails saying so.
+//! the job fails saying so. On macOS an obid that itself runs inside a job sandbox (a job running
+//! obid's tests) can't make another, since Seatbelt doesn't nest: what it starts stays in the job's
+//! sandbox it inherits ([`Tool::Enclosing`]), never in none.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -49,6 +51,39 @@ enum Tool {
     Bubblewrap(PathBuf),
     /// `/usr/bin/sandbox-exec`.
     Seatbelt(PathBuf),
+    /// macOS, when obid itself runs inside a job sandbox (a job running obid's tests): Seatbelt
+    /// can't nest, so what obid starts stays in the sandbox it was started in, which every
+    /// process inherits and none can leave ([`inside_a_job_sandbox`]).
+    Enclosing,
+}
+
+/// Whether this process is inside obid's own job sandbox. Asked only once `sandbox-exec` was
+/// refused, which happens only inside a sandbox; inside any other (an App Sandbox, a sandboxed
+/// launcher) obid makes none and runs nothing. The job profile's fingerprint, each part probed
+/// without a side effect (libsandbox's `sandbox_check` would need `unsafe`, which this workspace
+/// forbids): the person's home (from the password database, not `HOME`) can't be listed; a Unix
+/// socket that isn't the resolver's can't be connected to (syslog's: connected, nothing sent); and
+/// the pasteboard server can't be reached (`pbpaste` of the ruler pasteboard, its output
+/// discarded).
+fn inside_a_job_sandbox() -> bool {
+    let denied = |e: std::io::Error| e.kind() == std::io::ErrorKind::PermissionDenied;
+    let Ok(Some(user)) = nix::unistd::User::from_uid(nix::unistd::getuid()) else {
+        return false;
+    };
+    let home_hidden = user.dir.is_absolute()
+        && user.dir != Path::new("/")
+        && std::fs::read_dir(&user.dir).is_err_and(denied);
+    let sockets_denied = std::os::unix::net::UnixDatagram::unbound()
+        .and_then(|socket| socket.connect("/var/run/syslog"))
+        .is_err_and(denied);
+    let pasteboard_denied = std::process::Command::new("/usr/bin/pbpaste")
+        .args(["-pboard", "ruler"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| !status.success());
+    home_hidden && sockets_denied && pasteboard_denied
 }
 
 /// obid's argument that runs the rest of its command line in a session of its own:
@@ -170,16 +205,44 @@ impl Sandbox {
         let session = obid.to_path_buf();
         if cfg!(target_os = "macos") {
             let path = PathBuf::from("/usr/bin/sandbox-exec");
-            if path.exists() {
-                return Ok(Sandbox {
+            if !path.exists() {
+                return Err(
+                    "/usr/bin/sandbox-exec isn't on this Mac, so obid can't make the job sandbox."
+                        .into(),
+                );
+            }
+            // A trial run, as on Linux. Seatbelt doesn't nest: inside a sandbox (a job's, running
+            // obid's own tests) `sandbox_apply` is refused for any profile.
+            let tried = std::process::Command::new(&path)
+                .args([
+                    "-p",
+                    "(version 1)(allow default)(deny file-write* (literal \"/obid-trial\"))",
+                    "/usr/bin/true",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .output();
+            return match tried {
+                Ok(output) if output.status.success() => Ok(Sandbox {
                     tool: Tool::Seatbelt(path),
                     session,
-                });
-            }
-            return Err(
-                "/usr/bin/sandbox-exec isn't on this Mac, so obid can't make the job sandbox."
-                    .into(),
-            );
+                }),
+                Ok(output)
+                    if String::from_utf8_lossy(&output.stderr).contains("sandbox_apply")
+                        && inside_a_job_sandbox() =>
+                {
+                    Ok(Sandbox {
+                        tool: Tool::Enclosing,
+                        session,
+                    })
+                }
+                Ok(output) => Err(format!(
+                    "sandbox-exec can't make a sandbox on this Mac: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+                Err(e) => Err(format!("sandbox-exec can't run: {e}")),
+            };
         }
         if cfg!(target_os = "linux") {
             let Some(bwrap) = find_on_path("bwrap") else {
@@ -219,6 +282,11 @@ impl Sandbox {
             };
         }
         Err("obid makes the job sandbox only on Linux and macOS.".into())
+    }
+
+    /// Whether what obid starts stays in the job sandbox obid itself runs in ([`Tool::Enclosing`]).
+    pub fn encloses(&self) -> bool {
+        self.tool == Tool::Enclosing
     }
 
     /// The command line that runs `argv` inside the sandbox `spec` describes: the program, then its
@@ -307,6 +375,18 @@ impl Sandbox {
                         .unwrap_or_else(|| PathBuf::from("/"))
                         .into(),
                 );
+            }
+            Tool::Enclosing => {
+                // The same watcher, but it never reaps: `/` is readable, and `kill -1` would
+                // reach everything in the enclosing job sandbox, the job's own agent included.
+                // A process that called setsid ends with that job instead.
+                out.extend([
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    WATCHER.into(),
+                    "watcher".into(),
+                    "/".into(),
+                ]);
             }
         }
         out.extend(argv.iter().cloned());

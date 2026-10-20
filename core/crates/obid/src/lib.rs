@@ -215,8 +215,12 @@ pub async fn serve(
     let sandbox = std::env::current_exe()
         .map_err(|e| format!("obid can't find its own executable: {e}"))
         .and_then(|obid| sandbox::Sandbox::detect(&obid));
-    if let Err(why) = &sandbox {
-        tracing::warn!("no job sandbox, so no job will run: {why}");
+    match &sandbox {
+        Err(why) => tracing::warn!("no job sandbox, so no job will run: {why}"),
+        Ok(boxed) if boxed.encloses() => tracing::warn!(
+            "obid runs inside a job sandbox, which Seatbelt can't nest in: what it starts stays in that sandbox"
+        ),
+        Ok(_) => {}
     }
     let jobs = jobs::Jobs::open(config.clone(), events.clone(), sandbox).map_err(|source| {
         StartError::Jobs {

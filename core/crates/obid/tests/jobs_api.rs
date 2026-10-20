@@ -592,6 +592,224 @@ fn nothing_committed_is_done_and_needs_nothing() {
     );
 }
 
+/// A job that changes obid runs obid's own tests inside its job sandbox, and they start obid's
+/// fake agent there. Seatbelt can't make a sandbox inside another, so the test's obid runs its agent
+/// in the job's sandbox it inherits, and only in a job's ("The job sandbox"). Each case runs one of
+/// these tests inside a sandbox, as a job runs `cargo test`.
+#[cfg(target_os = "macos")]
+mod inside_a_job {
+    use super::*;
+    use obid::sandbox::{self, Sandbox, Spec};
+    use std::ffi::OsString;
+
+    /// What the inner run is given: the outer obid's home (with a file in it), a folder outside
+    /// everything the job may write, and the job's temporary folder.
+    pub struct Job {
+        _folder: Folder,
+        pub home: PathBuf,
+        pub outside: PathBuf,
+        pub temp: PathBuf,
+    }
+
+    impl Job {
+        pub fn new(name: &str) -> Job {
+            let folder = Folder::new(name);
+            let home = folder.0.join("obid-home");
+            let outside = folder.0.join("outside");
+            let temp = folder.0.join("job-tmp");
+            for dir in [&home, &outside, &temp] {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            std::fs::write(home.join("api-token"), "outer obid's\n").unwrap();
+            Job {
+                _folder: folder,
+                home,
+                outside,
+                temp,
+            }
+        }
+
+        /// A sandbox made as a job's agent's (`Jobs::spec`): this repository is the worktree,
+        /// obid's home and, with `person`, the person's homes are hidden.
+        pub fn spec(&self, person: bool) -> Spec {
+            let mut hidden = vec![self.home.clone()];
+            if person {
+                hidden.extend(obid::jobs::person_homes());
+            }
+            let path = obid::process::tools_path();
+            let mut read_only =
+                sandbox::tool_roots(&path, &hidden, std::slice::from_ref(&self.home));
+            // The test binaries, wherever cargo built them.
+            let this = std::env::current_exe().unwrap();
+            read_only.extend(
+                [this.parent().unwrap(), Path::new(OBID).parent().unwrap()].map(Path::to_path_buf),
+            );
+            Spec {
+                worktree: obi(),
+                temp: self.temp.clone(),
+                read_only,
+                hidden,
+                network: true,
+                ..Spec::default()
+            }
+        }
+
+        /// The command line that runs this binary's `test` (and only it, ignored or not)
+        /// inside `spec`'s sandbox.
+        pub fn wrapped(&self, spec: &Spec, test: &str) -> Vec<OsString> {
+            Sandbox::detect(Path::new(OBID))
+                .unwrap()
+                .wrap(spec, &self.argv(test))
+        }
+
+        pub fn argv(&self, test: &str) -> Vec<OsString> {
+            vec![
+                std::env::current_exe().unwrap().into_os_string(),
+                test.into(),
+                "--exact".into(),
+                "--include-ignored".into(),
+                "--nocapture".into(),
+            ]
+        }
+
+        /// Runs `argv` in this repository with a job's environment and `env`: what it printed,
+        /// and whether its one test passed.
+        pub fn run(&self, argv: &[OsString], env: &[(&str, OsString)]) -> (bool, String) {
+            let path = obid::process::tools_path();
+            let output = Command::new(&argv[0])
+                .args(&argv[1..])
+                .current_dir(obi())
+                .env_clear()
+                .envs(obid::process::sandbox_env(&path, &self.temp, env))
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            (said.contains("test result: ok. 1 passed"), said)
+        }
+
+        /// What the inner obids logged, the folders their tests kept (`OBID_TEST_KEEP`).
+        pub fn inner_logs(&self) -> String {
+            let mut logs = String::new();
+            for entry in std::fs::read_dir(&self.temp).unwrap().flatten() {
+                logs +=
+                    &std::fs::read_to_string(entry.path().join("obid.stderr")).unwrap_or_default();
+            }
+            logs
+        }
+    }
+}
+
+/// A fake-agent job test runs inside a job's sandbox, and its obid says it kept its agent in the
+/// sandbox it runs in.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_fake_agent_test_runs_inside_a_jobs_sandbox() {
+    let job = inside_a_job::Job::new("inside-a-job");
+    let argv = job.wrapped(
+        &job.spec(true),
+        "nothing_committed_is_done_and_needs_nothing",
+    );
+    let (passed, said) = job.run(&argv, &[("OBID_TEST_KEEP", "1".into())]);
+    assert!(passed, "{said}");
+    assert!(
+        job.inner_logs()
+            .contains("obid runs inside a job sandbox, which Seatbelt can't nest in"),
+        "{said}"
+    );
+}
+
+/// The fake agent of a test run inside a job's sandbox still reads nothing of the person's home
+/// or the outer obid's, and writes only where the job may: its own worktree, here.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_fake_agent_inside_a_jobs_sandbox_stays_in_it() {
+    let job = inside_a_job::Job::new("inside-a-job-fenced");
+    let person = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .unwrap()
+        .unwrap()
+        .dir;
+    let dirs = [
+        person.clone(),
+        job.home.clone(),
+        job.outside.clone(),
+        PathBuf::from("."),
+    ];
+    let reach = dirs
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let argv = job.wrapped(&job.spec(true), "reach_from_inside_a_job");
+    let (passed, said) = job.run(&argv, &[("OBID_REACH", reach.into())]);
+    assert!(passed, "{said}");
+    // The homes are hidden; a folder elsewhere is read, as by any job, never written.
+    for (dir, reached) in [
+        (&dirs[0], "read=no write=no"),
+        (&dirs[1], "read=no write=no"),
+        (&dirs[2], "read=ok write=no"),
+    ] {
+        let expected = format!("{} {reached}", dir.display());
+        assert!(said.contains(&expected), "{expected}: {said}");
+        assert!(!dir.join(".obid-reached").exists(), "{dir:?}");
+    }
+    assert!(said.contains(". read=ok write=ok"), "{said}");
+}
+
+/// Run by the test above, inside a job's sandbox: a job whose fake agent tries the folders
+/// `OBID_REACH` names, and says what it reached.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "run inside a job's sandbox by a_fake_agent_inside_a_jobs_sandbox_stays_in_it"]
+fn reach_from_inside_a_job() {
+    let reach = std::env::var("OBID_REACH").unwrap();
+    let folder = Folder::new("reach");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "research", "task": format!("REACH: {reach}")}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    println!("REACHED: {}", job["summary"]);
+}
+
+/// Inside any sandbox but a job's, obid makes none and runs nothing: one that doesn't hide the
+/// person's home, and one that hides it but lacks the job profile's other fences (Unix sockets,
+/// the pasteboard), as an App Sandbox or a sandboxed launcher would.
+#[cfg(target_os = "macos")]
+#[test]
+fn inside_another_sandbox_a_fake_agent_test_runs_nothing() {
+    let job = inside_a_job::Job::new("inside-another");
+    let person = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .unwrap()
+        .unwrap()
+        .dir;
+    let foreign = format!(
+        "(version 1)(allow default)(deny file-read-data (literal {:?}))(deny file-read* (subpath {:?}))",
+        person.display().to_string(),
+        job.home.display().to_string(),
+    );
+    let test = "nothing_committed_is_done_and_needs_nothing";
+    let mut sandbox_exec: Vec<std::ffi::OsString> =
+        vec!["/usr/bin/sandbox-exec".into(), "-p".into(), foreign.into()];
+    sandbox_exec.extend(job.argv(test));
+    for argv in [job.wrapped(&job.spec(false), test), sandbox_exec] {
+        let (passed, said) = job.run(&argv, &[]);
+        assert!(!passed, "{said}");
+        assert!(said.contains("sandbox-exec can't make a sandbox"), "{said}");
+    }
+}
+
 /// #606: what the agent left uncommitted when its job ends without being done is one `wip:`
 /// commit on the job's branch, published by nothing; a round the owner asks for afterwards takes
 /// it back out, so it counts as none of the job's commits.
@@ -1175,8 +1393,8 @@ fn a_failure_the_task_asked_for_ends_the_rounds() {
     );
 }
 
-/// obid answers the agent's permission prompts: publishing and leaving the worktree are refused,
-/// the rest of a bypass job's work is allowed; and none of obid's own secrets reach the agent.
+/// obid answers the agent's permission prompts: publishing, leaving the worktree and a background
+/// subagent are refused, the rest of a bypass job's work is allowed (a background command too); and none of obid's own secrets reach the agent.
 #[test]
 fn permission_prompts_are_answered_by_the_rules() {
     let folder = Folder::new("ask");
@@ -1192,8 +1410,13 @@ fn permission_prompts_are_answered_by_the_rules() {
             "answer: deny",
         ),
         (
-            json!({"tool": "Bash", "input": {"command": "sleep 1", "run_in_background": true}}),
+            json!({"tool": "Agent", "input": {"description": "x", "run_in_background": true}}),
             "answer: deny",
+        ),
+        // Waited for: Claude Code wakes when it ends (crate::agent).
+        (
+            json!({"tool": "Bash", "input": {"command": "sleep 1", "run_in_background": true}}),
+            "answer: allow",
         ),
         (
             json!({"tool": "mcp__github__create_pull_request", "input": {}}),
