@@ -399,3 +399,67 @@ fn the_feed_lists_offers_new_work_once_and_starts_it_on_a_tap() {
     refresh(&obid);
     assert_eq!(graphql_calls(&gh), asked);
 }
+
+#[test]
+fn each_item_carries_its_board_column_and_the_feed_goes_on_without_read_project() {
+    let folder = Folder::new("github-work-board");
+    let remote = fixture(&folder.0.join("fixture"));
+    let config = config(&folder.0, &remote, &agents().join("fake-claude"));
+    let obid = start(&folder.0, &config, Some(&agents()));
+    let gh = folder.0.join("env-home/github");
+    std::fs::create_dir_all(&gh).unwrap();
+    let on_board = |board: bool| {
+        let mut issue = node(REPO, 640);
+        if board {
+            issue["projectItems"] = json!({"nodes": [
+                {"project": {"title": "Ideas"}, "fieldValueByName": null},
+                {"project": {"title": "Oby — Roadmap"}, "fieldValueByName": {"name": "Todo"}}]});
+        }
+        let search = |nodes: Vec<Value>| json!({"issueCount": nodes.len(), "nodes": nodes});
+        let answer = json!({"data": {"reviews": search(vec![node(REPO, 702)]), "assigned": search(vec![issue]), "mine": search(vec![]),
+                                     "rateLimit": {"cost": 6, "remaining": 4900, "resetAt": "2026-10-18T10:00:00Z"},
+                                     "viewer": {"login": "wellington"}}});
+        std::fs::write(gh.join("work.json"), answer.to_string()).unwrap();
+    };
+
+    on_board(true);
+    let feed = refresh(&obid);
+    assert_eq!(
+        feed["assigned"][0]["board"],
+        json!({"project": "Oby — Roadmap", "column": "Todo"}),
+        "{feed}"
+    );
+    assert_eq!(feed["reviews"][0]["board"], Value::Null);
+    assert_eq!(feed["error"], Value::Null);
+
+    // gh's login without read:project: GitHub fails the whole query, so obid reads again without
+    // boards and says how to fix it (ticks skip boards for an hour; a refresh asks again).
+    std::fs::write(gh.join("no-board"), "").unwrap();
+    on_board(false);
+    let calls = graphql_calls(&gh);
+    let feed = refresh(&obid);
+    assert_eq!(graphql_calls(&gh), calls + 2);
+    assert_eq!(feed["signedIn"], true, "{feed}");
+    assert_eq!(feed["assigned"][0]["number"], 640);
+    assert_eq!(feed["assigned"][0]["board"], Value::Null);
+    assert_eq!(
+        feed["error"],
+        "Board columns need gh's read:project scope: run gh auth refresh -s read:project"
+    );
+    let feed = refresh(&obid);
+    assert_eq!(
+        graphql_calls(&gh),
+        calls + 4,
+        "a refresh asks for boards again"
+    );
+    assert_eq!(feed["reviews"].as_array().unwrap().len(), 1);
+    assert!(feed["error"].as_str().unwrap().contains("read:project"));
+
+    // Once the owner runs `gh auth refresh -s read:project`, a refresh reads boards at once.
+    std::fs::remove_file(gh.join("no-board")).unwrap();
+    on_board(true);
+    let feed = refresh(&obid);
+    assert_eq!(graphql_calls(&gh), calls + 5);
+    assert_eq!(feed["assigned"][0]["board"]["column"], "Todo", "{feed}");
+    assert_eq!(feed["error"], Value::Null);
+}

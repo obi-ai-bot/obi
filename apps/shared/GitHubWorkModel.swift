@@ -50,14 +50,34 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
         var known: Bool = true
         /// The queued or running job on it: the job is listed instead.
         var job: String?
+        /// Where it sits on a GitHub project board, when it's on one (a newer obid's; older ones leave it out).
+        var board: Board?
 
-        private enum Keys: String, CodingKey { case id, list, repo, number, title, url, author, updated, draft, reviewDecision, checks, known, job }
+        nonisolated struct Board: Decodable, Equatable, Sendable {
+            /// The project's name, "Oby — Roadmap".
+            var project: String?
+            /// Its column there, "Todo" or "In progress".
+            var column: String?
+
+            private enum Keys: String, CodingKey { case project, column }
+
+            init(project: String? = nil, column: String? = nil) { (self.project, self.column) = (project, column) }
+
+            /// Each field on its own: one this app can't read is left out, not the whole board.
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: Keys.self)
+                project = (try? c.decodeIfPresent(String.self, forKey: .project)) ?? nil
+                column = (try? c.decodeIfPresent(String.self, forKey: .column)) ?? nil
+            }
+        }
+
+        private enum Keys: String, CodingKey { case id, list, repo, number, title, url, author, updated, draft, reviewDecision, checks, known, job, board }
 
         init(id: String, list: List, repo: String, number: Int, title: String, url: String, author: String? = nil, updated: Date? = nil,
-             draft: Bool = false, reviewDecision: String? = nil, checks: String? = nil, known: Bool = true, job: String? = nil) {
+             draft: Bool = false, reviewDecision: String? = nil, checks: String? = nil, known: Bool = true, job: String? = nil, board: Board? = nil) {
             (self.id, self.list, self.repo, self.number, self.title, self.url, self.author, self.updated) = (id, list, repo, number, title, url, author, updated)
             self.draft = draft
-            (self.reviewDecision, self.checks, self.known, self.job) = (reviewDecision, checks, known, job)
+            (self.reviewDecision, self.checks, self.known, self.job, self.board) = (reviewDecision, checks, known, job, board)
         }
 
         init(from decoder: Decoder) throws {
@@ -75,6 +95,8 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
             checks = try c.decodeIfPresent(String.self, forKey: .checks)
             known = try c.decodeIfPresent(Bool.self, forKey: .known) ?? true
             job = try c.decodeIfPresent(String.self, forKey: .job)
+            // A board this app can't read is no board: the item still shows, under To do.
+            board = (try? c.decodeIfPresent(Board.self, forKey: .board)) ?? nil
         }
     }
 
@@ -180,6 +202,9 @@ extension GitHubWork.Item {
         return draft ? "It's a draft: Oby can review it once it's ready for review." : nil
     }
 
+    /// Its board column as one plain line ("Todo"), the small label on its card; nil off a board.
+    var column: String? { board?.column.map(GitHubWork.plain).flatMap { $0.isEmpty ? nil : $0 } }
+
     /// Its page on GitHub, only when it's one (`GitHubWork.page`).
     var page: URL? { GitHubWork.page(url) }
 }
@@ -233,6 +258,37 @@ extension GitHubWork {
     func waiting(_ kind: WorkType, later: Set<String> = []) -> [Item] {
         items.filter { $0.type == kind && $0.job == nil && !later.contains($0.id) }
             .sorted { ($0.updated ?? .distantPast) > ($1.updated ?? .distantPast) }
+    }
+
+    /// One group of a kind's To do tab: the waiting items in one board column (`name`) of one
+    /// project (`project`), or on no board (`name` nil).
+    nonisolated struct Column: Identifiable, Equatable, Sendable {
+        var name: String?
+        var project: String?
+        var items: [Item]
+        var id: String { "\(project ?? "")\u{1F}\(name ?? "")" }
+
+        /// Where a column goes on the tab: the work under way first, then what's next, the rest
+        /// by name, items on no board last.
+        static func rank(_ name: String?) -> Int {
+            guard let name else { return 5 }
+            return ["in progress", "in review", "todo", "backlog"].firstIndex(of: name.lowercased()) ?? 4
+        }
+    }
+
+    /// A kind's To do tab: its waiting items (`waiting`, newest first) by project and board column,
+    /// the columns in a fixed order (`Column.rank`, then by name and project), the items on no
+    /// board last. Without boards, one group with no name.
+    func toDo(_ kind: WorkType, later: Set<String> = []) -> [Column] {
+        var columns: [Column] = []
+        for item in waiting(kind, later: later) {
+            let project = item.column == nil ? nil : item.board?.project.map(GitHubWork.plain)
+            if let at = columns.firstIndex(where: { $0.name == item.column && $0.project == project }) { columns[at].items.append(item) }
+            else { columns.append(Column(name: item.column, project: project, items: [item])) }
+        }
+        return columns.sorted {
+            (Column.rank($0.name), $0.name?.lowercased() ?? "", $0.project ?? "") < (Column.rank($1.name), $1.name?.lowercased() ?? "", $1.project ?? "")
+        }
     }
 
     /// A GitHub page to open: `https://github.com/…` and nothing else (no other host, no login in

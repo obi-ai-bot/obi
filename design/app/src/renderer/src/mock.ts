@@ -124,6 +124,32 @@ const REVIEW: StageId[] = ['prepare', 'work', 'publish'];
 
 const { github, slack, gmail, deskree } = BRANDS;
 
+// GitHub's work no job has yet (obid's GET /v1/github/work): a review asked of
+// you, an issue assigned to you, each with its project board's column when it's
+// on one. Under To do in Review PR and Issues until you start it or put it off.
+export type GitHubItem = {
+  id: string;
+  type: 'review' | 'issues';
+  who?: string;        // a review's author, before the title
+  title: string;       // "#412 retry jitter"
+  repo: string;        // "tetrix-ee"
+  request: string;     // the headline
+  action: 'Review it' | 'Fix it';
+  board?: { project: string; column: string };
+  updated: number;     // minutes ago
+};
+
+const ROADMAP = 'Oby — Roadmap';
+export const GITHUB_WORK: GitHubItem[] = [
+  { id: 'g1', type: 'review', who: 'Ernesto', title: '#417 batch retries', repo: 'tetrix-ee', request: 'Ernesto asked you to review tetrix-ee #417.', action: 'Review it', updated: 12 },
+  { id: 'g2', type: 'review', who: 'Dima', title: '#420 graph cache', repo: 'tetrix-ee', request: 'Dima asked you to review tetrix-ee #420.', action: 'Review it', updated: 55 },
+  { id: 'g3', type: 'issues', title: '#266 Pin a task', repo: 'oby', request: 'Assigned to you in oby #266.', action: 'Fix it', board: { project: ROADMAP, column: 'In progress' }, updated: 64 },
+  { id: 'g4', type: 'issues', title: '#262 Snooze a task', repo: 'oby', request: 'Assigned to you in oby #262.', action: 'Fix it', board: { project: ROADMAP, column: 'Todo' }, updated: 90 },
+  { id: 'g5', type: 'issues', title: '#270 Mute a repository', repo: 'oby', request: 'Assigned to you in oby #270.', action: 'Fix it', board: { project: ROADMAP, column: 'Todo' }, updated: 240 },
+  { id: 'g6', type: 'issues', title: '#288 Weekly digest', repo: 'oby', request: 'Assigned to you in oby #288.', action: 'Fix it', board: { project: ROADMAP, column: 'Backlog' }, updated: 1500 },
+  { id: 'g7', type: 'issues', title: '#409 Copied links lose the filter', repo: 'tetrix-front-end', request: 'Assigned to you in tetrix-front-end #409.', action: 'Fix it', updated: 110 },
+];
+
 export const JOBS: Job[] = [
   {
     id: 's5', type: 'tasks', title: 'Invite link expired', request: 'invite links die after an hour, should be 7 days',

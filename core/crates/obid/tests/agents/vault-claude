@@ -14,8 +14,10 @@
 //   WAIT             waits 60 seconds, then ends the turn
 //   TOOLS            a session of tool calls, each answered (tests/vault_api.rs): its words, 5
 //                    reads, a to-do list, more words with VALUE in them plain, hex and
-//                    URL-encoded, 2 edits, and a run of the job's check (node --test) whose
-//                    command holds VALUE plain and base64 and fails
+//                    URL-encoded (streamed as partial messages, 41 lines), 2 edits, and a run of
+//                    the job's check (node --test) whose command holds VALUE plain and base64,
+//                    which prints 304 lines (VALUE, its base64 and a GitHub token among its last)
+//                    and fails with exit code 1
 //   anything else    ends the turn with "Nothing to do."
 // Every turn writes the prompt it got to .obi/seen-prompt.txt in the worktree (.obi/ is never part
 // of the work), so a test can read what reached the agent.
@@ -85,18 +87,28 @@ rl.on("line", (line) => {
     } else if (prompt.includes("TOOLS")) {
       let n = 0;
       const say = (text) => emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "text", text }] } });
-      const call = (name, input, error = false) => {
+      const call = (name, input, error = false, content = "raw output that never leaves obid") => {
         const id = `toolu_${++n}`;
         emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } });
-        emit({ type: "user", session_id: session, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, is_error: error, content: "raw output that never leaves obid" }] } });
+        emit({ type: "user", session_id: session, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, is_error: error, content }] } });
+      };
+      // Words as Claude Code streams them (--include-partial-messages), then the whole message.
+      const stream = (text) => {
+        for (let i = 0; i < text.length; i += 7)
+          emit({ type: "stream_event", session_id: session, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: text.slice(i, i + 7) } } });
+        say(text);
       };
       say("Looking for where a blocked scan ends the job.");
       for (const file of ["scan.rs", "jobs.rs", "publish.rs", "git.rs", "lib.rs"]) call("Read", { file_path: `${process.cwd()}/src/${file}` });
       call("TodoWrite", { todos: [{ content: "Find it", status: "completed", activeForm: "Finding it" }, { content: "Fix it", status: "in_progress", activeForm: "Fixing it" }] });
-      say(`Found it. Fixing it, with ${VALUE} for staging (${forms.hex}, ${forms.url}).`);
+      const steps = Array.from({ length: 40 }, (_, i) => `Step ${i + 1}: look again at the scan's exit.`).join("\n");
+      stream(`Found it. Fixing it, with ${VALUE} for staging (${forms.hex}, ${forms.url}).\n${steps}`);
       call("Edit", { file_path: `${process.cwd()}/src/scan.rs`, old_string: "a\nb", new_string: "c\nd\ne" });
       call("Edit", { file_path: `${process.cwd()}/src/jobs.rs`, old_string: "x", new_string: "y" });
-      call("Bash", { command: `export STAGING_KEY=${VALUE} KEY64=${forms.base64} && node --test` }, true);
+      const token = ["ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"].join("");
+      const printed = Array.from({ length: 300 }, (_, i) => `ok ${i + 1} - test ${i + 1}`);
+      printed.splice(296, 0, `using ${VALUE}`, `as base64 ${forms.base64}`, `token ${token}`);
+      call("Bash", { command: `export STAGING_KEY=${VALUE} KEY64=${forms.base64} && node --test` }, true, `Exit code 1\n${printed.join("\n")}`);
       result("Fixed it.");
     } else if (prompt.includes("WAIT")) {
       execFileSync("sleep", ["60"]);

@@ -411,7 +411,7 @@ private struct ResponseTooLarge: LocalizedError {
 
 /// Captures a bounded stdout while a fixed argv command runs. curl's size option can't cap
 /// unknown-length responses on older system versions, so the pipe itself enforces the limit.
-nonisolated private enum LimitedCommand {
+nonisolated enum LimitedCommand {
     nonisolated private final class LockedFlag: @unchecked Sendable {
         private let lock = NSLock()
         private var stored = false
@@ -420,14 +420,15 @@ nonisolated private enum LimitedCommand {
     }
     nonisolated private final class Collected: @unchecked Sendable { var data = Data() }
 
-    static func run(_ arguments: [String], outputLimit: Int, timeout: TimeInterval) async throws -> Shell.Output {
+    static func run(_ arguments: [String], outputLimit: Int, timeout: TimeInterval,
+                    environment: [String: String] = ["PATH": "/usr/bin:/bin"]) async throws -> Shell.Output {
         try await withCheckedThrowingContinuation { continuation in
             Thread.detachNewThread {
                 let process = Process()
                 let stdout = Pipe(), stderr = Pipe()
                 process.executableURL = URL(filePath: arguments[0])
                 process.arguments = Array(arguments.dropFirst())
-                process.environment = ["PATH": "/usr/bin:/bin"]
+                process.environment = environment
                 process.standardInput = FileHandle.nullDevice
                 process.standardOutput = stdout
                 process.standardError = stderr

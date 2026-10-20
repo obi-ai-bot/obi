@@ -19,6 +19,14 @@ struct JobPageScreens {
         try await save(TaskPagePreview(fixture: fixture), as: "mac-\(fixture.rawValue)")
     }
 
+    /// Sangam's sample session (#786), live.
+    @Test func session() async throws {
+        let session = LiveSession(job: "sample", load: { _ in TranscriptPage(entries: SessionFixture.entries()) }, loadDetail: { _ in SessionFixture.detail })
+        await session.catchUp()
+        try await save(SessionView(session: session, agent: "cursor", meta: "Cursor · Sonnet 5.5 · Deskree", live: true).background(Tokens.bg),
+                       as: "mac-session")
+    }
+
     /// One running, one done and one failed job from obid, if it has them.
     @Test(.enabled(if: ProcessInfo.processInfo.environment["OBY_LIVE"] != nil))
     func live() async throws {
@@ -31,7 +39,7 @@ struct JobPageScreens {
         }
         for job in picked {
             let actions = TaskActions(place: "This Mac", account: nil, extras: extras[job.id], accounts: [], stop: {}, message: { _ in },
-                                      dismiss: {}, permission: { _, _ in }, mode: { _ in }, transcript: { _ in TranscriptPage(entries: []) })
+                                      dismiss: {}, permission: { _, _ in }, mode: { _ in })
             try await save(TaskPage(job: job, actions: actions, tray: Tray()).frame(width: 700, height: 1480).background(Tokens.bg),
                            as: "live-\(job.status.rawValue)")
         }

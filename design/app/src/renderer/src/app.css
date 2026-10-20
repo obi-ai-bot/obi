@@ -258,6 +258,10 @@ button.crumb:hover { color: var(--ink); background: var(--hover); }
 .archive-ago { flex: none; }
 .group-cards { width: 100%; display: flex; flex-direction: column; gap: 8px; }
 .group-empty { margin: 8px 4px; color: var(--muted); font-size: var(--text-base); }
+/* To do (Review PR, Issues): GitHub's items by board column, each column's name over its cards */
+.group-board { display: contents; }
+.group-board-name { margin: 8px 4px 0; color: var(--muted); font-size: var(--text-sm); font-weight: 500; }
+.tc-column { display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: var(--radius-pill); background: var(--hover); color: var(--text); font-size: var(--text-sm); line-height: 16px; }
 /* switching tabs: the new cards come in right away, a little closer together */
 .group-layer.is-switched .group-cards .rise { animation-delay: calc((min(var(--i), 8) - 2) * 40ms); }
 .card {

@@ -134,13 +134,28 @@ struct WorkGroupsTests {
     /// rest. It opens where the new task is, else on Running while anything's open, else Completed.
     @Test func aGroupPageHasRunningAndCompletedTabs() {
         let items = [item("n", .tasks, .needs), item("r", .tasks, .running), item("d", .tasks, .done)]
-        #expect(WorkList.Tab.allCases.map(\.rawValue) == ["Running", "Completed"])
+        #expect(WorkList.Tab.allCases.map(\.rawValue) == ["To do", "Running", "Completed"])
+        #expect(WorkList.items(items, in: .todo).isEmpty)
         #expect(WorkList.items(items, in: .running).map(\.id) == ["n", "r"])
         #expect(WorkList.items(items, in: .done).map(\.id) == ["d"])
         #expect(WorkList.firstTab(items) == .running)
         #expect(WorkList.firstTab([item("d", .tasks, .done)]) == .done)
         #expect(WorkList.firstTab([item("r"), item("d", .tasks, .done, fresh: true)]) == .done)
         #expect(WorkList.firstTab([WorkList.Item<String>]()) == .running)
+    }
+
+    /// Review PR and Issues: GitHub's items no job works on count under To do alone, never under
+    /// Running; the page opens on Running while a job runs or needs you, else on To do.
+    @Test func gitHubItemsAreToDoNeverRunning() {
+        let done = [item("d", .issues, .done)]
+        #expect(WorkList.counts(done, toDo: 57) == [.todo: 57, .running: 0, .done: 1])
+        #expect(WorkList.counts(done, toDo: nil, upcoming: 2) == [.running: 2, .done: 1])
+        #expect(WorkList.firstTab(done, toDo: true) == .todo)
+        // With nothing to do (and GitHub connected), it never opens on an empty To do.
+        #expect(WorkList.firstTab(done, toDo: false) == .done)
+        #expect(WorkList.firstTab([WorkList.Item<String>](), toDo: false) == .running)
+        #expect(WorkList.firstTab(done + [item("n", .issues, .needs)], toDo: true) == .running)
+        #expect(WorkList.firstTab(done + [item("r", .issues, .running)], toDo: true) == .running)
     }
 
     /// Group by Type or Status, remembered under one key.
