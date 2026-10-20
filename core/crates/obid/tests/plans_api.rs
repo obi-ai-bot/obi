@@ -1548,6 +1548,29 @@ fn stop_reaches_only_its_own_conversation() {
 /// A brain dispatch can't start a job in Bypass mode: it waits as a confirm item whose title,
 /// made by obid from the job, says so; the owner's Confirm starts it (review on #551, N1).
 #[test]
+fn a_planned_check_replaces_the_repositorys_only_when_the_owner_said_it() {
+    let folder = Folder::new("brain-check-kept");
+    let obid = started(&folder);
+    let dispatch = |check: &str| {
+        json!({"action": "dispatch", "reply": "On it.", "question": null, "jobs": [], "dispatches": [
+            {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "fix", "title": "Greeting fix",
+             "task": "Fix the greeting", "rounds": 1, "check": check}]})
+        .to_string()
+    };
+    let check_of = |answer: &serde_json::Value| {
+        let id = answer["jobs"][0]["id"].as_str().unwrap().to_owned();
+        call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["check"].clone()
+    };
+    queue(&obid, &[dispatch("true")]);
+    let weaker = said(&obid, "fix the greeting");
+    assert_eq!(check_of(&weaker), "node --test", "{weaker}");
+    let named = "node --test --test-name-pattern=greet";
+    queue(&obid, &[dispatch(named)]);
+    let owners = said(&obid, &format!("fix the greeting. Check: {named}"));
+    assert_eq!(check_of(&owners), named, "{owners}");
+}
+
+#[test]
 fn a_bypass_dispatch_waits_for_the_owners_confirm() {
     let folder = Folder::new("brain-confirm-dispatch");
     let obid = started(&folder);

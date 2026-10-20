@@ -666,7 +666,8 @@ fn oby_dispatch_starts_a_job_whose_card_is_on_the_turn() {
 }
 
 /// The check the owner named ("Check: …") goes on the job exactly, so obid runs it before it
-/// publishes; one that isn't one line is refused.
+/// publishes; one the owner's words don't hold leaves the repository's own; one that isn't one
+/// line is refused.
 #[test]
 fn oby_dispatch_carries_the_check_the_owner_named() {
     let (_folder, obid) = obid("harness-dispatch-check", true);
@@ -684,6 +685,16 @@ fn oby_dispatch_carries_the_check_the_owner_named() {
         "{}",
         job.text
     );
+    // The agent's own `true` (escaped, so the owner's words never hold it) can't replace the
+    // fixture's `node --test`.
+    let weaker = said(
+        &obid,
+        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "fix", "check": "tru\u0065"}"#,
+               "new": true}),
+    );
+    let id = weaker.body["jobs"][0]["id"].as_str().unwrap();
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None);
+    assert_eq!(job.body["check"], "node --test", "{}", job.text);
     let refused = said(
         &obid,
         json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "check": "true\nrm -rf x"}"#,

@@ -46,7 +46,7 @@ fn list() -> Value {
              "mode": {"type": "string", "enum": ["ask", "acceptEdits", "plan", "bypass"], "description": "Leave it out for the owner's default (Sandbox). Bypass waits for the owner's own OK."},
              "issue": {"type": "integer", "description": "The issue the work is about."},
              "title": {"type": "string", "description": "A short title, 3 to 6 words."},
-             "check": {"type": "string", "maxLength": 200, "description": "A one-line shell command that must pass for the work to count as done, run before Oby publishes: exactly the one the owner named (\"Check: …\", \"run … to check\"), else the test command the repository's own instructions (its AGENTS.md or CLAUDE.md) give. Leave it out when there's neither."}},
+             "check": {"type": "string", "maxLength": 200, "description": "Only when the owner named one (\"Check: …\", \"run … to check\"): that one-line shell command, exactly as they said it, which must pass before Oby publishes. Left out, the repository's own check applies."}},
              "required": ["repo", "task"]}},
         {"name": "oby_tell_job", "description": "Tells a job something: a running job hears it at its next turn; one that ended gets a follow-up job, with the same kind, agent, account and repository, that starts with the owner's words. Its card goes on your answer.",
          "inputSchema": {"type": "object", "properties": {"id": id, "words": {"type": "string"}, "title": {"type": "string", "description": "When the job ended: the follow-up's short title, 3 to 6 words."}}, "required": ["id", "words"]}},

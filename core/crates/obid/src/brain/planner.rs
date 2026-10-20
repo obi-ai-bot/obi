@@ -772,10 +772,14 @@ pub async fn overloaded() -> Option<f64> {
     let text = if let Ok(load) = std::env::var("OBID_LOAD") {
         load
     } else if cfg!(target_os = "macos") {
-        let out = tokio::process::Command::new("/usr/sbin/sysctl")
+        // A Mac too busy to answer in a second counts as not known to be busy.
+        let read = tokio::process::Command::new("/usr/sbin/sysctl")
             .args(["-n", "vm.loadavg"])
-            .output()
+            .kill_on_drop(true)
+            .output();
+        let out = tokio::time::timeout(Duration::from_secs(1), read)
             .await
+            .ok()?
             .ok()?;
         String::from_utf8(out.stdout).ok()?
     } else {

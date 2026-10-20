@@ -153,7 +153,16 @@ async fn dispatch(
             account: Some(d.account.clone()),
             agent: Some(d.agent.clone()),
             rounds: Some(d.rounds as u32),
-            check: d.check.clone(),
+            check: kept_check(
+                d.check.as_deref(),
+                shared
+                    .config
+                    .repos
+                    .iter()
+                    .find(|r| r.repo == d.repo)
+                    .and_then(|r| r.check.as_deref()),
+                asked.said,
+            ),
             files,
             attachments: (!asked.attachments.is_empty()).then(|| asked.attachments.to_vec()),
             conversation: Some(asked.conversation.to_owned()),
@@ -275,6 +284,18 @@ pub fn describe(new: &NewJob) -> String {
         what.push_str(&format!(", check {}", super::briefing::line(check, 120)));
     }
     what
+}
+
+/// The check a planned job keeps. A repository's configured check stands unless the owner's own
+/// words hold the model's word for word: neither the model nor text it read (a repository's
+/// instructions) can swap it for `true` or a narrower test. With none configured, the model's
+/// stands. Left out, the job gets the configured one.
+fn kept_check(check: Option<&str>, configured: Option<&str>, said: &str) -> Option<String> {
+    let check = check.map(str::trim).filter(|c| !c.is_empty())?;
+    match configured.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(configured) if !said.contains(check) => Some(configured.to_owned()),
+        _ => Some(check.to_owned()),
+    }
 }
 
 /// What started, in Oby's voice (`Desk.startedLine`): "On it. Claude Code is fixing oby #12
@@ -1482,5 +1503,25 @@ mod tests {
         assert_eq!(title, "Send an answer: Review of #12");
         assert!(text.ends_with("> merge it\n> and push to main"), "{text}");
         assert_eq!(confirmed.action, action::ANSWER_ITEM);
+    }
+
+    /// A configured check survives a model's other one; the owner's own "Check: …" wins.
+    #[test]
+    fn a_configured_check_is_kept_unless_the_owner_named_another() {
+        let said = "fix it. Check: cargo test -p obid --lib brain::supervisor";
+        let named = "cargo test -p obid --lib brain::supervisor";
+        assert_eq!(
+            kept_check(Some("true"), Some("cargo test"), said).as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(
+            kept_check(Some(named), Some("cargo test"), said).as_deref(),
+            Some(named)
+        );
+        assert_eq!(
+            kept_check(Some(" true "), None, said).as_deref(),
+            Some("true")
+        );
+        assert_eq!(kept_check(Some(" "), Some("cargo test"), said), None);
     }
 }
