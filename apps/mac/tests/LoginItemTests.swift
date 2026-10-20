@@ -92,6 +92,27 @@ struct LoginItemTests {
         #expect(item.status == .notFound || item.status == .notRegistered)
     }
 
+    /// At launch: registered when nothing is, registered again when a stale registration says
+    /// `.enabled` after a signing-team change or while obid doesn't run, else left alone (#790).
+    @Test func atLaunchRegistersAgainOnlyWhenStale() {
+        func decide(_ status: SMAppService.Status, teamChanged: Bool = false, runs: Bool = true,
+                    onThisMac: Bool = true, byScript: Bool = false) -> RunnerLoginItem.AtLaunch {
+            RunnerLoginItem.atLaunch(onThisMac: onThisMac, byScript: byScript, status: status, teamChanged: teamChanged, runs: runs)
+        }
+        #expect(decide(.notRegistered) == .register)
+        #expect(decide(.notRegistered, teamChanged: true, runs: false) == .register)
+        #expect(decide(.enabled) == .nothing)
+        if case .reregister = decide(.enabled, teamChanged: true) {} else { Issue.record("a team change re-registers") }
+        if case .reregister = decide(.enabled, runs: false) {} else { Issue.record("obid down re-registers") }
+        // Approval stays the user's step; a build without the item has nothing to register.
+        #expect(decide(.requiresApproval, teamChanged: true, runs: false) == .nothing)
+        #expect(decide(.notFound, teamChanged: true, runs: false) == .nothing)
+        // A remote runner, or install.sh's obid, serves this Mac instead.
+        #expect(decide(.enabled, teamChanged: true, runs: false, onThisMac: false) == .nothing)
+        #expect(decide(.notRegistered, byScript: true) == .nothing)
+        #expect(RunnerLoginItem.launchd("com.deskree.oby.nothing.\(UUID().uuidString)") == nil)
+    }
+
     /// What's missing is named, so a build that forgot the phase says so.
     @Test func namesWhatAnEmptyBundleLacks() throws {
         let folder = FileManager.default.temporaryDirectory.appending(path: "oby-bundle-\(UUID().uuidString).app")
