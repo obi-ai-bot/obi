@@ -279,6 +279,18 @@ nonisolated struct TranscriptEntry: Codable, Equatable, Identifiable, Sendable {
         var text: String
         /// "pending", "running" or "done".
         var state: String?
+
+        init(text: String, state: String? = nil) {
+            self.text = text
+            self.state = state
+        }
+
+        /// `state` read on its own: one that can't be read is nil, never the item.
+        init(from decoder: any Decoder) throws {
+            let keys = try decoder.container(keyedBy: CodingKeys.self)
+            text = try keys.decode(String.self, forKey: .text)
+            state = try? keys.decodeIfPresent(String.self, forKey: .state)
+        }
     }
 
     var n: Int
@@ -299,6 +311,8 @@ nonisolated struct TranscriptEntry: Codable, Equatable, Identifiable, Sendable {
     /// What its call counts as: read, search, edit, command, test, tetrix, web, mcp or other.
     var activity: String?
     var file: String?
+    /// How a permission it asked for was answered ("asked" entries).
+    var answer: String?
 
     var id: Int { n }
 
@@ -306,6 +320,22 @@ nonisolated struct TranscriptEntry: Codable, Equatable, Identifiable, Sendable {
     var words: String { text ?? summary ?? "" }
     var running: Bool { state == "running" }
     var failed: Bool { state == "failed" || state == "declined" }
+
+    /// A tool row's words as Sangam's row sets them: the verb, then what it's on in code ("Reading"
+    /// `Engine/Inbox.swift`, "Running" `cargo test`): the file when obid names one, a command's
+    /// words after its verb; else all of its words, plain.
+    var verbAndTarget: (verb: String, target: String?) {
+        let words = summary ?? ""
+        if let file, !file.isEmpty {
+            for target in [file, (file as NSString).lastPathComponent] where words.count > target.count && words.hasSuffix(target) {
+                return (String(words.dropLast(target.count)).trimmingCharacters(in: .whitespaces), file)
+            }
+        }
+        if Filter.of(self) == .commands, let space = words.firstIndex(of: " ") {
+            return (String(words[..<space]), String(words[words.index(after: space)...]))
+        }
+        return (words, nil)
+    }
 
     /// What the tool row says at its right: how a command ended, what an edit changed.
     var meta: String? {
@@ -347,6 +377,21 @@ nonisolated struct TranscriptEntry: Codable, Equatable, Identifiable, Sendable {
             if tool.hasPrefix("web") { return .web }
             return nil
         }
+    }
+}
+
+extension TranscriptEntry {
+    /// `n` and `kind` must read; every other field is read on its own, and one that can't be read
+    /// (a newer obid's shape, a wrong type) is nil, never the entry. A to-do item that can't be read
+    /// is left out of the list.
+    init(from decoder: any Decoder) throws {
+        let keys = try decoder.container(keyedBy: CodingKeys.self)
+        func field<T: Decodable>(_ key: CodingKeys) -> T? { (try? keys.decodeIfPresent(T.self, forKey: key)) ?? nil }
+        self.init(n: try keys.decode(Int.self, forKey: .n), at: field(.at), kind: try keys.decode(String.self, forKey: .kind),
+                  tool: field(.tool), summary: field(.summary), text: field(.text), state: field(.state), seconds: field(.seconds),
+                  exit: field(.exit), added: field(.added), removed: field(.removed),
+                  todos: (field(.todos) as [Lenient<Todo>]?)?.compactMap(\.value), activity: field(.activity), file: field(.file),
+                  answer: field(.answer))
     }
 }
 

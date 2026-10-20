@@ -158,17 +158,18 @@ struct JobPageTests {
     @MainActor @Test func theSessionLogReadsEveryPage() async throws {
         let most = LiveSession.most
         var asked: [Int?] = []
-        let (entries, trimmed) = try await LiveSession.read([]) { after in
+        let fresh = try await LiveSession.pages(after: nil) { after in
             asked.append(after)
             let from = (after ?? 0) + 1
             let to = min(from + 999, most + 500)
             return TranscriptPage(entries: (from...to).map { TranscriptEntry(n: $0, kind: "tool") }, next: to < most + 500 ? to : nil)
         }
+        let (entries, trimmed) = LiveSession.kept([], adding: fresh)
         #expect(asked == [nil, 1000, 2000])
         #expect(trimmed && entries.count == most && entries.last?.n == most + 500 && entries.first?.n == 501)
         // A runner that keeps answering the same `next` is asked once more, never forever.
         var calls = 0
-        _ = try await LiveSession.read([TranscriptEntry(n: 1, kind: "said")]) { _ in calls += 1; return TranscriptPage(entries: [], next: 1) }
+        _ = try await LiveSession.pages(after: 1) { _ in calls += 1; return TranscriptPage(entries: [], next: 1) }
         #expect(calls == 1)
     }
 
@@ -267,5 +268,52 @@ struct JobPageTests {
         #expect(String(masked.characters) == "Signing with team  vault: APPLE_TEAM_ID  and  redacted: aws-key .")
         #expect(masked.runs.count(where: { $0.backgroundColor != nil }) == 2)
         #expect(JobPageText.took(0.2) == "0.2s" && JobPageText.took(3) == "3s" && JobPageText.took(41.4) == "41s" && JobPageText.took(192) == "3m 12s")
+    }
+
+    /// What an agent writes never opens anything: every link is taken out of its words, whatever its scheme.
+    @Test func theAgentsWordsHaveNoLinks() {
+        let said = SessionText.said("See [the file](file:///etc/passwd), [run it](shortcuts://run-shortcut?name=x), [docs](https://example.com) and `code`.")
+        #expect(said.runs.allSatisfy { $0.link == nil })
+        #expect(String(said.characters).contains("the file") && String(said.characters).contains("code"))
+    }
+
+    /// A read merges into the entries as they are when it's back: an event that came meanwhile, and
+    /// words appended to an entry the read sent again, stay.
+    @MainActor @Test func aReadKeepsWhatCameWhileItWasAway() async {
+        var session: LiveSession?
+        var reads = 0
+        session = LiveSession(job: "j", load: { @MainActor after in
+            reads += 1
+            if after == nil { return TranscriptPage(entries: [TranscriptEntry(n: 1, kind: "said", text: "Reading")]) }
+            session?.apply(TranscriptEvent(job: "j", n: 1, append: " the scan"))
+            session?.apply(TranscriptEvent(job: "j", entry: TranscriptEntry(n: 3, kind: "tool", tool: "Bash", state: "running")))
+            return TranscriptPage(entries: [TranscriptEntry(n: 1, kind: "said", text: "Reading"), TranscriptEntry(n: 2, kind: "tool", tool: "Read", state: "done")])
+        }, loadDetail: { _ in throw RunnerError(message: "Not found", status: 404) })
+        guard let session else { return }
+        await session.catchUp()
+        await session.catchUp()
+        #expect(reads == 2)
+        #expect(session.entries.map(\.n) == [1, 2, 3])
+        #expect(session.entries[0].words == "Reading the scan")
+        #expect(session.arriving == 1)
+        #expect(session.counts[.all] == 3 && session.counts[.said] == 1)
+    }
+
+    /// One field of the wrong type is nil, never the entry; a to-do item that can't be read is left out.
+    @Test func aBadFieldDoesntDropAnEntry() throws {
+        let page = try TranscriptPage.read(Data(#"{"next": null, "entries": [{"n": 1, "kind": "tool", "tool": "Bash", "seconds": "slow", "exit": "x", "state": "done"}, {"n": 2, "kind": "plan", "todos": [{"text": "Find it", "state": 3}, {"state": "done"}]}]}"#.utf8))
+        #expect(page.entries.map(\.n) == [1, 2])
+        #expect(page.entries[0].seconds == nil && page.entries[0].exit == nil && page.entries[0].state == "done")
+        #expect(page.entries[1].todos == [TranscriptEntry.Todo(text: "Find it")])
+    }
+
+    /// A tool row's verb, then what it's on in code.
+    @Test func aToolRowSaysItsVerbThenItsTarget() {
+        let read = TranscriptEntry(n: 1, kind: "tool", tool: "Read", summary: "Reading scan.rs", activity: "read", file: "core/crates/obid/src/scan.rs")
+        #expect(read.verbAndTarget.verb == "Reading" && read.verbAndTarget.target == "core/crates/obid/src/scan.rs")
+        let run = TranscriptEntry(n: 2, kind: "tool", tool: "Bash", summary: "Running cargo test -p obid", activity: "command")
+        #expect(run.verbAndTarget.verb == "Running" && run.verbAndTarget.target == "cargo test -p obid")
+        let other = TranscriptEntry(n: 3, kind: "tool", tool: "Task", summary: "Asked a helper")
+        #expect(other.verbAndTarget.verb == "Asked a helper" && other.verbAndTarget.target == nil)
     }
 }

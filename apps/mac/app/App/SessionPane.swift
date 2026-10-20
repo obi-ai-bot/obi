@@ -27,6 +27,7 @@ struct SessionPane: View {
                 }
                 MessageBox(text: $note, focused: $typing, tray: model.tray, placeholder: "Tell \(job.agentName)…", label: "Tell Oby about \(job.heading)",
                            maximumHeight: 240, onSend: { tell(job) }, onScreenshot: {}, onStop: { false }, onEscape: onBack, attachments: false)
+                    .keepsDraft($note, as: Drafts.task(job.id))
                     .disabled(sending)
                     .frame(maxWidth: Tokens.column).padding(.horizontal, Tokens.gutter).padding(.top, 8).padding(.bottom, 20)
             } else {
@@ -34,8 +35,8 @@ struct SessionPane: View {
             }
         }
         .onAppear {
-            let session = LiveSession(job: id, load: { [feed, id] after in try await feed.about(id) { try await $0.transcript(id, after: after) } },
-                                      loadDetail: { [feed, id] n in try await feed.about(id) { try await $0.transcriptDetail(id, n) } })
+            let session = self.session ?? LiveSession(job: id, load: { [feed, id] after in try await feed.about(id) { try await $0.transcript(id, after: after) } },
+                                                      loadDetail: { [feed, id] n in try await feed.about(id) { try await $0.transcriptDetail(id, n) } })
             self.session = session
             feed.liveSession = session
         }
@@ -48,14 +49,16 @@ struct SessionPane: View {
         return [job.agentName, job.model.map(ModelChoice.name), account].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
+    /// What you tell it goes the way the task's page sends it (`TaskActions.message`).
     private func tell(_ job: Job) {
         let text = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (1...2000).contains(text.count), !sending, feed.runner != nil else { return }
+        guard (1...2000).contains(text.count), !sending else { return }
+        let message = TaskActions.of(job, local: false, model: model).message
         sending = true
         Task {
             defer { sending = false }
             do {
-                feed.apply(try await feed.about(job.id) { try await $0.tell(job.id, text) })
+                try await message(text)
                 note = ""
                 problem = nil
             } catch { problem = error.localizedDescription }

@@ -620,6 +620,10 @@ private struct SessionSheet: View {
     @Environment(\.dismiss) private var dismiss
     let id: String
     @State private var session: LiveSession?
+    @State private var note = ""
+    @FocusState private var typing: Bool
+    @State private var sending = false
+    @State private var problem: String?
 
     private var job: Job? { phone.jobs.first { $0.id == id } }
 
@@ -629,6 +633,16 @@ private struct SessionSheet: View {
                 if let session, let job {
                     SessionView(session: session, agent: job.agent, meta: meta(job), live: job.isActive, compact: true, title: false)
                         .task(id: job.isActive) { await session.follow(live: job.isActive) }
+                        .safeAreaInset(edge: .bottom) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                if let problem {
+                                    Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.horizontal, Tokens.gutter + 12)
+                                }
+                                Composer(text: $note, prompt: "Tell \(job.agentName)…", typing: $typing, onSend: { _ in tell() })
+                                    .keepsDraft($note, as: Drafts.task(id))
+                                    .disabled(sending)
+                            }
+                        }
                 } else {
                     ProgressView()
                 }
@@ -641,12 +655,27 @@ private struct SessionSheet: View {
         }
         .onAppear {
             let runner = phone.runner
-            let session = LiveSession(job: id, load: { [id] after in try await runner.transcript(id, after: after) },
-                                      loadDetail: { [id] n in try await runner.transcriptDetail(id, n) })
+            let session = self.session ?? LiveSession(job: id, load: { [id] after in try await runner.transcript(id, after: after) },
+                                                      loadDetail: { [id] n in try await runner.transcriptDetail(id, n) })
             self.session = session
             phone.liveSession = session
         }
         .onDisappear { if phone.liveSession === session { phone.liveSession = nil } }
+    }
+
+    /// What you tell it goes to its agent, as from the task's page (`POST /v1/jobs/{id}/messages`).
+    private func tell() {
+        guard let text = ChatThread.words(note), text.count <= 2000, !sending else { return }
+        sending = true
+        Task {
+            defer { sending = false }
+            do {
+                try await phone.tell(id, text)
+                note = ""
+                typing = false
+                problem = nil
+            } catch { problem = error.localizedDescription }
+        }
     }
 
     /// "Claude Code · Opus 5.5 · Personal".

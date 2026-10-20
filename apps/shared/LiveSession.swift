@@ -11,7 +11,14 @@ final class LiveSession {
     let job: String
     @ObservationIgnored private let load: (Int?) async throws -> TranscriptPage
     @ObservationIgnored private let loadDetail: (Int) async throws -> TranscriptDetail
-    private(set) var entries: [TranscriptEntry] = []
+    private(set) var entries: [TranscriptEntry] = [] {
+        didSet { counts = Dictionary(uniqueKeysWithValues: TranscriptEntry.Filter.allCases.map { tab in (tab, entries.count(where: tab.takes)) }) }
+    }
+    /// How many entries each filter takes, kept as the entries change.
+    private(set) var counts: [TranscriptEntry.Filter: Int] = [:]
+    /// The entry the agent is writing into now: more words came in the last moment (`append`).
+    private(set) var arriving: Int?
+    @ObservationIgnored private var lastAppend = 0
     /// Older entries were dropped to keep the latest `most`.
     private(set) var trimmed = false
     private(set) var loaded = false
@@ -41,11 +48,13 @@ final class LiveSession {
         } while !Task.isCancelled
     }
 
-    /// What came or changed since the last entry, every page of it; then whether detail is served.
+    /// What came or changed since the last entry, every page of it, merged into the entries as
+    /// they are once it's all here (an event may have come meanwhile); then whether detail is served.
     func catchUp() async {
         guard !unavailable else { return }
         do {
-            (entries, trimmed) = try await Self.read(entries, trimmed: trimmed, load: load)
+            let fresh = try await Self.pages(after: entries.last?.n, load: load)
+            (entries, trimmed) = Self.kept(entries, trimmed: trimmed, adding: fresh)
             failure = nil
         } catch let error as RunnerError where error.status == 404 {
             unavailable = true
@@ -63,6 +72,18 @@ final class LiveSession {
             (entries, trimmed) = Self.kept(entries, trimmed: trimmed, adding: [entry])
         } else if let n = event.n, let append = event.append, let index = entries.firstIndex(where: { $0.n == n }) {
             entries[index].text = (entries[index].text ?? entries[index].summary ?? "") + append
+            arrived(n)
+        }
+    }
+
+    /// Words came for `n`: it's arriving until a second and a half passes with no more.
+    private func arrived(_ n: Int) {
+        arriving = n
+        lastAppend += 1
+        let mark = lastAppend
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(1500))
+            if let self, self.lastAppend == mark { self.arriving = nil }
         }
     }
 
@@ -85,19 +106,18 @@ final class LiveSession {
         } catch {}
     }
 
-    /// What came or changed since `kept`'s last entry, following `next` page by page until there's
-    /// no more (or a page brings nothing new).
-    nonisolated static func read(_ kept: [TranscriptEntry], trimmed: Bool = false,
-                     load: (Int?) async throws -> TranscriptPage) async throws -> (entries: [TranscriptEntry], trimmed: Bool) {
-        var result = (entries: kept, trimmed: trimmed)
-        var after = kept.last?.n
+    /// What came or changed after entry `after`, following `next` page by page until there's no
+    /// more (or a page brings nothing new).
+    nonisolated static func pages(after: Int?, load: (Int?) async throws -> TranscriptPage) async throws -> [TranscriptEntry] {
+        var fresh: [TranscriptEntry] = []
+        var after = after
         while !Task.isCancelled {
             let page = try await load(after)
-            result = Self.kept(result.entries, trimmed: result.trimmed, adding: page.entries)
+            fresh += page.entries
             guard let next = page.next, next != after, !page.entries.isEmpty else { break }
             after = next
         }
-        return result
+        return fresh
     }
 
     /// The entries once `new` comes: each by its `n`, a new one added and one obid sends again (a
@@ -106,7 +126,12 @@ final class LiveSession {
         var all = kept
         var at = Dictionary(kept.enumerated().map { ($1.n, $0) }, uniquingKeysWith: { $1 })
         for entry in new {
-            if let index = at[entry.n] { all[index] = entry } else { at[entry.n] = all.count; all.append(entry) }
+            if let index = at[entry.n] {
+                // Words that came as `append` after this copy was read stay.
+                var entry = entry
+                if let mine = all[index].text, mine.count > entry.words.count, mine.hasPrefix(entry.words) { entry.text = mine }
+                all[index] = entry
+            } else { at[entry.n] = all.count; all.append(entry) }
         }
         if !zip(all, all.dropFirst()).allSatisfy({ $0.n < $1.n }) { all.sort { $0.n < $1.n } }
         return all.count > most ? (Array(all.suffix(most)), true) : (all, trimmed)

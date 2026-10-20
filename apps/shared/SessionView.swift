@@ -24,9 +24,8 @@ struct SessionView: View {
 
     var body: some View {
         let entries = session.entries
-        let counts = Dictionary(uniqueKeysWithValues: TranscriptEntry.Filter.allCases.map { tab in (tab, entries.count(where: tab.takes)) })
+        let counts = session.counts
         let shown = filter == .all ? entries : entries.filter { $0.kind == "start" || filter.takes($0) }
-        let writing = live ? entries.last.flatMap { $0.kind == "said" ? $0.n : nil } : nil
         ScrollViewReader { reader in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -37,14 +36,12 @@ struct SessionView: View {
                                 .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
                         }
                         ForEach(shown) { entry in
-                            SessionRow(entry: entry, agent: agent, writing: entry.n == writing, session: session, compact: compact)
+                            SessionRow(entry: entry, agent: agent, writing: live && entry.n == session.arriving, session: session, compact: compact)
                         }
                         status(entries.isEmpty)
                     }
                     .textSelection(.enabled)
                     Color.clear.frame(height: 1).id("end")
-                        .onAppear { atEnd = true }
-                        .onDisappear { atEnd = false }
                 }
                 .frame(maxWidth: compact ? .infinity : Tokens.column, alignment: .leading)
                 .frame(maxWidth: .infinity)
@@ -52,6 +49,10 @@ struct SessionView: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollIndicators(.never)
+            // At the live end: within 48 points of the foot.
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 48
+            } action: { _, end in atEnd = end }
             // Stays at the live end while you're there, as a conversation does.
             .onChange(of: entries.last?.n) { if atEnd { reader.scrollTo("end", anchor: .bottom) } }
             .onChange(of: entries.last?.words.count) { if atEnd { reader.scrollTo("end", anchor: .bottom) } }
@@ -154,6 +155,7 @@ private struct SessionRow: View {
         case "you": you
         case "plan": plan
         case "tool": tool
+        case "asked": asked
         default:
             Text(entry.words).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted).padding(.leading, 32)
                 .fixedSize(horizontal: false, vertical: true)
@@ -177,8 +179,8 @@ private struct SessionRow: View {
     private var said: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             AgentMark(agent: agent).font(Tokens.font(13, .semibold)).foregroundStyle(Tokens.ink).opacity(0.7).frame(width: 22)
-            // Its `code` and links set apart, as in the conversation.
-            (Text(SaidText.styled(entry.words)) + Text(writing ? " " : ""))
+            // Its `code` set apart, as in the conversation; nothing in it opens.
+            (Text(SessionText.said(entry.words)) + Text(writing ? " " : ""))
                 .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.item).lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .overlay(alignment: .bottomTrailing) { if writing { Caret().offset(x: 9, y: -3) } }
@@ -237,6 +239,8 @@ private struct SessionRow: View {
                         else { WorkMarkView(mark: todo.state == "done" ? .done : .working, dot: 8) }
                     }
                     .frame(width: 12, height: 12)
+                    .accessibilityElement()
+                    .accessibilityLabel(todo.state == "done" ? "Done" : todo.state == "running" ? "Working" : "To do")
                     Text(todo.text).strikethrough(todo.state == "done", color: Tokens.check)
                         .foregroundStyle(todo.state == "done" ? Tokens.muted : Tokens.text)
                         .fixedSize(horizontal: false, vertical: true)
@@ -251,39 +255,29 @@ private struct SessionRow: View {
         .padding(.leading, 32).padding(.vertical, 4)
     }
 
-    /// A tool call: a quiet line, its words sweeping while it runs, that opens into its detail once
-    /// obid serves detail.
-    private var tool: some View {
+    /// A permission it asked for, and how it was answered.
+    private var asked: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "checkmark.shield").font(Tokens.font(12))
+            Text(entry.words + (entry.answer.map { " · \($0)" } ?? "")).fixedSize(horizontal: false, vertical: true)
+        }
+        .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+        .padding(.leading, 32)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// A tool call: a quiet line, its verb sweeping while it runs, that opens into its detail once
+    /// obid serves detail. One that can't open is plain content, not a button.
+    @ViewBuilder private var tool: some View {
         let opens = session.detailServed == true && !entry.running
-        return VStack(alignment: .leading, spacing: 0) {
-            Button { toggle() } label: {
-                HStack(spacing: 8) {
-                    // A quiet check once done (Sangam's `.ss-tool-mark`), the working dot, red when it failed.
-                    Group {
-                        if entry.failed { Circle().fill(Tokens.danger).frame(width: 8, height: 8) }
-                        else { WorkMarkView(mark: entry.running ? .working : .done, dot: 8) }
-                    }
-                    .frame(width: 12, height: 12)
-                    Group {
-                        if entry.running { Sheen(text: entry.words, size: Tokens.textMd).lineLimit(1) } else {
-                            Text(entry.words).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted).fadeOut()
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    if let meta = entry.meta {
-                        Text(meta).font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(entry.failed ? Tokens.danger : Tokens.muted)
-                    }
-                    took
-                    if opens {
-                        Image(systemName: "chevron.right").font(Tokens.font(9, .semibold)).foregroundStyle(Tokens.muted)
-                            .rotationEffect(.degrees(open ? 90 : 0))
-                    }
-                }
-                .frame(minHeight: compact ? 44 : 26).contentShape(Rectangle())
+        VStack(alignment: .leading, spacing: 0) {
+            if opens {
+                Button { toggle() } label: { toolLine(opens: true) }
+                    .buttonStyle(.plain)
+                    .accessibilityValue(open ? "Open" : "Folded")
+            } else {
+                toolLine(opens: false).accessibilityElement(children: .combine)
             }
-            .buttonStyle(.plain)
-            .disabled(!opens)
-            .accessibilityValue(opens ? (open ? "Open" : "Folded") : "")
             if open {
                 if let detail { ToolDetail(entry: entry, detail: detail).padding(.leading, 20).padding(.top, 6).padding(.bottom, 10) }
                 else if reading { ProgressView().controlSize(.small).padding(.leading, 20).padding(.vertical, 6) }
@@ -291,6 +285,35 @@ private struct SessionRow: View {
             }
         }
         .padding(.leading, 32)
+    }
+
+    private func toolLine(opens: Bool) -> some View {
+        let (verb, target) = entry.verbAndTarget
+        return HStack(spacing: 8) {
+            // A quiet check once done (Sangam's `.ss-tool-mark`), the working dot, red when it failed.
+            Group {
+                if entry.failed { Circle().fill(Tokens.danger).frame(width: 8, height: 8).accessibilityLabel("Failed") }
+                else { WorkMarkView(mark: entry.running ? .working : .done, dot: 8) }
+            }
+            .frame(width: 12, height: 12)
+            HStack(spacing: 4) {
+                if entry.running { Sheen(text: verb, size: Tokens.textMd).fixedSize() } else {
+                    Text(verb).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted).fixedSize()
+                }
+                if let target { Text(target).font(Tokens.mono(12)).foregroundStyle(Tokens.item) }
+            }
+            .fadeOut()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let meta = entry.meta {
+                Text(meta).font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(entry.failed ? Tokens.danger : Tokens.muted)
+            }
+            took
+            if opens {
+                Image(systemName: "chevron.right").font(Tokens.font(9, .semibold)).foregroundStyle(Tokens.muted)
+                    .rotationEffect(.degrees(open ? 90 : 0))
+            }
+        }
+        .frame(minHeight: compact ? 44 : 26).contentShape(Rectangle())
     }
 
     @ViewBuilder private var took: some View {
@@ -336,7 +359,8 @@ private struct ToolDetail: View {
                 }
                 if let output = detail.output?.text, !output.isEmpty { CodeBlock(text: SessionText.masked(output)) }
             }
-            if let foot = SessionText.foot(entry: entry, detail: detail) {
+            // How a command ended and how much it printed (Sangam's `.ss-foot`), for commands only.
+            if detail.command != nil || TranscriptEntry.Filter.of(entry) == .commands, let foot = SessionText.foot(entry: entry, detail: detail) {
                 foot.font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(Tokens.muted)
             }
         }
@@ -384,6 +408,14 @@ private struct Caret: View {
 
 /// How the session sets text: masked values as chips, a diff's lines in colour, a call's foot.
 enum SessionText {
+    /// The agent's words as the conversation sets them (`code`, bold, references), with every link
+    /// taken out: what an agent writes never opens anything (a `file://` or `shortcuts://` link would).
+    static func said(_ text: String) -> AttributedString {
+        var styled = SaidText.styled(text)
+        for run in styled.runs where run.link != nil { styled[run.range].link = nil }
+        return styled
+    }
+
     /// `[vault: NAME]` and `[redacted: rule]` as chips with their name (Sangam's `.ss-vault`), never the value.
     static func masked(_ text: String) -> AttributedString {
         var result = AttributedString()
