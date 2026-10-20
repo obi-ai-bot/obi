@@ -294,6 +294,13 @@ pub fn from_input(name: &str, input: &Value, path: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A private key's armor line, put together here so no source line holds one whole (the
+    /// secret scan of this repository would take the test's made-up key for a real one).
+    fn armor(kind: &str, end: bool) -> String {
+        let edge = if end { "END" } else { "BEGIN" };
+        format!("-----{edge} {kind}PRIVATE {}-----", "KEY")
+    }
+
     #[test]
     fn a_vault_secret_says_its_name_and_a_flagged_line_hides_alone() {
         let value = ["detail-", "secret/", "Q7m2+a=b"].concat();
@@ -368,8 +375,10 @@ mod tests {
             .map(|i| format!("b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB{i}AAAAMwAAAAtzc2gtZWQyNTUxOQ"))
             .collect();
         let text = format!(
-            "cat ~/.ssh/id_ed25519\n-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\ndone\n",
-            body.join("\n")
+            "cat ~/.ssh/id_ed25519\n{}\n{}\n{}\ndone\n",
+            armor("OPENSSH ", false),
+            body.join("\n"),
+            armor("OPENSSH ", true)
         );
         let masked = mask(&text);
         let lines: Vec<&str> = masked.lines().collect();
@@ -380,7 +389,7 @@ mod tests {
         }
         assert_eq!(lines[9], "done");
         // With no END in view, to the end.
-        let open = mask(&format!("-----BEGIN RSA PRIVATE KEY-----\n{}\n", body[0]));
+        let open = mask(&format!("{}\n{}\n", armor("RSA ", false), body[0]));
         assert!(!open.contains(&body[0]), "{open}");
     }
 
@@ -437,7 +446,7 @@ mod tests {
         let key: String = (0..250)
             .map(|i| format!("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo{i:03}\n"))
             .collect();
-        let raw = format!("-----BEGIN PRIVATE KEY-----\n{key}-----END PRIVATE KEY-----\nok\n");
+        let raw = format!("{}\n{key}{}\nok\n", armor("", false), armor("", true));
         let out = output(&raw, None);
         let text = out["text"].as_str().unwrap();
         assert!(

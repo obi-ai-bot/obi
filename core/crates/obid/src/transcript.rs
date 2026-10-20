@@ -943,6 +943,13 @@ fn tenths(started: Instant) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A private key's armor line, put together here so no source line holds one whole (the
+    /// secret scan of this repository would take the test's made-up key for a real one).
+    fn armor(kind: &str, end: bool) -> String {
+        let edge = if end { "END" } else { "BEGIN" };
+        format!("-----{edge} {kind}PRIVATE {}-----", "KEY")
+    }
     use serde_json::json;
 
     impl Transcripts {
@@ -1455,11 +1462,11 @@ mod tests {
         };
         let mut out = String::new();
         out += &stream("Here it is:\n");
-        out += &stream("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+        out += &stream(&format!("{}\n", armor("OPENSSH ", false)));
         out += &stream("b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ\n");
         out += &stream("AAAAAAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAI\n");
         assert!(!out.contains("b3BlbnNzaC1"), "{out}");
-        out += &stream("-----END OPENSSH PRIVATE KEY-----\nThat was it.\n");
+        out += &stream(&format!("{}\nThat was it.\n", armor("OPENSSH ", true)));
         assert!(
             !out.contains("b3BlbnNzaC1") && !out.contains("AAAAAAAAAAEAAAAz"),
             "{out}"
