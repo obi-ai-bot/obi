@@ -328,6 +328,9 @@ pub struct NewJob {
     pub earlier: Option<String>,
     #[serde(default)]
     pub start_from: Option<String>,
+    /// The routine whose run it is (crate::routines).
+    #[serde(default)]
+    pub routine: Option<crate::job::RoutineMark>,
 }
 
 /// Who tells a job something, which decides what words for one that ended do (the owner's
@@ -482,6 +485,8 @@ pub struct Jobs {
     plugins: std::sync::OnceLock<Arc<crate::plugins::Plugins>>,
     /// The connected-app broker: job-scoped MCP config and use records.
     connections: std::sync::OnceLock<Arc<crate::connections::Connections>>,
+    /// The routines, for the owner's Confirm of one the brain planned (crate::routines).
+    routines: std::sync::OnceLock<Arc<crate::routines::Routines>>,
     /// Oby's Tetrix login: every owner's job's agent gets Tetrix through obid (crate::tetrix).
     tetrix: std::sync::OnceLock<Arc<crate::tetrix::Tetrix>>,
     /// Where a job's `.obi/artifacts/` is published when it ends.
@@ -560,6 +565,7 @@ impl Jobs {
             permissions: Mutex::new(kept),
             plugins: std::sync::OnceLock::new(),
             connections: std::sync::OnceLock::new(),
+            routines: std::sync::OnceLock::new(),
             tetrix: std::sync::OnceLock::new(),
             artifacts: std::sync::OnceLock::new(),
             api_url: Mutex::new(api_url),
@@ -643,6 +649,14 @@ impl Jobs {
     }
 
     /// Where jobs' artifacts go (once; without it, a job publishes none).
+    pub fn use_routines(&self, routines: Arc<crate::routines::Routines>) {
+        let _ = self.routines.set(routines);
+    }
+
+    pub fn routines(&self) -> Option<&Arc<crate::routines::Routines>> {
+        self.routines.get()
+    }
+
     pub fn use_artifacts(&self, artifacts: Arc<crate::artifacts::Artifacts>) {
         let _ = self.artifacts.set(artifacts);
     }
@@ -1715,7 +1729,18 @@ impl Jobs {
     }
 
     /// Makes a job the owner described whole, queued.
-    pub fn create(self: &Arc<Self>, new: NewJob) -> Result<Job, Refused> {
+    /// Whether `create` would take `new`, without making it: its repository, kind, task, title,
+    /// tool and account, rounds, check, mode, files, base and model, as `create` checks them.
+    /// A routine is checked so when it's saved (crate::routines).
+    pub fn vet(&self, new: &NewJob) -> Result<(), Refused> {
+        self.vetted(new).map(|_| ())
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn vetted(
+        &self,
+        new: &NewJob,
+    ) -> Result<(Repo, Tool, crate::config::Account, Option<Vec<String>>), Refused> {
         let repo = self
             .repo(&new.repo)
             .ok_or_else(|| Refused(format!("{} isn't a repository obid knows.", new.repo)))?
@@ -1770,6 +1795,11 @@ impl Jobs {
                 tool.name()
             )));
         }
+        Ok((repo, tool, account, files))
+    }
+
+    pub fn create(self: &Arc<Self>, new: NewJob) -> Result<Job, Refused> {
+        let (repo, tool, account, files) = self.vetted(&new)?;
         let id = self.new_id();
         let mut job = Job::new(
             id.clone(),
@@ -1806,6 +1836,7 @@ impl Jobs {
             .start_from
             .filter(|b| new.follow_up_of.is_some() && git::is_branch_name(b));
         job.follow_up_of = new.follow_up_of;
+        job.routine = new.routine;
         job.mode = Some(if job.read_only() {
             Mode::Plan.as_str().to_owned()
         } else {

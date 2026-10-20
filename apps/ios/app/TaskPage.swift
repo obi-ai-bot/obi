@@ -568,6 +568,7 @@ struct JobPageBody<Decision: View, Result: View, Asked: View>: View {
             }
             if let verdict = job.verdictLine { Text(verdict).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted) }
             if let moved = job.movedLine { Text(moved).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted) }
+            if let routine = job.routine { Text(routine.line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted) }
         }
         .padding(.bottom, 16)
     }
