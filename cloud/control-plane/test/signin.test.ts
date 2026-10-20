@@ -140,19 +140,24 @@ describe("Sign in with Google", () => {
     await app.register(await Mac.make(), "Apple Mac", {}, "000777.me");
     const users = await env.DB.prepare("SELECT * FROM users ORDER BY provider").all<Record<string, unknown>>();
     expect(users.results.map(({ created_at, ...user }) => user)).toEqual([
-      { sub: "000777.me", provider: "apple", domain: null },
-      { sub: "google:000777.me", provider: "google", domain: "deskree.com" },
+      { sub: "000777.me", provider: "apple", workspace_domain: null, email_domain: null },
+      { sub: "google:000777.me", provider: "google", workspace_domain: "deskree.com", email_domain: "deskree.com" },
     ]);
     expect(JSON.stringify(users.results)).not.toContain("someone@");
     const owners = await env.DB.prepare("SELECT user_sub FROM installations ORDER BY name").all<{ user_sub: string }>();
     expect(owners.results.map((row) => row.user_sub)).toEqual(["000777.me", "google:000777.me"]);
   });
 
-  it("keeps a verified email's domain when there's no hd, and takes Google's other issuer spelling", async () => {
+  it("keeps the Workspace's domain apart from the email's: no hd, no Workspace domain; takes Google's other issuer spelling", async () => {
     const app = testApp();
-    const { location } = await google(app, await Mac.make(), (nonce) => app.google.token({ ...app.googleClaims(nonce, "123456789", "me@gmail.com", null), iss: "accounts.google.com" }));
+    const { location } = await google(app, await Mac.make(), (nonce) => app.google.token({ ...app.googleClaims(nonce, "123456789", "Alice@Deskree.com", null), iss: "accounts.google.com" }));
     expect(location).toMatch(/^oby-signin:\/\/done\?/);
-    expect(await env.DB.prepare("SELECT domain FROM users WHERE sub = 'google:123456789'").first("domain")).toBe("gmail.com");
+    // A personal Google account on a company address: its email's domain, never the Workspace's.
+    expect(await env.DB.prepare("SELECT workspace_domain, email_domain FROM users WHERE sub = 'google:123456789'").first()).toEqual({ workspace_domain: null, email_domain: "deskree.com" });
+    // A Workspace account whose address is on another of its domains: both, as they are.
+    const { location: other } = await google(app, await Mac.make(), (nonce) => app.google.token(app.googleClaims(nonce, "987654321", "bob@deskree.dev", "deskree.com")));
+    expect(other).toMatch(/^oby-signin:\/\/done\?/);
+    expect(await env.DB.prepare("SELECT workspace_domain, email_domain FROM users WHERE sub = 'google:987654321'").first()).toEqual({ workspace_domain: "deskree.com", email_domain: "deskree.dev" });
   });
 
   it("refuses a token that doesn't check out, and the sign-in stays unusable", async () => {
@@ -172,6 +177,8 @@ describe("Sign in with Google", () => {
       ["unverified email", async (nonce) => app.google.token({ ...claims(nonce), email_verified: false })],
       ["email_verified as text", async (nonce) => app.google.token({ ...claims(nonce), email_verified: "true" })],
       ["no email", async (nonce) => app.google.token({ ...claims(nonce), email: undefined })],
+      ["an email with no domain", async (nonce) => app.google.token({ ...claims(nonce), email: "someone" })],
+      ["an hd that isn't a domain", async (nonce) => app.google.token({ ...claims(nonce), hd: "not a domain" })],
       ["no sub", async (nonce) => app.google.token({ ...claims(nonce), sub: undefined })],
       ["a colon in sub", async (nonce) => app.google.token({ ...claims(nonce), sub: "google:1" })],
       ["unknown kid", async (nonce) => app.google.token(claims(nonce), "not-googles-kid")],

@@ -5,10 +5,17 @@
 -- be letters, digits, `.`, `_` and `-` (src/signin.ts), never a colon, so the two can't meet.
 
 ALTER TABLE users ADD COLUMN provider TEXT NOT NULL DEFAULT 'apple';
--- The account's domain, for company spheres later ("only @deskree.com"): Google's `hd` (the
--- Workspace domain), else the domain of the email Google verified. Never the email. Remote
--- access doesn't use it. Null for Apple, which gives no email.
-ALTER TABLE users ADD COLUMN domain TEXT;
+-- A Google account's two domains, which mean different things; never the email. Null for Apple,
+-- which gives no email.
+-- `workspace_domain` is Google's `hd`: set only for an account a Google Workspace manages, and
+-- the only thing a company sphere ("only @deskree.com") may trust for membership.
+ALTER TABLE users ADD COLUMN workspace_domain TEXT;
+-- `email_domain` is the domain of the email Google verified. It shows only that the address was
+-- reachable once (a personal Google account made on alice@deskree.com keeps it after Alice
+-- leaves), so it never grants membership. Remote access uses COALESCE(workspace_domain,
+-- email_domain) only to limit how much one domain's accounts can hold (src/app.ts, PER_DOMAIN).
+ALTER TABLE users ADD COLUMN email_domain TEXT;
+CREATE INDEX users_by_domain ON users (COALESCE(workspace_domain, email_domain));
 
 -- Which provider a sign-in was started for: only that provider's callback finishes it.
 ALTER TABLE sign_ins ADD COLUMN provider TEXT NOT NULL DEFAULT 'apple';

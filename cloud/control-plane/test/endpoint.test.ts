@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { tunnelsFromEnv } from "../src/cloudflare";
 import type { Env } from "../src/env";
 import { sweep } from "../src/app";
-import { HOUR, Mac, testApp } from "./helpers";
+import { DAY, HOUR, Mac, testApp } from "./helpers";
 
 async function registered(app: ReturnType<typeof testApp>) {
   const mac = await Mac.make();
@@ -150,6 +150,49 @@ describe("what a tunnel may cost", () => {
     expect(fourth.body.error).toMatch(/^This Mac turned remote access on too often today\./);
     app.time.advance(24 * HOUR);
     expect((await app.call(mac.mac, "POST", path)).status).toBe(201);
+  });
+
+  it("many Google accounts under one domain share its limits: 20 Macs set up a day and 25 live endpoints; gmail.com isn't one owner", async () => {
+    const app = testApp();
+    const path = "/v1/installations/self/endpoint";
+    // A domain with hundreds of cheap accounts (free Cloud Identity, or a catch-all), each under its
+    // own limits: 20 Macs set up a day between them, from any network.
+    for (let i = 0; i < 20; i++) {
+      expect((await app.registerWithGoogle(await Mac.make(), `cheap-${i}`, `user${i}@cheap.example`, "cheap.example", `10.${i}.0.1`)).status, `${i}`).toBe(201);
+    }
+    const over = await app.registerWithGoogle(await Mac.make(), "cheap-20", "user20@cheap.example", "cheap.example", "10.20.0.1");
+    expect(over.status).toBe(429);
+    expect(over.body.error).toMatch(/^Accounts at cheap\.example set up too many Macs today\./);
+    // Without hd, the email's domain counts the same; another domain isn't held back, and
+    // gmail.com says nothing about who owns an account, so its accounts aren't limited together.
+    expect((await app.registerWithGoogle(await Mac.make(), "cheap-21", "x@cheap.example", null, "10.21.0.1")).status).toBe(429);
+    expect((await app.registerWithGoogle(await Mac.make(), "other-1", "x@other.example", "other.example", "10.22.0.1")).status).toBe(201);
+    await app.counted("registrations:domain:gmail.com", 1000);
+    expect((await app.registerWithGoogle(await Mac.make(), "gmail-1", "x@gmail.com", null, "10.23.0.1")).status).toBe(201);
+
+    // Live endpoints: 25 between every account at the domain.
+    for (let i = 0; i < 25; i++) {
+      const sub = `google:cheap-live-${i}`;
+      await env.DB.prepare("INSERT INTO users (sub, provider, workspace_domain, email_domain, created_at) VALUES (?1, 'google', ?2, ?3, ?4)")
+        .bind(sub, i % 2 ? "cheap.example" : null, "cheap.example", app.time.now().toISOString())
+        .run();
+      await app.fill(1, `net-${i}`, sub);
+    }
+    app.time.advance(DAY);
+    const mac = await Mac.make();
+    expect((await app.registerWithGoogle(mac, "cheap-late", "late@cheap.example", "cheap.example", "10.30.0.1")).status).toBe(201);
+    const full = await app.call(mac, "POST", path, undefined, { "CF-Connecting-IP": "10.30.0.1" });
+    expect(full.status).toBe(409);
+    expect(full.body.error).toBe("Accounts at cheap.example have 25 Macs with remote access on already. Forget one first.");
+    // gmail.com's accounts don't share a cap.
+    for (let i = 0; i < 25; i++) {
+      const sub = `google:gmail-live-${i}`;
+      await env.DB.prepare("INSERT INTO users (sub, provider, email_domain, created_at) VALUES (?1, 'google', 'gmail.com', ?2)").bind(sub, app.time.now().toISOString()).run();
+      await app.fill(1, `gnet-${i}`, sub);
+    }
+    const gmail = await Mac.make();
+    expect((await app.registerWithGoogle(gmail, "gmail-2", "y@gmail.com", null, "10.31.0.1")).status).toBe(201);
+    expect((await app.call(gmail, "POST", path, undefined, { "CF-Connecting-IP": "10.31.0.1" })).status).toBe(201);
   });
 
   it("one Apple Account can't drain the global limit: 5 live endpoints and 10 creations a day", async () => {

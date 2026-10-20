@@ -2,8 +2,8 @@
 // app, and Apple's native Sign in with Apple is App Store only) and Sign in with Google. Each
 // sends an identity token, an RS256 JWT checked here against that provider's public keys. Apple
 // gives only `sub`, the account's stable id for this team, with no name or email asked for.
-// Google gives `sub` and the email, asked for only so the account's domain is known (`hd`, or a
-// verified email's domain); the email itself is never kept.
+// Google gives `sub` and the email, asked for only so the account's domains are known (its
+// Workspace's, `hd`, and its verified email's); the email itself is never kept.
 
 /// A provider's public keys, a JWKS's `keys`.
 export interface KeySource {
@@ -121,15 +121,32 @@ export async function verifyAppleToken(token: string, cache: KeyCache, audience:
   return (await verifyToken(token, cache, [APPLE_ISSUER], audience, nonceHash, now)).sub;
 }
 
-/// Google's ID token, for the OAuth client `audience`: its `sub`, and the account's domain: the
-/// Workspace domain (`hd`), else the domain of its email, which Google must have verified. The
-/// email itself isn't returned, so it's never kept.
-export async function verifyGoogleToken(token: string, cache: KeyCache, audience: string, nonceHash: string, now: Date): Promise<{ sub: string; domain: string }> {
+/// Google's ID token, for the OAuth client `audience`: its `sub` and two domains that mean
+/// different things. `workspaceDomain` is `hd`, set only for an account a Google Workspace manages:
+/// the one thing that shows the account belongs to that organization. `emailDomain` is the domain
+/// of its email, which Google must have verified; it only shows the address was reachable once (a
+/// personal Google account made on alice@deskree.com keeps it after Alice leaves). The email itself
+/// isn't returned, so it's never kept.
+export async function verifyGoogleToken(
+  token: string,
+  cache: KeyCache,
+  audience: string,
+  nonceHash: string,
+  now: Date,
+): Promise<{ sub: string; workspaceDomain: string | null; emailDomain: string }> {
   const claims = await verifyToken(token, cache, GOOGLE_ISSUERS, audience, nonceHash, now);
   if (claims.email_verified !== true || typeof claims.email !== "string") throw new TokenError("no verified email");
-  const domain = (typeof claims.hd === "string" ? claims.hd : (/^[^@\s]+@([^@\s]+)$/.exec(claims.email)?.[1] ?? "")).toLowerCase();
-  if (!/^(?=.{1,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain)) throw new TokenError("no domain");
-  return { sub: claims.sub, domain };
+  const emailDomain = domainOf(/^[^@\s]+@([^@\s]+)$/.exec(claims.email)?.[1]);
+  if (!emailDomain) throw new TokenError("no email domain");
+  const workspaceDomain = claims.hd === undefined ? null : domainOf(claims.hd);
+  if (workspaceDomain === undefined) throw new TokenError("an hd that isn't a domain");
+  return { sub: claims.sub, workspaceDomain, emailDomain };
+}
+
+/// A domain name, lowercased, or undefined when it isn't one.
+function domainOf(value: unknown): string | undefined {
+  const domain = typeof value === "string" ? value.toLowerCase() : "";
+  return /^(?=.{1,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain) ? domain : undefined;
 }
 
 export async function sha256Hex(text: string): Promise<string> {

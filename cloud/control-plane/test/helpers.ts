@@ -235,6 +235,16 @@ export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env
     return { signIn: state, signInCode: location.searchParams.get("code") ?? "" };
   }
 
+  /// Registers `mac`, signed in with Google as `sub` first (with that email and `hd`), from `ip`.
+  async function registerWithGoogle(mac: Mac, sub: string, email: string, hd: string | null, ip = "198.51.100.1"): Promise<Answer> {
+    const headers = { "CF-Connecting-IP": ip };
+    const { started, state, nonce } = await startSignIn(mac, headers, "google");
+    if (started.status !== 201) throw new Error(`starting a sign-in: ${started.status} ${JSON.stringify(started.body)}`);
+    const back = await callback({ state, id_token: await google.token(googleClaims(nonce, sub, email, hd)) }, headers, "google");
+    const code = new URL(back.headers.get("Location") ?? "about:blank").searchParams.get("code") ?? "";
+    return call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: state, signInCode: code }, headers);
+  }
+
   /// Registers `mac`, signed in with Apple as `sub` first, and returns the answer: `installation`.
   async function register(mac: Mac, name = "Wellington's MacBook Pro", headers: Record<string, string> = {}, sub = "001234.apple-account.0001"): Promise<Answer> {
     return call(mac, "POST", "/v1/installations", { name, platform: "macos", ...(await signIn(mac, sub, headers)) }, headers);
@@ -261,7 +271,7 @@ export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env
       .run();
   }
 
-  return { raw, call, register, signIn, startSignIn, callback, claims, googleClaims, fill, counted, apple, google, deps, tunnels, time };
+  return { raw, call, register, registerWithGoogle, signIn, startSignIn, callback, claims, googleClaims, fill, counted, apple, google, deps, tunnels, time };
 }
 
 export const MINUTE = 60_000;
