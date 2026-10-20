@@ -3500,11 +3500,10 @@ impl Jobs {
                 // Done counted its own.
                 match self.keep_commits(id).await {
                     Ok(_) => {
-                        let start_commit = self
-                            .get(id)
-                            .and_then(|j| j.start_commit)
-                            .unwrap_or_default();
-                        let made = count_commits(&worktree, &start_commit, &own_head).await;
+                        let made = match self.get(id) {
+                            Some(job) => self.counted(&job, &worktree, &own_head).await,
+                            None => 0,
+                        };
                         if made > 0 {
                             self.update(id, |job| {
                                 if job.status != Status::Done {
@@ -5472,12 +5471,8 @@ impl Jobs {
             stages.begin("keep commits");
             let head = self.keep_commits(id).await?;
             self.tetrix_ended(id, &worktree, &start_commit).await;
-            let commits = if head == start_commit {
-                0
-            } else {
-                count_commits(&worktree, &start_commit, "HEAD").await
-            };
             let job = self.get(id).ok_or("the job is gone")?;
+            let commits = self.counted(&job, &worktree, &head).await;
             // Nothing committed: done, as Claude Code is when its model stops, and the agent's
             // summary says why. A round the owner asked for says nothing of it: their words decide.
             if COMMITTING.contains(&job.kind.as_str()) && commits == 0 && !job.asked {
@@ -5722,6 +5717,29 @@ impl Jobs {
             job.finished = Some(obi_protocol::time::now());
             change(job);
         });
+    }
+
+    /// The commits `job` publishes, up to `head` in `worktree`: its own from `start_commit`, and
+    /// those a follow-up carries from the first job's work (#770): every commit over its base on a
+    /// branch of its own, which was never pushed, the first job's unpublished ones on its very branch.
+    async fn counted(&self, job: &Job, worktree: &Path, head: &str) -> u64 {
+        let start_commit = job.start_commit.as_deref().unwrap_or_default();
+        if job.start_from.is_none() || head.is_empty() {
+            return count_commits(worktree, start_commit, head).await;
+        }
+        if job.start_from.as_deref() != Some(job.branch.as_str()) {
+            let base = format!(
+                "refs/remotes/origin/{}",
+                job.base.as_deref().unwrap_or_default()
+            );
+            return count_commits(worktree, &base, head).await;
+        }
+        let carried = job
+            .follow_up_of
+            .as_deref()
+            .and_then(|first| self.get(first))
+            .map_or(0, |first| first.unpublished());
+        count_commits(worktree, start_commit, head).await + carried
     }
 
     /// How many of `commits` (up to `head`) the remote has: those in the commit obid pushed last,
