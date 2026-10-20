@@ -153,7 +153,16 @@ async fn dispatch(
             account: Some(d.account.clone()),
             agent: Some(d.agent.clone()),
             rounds: Some(d.rounds as u32),
-            check: d.check.clone(),
+            check: kept_check(
+                d.check.as_deref(),
+                shared
+                    .config
+                    .repos
+                    .iter()
+                    .find(|r| r.repo == d.repo)
+                    .and_then(|r| r.check.as_deref()),
+                asked.said,
+            ),
             files,
             attachments: (!asked.attachments.is_empty()).then(|| asked.attachments.to_vec()),
             conversation: Some(asked.conversation.to_owned()),
@@ -275,6 +284,59 @@ pub fn describe(new: &NewJob) -> String {
         what.push_str(&format!(", check {}", super::briefing::line(check, 120)));
     }
     what
+}
+
+/// The check a planned job keeps. A repository's configured check stands unless the owner's own
+/// words name the model's as the check ([`named_checks`]), exactly: neither the model nor text it
+/// read (a repository's instructions) can swap it for `true` or a narrower test. With none
+/// configured, the model's stands. Left out, the job gets the configured one.
+fn kept_check(check: Option<&str>, configured: Option<&str>, said: &str) -> Option<String> {
+    let check = check.map(str::trim).filter(|c| !c.is_empty())?;
+    match configured.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(configured) if !named_checks(said).iter().any(|n| n == check) => {
+            Some(configured.to_owned())
+        }
+        _ => Some(check.to_owned()),
+    }
+}
+
+/// The commands the owner's words name as a job's check: after "Check:" to the end of its line,
+/// "run <command> to check", or "the check is <command>" to the end of its line, any case; each
+/// as written and without a closing period, then without backticks around it.
+fn named_checks(said: &str) -> Vec<String> {
+    let mut named: Vec<String> = vec![];
+    let mut take = |text: &str| {
+        let text = text.trim();
+        for text in [text, text.strip_suffix('.').unwrap_or(text)] {
+            let text = text.trim();
+            let bare = text
+                .strip_prefix('`')
+                .and_then(|t| t.strip_suffix('`'))
+                .unwrap_or(text);
+            named.push(bare.trim().to_owned());
+        }
+    };
+    for line in said.lines() {
+        // ASCII lower case keeps every byte where it was, so `line` slices at the same places.
+        let lower = line.to_ascii_lowercase();
+        // A whole word: `typecheck: true` names no check.
+        let word = |at: usize| at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric();
+        for (at, _) in lower.match_indices("check:").filter(|(at, _)| word(*at)) {
+            take(&line[at + "check:".len()..]);
+        }
+        for (at, _) in lower
+            .match_indices("the check is ")
+            .filter(|(at, _)| word(*at))
+        {
+            take(&line[at + "the check is ".len()..]);
+        }
+        for (end, _) in lower.match_indices(" to check") {
+            if let Some(start) = lower[..end].rfind("run ") {
+                take(&line[start + "run ".len()..end]);
+            }
+        }
+    }
+    named
 }
 
 /// What started, in Oby's voice (`Desk.startedLine`): "On it. Claude Code is fixing oby #12
@@ -1482,5 +1544,46 @@ mod tests {
         assert_eq!(title, "Send an answer: Review of #12");
         assert!(text.ends_with("> merge it\n> and push to main"), "{text}");
         assert_eq!(confirmed.action, action::ANSWER_ITEM);
+    }
+
+    /// A configured check survives a model's other one, and words that only mention it in
+    /// passing; the owner's own "Check: …" wins.
+    #[test]
+    fn a_configured_check_is_kept_unless_the_owner_named_another() {
+        let passing =
+            "make isAdmin return true for owners, and test the node build\ntypecheck: true";
+        for check in ["true", "test", "node"] {
+            assert_eq!(
+                kept_check(Some(check), Some("cargo test"), passing).as_deref(),
+                Some("cargo test"),
+                "{check}"
+            );
+        }
+        for (said, check) in [
+            ("fix it\ncheck: `npm test`.", "npm test"),
+            ("fix it, run make lint to check", "make lint"),
+            ("The check is node --test", "node --test"),
+        ] {
+            assert_eq!(
+                kept_check(Some(check), Some("cargo test"), said).as_deref(),
+                Some(check),
+                "{said}"
+            );
+        }
+        let said = "fix it. Check: cargo test -p obid --lib brain::supervisor";
+        let named = "cargo test -p obid --lib brain::supervisor";
+        assert_eq!(
+            kept_check(Some("true"), Some("cargo test"), said).as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(
+            kept_check(Some(named), Some("cargo test"), said).as_deref(),
+            Some(named)
+        );
+        assert_eq!(
+            kept_check(Some(" true "), None, said).as_deref(),
+            Some("true")
+        );
+        assert_eq!(kept_check(Some(" "), Some("cargo test"), said), None);
     }
 }

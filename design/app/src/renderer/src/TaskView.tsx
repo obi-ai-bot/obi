@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import Composer, { typingIn } from './Composer';
 import { useScrollThumb } from './useScrollThumb';
 import TaskCard from './TaskCard';
+import { SESSIONS } from './session';
 import { markSeen, useTasks, type Task } from './tasks';
 import type { Attachments } from './mock';
 
@@ -14,7 +15,7 @@ const LEAVE_MS = 220;
 // the trail in the title bar) returns to them as they were; back, or a click
 // off the card, goes straight to Home. A conversation opened from it lies over
 // it the same way.
-export default function TaskView({ id, leaving, covered = false, onBack, onHome, onGone, onTell }: {
+export default function TaskView({ id, leaving, covered = false, onBack, onHome, onGone, onTell, onSession }: {
   id: string;
   leaving: boolean;
   covered?: boolean;  // its conversation is open over it
@@ -22,6 +23,7 @@ export default function TaskView({ id, leaving, covered = false, onBack, onHome,
   onHome: () => void;  // straight to Home, as the title bar's back does (a click off the card)
   onGone: () => void;
   onTell: (id: string, text: string, att: Attachments) => void;  // the message box: on the end of its conversation
+  onSession?: (id: string) => void;  // Full session: the job's session, over the page
 }) {
   const tasks = useTasks();
   // deleted (from its conversation), it's gone from the tasks while this sinks away
@@ -64,7 +66,7 @@ export default function TaskView({ id, leaving, covered = false, onBack, onHome,
           onClick={(e) => { if (!(e.target as Element).closest('.card')) onHome(); }}
         >
           <div className="chat-column">
-            <TaskCard task={task} alone style={{ '--i': 0 } as React.CSSProperties} />
+            <TaskCard task={task} alone onSession={onSession && SESSIONS[task.id] ? () => onSession(task.id) : undefined} style={{ '--i': 0 } as React.CSSProperties} />
           </div>
         </section>
         <div {...thumbProps} />

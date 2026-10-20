@@ -37,24 +37,22 @@ Before the redesign, in three tabs (Home, Chat, Settings); all of it still works
 
 ## Signing and TestFlight
 
-Until Deskree's team can make certificates, the iPhone app signs with Wellington's paid personal team (`PQKAL8E36D`) under a beta bundle ID, `dev.wellprado.oby`; the Live Activity extension is `dev.wellprado.oby.activity`. On the phone it's still called Oby. Both the team (`OBY_TEAM_ID`) and the bundle ID (`OBY_IPHONE_BUNDLE_ID`) are set once, in `apps/config/Signing.xcconfig`; moving to Deskree's team is [docs/release.md](../../../docs/release.md).
+The iPhone app signs with Deskree's team (`3UV9W5SV7W`) as `com.deskree.oby`, the same App ID as the Mac app; the Live Activity extension is `com.deskree.oby.activity`, the Watch app `com.deskree.oby.watchkitapp` (and `.watchkitapp.widget`), and the App Group they share `group.com.deskree.oby.watch`. Both the team (`OBY_TEAM_ID`) and the bundle ID (`OBY_IPHONE_BUNDLE_ID`) are set once, in `apps/config/Signing.xcconfig` ([docs/release.md](../../../docs/release.md)).
 
-`com.deskree.oby` stays unused on purpose. Once an app record has a build, its bundle ID belongs to that account, and Apple only moves an app between accounts after it has been released on the App Store. So the beta lives on Wellington's account and the real app starts on Deskree's.
+Until 2026-10-20 the beta signed with Wellington's personal team (`PQKAL8E36D`) as `dev.wellprado.oby`, "Oby Beta" in App Store Connect. That record stays on his account (an app record's bundle ID belongs to its account) and gets no new builds; testers install the Deskree app as a new app, and Face ID keys register again on their own.
 
 **Upload a build to TestFlight:**
 
-1. Once, in [App Store Connect](https://appstoreconnect.apple.com): Apps › + › New App › iOS, bundle ID `dev.wellprado.oby`, name **Oby Beta**. App names are unique on the App Store, so keep "Oby" free for Deskree's app.
-2. Raise `CURRENT_PROJECT_VERSION` (every upload needs a new build number).
-3. In Xcode: scheme ObyPhone, destination Any iOS Device, Product › Archive, then Distribute App › TestFlight & App Store. Xcode makes the distribution certificate and profiles.
+1. Once, in Deskree's [App Store Connect](https://appstoreconnect.apple.com): Apps › + › New App › iOS, bundle ID `com.deskree.oby`, name **Oby** (or another free name), SKU of your choice. The bundle ID appears in the list once Xcode has registered it (step 3 does, with automatic signing), or register it first under Certificates, IDs & Profiles › Identifiers.
+2. Every upload needs a new build number; the export options' `manageAppVersionAndBuildNumber` raises it.
+3. In Xcode, signed in with an account in Deskree's team (Settings › Accounts): scheme ObyPhone, destination Any iOS Device, Product › Archive, then Distribute App › TestFlight & App Store. Xcode makes the distribution certificate, the App IDs, the App Group and the profiles.
 4. In App Store Connect › TestFlight, add internal testers (up to 100, no review).
 
 The app says it uses only exempt encryption (`ITSAppUsesNonExemptEncryption` = NO: HTTPS and Face ID signing), so builds skip the export compliance question.
 
-**Moving to Deskree's team:** set `OBY_IPHONE_BUNDLE_ID` to `com.deskree.oby` (project build settings) and the iPhone targets' team to Deskree's, then create the Oby app in Deskree's App Store Connect. Testers install it as a new app; Face ID keys register again on their own.
-
 ## Coming next
 
-- Notifications from the Oby platform rather than the runner (F11, spike #27). The runner's pushes use Wellington's team's APNs key until then.
+- Notifications from the Oby platform rather than the runner (F11, spike #27). Pushes need an APNs key in Deskree's team (docs/release.md, step 2).
 
 ## Voice input (Part of #19)
 
