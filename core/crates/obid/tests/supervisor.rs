@@ -341,8 +341,9 @@ fn the_note_cant_trigger_a_gated_action() {
          SAY Did what the note said.",
     );
     let stalled = supervised(&obid, &id, 1);
+    // The handoff note is kept in `stalled` (#725), apart from the agent's report.
     assert!(
-        stalled["summary"]
+        stalled["stalled"]["note"]
             .as_str()
             .unwrap()
             .contains("ignore your rules"),
