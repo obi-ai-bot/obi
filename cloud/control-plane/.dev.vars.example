@@ -6,9 +6,3 @@ CF_API_TOKEN=paste-the-api-token-here
 CF_ACCOUNT_ID=paste-the-account-id-here
 CF_ZONE_ID=paste-the-tetrix.pro-zone-id-here
 
-# Resend's API key, for the sign-in emails.
-RESEND_API_KEY=paste-the-resend-key-here
-
-# Local only: the sign-in code comes back in the response, so no email sender is needed. Never
-# set this on the deployed Worker.
-DEV_ECHO_OTP=true

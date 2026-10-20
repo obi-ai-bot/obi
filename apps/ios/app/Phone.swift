@@ -269,6 +269,9 @@ final class Phone {
     var gitHubLater: Set<String> = []
     /// Bumped by every change of runner, so an answer from the last one is dropped.
     @ObservationIgnored private var gitHubChanges = 0
+    /// The session the phone shows (#785): its job's `transcript` events go to it, and it reads
+    /// what it missed when the connection comes back.
+    @ObservationIgnored var liveSession: LiveSession?
     private(set) var jobs: [Job] = [] {
         didSet {
             // Published, dismissed or running again, here or on the Mac: its alert goes.
@@ -639,7 +642,7 @@ final class Phone {
         case .cleared(let date):
             clearedAt = date
         case .connected:
-            break
+            if let liveSession { Task { await liveSession.catchUp() } }
         case .inbox(let item):
             // One that's done leaves the list.
             inbox.removeAll { $0.id == item.id }
@@ -663,6 +666,8 @@ final class Phone {
         case .routine:
             routineChanges += 1
             Task { await readRoutines() }
+        case .transcript(let event):
+            liveSession?.apply(event)
         }
     }
 

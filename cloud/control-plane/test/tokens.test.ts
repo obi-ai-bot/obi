@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { takeOne } from "../src/limits";
 import { env } from "cloudflare:test";
-import { OPAQUE_ALPHABET, opaqueLabel, randomToken, sha256, sixDigits, tunnelSecret } from "../src/tokens";
+import { addressBucket, networkBucket, OPAQUE_ALPHABET, opaqueLabel, registrableDomain, tunnelSecret } from "../src/tokens";
 
 describe("tokens", () => {
   it("makes opaque labels of lowercase letters and digits", () => {
@@ -16,16 +16,35 @@ describe("tokens", () => {
     expect(opaqueLabel(16)).toHaveLength(16);
   });
 
-  it("makes six-digit codes and prefixed tokens", () => {
-    for (let i = 0; i < 20; i++) expect(sixDigits()).toMatch(/^\d{6}$/);
-    expect(randomToken("oby_session_")).toMatch(/^oby_session_[A-Za-z0-9_-]{43}$/);
-    expect(randomToken("oby_install_")).toMatch(/^oby_install_[A-Za-z0-9_-]{43}$/);
-    expect(randomToken("oby_install_")).not.toBe(randomToken("oby_install_"));
-    expect(atob(tunnelSecret())).toHaveLength(32);
+  it("counts an IPv6 address by its /64, an IPv4 one as it is", () => {
+    expect(addressBucket("203.0.113.7")).toBe("203.0.113.7");
+    expect(addressBucket("2001:db8:1:2::1")).toBe("2001:db8:1:2::/64");
+    expect(addressBucket("2001:0DB8:0001:0002:ffff:ffff:ffff:ffff")).toBe("2001:db8:1:2::/64");
+    expect(addressBucket("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(addressBucket("::1")).toBe("0:0:0:0::/64");
+    expect(addressBucket("2001:db8:1:3::1")).not.toBe(addressBucket("2001:db8:1:2::1"));
   });
 
-  it("hashes as SHA-256 hex", async () => {
-    expect(await sha256("abc")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  it("counts a wider network: an IPv4 /24, an IPv6 /48", () => {
+    expect(networkBucket("203.0.113.7")).toBe("203.0.113.0/24");
+    expect(networkBucket("2001:db8:1:2::1")).toBe("2001:db8:1::/48");
+    expect(networkBucket("2001:db8:1:ffff::9")).toBe(networkBucket("2001:db8:1:2::1"));
+    expect(networkBucket("2001:db8:2::1")).not.toBe(networkBucket("2001:db8:1::1"));
+  });
+
+  it("finds a domain's registrable domain", () => {
+    expect(registrableDomain("tetrix.pro")).toBe("tetrix.pro");
+    expect(registrableDomain("devices.tetrix.pro")).toBe("tetrix.pro");
+    expect(registrableDomain("a.b.example.co.uk")).toBe("example.co.uk");
+    expect(registrableDomain("co.uk")).toBeNull();
+    expect(registrableDomain("pro")).toBeNull();
+    expect(registrableDomain("")).toBeNull();
+    expect(registrableDomain("bad_label.example.com")).toBeNull();
+  });
+
+  it("makes tunnel secrets of 32 random bytes", () => {
+    expect(atob(tunnelSecret())).toHaveLength(32);
+    expect(tunnelSecret()).not.toBe(tunnelSecret());
   });
 });
 

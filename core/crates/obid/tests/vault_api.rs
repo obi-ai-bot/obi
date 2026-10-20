@@ -873,9 +873,11 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
     assert_eq!(groups[1]["state"], "failed");
     assert_eq!(groups[1]["diff"], json!({"added": 4, "removed": 3}));
     assert_eq!(job["contextBy"], "agent");
-    assert_eq!(
-        job["context"],
-        "Found it. Fixing it, with [redacted: vault staging-api-key] for staging ([redacted: vault staging-api-key], [redacted: vault staging-api-key])."
+    assert!(
+        job["context"].as_str().unwrap().starts_with(
+            "Found it. Fixing it, with [vault: staging-api-key] for staging ([vault: staging-api-key], [vault: staging-api-key])."
+        ),
+        "{job}"
     );
     let stored = std::fs::read_to_string(obid.home.join(format!("jobs/{id}.json"))).unwrap();
     holds_none(&stored, &value(), "the job's file");
@@ -910,10 +912,18 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
         entries[7]["todos"][1],
         json!({"text": "Fix it", "state": "running"})
     );
-    assert_eq!(
-        entries[8]["summary"],
-        "Found it. Fixing it, with [redacted: vault staging-api-key] for staging ([redacted: vault staging-api-key], [redacted: vault staging-api-key])."
+    // The agent's words whole (#784): all 41 lines, the summary their first 300 characters.
+    let steps: Vec<String> = (1..=40)
+        .map(|i| format!("Step {i}: look again at the scan's exit."))
+        .collect();
+    let whole = format!(
+        "Found it. Fixing it, with [vault: staging-api-key] for staging ([vault: staging-api-key], [vault: staging-api-key]).\n{}",
+        steps.join("\n")
     );
+    assert_eq!(entries[8]["text"], whole.as_str());
+    let summary = entries[8]["summary"].as_str().unwrap();
+    assert!(summary.starts_with("Found it. Fixing it, with [vault: staging-api-key] for staging ([vault: staging-api-key], [vault: staging-api-key]). Step 1:"), "{summary}");
+    assert!(summary.chars().count() <= 300, "{summary}");
     for tool in entries.iter().filter(|e| e["kind"] == "tool") {
         assert!(
             tool["at"].is_string() && tool["seconds"].is_number(),
@@ -938,12 +948,13 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
         entries[11]["summary"]
             .as_str()
             .unwrap()
-            .starts_with("Running export STAGING_KEY=[redacted"),
+            .starts_with("Running export STAGING_KEY=[vault: staging-api-key]"),
         "{}",
         entries[11]
     );
 
-    // Only what came since entry 9.
+    // Only what came or changed since entry 9 first came: 9 itself came again once its words
+    // were whole.
     let since = call(
         &obid,
         "GET",
@@ -952,7 +963,7 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
     );
     assert_eq!(
         since.body,
-        json!({"entries": entries[9..], "next": null}),
+        json!({"entries": entries[8..], "next": null}),
         "{}",
         since.text
     );
@@ -979,13 +990,30 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
     let none = call(&obid, "GET", "/v1/jobs/nope/transcript", None);
     assert_eq!(none.status, 404);
 
-    // The events carry the same entries in the same order, each as it changed.
+    // The events carry the same entries in the same order, each as it changed, and the words
+    // as they were written: whole lines added to their entry.
     let mut streamed: Vec<Value> = Vec::new();
+    let mut appended = String::new();
+    let mut appends = 0;
     while let Ok((name, data)) = events.recv_timeout(std::time::Duration::from_secs(1)) {
-        if name == "transcript" && data["job"] == json!(id) {
+        if name != "transcript" || data["job"] != json!(id) {
+            continue;
+        }
+        if data["entry"].is_object() {
             streamed.push(data["entry"].clone());
+        } else {
+            assert_eq!(data["n"], 9, "{data}");
+            appended.push_str(data["append"].as_str().unwrap());
+            appends += 1;
         }
     }
+    assert!(appends >= 30, "{appends} appends");
+    let first = format!("{}\n", whole.lines().next().unwrap());
+    assert!(
+        whole.starts_with(&format!("{first}{appended}")),
+        "{appended}"
+    );
+    assert!(appended.ends_with("Step 39: look again at the scan's exit.\n"));
     let mut last = std::collections::BTreeMap::new();
     for entry in &streamed {
         last.insert(entry["n"].as_u64().unwrap(), entry.clone());
@@ -1001,6 +1029,62 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
     ] {
         holds_none(text, &value(), what);
         assert!(!text.contains("raw output"), "{what}: {text}");
+    }
+    holds_none(&appended, &value(), "the appends");
+
+    // An entry opened (#784): the call's whole command, the last 200 of its 304 lines with its
+    // exit code, the vault's value as its name in every form, and only the token's own line hidden.
+    let bash = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/12"), None);
+    assert_eq!(bash.status, 200, "{}", bash.text);
+    let detail = &bash.body["detail"];
+    assert_eq!(bash.body["n"], 12);
+    assert_eq!(
+        detail["input"]["command"],
+        "export STAGING_KEY=[vault: staging-api-key] KEY64=[vault: staging-api-key] && node --test"
+    );
+    let output = &detail["output"];
+    assert_eq!(
+        (&output["lines"], &output["exit"], &output["truncated"]),
+        (&json!(304), &json!(1), &json!(true)),
+        "{output}"
+    );
+    let text: Vec<&str> = output["text"].as_str().unwrap().lines().collect();
+    assert_eq!(text.len(), 200);
+    assert_eq!(text[0], "ok 104 - test 104");
+    let at = text.iter().position(|l| l.starts_with("using ")).unwrap();
+    assert_eq!(text[at - 1], "ok 296 - test 296");
+    assert_eq!(text[at], "using [vault: staging-api-key]");
+    assert_eq!(text[at + 1], "as base64 [vault: staging-api-key]");
+    assert!(
+        text[at + 2].starts_with("[redacted: ") && !text[at + 2].contains("ghp_"),
+        "{}",
+        text[at + 2]
+    );
+    assert_eq!(text[at + 3], "ok 297 - test 297");
+    let edit = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/10"), None);
+    assert_eq!(
+        edit.body["detail"]["diff"],
+        json!([{"path": "src/scan.rs",
+                "patch": "--- a/src/scan.rs\n+++ b/src/scan.rs\n@@ -1,2 +1,3 @@\n-a\n-b\n+c\n+d\n+e\n"}]),
+        "{}",
+        edit.text
+    );
+    let words = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/9"), None);
+    assert_eq!(words.body["text"], whole.as_str());
+    assert!(words.body.get("detail").is_none(), "{}", words.text);
+    let missing = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/99"), None);
+    assert_eq!(missing.status, 404);
+    let wrong = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/x"), None);
+    assert_eq!(wrong.status, 422);
+    let kept =
+        std::fs::read_to_string(obid.home.join(format!("jobs/{id}/transcript-detail.jsonl")))
+            .unwrap();
+    for (what, text) in [
+        ("the detail file", kept.as_str()),
+        ("the opened call", bash.text.as_str()),
+    ] {
+        holds_none(text, &value(), what);
+        assert!(!text.contains("ghp_"), "{what}: {text}");
     }
 }
 

@@ -1664,6 +1664,7 @@ async fn one(
             Event::Step(_)
             | Event::Denied(_)
             | Event::Said(_)
+            | Event::Thought { .. }
             | Event::Plan(_)
             | Event::Usage(_)
             | Event::Tokens(_) => {}
