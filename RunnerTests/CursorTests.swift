@@ -146,10 +146,11 @@ struct CursorTests {
         var summary: String? { all.compactMap { if case .turnEnded(let summary, _) = $0 { summary } else { nil } }.last }
     }
 
-    /// Waits up to `seconds` for `done`.
+    /// Waits for `done`, looking every 10 ms, up to `seconds` worth of looks. Looks are counted,
+    /// not the clock (as the other suites' `until`): the agent's messages are handled on the main
+    /// actor, which the whole suite's other tests hold for seconds at a time.
     func until(_ seconds: Double = 30, _ done: () -> Bool) async throws {
-        let end = Date.now.addingTimeInterval(seconds)
-        while !done(), Date.now < end { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<Int(seconds * 100) where !done() { try await Task.sleep(for: .milliseconds(10)) }
     }
 
     /// The JSON lines the fake received.
