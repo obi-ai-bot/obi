@@ -1,17 +1,22 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useScrollThumb } from './useScrollThumb';
 import TaskCard from './TaskCard';
-import { tasksIn, useTasks, type Tab, type TaskType } from './tasks';
+import { BrandMark, BRANDS } from './brands';
+import { ago, ASK_LABEL, type GitHubItem } from './mock';
+import { columnsOf, hasToDo, putOff, startGitHub, tasksIn, toDoOf, useTasks, type Tab, type TaskType } from './tasks';
 
 // how long the way out takes (the sink animation in app.css)
 const LEAVE_MS = 220;
 const TABS: { id: Tab; label: string }[] = [
+  { id: 'todo', label: 'To do' },
   { id: 'running', label: 'Running' },
   { id: 'done', label: 'Completed' },
 ];
 
 // One kind of work: its name, tabs for Running / Completed, and a card per
 // task in the open tab; under Completed, a way to the older ones, archived.
+// Review PR and Issues have To do first: GitHub's items no job works on yet,
+// by their project board's column, each one start away.
 // Everything rises in, one after another; on the way out it sinks and fades,
 // then onGone lets Home bring Oby back. A card opens its task's own page
 // (TaskView) over the list.
@@ -54,6 +59,11 @@ export default function GroupView({ group, tab: startTab, leaving, covered = fal
   // anything added meanwhile goes on top
   const order = useMemo(() => tasksIn(group.id, tab).map((t) => t.id), [group.id, tab]);
   const cards = tasksIn(group.id, tab).sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+  const tabs = TABS.filter((t) => t.id !== 'todo' || hasToDo(group.id));
+  const count = (t: Tab) => (t === 'todo' ? toDoOf(group.id).length : tasksIn(group.id, t).length);
+  const columns = tab === 'todo' ? columnsOf(group.id) : [];
+  const named = columns.some((c) => c.name);
+  let at = 2;
   // back from a task's page: everything rises in again, as the page did
   const wasCovered = useRef(false);
   if (covered) wasCovered.current = true;
@@ -87,7 +97,7 @@ export default function GroupView({ group, tab: startTab, leaving, covered = fal
         <div className="group-column">
           <h1 className="group-title rise" style={{ '--i': 0 } as React.CSSProperties}>{group.label}</h1>
           <div ref={tabRow} className="line-tabs rise" role="tablist" aria-label={`${group.label} by status`} style={{ '--i': 1 } as React.CSSProperties}>
-            {TABS.map((t) => (
+            {tabs.map((t) => (
               <button
                 key={t.id}
                 role="tab"
@@ -97,17 +107,23 @@ export default function GroupView({ group, tab: startTab, leaving, covered = fal
                 onClick={() => { if (t.id !== tab) { setTab(t.id); setSwitched(true); } }}
               >
                 {t.label}
-                <span className="line-tab-count">{tasksIn(group.id, t.id).length}</span>
+                <span className="line-tab-count">{count(t.id)}</span>
               </button>
             ))}
             <span ref={line} className={`line-tab-line${switched ? ' is-moving' : ''}`} aria-hidden="true" />
           </div>
           {/* keyed by tab, so switching brings the new cards in fresh */}
           <div key={tab} className="group-cards" role="tabpanel">
+            {columns.map((c) => (
+              <div key={`${c.project ?? ''}/${c.name ?? ''}`} className="group-board">
+                {named && <h2 className="group-board-name rise" style={{ '--i': at++ } as React.CSSProperties}>{c.name ?? 'Not on a board'}</h2>}
+                {c.items.map((g) => <GitHubCard key={g.id} item={g} style={{ '--i': at++ } as React.CSSProperties} />)}
+              </div>
+            ))}
             {cards.map((c, i) => (
               <TaskCard key={c.id} task={c} onOpen={onOpenTask} style={{ '--i': i + 2 } as React.CSSProperties} />
             ))}
-            {!cards.length && <p className="group-empty rise" style={{ '--i': 2 } as React.CSSProperties}>Nothing {tab === 'done' ? 'completed yet' : tab}</p>}
+            {!cards.length && !columns.length && <p className="group-empty rise" style={{ '--i': 2 } as React.CSSProperties}>Nothing {tab === 'done' ? 'completed yet' : tab === 'todo' ? 'to do' : tab}</p>}
             {/* completed ones leave Home after a while (Archive completed, in Home's ⋮) */}
             {tab === 'done' && (
               <button className="group-archived rise" style={{ '--i': cards.length + 2 } as React.CSSProperties} onClick={onOpenArchive}>
@@ -119,5 +135,36 @@ export default function GroupView({ group, tab: startTab, leaving, covered = fal
       </section>
       <div {...thumbProps} />
     </div>
+  );
+}
+
+// A GitHub item no job works on yet, as a card under To do: GitHub's mark, who
+// and what, the repository and its board column, then "Start it?" with the one
+// click that starts Oby's job on it, Open on GitHub, and Later.
+function GitHubCard({ item, style }: { item: GitHubItem; style?: React.CSSProperties }) {
+  return (
+    <article className="card rise task-card" aria-label={item.title} style={style}>
+      <header className="tc-head">
+        <BrandMark brand={BRANDS.github} size={16} mono />
+        <h2 className="tc-title">
+          {item.who && <span className="tc-who">{item.who}</span>}
+          {item.title}
+        </h2>
+        <span className="tc-ago">{ago(item.updated)}</span>
+      </header>
+      <p className="tc-meta">
+        {item.repo}
+        {item.board && <span className="tc-column">{item.board.column}</span>}
+      </p>
+      <div className="tc-ask">
+        <span className="tc-ask-kind">{ASK_LABEL.start}</span>
+        <p className="tc-ask-head">{item.request}</p>
+        <div className="tc-options">
+          <button className="tc-option is-primary" onClick={() => startGitHub(item.id)}>{item.action}</button>
+          <button className="tc-option">Open on GitHub</button>
+          <button className="tc-option is-quiet" onClick={() => putOff(item.id)}>Later</button>
+        </div>
+      </div>
+    </article>
   );
 }

@@ -15,6 +15,15 @@ struct GitHubWorkTests {
         #expect(parser.feed("") == .github(work))
     }
 
+    /// Issues' To do on the iPhone: by board column, and one group when obid sends no board.
+    @Test func toDoGroupsByBoardColumn() throws {
+        let json = #"{"signedIn": true, "reviews": [], "mine": [], "assigned": [{"id": "a", "list": "assigned", "repo": "o/r", "number": 3, "title": "t", "url": "https://github.com/o/r/issues/3", "known": true, "job": null, "board": {"project": "Oby — Roadmap", "column": "In progress"}}, {"id": "b", "list": "assigned", "repo": "o/r", "number": 4, "title": "t", "url": "https://github.com/o/r/issues/4", "known": true, "job": null}]}"#
+        let work = try Runner.decoder.decode(GitHubWork.self, from: Data(json.utf8))
+        #expect(work.toDo(.issues).map(\.name) == ["In progress", nil])
+        #expect(work.items[0].column == "In progress" && work.items[1].board == nil)
+        #expect(WorkList.counts([WorkList.Item<String>](), toDo: 2)[.running] == 0)
+    }
+
     @Test func connectAndLinks() {
         #expect(GitHubWork.Connect(GitHubWork(signedIn: false)) == .signedOut)
         #expect(GitHubWork.page("https://github.com/o/r/issues/1") != nil)

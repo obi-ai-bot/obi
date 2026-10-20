@@ -523,7 +523,8 @@ struct WorkMarkView: View {
 }
 
 /// Underlined tabs (Sangam's `.line-tabs`): the names alone with their counts, the open one in ink
-/// with a 2-point line on the 1-point line under the row, sliding to the tab picked.
+/// with a 2-point line on the 1-point line under the row, sliding to the tab picked. To do shows
+/// only where it's counted (Review PR and Issues).
 struct LineTabs: View {
     let tab: WorkList.Tab
     let counts: [WorkList.Tab: Int]
@@ -532,7 +533,7 @@ struct LineTabs: View {
 
     var body: some View {
         HStack(spacing: 24) {
-            ForEach(WorkList.Tab.allCases, id: \.self) { each in
+            ForEach(WorkList.Tab.allCases.filter { $0 != .todo || counts[$0] != nil }, id: \.self) { each in
                 Button { withAnimation(Tokens.warm) { onPick(each) } } label: {
                     HStack(spacing: 6) {
                         Text(each.rawValue).font(Tokens.font(Tokens.textBase))
