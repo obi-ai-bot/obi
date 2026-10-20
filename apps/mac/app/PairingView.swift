@@ -63,7 +63,7 @@ struct PairingView: View {
         .task { await loadDevices() }
     }
 
-    private var remoteOn: Bool { remote?.step == .on && remote?.hostname.map(MacLink.isHostname) == true }
+    private var remoteOn: Bool { remote?.on == true && remote?.hostname.map(MacLink.isHostname) == true }
 
     private func create() async {
         busy = true
