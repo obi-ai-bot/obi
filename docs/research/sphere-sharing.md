@@ -9,7 +9,7 @@ Research and design, 2026-10-20. Not built yet: both features are on the roadmap
 
 - **A works, built so that a member's login never comes to my Mac.** Their job runs on my Mac in a Linux VM of its own. The VM reaches their AI account, and the network, only through their own Oby: their obid adds their login to each model call on their Mac, and the call leaves from their Mac. No copy of their login is ever made, so there is nothing to delete afterwards.
 - **B as asked (30% of my Claude Max for Sangam) breaks all three providers' terms.** Anthropic, OpenAI and Cursor all keep a personal plan to one person, whether it's shared by handing over a login or by running someone else's tasks on it and returning the results. Per-person Team and Business seats are the same.
-- **B is redesigned, and needs the owner's decision.** Only an account the company pays by use can be shared: an organisation's API key, under its own budget. A shared job runs on the key holder's Mac, in the same VM as A, and its model calls go through the key holder's obid, which adds the key and meters the share. API accounts have no 5-hour or weekly window, so the share is a percentage of a monthly budget the owner sets.
+- **B is redesigned, and the owner accepted it on 2026-10-20 (section 7).** Only an account the company pays by use can be shared: an organisation's API key, under its own budget. A shared job runs on the key holder's Mac, in the same VM as A, and its model calls go through the key holder's obid, which adds the key and meters the share. API accounts have no 5-hour or weekly window, so the share is a percentage of a monthly budget the owner sets.
 
 ## 1. What the providers' terms allow
 
@@ -212,7 +212,7 @@ These are added the way `review_request` is today. Every one is signed, scanned 
   - The VM's model calls go to my obid, which adds my key. **The key never enters the VM or leaves my Mac.**
   - The member gets the result, and their own obid publishes it.
   - It needs my Mac free, as A does.
-- **B2, an alternative to decide on: anywhere, with model calls through the key holder's Oby.**
+- **B2, considered and not chosen (section 7): anywhere, with model calls through the key holder's Oby.**
   - The member's job runs on the member's own Mac, and its model calls relay to my obid, which adds the key.
   - No one's code comes to my Mac, and my Mac only needs to be online, not free.
   - It's the same relay as A, the other way round.
@@ -264,17 +264,21 @@ The preview is Sangam's Electron design (`design/app`); run it with the `sangam-
 2. **The relay:** run it on the Sphere server (Deskree's, on DigitalOcean), or go directly between the two Macs over each Mac's Cloudflare tunnel? We recommend the Sphere server, with end-to-end encryption.
 3. **Dependencies:** with all guest traffic leaving from the member's Mac, `npm install` and the like work under the member's policy. Is the bandwidth acceptable on a laptop over hotel Wi-Fi?
 4. **Apple checks for guests:** Linux VMs can't run Xcode. Should we offer one of the two macOS VM slots later, given the image size and setup time?
-5. **B:** build it at all, given that Console workspaces and OpenAI projects with per-person spend limits exist? If we do, B1 or B2?
+5. ~~**B:** build it at all, and B1 or B2?~~ Decided: build it for company-paid API accounts, on the key holder's Mac (B1). See section 7.
 6. **The owner's reserve on a shared API account** (for example "keep 20% for me"): is it worth one more knob?
 7. **Members outside the company's Google Workspace** (guests in a Sphere): exclude them from both features by default?
 8. **Cursor:** offer it for A only if Cursor adds a base-URL override or an API-key flow that works through a relay?
 
-## 7. Decisions for the owner
+## 7. Decided (owner, 2026-10-20)
 
-1. **B's scope:** only organisation-billed API accounts. Personal plans and seats can't be shared; that's the providers' terms, not ours. Or don't build B, and point to Console workspaces instead.
-2. **A's credential path:** the login stays on the member's Mac, with a relay through their obid, and copies are never made. Ship it for API-key accounts first, and for subscription logins once providers confirm.
-3. **A's box:** a Linux VM per guest job, and no Seatbelt-only mode for other people's work. That means no Apple checks for guests in v1.
-4. **Guest network:** all of it leaves from the member's Mac, never the host's.
-5. **Defaults:** off. When on: "When I'm away", "Everyone, ask me first", 1 job, the small size, any job, a 2-hour limit.
-6. **Presence:** members see free or busy, never "away".
-7. **B1 or B2,** if B is built.
+The owner accepted the redesign and its defaults. Both features stay `future`: nothing is built yet.
+
+1. **B's scope:** only company-paid API accounts (organisation keys) can be shared, as a share of a monthly budget. Personal plans and seats show under **Kept for you**, with the reason.
+2. **Where B runs:** on the key holder's Mac (B1), in the same VM as A. The key never leaves that Mac.
+3. **A's login:** the member's login stays on the member's Mac, and their obid adds it to each call. No copies are ever made.
+4. **A's box:** one Linux VM per guest job, with no Seatbelt-only mode for other people's work. So there are no Apple checks for guests in v1.
+5. **Guest network:** all of it leaves from the member's Mac, never the host's.
+6. **Defaults:** sharing is off. Once on: "When I'm away", "Everyone, ask me first", 1 job, 4 cores · 8 GB · 30 GB, 2 hours per job.
+7. **Privacy:** members see only free or busy, never "away".
+
+**Still open:** ask Anthropic and OpenAI whether a subscription login's calls may be routed through another Mac. Until they confirm, A uses API-key accounts only (open question 1).
