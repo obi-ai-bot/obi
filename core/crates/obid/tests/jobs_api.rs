@@ -969,9 +969,63 @@ fn a_follow_up_doesnt_republish_a_closed_pull_requests_commits() {
     assert_eq!(follow["commits"], 1, "{follow}");
     assert_eq!(follow["published"], Value::Null, "{follow}");
     assert_eq!(follow["outgoing"], json!([]), "{follow}");
+    let turned_down = "The pull request of Add a.txt was closed without merging, so Oby didn't publish its commits again: Publish opens a new pull request with them.";
+    assert_eq!(follow["reason"], turned_down, "{follow}");
+
+    // A follow-up of that follow-up carries the same turned-down commits: nor does it.
+    let told = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{next}/messages"),
+        Some(&json!({"text": "And now?"}).to_string()),
+    );
+    assert_eq!(told.status, 201, "{}", told.text);
+    let last = told.body["id"].as_str().unwrap().to_owned();
+    let again = wait(&obid, &last);
+    assert_eq!(again["status"], "done", "{again}");
+    assert_eq!(again["branch"], format!("oby/build-{last}"), "{again}");
+    assert_eq!(again["commits"], 1, "{again}");
+    assert_eq!(again["published"], Value::Null, "{again}");
+    assert_eq!(again["outgoing"], json!([]), "{again}");
+    assert_eq!(again["reason"], turned_down, "{again}");
+}
+
+/// A follow-up of a job that pushed with no pull request (a remote without them) doesn't push
+/// those commits again to a branch of its own when it adds none: they're out (#770).
+#[test]
+fn a_follow_up_doesnt_repush_its_first_jobs_pushed_commits() {
+    let folder = Folder::new("follow-pushed");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote);
+    config["repos"][0]["pullRequests"] = json!(false);
+    let obid = start(&folder.0, &config);
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt", "request": "Add a.txt", "title": "Add a.txt", "check": "test -f a.txt"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["pushed"], 1, "{job}");
+    assert_eq!(job["published"], Value::Null, "{job}");
+    let told = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "Anything left?"}).to_string()),
+    );
+    assert_eq!(told.status, 201, "{}", told.text);
+    let next = told.body["id"].as_str().unwrap().to_owned();
+    let follow = wait(&obid, &next);
+    assert_eq!(follow["status"], "done", "{follow}");
+    assert_eq!(follow["branch"], format!("oby/build-{next}"), "{follow}");
+    assert_eq!(follow["commits"], 0, "{follow}");
+    assert_eq!(follow["outgoing"], json!([]), "{follow}");
     assert_eq!(
-        follow["reason"],
-        "The pull request of Add a.txt was closed without merging, so Oby didn't publish its commits again: Publish opens a new pull request with them.",
+        follow["reason"], "Nothing committed, so nothing was published.",
         "{follow}"
     );
 }

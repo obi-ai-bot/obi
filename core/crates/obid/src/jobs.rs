@@ -5732,21 +5732,26 @@ impl Jobs {
 
     /// The commits `job` publishes, up to `head` in `worktree`: its own from `start_commit`, and,
     /// for a follow-up that started from its first job's work, those it carries (#770): what its
-    /// branch has over the last commit any job pushed to that branch, or, when none is under
-    /// `head` (a branch of its own, or one rebased since), over its base or its pull request's
-    /// head. A split part counts only its own: its siblings carry the same commits.
+    /// branch has over the last commit any job pushed to that branch or to the one it started from
+    /// (unless that work's pull request was closed unmerged), or, when none is under `head` (a
+    /// branch of its own, or one rebased since), over its base or its pull request's head. A split
+    /// part counts only its own: its siblings carry the same commits.
     async fn counted(&self, job: &Job, worktree: &Path, head: &str) -> u64 {
         let start_commit = job.start_commit.as_deref().unwrap_or_default();
         if job.start_from.is_none() || head.is_empty() || self.split_part(job) {
             return count_commits(worktree, start_commit, head).await;
         }
+        let from_out = self.first_turned_down(job).is_none();
+        let out = |branch: Option<&str>| {
+            branch == Some(job.branch.as_str()) || from_out && branch == job.start_from.as_deref()
+        };
         let pushed: Vec<String> = self
             .lock()
             .jobs
             .values()
             .filter(|j| j.repo == job.repo)
             .flat_map(|j| j.outgoing.iter())
-            .filter(|o| o.action == "push" && o.branch.as_deref() == Some(job.branch.as_str()))
+            .filter(|o| o.action == "push" && out(o.branch.as_deref()))
             .map(|o| o.id.clone())
             .collect();
         let mut least: Option<u64> = None;
@@ -5785,17 +5790,25 @@ impl Jobs {
             })
     }
 
-    /// The title of `job`'s first job when that one's pull request was closed without merging:
-    /// the owner turned its commits down, so a follow-up that adds none doesn't send them again by
-    /// itself (#770).
+    /// The title of the job whose work `job` carries, through the follow-ups between them, when
+    /// that one's pull request was closed without merging: the owner turned its commits down, so a
+    /// follow-up that adds none doesn't send them again by itself (#770).
     fn first_turned_down(&self, job: &Job) -> Option<String> {
-        let first = self.get(job.follow_up_of.as_deref()?)?;
-        let closed = first
-            .pull_request
-            .as_ref()
-            .is_some_and(|pr| pr.state == "CLOSED");
-        (job.start_from.is_some() && first.published.is_some() && closed)
-            .then(|| first.short_title())
+        let mut job = job.clone();
+        // ponytail: a bounded walk; follow-up chains are short.
+        for _ in 0..64 {
+            job.start_from.as_ref()?;
+            let first = self.get(job.follow_up_of.as_deref()?)?;
+            if first.published.is_some() {
+                let closed = first
+                    .pull_request
+                    .as_ref()
+                    .is_some_and(|pr| pr.state == "CLOSED");
+                return closed.then(|| first.short_title());
+            }
+            job = first;
+        }
+        None
     }
 
     /// How many of `commits` (up to `head`) the remote has: those in the commit obid pushed last,
@@ -9686,6 +9699,19 @@ mod tests {
         follow.pr = Some(5);
         assert_eq!(jobs.counted(&follow, &repo, &first).await, 1);
         follow.pr = None;
+        // A split part: its own alone.
+        let mut split = parent.clone();
+        split.supervised.push(crate::job::Supervision {
+            at: 0,
+            decision: "split".into(),
+            jobs: vec!["f".into()],
+            turn: "t".into(),
+            count: 1,
+        });
+        jobs.lock().jobs.insert("p".into(), split);
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 0);
+        assert_eq!(jobs.counted(&follow, &repo, &next).await, 1);
+        jobs.lock().jobs.insert("p".into(), parent.clone());
         // Its first job's branch: over the last push under its head, never a rebased one.
         follow.branch = "oby/fix-p".into();
         assert_eq!(jobs.counted(&follow, &repo, &first).await, 2);
@@ -9698,18 +9724,30 @@ mod tests {
         jobs.lock().jobs.insert("p".into(), parent.clone());
         assert_eq!(jobs.counted(&follow, &repo, &first).await, 0);
         assert_eq!(jobs.counted(&follow, &repo, &next).await, 1);
-        // A split part: its own alone.
+        // A branch of its own: what was pushed to the one it started from is out too, unless its
+        // pull request was closed unmerged.
         follow.branch = "oby/fix-f".into();
-        parent.supervised.push(crate::job::Supervision {
-            at: 0,
-            decision: "split".into(),
-            jobs: vec!["f".into()],
-            turn: "t".into(),
-            count: 1,
-        });
-        jobs.lock().jobs.insert("p".into(), parent);
         assert_eq!(jobs.counted(&follow, &repo, &first).await, 0);
         assert_eq!(jobs.counted(&follow, &repo, &next).await, 1);
+        parent.published = Some("https://github.com/o/r/pull/9".into());
+        parent.pull_request = Some(crate::github::PullRequest {
+            state: "CLOSED".into(),
+            review_decision: None,
+            base: "main".into(),
+            merged_at: None,
+            checked_at: 0,
+            head: None,
+        });
+        jobs.lock().jobs.insert("p".into(), parent);
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 2);
+        // Through a follow-up between them that published nothing.
+        let mut middle = new("m", "oby/fix-m");
+        middle.follow_up_of = Some("p".into());
+        middle.start_from = Some("oby/fix-p".into());
+        jobs.lock().jobs.insert("m".into(), middle);
+        follow.follow_up_of = Some("m".into());
+        follow.start_from = Some("oby/fix-m".into());
+        assert_eq!(jobs.first_turned_down(&follow).as_deref(), Some("Fix it"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
