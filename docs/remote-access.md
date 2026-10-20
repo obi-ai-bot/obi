@@ -2,10 +2,11 @@
 
 Outside the home network, the iPhone reaches the Mac with no port forwarding, no VPN app and no Tailscale account: an Oby control plane on Cloudflare gives each installation its own Cloudflare Tunnel, the Mac runs `cloudflared` outbound as a child of Oby, and the iPhone talks HTTPS to an opaque hostname. The pattern is OpenMausBot's `cloudflare/control-plane`.
 
-- **The control plane** is a Worker with a D1 database, `cloud/control-plane/`, at `oby-control.tetrix.pro`. Sign-in is a six-digit code by email (Sign in with Apple comes with #282). Each Mac registers an installation with its own revocable credential, asks for its endpoint, and gets its tunnel's run token.
+- **The control plane** is a Worker with a D1 database, `cloud/control-plane/`, at `oby-control.tetrix.pro`. There's no account and no sign-in (the owner's decision of 2026-10-20): each Mac makes a P-256 key, registers an installation by its public key, and signs every call with it, so the iPhone only scans the Mac's QR code. Sign in with Apple (#282) may come later as an optional way to manage several Macs.
+- **Abuse control** is rate limits and expiry, not an account: 5 new installations an hour per network and 60 an hour over everyone; one installation per key; and an installation no Mac has signed a call for in 30 days is removed with its tunnel and hostname, by an hourly cron. App Attest isn't used: checking an attestation in the Worker means parsing CBOR and Apple's certificate chain, and the Developer ID build would need the App Attest entitlement and a provisioning profile; it can come later on top of the key.
 - **Hostnames** are first-level names under `tetrix.pro`, `oby-<20 opaque characters>.tetrix.pro`, so Cloudflare's free Universal SSL covers them. Never `<id>.oby.tetrix.pro`: a second-level name would need Advanced Certificate Manager. The zone is the user's own; the Watch API's tunnel lives there too, and the Worker never touches records it didn't make.
 - **The tunnel** routes one hostname to the gateway on the Mac (`http://127.0.0.1:8810`, #284) and nothing else: the last ingress rule is `http_status:404`.
-- **Secrets** live only in the Worker's secrets (the Cloudflare API token, the account and zone ids, the email sender's key) and in the Mac's keychain (the session token, the installation's credential, the tunnel's token). D1 keeps hashes; nothing secret is logged.
+- **Secrets** live only in the Worker's secrets (the Cloudflare API token, the account and zone ids) and in the Mac's keychain (the installation's key, the tunnel's token). D1 keeps public keys and spent nonces; nothing secret is logged.
 
 ## One-time setup on Cloudflare (the user's step)
 
@@ -26,10 +27,8 @@ Everything below runs on your Mac, in `cloud/control-plane/`. Deploying is never
    pnpm exec wrangler secret put CF_API_TOKEN
    pnpm exec wrangler secret put CF_ACCOUNT_ID
    pnpm exec wrangler secret put CF_ZONE_ID
-   pnpm exec wrangler secret put RESEND_API_KEY
    ```
-   The sign-in emails go through [Resend](https://resend.com): add and verify `tetrix.pro` there (its DNS records go in the same zone), make an API key, and check `EMAIL_FROM` in `wrangler.jsonc` is an address on that domain.
-8. **Deploy:** `pnpm deploy`. The route in `wrangler.jsonc` is a custom domain, so Cloudflare adds the `oby-control.tetrix.pro` record and certificate itself.
+8. **Deploy:** `pnpm deploy`. The route in `wrangler.jsonc` is a custom domain, so Cloudflare adds the `oby-control.tetrix.pro` record and certificate itself, and the hourly cron (`triggers` in `wrangler.jsonc`) starts sweeping idle installations.
 9. **Check it:** `curl https://oby-control.tetrix.pro/v1/health` answers `{"ok":true}`.
 
 To rotate the API token later, make a new one with the same scopes, `wrangler secret put CF_API_TOKEN` again, and delete the old one in the dashboard. Nothing on the Macs changes.
@@ -41,35 +40,40 @@ cd cloud/control-plane
 cp .dev.vars.example .dev.vars    # placeholders; fill in what you have
 pnpm migrate:local                # the D1 database in .wrangler/
 pnpm dev                          # http://localhost:8787
-pnpm test                         # vitest, inside workerd (Miniflare), with the Cloudflare API mocked
+pnpm exec vitest run --config worker.vitest.ts   # inside workerd (Miniflare), with the Cloudflare API mocked
 ```
 
-With `DEV_ECHO_OTP=true` in `.dev.vars`, asking for a code answers with the code (`devCode`), so sign-in works with no email sender. Never set it on the deployed Worker. Without the three `CF_*` secrets, sign-in and installations still work; asking for an endpoint answers 503 saying what's missing.
+Without the three `CF_*` secrets, registering still works; asking for an endpoint answers 503 saying what's missing. `wrangler dev --test-scheduled` runs the sweep at `/__scheduled`.
 
 ### The API
 
-Every answer is JSON; an error is `{"error": "one line to show"}` with its status. Bearer tokens: `oby_session_…` is a user's session (90 days), `oby_install_…` an installation's credential.
+Every answer is JSON; an error is `{"error": "one line to show"}` with its status. There are no bearer tokens: every call but `/v1/health` is signed by the Mac's key, with these headers:
 
-| Call | Who | What |
-| --- | --- | --- |
-| `POST /v1/auth/otp/request` `{email}` | anyone | Emails a six-digit code (ten minutes, five tries). 5 per email per 15 minutes, 20 per address per hour. |
-| `POST /v1/auth/otp/verify` `{email, code}` | anyone | `{token, user, expiresAt}`: the session, shown once. |
-| `GET /v1/me`, `POST /v1/auth/signout` | session | Who's signed in; ends the session. |
-| `GET /v1/installations` | session | The user's installations, each with its `endpoint` (hostname) or null. |
-| `POST /v1/installations` `{clientId, name, platform}` | session | Registers a Mac (201) or, the same `clientId` again, keeps its installation (200); either way `{installation, credential}` with a fresh credential, the one before revoked. 10 an hour, 20 per account. |
-| `POST /v1/installations/{id}/credential` | session | A fresh credential; the one before stops working. |
-| `DELETE /v1/installations/{id}` | session | Tears the tunnel and record down at Cloudflare, revokes the credential and the session the Mac registered with. Another user's installation is a 404. |
-| `GET /v1/installations/self` | credential | This installation, with its endpoint. |
-| `POST /v1/installations/self/endpoint` | credential | Makes the tunnel (`config_src: cloudflare`), its ingress (the hostname to the gateway, then `http_status:404`) and the proxied CNAME to `<tunnel>.cfargotunnel.com`; `{endpoint: {hostname, tunnelId, createdAt}}`. Again later: the same one. If the record fails, the tunnel is removed and the call fails. |
-| `GET /v1/installations/self/endpoint/token` | credential | `{token, hostname}`: the tunnel's run token, read from Cloudflare each time, never stored. |
-| `DELETE /v1/installations/self/endpoint` | credential | Removes the record and the tunnel. |
+- `Oby-Key`: the public key, an uncompressed P-256 point (X9.63, 65 bytes), base64url with no padding. One spelling per key.
+- `Oby-Timestamp`: Unix seconds; refused when more than 5 minutes from the Worker's clock (401, "This Mac's clock is off…").
+- `Oby-Nonce`: 16 to 64 letters, digits, `-` or `_`; each one works once per key (401, "That call was made already").
+- `Oby-Signature`: ECDSA P-256 with SHA-256, r‖s (64 bytes), base64url, over `oby-control-v1`, the method, the path, the timestamp and the nonce, each followed by a newline, then the body's bytes.
+
+A bad or missing signature is 401; a good signature from a key with no installation is 404 ("This Mac isn't registered"), which tells the Mac to register again.
+
+| Call | What |
+| --- | --- |
+| `POST /v1/installations` `{name, platform}` | Registers the signing key (201) or, the same key again, keeps its installation and hostname (200); `{installation}`. New keys only: 5 an hour per address, 60 an hour over everyone. |
+| `GET /v1/installations/self` | This installation, with its endpoint. Like every signed call, it keeps the installation from being swept as idle. |
+| `DELETE /v1/installations/self` | Forget This Mac: tears the tunnel and record down at Cloudflare, then removes the installation. If Cloudflare refuses, nothing is removed and the call fails. |
+| `POST /v1/installations/self/endpoint` | Makes the tunnel (`config_src: cloudflare`), its ingress (the hostname to the gateway, then `http_status:404`) and the proxied CNAME to `<tunnel>.cfargotunnel.com`; `{endpoint: {hostname, tunnelId, createdAt}}`. Again later: the same one. If the record fails, the tunnel is removed and the call fails. |
+| `GET /v1/installations/self/endpoint/token` | `{token, hostname}`: the tunnel's run token, read from Cloudflare each time, never stored. |
+| `DELETE /v1/installations/self/endpoint` | Removes the record and the tunnel. |
+
+The hourly cron (`sweep` in `src/app.ts`) deletes spent nonces and removes up to 20 installations idle for 30 days, tunnels and records first; one that Cloudflare refuses is tried again next hour.
 
 ## On the Mac
 
 - **`cloudflared` ships inside Oby.app** (`Contents/MacOS/cloudflared`): the "Bundle cloudflared" build phase runs `apps/mac/app/Tools/bundle-cloudflared.sh`, which downloads the pinned release once into `~/Library/Caches/com.deskree.oby/cloudflared/`, checks its SHA-256, makes a universal binary and signs it with the app's identity and the hardened runtime, so it's notarized with the app. `apps/mac/tests/RemoteAccessTests.swift` checks the bundled binary is there, signed, universal, and the pinned version. To move to a newer cloudflared, change `VERSION` and the two checksums in the script.
-- **Settings › Remote access** (`apps/mac/app/RemoteAccess.swift`, `apps/mac/app/Settings.swift`): type your email, then the code; then "Reach this Mac from anywhere". Oby registers this Mac (a stable client id it makes once; the name from Sharing settings), asks for its endpoint, puts the tunnel token in the keychain, and runs `cloudflared tunnel run` as its child with the token in `TUNNEL_TOKEN`, never in the arguments, so the process list doesn't show it. The hostname and status show there. The tunnel restarts by itself when it drops, waiting a little longer each time, and ends when Oby quits; with Oby opening at login, it's up whenever the Mac is.
-- **Off** stops the tunnel and keeps the hostname; **Forget This Mac** removes the installation (its tunnel and hostname go, and the hostname never answers again) and signs out. A session lasts 90 days; after that, "Sign in again" shows and the email field is back.
-- **What's kept where:** the keychain, service `com.deskree.oby.remote`: `control-plane-session`, `installation-credential`, `tunnel-token`. The defaults: `remote.email`, `remote.hostname`, `remote.installation`, `remote.clientID`, `remote.enabled`. The user's vault (Settings › Vault) isn't involved.
+- **Settings › Remote access** (`apps/mac/app/RemoteAccess.swift`, `apps/mac/app/Settings.swift`): "Reach this Mac from anywhere", with no email and no sign-in. The first time, Oby makes this Mac's key: in the Secure Enclave when the Mac has one (the keychain keeps only the enclave's wrapped key, which no other Mac can use), else a software P-256 key in the keychain. It registers this Mac by that key (the name from Sharing settings), asks for its endpoint, puts the tunnel token in the keychain, and runs `cloudflared tunnel run` as its child with the token in `TUNNEL_TOKEN`, never in the arguments, so the process list doesn't show it. The hostname and status show there. The tunnel restarts by itself when it drops, waiting a little longer each time, and ends when Oby quits; with Oby opening at login, it's up whenever the Mac is.
+- **Off** stops the tunnel and keeps the hostname; **Forget This Mac** removes the installation with a call signed by the key (its tunnel and hostname go, and the hostname never answers again), then deletes the key and the token here.
+- **Checking in:** with a hostname, on or off, Oby makes a signed call at launch and once a day, so the installation isn't swept. A Mac Oby hasn't run on for 30 days loses its installation; at its next check-in (404) it registers again, gets a new hostname, and, if remote access was on, runs the tunnel again; the iPhone pairs again for the new hostname.
+- **What's kept where:** the keychain, service `com.deskree.oby.remote`: `installation-key` (`se:` and the enclave's wrapped key, or `sw:` and a software key), `tunnel-token`. The defaults: `remote.hostname`, `remote.enabled`. The user's vault (Settings › Vault) isn't involved.
 
 ## On the iPhone
 
@@ -84,4 +88,5 @@ The switch between the two keeps the conversation: only the connection is made a
 
 - The gateway on `127.0.0.1:8810` is #284: until it exists, the tunnel is up and routes to nothing (Cloudflare answers 502). Device tokens and the route allowlist are its job; the control plane only makes the tunnel.
 - The Mac staying awake is #286. Pushes still use the runner's direct APNs path; a control-plane relay remains deferred until its Worker API, D1 token storage, and APNs secret configuration are designed and deployed. End-to-end encryption between the devices and the Mac is #287; the runner on the Mac is #283 and #288.
-- Sign in with Apple waits for the Deskree team (#282).
+- Sign in with Apple (#282), later and optional, would tie installations to a person so they can manage several Macs; remote access doesn't need it.
+- App Attest, or another check that a key belongs to a real Oby, would sit on top of the key (see "Abuse control" above).

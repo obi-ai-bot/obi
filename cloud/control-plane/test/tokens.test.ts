@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { takeOne } from "../src/limits";
 import { env } from "cloudflare:test";
-import { OPAQUE_ALPHABET, opaqueLabel, randomToken, sha256, sixDigits, tunnelSecret } from "../src/tokens";
+import { OPAQUE_ALPHABET, opaqueLabel, tunnelSecret } from "../src/tokens";
 
 describe("tokens", () => {
   it("makes opaque labels of lowercase letters and digits", () => {
@@ -16,16 +16,9 @@ describe("tokens", () => {
     expect(opaqueLabel(16)).toHaveLength(16);
   });
 
-  it("makes six-digit codes and prefixed tokens", () => {
-    for (let i = 0; i < 20; i++) expect(sixDigits()).toMatch(/^\d{6}$/);
-    expect(randomToken("oby_session_")).toMatch(/^oby_session_[A-Za-z0-9_-]{43}$/);
-    expect(randomToken("oby_install_")).toMatch(/^oby_install_[A-Za-z0-9_-]{43}$/);
-    expect(randomToken("oby_install_")).not.toBe(randomToken("oby_install_"));
+  it("makes tunnel secrets of 32 random bytes", () => {
     expect(atob(tunnelSecret())).toHaveLength(32);
-  });
-
-  it("hashes as SHA-256 hex", async () => {
-    expect(await sha256("abc")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    expect(tunnelSecret()).not.toBe(tunnelSecret());
   });
 });
 

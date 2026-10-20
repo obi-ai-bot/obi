@@ -1,10 +1,10 @@
 // What the tests call the Worker with: `handle` on the test's own D1, a fake Cloudflare API that
-// records its calls, a fake email sender that keeps what it sent, and a clock the test moves.
+// records its calls, a clock the test moves, and Macs: P-256 keys that sign their calls as the
+// Mac app does (Engine/ControlPlane.swift).
 
 import { env } from "cloudflare:test";
-import { type Deps, handle } from "../src/app";
+import { type Deps, handle, SIGNED_PREFIX } from "../src/app";
 import { CloudflareError, type Ingress, type TunnelAPI } from "../src/cloudflare";
-import type { Mailer } from "../src/email";
 import type { Env } from "../src/env";
 
 export class FakeTunnels implements TunnelAPI {
@@ -63,25 +63,6 @@ export class FakeTunnels implements TunnelAPI {
   }
 }
 
-export class FakeMail implements Mailer {
-  sent: { to: string; subject: string; text: string }[] = [];
-  /// Thrown by the next send, when set.
-  failure?: Error;
-
-  async send(to: string, subject: string, text: string): Promise<void> {
-    if (this.failure) throw this.failure;
-    this.sent.push({ to, subject, text });
-  }
-
-  /// The code in the last email.
-  lastCode(): string {
-    const text = this.sent.at(-1)?.text ?? "";
-    const code = text.match(/\b\d{6}\b/)?.[0];
-    if (!code) throw new Error(`no code in the last email: ${text}`);
-    return code;
-  }
-}
-
 export interface Answer {
   status: number;
   headers: Headers;
@@ -89,9 +70,36 @@ export interface Answer {
   body: any;
 }
 
-export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env> = {}) {
+/// A Mac's key pair, made with Web Crypto as the Mac makes it with CryptoKit.
+export class Mac {
+  private constructor(
+    readonly keys: CryptoKeyPair,
+    /// The public key as the control plane keeps it: X9.63, base64url.
+    readonly publicKey: string,
+  ) {}
+
+  static async make(): Promise<Mac> {
+    const keys = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"])) as CryptoKeyPair;
+    const raw = new Uint8Array((await crypto.subtle.exportKey("raw", keys.publicKey)) as ArrayBuffer);
+    return new Mac(keys, base64url(raw));
+  }
+
+  /// The headers that sign `method path` with `body` at `seconds` (Unix time).
+  async headers(method: string, path: string, body: string, seconds: number, nonce = crypto.randomUUID()): Promise<Record<string, string>> {
+    const message = new TextEncoder().encode(`${SIGNED_PREFIX}\n${method}\n${path}\n${seconds}\n${nonce}\n${body}`);
+    const signature = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, this.keys.privateKey, message));
+    return { "Oby-Key": this.publicKey, "Oby-Timestamp": String(seconds), "Oby-Nonce": nonce, "Oby-Signature": base64url(signature) };
+  }
+}
+
+export function base64url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export function testApp(overrides: Partial<Deps> = {}) {
   const tunnels = new FakeTunnels();
-  const mail = new FakeMail();
   let at = new Date("2026-10-12T12:00:00.000Z");
   const time = {
     now: () => at,
@@ -99,38 +107,33 @@ export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env
       at = new Date(at.getTime() + ms);
     },
   };
-  const deps: Deps = { tunnels, mail, now: time.now, ...overrides };
+  const deps: Deps = { tunnels, now: time.now, ...overrides };
 
-  async function call(method: string, path: string, body?: unknown, token?: string, headers: Record<string, string> = {}): Promise<Answer> {
+  /// A request as it reaches the Worker, with `headers` as they are (no signature added).
+  async function raw(method: string, path: string, body?: string, headers: Record<string, string> = {}): Promise<Answer> {
     const request = new Request(`https://oby-control.tetrix.pro${path}`, {
       method,
-      headers: {
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...headers,
-      },
-      body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
+      headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...headers },
+      body,
     });
-    const response = await handle(request, { ...env, ...envOverrides }, deps);
+    const response = await handle(request, env, deps);
     const text = await response.text();
     return { status: response.status, headers: response.headers, body: text ? JSON.parse(text) : null };
   }
 
-  /// Signs `email` in through the emailed code and returns the session token.
-  async function signIn(email = "well@example.com"): Promise<string> {
-    const asked = await call("POST", "/v1/auth/otp/request", { email });
-    if (asked.status !== 202) throw new Error(`asking for a code: ${asked.status} ${JSON.stringify(asked.body)}`);
-    const verified = await call("POST", "/v1/auth/otp/verify", { email, code: mail.lastCode() });
-    if (verified.status !== 201) throw new Error(`verifying the code: ${verified.status} ${JSON.stringify(verified.body)}`);
-    return verified.body.token as string;
+  /// A call signed by `mac`, now.
+  async function call(mac: Mac, method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<Answer> {
+    const text = body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body);
+    const signed = await mac.headers(method, path, text ?? "", Math.floor(at.getTime() / 1000));
+    return raw(method, path, text, { ...signed, ...headers });
   }
 
-  /// Registers a Mac under `session` and returns the answer's body: `installation` and `credential`.
-  async function register(session: string, clientId = "mac-client-0001", name = "Wellington's MacBook Pro"): Promise<Answer> {
-    return call("POST", "/v1/installations", { clientId, name, platform: "macos" }, session);
+  /// Registers `mac` and returns the answer: `installation`.
+  async function register(mac: Mac, name = "Wellington's MacBook Pro", headers: Record<string, string> = {}): Promise<Answer> {
+    return call(mac, "POST", "/v1/installations", { name, platform: "macos" }, headers);
   }
 
-  return { call, signIn, register, tunnels, mail, time };
+  return { raw, call, register, tunnels, time };
 }
 
 export const MINUTE = 60_000;

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import Oby
@@ -21,18 +22,17 @@ struct RemoteAccessTests {
         #expect(version.out.contains("cloudflared version 2026.10.0"), Comment(rawValue: version.out))
     }
 
-    /// Turning on registers this Mac, keeps the credential and the tunnel's token in the keychain
-    /// and the hostname in the defaults, and runs cloudflared with the token in its environment,
-    /// never in its arguments. Off keeps the hostname; an ended session signs out.
-    @Test @MainActor func turningOnKeepsTheTokenInTheKeychainAndRunsTheTunnel() async throws {
-        let installation = #"{"id": "i1", "clientId": "c", "name": "MacBook", "platform": "macos", "createdAt": "2026-10-12T12:00:00.000Z", "lastSeenAt": null, "endpoint": null}"#
+    static let installation = #"{"id": "i1", "name": "MacBook", "platform": "macos", "createdAt": "2026-10-12T12:00:00.000Z", "lastSeenAt": null, "endpoint": null}"#
+
+    /// Turning on makes this Mac's key, registers by it with no sign-in, keeps the key and the
+    /// tunnel's token in the keychain and the hostname in the defaults, and runs cloudflared with
+    /// the token in its environment, never in its arguments. Every call is signed by the key. Off
+    /// keeps the hostname; Forget removes the installation, signed, and the key with it.
+    @Test @MainActor func turningOnSignsWithThisMacsKeyAndRunsTheTunnel() async throws {
         let exchange = Exchange([
-            (202, #"{"sent": true}"#),
-            (201, #"{"token": "oby_session_abc", "user": {"id": "u1", "email": "well@example.com"}, "expiresAt": "2027-01-10T12:00:00.000Z"}"#),
-            (201, #"{"installation": \#(installation), "credential": "oby_install_xyz"}"#),
+            (201, #"{"installation": \#(Self.installation)}"#),
             (201, #"{"endpoint": {"hostname": "oby-abcdefghij0123456789.tetrix.pro", "tunnelId": "t1", "createdAt": "2026-10-12T12:00:01.000Z"}}"#),
             (200, #"{"token": "eyJ-run-token", "hostname": "oby-abcdefghij0123456789.tetrix.pro"}"#),
-            (401, #"{"error": "Sign in again."}"#),
         ])
         let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
         defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
@@ -41,22 +41,17 @@ struct RemoteAccessTests {
         let runner = TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) })
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
                                   secrets: secrets, defaults: defaults, runner: runner)
-        #expect(remote.step == .signedOut)
-
-        await remote.requestCode(" Well@example.com ")
-        #expect(remote.step == .codeSent("Well@example.com"))
-        await remote.verify("123456")
-        #expect(remote.step == .signedIn)
-        #expect(remote.email == "well@example.com")
-        #expect(try secrets.value(RemoteAccess.sessionKey) == "oby_session_abc")
+        defer { remote.stop() }
+        #expect(!remote.on)
+        #expect(remote.status == "Off")
 
         await remote.turnOn()
         #expect(remote.problem == nil)
-        #expect(remote.step == .on)
+        #expect(remote.on)
         #expect(remote.hostname == "oby-abcdefghij0123456789.tetrix.pro")
         #expect(defaults.bool(forKey: "remote.enabled"))
-        #expect(defaults.string(forKey: "remote.installation") == "i1")
-        #expect(try secrets.value(RemoteAccess.credentialKey) == "oby_install_xyz")
+        let saved = try #require(try secrets.value(RemoteAccess.keyKey))
+        #expect(saved.hasPrefix(SecureEnclave.isAvailable ? "se:" : "sw:"))
         #expect(try secrets.value(RemoteAccess.tokenKey) == "eyJ-run-token")
         let process = try #require(launched.processes.first)
         #expect(process.executableURL?.path == "/usr/bin/true")
@@ -64,27 +59,71 @@ struct RemoteAccessTests {
         #expect(process.environment?["TUNNEL_TOKEN"] == "eyJ-run-token")
         #expect(remote.tunnel == .starting)
 
-        let paths = exchange.requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" }
-        #expect(paths == ["POST /v1/auth/otp/request", "POST /v1/auth/otp/verify", "POST /v1/installations",
-                          "POST /v1/installations/self/endpoint", "GET /v1/installations/self/endpoint/token"])
-        let body = try JSONDecoder().decode([String: String].self, from: try #require(exchange.requests[2].httpBody))
-        #expect(body["clientId"] == remote.clientID)
-        #expect(body["platform"] == "macos")
-        #expect(exchange.requests[4].value(forHTTPHeaderField: "Authorization") == "Bearer oby_install_xyz")
+        let requests = Array(exchange.requests.prefix(3))
+        #expect(requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == ["POST /v1/installations",
+                                                                                   "POST /v1/installations/self/endpoint", "GET /v1/installations/self/endpoint/token"])
+        let body = try #require(requests[0].httpBody)
+        #expect(try JSONDecoder().decode([String: String].self, from: body)["platform"] == "macos")
+        // Each call's signature checks out against the key's public half, as the Worker checks it.
+        let publicKey = try MacKey.signer(saved).publicKey
+        for request in requests {
+            #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+            #expect(request.value(forHTTPHeaderField: "Oby-Key") == ControlPlane.base64url(publicKey))
+            #expect(try Self.verifies(request, publicKey: publicKey))
+        }
 
         // Off keeps the hostname for next time; nothing ran, so there's nothing to end.
         remote.turnOff()
-        #expect(remote.step == .signedIn)
+        #expect(!remote.on)
         #expect(remote.hostname == "oby-abcdefghij0123456789.tetrix.pro")
         #expect(!defaults.bool(forKey: "remote.enabled"))
         #expect(remote.tunnel == .off)
 
-        // On again with a session that ended: signed out, with the control plane's line.
-        await remote.turnOn()
-        #expect(remote.step == .signedOut)
-        #expect(remote.problem == "Sign in again.")
-        #expect(try secrets.value(RemoteAccess.sessionKey) == nil)
-        #expect(launched.processes.count == 1)
+        // Forget: one signed call, then nothing of it stays here.
+        let forgetting = Exchange([(204, "")])
+        let forgets = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: forgetting.transport),
+                                   secrets: secrets, defaults: defaults, runner: runner)
+        await forgets.forget()
+        #expect(forgets.problem == nil)
+        #expect(forgetting.requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == ["DELETE /v1/installations/self"])
+        #expect(try Self.verifies(try #require(forgetting.requests.first), publicKey: publicKey))
+        #expect(try secrets.value(RemoteAccess.keyKey) == nil)
+        #expect(try secrets.value(RemoteAccess.tokenKey) == nil)
+        #expect(forgets.hostname == nil)
+        #expect(defaults.string(forKey: "remote.hostname") == nil)
+    }
+
+    /// The control plane removed this Mac (idle for 30 days): the check-in registers it again,
+    /// on, with its new hostname and token.
+    @Test @MainActor func aForgottenMacRegistersAgainAtItsCheckIn() async throws {
+        let exchange = Exchange([
+            (404, #"{"error": "This Mac isn't registered. Turn remote access on again."}"#),
+            (201, #"{"installation": \#(Self.installation)}"#),
+            (201, #"{"endpoint": {"hostname": "oby-newnewnewnew01234567.tetrix.pro", "tunnelId": "t2", "createdAt": "2026-11-12T12:00:01.000Z"}}"#),
+            (200, #"{"token": "eyJ-new-token", "hostname": "oby-newnewnewnew01234567.tetrix.pro"}"#),
+        ])
+        let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
+        defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
+        let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
+        defaults.set("oby-abcdefghij0123456789.tetrix.pro", forKey: "remote.hostname")
+        defaults.set(true, forKey: "remote.enabled")
+        try secrets.save(MacKey.make(), as: RemoteAccess.keyKey)
+        try secrets.save("eyJ-run-token", as: RemoteAccess.tokenKey)
+        let launched = Launched()
+        let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
+                                  secrets: secrets, defaults: defaults,
+                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) }))
+        defer { remote.stop() }
+
+        await remote.checkIn()
+        #expect(remote.problem == nil)
+        #expect(remote.on)
+        #expect(remote.hostname == "oby-newnewnewnew01234567.tetrix.pro")
+        #expect(try secrets.value(RemoteAccess.tokenKey) == "eyJ-new-token")
+        #expect(launched.processes.first?.environment?["TUNNEL_TOKEN"] == "eyJ-new-token")
+        #expect(exchange.requests.prefix(4).map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == [
+            "GET /v1/installations/self", "POST /v1/installations", "POST /v1/installations/self/endpoint", "GET /v1/installations/self/endpoint/token",
+        ])
     }
 
     /// At launch with remote access on, the tunnel runs again from the keychain's token; with
@@ -93,15 +132,13 @@ struct RemoteAccessTests {
         let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
         defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
         let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
-        defaults.set("well@example.com", forKey: "remote.email")
-        defaults.set("oby-abcdefghij0123456789.tetrix.pro", forKey: "remote.hostname")
         defaults.set(true, forKey: "remote.enabled")
         try secrets.save("eyJ-run-token", as: RemoteAccess.tokenKey)
         let launched = Launched()
         let plane = ControlPlane(base: URL(string: "https://oby-control.test")!) { _ in (Data(), 500) }
         let remote = RemoteAccess(plane: plane, secrets: secrets, defaults: defaults,
                                   runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) }))
-        #expect(remote.step == .on)
+        #expect(remote.on)
         remote.start()
         #expect(launched.processes.first?.environment?["TUNNEL_TOKEN"] == "eyJ-run-token")
         #expect(remote.tunnel == .starting)
@@ -110,9 +147,23 @@ struct RemoteAccessTests {
         let again = RemoteAccess(plane: plane, secrets: secrets, defaults: defaults,
                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) }))
         again.start()
-        #expect(again.step == .signedIn)
+        #expect(!again.on)
         #expect(again.problem?.contains("keychain") == true)
         #expect(launched.processes.count == 1)
+    }
+
+    /// The Worker's check (cloud/control-plane/src/app.ts, `signed`), in CryptoKit.
+    static func verifies(_ request: URLRequest, publicKey: Data) throws -> Bool {
+        let header = { (name: String) in request.value(forHTTPHeaderField: name) ?? "" }
+        let head = ["oby-control-v1", request.httpMethod ?? "", request.url?.path ?? "", header("Oby-Timestamp"), header("Oby-Nonce"), ""].joined(separator: "\n")
+        let signature = try #require(Data(base64Encoded: base64(header("Oby-Signature"))))
+        return try P256.Signing.PublicKey(x963Representation: publicKey)
+            .isValidSignature(P256.Signing.ECDSASignature(rawRepresentation: signature), for: Data(head.utf8) + (request.httpBody ?? Data()))
+    }
+
+    private static func base64(_ url: String) -> String {
+        let plain = url.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        return plain + String(repeating: "=", count: (4 - plain.count % 4) % 4)
     }
 
     /// Records every request and answers from a script, in order.

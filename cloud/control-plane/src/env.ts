@@ -7,15 +7,10 @@ export interface Env {
   HOSTNAME_PREFIX: string;
   /// What every tunnel routes to on the Mac: the gateway, http://127.0.0.1:8810.
   GATEWAY: string;
-  EMAIL_FROM: string;
-  /// "true" in .dev.vars only: the sign-in code comes back in the response, and no email goes.
-  DEV_ECHO_OTP?: string;
 
   // Secrets: `wrangler secret put`, or .dev.vars. Never in D1 and never logged.
   /// A Cloudflare API token with Cloudflare Tunnel: Edit on the account and DNS: Edit on the zone.
   CF_API_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
   CF_ZONE_ID?: string;
-  /// Resend's API key, for the sign-in emails.
-  RESEND_API_KEY?: string;
 }
