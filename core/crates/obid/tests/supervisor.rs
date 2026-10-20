@@ -575,3 +575,81 @@ fn a_supervisor_turn_runs_no_commands() {
     let room = obid.home.join(format!("conversations/{conversation}/room"));
     assert!(!room.join("ran.txt").exists());
 }
+
+/// The conversation's own task list never reaches a supervisor turn: it isn't in its prompt, and
+/// the turn can't write it (a steered turn would plant words in the owner's later turns).
+#[test]
+fn a_supervisor_turn_neither_sees_nor_writes_the_task_list() {
+    let (_folder, obid) = obid("supervisor-tasks");
+    let tasks =
+        r#"OBY oby_tasks {"tasks": [{"title": "OWNERS-PRIVATE-PLAN", "status": "pending"}]}"#;
+    let answer = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": tasks, "new": true})),
+    );
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    let conversation = answer.body["conversation"].as_str().unwrap().to_owned();
+    let folder = obid.home.join(format!("conversations/{conversation}"));
+    std::fs::write(
+        folder.join("room/supervise.txt"),
+        "OBY oby_continue_job {\"id\": \"$JOB\"}\nOBY oby_tasks {\"tasks\": [{\"title\": \"PLANTED\", \"status\": \"pending\"}]}",
+    )
+    .unwrap();
+    let dispatch = format!(
+        "OBY oby_dispatch {}",
+        json!({"repo": "obi-e2e/fixture-app", "task": "Look into both halves STALLS-ONCE",
+               "kind": "investigate", "mode": "acceptEdits", "title": "Both halves"})
+    );
+    let started = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": dispatch, "conversation": conversation})),
+    );
+    let id = started.body["jobs"][0]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}", started.text))
+        .to_owned();
+    supervised(&obid, &id, 1);
+    let said = within(30, "the conversation's line", || {
+        obys(&obid, &conversation)
+            .into_iter()
+            .find(|t| t.contains("automatic steps"))
+    });
+    assert!(
+        said.starts_with("oby: refused: A turn nobody watches reads only its own job"),
+        "{said}"
+    );
+    let prompts: Vec<String> = std::fs::read_to_string(folder.join("config/turns.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| {
+            serde_json::from_str::<Value>(l).unwrap()["prompt"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let supervisor = prompts
+        .iter()
+        .find(|p| p.starts_with("Oby here, not the owner"))
+        .expect("the supervisor turn");
+    assert!(!supervisor.contains("OWNERS-PRIVATE-PLAN"), "{supervisor}");
+    // The owner's own turns had it.
+    assert!(
+        prompts.iter().any(|p| p.contains("OWNERS-PRIVATE-PLAN")),
+        "{prompts:?}"
+    );
+    let listed = call(&obid, "GET", "/v1/conversations", None).body;
+    let kept = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == conversation.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(kept["tasks"][0]["title"], "OWNERS-PRIVATE-PLAN", "{kept}");
+    assert_eq!(kept["tasks"].as_array().unwrap().len(), 1, "{kept}");
+}

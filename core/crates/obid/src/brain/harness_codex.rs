@@ -44,6 +44,12 @@ const OFF: &[&str] = &[
     "workspace_dependencies",
     "daemon_auto_start",
     "worktrees",
+    // No memory from earlier threads, or of other conversations' history (all off by default in
+    // 0.162.1; pinned, so a fresh supervisor thread starts with nothing but its prompt).
+    "memories",
+    "external_agent_memory_import",
+    "guardian_conversation_history_tools",
+    "analytics_plan_history",
 ];
 
 /// Its other settings: the turn's token never reaches a command's environment.

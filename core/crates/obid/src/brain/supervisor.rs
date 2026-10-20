@@ -181,12 +181,13 @@ pub fn allowed(
 
 /// Why a supervisor turn can't call Oby's `tool` with `args`, when it can't: nobody watches it,
 /// so it reads only its own stalled job (never other jobs, the inbox, past conversations or the
-/// room's files, which carry the owner's other work), runs no commands and archives nothing.
+/// room's files or the conversation's task list, which carry the owner's other work), runs no
+/// commands and archives nothing.
 pub fn refused(session: &Session, tool: &str, args: &serde_json::Value) -> Option<&'static str> {
     let watch = session.supervising.as_ref()?;
     match tool {
         "oby_jobs" | "oby_conversations" | "oby_inbox" | "oby_archive_job" | "oby_read"
-        | "oby_search" | "oby_list" => {
+        | "oby_search" | "oby_list" | "oby_tasks" => {
             Some("A turn nobody watches reads only its own job and archives nothing.")
         }
         // The conversation's shell (super::shell) runs commands in the room: never unattended.
@@ -591,6 +592,7 @@ mod tests {
             room: "/nowhere/room".into(),
             artifacts: Mutex::new(vec![]),
             supervising,
+            shell_out: Mutex::default(),
         };
         let unattended = session(Some(Arc::new(Watch::new("j1", "t1"))));
         for tool in [
@@ -604,6 +606,7 @@ mod tests {
             "oby_shell",
             "oby_shell_output",
             "oby_shell_stop",
+            "oby_tasks",
         ] {
             assert!(
                 refused(&unattended, tool, &serde_json::json!({})).is_some(),

@@ -1168,11 +1168,16 @@ async fn attempts(
     if !session.attachments.is_empty() {
         session.taint();
     }
-    // Its own task list while something on it is still to do, so a summarized session keeps it.
-    let (listed, tainted) = shared
-        .conversations
-        .tasks(&control.conversation)
-        .unwrap_or_default();
+    // Its own task list while something on it is still to do, so a summarized session keeps it;
+    // never a supervisor turn's, which knows only its stalled job (super::supervisor).
+    let (listed, tainted) = if session.supervising.is_some() {
+        Default::default()
+    } else {
+        shared
+            .conversations
+            .tasks(&control.conversation)
+            .unwrap_or_default()
+    };
     let tasks = tasks_line(&listed, &session.nonce);
     // A list written after something untrusted was read carries that in: so does this turn.
     if tasks.is_some() && tainted {
