@@ -44,6 +44,7 @@ struct SettingsPane: View {
         case .accounts: AccountsSettingsView(store: store, feed: feed)
         case .models: ModelsSettingsView(store: store, feed: feed)
         case .connectors: ConnectorsSettingsView(store: store, feed: feed)
+        case .sphere: SphereSettingsView(feed: feed)
         case .vault: VaultSettingsView(vault: model.vault ?? .shared)
         case .about: AboutSettingsView(updater: model.updater)
         }

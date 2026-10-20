@@ -14,7 +14,7 @@ nonisolated enum WindowStep: Hashable, Sendable {
 /// Settings' pages, in the side panel's Settings section in this order (Sangam's SettingsView.tsx
 /// `SETTINGS_PAGES`).
 nonisolated enum SettingsPage: String, CaseIterable, Hashable, Sendable {
-    case general, runner, remote, accounts, models, connectors, vault, about
+    case general, runner, remote, accounts, models, connectors, sphere, vault, about
 
     var label: String {
         switch self {
@@ -24,6 +24,7 @@ nonisolated enum SettingsPage: String, CaseIterable, Hashable, Sendable {
         case .accounts: "Accounts"
         case .models: "Models"
         case .connectors: "Connectors"
+        case .sphere: "Obysphere"
         case .vault: "Vault"
         case .about: "About"
         }

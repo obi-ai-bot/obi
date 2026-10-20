@@ -7,7 +7,7 @@ import Testing
 @MainActor
 struct SettingsWindowTests {
     @Test func pagesAreSangamsInHisOrder() {
-        #expect(SettingsPage.allCases.map(\.label) == ["General", "Runner", "Remote access", "Accounts", "Models", "Connectors", "Vault", "About"])
+        #expect(SettingsPage.allCases.map(\.label) == ["General", "Runner", "Remote access", "Accounts", "Models", "Connectors", "Obysphere", "Vault", "About"])
     }
 
     @Test func aPageOpensOverHomeWithThePanelOnSettings() {
