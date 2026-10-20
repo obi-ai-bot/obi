@@ -331,6 +331,10 @@ pub struct NewJob {
     /// The routine whose run it is (crate::routines).
     #[serde(default)]
     pub routine: Option<crate::job::RoutineMark>,
+    /// One part of a stalled job's split (crate::brain::supervisor): its parts follow it up side
+    /// by side, each on a branch of its own. Never from the API, never kept.
+    #[serde(skip)]
+    pub split: bool,
 }
 
 /// Who tells a job something, which decides what words for one that ended do (the owner's
@@ -1868,7 +1872,10 @@ impl Jobs {
                 .values()
                 .filter(|j| j.status.is_active())
                 .collect();
-            if let Some(other) = active.iter().find(|j| j.follow_up_of == job.follow_up_of) {
+            if let Some(other) = active
+                .iter()
+                .find(|j| !new.split && j.follow_up_of == job.follow_up_of)
+            {
                 return Err(Refused(format!(
                     "{} (job {}) is following it up already: tell that one instead.",
                     other.short_title(),
@@ -2230,11 +2237,11 @@ impl Jobs {
             }
             job.finished = None;
             job.dismissed = None;
+            job.archived = None;
             if past_safety(job) {
                 job.ran_secs = None;
                 job.budget_from = Some(spent(job));
             }
-            job.archived = None;
             job.limit = None;
             job.stalled = None;
             job.waiting = None;
@@ -2769,6 +2776,32 @@ impl Jobs {
         self.events.send("job", dismissed.to_json());
         self.changed.notify_waiters();
         Some(Ok(dismissed))
+    }
+
+    /// Records what the conversation that owns the job did about it when it stalled
+    /// (crate::brain::supervisor): a second part of the same turn's split joins its entry.
+    pub fn supervised(&self, id: &str, entry: crate::job::Supervision) -> Option<Job> {
+        let job = {
+            let mut state = self.lock();
+            let job = state.jobs.get_mut(id)?;
+            match job
+                .supervised
+                .iter_mut()
+                .find(|s| s.turn == entry.turn && s.decision == entry.decision)
+            {
+                Some(same) => {
+                    same.jobs.extend(entry.jobs);
+                    same.count = entry.count;
+                }
+                None => job.supervised.push(entry),
+            }
+            job.clone()
+        };
+        if let Err(e) = self.store.save(&job) {
+            tracing::error!("can't keep job {id}: {e}");
+        }
+        self.events.send("job", job.to_json());
+        Some(job)
     }
 
     /// Archives a job that ended and needs nothing, or unarchives it (`archived` false), adding
@@ -7391,7 +7424,14 @@ pub fn not_continuable(job: &Job) -> Option<&'static str> {
 /// request is open (publishing updates it), else on a branch of its own.
 pub fn follow_up(job: &Job, words: &str) -> NewJob {
     let unmerged = job.commits.unwrap_or(0) > 0 && !job.merged();
-    let title = crate::brain::briefing::line(&format!("Follow-up: {}", job.short_title()), 60);
+    // A follow-up of a follow-up keeps one "Follow-up: ".
+    let title = crate::brain::briefing::line(
+        &format!(
+            "Follow-up: {}",
+            job.short_title().trim_start_matches("Follow-up: ")
+        ),
+        60,
+    );
     let commits = job.commits.unwrap_or(0);
     let mut did = vec![
         format!(

@@ -356,6 +356,8 @@ pub async fn serve(
     routines::spawn(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
     brain::orchestrator::spawn(shared.clone());
+    // A job a conversation started that stalls goes back to that conversation, which decides.
+    brain::supervisor::spawn(shared.clone());
     // Every event a plug-in emits becomes a `pluginEvent` inbox item. The receiver ends once
     // the host has shut down.
     if let Some(mut events) = plugins.take_events() {

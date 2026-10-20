@@ -899,8 +899,15 @@ pub fn job_report(job: &Value) -> Option<(String, String)> {
             .map(|l| crate::brain::briefing::line(l, 300))
     };
     let title = crate::brain::briefing::line(job["title"].as_str().unwrap_or("A job"), 80);
-    let said = match job["status"].as_str()? {
-        "done" => match (job["published"].as_str(), first_line("publishError")) {
+    let status = job["status"].as_str()?;
+    let said = match (status, job["stalled"]["text"].as_str()) {
+        // A stall says why in obid's words (`stalled.text`), whatever status it ended in, and its
+        // conversation decides next.
+        ("failed" | "interrupted", Some(why)) => format!(
+            "{title} stalled: {}. Its branch is kept and nothing was pushed.",
+            crate::brain::briefing::line(why, 120)
+        ),
+        ("done", _) => match (job["published"].as_str(), first_line("publishError")) {
             (Some(url), _) => format!("{title} is done: {url}"),
             // The push went out; only its pull request failed (#627).
             (None, Some(why)) if why.starts_with(crate::publish::PUSHED_BUT) => {
@@ -912,12 +919,13 @@ pub fn job_report(job: &Value) -> Option<(String, String)> {
             }
             (None, None) => format!("{title} is done."),
         },
-        "failed" => format!("{title} failed."),
-        "stopped" => format!("{title} was stopped."),
-        "interrupted" => format!("{title} was interrupted."),
+        ("failed", _) => format!("{title} failed."),
+        ("stopped", _) => format!("{title} was stopped."),
+        ("interrupted", _) => format!("{title} was interrupted."),
         _ => return None,
     };
-    let text = match first_line("summary") {
+    // A stalled job's summary starts with the same stall in other words: obid says it once.
+    let text = match first_line("summary").filter(|_| job["stalled"].is_null()) {
         Some(summary) => format!("{said}\n{summary}"),
         None => said,
     };
@@ -1309,6 +1317,19 @@ mod tests {
         assert_eq!(
             job_report(&job("interrupted")).unwrap().1,
             "Fix oby #351 was interrupted."
+        );
+        // A stall says why in obid's words; its conversation decides what comes next.
+        let mut stalled = job("failed");
+        stalled["stalled"] = json!({"text": "no progress for 15 minutes", "note": "Left: tests"});
+        assert_eq!(
+            job_report(&stalled).unwrap().1,
+            "Fix oby #351 stalled: no progress for 15 minutes. Its branch is kept and nothing was pushed."
+        );
+        // As #725 ends it: interrupted, `stalled` kept.
+        stalled["status"] = json!("interrupted");
+        assert_eq!(
+            job_report(&stalled).unwrap().1,
+            "Fix oby #351 stalled: no progress for 15 minutes. Its branch is kept and nothing was pushed."
         );
         // Nothing for a job still under way, one no conversation started, or one let go.
         assert_eq!(job_report(&job("running")), None);

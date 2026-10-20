@@ -190,6 +190,10 @@ fn a_codex_turn_streams_its_words_and_ends_in_a_turn() {
         "features.workspace_dependencies=false",
         "features.daemon_auto_start=false",
         "features.worktrees=false",
+        "features.memories=false",
+        "features.external_agent_memory_import=false",
+        "features.guardian_conversation_history_tools=false",
+        "features.analytics_plan_history=false",
         r#"shell_environment_policy.exclude=["OBY_MCP_TOKEN"]"#,
     ] {
         assert!(argv.contains(&setting), "{setting}: {argv:?}");

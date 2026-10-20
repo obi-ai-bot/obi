@@ -212,6 +212,10 @@ async fn call(
     if !session.control.live() {
         return Err("The turn was stopped: nothing more happens for it.".into());
     }
+    // A turn nobody watches reads only its own job, and archives nothing (super::supervisor).
+    if let Some(why) = super::supervisor::refused(session, name, &args) {
+        return Err(why.into());
+    }
     match name {
         "oby_jobs" => Ok(jobs(shared, session, args)?),
         "oby_job" => {
@@ -490,7 +494,31 @@ fn continue_job(shared: &Arc<Shared>, session: &Session, args: Value) -> Result<
         shown.push(format!("What Oby adds for its agent:\n{words}"));
     }
     let shown = crate::secrets::known().redact(&shown.join("\n\n"));
-    // supervisor hook: a supervising turn's own allowance goes here, before the Confirm below.
+    // A supervisor turn carries its stalled job on by itself, within obid's bounds
+    // (super::supervisor): the job hears Try again and the conversation's words, quoted, never
+    // obid's prompt as the owner's.
+    if let Some(allowed) =
+        super::supervisor::allowed(shared, session, &job, super::supervisor::Kind::Continue)
+    {
+        allowed?;
+        let words = match words.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+            Some(words) => Some(super::supervisor::quoted(words, &session.nonce)?),
+            None => None,
+        };
+        return match shared.jobs.continue_job(&id, words.as_deref(), BY_OBY) {
+            Some(Ok(job)) => {
+                super::supervisor::record(
+                    shared,
+                    session,
+                    super::supervisor::Kind::Continue,
+                    vec![],
+                );
+                Ok(format!("Continuing {name}: round {}.", job.current_round()))
+            }
+            Some(Err(refused)) => Err(format!("Couldn't continue {name}: {}", refused.0)),
+            None => Err("That job isn't here any more.".into()),
+        };
+    }
     let why = waits(session, &job).or(bypass.then_some("it runs in Bypass mode, never asking"));
     if let Some(why) = why {
         return confirm_waits(
@@ -1249,6 +1277,20 @@ async fn tell(
     let agent_ready = |text: &str| -> Result<String, String> {
         Ok(crate::secrets::known().redact(&crate::vault::for_agent(text.trim())?))
     };
+    // A supervisor turn starts its stalled job fresh from its handoff note by itself, within
+    // obid's bounds (super::supervisor).
+    if let Some(allowed) =
+        super::supervisor::allowed(shared, session, &job, super::supervisor::Kind::Restart)
+    {
+        allowed?;
+        let new = super::supervisor::follow_up(&job, added, None, &session.nonce)?;
+        let outcome = actions::follow_up(shared, &job, new);
+        if let Outcome::Started(_, next) = &outcome {
+            let started = next["id"].as_str().map(str::to_owned).into_iter().collect();
+            super::supervisor::record(shared, session, super::supervisor::Kind::Restart, started);
+        }
+        return outcome_answer(session, outcome);
+    }
     // Its follow-up is working already (this turn's or an earlier one's): that one hears them.
     if let Some(next) = shared.jobs.following(&id) {
         let words = agent_ready(&words)?;
@@ -1298,6 +1340,47 @@ async fn tell(
 async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Result<String, String> {
     capped(&session.dispatched, "starts jobs")?;
     let start: Start = parse(args)?;
+    // A supervisor turn splits what's left of its stalled job into new jobs by itself, within
+    // obid's bounds (super::supervisor): each part a follow-up from its branch.
+    if let Some(job) = super::supervisor::part_of(
+        shared,
+        session,
+        &start.repo,
+        start.agent.as_deref(),
+        start.account.as_deref(),
+        start.mode.as_deref(),
+    ) && let Some(allowed) =
+        super::supervisor::allowed(shared, session, &job, super::supervisor::Kind::Split)
+    {
+        allowed?;
+        let part = Some(super::supervisor::part(session));
+        let mut new = super::supervisor::follow_up(&job, &start.task, part, &session.nonce)?;
+        new.split = true;
+        let outcome = match shared.jobs.create(new) {
+            Ok(part) => {
+                super::supervisor::record(
+                    shared,
+                    session,
+                    super::supervisor::Kind::Split,
+                    vec![part.id.clone()],
+                );
+                Outcome::Started(
+                    format!(
+                        "Started {} for part of what {} left.",
+                        part.short_title(),
+                        job.short_title()
+                    ),
+                    part.to_json(),
+                )
+            }
+            Err(refused) => Outcome::Failed(format!(
+                "Couldn't start that part of {}: {}",
+                job.short_title(),
+                refused.0
+            )),
+        };
+        return outcome_answer(session, outcome);
+    }
     let mode = match &start.mode {
         None => None,
         Some(mode) => Some(

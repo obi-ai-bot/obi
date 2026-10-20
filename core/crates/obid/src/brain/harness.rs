@@ -40,6 +40,16 @@ const MAX_TURNS: &str = "50";
 /// web, writes in the room, a to-do list and sub-agents. No Bash or other code-running tool, so
 /// nothing the session runs can read its login copy and send it out; running anything is a job.
 const TOOLS: &str = "Read,Grep,Glob,LS,NotebookRead,WebSearch,WebFetch,Write,Edit,MultiEdit,NotebookEdit,Task,TodoWrite";
+/// The built-in tools of a turn nobody watches (super::supervisor): a to-do list only. No web,
+/// helpers or files (the room holds what the owner's own turns wrote), so what an agent's note
+/// says can't reach the owner's work or send anything anywhere; it reads its job with oby_job.
+const UNATTENDED_TOOLS: &str = "TodoWrite";
+/// Why a turn nobody watches is refused a built-in tool.
+const UNATTENDED: &str =
+    "A turn nobody watches reads only its job, with oby_job: no web, helpers or files.";
+/// Where a supervisor turn keeps its own session's id and taint, beside the conversation's
+/// `session.json`, which it never reads or writes.
+const SUPERVISOR_KEPT: &str = "supervisor-session.json";
 /// The file in the session's `HOME` that gives it Oby's MCP server.
 const MCP_FILE: &str = "oby-mcp.json";
 /// The line the plan loop's answer ends with when there was no Claude Code account to talk with.
@@ -75,6 +85,9 @@ pub struct Session {
     pub room: PathBuf,
     /// The artifacts its tools published this turn, `{id, version}` each: they go on the turn.
     pub artifacts: Mutex<Vec<Value>>,
+    /// A supervisor turn's stalled job, and what it decided (super::supervisor); none for the
+    /// owner's own turns.
+    pub supervising: Option<Arc<super::supervisor::Watch>>,
     /// The end of what each shell call's command wrote, by the command (or its id) the call named,
     /// for its step's `output` (obid only: the conversation's shell).
     pub shell_out: Mutex<HashMap<String, String>>,
@@ -592,7 +605,7 @@ pub async fn run(
     let tool = shared.config.conversation.agent;
     let why = match shared.jobs.signed_in_account(tool) {
         None => format!("no {} account is signed in for conversations", tool.name()),
-        Some(account) => match session(shared, &account, said, given, asked, control).await {
+        Some(account) => match session(shared, &account, said, given, asked, control, None).await {
             Ok(answered) => return answered,
             Err(why) => why,
         },
@@ -612,6 +625,27 @@ pub async fn run(
     let why = placed(&crate::secrets::known().redact(&why), &homes(shared));
     answered.talk = said_why(answered.talk, &why);
     answered
+}
+
+/// A supervisor turn (super::supervisor) in its conversation's session, on `account`: never the
+/// plan loop, which would read obid's words as the owner's. `Err` says why it couldn't run.
+pub(super) async fn supervise(
+    shared: &Arc<Shared>,
+    account: &crate::config::Account,
+    asked: &Asked<'_>,
+    control: &Arc<Control>,
+    watch: Arc<super::supervisor::Watch>,
+) -> Result<Answered, String> {
+    session(
+        shared,
+        account,
+        asked.said,
+        &[],
+        asked,
+        control,
+        Some(watch),
+    )
+    .await
 }
 
 /// The plan loop's answer, with the line that says why it answered.
@@ -954,6 +988,7 @@ async fn session(
     given: &[Turn],
     asked: &Asked<'_>,
     control: &Arc<Control>,
+    supervising: Option<Arc<super::supervisor::Watch>>,
 ) -> Result<Answered, String> {
     let watch = Stopwatch::new();
     let place = Place::of(&shared.config.home, &control.conversation);
@@ -970,7 +1005,10 @@ async fn session(
     checkouts(shared, &place, &|| control.live()).await;
     watch.mark("repositories");
     super::thinking(shared, control, 1, "Thinking", State::Running);
-    let resumed = kept(&place, &account.id);
+    // A supervisor turn runs in a session of its own, never the conversation's: nothing of the
+    // owner's history is in it (super::supervisor), and its id is kept apart.
+    let unattended = supervising.is_some();
+    let resumed = kept(&place, &account.id).filter(|_| !unattended);
     let session = Arc::new(Session {
         conversation: control.conversation.clone(),
         said: said.to_owned(),
@@ -983,14 +1021,24 @@ async fn session(
         ),
         dispatched: AtomicUsize::new(0),
         told: AtomicUsize::new(0),
-        kept: place.session.clone(),
+        kept: if unattended {
+            place.folder.join(SUPERVISOR_KEPT)
+        } else {
+            place.session.clone()
+        },
         account: account.id.clone(),
         room: place.room.clone(),
         artifacts: Mutex::new(vec![]),
+        supervising,
         shell_out: Mutex::default(),
     });
+    // A supervisor turn is about what an agent wrote: nothing it does counts as the owner's own
+    // words, except what super::supervisor lets it do by itself.
+    if session.supervising.is_some() {
+        session.taint();
+    }
     // Its Claude Code still running from the turn before, on the same session and account.
-    let warm = (shared.config.conversation.agent == Tool::Claude)
+    let warm = (shared.config.conversation.agent == Tool::Claude && !unattended)
         .then(|| {
             shared.harness.take_warm(
                 &control.conversation,
@@ -1120,11 +1168,16 @@ async fn attempts(
     if !session.attachments.is_empty() {
         session.taint();
     }
-    // Its own task list while something on it is still to do, so a summarized session keeps it.
-    let (listed, tainted) = shared
-        .conversations
-        .tasks(&control.conversation)
-        .unwrap_or_default();
+    // Its own task list while something on it is still to do, so a summarized session keeps it;
+    // never a supervisor turn's, which knows only its stalled job (super::supervisor).
+    let (listed, tainted) = if session.supervising.is_some() {
+        Default::default()
+    } else {
+        shared
+            .conversations
+            .tasks(&control.conversation)
+            .unwrap_or_default()
+    };
     let tasks = tasks_line(&listed, &session.nonce);
     // A list written after something untrusted was read carries that in: so does this turn.
     if tasks.is_some() && tainted {
@@ -1153,6 +1206,11 @@ async fn attempts(
             None => first.clone(),
         };
         let mut flags = claude_flags(shared);
+        if session.supervising.is_some()
+            && let Some(at) = flags.iter().position(|f| f == TOOLS)
+        {
+            flags[at] = UNATTENDED_TOOLS.into();
+        }
         let key = flags_key(&flags);
         if let Some(session) = &resume {
             flags.extend(["--resume".into(), session.into()]);
@@ -1194,9 +1252,16 @@ async fn attempts(
             }
             None => match tool {
                 Tool::Codex => {
-                    let (launch, codex) =
-                        super::harness_codex::launch(shared, account, place, &url, token, &resume)
-                            .await?;
+                    let (launch, codex) = super::harness_codex::launch(
+                        shared,
+                        account,
+                        place,
+                        &url,
+                        token,
+                        &resume,
+                        session.supervising.is_none(),
+                    )
+                    .await?;
                     (Run::Cold(launch), codex)
                 }
                 _ => {
@@ -1247,7 +1312,7 @@ async fn attempts(
                 web: true,
             };
             let _ = crate::store::write_private(
-                &place.session,
+                &session.kept,
                 &serde_json::to_vec(&kept).unwrap_or_default(),
             );
             return Err(why);
@@ -1259,22 +1324,27 @@ async fn attempts(
                 web: session.web.load(Ordering::SeqCst),
             };
             let _ = crate::store::write_private(
-                &place.session,
+                &session.kept,
                 &serde_json::to_vec(&kept).unwrap_or_default(),
             );
         }
-        // Kept for the conversation's next turn when this one answered; else it ends.
+        // Kept for the conversation's next turn when this one answered; else it ends. A
+        // supervisor turn's session is never the conversation's (super::supervisor).
         let kept_for = match (running, &turn.session) {
-            (Some(conn), Some(id)) if turn.succeeded() && control.live() => Some(Warm {
-                conn,
-                token: token.to_owned(),
-                account: account.id.clone(),
-                config_dir: account.config_dir.clone(),
-                session: Some(id.clone()),
-                key,
-                place: place.clone(),
-                since: Instant::now(),
-            }),
+            (Some(conn), Some(id))
+                if turn.succeeded() && control.live() && session.supervising.is_none() =>
+            {
+                Some(Warm {
+                    conn,
+                    token: token.to_owned(),
+                    account: account.id.clone(),
+                    config_dir: account.config_dir.clone(),
+                    session: Some(id.clone()),
+                    key,
+                    place: place.clone(),
+                    since: Instant::now(),
+                })
+            }
             // As before: it may take a few seconds to finish the session file a `--resume` reads.
             (Some(mut conn), _) => {
                 let until = Instant::now() + agent::AFTER_RESULT;
@@ -1600,6 +1670,12 @@ async fn one(
         }
     };
     let decide = |tool: &str, input: &Value| {
+        if session.supervising.is_some()
+            && !tool.starts_with("mcp__oby__")
+            && !UNATTENDED_TOOLS.split(',').any(|t| t == tool)
+        {
+            return Ruling::Now(Answer::Deny(UNATTENDED.into()));
+        }
         Ruling::Now(rule(tool, input, &bounds, &place.repos, &|| {
             session.taint()
         }))
@@ -2539,6 +2615,27 @@ mod tests {
     }
 
     /// The mark goes to `session.json` as soon as it's set, before the run ends (crash safety).
+    /// A turn nobody watches has no web, helpers or files.
+    #[test]
+    fn an_unattended_turn_has_no_web_or_helpers() {
+        let tools: Vec<&str> = UNATTENDED_TOOLS.split(',').collect();
+        for gone in [
+            "WebSearch",
+            "WebFetch",
+            "Task",
+            "Agent",
+            "Bash",
+            "Read",
+            "Grep",
+            "Glob",
+            "LS",
+            "Write",
+        ] {
+            assert!(!tools.contains(&gone), "{gone}");
+        }
+        assert!(tools.iter().all(|t| TOOLS.split(',').any(|o| o == *t)));
+    }
+
     #[test]
     fn a_taint_is_kept_at_once() {
         let home = std::env::temp_dir().join(format!("obid-taint-kept-{}", std::process::id()));
@@ -2559,6 +2656,7 @@ mod tests {
             account: "a".into(),
             room: place.room.clone(),
             artifacts: Mutex::new(vec![]),
+            supervising: None,
             shell_out: Mutex::default(),
         };
         // The run names its session: kept at once, unmarked.
@@ -2803,6 +2901,7 @@ mod tests {
             account: "a".into(),
             room: PathBuf::from("/nowhere/room"),
             artifacts: Mutex::new(vec![]),
+            supervising: None,
             shell_out: Mutex::default(),
         }));
         assert!(sessions.session("conversation-c1", &token).is_some());

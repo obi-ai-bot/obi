@@ -132,6 +132,23 @@ impl Turns {
         control
     }
 
+    /// A turn in `conversation` only when none is under way there, checked as it begins: a
+    /// supervisor turn (super::supervisor) never replaces the owner's.
+    pub fn begin_if_idle(&self, turn: &str, conversation: &str) -> Option<Arc<Control>> {
+        let mut underway = self.lock();
+        if underway.iter().any(|c| c.conversation == conversation) {
+            return None;
+        }
+        let control = Arc::new(Control {
+            turn: turn.into(),
+            conversation: conversation.into(),
+            stopped: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+        });
+        underway.push(control.clone());
+        Some(control)
+    }
+
     pub fn end(&self, control: &Arc<Control>) {
         self.lock().retain(|c| !Arc::ptr_eq(c, control));
     }
@@ -165,6 +182,11 @@ impl Turns {
         self.lock()
             .iter()
             .any(|c| c.conversation != super::orchestrator::CONVERSATION)
+    }
+
+    /// Whether a turn is under way in `conversation`: a supervisor turn waits for it to end.
+    pub fn underway_in(&self, conversation: &str) -> bool {
+        self.lock().iter().any(|c| c.conversation == conversation)
     }
 
     /// The conversation of the latest turn under way.
@@ -1194,6 +1216,20 @@ pub fn step_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A supervisor turn begins only where no turn is under way, and never cancels the owner's.
+    #[test]
+    fn a_supervisor_turn_never_replaces_the_owners() {
+        let turns = Turns::default();
+        let owner = turns.begin("t1", "c1");
+        assert!(turns.begin_if_idle("s1", "c1").is_none());
+        assert!(owner.live());
+        let elsewhere = turns.begin_if_idle("s2", "c2").unwrap();
+        assert!(turns.underway_in("c2"));
+        turns.end(&elsewhere);
+        turns.end(&owner);
+        assert!(turns.begin_if_idle("s3", "c1").is_some());
+    }
 
     /// ConversationTests.wordsThatCancelAreKnown
     #[test]
