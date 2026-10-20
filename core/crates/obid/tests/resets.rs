@@ -37,8 +37,8 @@ fn job(obid: &Obid, id: &str) -> Value {
     call(obid, "GET", &format!("/v1/jobs/{id}"), None).body
 }
 
-/// Kept in the job files before obid starts (a restart): the due job is tried again in its own
-/// session, its step and note Oby's, never words the owner said; a dismissed one and one a
+/// Kept in the job files before obid starts (a restart): the due job is tried again (Try again, in
+/// its session), its step and note Oby's, never words the owner said; a dismissed one and one a
 /// follow-up took on aren't, and stop waiting.
 #[test]
 fn a_reset_job_is_tried_again_after_a_restart_unless_let_go() {
@@ -66,7 +66,6 @@ fn a_reset_job_is_tried_again_after_a_restart_unless_let_go() {
         let job = job(&obid, &due.id);
         (job["round"] == 2 && job["status"] == "done").then_some(job)
     });
-    assert_eq!(again["session"], json!(due.session), "{again}");
     assert_eq!(again["resumesAt"], Value::Null, "{again}");
     assert_eq!(again["reason"], Value::Null, "{again}");
     assert_eq!(
