@@ -10,9 +10,9 @@ Teammates install the DMG once, without a Gatekeeper warning, and from then on t
 
 | Setting | Today | What it is |
 | --- | --- | --- |
-| `OBY_TEAM_ID` | `PQKAL8E36D` | Every target's `DEVELOPMENT_TEAM`. Switching every app to the Deskree team is this one line. |
+| `OBY_TEAM_ID` | `3UV9W5SV7W` (Deskree) | Every target's `DEVELOPMENT_TEAM`. Switching every app to the Deskree team is this one line. |
 | `OBY_MAC_BUNDLE_ID` | `com.deskree.oby` | The Mac app (`.tests` for MacTests). |
-| `OBY_IPHONE_BUNDLE_ID` | `dev.wellprado.oby` | The iPhone app (`.activity` for the Live Activity, `.tests` for iOSTests). See [apps/ios/app/README.md](../apps/ios/app/README.md). |
+| `OBY_IPHONE_BUNDLE_ID` | `com.deskree.oby` | The iPhone app (one App ID with the Mac app's; `.watchkitapp` and `.watchkitapp.widget` for the Watch) (`.activity` for the Live Activity, `.tests` for iOSTests). See [apps/ios/app/README.md](../apps/ios/app/README.md). |
 | `OBY_APPCAST_URL` | `https://downloads.oby.deskree.com/appcast.xml` | Where the Mac app looks for updates (`SUFeedURL`). Hosting is this one setting. |
 | `OBY_SPARKLE_PUBLIC_KEY` | a placeholder of 32 zero bytes | Sparkle's EdDSA public key (`SUPublicEDKey`). With the placeholder, Oby starts fine and accepts no update, and `release.sh` refuses a real release. |
 
@@ -92,6 +92,8 @@ scripts/release.sh 0.2.0 --dry-run
 A dry run needs no certificate, key or bucket: it archives with ad hoc signing (CI's flags, hardened runtime on), notarizes and uploads nothing, signs the DMG ad hoc, uses a placeholder Sparkle signature when the keychain has no key, writes the appcast to `build/release/appcast.xml`, checks it with `xmllint` and prints the entry. It commits and tags nothing, and leaves the project untouched. Put its output in the pull request.
 
 ## Moving the iPhone and Watch apps to the Deskree team
+
+Done on 2026-10-20: every app signs with Deskree's team (`3UV9W5SV7W`) and the iPhone app is `com.deskree.oby`. The beta on Wellington's team (`dev.wellprado.oby`, "Oby Beta") stays where it is and gets no new builds. What the move needed, for the record:
 
 The Mac app only needs `OBY_TEAM_ID`. The iPhone and Watch apps need more, because their identifiers and pushes belong to the account:
 

@@ -12,16 +12,18 @@ import { answer, markSeen, type Task } from './tasks';
 // On that page (alone) it's the same card with everything open: the stages,
 // the agent's result once it's done, the facts (repo, branch, model, what has
 // to pass) and the agent's session.
-export default function TaskCard({ task, alone = false, onOpen, style }: {
+export default function TaskCard({ task, alone = false, onOpen, onSession, style }: {
   task: Task;
   alone?: boolean;  // on the task's own page: everything open, nothing to fold or hover
   onOpen?: (id: string) => void;      // in the list: its page
+  onSession?: () => void;  // on its page: the session, opened over it (else it opens in place)
   style?: React.CSSProperties;
 }) {
   const j = task.job;
   const page = alone ? j.page : undefined;
   // the raw session, opened from Details
-  const [log, setLog] = useState(false);
+  const [log, setLogOpen] = useState(false);
+  const setLog = (on: boolean) => (onSession && on ? onSession() : setLogOpen(on));
   const repo = j.repo.includes('/') ? j.repo.split('/')[1] : null;
   // top right: how long an open task has been going; when a done one finished
   const done = task.status === 'done';
