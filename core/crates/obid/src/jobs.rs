@@ -5489,6 +5489,17 @@ impl Jobs {
                 });
                 return Ok(());
             }
+            // Carrying only commits whose pull request was closed unmerged: Publish is the owner's.
+            if let Some(first) = self.first_turned_down(&job)
+                && count_commits(&worktree, &start_commit, &head).await == 0
+            {
+                self.end_done(id, commits, job.pushed, |job| {
+                    job.reason = Some(format!(
+                        "The pull request of {first} was closed without merging, so Oby didn't publish its commits again: Publish opens a new pull request with them."
+                    ));
+                });
+                return Ok(());
+            }
             let pushed = self.still_pushed(&job, &head, commits).await;
             // The job as it would end, which is what gets published.
             let mut ended = job.clone();
@@ -5719,27 +5730,72 @@ impl Jobs {
         });
     }
 
-    /// The commits `job` publishes, up to `head` in `worktree`: its own from `start_commit`, and
-    /// those a follow-up carries from the first job's work (#770): every commit over its base on a
-    /// branch of its own, which was never pushed, the first job's unpublished ones on its very branch.
+    /// The commits `job` publishes, up to `head` in `worktree`: its own from `start_commit`, and,
+    /// for a follow-up that started from its first job's work, those it carries (#770): what its
+    /// branch has over the last commit any job pushed to that branch, or, when none is under
+    /// `head` (a branch of its own, or one rebased since), over its base or its pull request's
+    /// head. A split part counts only its own: its siblings carry the same commits.
     async fn counted(&self, job: &Job, worktree: &Path, head: &str) -> u64 {
         let start_commit = job.start_commit.as_deref().unwrap_or_default();
-        if job.start_from.is_none() || head.is_empty() {
+        if job.start_from.is_none() || head.is_empty() || self.split_part(job) {
             return count_commits(worktree, start_commit, head).await;
         }
-        if job.start_from.as_deref() != Some(job.branch.as_str()) {
-            let base = format!(
+        let pushed: Vec<String> = self
+            .lock()
+            .jobs
+            .values()
+            .filter(|j| j.repo == job.repo)
+            .flat_map(|j| j.outgoing.iter())
+            .filter(|o| o.action == "push" && o.branch.as_deref() == Some(job.branch.as_str()))
+            .map(|o| o.id.clone())
+            .collect();
+        let mut least: Option<u64> = None;
+        for there in pushed.iter().filter(|there| git::is_sha(there)) {
+            let under = git::git(worktree, &["merge-base", "--is-ancestor", there, head])
+                .await
+                .is_ok();
+            if under {
+                let count = count_commits(worktree, there, head).await;
+                least = Some(least.map_or(count, |least| least.min(count)));
+            }
+        }
+        if let Some(count) = least {
+            return count;
+        }
+        let from = match job.pr {
+            Some(pr) => format!("refs/remotes/origin/pr/{pr}"),
+            None => format!(
                 "refs/remotes/origin/{}",
                 job.base.as_deref().unwrap_or_default()
-            );
-            return count_commits(worktree, &base, head).await;
-        }
-        let carried = job
-            .follow_up_of
+            ),
+        };
+        count_commits(worktree, &from, head).await
+    }
+
+    /// Whether `job` is one part of its first job's split (crate::brain::supervisor).
+    fn split_part(&self, job: &Job) -> bool {
+        job.follow_up_of
             .as_deref()
             .and_then(|first| self.get(first))
-            .map_or(0, |first| first.unpublished());
-        count_commits(worktree, start_commit, head).await + carried
+            .is_some_and(|first| {
+                first
+                    .supervised
+                    .iter()
+                    .any(|s| s.decision == "split" && s.jobs.contains(&job.id))
+            })
+    }
+
+    /// The title of `job`'s first job when that one's pull request was closed without merging:
+    /// the owner turned its commits down, so a follow-up that adds none doesn't send them again by
+    /// itself (#770).
+    fn first_turned_down(&self, job: &Job) -> Option<String> {
+        let first = self.get(job.follow_up_of.as_deref()?)?;
+        let closed = first
+            .pull_request
+            .as_ref()
+            .is_some_and(|pr| pr.state == "CLOSED");
+        (job.start_from.is_some() && first.published.is_some() && closed)
+            .then(|| first.short_title())
     }
 
     /// How many of `commits` (up to `head`) the remote has: those in the commit obid pushed last,
@@ -9545,6 +9601,115 @@ mod tests {
             );
         }
         assert_eq!(jobs.list(10).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A follow-up from its first job's work counts what it publishes (#770): over the last commit
+    /// pushed to its branch, a rebased one aside; else over its pull request's head, or its base. A
+    /// split part counts only its own commits.
+    #[tokio::test]
+    async fn a_follow_up_counts_what_it_publishes() {
+        let root = std::env::temp_dir().join(format!("obid-counted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        let commit = |name: &str| {
+            git(&["commit", "-q", "--allow-empty", "-m", name]);
+            git(&["rev-parse", "HEAD"])
+        };
+        let base = commit("base");
+        git(&["update-ref", "refs/remotes/origin/main", &base]);
+        let theirs = commit("theirs");
+        git(&["update-ref", "refs/remotes/origin/pr/5", &theirs]);
+        let first = commit("first");
+        let next = commit("next");
+        git(&["checkout", "-q", "--detach", &base]);
+        let rebased = commit("rebased");
+
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let new = |id: &str, branch: &str| {
+            let mut job = Job::new(
+                id.into(),
+                "o/r".into(),
+                "fix".into(),
+                "Fix it".into(),
+                "claude".into(),
+                "a".into(),
+            );
+            job.branch = branch.into();
+            job.base = Some("main".into());
+            job
+        };
+        let mut parent = new("p", "oby/fix-p");
+        parent.outgoing.push(crate::publish::Outgoing::new(
+            "push",
+            "o/r",
+            &rebased,
+            Some("oby/fix-p"),
+        ));
+        jobs.lock().jobs.insert("p".into(), parent.clone());
+        let mut follow = new("f", "oby/fix-f");
+        follow.follow_up_of = Some("p".into());
+        follow.start_from = Some("oby/fix-p".into());
+        follow.start_commit = Some(first.clone());
+        // A branch of its own: over its base, or its pull request's head.
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 2);
+        follow.pr = Some(5);
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 1);
+        follow.pr = None;
+        // Its first job's branch: over the last push under its head, never a rebased one.
+        follow.branch = "oby/fix-p".into();
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 2);
+        parent.outgoing.push(crate::publish::Outgoing::new(
+            "push",
+            "o/r",
+            &first,
+            Some("oby/fix-p"),
+        ));
+        jobs.lock().jobs.insert("p".into(), parent.clone());
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 0);
+        assert_eq!(jobs.counted(&follow, &repo, &next).await, 1);
+        // A split part: its own alone.
+        follow.branch = "oby/fix-f".into();
+        parent.supervised.push(crate::job::Supervision {
+            at: 0,
+            decision: "split".into(),
+            jobs: vec!["f".into()],
+            turn: "t".into(),
+            count: 1,
+        });
+        jobs.lock().jobs.insert("p".into(), parent);
+        assert_eq!(jobs.counted(&follow, &repo, &first).await, 0);
+        assert_eq!(jobs.counted(&follow, &repo, &next).await, 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 

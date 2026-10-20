@@ -385,15 +385,17 @@ fn dispatch_takes_only_whole_jobs() {
 }
 
 /// A stand-in `gh` in `folder/bin` that keeps its arguments (`folder/gh-calls`) and environment
-/// (`folder/gh-env`), and opens pull request 7.
+/// (`folder/gh-env`), opens pull request 7, and answers `gh pr view` with `folder/pr-view.json`
+/// when there's one.
 fn fake_gh(folder: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = folder.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\nenv >> '{env}'\ncase \"$1 $2\" in\n  \"pr list\") exit 0 ;;\n  \"pr create\") echo https://github.com/obi-e2e/fixture-app/pull/7 ;;\n  *) exit 1 ;;\nesac\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\nenv >> '{env}'\ncase \"$1 $2\" in\n  \"pr list\") exit 0 ;;\n  \"pr create\") echo https://github.com/obi-e2e/fixture-app/pull/7 ;;\n  \"pr view\") exec cat '{view}' ;;\n  *) exit 1 ;;\nesac\n",
         calls = folder.join("gh-calls").display(),
-        env = folder.join("gh-env").display()
+        env = folder.join("gh-env").display(),
+        view = folder.join("pr-view.json").display()
     );
     std::fs::write(bin.join("gh"), script).unwrap();
     std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -926,6 +928,51 @@ fn a_follow_up_publishes_the_first_jobs_commits() {
     assert_eq!(
         again["reason"], "Nothing committed, so nothing was published.",
         "{again}"
+    );
+}
+
+/// A follow-up of a job whose pull request was closed without merging doesn't send those commits
+/// again by itself when it adds none: it ends done, saying so, with Publish the owner's (#770).
+#[test]
+fn a_follow_up_doesnt_republish_a_closed_pull_requests_commits() {
+    let folder = Folder::new("follow-closed");
+    let remote = fixture(&folder.0.join("fixture"));
+    let bin = fake_gh(&folder.0);
+    std::fs::write(
+        folder.0.join("pr-view.json"),
+        json!({"state": "CLOSED", "reviewDecision": null, "mergedAt": null, "baseRefName": "main"})
+            .to_string(),
+    )
+    .unwrap();
+    let obid = start_with(&folder.0, &config(&folder.0, &remote), Some(&bin));
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt", "request": "Add a.txt", "title": "Add a.txt", "check": "test -f a.txt"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = until(&obid, &id, |j| j["pullRequest"]["state"] == "CLOSED");
+    assert_eq!(job["status"], "done", "{job}");
+    let told = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "Why was it closed?"}).to_string()),
+    );
+    assert_eq!(told.status, 201, "{}", told.text);
+    let next = told.body["id"].as_str().unwrap().to_owned();
+    let follow = wait(&obid, &next);
+    assert_eq!(follow["status"], "done", "{follow}");
+    assert_eq!(follow["branch"], format!("oby/build-{next}"), "{follow}");
+    assert_eq!(follow["commits"], 1, "{follow}");
+    assert_eq!(follow["published"], Value::Null, "{follow}");
+    assert_eq!(follow["outgoing"], json!([]), "{follow}");
+    assert_eq!(
+        follow["reason"],
+        "The pull request of Add a.txt was closed without merging, so Oby didn't publish its commits again: Publish opens a new pull request with them.",
+        "{follow}"
     );
 }
 
