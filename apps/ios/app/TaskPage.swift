@@ -343,6 +343,11 @@ struct TaskPage: View {
             Text(SaidText.styled(job.summary)).font(Tokens.font(16, .medium)).foregroundStyle(Tokens.ink).lineSpacing(6)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
         }
+        if let note = job.handoffNote {
+            Text("Handoff note").font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.muted).padding(.top, 12)
+            Text(note).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).lineSpacing(4)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+        }
         if let line = TaskFacts.resultLine(job) {
             Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 8)
         } else if let commits = job.commits, commits > 0 {

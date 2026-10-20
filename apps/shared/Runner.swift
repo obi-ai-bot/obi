@@ -100,6 +100,18 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var resumesAt: Lenient<Date>?
     /// `resumesAt`, read.
     var resumes: Date? { resumesAt?.value }
+    /// A stalled job's why and handoff note (obid only, #773), or nil; one this phone can't read
+    /// is left out, never failing the job.
+    var stalled: Lenient<Stalled>?
+    /// The handoff note a stalled job left, or nil.
+    var handoffNote: String? { stalled?.value?.note.flatMap { $0.isEmpty ? nil : $0 } }
+
+    /// Why and where a stalled job stopped (obid's `stalled`, #773), as far as the apps show it:
+    /// its handoff note. Every key optional, so a newer obid's object still decodes.
+    struct Stalled: Codable, Equatable, Sendable {
+        var why: String?
+        var note: String?
+    }
     /// The job page's facts (#739), each nil until obid serves it: its tools, tokens, share of the
     /// limit windows, the estimate, the check's commands, the secret scan, the diff and what the
     /// current stage is doing (`JobFacts`). Each is `Lenient`: one this phone can't read is left
@@ -154,7 +166,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
              conversation, turn, artifacts, followUpOf, tetrix, activity, usage, windowShare, estimate, checks, scan, diff, context,
-             reason, nextStep, resumesAt
+             reason, nextStep, resumesAt, stalled
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -214,7 +226,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Not once the user dismissed it, never on Oby's own review jobs, and never once its pull
     /// request was merged or closed (as Engine's `Job.canPublish`).
     var canPublish: Bool {
-        status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
+        status == .done && kind != "research" && kind != "review" && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
             && (pullRequest?.state ?? "OPEN") == "OPEN"
     }
 

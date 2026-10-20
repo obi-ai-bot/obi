@@ -192,6 +192,17 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var resumesAt: Date?
     /// `resumesAt`, as the iPhone's `Job` reads it.
     var resumes: Date? { resumesAt }
+    /// A stalled job's why and handoff note (obid only, #773), or nil.
+    var stalled: Stalled?
+    /// The handoff note a stalled job left, or nil.
+    var handoffNote: String? { stalled?.note.flatMap { $0.isEmpty ? nil : $0 } }
+
+    /// Why and where a stalled job stopped (obid's `stalled`, #773), as far as the apps show it:
+    /// its handoff note. Every key optional, so a newer obid's object still decodes.
+    struct Stalled: Codable, Equatable, Sendable {
+        var why: String?
+        var note: String?
+    }
 
     /// What a queued job waits for, in the words every app shows after "Waiting": "a slot opens",
     /// "runner update". `job` is the job it waits behind, for `job` and `files`.
