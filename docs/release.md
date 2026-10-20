@@ -14,7 +14,7 @@ Teammates install the DMG once, without a Gatekeeper warning, and from then on t
 | `OBY_MAC_BUNDLE_ID` | `com.deskree.oby` | The Mac app (`.tests` for MacTests). |
 | `OBY_IPHONE_BUNDLE_ID` | `com.deskree.oby` | The iPhone app (one App ID with the Mac app's; `.watchkitapp` and `.watchkitapp.widget` for the Watch) (`.activity` for the Live Activity, `.tests` for iOSTests). See [apps/ios/app/README.md](../apps/ios/app/README.md). |
 | `OBY_APPCAST_URL` | `https://downloads.oby.deskree.com/appcast.xml` | Where the Mac app looks for updates (`SUFeedURL`). Hosting is this one setting. |
-| `OBY_SPARKLE_PUBLIC_KEY` | a placeholder of 32 zero bytes | Sparkle's EdDSA public key (`SUPublicEDKey`). With the placeholder, Oby starts fine and accepts no update, and `release.sh` refuses a real release. |
+| `OBY_SPARKLE_PUBLIC_KEY` | `rcgwHqm6…YP34=` (generated 2026-10-20) | Sparkle's EdDSA public key (`SUPublicEDKey`). Its private half is in the release Mac's login keychain; every update must be signed with it, so export a copy (`generate_keys -x <file>`) to a safe place. |
 
 To override any of them on one Mac, write it in `apps/config/Signing.local.xcconfig` (gitignored, included at the end). CI's command-line flags still win over both ([ci.md, Signing](ci.md#signing)).
 
@@ -58,7 +58,8 @@ Hand the `.p12` and its password, the `.p8`, the Key ID, the Issuer ID and the T
    ```
 
    `.env.local` at the repository root (gitignored) with `OBY_R2_ACCOUNT_ID`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` works too.
-6. **Optional:** `brew install create-dmg` for a DMG with a background (`apps/icon/dmg-background.png`, when it exists). Without it, the DMG is plain: Oby.app and an Applications link.
+6. **Both architectures.** Homebrew's `rust` builds Apple Silicon only, and a release needs obid for both. Install `rustup` from Homebrew (`brew install rustup`), then `$(brew --prefix rustup)/bin/rustup toolchain install stable --profile minimal -t aarch64-apple-darwin,x86_64-apple-darwin`, and link its `cargo`, `rustc` and `rustup` into `~/.cargo/bin`, which the Bundle obid phase looks in first. Leave `~/.cargo/bin` off your shell's PATH if you build obid day to day with Homebrew's `rust`.
+7. **Optional:** `brew install create-dmg` for a DMG with a background (`apps/icon/dmg-background.png`, when it exists). Without it, the DMG is plain: Oby.app and an Applications link.
 
 ## A release
 
