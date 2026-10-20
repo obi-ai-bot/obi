@@ -797,7 +797,7 @@ final class RunnerFeed {
         switch notice {
         case .ready: "\(job.publishError == nil ? "Ready to publish" : "Couldn't publish"): \(job.heading)"
         case .failed: "Failed: \(job.heading)"
-        case .interrupted: "Interrupted: \(job.heading)"
+        case .interrupted: "Needs you: \(job.heading)"
         case .review: "Changes requested: \(job.heading)"
         case .question: "Question: \(job.heading)"
         case .merge: "Not merged: \(job.heading)"
@@ -813,6 +813,7 @@ final class RunnerFeed {
         if notice == .question, let question = job.question { return question.text }
         if notice == .permission, let permission = job.permission { return permission.title }
         if notice == .merge { return job.mergeError ?? job.macCheck.map { $0.problem ?? $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? "Not merged" }
+        if notice == .interrupted, let reason = job.reason { return reason }
         return line ?? job.status.rawValue.capitalized
     }
 

@@ -92,6 +92,23 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var routine: RoutineMark?
     /// What its agent asked Tetrix, the session it saved and where the graph fell short, or nil.
     var tetrix: TetrixJobReport?
+    /// Why it stopped without ending done, apart from its agent's summary (obid only), or nil.
+    var reason: String?
+    /// Interrupted on obid: its one next step, as its button says it ("One more round", "Try
+    /// again"), or nil.
+    var nextStep: String?
+    /// A stalled job's why and handoff note (obid only, #773), or nil; one this phone can't read
+    /// is left out, never failing the job.
+    var stalled: Lenient<Stalled>?
+    /// The handoff note a stalled job left, or nil.
+    var handoffNote: String? { stalled?.value?.note.flatMap { $0.isEmpty ? nil : $0 } }
+
+    /// Why and where a stalled job stopped (obid's `stalled`, #773), as far as the apps show it:
+    /// its handoff note. Every key optional, so a newer obid's object still decodes.
+    struct Stalled: Codable, Equatable, Sendable {
+        var why: String?
+        var note: String?
+    }
     /// The job page's facts (#739), each nil until obid serves it: its tools, tokens, share of the
     /// limit windows, the estimate, the check's commands, the secret scan, the diff and what the
     /// current stage is doing (`JobFacts`). Each is `Lenient`: one this phone can't read is left
@@ -145,7 +162,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
-             conversation, turn, artifacts, followUpOf, tetrix, activity, usage, windowShare, estimate, checks, scan, diff, context
+             conversation, turn, artifacts, followUpOf, tetrix, activity, usage, windowShare, estimate, checks, scan, diff, context,
+             reason, nextStep, stalled
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -195,7 +213,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         return switch status {
         case .queued, .running: step
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
-        case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
+        case .interrupted: reason ?? summary.split(separator: "\n").first.map(String.init) ?? "Needs you"
+        case .failed, .stopped: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
         }
     }
 
@@ -204,7 +223,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Not once the user dismissed it, never on Oby's own review jobs, and never once its pull
     /// request was merged or closed (as Engine's `Job.canPublish`).
     var canPublish: Bool {
-        status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
+        status == .done && kind != "research" && kind != "review" && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
             && (pullRequest?.state ?? "OPEN") == "OPEN"
     }
 
@@ -843,10 +862,24 @@ extension Job {
         return switch status {
         case .queued, .running: step
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
-        case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
+        case .interrupted: reason ?? summary.split(separator: "\n").first.map(String.init) ?? "Needs you"
+        case .failed, .stopped: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
         }
     }
     #endif
+
+    /// What One more round and Try again send (docs/runner-api.md, `POST /v1/jobs/{id}/messages`):
+    /// the agent's session picks up where it stopped, in the same worktree and branch.
+    nonisolated static let tryAgainWords = "Try again, picking up where you left off. Finish with a short summary as asked."
+
+    /// The one next step of a job that stopped part way and needs you (obid's `interrupted`), or nil.
+    nonisolated var nextStepOffered: String? { status == .interrupted && dismissed == nil ? nextStep : nil }
+
+    /// Its decision card's kind (Sangam's labels): Out of usage when its agent hit a usage limit.
+    nonisolated var needsYouKind: String {
+        (reason ?? "").range(of: #"(?i)\b(usage|rate)[ -]?limit|hit your limit|limit (reached|exceeded)\b"#, options: .regularExpression) == nil
+            ? "Needs you" : "Out of usage"
+    }
 
     /// A finished job can run again for the user's words: it has a session to pick up, or it was
     /// moved since its last round and starts a new one where it went (docs/runner-api.md).
@@ -904,7 +937,7 @@ extension Job {
         case .done: return JobBadge(text: "Ready", tone: .green)
         case .failed: return JobBadge(text: "Failed", tone: .red)
         case .stopped: return JobBadge(text: "Stopped", tone: .gray)
-        case .interrupted: return JobBadge(text: "Blocked", tone: .gray)
+        case .interrupted: return JobBadge(text: "Needs you", tone: .orange)
         }
     }
 
@@ -927,7 +960,7 @@ nonisolated enum NeedsYou {
         let parts = [
             count(needing.count(where: \.canPublish), "is ready to publish", "are ready to publish"),
             count(needing.count { $0.status == .failed }, "failed", "failed"),
-            count(needing.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
+            count(needing.count { $0.status == .interrupted }, "needs you", "need you"),
             count(needing.count(where: \.reviewNeedsYou), "needs your review", "need your review"),
             count(needing.count(where: \.stranded), "wasn't published", "weren't published"),
             count(needing.count(where: \.mergeNeedsYou), "wasn't merged", "weren't merged"),

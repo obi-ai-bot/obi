@@ -128,6 +128,13 @@ pub fn section(job: &Job, home: &Path) -> String {
     if let Some(limit) = &job.limit {
         lines.push(format!("Stopped at a limit: {}", line(limit, 200)));
     }
+    // Why it stopped without ending done, and its one next step (#725): apart from the report.
+    if let Some(reason) = &job.reason {
+        lines.push(format!("Why it stopped: {}", line(reason, 600)));
+    }
+    if let Some(next) = &job.next_step {
+        lines.push(format!("Next step: {next}"));
+    }
     // What its conversation did each time it stalled (super::supervisor), in obid's words.
     for step in &job.supervised {
         let started = if step.jobs.is_empty() {
@@ -150,6 +157,10 @@ pub fn section(job: &Job, home: &Path) -> String {
     } else {
         job.summary.chars().take(3000).collect()
     });
+    if let Some(stalled) = &job.stalled {
+        lines.extend([String::new(), "### Handoff note".into()]);
+        lines.push(stalled.note.chars().take(3000).collect());
+    }
     // What obid sent for it, ids only: a push that went out is never read as nothing (#627).
     lines.extend([String::new(), "### Outgoing actions".into()]);
     if job.outgoing.is_empty() {
@@ -351,6 +362,30 @@ mod tests {
             "{pushed}"
         );
         assert!(!pushed.contains("(nothing went out)"), "{pushed}");
+        // A job that needs the owner says why apart from its report, with its handoff note (#725).
+        bare.status = crate::job::Status::Interrupted;
+        bare.reason = Some("Stalled: no progress for 15 minutes.".into());
+        bare.next_step = Some(crate::job::TRY_AGAIN.into());
+        bare.stalled = Some(crate::job::Stalled {
+            why: "quiet".into(),
+            text: "no progress for 15 minutes".into(),
+            at: 0,
+            round: 1,
+            branch: "oby/build-bbbb2222".into(),
+            commit: None,
+            commits: 0,
+            session: true,
+            note: "Done: the parser.\nLeft: the tests.".into(),
+            note_by: "agent".into(),
+        });
+        let needs = section(&bare, Path::new("/nonexistent"));
+        for part in [
+            "Why it stopped: Stalled: no progress for 15 minutes.",
+            "Next step: Try again",
+            "### Handoff note\nDone: the parser.\nLeft: the tests.",
+        ] {
+            assert!(needs.contains(part), "{part}\n\n{needs}");
+        }
         assert!(
             pushed.contains("Publishing failed: Pushed, but couldn't open the pull request"),
             "{pushed}"

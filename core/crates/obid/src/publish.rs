@@ -242,7 +242,7 @@ pub fn action(job: &Job, base: &str) -> String {
     }
 }
 
-/// Why a review that made commits failed, and why obid won't publish one.
+/// Why a review that made commits published nothing, and why obid won't publish one.
 pub const REVIEW_COMMITTED: &str = "A review made commits; nothing was published.";
 
 /// Why obid won't publish this job, or none to go ahead: never a review, only its own `oby/`

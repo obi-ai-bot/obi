@@ -917,11 +917,17 @@ pub fn job_report(job: &Value) -> Option<(String, String)> {
             (None, None) if job["pushed"].as_u64().is_some_and(|n| n > 0) => {
                 format!("{title} is done and pushed.")
             }
-            (None, None) => format!("{title} is done."),
+            (None, None) => match first_line("reason") {
+                Some(why) => format!("{title} is done. {why}"),
+                None => format!("{title} is done."),
+            },
         },
         ("failed", _) => format!("{title} failed."),
         ("stopped", _) => format!("{title} was stopped."),
-        ("interrupted", _) => format!("{title} was interrupted."),
+        ("interrupted", _) => match first_line("reason") {
+            Some(why) => format!("{title} needs you: {why}"),
+            None => format!("{title} needs you."),
+        },
         _ => return None,
     };
     // A stalled job's summary starts with the same stall in other words: obid says it once.
@@ -1316,7 +1322,19 @@ mod tests {
         );
         assert_eq!(
             job_report(&job("interrupted")).unwrap().1,
-            "Fix oby #351 was interrupted."
+            "Fix oby #351 needs you."
+        );
+        let mut needs_you = job("interrupted");
+        needs_you["reason"] = json!("Stopped at a limit: the round ran past 45 minutes.");
+        assert_eq!(
+            job_report(&needs_you).unwrap().1,
+            "Fix oby #351 needs you: Stopped at a limit: the round ran past 45 minutes."
+        );
+        let mut nothing = job("done");
+        nothing["reason"] = json!("Nothing committed, so nothing was published.");
+        assert_eq!(
+            job_report(&nothing).unwrap().1,
+            "Fix oby #351 is done. Nothing committed, so nothing was published."
         );
         // A stall says why in obid's words; its conversation decides what comes next.
         let mut stalled = job("failed");

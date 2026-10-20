@@ -219,7 +219,9 @@ fn jobs_have_iso_dates_and_every_key() {
                 "changes",
                 "conversation",
                 "followUpOf",
+                "nextStep",
                 "obi",
+                "reason",
                 "routine",
                 "stalled",
                 "supervised",
@@ -229,7 +231,7 @@ fn jobs_have_iso_dates_and_every_key() {
             "{body}"
         );
         let known = keys.keys().filter(|k| page.contains(&k.as_str())).count();
-        assert_eq!(keys.len(), 79 + known);
+        assert_eq!(keys.len(), 81 + known);
         // POST /v1/jobs: no turn of a conversation started it.
         assert!(body["turn"].is_null(), "{body}");
         // What obid never sets is there, as null.
@@ -1313,7 +1315,8 @@ fn a_running_job_hears_the_words_next_and_the_owners_round_may_commit_nothing() 
     // The turn only the words started keeps the work's summary (#699).
     assert_eq!(done["summary"], "Paused.");
 
-    // A fix that commits nothing fails; the owner's round after it may end done without a commit.
+    // A fix that commits nothing is done, saying so; the owner's round after it may end done
+    // without a commit too.
     let fix = dispatch(
         &obid,
         json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "Look around"}),
@@ -1321,9 +1324,13 @@ fn a_running_job_hears_the_words_next_and_the_owners_round_may_commit_nothing() 
         .as_str()
         .unwrap()
         .to_owned();
-    let failed = ended(&obid, &fix);
-    assert_eq!(failed["status"], "failed");
-    assert_eq!(failed["summary"], "Nothing committed: Nothing to do.");
+    let nothing = ended(&obid, &fix);
+    assert_eq!(nothing["status"], "done");
+    assert_eq!(nothing["summary"], "Nothing to do.");
+    assert_eq!(
+        nothing["reason"],
+        "Nothing committed, so nothing was published."
+    );
     assert_eq!(post(&fix, TRY_AGAIN).status, 200);
     let left = ended(&obid, &fix);
     assert_eq!(left["status"], "done", "{left}");
@@ -1340,12 +1347,12 @@ fn publish_by_hand_is_off_a_dismissed_job() {
     let (obid, _) = obid(&folder);
     let id = dispatch(
         &obid,
-        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "Look around"}),
+        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "FAIL"}),
     )["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    assert_eq!(ended(&obid, &id)["status"], "failed");
+    assert_eq!(ended(&obid, &id)["status"], "interrupted");
     assert_eq!(
         call(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None).status,
         200

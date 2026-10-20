@@ -282,12 +282,14 @@ fn codex_in_plan_mode_changes_no_file() {
         json!({"agent": "codex", "kind": "build", "task": "COMMIT: plan.txt", "mode": "plan"}),
     );
     let job = ended(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
-    assert_eq!(job["commits"], Value::Null);
-    assert!(
-        summary(&job).contains("Nothing committed: edit: decline"),
+    // Nothing committed: done, and the agent's summary says why.
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["commits"], 0);
+    assert_eq!(
+        job["reason"], "Nothing committed, so nothing was published.",
         "{job}"
     );
+    assert!(summary(&job).contains("edit: decline"), "{job}");
     assert!(
         !obid
             .home
@@ -335,10 +337,10 @@ fn codex_reviews_and_investigates_in_plan_mode() {
     }
 }
 
-/// A review on Codex that commits anyway (#630) fails: it publishes nothing, says so, and shows
-/// the commits it made.
+/// A review on Codex that commits anyway (#630) is done, its review standing: it publishes
+/// nothing, says so, and shows the commits it made.
 #[test]
-fn a_review_that_commits_fails() {
+fn a_review_that_commits_publishes_nothing() {
     let folder = Folder::new("codex-review-commits");
     let obid = obid(&folder, false);
     let id = dispatch(
@@ -346,10 +348,9 @@ fn a_review_that_commits_fails() {
         json!({"agent": "codex", "kind": "review", "task": "SNEAK: notes.txt"}),
     );
     let job = ended(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "done", "{job}");
     assert_eq!(
-        summary(&job),
-        "A review made commits; nothing was published.",
+        job["reason"], "A review made commits; nothing was published.",
         "{job}"
     );
     assert_eq!(job["commits"], 1, "{job}");
@@ -383,9 +384,12 @@ fn codex_resumes_fails_and_stops() {
             && second.ends_with("GOAL MET"),
         "{job}"
     );
+    // A turn that fails part way needs you: Try again picks its thread up.
     let job = ended(&obid, &fail);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert_eq!(summary(&job), "Codex hit an error: it broke");
+    assert_eq!(job["reason"], "Codex hit an error: it broke");
+    assert_eq!(job["nextStep"], "Try again");
 
     beats(&obid, &sleep);
     let started = std::time::Instant::now();
@@ -500,7 +504,7 @@ fn cursor_plans_then_goes_ahead() {
 }
 
 /// A signed-out Cursor account fails the job saying so; a prompt answered with an error, or a
-/// refusal, fails it with the tool's words; Stop cancels the prompt and ends Cursor.
+/// refusal, leaves it needing you with the tool's words; Stop cancels the prompt and ends Cursor.
 #[test]
 fn cursor_signed_out_failures_and_stop() {
     let folder = Folder::new("cursor-out");
@@ -524,7 +528,7 @@ fn cursor_signed_out_failures_and_stop() {
         "Cursor hit an error: it broke"
     );
     let job = ended(&obid, &refuse);
-    assert_eq!(job["status"], "failed");
+    assert_eq!(job["status"], "interrupted");
     assert_eq!(summary(&job), "The model refused to continue.");
     beats(&obid, &sleep);
     let started = std::time::Instant::now();

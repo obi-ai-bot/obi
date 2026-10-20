@@ -539,10 +539,10 @@ fn a_build_job_commits_and_ends_done() {
     assert_eq!(by_id, job);
 }
 
-/// A fix that commits nothing failed: `Nothing committed: ` and the agent's first line. Dismiss lets
-/// it go; a job that needs nothing can't be dismissed.
+/// A fix that commits nothing is done, as Claude Code is when its model stops: the agent's summary
+/// says why, and `reason` that nothing was published. It needs nothing, so it can't be dismissed.
 #[test]
-fn nothing_committed_fails_and_dismiss_lets_it_go() {
+fn nothing_committed_is_done_and_needs_nothing() {
     let folder = Folder::new("nothing");
     let remote = fixture(&folder.0.join("fixture"));
     let obid = start(&folder.0, &config(&folder.0, &remote));
@@ -555,19 +555,17 @@ fn nothing_committed_fails_and_dismiss_lets_it_go() {
         .unwrap()
         .to_owned();
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed");
-    assert_eq!(job["summary"], "Nothing committed: Nothing to do.");
-    let dismissed = request(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None);
-    assert_eq!(dismissed.status, 200);
-    assert!(dismissed.body["dismissed"].as_str().unwrap().ends_with('Z'));
-    let publish = dismissed.body["pipeline"]["stages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|s| s["id"] == "publish")
-        .cloned()
-        .unwrap();
-    assert_eq!(publish["detail"], "Dismissed");
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["summary"], "Nothing to do.");
+    assert_eq!(
+        job["reason"],
+        "Nothing committed, so nothing was published."
+    );
+    assert_eq!(job["commits"], 0);
+    assert_eq!(
+        request(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None).status,
+        409
+    );
     assert_eq!(
         request(&obid, "POST", "/v1/jobs/nowhere/dismiss", None).status,
         404
@@ -611,8 +609,12 @@ fn uncommitted_work_is_kept_as_a_wip_commit() {
         .unwrap()
         .to_owned();
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed");
-    assert_eq!(job["summary"], "Nothing committed: Nothing to do.");
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["summary"], "Nothing to do.");
+    assert_eq!(
+        job["reason"],
+        "Nothing committed, so nothing was published."
+    );
     let branch = format!("oby/fix-{id}");
     let start = job["startCommit"].as_str().unwrap();
     assert_eq!(
@@ -692,7 +694,8 @@ fn uncommitted_work_is_kept_as_a_wip_commit() {
     );
 }
 
-/// A check that keeps failing gets the agent another round with its output, then stops at a limit.
+/// A check that keeps failing gets the agent another round with its output, then stops at a limit:
+/// it needs you, with One more round, its branch kept. Dismiss lets it go.
 #[test]
 fn a_check_that_keeps_failing_stops_at_a_limit() {
     let folder = Folder::new("limit");
@@ -707,18 +710,25 @@ fn a_check_that_keeps_failing_stops_at_a_limit() {
         .unwrap()
         .to_owned();
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert_eq!(job["round"], 2);
     assert_eq!(job["rounds"], 2);
     assert_eq!(
         job["limit"],
         "`echo the check failed; false` still fails after 2 round(s)"
     );
+    assert_eq!(
+        job["reason"],
+        "Stopped at a limit: `echo the check failed; false` still fails after 2 round(s). The branch is kept and nothing was pushed."
+    );
+    assert_eq!(job["nextStep"], "One more round");
+    // The agent's own summary stays.
     assert!(
-        job["summary"]
+        !job["summary"]
             .as_str()
             .unwrap()
-            .starts_with("Stopped at a limit: ")
+            .starts_with("Stopped at a limit: "),
+        "{job}"
     );
     let log = std::fs::read_to_string(obid.home.join("logs").join(&id).join("check.log")).unwrap();
     assert!(log.contains("the check failed"), "{log}");
@@ -748,6 +758,17 @@ fn a_check_that_keeps_failing_stops_at_a_limit() {
         job["scan"],
         json!({"ran": false, "reason": "checks failed"})
     );
+    let dismissed = request(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None);
+    assert_eq!(dismissed.status, 200);
+    assert!(dismissed.body["dismissed"].as_str().unwrap().ends_with('Z'));
+    let publish = dismissed.body["pipeline"]["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "publish")
+        .cloned()
+        .unwrap();
+    assert_eq!(publish["detail"], "Dismissed");
 }
 
 /// A job stopped at a limit after committing keeps its commits and counts them (#757): words told
@@ -767,7 +788,7 @@ fn a_job_stopped_at_a_limit_counts_its_commits_for_a_follow_up() {
         .unwrap()
         .to_owned();
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     assert_eq!(
         job["limit"], "`false` still fails after 1 round(s)",
         "{job}"
@@ -808,7 +829,9 @@ fn try_again_after_a_limit_keeps_the_rounds_summary() {
             .unwrap()
             .to_owned();
         let job = wait(&obid, &id);
-        assert_eq!(job["status"], "failed", "{job}");
+        // At its limit it needs you (#725), One more round its next step.
+        assert_eq!(job["status"], "interrupted", "{job}");
+        assert_eq!(job["nextStep"], "One more round", "{job}");
         assert!(job["limit"].is_string(), "{job}");
         let more = request(
             &obid,
@@ -853,7 +876,7 @@ fn each_round_keeps_its_diff_stat() {
         .unwrap()
         .to_owned();
     let job = wait(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["status"], "interrupted", "{job}");
     let clone = obid.home.join("clones/obi-e2e/fixture-app");
     let start = job["startCommit"].as_str().unwrap();
     let numstat = git(
@@ -911,13 +934,16 @@ fn a_failure_the_task_asked_for_ends_the_rounds() {
     let job = wait(&obid, &id);
     // No other round, and nothing goes out: a check that fails isn't a pass, whatever the agent
     // says (AGENTS.md: only checks that pass publish).
-    assert_eq!(job["status"], "failed", "{job}");
+    // It needs you, with no button: nothing publishes a check that fails, by hand neither.
+    assert_eq!(job["status"], "interrupted", "{job}");
+    assert_eq!(job["nextStep"], Value::Null, "{job}");
     assert_eq!(job["round"], 2);
     assert_eq!(job["limit"], Value::Null);
     assert_eq!(job["pushed"], Value::Null, "{job}");
     assert_eq!(job["published"], Value::Null, "{job}");
-    let summary = job["summary"].as_str().unwrap();
-    assert!(summary.contains("nothing was pushed"), "{job}");
+    let reason = job["reason"].as_str().unwrap();
+    assert!(reason.contains("nothing was pushed"), "{job}");
+    assert!(!reason.contains("by hand"), "{job}");
     // The agent's own words stay with the round.
     let rounds = job["summaries"].as_array().unwrap();
     assert!(

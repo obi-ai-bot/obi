@@ -359,23 +359,23 @@ fn jobs_and_their_events_land_in_the_conversation_that_started_them() {
             answer.body
         })
         .collect();
-    // The fake Claude Code fails as an agent: each job fails.
+    // The fake Claude Code commits nothing: each job is done, saying so.
     for job in &ended {
-        assert_eq!(job["status"], "failed", "{job}");
+        assert_eq!(job["status"], "done", "{job}");
         assert_eq!(job["conversation"], started.as_str(), "{job}");
     }
 
     // Every event of theirs, to the last (how each ended), carries its conversation, and so does
     // every turn.
-    let failed_at_last = |heard: &[(String, Value)], id: &str| {
+    let done_at_last = |heard: &[(String, Value)], id: &str| {
         heard
             .iter()
             .rev()
             .find(|(name, job)| name == "job" && job["id"] == id)
-            .is_some_and(|(_, job)| job["status"] == "failed")
+            .is_some_and(|(_, job)| job["status"] == "done")
     };
     let heard = heard_until(&events, 30, |heard| {
-        job_ids.iter().all(|id| failed_at_last(heard, id))
+        job_ids.iter().all(|id| done_at_last(heard, id))
             && heard.iter().filter(|(name, _)| name == "turn").count() == 8
     });
     let theirs: Vec<&Value> = heard
@@ -413,7 +413,12 @@ fn jobs_and_their_events_land_in_the_conversation_that_started_them() {
         assert_eq!(report["conversation"], started.as_str());
         let title = job["title"].as_str().unwrap();
         let text = report["text"].as_str().unwrap();
-        assert!(text.starts_with(&format!("{title} failed.")), "{text}");
+        assert!(
+            text.starts_with(&format!(
+                "{title} is done. Nothing committed, so nothing was published."
+            )),
+            "{text}"
+        );
     }
     let thread = turns(&obid, &format!("?id={started}"));
     assert_eq!(thread.len(), 4, "{thread:?}");

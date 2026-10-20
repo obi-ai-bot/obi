@@ -51,6 +51,9 @@ struct TaskCard: View {
                         InboxDecision(item: item, inset: false)
                     } else if (job.permission != nil && job.isActive) || job.waitsForAnswer {
                         JobDecision(job: job, inset: false)
+                    } else if let next = job.nextStepOffered {
+                        AskCard(kind: job.needsYouKind, title: job.line, options: CardOption.of([next], recommended: 0), busy: busy,
+                                onChoose: { _ in tryAgain(job.id) })
                     } else {
                         Text(job.badge.text).font(Tokens.font(Tokens.textSm, .medium))
                             .foregroundStyle(job.badge.tone == .red ? Tokens.danger : Tokens.needs)
@@ -88,6 +91,15 @@ struct TaskCard: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(job.heading), \(item.mark.rawValue)")
         .accessibilityAction(named: "Open") { push(.task(job.id)) }
+    }
+
+    /// One more round or Try again: the agent's session picks up where it stopped.
+    private func tryAgain(_ id: String) {
+        busy = true
+        Task {
+            defer { busy = false }
+            do { try await phone.tell(id, Job.tryAgainWords); problem = nil } catch { problem = error.localizedDescription }
+        }
     }
 }
 
@@ -330,6 +342,11 @@ struct TaskPage: View {
             // Its `code` and links set apart, as in the conversation.
             Text(SaidText.styled(job.summary)).font(Tokens.font(16, .medium)).foregroundStyle(Tokens.ink).lineSpacing(6)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        }
+        if let note = job.handoffNote {
+            Text("Handoff note").font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.muted).padding(.top, 12)
+            Text(note).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).lineSpacing(4)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
         }
         if let line = TaskFacts.resultLine(job) {
             Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 8)

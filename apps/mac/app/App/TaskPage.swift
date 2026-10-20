@@ -125,6 +125,10 @@ struct TaskDecision: View {
                     options: question.cardOptions, busy: busy, keyboardEnabled: box,
                     hint: box ? "Or answer in your own words below" : nil, onChoose: { option in run { try await actions.message(option.answer) } })
                 .id(question.text)
+        } else if let next = job.nextStepOffered {
+            AskCard(kind: job.needsYouKind, title: job.line, options: CardOption.of([next], recommended: 0), busy: busy,
+                    onChoose: { _ in run { try await actions.message(Job.tryAgainWords) } })
+                .id("\(job.id)-\(job.finished?.timeIntervalSince1970 ?? 0)")
         }
     }
 
@@ -139,6 +143,7 @@ struct TaskDecision: View {
     /// Whether there's a decision to show.
     static func shows(_ job: Job, extras: RunnerJobExtras?) -> Bool {
         (extras?.permission != nil && job.isActive) || (job.waitsForAnswer && (extras?.question != nil || job.question != nil))
+            || job.nextStepOffered != nil
     }
 }
 
@@ -467,6 +472,11 @@ struct TaskPage: View {
         if !job.summary.isEmpty {
             Text(job.summary).font(Tokens.font(16, .medium)).foregroundStyle(Tokens.ink).lineSpacing(6)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        }
+        if let note = job.handoffNote {
+            Text("Handoff note").font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.muted).padding(.top, 12)
+            Text(note).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).lineSpacing(4)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
         }
         if let line = TaskFacts.resultLine(job) {
             Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 8)
