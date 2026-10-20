@@ -4,11 +4,12 @@ import FoundationNetworking
 #endif
 
 /// Oby's control plane on Cloudflare (cloud/control-plane, #285), as the Mac talks to it: sign in
-/// with Apple, register this installation, and get its tunnel's hostname and run token. The Mac is
+/// with Apple or Google, register this installation, and get its tunnel's hostname and run token. The Mac is
 /// known by its P-256 key, and every call is signed with it (`Signer`), with a timestamp and a
 /// nonce, so nothing the Mac sends works for anyone else or works twice; a new installation also
-/// belongs to the Apple Account it signed in with. The control plane keeps the public key and the
-/// account's `sub`, and never the tunnel token.
+/// belongs to the Apple or Google account it signed in with. The control plane keeps the public
+/// key and the account's `sub` (and a Google account's domain, never its email), and never the
+/// tunnel token.
 nonisolated struct ControlPlane: Sendable {
     var base: URL
     /// How a request goes out and what comes back (the body and the status): URLSession, or a
@@ -71,15 +72,22 @@ nonisolated struct ControlPlane: Sendable {
 
     // MARK: This installation, signed by its key
 
-    /// A sign-in with Apple this Mac starts: Apple's authorization page, and the state that names
-    /// it. Apple sends the result to the control plane, never to the Mac.
-    struct AppleSignIn: Codable, Equatable, Sendable {
+    /// Who a new installation signs in with, on the web.
+    enum Provider: String, CaseIterable, Sendable {
+        case apple, google
+        /// What Settings' button and messages call it: "Sign in with Apple".
+        var name: String { self == .apple ? "Apple" : "Google" }
+    }
+
+    /// A sign-in this Mac starts: the provider's authorization page, and the state that names it.
+    /// The provider sends the result to the control plane, never to the Mac.
+    struct SignIn: Codable, Equatable, Sendable {
         var url: URL
         var state: String
     }
 
-    func startAppleSignIn(_ signer: Signer) async throws -> AppleSignIn {
-        try await call("POST", "v1/auth/apple/start", signer: signer)
+    func startSignIn(_ signer: Signer, with provider: Provider) async throws -> SignIn {
+        try await call("POST", "v1/auth/\(provider.rawValue)/start", signer: signer)
     }
 
     /// What registering gives: the installation, and the Mac the account gave up to make room for

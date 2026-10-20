@@ -243,7 +243,7 @@ struct RunnerSettingsView: View {
 }
 
 /// Settings › Remote access: reach this Mac from anywhere (#285, apps/mac/app/RemoteAccess.swift).
-/// Turn it on: the first time, this Mac signs in with Apple (no name, no email) and registers with
+/// Turn it on: the first time, this Mac signs in with Apple or Google and registers with
 /// Oby's control plane by a key of its own, gets a hostname, and runs its tunnel. The iPhone connects to the hostname when it's
 /// away from home.
 struct RemoteAccessSettingsView: View {
@@ -255,14 +255,24 @@ struct RemoteAccessSettingsView: View {
     private var pointed: Bool { openSettings.spotlight == .remoteAccess }
 
     var body: some View {
-        SetGroup("Remote access", footer: "The first time, you sign in with Apple: Oby asks for no name or email. One Apple Account has up to 5 Macs: a sixth takes the place of the one used longest ago. On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Off keeps the hostname for a while: after 3 days off, asleep or offline, this Mac gets a new one when it’s back, and your iPhone pairs again. Forget removes this Mac from Oby’s control plane, and the hostname stops answering.",
+        SetGroup("Remote access", footer: "The first time, you sign in with Apple or Google: Oby asks Apple for no name or email, and keeps only your Google account’s domains, never the email. One account has up to 5 Macs: a sixth takes the place of the one used longest ago. On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Off keeps the hostname for a while: after 3 days off, asleep or offline, this Mac gets a new one when it’s back, and your iPhone pairs again. Forget removes this Mac from Oby’s control plane, and the hostname stops answering.",
                  problem: remote.problem) {
             SetRow("Reach this Mac from anywhere") {
-                Toggle("Reach this Mac from anywhere", isOn: Binding(get: { remote.on }, set: { on in
-                    if on { Task { await remote.turnOn() } } else { remote.turnOff() }
-                }))
-                .toggleStyle(.set)
-                .disabled(remote.busy)
+                if remote.signsInFirst {
+                    HStack(spacing: 8) {
+                        ForEach(RemoteAccess.signInButtons, id: \.provider) { button in
+                            Button(button.title) { Task { await remote.turnOn(with: button.provider) } }
+                                .buttonStyle(.set)
+                                .disabled(remote.busy)
+                        }
+                    }
+                } else {
+                    Toggle("Reach this Mac from anywhere", isOn: Binding(get: { remote.on }, set: { on in
+                        if on { Task { await remote.turnOn() } } else { remote.turnOff() }
+                    }))
+                    .toggleStyle(.set)
+                    .disabled(remote.busy)
+                }
             }
             .spotlit(pointed && !remote.on, id: .remoteAccess)
             if let hostname = remote.hostname {

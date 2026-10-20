@@ -1,6 +1,8 @@
 // Random things and signatures, on Web Crypto: tunnel secrets, hostnames' opaque part, and the
 // check of a Mac's signature.
 
+import { PUBLIC_SUFFIXES } from "./suffixes";
+
 export function randomBytes(count: number): Uint8Array {
   const bytes = new Uint8Array(count);
   crypto.getRandomValues(bytes);
@@ -96,20 +98,24 @@ export function networkBucket(address: string): string {
   return octets.length === 4 ? `${octets.slice(0, 3).join(".")}.0/24` : address;
 }
 
-// ponytail: a handful of two-level public suffixes, not the Public Suffix List; load the list if
-// a device or product domain ever sits under one not here.
-const TWO_LEVEL_SUFFIXES = new Set([
-  "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp", "ne.jp", "or.jp",
-  "com.br", "net.br", "com.cn", "com.hk", "com.sg", "co.in", "co.za", "com.mx", "com.tr", "co.kr", "com.tw", "com.ar",
-]);
-
-/// The registrable domain `domain` is under (eTLD+1): `devices.example.co.uk` is `example.co.uk`.
-/// Null for a bare public suffix or something that isn't a domain.
+/// The registrable domain `domain` is under (eTLD+1), by the Public Suffix List's ICANN section
+/// (src/suffixes.ts): `devices.example.co.uk` is `example.co.uk`, and `x.ac.in` and `y.ac.in` are
+/// two. Null for a public suffix itself or something that isn't a domain. The longest rule that
+/// matches wins, `*.` covers any one label, and a `!` exception makes its parent the suffix; with
+/// no rule, the last label is.
 export function registrableDomain(domain: string): string | null {
   const labels = domain.trim().toLowerCase().split(".");
   if (labels.some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return null;
-  const take = TWO_LEVEL_SUFFIXES.has(labels.slice(-2).join(".")) ? 3 : 2;
-  return labels.length >= take ? labels.slice(-take).join(".") : null;
+  let suffix = 1;
+  for (let i = labels.length - 1; i >= 0; i--) {
+    const name = labels.slice(i).join(".");
+    if (PUBLIC_SUFFIXES.has(`!${name}`)) {
+      suffix = labels.length - i - 1;
+      break;
+    }
+    if (PUBLIC_SUFFIXES.has(name) || PUBLIC_SUFFIXES.has(`*.${labels.slice(i + 1).join(".")}`)) suffix = labels.length - i;
+  }
+  return labels.length > suffix ? labels.slice(-(suffix + 1)).join(".") : null;
 }
 
 export function newId(): string {

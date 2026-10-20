@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { tunnelsFromEnv } from "../src/cloudflare";
 import type { Env } from "../src/env";
 import { sweep } from "../src/app";
-import { HOUR, Mac, testApp } from "./helpers";
+import { DAY, HOUR, Mac, testApp } from "./helpers";
 
 async function registered(app: ReturnType<typeof testApp>) {
   const mac = await Mac.make();
@@ -152,6 +152,92 @@ describe("what a tunnel may cost", () => {
     expect((await app.call(mac.mac, "POST", path)).status).toBe(201);
   });
 
+  it("Google accounts under one registrable domain share its limits, subdomains too: 20 Macs set up a day and 25 live endpoints", async () => {
+    const app = testApp();
+    const path = "/v1/installations/self/endpoint";
+    // A domain with hundreds of cheap accounts (a catch-all, on as many subdomains as you like),
+    // each under its own limits: 20 Macs set up a day between them, from any network.
+    for (let i = 0; i < 20; i++) {
+      const at = `${i % 2 ? "a" : "b"}.cheap.example`;
+      expect((await app.registerWithGoogle(await Mac.make(), `cheap-${i}`, `user${i}@${at}`, null, `10.${i}.0.1`)).status, `${i}`).toBe(201);
+    }
+    const over = await app.registerWithGoogle(await Mac.make(), "cheap-20", "user20@c.cheap.example", null, "10.20.0.1");
+    expect(over.status).toBe(429);
+    expect(over.body.error).toMatch(/^Accounts at cheap\.example set up too many Macs today\./);
+    // Another domain isn't held back.
+    expect((await app.registerWithGoogle(await Mac.make(), "other-1", "x@other.example", null, "10.22.0.1")).status).toBe(201);
+
+    // Live endpoints: 25 between every account under the domain, whichever subdomain.
+    for (let i = 0; i < 25; i++) await app.fill(1, `net-${i}`, await app.googleUser(`cheap-live-${i}`, "cheap.example"));
+    app.time.advance(DAY);
+    const mac = await Mac.make();
+    expect((await app.registerWithGoogle(mac, "cheap-late", "late@z.cheap.example", null, "10.30.0.1")).status).toBe(201);
+    const full = await app.call(mac, "POST", path, undefined, { "CF-Connecting-IP": "10.30.0.1" });
+    expect(full.status).toBe(409);
+    expect(full.body.error).toBe("Accounts at cheap.example have 25 Macs with remote access on already. Forget one first.");
+  });
+
+  it("two universities under ac.in don't share a bucket", async () => {
+    const app = testApp();
+    const path = "/v1/installations/self/endpoint";
+    for (let i = 0; i < 25; i++) await app.fill(1, `net-${i}`, await app.googleUser(`x-live-${i}`, "x.ac.in"));
+    const y = await Mac.make();
+    expect((await app.registerWithGoogle(y, "y-1", "student@y.ac.in", "y.ac.in", "10.1.0.1")).status).toBe(201);
+    expect(await env.DB.prepare("SELECT limit_domain FROM users WHERE sub = 'google:y-1'").first("limit_domain")).toBe("y.ac.in");
+    expect((await app.call(y, "POST", path, undefined, { "CF-Connecting-IP": "10.1.0.1" })).status).toBe(201);
+    // x.ac.in's own accounts are at its 25.
+    const x = await Mac.make();
+    expect((await app.registerWithGoogle(x, "x-1", "student@mail.x.ac.in", null, "10.2.0.1")).status).toBe(201);
+    expect((await app.call(x, "POST", path, undefined, { "CF-Connecting-IP": "10.2.0.1" })).status).toBe(409);
+  });
+
+  it("a Workspace's accounts get the larger allowance from wrangler.jsonc; personal accounts on its addresses don't", async () => {
+    const app = testApp({}, { WORKSPACE_DOMAIN_ENDPOINTS: "30", WORKSPACE_DOMAIN_REGISTRATIONS: "22" });
+    const path = "/v1/installations/self/endpoint";
+    // 22 a day for the Workspace, its subdomains with it; past 20, a personal account on its
+    // addresses is refused, while the Workspace's own aren't.
+    for (let i = 0; i < 20; i++) {
+      expect((await app.registerWithGoogle(await Mac.make(), `ws-${i}`, `u${i}@deskree.com`, i % 2 ? "deskree.com" : "eng.deskree.com", `10.${i}.0.1`)).status, `${i}`).toBe(201);
+    }
+    expect((await app.registerWithGoogle(await Mac.make(), "personal", "alice@deskree.com", null, "10.40.0.1")).status).toBe(429);
+    for (let i = 20; i < 22; i++) expect((await app.registerWithGoogle(await Mac.make(), `ws-${i}`, `u${i}@deskree.com`, "deskree.com", `10.${i}.0.1`)).status).toBe(201);
+    expect((await app.registerWithGoogle(await Mac.make(), "ws-22", "u22@deskree.com", "deskree.com", "10.41.0.1")).status).toBe(429);
+
+    app.time.advance(DAY);
+    for (let i = 0; i < 29; i++) await app.fill(1, `net-${i}`, await app.googleUser(`ws-live-${i}`, "deskree.com", true));
+    const personal = await Mac.make();
+    expect((await app.registerWithGoogle(personal, "personal-2", "bob@deskree.com", null, "10.42.0.1")).status).toBe(201);
+    expect((await app.call(personal, "POST", path, undefined, { "CF-Connecting-IP": "10.42.0.1" })).status).toBe(409);
+    const member = await Mac.make();
+    expect((await app.registerWithGoogle(member, "ws-member", "carol@deskree.com", "deskree.com", "10.43.0.1")).status).toBe(201);
+    expect((await app.call(member, "POST", path, undefined, { "CF-Connecting-IP": "10.43.0.1" })).status).toBe(201);
+    const thirtyFirst = await Mac.make();
+    expect((await app.registerWithGoogle(thirtyFirst, "ws-31", "dave@deskree.com", "deskree.com", "10.44.0.1")).status).toBe(201);
+    const full = await app.call(thirtyFirst, "POST", path, undefined, { "CF-Connecting-IP": "10.44.0.1" });
+    expect(full.status).toBe(409);
+    expect(full.body.error).toBe("Accounts at deskree.com have 30 Macs with remote access on already. Forget one first.");
+  });
+
+  it("public mail providers' accounts aren't limited together, but a look-alike domain is", async () => {
+    const app = testApp();
+    const path = "/v1/installations/self/endpoint";
+    for (const domain of ["gmail.com", "outlook.com", "yahoo.co.uk", "proton.me"]) await app.counted(`registrations:domain:${domain}`, 1000);
+    for (const [i, email] of ["x@gmail.com", "x@outlook.com", "x@yahoo.co.uk", "x@proton.me"].entries()) {
+      expect((await app.registerWithGoogle(await Mac.make(), `public-${i}`, email, null, `10.${i}.0.1`)).status, email).toBe(201);
+    }
+    const users = await env.DB.prepare("SELECT limit_domain FROM users WHERE sub LIKE 'google:public-%'").all<{ limit_domain: string | null }>();
+    expect(users.results.length).toBe(4);
+    expect(users.results.every((user) => user.limit_domain === null)).toBe(true);
+    // 25 live endpoints on outlook.com don't stop the 26th.
+    for (let i = 0; i < 25; i++) await app.fill(1, `net-${i}`, await app.googleUser(`outlook-live-${i}`, null));
+    const outlook = await Mac.make();
+    expect((await app.registerWithGoogle(outlook, "outlook-26", "y@outlook.com", null, "10.20.0.1")).status).toBe(201);
+    expect((await app.call(outlook, "POST", path, undefined, { "CF-Connecting-IP": "10.20.0.1" })).status).toBe(201);
+    // A look-alike isn't a provider.
+    await app.counted("registrations:domain:yahoo.xyz", 20);
+    expect((await app.registerWithGoogle(await Mac.make(), "lookalike", "x@yahoo.xyz", null, "10.21.0.1")).status).toBe(429);
+  });
+
   it("one Apple Account can't drain the global limit: 5 live endpoints and 10 creations a day", async () => {
     const app = testApp();
     const path = "/v1/installations/self/endpoint";
@@ -165,13 +251,13 @@ describe("what a tunnel may cost", () => {
     await app.fill(1, "fill", "000444.drain");
     const sixth = await app.call(macs[4]!, "POST", path, undefined, { "CF-Connecting-IP": "10.4.0.1" });
     expect(sixth.status).toBe(409);
-    expect(sixth.body.error).toBe("This Apple Account has 5 Macs with remote access on already. Forget one first.");
+    expect(sixth.body.error).toBe("This account has 5 Macs with remote access on already. Forget one first.");
     // Make and remove, so nothing stays live: what a drain would do. Ten a day per account.
     await app.counted("creations:account:000444.drain", 10);
     expect((await app.call(macs[0]!, "DELETE", path)).status).toBe(204);
     const drain = await app.call(macs[0]!, "POST", path);
     expect(drain.status).toBe(429);
-    expect(drain.body.error).toMatch(/^This Apple Account turned remote access on too often today\./);
+    expect(drain.body.error).toMatch(/^This account turned remote access on too often today\./);
     // Another account isn't held back.
     expect((await app.call(macs[5]!, "POST", path, undefined, { "CF-Connecting-IP": "10.5.0.1" })).status).toBe(201);
     // Over everyone, 300 an hour: a drain needs 30 Apple Accounts.
@@ -238,7 +324,7 @@ describe("what a tunnel may cost", () => {
     await env.DB.prepare("UPDATE installations SET user_sub = NULL").run();
     const refused = await app.call(mac.mac, "POST", "/v1/installations/self/endpoint");
     expect(refused.status).toBe(403);
-    expect(refused.body.error).toBe("Sign in with Apple again: turn remote access off and on.");
+    expect(refused.body.error).toBe("Sign in again: turn remote access off and on.");
     expect(app.tunnels.calls).toEqual([]);
   });
 
