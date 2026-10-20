@@ -22,22 +22,31 @@ make e2e-live     # the real Claude Code adapter: a person runs it on a Mac (see
 | `OBI_E2E_KEEP` | unset | `1` keeps the run folder afterwards, for reading the logs. |
 | `OBI_SPHERE_URL` | unset | Opt-in remote mode: the base URL of a Sphere that is already deployed. See "Against a deployed Sphere". |
 | `SPHERE_OPERATOR_TOKEN` | unset | The deployed Sphere's operator token; required with `OBI_SPHERE_URL`, never printed, written or committed. |
+| `OBI_E2E_REMOTE` | unset | `1` (or the `--remote` argument) confirms remote mode. Under `CI` only the variable counts. |
 
-### Against a deployed Sphere
-
-With `OBI_SPHERE_URL` set, the run uses that Sphere instead of starting one with `node scripts/local.mjs`. Everything else is as written: two real obids with stub agents, the same eight steps and checks. Only these differ:
-
-- The Sphere is `OBI_SPHERE_URL` (no trailing slash) and its operator token is `SPHERE_OPERATOR_TOKEN`; every "`http://127.0.0.1:<sphere port>`" above is that URL.
-- Step 1.2 creates Sphere `e2e-<8 hex digits>`, new for every run, in place of `e2e` (v0.1 can't delete Spheres); the owner assertions' `aud`, every `/v0.1/spheres/<id>/…` path and the envelope checks use that id.
-- Skipped, because there is no local Sphere process: step 1.1's start (the health check is still made), step 8.6's SIGTERM to the Sphere, and the Sphere's ports and write root (`R/sphere/`). obid A, obid B, the fixture and the checkouts' write checks stay.
-
-Needs, besides the above: network access to that URL.
-
-Needs: Node 22.18 or later (obi-sphere’s minimum, which also meets the pinned pnpm’s requirement), pnpm, git, and a Rust toolchain (`cargo`) once `core/` exists. Nothing else at run time: no network beyond 127.0.0.1, no GitHub, no model (building obid and installing obi-sphere's packages may fetch dependencies first).
+Needs: Node 22.18 or later (obi-sphere’s minimum, which also meets the pinned pnpm’s requirement), pnpm, git, and a Rust toolchain (`cargo`) once `core/` exists. Nothing else at run time: no network beyond 127.0.0.1 (except remote mode, below), no GitHub, no model (building obid and installing obi-sphere's packages may fetch dependencies first).
 
 Keep both checkouts idle during the scenario: do not run concurrent builds, tests or other tools that change their files. Snapshots include gitignored build output (except the exclusions in step 8.4.1) and hash it in bounded chunks, including files larger than 2 GiB. Snapshot I/O failures are reported as `[harness snapshot]`.
 
 The harness is [`e2e/run.mjs`](run.mjs). It runs five **preflight** checks (Node, git, the fixture repository, the stub agent, and that this document, `e2e/fixtures/messages/` and the harness's values in `e2e/lib/` agree and the messages validate against the spec; these pass today), then the eight **steps** below in order, prints one line per check, and exits 0 only when all of them pass. A step whose body isn't written yet prints `step N (<title>): not implemented`. Every step builds on the ones before it, so a written step after one that failed or isn't written yet prints `not run`, naming that step. Every process the harness starts runs in its own process group, and when the run ends, whatever ended it (a pass, a failure, an exception, SIGINT or SIGTERM), the harness sends each group still running SIGTERM, then SIGKILL 10 seconds later.
+
+### Against a deployed Sphere
+
+**This writes to a real Sphere.** Run it against a production Sphere only with its owner's OK. Every run creates a Sphere of its own there and leaves it behind (below).
+
+```sh
+SPHERE_OPERATOR_TOKEN="$(security find-generic-password -s obi-sphere-operator-token -w)" \
+OBI_SPHERE_URL=https://obi-sphere.well0cp.workers.dev OBI_E2E_REMOTE=1 make e2e
+```
+
+Three things must all be set, or the run refuses before it starts anything (exit 2): `OBI_SPHERE_URL`, `SPHERE_OPERATOR_TOKEN`, and `OBI_E2E_REMOTE=1` or `--remote` (`node e2e/run.mjs --remote`). With `CI` set, only `OBI_E2E_REMOTE=1` is accepted. Only the URL's origin is printed.
+
+The run uses that Sphere instead of starting one with `node scripts/local.mjs`. Everything else is as written: two real obids with stub agents, the same eight steps and checks. Only these differ:
+
+- The Sphere is `OBI_SPHERE_URL` and its operator token is `SPHERE_OPERATOR_TOKEN`; every "`http://127.0.0.1:<sphere port>`" above is that origin. obid accepts any `http(s)` Sphere base URL (`is_base_url`), so this is real obid over HTTPS.
+- Step 1.2 creates Sphere `e2e-<8 hex digits>`, new for every run, in place of `e2e`; the owner assertions' `aud`, every `/v0.1/spheres/<id>/…` path and the envelope checks use that id.
+- Skipped, because there is no local Sphere process: step 1.1's start (the health check is still made), step 8.6's SIGTERM to the Sphere, and the Sphere's ports and write root (`R/sphere/`). obid A, obid B, the fixture and the checkouts' write checks stay.
+- **Cleanup:** v0.1 can't delete a Sphere. When the run ends, however it ends, the harness revokes both test Obis (`DELETE /v0.1/spheres/<id>/members/<obi>`, admin token) and prints the result. The Sphere, its members (revoked), invitations and audit rows stay in the deployed Sphere's database. If the revoke fails, the output says so and names the Sphere. An operator-only Sphere delete in obi-sphere would remove this leftover; it is a follow-up there.
 
 ## Processes, folders and ports
 

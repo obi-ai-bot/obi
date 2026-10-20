@@ -4,6 +4,9 @@
 #   make e2e        the scenario with stub agents: headless, no model credentials, Linux and macOS
 #   make e2e-live   the same with the real Claude Code adapter, run by a person on a Mac
 #
+# Remote mode (writes to a deployed Sphere; see e2e/SCENARIO.md, "Against a deployed Sphere"):
+#   OBI_SPHERE_URL=https://... SPHERE_OPERATOR_TOKEN=... OBI_E2E_REMOTE=1 make e2e
+#
 # OBI_SPHERE_DIR is the obi-sphere checkout (default: ../obi-sphere); OBID_BIN the obid binary
 # (default: core/target/debug/obid, which `make e2e` builds first). Both are documented in
 # e2e/SCENARIO.md. This file belongs to the lead (docs/ARCHITECTURE.md, section 6).

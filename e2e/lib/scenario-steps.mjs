@@ -216,12 +216,11 @@ async function step1(ctx) {
   };
   // Remote mode (SCENARIO.md, "Against a deployed Sphere"): OBI_SPHERE_URL and SPHERE_OPERATOR_TOKEN
   // name a Sphere that is already running; this run makes a Sphere of its own id in it and starts no process.
-  const remote = process.env.OBI_SPHERE_URL;
+  const remote = ctx.remote;
   const [portA, portB] = [await freePort(), await freePort()];
   if (remote) {
-    assert(process.env.SPHERE_OPERATOR_TOKEN, "OBI_SPHERE_URL is set but SPHERE_OPERATOR_TOKEN isn't");
-    ctx.sphereUrl = remote.replace(/\/+$/, "");
-    ctx.operatorToken = process.env.SPHERE_OPERATOR_TOKEN;
+    ctx.sphereUrl = remote.url;
+    ctx.operatorToken = remote.token;
     ctx.sphereId = `${SPHERE.id}-${randomBytes(4).toString("hex")}`;
   } else {
     ctx.sphereUrl = `http://127.0.0.1:${await freePort()}`;
@@ -259,6 +258,7 @@ async function step1(ctx) {
     token: ctx.operatorToken,
     body: { sphere: ctx.sphereId, name: SPHERE.name, admin: { owner: OBIS.a.owner, owner_key: ctx.owners.w.key.publicKey } },
   }), 201, "POST /v0.1/spheres");
+  ctx.sphereCreated = true;
   assert(created.sphere === ctx.sphereId && created.admin_owner === OBIS.a.owner && created.protocol === "obi/0.1", `the Sphere answered ${show(created)}`);
 
   // 1.3 The admin token, as every later one is made.
@@ -611,6 +611,22 @@ async function step8(ctx) {
   const inTmp = appeared(ctx.before.tmp, tmpdir());
   assert(inHome.length === 0, `new in HOME: ${inHome.join(", ")}`);
   assert(inTmp.length === 0, `new in the system's temp folder: ${inTmp.join(", ")}`);
+}
+
+// Remote mode only, at the end of the run however it ends: revokes both test Obis in the Sphere the
+// run made (v0.1 can't delete a Sphere, so an empty one stays). Never throws; answers what happened.
+export async function cleanupRemote(ctx) {
+  if (!ctx.remote || !ctx.sphereCreated) return "";
+  const left = [];
+  for (const o of Object.values(OBIS)) {
+    try {
+      const r = await asAdmin(ctx, `/spheres/${ctx.sphereId}/members/${o.id}`, { method: "DELETE", timeoutMs: 15_000 });
+      if (r.status !== 200 && r.status !== 404) left.push(`${o.id}: ${r.status} ${show(r.body)}`);
+    } catch (e) {
+      left.push(`${o.id}: ${e.message}`);
+    }
+  }
+  return left.length ? `Couldn't revoke every test Obi in Sphere ${ctx.sphereId}: ${left.join("; ")}` : `Revoked both test Obis in Sphere ${ctx.sphereId}; the empty Sphere stays (v0.1 can't delete one).`;
 }
 
 const STEPS = { 1: step1, 2: step2, 3: step3, 4: step4, 5: step5, 6: step6, 7: step7, 8: step8 };

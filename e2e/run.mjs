@@ -9,8 +9,10 @@
 //   OBID_BIN         the obid binary (default: core/target/debug/obid in this repository)
 //   OBI_E2E_RUN_DIR  where the run keeps its files (default: a new folder under the system's temp)
 //   OBI_E2E_KEEP=1   keep the run folder afterwards
-//   OBI_SPHERE_URL   run against this deployed Sphere (needs SPHERE_OPERATOR_TOKEN) instead of starting one;
-//                    a new Sphere id per run (e2e/SCENARIO.md, "Against a deployed Sphere")
+//   OBI_SPHERE_URL   remote mode: run against this deployed Sphere instead of starting one. It writes to
+//                    that Sphere (a new e2e-<hex> Sphere per run, left empty behind), so it also needs
+//                    SPHERE_OPERATOR_TOKEN and --remote or OBI_E2E_REMOTE=1 (under CI: OBI_E2E_REMOTE=1).
+//                    See e2e/SCENARIO.md, "Against a deployed Sphere".
 //
 // It runs the preflight checks, then the eight scenario steps in order, prints one line per check,
 // and exits 0 only when every one passed. A step that isn't implemented yet says so; an
@@ -43,6 +45,7 @@ const env = {
   OBID_BIN: resolve(process.env.OBID_BIN ?? join(OBI_DIR, "core", "target", "debug", "obid")),
   STUB_AGENT: join(here, "stub-agent", "stub-agent"),
 };
+const REMOTE = remoteConfig(); // before anything is created, so a refusal leaves nothing behind
 const RUN_DIR = process.env.OBI_E2E_RUN_DIR ? resolve(process.env.OBI_E2E_RUN_DIR) : mkdtempSync(join(tmpdir(), "obi-e2e-"));
 mkdirSync(RUN_DIR, { recursive: true });
 
@@ -55,8 +58,33 @@ const assert = (condition, message) => {
 };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
+// Remote mode writes to a deployed Sphere, so it needs three things: its URL, its operator token
+// and an explicit opt-in (--remote or OBI_E2E_REMOTE=1; under CI only the variable counts).
+// Anything less stops here, before any step. Only the origin is ever printed.
+function remoteConfig() {
+  const { OBI_SPHERE_URL: url, SPHERE_OPERATOR_TOKEN: token, OBI_E2E_REMOTE, CI } = process.env;
+  const asked = process.argv.includes("--remote") || OBI_E2E_REMOTE === "1";
+  if (!url && !asked) return null;
+  const refuse = (why) => {
+    console.error(`Remote mode refused: ${why}`);
+    process.exit(2);
+  };
+  if (!url) refuse("--remote or OBI_E2E_REMOTE=1 is set without OBI_SPHERE_URL.");
+  if (!token) refuse("OBI_SPHERE_URL is set without SPHERE_OPERATOR_TOKEN.");
+  if (!asked) refuse("OBI_SPHERE_URL is set but this run would write to that Sphere: add --remote or OBI_E2E_REMOTE=1 to say so.");
+  if (CI && OBI_E2E_REMOTE !== "1") refuse("CI is set: remote mode there needs OBI_E2E_REMOTE=1, not the flag.");
+  let origin;
+  try {
+    ({ origin } = new URL(url));
+  } catch {
+    refuse("OBI_SPHERE_URL isn't a URL.");
+  }
+  if (!/^https?:/.test(origin)) refuse("OBI_SPHERE_URL must be http(s)://host[:port].");
+  return { url: origin, token };
+}
+
 // Shared between steps: processes, ports, keys, tokens, ids. Filled in as steps run.
-const ctx = { runDir: RUN_DIR, live: LIVE, env, processes: [] };
+const ctx = { runDir: RUN_DIR, live: LIVE, env, processes: [], remote: REMOTE };
 
 // ---------------------------------------------------------------------------------------------
 // Processes. Every process the run starts is started here, as the leader of its own process group,
@@ -93,6 +121,7 @@ let finished = false;
 async function finish() {
   if (finished) return;
   finished = true;
+  if (ctx.remote) console.log(`\n${await (await import("./lib/scenario-steps.mjs")).cleanupRemote(ctx)}`);
   await stopAll();
   if (process.env.OBI_E2E_KEEP === "1") console.log(`Kept ${RUN_DIR}.`);
   else rmSync(RUN_DIR, { recursive: true, force: true });
@@ -293,7 +322,7 @@ async function run() {
   console.log(`  OBI_SPHERE_DIR  ${env.OBI_SPHERE_DIR}${existsSync(env.OBI_SPHERE_DIR) ? "" : "  (missing)"}`);
   console.log(`  OBID_BIN        ${env.OBID_BIN}${existsSync(env.OBID_BIN) ? "" : "  (missing)"}`);
   console.log(`  run folder      ${RUN_DIR}`);
-  if (process.env.OBI_SPHERE_URL) console.log(`  Sphere          ${process.env.OBI_SPHERE_URL} (deployed; a new Sphere id for this run)`);
+  if (ctx.remote) console.log(`  Sphere          ${ctx.remote.url} (deployed: remote mode, a new Sphere id for this run, left empty behind)`);
   let failures = 0;
 
   console.log("\nPreflight");
