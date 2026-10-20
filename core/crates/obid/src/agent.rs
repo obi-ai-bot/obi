@@ -94,7 +94,7 @@ pub enum Event {
     /// A permission obid refused, and why.
     Denied(String),
     /// Words as the agent writes them: Claude Code's partial messages
-    /// (`--include-partial-messages`), which only a conversation's session asks for.
+    /// (`--include-partial-messages`), Codex's message deltas, ACP's message chunks.
     Delta(String),
     /// A tool call, by its id, its tool's name and its input.
     Tool {
@@ -103,15 +103,22 @@ pub enum Event {
         input: Value,
     },
     /// The answer to the tool call `id` came back; `failed` when it was an error. `exit` is a
-    /// command's exit code, `lines` the lines a file change added and removed, when the tool says.
+    /// command's exit code, `lines` the lines a file change added and removed, `output` what it
+    /// printed or answered, `patches` its file changes as unified diffs by path, when the tool says.
+    /// Only a job's transcript keeps the output and patches, masked (crate::detail).
     ToolDone {
         id: String,
         failed: bool,
         exit: Option<i64>,
         lines: Option<(u64, u64)>,
+        output: Option<String>,
+        patches: Vec<(String, String)>,
     },
     /// The agent's words between tool calls, whole (a job's transcript).
     Said(String),
+    /// Its thinking, or a summary of its reasoning, when the tool reports it, and how long it
+    /// took when the tool says.
+    Thought { text: String, seconds: Option<f64> },
     /// Its to-do list, whole, each time it changes (Codex's and Cursor's; Claude Code's are tool
     /// calls).
     Plan(Vec<crate::transcript::Todo>),
@@ -295,6 +302,15 @@ pub async fn turn_on(
                         }
                         on_event(Event::Said(text));
                     }
+                    if block.get("type").and_then(Value::as_str) == Some("thinking") {
+                        let text = text_of(block, "thinking");
+                        if !text.trim().is_empty() {
+                            on_event(Event::Thought {
+                                text,
+                                seconds: None,
+                            });
+                        }
+                    }
                     if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                         let name = block.get("name").and_then(Value::as_str).unwrap_or("");
                         let input = block.get("input").cloned().unwrap_or(Value::Null);
@@ -315,11 +331,34 @@ pub async fn turn_on(
                     .flatten()
                     .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
                 {
+                    let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                    let output = result_text(&block["content"]);
+                    // Claude Code's Bash says a command's exit code in its answer: "Exit code 1".
+                    let exit = output
+                        .lines()
+                        .take(3)
+                        .find_map(|l| l.split("Exit code ").nth(1))
+                        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+                        .and_then(|n| n.parse().ok())
+                        .filter(|_| failed);
+                    // An edit's answer carries its hunks (never the file it read: originalFile).
+                    let result = &message["tool_use_result"];
+                    let patches = match (
+                        result["filePath"].as_str(),
+                        result["structuredPatch"].as_array(),
+                    ) {
+                        (Some(path), Some(hunks)) if !hunks.is_empty() => {
+                            vec![(path.to_owned(), crate::detail::structured(path, hunks))]
+                        }
+                        _ => vec![],
+                    };
                     on_event(Event::ToolDone {
                         id: text_of(block, "tool_use_id"),
-                        failed: block.get("is_error").and_then(Value::as_bool) == Some(true),
-                        exit: None,
+                        failed,
+                        exit,
                         lines: None,
+                        output: Some(output),
+                        patches,
                     });
                 }
             }
@@ -373,6 +412,19 @@ pub async fn turn_on(
         conn.finish().await
     };
     (turn, None)
+}
+
+/// A `tool_result`'s content as text: a string, or its text blocks one after the other.
+fn result_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
 }
 
 fn text_of(value: &Value, key: &str) -> String {

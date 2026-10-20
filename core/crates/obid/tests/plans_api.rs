@@ -4500,3 +4500,41 @@ fn a_follow_ups_proposal_closes_once_its_work_merged() {
         1
     );
 }
+
+/// #784: what a job's call printed is kept for its transcript (opened per entry), and never
+/// reaches the brain: not its prompt, its arguments or its quoted file, even while it reads about
+/// that very job.
+#[test]
+fn a_calls_output_never_reaches_the_brain() {
+    let folder = Folder::new("brain-detail");
+    let obid = started(&folder);
+    let answer = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research",
+                             "task": "DETAIL", "title": "Lister"}}),
+        ),
+    );
+    assert_eq!(answer.status, 201, "{}", answer.text);
+    let id = answer.body["id"].as_str().unwrap().to_owned();
+    let ended = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None);
+    assert_eq!(ended.status, 200, "{}", ended.text);
+    let canary = "DETAIL-ONLY-CANARY-7f3a";
+    let opened = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/2"), None);
+    assert!(opened.text.contains(canary), "{}", opened.text);
+    queue(&obid, &[reply("It listed the files.")]);
+    assert_eq!(
+        said(&obid, "what did the Lister job find?")["text"],
+        "It listed the files."
+    );
+    let asked = calls(&obid);
+    assert!(!asked.is_empty(), "the brain was asked");
+    for call_dir in asked {
+        for part in ["input", "args", "work.md"] {
+            let text = read(call_dir.join(part));
+            assert!(!text.contains(canary), "{part}: {text}");
+        }
+    }
+}

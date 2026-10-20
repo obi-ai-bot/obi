@@ -1,10 +1,10 @@
 //! A job's transcript (#381; docs/runner-api.md, "GET /v1/jobs/{id}/transcript"): one entry per
 //! tool call, the agent's words between them, the owner's words, its to-do list and each round's
 //! start, live. Kept in `home/jobs/<id>/transcript.jsonl` (0600): one JSON line per change, each
-//! entry numbered `n` in order; a tool call that ends is written again under its `n`. The secrets
-//! obid holds are taken out before anything is written. Never a command's output or a file's
-//! contents: the tool, a short summary of its input, how it ended, how long it took, its exit code
-//! and the lines it added and removed.
+//! entry numbered `n` in order; a tool call that ends is written again under its `n`. The agent's
+//! words and thoughts are whole, and stream in as it writes them (#784). What a call took in and
+//! gave back (crate::detail) is kept apart, in `transcript-detail.jsonl`, and served only when an
+//! entry is opened. Everything is masked (crate::detail::mask) before it's written.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::agent::{self, Event};
 
@@ -31,6 +31,8 @@ pub const MOST_BYTES: u64 = 8 * 1024 * 1024;
 pub const PAGE: usize = 1_000;
 /// How long a finished job's transcript is kept.
 pub const KEPT_DAYS: i64 = 30;
+/// How much of what a job's calls took in and gave back obid keeps (crate::detail).
+pub const MOST_DETAIL_BYTES: u64 = 32 * 1024 * 1024;
 
 /// One entry.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -43,6 +45,10 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
     pub summary: String,
+    /// The whole text of the agent's words (`said`), its thinking (`thought`) or the owner's
+    /// words (`you`), masked: `summary` is its first 300 characters on one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
     /// A tool call's: `running`, `done`, `failed` or `declined`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
@@ -64,6 +70,28 @@ pub struct Entry {
     /// The file a tool call reads or changes, from the worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+}
+
+/// What [`Transcripts::record`] changed: an entry written (new, or again), or words added to the
+/// `said` entry `n` as the agent writes them, not written until the words are whole.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    Entry(Box<Entry>),
+    Append { n: u64, text: String },
+}
+
+impl From<Entry> for Change {
+    fn from(entry: Entry) -> Change {
+        Change::Entry(Box::new(entry))
+    }
+}
+
+/// The words the agent is writing: the entry they go to once a line is whole, and what's not
+/// whole yet (a line is masked only once it's whole, since the scan judges whole lines).
+#[derive(Default)]
+struct Writing {
+    n: Option<u64>,
+    pending: String,
 }
 
 /// One item of the agent's to-do list.
@@ -91,7 +119,13 @@ struct Live {
     activity: crate::activity::Activity,
     /// The file is full ([`MOST_ENTRIES`], [`MOST_BYTES`]): said in the log once.
     full: bool,
-    open: HashMap<String, (Entry, Instant)>,
+    /// The calls not ended yet: their entry, when they started, and their detail so far.
+    open: HashMap<String, (Entry, Instant, Value)>,
+    writing: Option<Writing>,
+    /// The detail file's size, where each entry's latest detail is in it, and whether it's full.
+    detail_bytes: u64,
+    details: HashMap<u64, (u64, u64)>,
+    detail_full: bool,
     /// The call obid declined last: its end says `declined`, not `failed`.
     declined: Option<String>,
     /// Claude Code's `TaskCreate`/`TaskUpdate` list, in the order the tasks were made.
@@ -115,6 +149,13 @@ impl Transcripts {
         self.home.join("jobs").join(job).join("transcript.jsonl")
     }
 
+    fn detail_path(&self, job: &str) -> PathBuf {
+        self.home
+            .join("jobs")
+            .join(job)
+            .join("transcript-detail.jsonl")
+    }
+
     /// Takes in what the agent did in `worktree`, where the job's check is `check`; the entries
     /// it wrote or changed, in order.
     pub fn record(
@@ -123,20 +164,44 @@ impl Transcripts {
         event: &Event,
         worktree: &Path,
         check: Option<&str>,
-    ) -> Vec<Entry> {
+    ) -> Vec<Change> {
         let mut all = self.live.lock().unwrap_or_else(|e| e.into_inner());
         let live = self.live_for(&mut all, job);
+        let mut details: Vec<(u64, Value)> = Vec::new();
         let entries = match event {
-            Event::Tool { id, name, input } => tool(live, id, name, input, worktree, check),
+            Event::Tool { id, name, input } => {
+                let entries = tool(live, id, name, input, worktree, check);
+                if let Some((entry, _, detail)) = live.open.get(id) {
+                    details.push((entry.n, detail.clone()));
+                }
+                entries
+            }
             Event::ToolDone {
                 id,
                 failed,
                 exit,
                 lines,
+                output,
+                patches,
             } => live
                 .open
                 .remove(id)
-                .map(|(mut entry, started)| {
+                .map(|(mut entry, started, mut detail)| {
+                    if let Some(output) = output {
+                        detail["output"] = crate::detail::output(output, *exit);
+                    }
+                    if !patches.is_empty() {
+                        detail["diff"] = patches
+                            .iter()
+                            .map(|(path, patch)| {
+                                crate::detail::patch(
+                                    &shown_path(path, worktree),
+                                    &placed(patch, worktree),
+                                )
+                            })
+                            .collect();
+                    }
+                    details.push((entry.n, detail));
                     let declined = live.declined.as_deref() == Some(id.as_str());
                     entry.state = Some(
                         match (declined, failed) {
@@ -160,19 +225,94 @@ impl Transcripts {
                 live.declined = live
                     .open
                     .iter()
-                    .max_by_key(|(_, (e, _))| e.n)
+                    .max_by_key(|(_, (e, _, _))| e.n)
                     .map(|(id, _)| id.clone());
                 vec![]
             }
-            Event::Said(words) => said(live, "said", words),
+            Event::Delta(words) => {
+                let (entries, appends) = writing(live, words);
+                if !appends.is_empty() {
+                    return appends;
+                }
+                entries
+            }
+            Event::Said(words) => match live.writing.take().and_then(|w| w.n) {
+                // The words it was writing, now whole: the entry again, with all of them.
+                Some(n) => live
+                    .now
+                    .get(&n)
+                    .cloned()
+                    .map(|mut entry| {
+                        let text = crate::detail::mask(&crate::detail::capped(words));
+                        entry.summary = crate::brain::briefing::line(&text, WORDS);
+                        entry.text = Some(text);
+                        vec![entry]
+                    })
+                    .unwrap_or_default(),
+                None => said(live, "said", words),
+            },
+            Event::Thought { text, seconds } => {
+                let mut entries = said(live, "thought", text);
+                for entry in &mut entries {
+                    entry.seconds = *seconds;
+                }
+                entries
+            }
             Event::Plan(todos) => vec![plan(live, todos.clone())],
-            Event::Session(_)
-            | Event::Step(_)
-            | Event::Delta(_)
-            | Event::Usage(_)
-            | Event::Tokens(_) => vec![],
+            Event::Session(_) | Event::Step(_) | Event::Usage(_) | Event::Tokens(_) => vec![],
         };
-        self.write(job, live, entries)
+        let written = self.write(job, live, entries);
+        for (n, detail) in details {
+            if live.now.contains_key(&n) {
+                self.write_detail(job, live, n, &detail);
+            }
+        }
+        written.into_iter().map(Change::from).collect()
+    }
+
+    /// The entry `n` as it is now, and its detail (crate::detail): none for an entry that has
+    /// none, `{"kept": false}` for a call whose detail came once the job's was full. `None` for
+    /// an entry the transcript doesn't have.
+    pub fn detail(&self, job: &str, n: u64) -> Option<(Entry, Option<Value>)> {
+        let all = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(live) = all.get(job) {
+            let entry = live.now.get(&n)?.clone();
+            let detail = live
+                .details
+                .get(&n)
+                .and_then(|&(at, len)| read_at(&self.detail_path(job), at, len))
+                .and_then(|line| detail_of(&line));
+            let full = live.detail_full;
+            return Some((entry.clone(), detail.or_else(|| not_kept(&entry, full))));
+        }
+        drop(all);
+        // A job whose agent isn't running: its files, read once through (they're bounded).
+        let entry: Entry = serde_json::from_slice(&last_line(&self.path(job), n)?).ok()?;
+        let path = self.detail_path(job);
+        let detail = last_line(&path, n).and_then(|line| detail_of(&line));
+        let full = std::fs::metadata(&path).is_ok_and(|m| m.len() + 4096 > MOST_DETAIL_BYTES);
+        let kept = detail.or_else(|| not_kept(&entry, full));
+        Some((entry, kept))
+    }
+
+    /// Adds an entry's detail to the detail file, unless it's full.
+    fn write_detail(&self, job: &str, live: &mut Live, n: u64, detail: &Value) {
+        let line = format!("{{\"n\":{n},\"detail\":{detail}}}\n");
+        if live.detail_full || live.detail_bytes + line.len() as u64 > MOST_DETAIL_BYTES {
+            if !live.detail_full {
+                live.detail_full = true;
+                tracing::warn!("job {job}'s transcript detail is full: obid keeps no more of it");
+            }
+            return;
+        }
+        match append(&self.detail_path(job), &line) {
+            Ok(()) => {
+                live.details
+                    .insert(n, (live.detail_bytes, line.len() as u64));
+                live.detail_bytes += line.len() as u64;
+            }
+            Err(e) => tracing::error!("can't keep job {job}'s transcript detail: {e}"),
+        }
     }
 
     /// The job's `activity` (none before its first tool call) and `context` (`crate::activity`),
@@ -198,23 +338,47 @@ impl Transcripts {
 
     /// A round began: `summary` says which, on which tool.
     pub fn start(&self, job: &str, summary: &str) -> Vec<Entry> {
-        self.note(job, |live| vec![entry(live, "start", None, mask(summary))])
+        self.note(job, |live| {
+            vec![entry(live, "start", None, crate::detail::mask(summary))]
+        })
     }
 
     /// The turn is over: a call that never ended (the agent was stopped or died) failed.
     pub fn end_turn(&self, job: &str) -> Vec<Entry> {
         self.note(job, |live| {
+            // Words it was writing that never came whole: what came is what it said.
+            let mut words: Vec<Entry> = match live.writing.take() {
+                Some(Writing {
+                    n: Some(n),
+                    pending,
+                }) => live
+                    .now
+                    .get(&n)
+                    .cloned()
+                    .map(|mut entry| {
+                        let mut text = entry.text.clone().unwrap_or_default();
+                        text.push_str(&crate::detail::mask(&pending));
+                        entry.summary = crate::brain::briefing::line(&text, WORDS);
+                        entry.text = Some(crate::detail::capped(&text));
+                        entry
+                    })
+                    .into_iter()
+                    .collect(),
+                Some(Writing { n: None, pending }) => said(live, "said", &pending),
+                None => vec![],
+            };
             let mut ended: Vec<Entry> = live
                 .open
                 .drain()
-                .map(|(_, (mut entry, started))| {
+                .map(|(_, (mut entry, started, _))| {
                     entry.state = Some("failed".into());
                     entry.seconds = Some(tenths(started));
                     entry
                 })
                 .collect();
             ended.sort_by_key(|e| e.n);
-            ended
+            words.extend(ended);
+            words
         })
     }
 
@@ -246,6 +410,21 @@ impl Transcripts {
         };
         for entry in lines(&path) {
             live.take(entry);
+        }
+        let detail = self.detail_path(job);
+        live.detail_bytes = std::fs::metadata(&detail).map_or(0, |m| m.len());
+        live.detail_full = live.detail_bytes + 4096 > MOST_DETAIL_BYTES;
+        if let Ok(file) = std::fs::File::open(&detail) {
+            let mut at = 0;
+            for line in std::io::BufReader::new(file)
+                .split(b'\n')
+                .map_while(Result::ok)
+            {
+                if let Some(n) = n_of(&line) {
+                    live.details.insert(n, (at, line.len() as u64 + 1));
+                }
+                at += line.len() as u64 + 1;
+            }
         }
         // ponytail: Claude Code's task list picks up from the last to-do list written, which
         // may have been a TodoWrite's.
@@ -341,6 +520,7 @@ impl Transcripts {
             let id = folder.file_name().to_string_lossy().into_owned();
             if path.join("transcript.jsonl").is_file() && !keep(&id) {
                 let _ = std::fs::remove_file(path.join("transcript.jsonl"));
+                let _ = std::fs::remove_file(path.join("transcript-detail.jsonl"));
                 let _ = std::fs::remove_dir(&path);
             }
         }
@@ -414,19 +594,54 @@ fn entry(live: &mut Live, kind: &str, tool: Option<&str>, summary: String) -> En
     }
 }
 
+/// An entry of words (`said`, `thought`, `you`): all of them, masked, and their first line.
 fn said(live: &mut Live, kind: &str, words: &str) -> Vec<Entry> {
-    let words = crate::brain::briefing::line(&mask(words), WORDS);
-    if words.is_empty() {
+    let text = crate::detail::mask(&crate::detail::capped(words));
+    let summary = crate::brain::briefing::line(&text, WORDS);
+    if summary.is_empty() {
         return vec![];
     }
-    vec![entry(live, kind, None, words)]
+    let mut entry = entry(live, kind, None, summary);
+    entry.text = Some(text);
+    vec![entry]
+}
+
+/// Words as the agent writes them: each whole line, masked, goes to its `said` entry (made with
+/// the first) as an append. The entries made, or the appends.
+fn writing(live: &mut Live, words: &str) -> (Vec<Entry>, Vec<Change>) {
+    let open = live.writing.get_or_insert_with(Writing::default);
+    open.pending.push_str(words);
+    let Some(cut) = open.pending.rfind('\n') else {
+        return (vec![], vec![]);
+    };
+    let lines: String = open.pending.drain(..=cut).collect();
+    let n = open.n;
+    let text = crate::detail::mask(&lines);
+    match n.and_then(|n| live.now.get_mut(&n)) {
+        Some(entry) => {
+            let had = entry.text.get_or_insert_with(String::new);
+            // Past its cap the words stop growing here; the whole message replaces them.
+            if had.len() >= crate::detail::TEXT_BYTES {
+                return (vec![], vec![]);
+            }
+            had.push_str(&text);
+            (vec![], vec![Change::Append { n: entry.n, text }])
+        }
+        None => {
+            let entries = said(live, "said", &text);
+            if let (Some(entry), Some(open)) = (entries.first(), live.writing.as_mut()) {
+                open.n = Some(entry.n);
+            }
+            (entries, vec![])
+        }
+    }
 }
 
 fn plan(live: &mut Live, todos: Vec<Todo>) -> Entry {
     let todos: Vec<Todo> = todos
         .into_iter()
         .map(|t| Todo {
-            text: crate::brain::briefing::line(&mask(&t.text), WORDS),
+            text: crate::brain::briefing::line(&crate::detail::mask(&t.text), WORDS),
             state: t.state,
         })
         .collect();
@@ -485,9 +700,12 @@ fn tool(
         }
         _ => {
             // Masked before they're cut short, so no part of a secret is left.
-            let shown = crate::brain::briefing::line(&mask(name), NAME);
-            let summary =
-                crate::brain::briefing::line(&mask(&agent::step(&shown, &masked(input))), SUMMARY);
+            let shown = crate::brain::briefing::line(&crate::detail::mask(name), NAME);
+            let input_kept = crate::detail::input(input);
+            let summary = crate::brain::briefing::line(
+                &crate::detail::mask(&agent::step(&shown, &input_kept)),
+                SUMMARY,
+            );
             let mut entry = entry(live, "tool", Some(&shown), summary);
             entry.state = Some("running".into());
             entry.activity = Some(crate::activity::kind(name, input, check).into());
@@ -495,8 +713,13 @@ fn tool(
             if let Some((added, removed)) = edited(name, input) {
                 (entry.added, entry.removed) = (Some(added), Some(removed));
             }
+            let mut detail = json!({"input": input_kept});
+            let path = entry.file.clone().unwrap_or_default();
+            if let Some(patch) = crate::detail::from_input(name, input, &path) {
+                detail["diff"] = json!([crate::detail::patch(&path, &patch)]);
+            }
             live.open
-                .insert(id.to_owned(), (entry.clone(), Instant::now()));
+                .insert(id.to_owned(), (entry.clone(), Instant::now(), detail));
             vec![entry]
         }
     }
@@ -535,7 +758,10 @@ fn file_of(input: &Value, worktree: &Path) -> Option<String> {
         Some(relative) => relative.display().to_string(),
         None => path.file_name()?.to_string_lossy().into_owned(),
     };
-    Some(crate::brain::briefing::line(&mask(&shown), SUMMARY))
+    Some(crate::brain::briefing::line(
+        &crate::detail::mask(&shown),
+        SUMMARY,
+    ))
 }
 
 /// The lines a Claude Code edit adds and removes, from its input.
@@ -574,26 +800,73 @@ pub fn diff_lines(diff: &str) -> (u64, u64) {
     })
 }
 
-/// `text` with the secrets obid holds taken out, and anything the scan calls a secret whole.
-fn mask(text: &str) -> String {
-    let text = crate::secrets::known().redact(text);
-    if crate::scan::matches(&text).is_empty() {
-        text
-    } else {
-        "[redacted]".into()
+/// A file change's path as the transcript shows it: from the worktree, or only its name.
+fn shown_path(path: &str, worktree: &Path) -> String {
+    file_of(&json!({ "path": path }), worktree).unwrap_or_default()
+}
+
+/// A diff with the worktree's own path taken off its file names, and the home folder as `[home]`.
+fn placed(patch: &str, worktree: &Path) -> String {
+    let real = crate::policy::real_path(worktree).unwrap_or_else(|| worktree.to_path_buf());
+    let mut patch = patch.to_owned();
+    for root in [worktree, real.as_path()] {
+        patch = patch.replace(&format!("{}/", root.display()), "");
+    }
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() => patch.replace(&home, "[home]"),
+        _ => patch,
     }
 }
 
-/// `input` with [`mask`] on every string in it.
-fn masked(input: &Value) -> Value {
-    match input {
-        Value::String(text) => Value::String(mask(text)),
-        Value::Array(items) => Value::Array(items.iter().map(masked).collect()),
-        Value::Object(fields) => {
-            Value::Object(fields.iter().map(|(k, v)| (k.clone(), masked(v))).collect())
-        }
-        other => other.clone(),
+/// Appends `text` to the file at `path` (0600), making its folder (0700).
+fn append(path: &Path, text: &str) -> std::io::Result<()> {
+    crate::store::make_private_dir(path.parent().expect("a folder"))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    options.open(path)?.write_all(text.as_bytes())
+}
+
+/// The `n` a transcript or detail line starts with (`{"n":12,…`), read without the rest.
+fn n_of(line: &[u8]) -> Option<u64> {
+    let rest = line.strip_prefix(b"{\"n\":")?;
+    let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+    std::str::from_utf8(&rest[..digits]).ok()?.parse().ok()
+}
+
+/// The last line of the file at `path` for entry `n`.
+fn last_line(path: &Path, n: u64) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    std::io::BufReader::new(file)
+        .split(b'\n')
+        .map_while(Result::ok)
+        .filter(|line| n_of(line) == Some(n))
+        .last()
+}
+
+/// The line `len` bytes long at `at` in the file at `path`.
+fn read_at(path: &Path, at: u64, len: u64) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    file.seek(SeekFrom::Start(at)).ok()?;
+    let mut line = vec![0; usize::try_from(len).ok()?];
+    file.read_exact(&mut line).ok()?;
+    Some(line)
+}
+
+/// A detail line's `detail`.
+fn detail_of(line: &[u8]) -> Option<Value> {
+    let value: Value = serde_json::from_slice(line).ok()?;
+    Some(value.get("detail")?.clone())
+}
+
+/// What a call's detail says once the job's detail was full when it came.
+fn not_kept(entry: &Entry, full: bool) -> Option<Value> {
+    (full && entry.kind == "tool").then(|| json!({"kept": false}))
 }
 
 fn tenths(started: Instant) -> f64 {
@@ -608,6 +881,12 @@ mod tests {
     impl Transcripts {
         fn rec(&self, job: &str, event: &Event) -> Vec<Entry> {
             self.record(job, event, Path::new("/w"), None)
+                .into_iter()
+                .filter_map(|c| match c {
+                    Change::Entry(entry) => Some(*entry),
+                    Change::Append { .. } => None,
+                })
+                .collect()
         }
     }
 
@@ -632,6 +911,8 @@ mod tests {
             failed,
             exit: None,
             lines: None,
+            output: None,
+            patches: vec![],
         }
     }
 
@@ -770,7 +1051,7 @@ mod tests {
         crate::secrets::known().forget("vault transcript-test");
         let file = std::fs::read_to_string(t.path("j")).unwrap();
         assert!(!file.contains(&value), "{file}");
-        assert!(file.contains("[redacted"), "{file}");
+        assert!(file.contains("[vault: transcript-test]"), "{file}");
     }
 
     #[test]
@@ -929,5 +1210,170 @@ mod tests {
         assert_eq!(file("src/a.rs").as_deref(), Some("src/a.rs"));
         assert_eq!(file("/Users/me/.ssh/config").as_deref(), Some("config"));
         assert_eq!(file("../../etc/hosts").as_deref(), Some("hosts"));
+    }
+
+    #[test]
+    fn words_stream_in_whole_lines_and_end_whole() {
+        let t = transcripts("stream");
+        let all = |e: &Event| t.record("j", e, Path::new("/w"), None);
+        assert!(all(&Event::Delta("First li".into())).is_empty());
+        let made = all(&Event::Delta("ne.\nSecond".into()));
+        let Change::Entry(entry) = &made[0] else {
+            panic!("{made:?}")
+        };
+        assert_eq!(
+            (entry.kind.as_str(), entry.text.as_deref()),
+            ("said", Some("First line.\n"))
+        );
+        let n = entry.n;
+        let more = all(&Event::Delta(" line.\nThird".into()));
+        assert_eq!(
+            more,
+            [Change::Append {
+                n,
+                text: "Second line.\n".into()
+            }]
+        );
+        // The whole message replaces what came, under the same n.
+        let whole = "First line.\nSecond line.\nThird line, at last.";
+        let ended = all(&Event::Said(whole.into()));
+        let Change::Entry(entry) = &ended[0] else {
+            panic!("{ended:?}")
+        };
+        assert_eq!((entry.n, entry.text.as_deref()), (n, Some(whole)));
+        assert_eq!(
+            entry.summary,
+            "First line. Second line. Third line, at last."
+        );
+        // The next words are a new entry.
+        let next = all(&Event::Delta("Again.\n".into()));
+        assert!(matches!(&next[0], Change::Entry(e) if e.n == n + 1));
+        // A turn that ends mid-message keeps what came.
+        all(&Event::Delta("cut sh".into()));
+        let ended = t.end_turn("j");
+        assert_eq!(ended[0].text.as_deref(), Some("Again.\ncut sh"));
+    }
+
+    #[test]
+    fn a_secret_split_across_deltas_never_streams() {
+        let t = transcripts("stream-secret");
+        let value = ["stream-", "secret/", "Q7m2+a=b"].concat();
+        crate::secrets::known().learn("vault stream-test", &value);
+        let (a, b) = value.split_at(8);
+        let mut out = String::new();
+        for piece in [format!("key {a}"), format!("{b} ok\n")] {
+            for change in t.record("j", &Event::Delta(piece), Path::new("/w"), None) {
+                out.push_str(&format!("{change:?}"));
+            }
+        }
+        crate::secrets::known().forget("vault stream-test");
+        assert!(!out.contains(a) || !out.contains(b), "{out}");
+        assert!(out.contains("[vault: stream-test]"), "{out}");
+    }
+
+    #[test]
+    fn thoughts_are_entries_of_their_own() {
+        let t = transcripts("thoughts");
+        let e = t.rec(
+            "j",
+            &Event::Thought {
+                text: "Maybe the scan.\nOr the check.".into(),
+                seconds: Some(1.5),
+            },
+        );
+        assert_eq!((e[0].kind.as_str(), e[0].seconds), ("thought", Some(1.5)));
+        assert_eq!(e[0].text.as_deref(), Some("Maybe the scan.\nOr the check."));
+    }
+
+    #[test]
+    fn a_call_keeps_its_input_output_and_diff_apart() {
+        let t = transcripts("detail");
+        let w = Path::new("/w");
+        t.record(
+            "j",
+            &tool_event("a", "Bash", json!({"command": "cargo test --all"})),
+            w,
+            None,
+        );
+        t.record(
+            "j",
+            &tool_event(
+                "b",
+                "Edit",
+                json!({"file_path": "/w/src/x.rs", "old_string": "a", "new_string": "b"}),
+            ),
+            w,
+            None,
+        );
+        // Running, its input is there already.
+        let (_, running) = t.detail("j", 1).unwrap();
+        assert_eq!(running.unwrap()["input"]["command"], "cargo test --all");
+        let output: String = (1..=300).map(|i| format!("test {i} ok\n")).collect();
+        t.record(
+            "j",
+            &Event::ToolDone {
+                id: "a".into(),
+                failed: true,
+                exit: Some(101),
+                lines: None,
+                output: Some(output),
+                patches: vec![],
+            },
+            w,
+            None,
+        );
+        t.record("j", &done("b", false), w, None);
+        let (entry, detail) = t.detail("j", 1).unwrap();
+        let detail = detail.unwrap();
+        assert_eq!(entry.state.as_deref(), Some("failed"));
+        assert_eq!(detail["output"]["lines"], 300);
+        assert_eq!(detail["output"]["exit"], 101);
+        assert_eq!(detail["output"]["truncated"], true);
+        assert!(
+            detail["output"]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("test 101 ok\n")
+        );
+        let (_, edit) = t.detail("j", 2).unwrap();
+        assert_eq!(
+            edit.unwrap()["diff"][0],
+            json!({"path": "src/x.rs", "patch": "--- a/src/x.rs\n+++ b/src/x.rs\n@@ -1,1 +1,1 @@\n-a\n+b\n"})
+        );
+        // The list never carries it, and once the turn is over it's read from the files.
+        assert!(
+            std::fs::read_to_string(t.path("j"))
+                .unwrap()
+                .find("test 101")
+                .is_none()
+        );
+        t.forget("j");
+        let (_, again) = t.detail("j", 1).unwrap();
+        assert_eq!(again.unwrap()["output"]["lines"], 300);
+        assert!(t.detail("j", 99).is_none());
+    }
+
+    #[test]
+    fn a_full_detail_file_says_so() {
+        let t = transcripts("detail-full");
+        let w = Path::new("/w");
+        t.record(
+            "j",
+            &tool_event("a", "Bash", json!({"command": "ls"})),
+            w,
+            None,
+        );
+        t.live.lock().unwrap().get_mut("j").unwrap().detail_bytes = MOST_DETAIL_BYTES;
+        t.record(
+            "j",
+            &tool_event("b", "Bash", json!({"command": "pwd"})),
+            w,
+            None,
+        );
+        assert_eq!(t.detail("j", 2).unwrap().1, Some(json!({"kept": false})));
+        assert_eq!(
+            t.detail("j", 1).unwrap().1.unwrap()["input"]["command"],
+            "ls"
+        );
     }
 }

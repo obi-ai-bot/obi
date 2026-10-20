@@ -4206,7 +4206,10 @@ impl Jobs {
                     }
                 }
                 // The words and to-do list are the transcript's.
-                AgentEvent::Delta(_) | AgentEvent::Said(_) | AgentEvent::Plan(_) => {}
+                AgentEvent::Delta(_)
+                | AgentEvent::Said(_)
+                | AgentEvent::Thought { .. }
+                | AgentEvent::Plan(_) => {}
             }
         };
         let plan = Self::mode_of(&job) == Mode::Plan;
@@ -4400,12 +4403,29 @@ impl Jobs {
         needs_you()
     }
 
-    /// Tells the apps about transcript entries that came or changed (`transcript` events).
-    fn transcribed(&self, id: &str, entries: Vec<crate::transcript::Entry>) {
-        for entry in entries {
-            self.events
-                .send("transcript", json!({"job": id, "entry": entry}));
+    /// Tells the apps about transcript entries that came or changed, and words added to one as
+    /// the agent writes them (`transcript` events).
+    fn transcribed<C: Into<crate::transcript::Change>>(&self, id: &str, changes: Vec<C>) {
+        for change in changes {
+            let data = match change.into() {
+                crate::transcript::Change::Entry(entry) => json!({"job": id, "entry": entry}),
+                crate::transcript::Change::Append { n, text } => {
+                    json!({"job": id, "n": n, "append": text})
+                }
+            };
+            self.events.send("transcript", data);
         }
+    }
+
+    /// The transcript entry `n` of job `id` with its detail (`GET /v1/jobs/{id}/transcript/{n}`);
+    /// `None` for a job or an entry obid doesn't have.
+    pub fn transcript_entry(
+        &self,
+        id: &str,
+        n: u64,
+    ) -> Option<(crate::transcript::Entry, Option<Value>)> {
+        self.get(id)?;
+        self.transcripts.detail(id, n)
     }
 
     /// Keeps the job's `activity` and `context` up to date with its transcript, when they changed.
@@ -5106,6 +5126,8 @@ impl Jobs {
                     "--output-format",
                     "stream-json",
                     "--verbose",
+                    // The words as the agent writes them, for the transcript (Event::Delta).
+                    "--include-partial-messages",
                     "--permission-prompt-tool",
                     "stdio",
                     "--permission-mode",

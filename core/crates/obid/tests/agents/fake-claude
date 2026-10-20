@@ -24,6 +24,8 @@
 //                    settings.json and .claude.json, tries the same in <dir> (its account's own
 //                    folder) and to read <dir>'s login; says whether its config folder is <dir> and
 //                    whether its login kept a refresh token
+//   DETAIL           runs `ls`, whose output holds DETAIL-ONLY-CANARY-7f3a, then ends the turn with
+//                    "Listed the files." (tests/plans_api.rs: what a call printed never reaches the brain)
 //   ECHO             ends the turn with "heard: <the prompt> resume=<the session it resumed, or none>"
 //   PAUSE: <ms>      waits that long, then ends the turn with "Paused."
 //   ARTIFACTS        writes .obi/artifacts/ in the worktree: a page (a folder with index.html,
@@ -219,6 +221,10 @@ rl.on("line", (line) => {
     const read = tries(() => readFileSync(`${plant[1]}/.credentials.json`));
     const dir = own === plant[1] ? "account" : "own";
     result(`plant: dir=${dir} refresh=${refresh} settings=${settings} state=${state} real=${real} real-state=${realState} read=${read}`);
+  } else if (prompt.includes("DETAIL")) {
+    emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }] } });
+    emit({ type: "user", session_id: session, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", is_error: false, content: "DETAIL-ONLY-CANARY-7f3a\nREADME.md" }] } });
+    result("Listed the files.");
   } else if (prompt.startsWith("ECHO")) {
     const at = process.argv.indexOf("--resume");
     result(`heard: ${prompt} resume=${at >= 0 ? process.argv[at + 1] : "none"}`);

@@ -231,6 +231,20 @@ fn a_codex_jobs_transcript_matches_claudes() {
         "{job}"
     );
     assert_eq!(job["activity"]["groups"][1]["title"], "Found it");
+    // Opened (#784): a command's output and exit code, a file change's diff.
+    let bash = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/12"), None).body;
+    assert_eq!(bash["detail"]["input"]["command"], "node --test", "{bash}");
+    assert_eq!(
+        bash["detail"]["output"],
+        json!({"text": "raw output that never leaves obid", "lines": 1, "truncated": false, "exit": 101})
+    );
+    let edit = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/10"), None).body;
+    assert_eq!(
+        edit["detail"]["diff"],
+        json!([{"path": "src/scan.rs",
+                "patch": "--- a/src/scan.rs\n+++ b/src/scan.rs\n@@ -1,2 +1,3 @@\n-a\n-b\n+c\n+d\n+e\n"}]),
+        "{edit}"
+    );
     assert_eq!(job["context"], "Found it. Fixing it.");
 }
 
