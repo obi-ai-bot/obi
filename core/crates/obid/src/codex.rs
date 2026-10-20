@@ -97,6 +97,7 @@ pub async fn run_turn(
         thread: None,
         turn: None,
         said: None,
+        reasoning: HashMap::new(),
         ended: None,
         resets: None,
     };
@@ -184,6 +185,8 @@ struct Run<D, E> {
     turn: Option<String>,
     /// The agent's last message this turn, from `item/completed`.
     said: Option<String>,
+    /// When each reasoning item started, for how long it took.
+    reasoning: HashMap<String, std::time::Instant>,
     /// The turn's end: what it said, and whether it failed.
     ended: Option<(String, bool)>,
     /// When Codex's own limit resets, once it said it's full (crate::limits).
@@ -339,6 +342,28 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                     self.resets = Some(at);
                 }
             }
+            Some("item/started") if item["type"] == "reasoning" => {
+                if let Some(id) = item["id"].as_str() {
+                    self.reasoning
+                        .insert(id.to_owned(), std::time::Instant::now());
+                }
+            }
+            Some("item/completed") if item["type"] == "reasoning" => {
+                let started = item["id"].as_str().and_then(|id| self.reasoning.remove(id));
+                let text = item["summary"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|s| s.as_str().or(s["text"].as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if !text.trim().is_empty() {
+                    (self.on_event)(Event::Thought {
+                        text,
+                        seconds: started.map(|s| (s.elapsed().as_secs_f64() * 10.0).round() / 10.0),
+                    });
+                }
+            }
             Some("item/started") => {
                 if let Some(step) = step(item) {
                     (self.on_event)(Event::Step(step));
@@ -385,6 +410,17 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                         || !item["error"].is_null(),
                     exit: item["exitCode"].as_i64(),
                     lines: diffs,
+                    output: output_of(item),
+                    patches: item["changes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|c| {
+                            let path = c["path"].as_str().unwrap_or("").to_owned();
+                            let patch = unified(&path, c);
+                            (path, patch)
+                        })
+                        .collect(),
                 });
             }
             Some("turn/plan/updated") => {
@@ -762,6 +798,37 @@ pub fn step(item: &Value) -> Option<String> {
             &json!({}),
         )),
         _ => tool_call(item).map(|(name, input)| agent::step(&name, &input)),
+    }
+}
+
+/// What a tool item printed or answered: a command's aggregated output, an MCP tool's text.
+fn output_of(item: &Value) -> Option<String> {
+    if let Some(text) = item["aggregatedOutput"].as_str() {
+        return Some(text.to_owned());
+    }
+    let blocks = item["result"]["content"].as_array()?;
+    Some(
+        blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// A file change as a unified diff: Codex's own when it has its headers, its hunks under them
+/// when not, and a new or deleted file's whole text as added or removed lines.
+fn unified(path: &str, change: &Value) -> String {
+    let diff = change["diff"].as_str().unwrap_or("");
+    if diff.starts_with("--- ") || diff.starts_with("diff ") {
+        return diff.to_owned();
+    }
+    if diff.starts_with("@@") {
+        return format!("--- a/{path}\n+++ b/{path}\n{diff}");
+    }
+    match change["kind"]["type"].as_str() {
+        Some("delete") => crate::detail::replaced(path, diff, ""),
+        _ => crate::detail::replaced(path, "", diff),
     }
 }
 

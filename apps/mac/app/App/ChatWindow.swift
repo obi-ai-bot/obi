@@ -269,8 +269,11 @@ struct ChatView: View {
         // A job that left every list: its page goes too.
         .onChange(of: model.desk.jobs.map(\.id) + model.feed.jobs.map(\.id)) {
             state.trail.drop { step in
-                guard case .job(let id, let local) = step else { return false }
-                return !(local ? model.desk.jobs : model.feed.jobs).contains { $0.id == id }
+                switch step {
+                case .job(let id, let local): !(local ? model.desk.jobs : model.feed.jobs).contains { $0.id == id }
+                case .session(let id): !model.feed.jobs.contains { $0.id == id }
+                default: false
+                }
             }
         }
     }
@@ -410,7 +413,10 @@ private struct HomeView: View {
                              onOpenJob: { state.trail.push(.job(id: $0, local: $1)) }, onBack: back)
         case .job(let id, let local):
             JobPane(model: model, id: id, local: local, onBack: back,
-                    onOpenJob: { state.trail.push(.job(id: $0, local: local)) }).takesKeys()
+                    onOpenJob: { state.trail.push(.job(id: $0, local: local)) },
+                    onSession: local ? nil : { state.trail.push(.session(id: id)) }).takesKeys()
+        case .session(let id):
+            SessionPane(model: model, id: id, onBack: back).takesKeys()
         case .group(let kind):
             GroupPane(model: model, kind: kind, items: work.filter { $0.type == kind },
                       onOpenJob: { state.trail.push(.job(id: $0, local: $1)) },
@@ -577,6 +583,7 @@ enum WindowLabels {
         case .talk: model.feed.conversationsOn ? model.feed.conversations.shownTitle : "Oby"
         case .job(let id, let local):
             (local ? model.desk.jobs : model.feed.jobs).first { $0.id == id }?.heading ?? "Task"
+        case .session: "Session"
         }
     }
 }
@@ -706,6 +713,8 @@ private struct JobPane: View {
     let local: Bool
     var onBack: (() -> Void)? = nil
     var onOpenJob: (String) -> Void = { _ in }
+    /// Full session: the job's session over its page; nil for this Mac's own jobs, which keep none.
+    var onSession: (() -> Void)? = nil
     @State private var problem: String?
 
     private var desk: Desk { model.desk }
@@ -717,7 +726,8 @@ private struct JobPane: View {
             if let job {
                 TaskPage(job: job, actions: TaskActions.of(job, local: local, model: model), tray: model.tray,
                          publishNow: model.publishing == job.id, onPublishNow: { model.publishing = nil }, onBack: onBack,
-                         followUps: ThreadTaskLine.followUps(of: job.id, in: local ? desk.jobs : feed.jobs), onOpenJob: onOpenJob)
+                         followUps: ThreadTaskLine.followUps(of: job.id, in: local ? desk.jobs : feed.jobs), onOpenJob: onOpenJob,
+                         onSession: onSession)
             } else if let problem {
                 Text(problem).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.danger)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

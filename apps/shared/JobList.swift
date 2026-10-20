@@ -235,8 +235,9 @@ nonisolated enum WorkList {
         var fresh: Bool
     }
 
-    /// A kind's page: Running holds everything not done, what needs you included; Completed the rest.
-    enum Tab: String, CaseIterable, Sendable { case running = "Running", done = "Completed" }
+    /// A kind's page: To do holds GitHub's items no job works on yet (Review PR and Issues only);
+    /// Running every job not done, what needs you included; Completed the rest.
+    enum Tab: String, CaseIterable, Sendable { case todo = "To do", running = "Running", done = "Completed" }
 
     /// `items` (newest first) in their groups, empty ones left out.
     static func groups<J>(_ items: [Item<J>], by: GroupBy) -> [Group<J>] {
@@ -292,16 +293,26 @@ nonisolated enum WorkList {
     /// decision, plus the decisions that have no task (`loose`).
     static func needsYou<J>(_ items: [Item<J>], loose: Int) -> Int { items.count { $0.status == .needs } + loose }
 
-    /// A kind's tasks under one tab of its page.
+    /// A kind's tasks under one tab of its page: To do holds no task, only GitHub's items.
     static func items<J>(_ items: [Item<J>], in tab: Tab) -> [Item<J>] {
-        items.filter { ($0.status == .done) == (tab == .done) }
+        tab == .todo ? [] : items.filter { ($0.status == .done) == (tab == .done) }
     }
 
-    /// The tab a kind's page opens on: where its new task is, else Running while anything's open,
-    /// else Completed when anything's done, else Running.
-    static func firstTab<J>(_ items: [Item<J>]) -> Tab {
+    /// Each tab's count on a kind's page: Running and Completed count jobs alone (and Running a
+    /// routine's next run, `upcoming`); To do, on a page that has it, GitHub's items no job works on.
+    static func counts<J>(_ items: [Item<J>], toDo: Int?, upcoming: Int = 0) -> [Tab: Int] {
+        var counts = [Tab.running: Self.items(items, in: .running).count + upcoming, .done: Self.items(items, in: .done).count]
+        counts[.todo] = toDo
+        return counts
+    }
+
+    /// The tab a kind's page opens on: where its new task is, else Running while anything's open
+    /// (what needs you included), else To do on a page that has it (`toDo`), else Completed when
+    /// anything's done, else Running.
+    static func firstTab<J>(_ items: [Item<J>], toDo: Bool = false) -> Tab {
         if let fresh = items.first(where: \.fresh) { return fresh.status == .done ? .done : .running }
         if items.contains(where: { $0.status != .done }) { return .running }
+        if toDo { return .todo }
         return items.isEmpty ? .running : .done
     }
 }

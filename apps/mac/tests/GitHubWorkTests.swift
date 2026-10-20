@@ -37,6 +37,34 @@ struct GitHubWorkTests {
         #expect(!out.signedIn && out.items.isEmpty)
     }
 
+    /// To do groups an issue by project and board column in a fixed order (In progress, In review,
+    /// Todo, Backlog, the rest by name, no board last), whenever each was updated; a board this app
+    /// can't read, or none, falls back to one group with no name, and one bad field drops only itself.
+    @Test func toDoGroupsByBoardColumn() throws {
+        func issue(_ id: String, _ board: String, _ hour: String, job: String = "null") -> String {
+            #"{"id": "\#(id)", "list": "assigned", "repo": "o/r", "number": 1, "title": "t", "url": "https://github.com/o/r/issues/1", "updated": "2026-10-18T\#(hour):00:00Z", "known": true, "job": \#(job), "board": \#(board)}"#
+        }
+        func on(_ column: String, _ project: String = "Oby — Roadmap") -> String { #"{"project": "\#(project)", "column": "\#(column)"}"# }
+        let assigned = [issue("a", on("Todo"), "13"), issue("b", on("In progress"), "08"), issue("c", "null", "14"),
+                        issue("d", on("Todo"), "09"), issue("e", #""a newer shape""#, "15"), issue("f", on("Todo"), "16", job: #""ab12cd34""#),
+                        issue("g", on("Backlog"), "17"), issue("h", on("Blocked"), "18"), issue("i", on("In review"), "07"),
+                        issue("j", on("Todo", "Tetrix"), "12"), issue("k", #"{"project": 7, "column": "Archive"}"#, "11")]
+        let json = #"{"signedIn": true, "reviews": [], "mine": [], "assigned": ["# + assigned.joined(separator: ", ") + "]}"
+        let work = try Runner.decoder.decode(GitHubWork.self, from: Data(json.utf8))
+        #expect(work.items.count == 11)
+        let columns = work.toDo(.issues)
+        // "f" has a job: it's listed as the job, under Running, never here too. "j"'s Todo is
+        // another project's; "k"'s project can't be read, but its column still is.
+        #expect(columns.map(\.name) == ["In progress", "In review", "Todo", "Todo", "Backlog", "Archive", "Blocked", nil])
+        #expect(columns.map(\.project) == ["Oby — Roadmap", "Oby — Roadmap", "Oby — Roadmap", "Tetrix", "Oby — Roadmap", nil, "Oby — Roadmap", nil])
+        #expect(columns.map { $0.items.map(\.id) } == [["b"], ["i"], ["a", "d"], ["j"], ["g"], ["k"], ["h"], ["e", "c"]])
+        #expect(work.items[0].column == "Todo" && work.items[0].board?.project == "Oby — Roadmap" && work.items[2].column == nil)
+        // An older obid sends no board: one group, no name.
+        let older = try Runner.decoder.decode(GitHubWork.self, from: Data(self.json.utf8))
+        #expect(older.toDo(.review).map(\.name) == [nil] && older.toDo(.review)[0].items.map(\.id) == ["a", "c"])
+        #expect(older.toDo(.issues, later: ["b"]).isEmpty)
+    }
+
     @Test func groupsByKindLeavingStartedAndPutOffOnesOut() throws {
         let work = try Runner.decoder.decode(GitHubWork.self, from: Data(json.utf8))
         // Your own pull requests go under Review PR; "d" has a job on it, which is listed instead.

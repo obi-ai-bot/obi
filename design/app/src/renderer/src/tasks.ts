@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
-import type { Brand } from './brands';
-import { AGENTS, ARCHIVE, JOBS, hasAttachments, type Archived, type Attachments, type Job, type Message } from './mock';
+import { BRANDS, type Brand } from './brands';
+import { AGENTS, ARCHIVE, GITHUB_WORK, JOBS, hasAttachments, type Archived, type Attachments, type GitHubItem, type Job, type Message } from './mock';
 import { streamWords } from './stream';
 
 // Tasks are Oby's jobs (mock.ts) as Home shows them. Each belongs to a kind of
@@ -186,13 +186,54 @@ export const countOf = (status: Status, type?: string) =>
 // a kind of work's count: its tasks not done yet, running or needing you
 export const openOf = (type: string) => countOf('running', type) + countOf('needs', type);
 export const hasFresh = (type: string) => tasksOf(type).some((t) => t.fresh);
-// A kind of work's two tabs: Running holds everything not done, what needs you
-// included (it's still running, only waiting on you); and Done.
-export type Tab = 'running' | 'done';
+// A kind of work's tabs: Running holds everything not done, what needs you
+// included (it's still running, only waiting on you); and Done. Review PR and
+// Issues have To do first: GitHub's items no job works on yet, never counted
+// as running.
+export type Tab = 'todo' | 'running' | 'done';
 const tabOf = (t: Task): Tab => (t.status === 'done' ? 'done' : 'running');
-export const tasksIn = (type: string, tab: Tab) => tasksOf(type).filter((t) => tabOf(t) === tab);
-// the tab it opens on: where the new task is, else Running when anything's open, else Done
+export const tasksIn = (type: string, tab: Tab) => (tab === 'todo' ? [] : tasksOf(type).filter((t) => tabOf(t) === tab));
+export const hasToDo = (type: string) => type === 'review' || type === 'issues';
+// the tab it opens on: where the new task is, else Running when anything's open,
+// else To do when it holds something, else Done
 export const firstTab = (type: string): Tab => {
   const f = tasksOf(type).find((t) => t.fresh);
-  return f ? tabOf(f) : openOf(type) ? 'running' : countOf('done', type) ? 'done' : 'running';
+  return f ? tabOf(f) : openOf(type) ? 'running' : toDoOf(type).length ? 'todo' : countOf('done', type) ? 'done' : 'running';
 };
+
+// GitHub's items waiting under To do, until started or put off (Later)
+let waiting = GITHUB_WORK;
+export const toDoOf = (type: string) => waiting.filter((g) => g.type === type).sort((a, b) => a.updated - b.updated);
+// One group of To do: a project's board column, or the items on no board.
+export type BoardColumn = { name?: string; project?: string; items: GitHubItem[] };
+// work under way first, then what's next, the rest by name, no board last
+const rankOf = (name?: string) => {
+  if (!name) return 5;
+  const at = ['in progress', 'in review', 'todo', 'backlog'].indexOf(name.toLowerCase());
+  return at < 0 ? 4 : at;
+};
+export const columnsOf = (type: string): BoardColumn[] => {
+  const columns: BoardColumn[] = [];
+  for (const g of toDoOf(type)) {
+    const c = columns.find((k) => k.name === g.board?.column && k.project === g.board?.project);
+    if (c) c.items.push(g); else columns.push({ name: g.board?.column, project: g.board?.project, items: [g] });
+  }
+  return columns.sort((a, b) => rankOf(a.name) - rankOf(b.name) || (a.name ?? '').localeCompare(b.name ?? '') || (a.project ?? '').localeCompare(b.project ?? ''));
+};
+// Later takes it off the list for now; Review it / Fix it starts its job, queued
+export function putOff(id: string) {
+  waiting = waiting.filter((g) => g.id !== id);
+  set([...tasks]);
+}
+export function startGitHub(id: string) {
+  const g = waiting.find((k) => k.id === id);
+  if (!g) return;
+  waiting = waiting.filter((k) => k.id !== id);
+  set([toTask({
+    id: `s${id}`, type: g.type, who: g.who, title: g.title, from: BRANDS.github, request: g.request,
+    agent: 'claude', account: 'Deskree', model: 'Opus 5.5', repo: `deskree-inc/${g.repo}`, branch: '—', base: 'dev',
+    status: 'queued', step: 'Getting ready',
+    stages: [{ id: 'prepare', title: 'Prepare', detail: 'Clone and worktree', state: 'current' }, { id: 'work', title: 'Work', state: 'upcoming' }],
+    created: 0,
+  }, true), ...tasks]);
+}

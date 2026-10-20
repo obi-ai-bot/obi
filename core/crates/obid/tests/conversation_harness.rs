@@ -2155,10 +2155,14 @@ fn archive_is_at_once_and_delete_waits_for_confirm() {
     // The apps' own route: a running job is refused, one that ended goes.
     // (A new conversation: this one read the web, so its dispatch would wait for a Start.)
     let (other, _) = ended_job(&obid, None);
+    let transcript = obid.home.join(format!("jobs/{other}"));
+    assert!(transcript.join("transcript.jsonl").exists());
     assert_eq!(
         call(&obid, "DELETE", &format!("/v1/jobs/{other}"), None).status,
         204
     );
+    // Its transcript and detail go with it (#787).
+    assert!(!transcript.exists(), "{}", transcript.display());
     assert_eq!(
         call(&obid, "DELETE", &format!("/v1/jobs/{other}"), None).status,
         404

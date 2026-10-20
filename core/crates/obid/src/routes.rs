@@ -106,6 +106,28 @@ pub async fn transcript(
     ))
 }
 
+/// `GET /v1/jobs/{id}/transcript/{n}`: the entry `n` with its `detail` (crate::detail), masked.
+pub async fn transcript_entry(
+    State(shared): State<Arc<Shared>>,
+    Path((id, n)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let n = n
+        .parse::<u64>()
+        .map_err(|_| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "n is a number."))?;
+    if shared.jobs.get(&id).is_none() {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB));
+    }
+    let (entry, detail) = shared
+        .jobs
+        .transcript_entry(&id, n)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "The transcript has no such entry."))?;
+    let mut value = json!(entry);
+    if let Some(detail) = detail {
+        value["detail"] = detail;
+    }
+    Ok(json(StatusCode::OK, value))
+}
+
 /// `POST /v1/jobs/{id}/stop`: a job that already ended comes back as it is.
 pub async fn stop(
     State(shared): State<Arc<Shared>>,
