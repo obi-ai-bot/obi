@@ -20,8 +20,6 @@ struct TaskActions {
     var publishing: JobView.Publishing?
     var readReport: (() async throws -> ResearchDocument)?
     var fileProposal: ((Int, Bool) async throws -> FileProposalResult)?
-    /// The job's raw session after a line (#381); nil for this Mac's own jobs, which keep none.
-    var transcript: ((Int?) async throws -> TranscriptPage)? = nil
 
     @MainActor static func of(_ job: Job, local: Bool, model: IslandModel) -> TaskActions {
         let desk = model.desk, feed = model.feed
@@ -61,8 +59,7 @@ struct TaskActions {
                 ? JobView.Publishing(action: { try await feed.publishAction(job.id) }, publish: { try await feed.publish(job.id, action: $0) })
                 : nil,
             readReport: { try await feed.about(job.id) { try await $0.report(job.id) } },
-            fileProposal: { index, start in try await feed.about(job.id) { try await $0.fileProposal(job.id, index: index, start: start) } },
-            transcript: { after in try await feed.about(job.id) { try await $0.transcript(job.id, after: after) } })
+            fileProposal: { index, start in try await feed.about(job.id) { try await $0.fileProposal(job.id, index: index, start: start) } })
     }
 
     /// Files one of this Mac's research report's proposed issues, after the secret scan, and starts
@@ -305,6 +302,9 @@ struct TaskPage: View {
     /// Its follow-ups, oldest first (`ThreadTaskLine.followUps`), and opening one's page.
     var followUps: [Job] = []
     var onOpenJob: (String) -> Void = { _ in }
+    /// Full session: the job's live session, over this page with Session in the trail (#785); nil
+    /// for this Mac's own jobs, which keep none.
+    var onSession: (() -> Void)? = nil
     @State private var moving = false
     @State private var busy = false
     @State private var problem: String?
@@ -317,7 +317,6 @@ struct TaskPage: View {
     /// Why the words for the agent didn't go, over the box.
     @State private var noteProblem: String?
     @State private var showingReport = false
-    @State private var showingSession = false
 
     private var facts: JobFacts? { actions.extras?.facts }
     private var mode: String? { actions.extras?.mode }
@@ -349,7 +348,7 @@ struct TaskPage: View {
                             PageSection("Result", first: true) { result }
                         }
                         JobTimeline(job: job, facts: facts, mode: mode, needs: needs,
-                                    onSession: actions.transcript == nil ? nil : { showingSession = true }, first: !hasResult)
+                                    onSession: onSession, first: !hasResult)
                         if JobUsageLine.shows(facts) {
                             PageSection("Usage") {
                                 JobUsageLine(usage: facts?.usage, share: facts?.windowShare,
@@ -357,13 +356,8 @@ struct TaskPage: View {
                             }
                         }
                         PageSection(title: "Details", accessory: {
-                            if actions.transcript != nil && !showingSession { SectionLink(title: "Full session") { showingSession = true } }
+                            if let onSession { SectionLink(title: "Full session", action: onSession) }
                         }) { details }
-                        if showingSession, let transcript = actions.transcript {
-                            PageSection("Session") {
-                                SessionLog(agent: job.agentName, load: transcript, live: job.isActive).frame(height: 420)
-                            }
-                        }
                         PageSection("What you asked") { asked }
                         if let tetrix = actions.extras?.tetrix, !tetrix.isEmpty { PageSection("Tetrix") { TetrixReportView(report: tetrix) } }
                         if !followUps.isEmpty { PageSection("Follow-ups") { followUpList } }
@@ -454,11 +448,11 @@ struct TaskPage: View {
         let failing = facts?.checks?.last?.failing?.map { [$0.test, $0.message.map { "  " + $0 }].compactMap { $0 }.joined(separator: "\n") }
         return AskCard(kind: "Failed", failed: true, title: lines.first ?? job.line, happened: lines.count > 1 ? lines[1] : nil,
                        detail: failing?.joined(separator: "\n"),
-                       options: FailedChoice.options(session: actions.transcript != nil), busy: busy,
+                       options: FailedChoice.options(session: onSession != nil), busy: busy,
                        onChoose: { option in
                            switch FailedChoice(rawValue: option.answer) {
                            case .round: run { try await actions.message(FailedChoice.roundWords) }
-                           case .session: showingSession = true
+                           case .session: onSession?()
                            case .dismiss: run(actions.dismiss)
                            case nil: break
                            }
@@ -677,9 +671,8 @@ struct TaskPagePreview: View {
             let account = AccountState(account: Account(id: "personal", agent: "claude", name: "Personal", payer: "me"),
                                        label: "Max", fiveHour: fixture.windows.fiveHour, sevenDay: fixture.windows.sevenDay)
             TaskPage(job: job, actions: TaskActions(place: "Studio", account: "Personal", extras: extras, accounts: [account], stop: {},
-                                                    message: { _ in }, dismiss: {}, permission: { _, _ in }, mode: { _ in },
-                                                    transcript: { _ in TranscriptPage(entries: []) }),
-                     tray: Tray())
+                                                    message: { _ in }, dismiss: {}, permission: { _, _ in }, mode: { _ in }),
+                     tray: Tray(), onSession: {})
                 .frame(width: 700, height: 1480).background(Tokens.bg)
         }
     }

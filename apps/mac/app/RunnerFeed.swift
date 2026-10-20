@@ -70,6 +70,9 @@ final class RunnerFeed {
     private(set) var routineChanges = 0
     /// obid's routines (#395), for the next runs on Home's Routines page; none from a runner without.
     private(set) var routines: [RunnerRoutine] = []
+    /// The session the window shows (#785): its job's `transcript` events go to it, and it reads
+    /// what it missed when the connection comes back.
+    @ObservationIgnored var liveSession: LiveSession?
     private(set) var extras: [String: RunnerJobExtras] = [:] {
         didSet { capturePermissions() }
     }
@@ -374,6 +377,7 @@ final class RunnerFeed {
                         // while the connection was down is in it.
                         await conversation.reload()
                         try Task.checkCancellation()
+                        if let liveSession { Task { await liveSession.catchUp() } }
                         connection = .live
                         wait = 1
                         Self.ask()
@@ -398,6 +402,7 @@ final class RunnerFeed {
                     case .routine:
                         routineChanges += 1
                         Task { if let routines = try? await runner.routines() { self.routines = routines ?? [] } }
+                    case .transcript(let event): liveSession?.apply(event)
                     }
                 }
             } catch {
