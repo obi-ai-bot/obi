@@ -20,6 +20,18 @@ make e2e-live     # the real Claude Code adapter: a person runs it on a Mac (see
 | `OBID_BIN` | `core/target/debug/obid` in this repository | The `obid` binary to run. With the default, `make e2e` builds it first (`cargo build --locked -p obid` in `core/`, once `core/Cargo.toml` exists) and stops if the build fails; with another value it builds nothing and runs that binary. CI installs a stable Rust toolchain for the build. |
 | `OBI_E2E_RUN_DIR` | a new folder under the system's temp folder | Where the run keeps everything it makes. |
 | `OBI_E2E_KEEP` | unset | `1` keeps the run folder afterwards, for reading the logs. |
+| `OBI_SPHERE_URL` | unset | Opt-in remote mode: the base URL of a Sphere that is already deployed. See "Against a deployed Sphere". |
+| `SPHERE_OPERATOR_TOKEN` | unset | The deployed Sphere's operator token; required with `OBI_SPHERE_URL`, never printed, written or committed. |
+
+### Against a deployed Sphere
+
+With `OBI_SPHERE_URL` set, the run uses that Sphere instead of starting one with `node scripts/local.mjs`. Everything else is as written: two real obids with stub agents, the same eight steps and checks. Only these differ:
+
+- The Sphere is `OBI_SPHERE_URL` (no trailing slash) and its operator token is `SPHERE_OPERATOR_TOKEN`; every "`http://127.0.0.1:<sphere port>`" above is that URL.
+- Step 1.2 creates Sphere `e2e-<8 hex digits>`, new for every run, in place of `e2e` (v0.1 can't delete Spheres); the owner assertions' `aud`, every `/v0.1/spheres/<id>/…` path and the envelope checks use that id.
+- Skipped, because there is no local Sphere process: step 1.1's start (the health check is still made), step 8.6's SIGTERM to the Sphere, and the Sphere's ports and write root (`R/sphere/`). obid A, obid B, the fixture and the checkouts' write checks stay.
+
+Needs, besides the above: network access to that URL.
 
 Needs: Node 22.18 or later (obi-sphere’s minimum, which also meets the pinned pnpm’s requirement), pnpm, git, and a Rust toolchain (`cargo`) once `core/` exists. Nothing else at run time: no network beyond 127.0.0.1, no GitHub, no model (building obid and installing obi-sphere's packages may fetch dependencies first).
 

@@ -119,7 +119,7 @@ function newKey(spec) {
 // An owner assertion signed by `owner` (identity.md 4.1); with `mayAct`, a delegation to that Obi.
 function assertion(ctx, owner, scope, { lifetime = 300, mayAct } = {}) {
   const iat = nowSeconds();
-  const claims = { iss: owner.id, sub: owner.id, aud: `obi-sphere:${SPHERE.id}`, iat, exp: iat + lifetime, jti: randomUUID(), scope };
+  const claims = { iss: owner.id, sub: owner.id, aud: `obi-sphere:${ctx.sphereId}`, iat, exp: iat + lifetime, jti: randomUUID(), scope };
   if (mayAct) claims.may_act = { sub: mayAct };
   return ctx.spec.signJwt(claims, owner.key.privateKey, owner.key.keyId);
 }
@@ -148,7 +148,7 @@ function directoryKeys(members) {
 }
 
 async function members(ctx) {
-  return expect(await asAdmin(ctx, `/spheres/${SPHERE.id}/members`), 200, "the members").members;
+  return expect(await asAdmin(ctx, `/spheres/${ctx.sphereId}/members`), 200, "the members").members;
 }
 
 async function exchange(ctx, which, id) {
@@ -214,9 +214,20 @@ async function step1(ctx) {
     home: topNames(homedir()),
     tmp: topNames(tmpdir()),
   };
-  const [spherePort, portA, portB] = [await freePort(), await freePort(), await freePort()];
-  ctx.sphereUrl = `http://127.0.0.1:${spherePort}`;
-  ctx.operatorToken = randomBytes(32).toString("base64url");
+  // Remote mode (SCENARIO.md, "Against a deployed Sphere"): OBI_SPHERE_URL and SPHERE_OPERATOR_TOKEN
+  // name a Sphere that is already running; this run makes a Sphere of its own id in it and starts no process.
+  const remote = process.env.OBI_SPHERE_URL;
+  const [portA, portB] = [await freePort(), await freePort()];
+  if (remote) {
+    assert(process.env.SPHERE_OPERATOR_TOKEN, "OBI_SPHERE_URL is set but SPHERE_OPERATOR_TOKEN isn't");
+    ctx.sphereUrl = remote.replace(/\/+$/, "");
+    ctx.operatorToken = process.env.SPHERE_OPERATOR_TOKEN;
+    ctx.sphereId = `${SPHERE.id}-${randomBytes(4).toString("hex")}`;
+  } else {
+    ctx.sphereUrl = `http://127.0.0.1:${await freePort()}`;
+    ctx.operatorToken = randomBytes(32).toString("base64url");
+    ctx.sphereId = SPHERE.id;
+  }
   ctx.owners = {
     w: { id: OBIS.a.owner, key: newKey(ctx.spec) },
     e: { id: OBIS.b.owner, key: newKey(ctx.spec) },
@@ -229,15 +240,15 @@ async function step1(ctx) {
 
   // 1.1 The Sphere, with exactly the environment SCENARIO.md gives it.
   const sphereDir = join(R, "sphere");
-  for (const d of ["state", "home", "tmp"]) mkdirSync(join(sphereDir, d), { recursive: true });
   mkdirSync(join(R, "harness"), { recursive: true });
-  ctx.sphereProcess = ctx.start("sphere", process.execPath, ["scripts/local.mjs", "--port", String(spherePort), "--persist-to", join(sphereDir, "state")], {
+  if (!remote) for (const d of ["state", "home", "tmp"]) mkdirSync(join(sphereDir, d), { recursive: true });
+  if (!remote) ctx.sphereProcess = ctx.start("sphere", process.execPath, ["scripts/local.mjs", "--port", new URL(ctx.sphereUrl).port, "--persist-to", join(sphereDir, "state")], {
     cwd: join(ctx.env.OBI_SPHERE_DIR, "server"),
     env: { SPHERE_OPERATOR_TOKEN: ctx.operatorToken, HOME: join(sphereDir, "home"), TMPDIR: join(sphereDir, "tmp"), WRANGLER_SEND_METRICS: "false", PATH: process.env.PATH },
     log: join(R, "harness", "sphere.log"),
   });
   await within(60, async () => {
-    if (ctx.sphereProcess.exitCode !== null || ctx.sphereProcess.spawnError) throw new Error(`the Sphere exited (${ctx.sphereProcess.spawnError?.message ?? ctx.sphereProcess.exitCode}); see R/harness/sphere.log`);
+    if (ctx.sphereProcess && (ctx.sphereProcess.exitCode !== null || ctx.sphereProcess.spawnError)) throw new Error(`the Sphere exited (${ctx.sphereProcess.spawnError?.message ?? ctx.sphereProcess.exitCode}); see R/harness/sphere.log`);
     const r = await sphere(ctx, "/health", { timeoutMs: 2000 });
     return r.status === 200 && same(r.body, { ok: true, protocol: "obi/0.1" }) ? r : undefined;
   }, (_, e) => `GET /v0.1/health didn't answer 200 {"ok": true, "protocol": "obi/0.1"}${e ? ` (${e.message})` : ""}`);
@@ -246,9 +257,9 @@ async function step1(ctx) {
   const created = expect(await sphere(ctx, "/spheres", {
     method: "POST",
     token: ctx.operatorToken,
-    body: { sphere: SPHERE.id, name: SPHERE.name, admin: { owner: OBIS.a.owner, owner_key: ctx.owners.w.key.publicKey } },
+    body: { sphere: ctx.sphereId, name: SPHERE.name, admin: { owner: OBIS.a.owner, owner_key: ctx.owners.w.key.publicKey } },
   }), 201, "POST /v0.1/spheres");
-  assert(created.sphere === SPHERE.id && created.admin_owner === OBIS.a.owner && created.protocol === "obi/0.1", `the Sphere answered ${show(created)}`);
+  assert(created.sphere === ctx.sphereId && created.admin_owner === OBIS.a.owner && created.protocol === "obi/0.1", `the Sphere answered ${show(created)}`);
 
   // 1.3 The admin token, as every later one is made.
   const token = expect(await sphere(ctx, "/oauth/token", {
@@ -260,7 +271,7 @@ async function step1(ctx) {
 
   // 1.4 One invitation per Obi.
   for (const o of Object.values(ctx.obids)) {
-    const inv = expect(await asAdmin(ctx, `/spheres/${SPHERE.id}/invitations`, {
+    const inv = expect(await asAdmin(ctx, `/spheres/${ctx.sphereId}/invitations`, {
       method: "POST",
       body: { owner: o.owner.id, obi: o.id, expires_in: 3600 },
     }), 201, `the invitation for ${o.id}`);
@@ -270,13 +281,13 @@ async function step1(ctx) {
   }
 
   // 1.5 The policy.
-  const policy = expect(await asAdmin(ctx, `/spheres/${SPHERE.id}/policy`), 200, "GET policy");
+  const policy = expect(await asAdmin(ctx, `/spheres/${ctx.sphereId}/policy`), 200, "GET policy");
   assert(policy.version === 0 && same(policy.rules, []), `the new Sphere's policy is ${show(policy)}`);
-  const written = expect(await asAdmin(ctx, `/spheres/${SPHERE.id}/policy`, { method: "PUT", body: { expected_version: 0, rules: POLICY_RULES } }), 200, "PUT policy");
+  const written = expect(await asAdmin(ctx, `/spheres/${ctx.sphereId}/policy`, { method: "PUT", body: { expected_version: 0, rules: POLICY_RULES } }), 200, "PUT policy");
   assert(written.version === 1 && same(written.rules, POLICY_RULES), `PUT policy answered ${show(written)}`);
 
   // 1.6 An empty audit chain.
-  const audit = expect(await asAdmin(ctx, `/spheres/${SPHERE.id}/audit`), 200, "GET audit");
+  const audit = expect(await asAdmin(ctx, `/spheres/${ctx.sphereId}/audit`), 200, "GET audit");
   assert(same(audit.entries, []) && audit.head?.seq === 0 && audit.head?.hash === ZERO_HASH, `the new Sphere's audit is ${show(audit)}`);
 }
 
@@ -330,7 +341,7 @@ async function step2(ctx) {
     o.publicKey = key.publicKey;
     const made = expect(await obid(ctx, which, "/obid/sphere/card", {
       method: "POST",
-      body: { url: ctx.sphereUrl, sphere: SPHERE.id, obiId: o.id, name: o.name, ownerKey: o.owner.key.publicKey, accepts: o.accepts },
+      body: { url: ctx.sphereUrl, sphere: ctx.sphereId, obiId: o.id, name: o.name, ownerKey: o.owner.key.publicKey, accepts: o.accepts },
     }), 200, `${which}: POST /v1/obid/sphere/card`);
     const params = made.card?.capabilities?.extensions?.[0]?.params;
     assert(params?.key_id === o.keyId && params?.public_key === o.publicKey, `${which}: the card's Obi extension doesn't carry obid's keyId and publicKey`);
@@ -339,7 +350,7 @@ async function step2(ctx) {
     const delegation = assertion(ctx, o.owner, OBI_SCOPES, { lifetime: 3600, mayAct: o.id });
     const joined = expect(await obid(ctx, which, "/obid/sphere/join", {
       method: "POST",
-      body: { url: ctx.sphereUrl, sphere: SPHERE.id, invitation: o.invitation, card, delegation },
+      body: { url: ctx.sphereUrl, sphere: ctx.sphereId, invitation: o.invitation, card, delegation },
     }), 200, `${which}: POST /v1/obid/sphere/join`);
     assert(joined.state === "joined" && joined.obiId === o.id && joined.keyId === o.keyId, `${which}: the membership is ${show(joined)}`);
   }
@@ -378,7 +389,7 @@ async function step3(ctx) {
   ctx.requestX = message.envelope;
 
   // 3.2
-  const audit = expect(await asAdmin(ctx, `/spheres/${SPHERE.id}/audit`), 200, "GET audit");
+  const audit = expect(await asAdmin(ctx, `/spheres/${ctx.sphereId}/audit`), 200, "GET audit");
   assert(audit.entries.length === 1 && audit.entries[0].seq === 1, `the audit has ${audit.entries.length} entries`);
   const env = audit.entries[0].envelope;
   assert(same(env, message.envelope), "the audit's envelope differs from B's message");
@@ -387,7 +398,7 @@ async function step3(ctx) {
   assert(env.key_id === ctx.obids.b.keyId, "the entry isn't signed with B's key");
   assert(same(env.body, BRIEF), "the entry's body differs from the brief");
   const keys = directoryKeys(await members(ctx));
-  const verdict = ctx.spec.verifyEnvelope(env, { now: timestamp(nowSeconds()), sphere: SPHERE.id, receiver: OBIS.a.id, keys, seq: 1, seen_ids: [] });
+  const verdict = ctx.spec.verifyEnvelope(env, { now: timestamp(nowSeconds()), sphere: ctx.sphereId, receiver: OBIS.a.id, keys, seq: 1, seen_ids: [] });
   assert(verdict.ok, `verifyEnvelope refuses it: ${verdict.code}: ${verdict.message}`);
 }
 
@@ -467,7 +478,7 @@ async function checkOutgoing(ctx, id, acceptBody, byRule, seconds, what) {
   checkResult(ctx, e.messages.at(-1).envelope.body, byRule, `${what}'s result`);
   const keys = directoryKeys(await members(ctx));
   for (const m of e.messages.filter((x) => x.direction === "received")) {
-    const verdict = ctx.spec.verifyEnvelope(m.envelope, { now: timestamp(nowSeconds()), sphere: SPHERE.id, receiver: OBIS.b.id, keys, seq: m.seq, seen_ids: [] });
+    const verdict = ctx.spec.verifyEnvelope(m.envelope, { now: timestamp(nowSeconds()), sphere: ctx.sphereId, receiver: OBIS.b.id, keys, seq: m.seq, seen_ids: [] });
     assert(verdict.ok, `B's received ${m.envelope.type} fails verifyEnvelope: ${verdict.code}: ${verdict.message}`);
   }
   return e;
@@ -510,10 +521,10 @@ async function step6(ctx) {
 
 async function step7(ctx) {
   // 7.1
-  const audit = expect(await asAdmin(ctx, `/spheres/${SPHERE.id}/audit?from_seq=1&limit=1000`), 200, "GET audit");
+  const audit = expect(await asAdmin(ctx, `/spheres/${ctx.sphereId}/audit?from_seq=1&limit=1000`), 200, "GET audit");
   const list = await members(ctx);
   // 7.2
-  const verdict = ctx.spec.verifyChain({ sphere: SPHERE.id, entries: audit.entries }, { keys: directoryKeys(list) });
+  const verdict = ctx.spec.verifyChain({ sphere: ctx.sphereId, entries: audit.entries }, { keys: directoryKeys(list) });
   assert(verdict.ok, `verifyChain refuses the chain: ${verdict.code}: ${verdict.message}`);
   // 7.3 Exactly the two exchanges, each envelope as its sender keeps it.
   const a = { X: await exchange(ctx, "a", ctx.X), Y: await exchange(ctx, "a", ctx.Y) };
@@ -578,7 +589,7 @@ async function step8(ctx) {
   const want = `refs/heads/${FIXTURE.headBranch} ${FIXTURE.headSha}\nrefs/heads/${FIXTURE.baseBranch} ${FIXTURE.baseSha}`;
   assert(after === ctx.before.refs && after === want, `the remote's refs are now:\n${after}`);
   // 8.6 Clean exit: SIGTERM to obid A, obid B and the Sphere.
-  for (const [name, child, zero] of [["obid A", ctx.obids.a.process, true], ["obid B", ctx.obids.b.process, true], ["the Sphere", ctx.sphereProcess, false]]) {
+  for (const [name, child, zero] of [["obid A", ctx.obids.a.process, true], ["obid B", ctx.obids.b.process, true], ["the Sphere", ctx.sphereProcess, false]].filter(([, child]) => child)) {
     const exit = await stop(child, 10);
     assert(exit, `${name} or its descendants were still running 10 seconds after PID-only SIGTERM`);
     if (zero) assert(exit.code === 0, `${name} exited with ${exit.code ?? exit.signal}, not 0`);

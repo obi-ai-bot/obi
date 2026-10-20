@@ -9,6 +9,8 @@
 //   OBID_BIN         the obid binary (default: core/target/debug/obid in this repository)
 //   OBI_E2E_RUN_DIR  where the run keeps its files (default: a new folder under the system's temp)
 //   OBI_E2E_KEEP=1   keep the run folder afterwards
+//   OBI_SPHERE_URL   run against this deployed Sphere (needs SPHERE_OPERATOR_TOKEN) instead of starting one;
+//                    a new Sphere id per run (e2e/SCENARIO.md, "Against a deployed Sphere")
 //
 // It runs the preflight checks, then the eight scenario steps in order, prints one line per check,
 // and exits 0 only when every one passed. A step that isn't implemented yet says so; an
@@ -291,6 +293,7 @@ async function run() {
   console.log(`  OBI_SPHERE_DIR  ${env.OBI_SPHERE_DIR}${existsSync(env.OBI_SPHERE_DIR) ? "" : "  (missing)"}`);
   console.log(`  OBID_BIN        ${env.OBID_BIN}${existsSync(env.OBID_BIN) ? "" : "  (missing)"}`);
   console.log(`  run folder      ${RUN_DIR}`);
+  if (process.env.OBI_SPHERE_URL) console.log(`  Sphere          ${process.env.OBI_SPHERE_URL} (deployed; a new Sphere id for this run)`);
   let failures = 0;
 
   console.log("\nPreflight");
