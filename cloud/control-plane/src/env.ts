@@ -10,9 +10,10 @@ export interface Env {
   PRODUCT_DOMAIN: string;
   /// The hostnames' prefix: oby-<opaque>.<DEVICE_DOMAIN>.
   HOSTNAME_PREFIX: string;
-  /// How many leading zero bits a new Mac's proof of work needs (src/app.ts, `register`). The Mac
-  /// app's `RemoteAccess.workBits` must be at least this.
-  REGISTRATION_WORK_BITS: string;
+  /// Sign in with Apple on the web: the Services ID (its `client_id`, and the identity token's
+  /// `aud`), and the return URL registered with it, this Worker's /v1/auth/apple/callback.
+  APPLE_CLIENT_ID: string;
+  APPLE_REDIRECT_URI: string;
   /// The most endpoints (tunnels and hostnames) alive at once.
   MAX_ENDPOINTS: string;
   /// What every tunnel routes to on the Mac: the gateway, http://127.0.0.1:8810.

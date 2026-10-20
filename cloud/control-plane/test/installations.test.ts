@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { EXTRA_BITS, MAX_WORK_BITS, reclaimable, STATUS_BATCH, sweep } from "../src/app";
-import { checks, DAY, HOUR, Mac, testApp, work } from "./helpers";
+import { reclaimable, STATUS_BATCH, sweep } from "../src/app";
+import { DAY, HOUR, Mac, testApp } from "./helpers";
 
 describe("installations", () => {
   it("registers a Mac by its key, with no account", async () => {
@@ -37,7 +37,7 @@ describe("installations", () => {
   it("checks the fields", async () => {
     const app = testApp();
     const mac = await Mac.make();
-    const blank = await app.call(mac, "POST", "/v1/installations", { name: "   ", platform: "macos", proofAt: "1", proof: "1" });
+    const blank = await app.call(mac, "POST", "/v1/installations", { name: "   ", platform: "macos" });
     expect(blank.status).toBe(422);
     expect(blank.body.error).toBe("name is 1 to 64 characters.");
     expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macOS" })).status).toBe(422);
@@ -47,111 +47,66 @@ describe("installations", () => {
     expect((await app.raw("GET", "/v1/health")).body).toEqual({ ok: true });
   });
 
-  it("a new Mac pays a proof of work; the same key again doesn't", async () => {
+  it("a new Mac signs in with Apple first, once per sign-in; the same key again doesn't", async () => {
     const app = testApp();
     const mac = await Mac.make();
-    const at = Math.floor(app.time.now().getTime() / 1000);
     const none = await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos" });
     expect(none.status).toBe(403);
-    expect(none.body.error).toBe("A new Mac needs a proof of work. Update Oby.");
-    // An answer that doesn't make the zero bits, and this key's answer sent by another key.
-    const right = await work(mac.publicKey, at);
-    const bad = await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", proofAt: String(at), proof: await work(mac.publicKey, at, false) });
-    expect(bad.status).toBe(403);
-    expect(bad.body.error).toBe("That proof of work doesn't check out.");
+    expect(none.body.error).toBe("Sign in with Apple first.");
+    // Started but not finished at Apple: no account yet.
+    const { state } = await app.startSignIn(mac);
+    expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: state })).status).toBe(403);
+    const signedIn = await app.signIn(mac, "000111.owner");
+    // Another key can't use this Mac's sign-in.
     const other = await Mac.make();
-    if (!(await checks(other.publicKey, at, right))) {
-      expect((await app.call(other, "POST", "/v1/installations", { name: "Mac", platform: "macos", proofAt: String(at), proof: right })).status).toBe(403);
-    }
-    // A proof made long ago is refused.
-    const old = at - 10 * 60;
-    const stale = await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", proofAt: String(old), proof: await work(mac.publicKey, old) });
-    expect(stale.status).toBe(403);
-    expect(stale.body.error).toBe("That proof of work is too old.");
-    expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", proofAt: String(at), proof: right })).status).toBe(201);
-    // Registered, the key needs no proof again.
+    expect((await app.call(other, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: signedIn })).status).toBe(403);
+    const made = await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: signedIn });
+    expect(made.status).toBe(201);
+    const row = await env.DB.prepare("SELECT user_sub FROM installations").first<{ user_sub: string }>();
+    expect(row?.user_sub).toBe("000111.owner");
+    // The account is kept by `sub` alone.
+    expect((await env.DB.prepare("SELECT * FROM users").all()).results).toEqual([{ sub: "000111.owner", created_at: "2026-10-12T12:00:00.000Z" }]);
+    // Registered, the key needs no sign-in again.
     expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos" })).status).toBe(200);
   });
 
-  it("limits new Macs per network, an IPv6 /64 as one network; a key again isn't counted", async () => {
+  it("a sign-in is used once, and only within ten minutes", async () => {
     const app = testApp();
-    const macs: Mac[] = [];
-    for (let i = 0; i < 5; i++) {
-      macs.push(await Mac.make());
-      expect((await app.register(macs[i]!, "Mac", { "CF-Connecting-IP": `2001:db8:1:2::${i + 1}` })).status).toBe(201);
-    }
+    const mac = await Mac.make();
+    const state = await app.signIn(mac);
+    app.time.advance(11 * 60_000);
+    expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: state })).status).toBe(403);
+    const fresh = await app.signIn(mac);
+    expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: fresh })).status).toBe(201);
+    await app.call(mac, "DELETE", "/v1/installations/self");
+    expect((await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", signIn: fresh })).status).toBe(403);
+  });
+
+  it("one Apple Account has at most 5 Macs, and sets up at most 10 a day", async () => {
+    const app = testApp();
+    for (let i = 0; i < 5; i++) expect((await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": `10.${i}.0.1` }, "000222.busy")).status).toBe(201);
+    const sixth = await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "10.9.0.1" }, "000222.busy");
+    expect(sixth.status).toBe(409);
+    expect(sixth.body.error).toBe("This Apple Account has 5 Macs with remote access already. Forget one first.");
+    // Another account isn't held back.
+    expect((await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "10.9.0.2" }, "000333.other")).status).toBe(201);
+    await app.counted("registrations:account:000333.other", 10);
+    const tenth = await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "10.9.0.3" }, "000333.other");
+    expect(tenth.status).toBe(429);
+    expect(tenth.body.error).toMatch(/^This Apple Account set up too many Macs today\./);
+  });
+
+  it("limits new Macs per network as a backstop, an IPv6 /64 as one client and a /48 as one network", async () => {
+    const app = testApp();
+    await app.counted("registrations:address:2001:db8:1:2::/64", 20);
     const sixth = await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "2001:db8:1:2:ffff:ffff:ffff:ffff" });
     expect(sixth.status).toBe(429);
     expect(sixth.body.error).toMatch(/^Too many Macs were set up from this network lately\. Try again in \d+ minutes?\.$/);
     expect(sixth.headers.get("Retry-After")).not.toBeNull();
-    expect((await app.register(macs[0]!, "Mac", { "CF-Connecting-IP": "2001:db8:1:2::1" })).status).toBe(200);
-    // The next /64 is another network.
     expect((await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "2001:db8:1:3::1" })).status).toBe(201);
-  });
-
-  it("over everyone, past the breaker, asks for more work instead of refusing", async () => {
-    const app = testApp();
-    const window = Math.floor(app.time.now().getTime() / 1000);
-    await env.DB.prepare("INSERT INTO rate_limits (key, window_start, count) VALUES ('registrations:everywhere', ?1, 1000)").bind(window).run();
-    const mac = await Mac.make();
-    const at = Math.floor(app.time.now().getTime() / 1000);
-    const harder = await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", proofAt: String(at), proof: await work(mac.publicKey, at, true, 8) });
-    expect(harder.status).toBe(403);
-    expect(harder.body.workBits).toBe(12);
-    // With the bits asked for, it's in.
-    expect((await app.register(mac, "Mac", { "CF-Connecting-IP": "192.0.2.1" })).status).toBe(201);
-  });
-
-  it("limits new Macs per network too: an IPv6 /48 or an IPv4 /24", async () => {
-    const app = testApp();
-    for (let i = 0; i < 4; i++) {
-      for (let j = 0; j < 5; j++) expect((await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": `2001:db8:7:${i}::${j + 1}` })).status).toBe(201);
-    }
-    const another64 = await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "2001:db8:7:ff::1" });
-    expect(another64.status).toBe(429);
-    expect((await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "2001:db8:8::1" })).status).toBe(201);
-    for (let i = 0; i < 4; i++) {
-      for (let j = 0; j < 5; j++) expect((await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": `198.51.100.${i * 10 + j}` })).status).toBe(201);
-    }
-    expect((await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "198.51.100.200" })).status).toBe(429);
-  });
-
-  it("asks for more work as endpoints near the cap and past the breaker, never past what a Mac does", async () => {
-    const bitsNow = async (app: ReturnType<typeof testApp>) => {
-      const mac = await Mac.make();
-      const at = Math.floor(app.time.now().getTime() / 1000);
-      // An answer that misses even the base bits, so every level refuses it and says what it needs.
-      const proof = await work(mac.publicKey, at, false);
-      const answer = await app.call(mac, "POST", "/v1/installations", { name: "Mac", platform: "macos", proofAt: String(at), proof });
-      return answer.body.workBits as number;
-    };
-    const app = testApp({}, { MAX_ENDPOINTS: "10" });
-    await app.fill(4);
-    expect(await bitsNow(app)).toBe(8);
-    await app.fill(1);
-    expect(await bitsNow(app)).toBe(10);
-    await app.fill(3);
-    expect(await bitsNow(app)).toBe(12);
-    const window = Math.floor(app.time.now().getTime() / 1000);
-    await env.DB.prepare("INSERT INTO rate_limits (key, window_start, count) VALUES ('registrations:everywhere', ?1, 1000)").bind(window).run();
-    expect(await bitsNow(app)).toBe(16);
-
-    // The deployed base (wrangler.jsonc, 22) with every extra is exactly what a Mac does.
-    expect(22 + EXTRA_BITS.nearlyFull + EXTRA_BITS.busy).toBe(MAX_WORK_BITS);
-    expect(MAX_WORK_BITS).toBe(30);
-    // A higher base is held to it.
-    const high = testApp({}, { MAX_ENDPOINTS: "10", REGISTRATION_WORK_BITS: "26" });
-    await high.fill(8);
-    await env.DB.prepare("INSERT INTO rate_limits (key, window_start, count) VALUES ('registrations:everywhere', ?1, 1000) ON CONFLICT (key) DO UPDATE SET count = 1000").bind(window).run();
-    expect(await bitsNow(high)).toBe(MAX_WORK_BITS);
-  });
-  it("fails closed on a work-bits setting that isn't a number", async () => {
-    for (const bits of ["", "x", "8x", "31"]) {
-      const app = testApp({}, { REGISTRATION_WORK_BITS: bits });
-      const answer = await app.register(await Mac.make());
-      expect(answer.status, bits).toBe(503);
-      expect(answer.body.error).toMatch(/^REGISTRATION_WORK_BITS in wrangler\.jsonc isn't a whole number/);
-    }
+    await app.counted("registrations:network:2001:db8:1::/48", 100);
+    expect((await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "2001:db8:1:4::1" })).status).toBe(429);
+    expect((await app.register(await Mac.make(), "Mac", { "CF-Connecting-IP": "2001:db8:2::1" })).status).toBe(201);
   });
 
   it("Forget This Mac removes the installation, its tunnel and its hostname", async () => {
@@ -197,10 +152,10 @@ describe("the sweep", () => {
     app.tunnels.connectAll();
     app.time.advance(29 * DAY);
     await app.call(alive, "GET", "/v1/installations/self");
-    expect(await sweep(env, { tunnels: app.tunnels, now: app.time.now })).toEqual({ removed: 0, reclaimed: 0, failed: 0, unused: 0 });
+    expect(await sweep(env, app.deps)).toEqual({ removed: 0, reclaimed: 0, failed: 0, unused: 0 });
 
     app.time.advance(2 * DAY);
-    expect(await sweep(env, { tunnels: app.tunnels, now: app.time.now })).toEqual({ removed: 1, reclaimed: 0, failed: 0, unused: 0 });
+    expect(await sweep(env, app.deps)).toEqual({ removed: 1, reclaimed: 0, failed: 0, unused: 0 });
     expect((await app.call(idle, "GET", "/v1/installations/self")).status).toBe(410);
     expect((await app.call(alive, "GET", "/v1/installations/self")).status).toBe(200);
     expect(app.tunnels.tunnels.size).toBe(1);
@@ -221,9 +176,9 @@ describe("the sweep", () => {
     app.tunnels.connectAll();
     app.time.advance(31 * DAY);
     app.tunnels.refuse.deleteDNSRecord = "rate limited";
-    expect(await sweep(env, { tunnels: app.tunnels, now: app.time.now })).toEqual({ removed: 0, reclaimed: 0, failed: 1, unused: 0 });
+    expect(await sweep(env, app.deps)).toEqual({ removed: 0, reclaimed: 0, failed: 1, unused: 0 });
     app.tunnels.refuse = {};
-    expect(await sweep(env, { tunnels: app.tunnels, now: app.time.now })).toEqual({ removed: 1, reclaimed: 0, failed: 0, unused: 0 });
+    expect(await sweep(env, app.deps)).toEqual({ removed: 1, reclaimed: 0, failed: 0, unused: 0 });
     expect(await env.DB.prepare("SELECT * FROM installations").first()).toBeNull();
   });
 
@@ -236,11 +191,11 @@ describe("the sweep", () => {
     await app.call(used, "POST", "/v1/installations/self/endpoint");
     app.tunnels.connectAll();
     app.time.advance(23 * HOUR);
-    expect((await sweep(env, { tunnels: app.tunnels, now: app.time.now })).unused).toBe(0);
+    expect((await sweep(env, app.deps)).unused).toBe(0);
     const windows = async () => (await env.DB.prepare("SELECT count(*) AS n FROM rate_limits").first<{ n: number }>())?.n;
     expect(await windows()).toBeGreaterThan(0);
     app.time.advance(2 * HOUR);
-    expect(await sweep(env, { tunnels: app.tunnels, now: app.time.now })).toEqual({ removed: 0, reclaimed: 0, failed: 0, unused: 3 });
+    expect(await sweep(env, app.deps)).toEqual({ removed: 0, reclaimed: 0, failed: 0, unused: 3 });
     for (const mac of unused) expect((await app.call(mac, "GET", "/v1/installations/self")).status).toBe(410);
     expect((await app.call(used, "GET", "/v1/installations/self")).status).toBe(200);
     // The registrations' and the endpoint's windows, an hour each, are over a day old: gone.
@@ -262,15 +217,15 @@ describe("the sweep", () => {
     app.tunnels.status.set(ids.up!, { connected: true, activeAt: app.time.now().toISOString(), inactiveAt: null });
     app.tunnels.status.set(ids.down!, { connected: true, activeAt: app.time.now().toISOString(), inactiveAt: null });
     app.time.advance(59 * 60_000);
-    expect(await sweep(env, { tunnels: app.tunnels, now: app.time.now })).toEqual({ removed: 0, reclaimed: 0, failed: 0, unused: 0 });
+    expect(await sweep(env, app.deps)).toEqual({ removed: 0, reclaimed: 0, failed: 0, unused: 0 });
     app.time.advance(2 * 60_000);
     app.tunnels.status.set(ids.down!, { connected: false, activeAt: "2026-10-12T12:01:00.000Z", inactiveAt: app.time.now().toISOString() });
-    expect(await sweep(env, { tunnels: app.tunnels, now: app.time.now })).toEqual({ removed: 0, reclaimed: 1, failed: 0, unused: 0 });
+    expect(await sweep(env, app.deps)).toEqual({ removed: 0, reclaimed: 1, failed: 0, unused: 0 });
     expect(app.tunnels.tunnels.has(ids.never!)).toBe(false);
     // Never used: the installation went too.
     expect((await app.call(never, "GET", "/v1/installations/self")).status).toBe(410);
     app.time.advance(3 * DAY);
-    expect((await sweep(env, { tunnels: app.tunnels, now: app.time.now })).reclaimed).toBe(1);
+    expect((await sweep(env, app.deps)).reclaimed).toBe(1);
     expect(app.tunnels.tunnels.has(ids.down!)).toBe(false);
     // Down for days: the installation stays, with no endpoint; turning on again makes a new hostname.
     expect((await app.call(down, "GET", "/v1/installations/self")).body.installation.endpoint).toBeNull();
@@ -288,11 +243,11 @@ describe("the sweep", () => {
     app.time.advance(60_000);
     await app.fill(1, "late");
     const late = (await env.DB.prepare("SELECT tunnel_id FROM endpoints WHERE network = 'late'").first<{ tunnel_id: string }>())!.tunnel_id;
-    await sweep(env, { tunnels: app.tunnels, now: app.time.now });
+    await sweep(env, app.deps);
     expect(asked()).toHaveLength(STATUS_BATCH);
     expect(asked()).not.toContain(late);
     app.time.advance(60_000);
-    await sweep(env, { tunnels: app.tunnels, now: app.time.now });
+    await sweep(env, app.deps);
     // The next run starts with the four never asked about, the late one last of them.
     const second = asked().slice(STATUS_BATCH, STATUS_BATCH + 4);
     for (const id of second) expect(asked().slice(0, STATUS_BATCH)).not.toContain(id);

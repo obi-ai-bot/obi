@@ -3,11 +3,12 @@ import Foundation
 import FoundationNetworking
 #endif
 
-/// Oby's control plane on Cloudflare (cloud/control-plane, #285), as the Mac talks to it: register
-/// this installation, and get its tunnel's hostname and run token. There's no account: the Mac is
+/// Oby's control plane on Cloudflare (cloud/control-plane, #285), as the Mac talks to it: sign in
+/// with Apple, register this installation, and get its tunnel's hostname and run token. The Mac is
 /// known by its P-256 key, and every call is signed with it (`Signer`), with a timestamp and a
-/// nonce, so nothing the Mac sends works for anyone else or works twice. The control plane keeps
-/// the public key, and never the tunnel token.
+/// nonce, so nothing the Mac sends works for anyone else or works twice; a new installation also
+/// belongs to the Apple Account it signed in with. The control plane keeps the public key and the
+/// account's `sub`, and never the tunnel token.
 nonisolated struct ControlPlane: Sendable {
     var base: URL
     /// How a request goes out and what comes back (the body and the status): URLSession, or a
@@ -65,19 +66,28 @@ nonisolated struct ControlPlane: Sendable {
     struct Failure: LocalizedError, Equatable {
         let message: String
         let status: Int
-        /// A registration refused for its proof of work says how many bits it needs now.
-        var workBits: Int? = nil
-        var errorDescription: String? { message }
+            var errorDescription: String? { message }
     }
 
     // MARK: This installation, signed by its key
 
+    /// A sign-in with Apple this Mac starts: Apple's authorization page, and the state that names
+    /// it. Apple sends the result to the control plane, never to the Mac.
+    struct AppleSignIn: Codable, Equatable, Sendable {
+        var url: URL
+        var state: String
+    }
+
+    func startAppleSignIn(_ signer: Signer) async throws -> AppleSignIn {
+        try await call("POST", "v1/auth/apple/start", signer: signer)
+    }
+
     /// Registers this Mac by its key; the same key again keeps its installation and hostname. A
-    /// new key brings a proof of work made at `proofAt` (Unix seconds); the Mac app makes it
-    /// (apps/mac/app/RemoteAccess.swift, `MacKey.work`), since this file does no crypto.
-    func register(_ signer: Signer, name: String, proofAt: Int, proof: String, platform: String = "macos") async throws -> Installation {
+    /// new key brings `signIn`, the state of a sign-in with Apple it finished.
+    func register(_ signer: Signer, name: String, signIn: String? = nil, platform: String = "macos") async throws -> Installation {
         struct Answer: Decodable { var installation: Installation }
-        let body = ["name": name, "platform": platform, "proofAt": String(proofAt), "proof": proof]
+        var body = ["name": name, "platform": platform]
+        if let signIn { body["signIn"] = signIn }
         let answer: Answer = try await call("POST", "v1/installations", body: body, signer: signer)
         return answer.installation
     }
@@ -157,8 +167,8 @@ nonisolated struct ControlPlane: Sendable {
 
     /// The control plane's own line (`{"error": …}`), or one about the status.
     static func failure(_ data: Data, status: Int) -> Failure {
-        struct Said: Decodable { var error: String; var workBits: Int? }
-        if let said = try? JSONDecoder().decode(Said.self, from: data) { return Failure(message: said.error, status: status, workBits: said.workBits) }
+        struct Said: Decodable { var error: String }
+        if let said = try? JSONDecoder().decode(Said.self, from: data) { return Failure(message: said.error, status: status) }
         return Failure(message: status == 0 ? "The control plane didn't answer." : "The control plane answered \(status).", status: status)
     }
 

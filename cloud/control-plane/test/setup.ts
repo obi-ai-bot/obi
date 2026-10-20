@@ -6,7 +6,7 @@ await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
 
 beforeEach(async () => {
   await env.DB.batch(
-    ["rate_limits", "nonces", "endpoints", "installations"].map((table) =>
+    ["rate_limits", "nonces", "endpoints", "installations", "sign_ins", "users"].map((table) =>
       env.DB.prepare(`DELETE FROM ${table}`),
     ),
   );

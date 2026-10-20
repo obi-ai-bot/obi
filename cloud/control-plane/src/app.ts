@@ -4,20 +4,25 @@
 // call can't be sent again or changed on the way. `handle` takes the Cloudflare API as `deps`, so
 // the tests pass a fake.
 //
-// Anyone can run Oby, so anyone can get a hostname: the hostnames live on a domain of their own
-// (DEVICE_DOMAIN, never the product's), a new Mac pays a proof of work, new Macs and Cloudflare
-// calls are rate-limited, live endpoints are capped, and unused or idle installations are swept.
+// A new Mac signs in with Apple first (on the web: Oby is a Developer ID app), and each
+// installation belongs to that Apple Account's `sub`, with a few Macs and endpoints each. The
+// hostnames live on a domain of their own (DEVICE_DOMAIN, never the product's); per-network and
+// global limits are a backstop; live endpoints are capped; and unused, idle or unconnected
+// installations are swept.
 //
 // Nothing secret is kept: D1 holds public keys, and a tunnel's run token is fetched from
 // Cloudflare when the Mac asks.
 
 import { CloudflareError, CloudflareSetupError, type TunnelAPI, type TunnelStatus } from "./cloudflare";
 import type { Env } from "./env";
-import { counted, type Limit, takeOne } from "./limits";
-import { addressBucket, canonicalKey, leadingZeroBits, networkBucket, newId, opaqueLabel, registrableDomain, tunnelSecret, verifyP256 } from "./tokens";
+import { type Limit, takeOne } from "./limits";
+import { type AppleKeyCache, AppleTokenError, sha256Hex, verifyAppleToken } from "./apple";
+import { addressBucket, canonicalKey, networkBucket, newId, opaqueLabel, randomBytes, registrableDomain, tunnelSecret, verifyP256 } from "./tokens";
 
 export interface Deps {
   tunnels: TunnelAPI;
+  /// Apple's public keys, for Sign in with Apple's identity tokens.
+  apple: AppleKeyCache;
   /// The clock, for tests of expiry.
   now?: () => Date;
 }
@@ -42,35 +47,34 @@ export const DISCONNECTED_HOURS = 72;
 export const SWEEP_BATCH = 8;
 export const STATUS_BATCH = 8;
 /// The most endpoints from one network (an IPv4 /24 or an IPv6 /48) whose tunnel hasn't
-/// connected yet. Connected ones don't count: offices, carrier-grade NAT and mobile networks
-/// put many real Macs behind one.
-export const UNCONNECTED_PER_NETWORK = 3;
-/// The most work the Mac app does (apps/mac/app/RemoteAccess.swift, `mostWorkBits`): the work
-/// asked for never goes past it, base and extras together.
-export const MAX_WORK_BITS = 30;
-/// New installations, per client (an IPv6 /64 is one) and per network (/24 or /48); a key is
-/// one installation, and registering the same key again isn't counted. Over everyone, past the
-/// breaker the proof of work gets harder instead of anyone being refused. Then each
-/// installation's Cloudflare calls, and the same calls over everyone: they share the account's
-/// one API token.
+/// connected yet: a generous backstop. Connected ones don't count, so offices, carrier-grade NAT
+/// and mobile networks can have many.
+export const UNCONNECTED_PER_NETWORK = 20;
+/// What one Apple Account may have: live installations and live endpoints.
+export const PER_ACCOUNT = { installations: 5, endpoints: 5 };
+/// How long a sign-in started on a Mac has to finish at Apple and be used to register.
+export const SIGN_IN_MINUTES = 10;
+/// Sign-ins started, and new installations, per Apple Account (`sub`) and, as a generous backstop,
+/// per client (an IPv6 /64 is one) and per network (/24 or /48); a key is one installation, and
+/// registering the same key again isn't counted. Then endpoint creations per account,
+/// installation and network, and each installation's Cloudflare calls, and the same calls over
+/// everyone: they share the account's one API token.
 export const LIMITS = {
-  registrationsPerAddress: { max: 5, windowSeconds: 60 * 60 } satisfies Limit,
-  registrationsPerNetwork: { max: 20, windowSeconds: 60 * 60 } satisfies Limit,
-  registrationsEverywhere: { max: 1000, windowSeconds: 60 * 60 } satisfies Limit,
+  signInsPerAddress: { max: 30, windowSeconds: 60 * 60 } satisfies Limit,
+  signInCallbacksPerAddress: { max: 60, windowSeconds: 60 * 60 } satisfies Limit,
+  registrationsPerAccount: { max: 10, windowSeconds: 24 * 60 * 60 } satisfies Limit,
+  registrationsPerAddress: { max: 20, windowSeconds: 60 * 60 } satisfies Limit,
+  registrationsPerNetwork: { max: 100, windowSeconds: 60 * 60 } satisfies Limit,
   endpointChangesPerInstallation: { max: 5, windowSeconds: 60 * 60 } satisfies Limit,
   creationsPerInstallation: { max: 3, windowSeconds: 24 * 60 * 60 } satisfies Limit,
-  creationsPerNetworkHour: { max: 5, windowSeconds: 60 * 60 } satisfies Limit,
-  creationsPerNetworkDay: { max: 10, windowSeconds: 24 * 60 * 60 } satisfies Limit,
+  creationsPerAccount: { max: 10, windowSeconds: 24 * 60 * 60 } satisfies Limit,
+  creationsPerNetworkHour: { max: 30, windowSeconds: 60 * 60 } satisfies Limit,
+  creationsPerNetworkDay: { max: 100, windowSeconds: 24 * 60 * 60 } satisfies Limit,
   tokenReadsPerInstallation: { max: 4, windowSeconds: 60 * 60 } satisfies Limit,
   endpointsEverywhere: { max: 300, windowSeconds: 60 * 60 } satisfies Limit,
   removalsEverywhere: { max: 120, windowSeconds: 60 * 60 } satisfies Limit,
   tokenReadsEverywhere: { max: 300, windowSeconds: 5 * 60 } satisfies Limit,
 };
-/// How much harder the proof of work gets past half the endpoint cap, past 80% of it, and past
-/// the registration breaker; they add up.
-export const EXTRA_BITS = { halfFull: 2, nearlyFull: 4, busy: 4 };
-/// What a new Mac's proof of work hashes, before its key, its time and its answer, a line each.
-export const WORK_PREFIX = "oby-register-v1";
 /// What the Mac signs, before the body's bytes: the version, then one field a line.
 export const SIGNED_PREFIX = "oby-control-v1";
 
@@ -90,6 +94,8 @@ class Reply extends Error {
 interface InstallationRow {
   id: string;
   public_key: string;
+  /// The Apple Account it belongs to.
+  user_sub: string | null;
   name: string;
   platform: string;
   created_at: string;
@@ -137,6 +143,8 @@ async function route(request: Request, env: Env, deps: Deps, now: () => Date): P
   const path = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
   const method = request.method;
   if (path === "/v1/health" && method === "GET") return json({ ok: true });
+  if (path === "/v1/auth/apple/start" && method === "POST") return startSignIn(request, env, now);
+  if (path === "/v1/auth/apple/callback" && method === "POST") return finishSignIn(request, env, deps, now);
   if (path === "/v1/installations" && method === "POST") return register(request, env, now);
   if (path === "/v1/installations/self" && method === "GET") return showSelf(request, env, now);
   if (path === "/v1/installations/self" && method === "DELETE") return forget(request, env, deps, now);
@@ -148,10 +156,78 @@ async function route(request: Request, env: Env, deps: Deps, now: () => Date): P
 
 // MARK: Installations
 
+// MARK: Sign in with Apple
+
+/// A Mac starts signing in, signed by its key: a single-use sign-in (`state`, and a nonce whose
+/// hash only is kept) bound to that key, and Apple's authorization URL for it. No scope is asked
+/// for, so Apple sends no name and no email.
+async function startSignIn(request: Request, env: Env, now: () => Date): Promise<Response> {
+  const call = await signed(request, env, now());
+  const client = appleSetting(env.APPLE_CLIENT_ID, "APPLE_CLIENT_ID");
+  const redirect = appleSetting(env.APPLE_REDIRECT_URI, "APPLE_REDIRECT_URI");
+  const address = addressBucket(request.headers.get("CF-Connecting-IP") ?? "unknown");
+  await limit(env.DB, `sign-ins:address:${address}`, LIMITS.signInsPerAddress, now(), "Too many sign-ins were started from this network lately.");
+  await spend(env.DB, call);
+  const state = base64url(randomBytes(32));
+  const nonce = base64url(randomBytes(32));
+  const at = now();
+  await env.DB.prepare("INSERT INTO sign_ins (state, public_key, nonce_hash, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)")
+    .bind(state, call.key, await sha256Hex(nonce), iso(at), Math.floor(at.getTime() / 1000) + SIGN_IN_MINUTES * 60)
+    .run();
+  const url = new URL("https://appleid.apple.com/auth/authorize");
+  url.search = new URLSearchParams({ client_id: client, redirect_uri: redirect, response_type: "code id_token", response_mode: "form_post", state, nonce }).toString();
+  return json({ url: url.toString(), state }, 201, noStore);
+}
+
+/// Apple posts the sign-in's result here (form_post): the identity token is checked against the
+/// sign-in it names (`state`), and its `sub` is bound to it. The browser is sent back to the Mac
+/// (`oby-signin://`), which then registers with the state; nothing secret goes through it.
+async function finishSignIn(request: Request, env: Env, deps: Deps, now: () => Date): Promise<Response> {
+  const back = (outcome: "done" | "failed", state: string) => new Response(null, { status: 303, headers: { Location: `oby-signin://${outcome}?state=${encodeURIComponent(state)}`, ...noStore } });
+  const address = addressBucket(request.headers.get("CF-Connecting-IP") ?? "unknown");
+  await limit(env.DB, `sign-in-callbacks:address:${address}`, LIMITS.signInCallbacksPerAddress, now(), "Too many sign-ins from this network lately.");
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch {
+    throw new Reply(400, "Send Apple's form.");
+  }
+  const state = String(form.get("state") ?? "");
+  const token = String(form.get("id_token") ?? "");
+  if (!/^[A-Za-z0-9_-]{43}$/.test(state)) throw new Reply(400, "That sign-in isn't Oby's.");
+  const seconds = Math.floor(now().getTime() / 1000);
+  const pending = await env.DB.prepare("SELECT nonce_hash FROM sign_ins WHERE state = ?1 AND sub IS NULL AND used_at IS NULL AND expires_at > ?2")
+    .bind(state, seconds)
+    .first<{ nonce_hash: string }>();
+  // Cancelled at Apple (`error`), or no such sign-in, or used already: back to the Mac, which says so.
+  if (!pending || !token) return back("failed", state);
+  let sub: string;
+  try {
+    sub = await verifyAppleToken(token, deps.apple, appleSetting(env.APPLE_CLIENT_ID, "APPLE_CLIENT_ID"), pending.nonce_hash, now());
+  } catch (error) {
+    if (!(error instanceof AppleTokenError)) throw error;
+    console.warn(`sign in with apple: ${error.message}`);
+    return back("failed", state);
+  }
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO users (sub, created_at) VALUES (?1, ?2) ON CONFLICT (sub) DO NOTHING").bind(sub, iso(now())),
+    env.DB.prepare("UPDATE sign_ins SET sub = ?2 WHERE state = ?1 AND sub IS NULL").bind(state, sub),
+  ]);
+  return back("done", state);
+}
+
+/// An APPLE_* setting from wrangler.jsonc, or the control plane says it isn't set up.
+function appleSetting(value: string | undefined, name: string): string {
+  const text = (value ?? "").trim();
+  if (!text) throw new Reply(503, `Sign in with Apple isn't set up: set ${name} in wrangler.jsonc.`);
+  return text;
+}
+
+// MARK: Installations
+
 /// Registers the Mac whose key signed the call (201), or, the same key again, keeps its
-/// installation and its hostname (200). A new key also brings a proof of work: `proof`, a
-/// decimal answer such that SHA-256 of WORK_PREFIX, the key, `proofAt` (Unix seconds, within
-/// five minutes) and the answer, a line each, starts with REGISTRATION_WORK_BITS zero bits.
+/// installation and its hostname (200). A new key brings `signIn`: the state of a sign-in it
+/// started and finished at Apple, used once; the installation belongs to that Apple Account.
 async function register(request: Request, env: Env, now: () => Date): Promise<Response> {
   const call = await signed(request, env, now());
   const name = field(typeof call.body.name === "string" ? call.body.name.trim() : call.body.name, "name", /^[^\n\r]{1,64}$/, "1 to 64 characters");
@@ -163,17 +239,30 @@ async function register(request: Request, env: Env, now: () => Date): Promise<Re
     await env.DB.prepare("UPDATE installations SET name = ?2, platform = ?3, last_seen_at = ?4 WHERE id = ?1").bind(existing.id, name, platform, at).run();
     return json({ installation: await publicInstallation(env.DB, { ...existing, name, platform, last_seen_at: at }) });
   }
-  await checkWork(call, await workBits(env, now()), now());
+  const state = typeof call.body.signIn === "string" ? call.body.signIn : "";
+  const seconds = Math.floor(now().getTime() / 1000);
+  const signIn = await env.DB.prepare("SELECT sub FROM sign_ins WHERE state = ?1 AND public_key = ?2 AND sub IS NOT NULL AND used_at IS NULL AND expires_at > ?3")
+    .bind(state, call.key, seconds)
+    .first<{ sub: string }>();
+  if (!signIn) throw new Reply(403, "Sign in with Apple first.");
   await spend(env.DB, call);
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  await limit(env.DB, `registrations:account:${signIn.sub}`, LIMITS.registrationsPerAccount, now(), "This Apple Account set up too many Macs today.");
   await limit(env.DB, `registrations:address:${addressBucket(address)}`, LIMITS.registrationsPerAddress, now(), "Too many Macs were set up from this network lately.");
   await limit(env.DB, `registrations:network:${networkBucket(address)}`, LIMITS.registrationsPerNetwork, now(), "Too many Macs were set up from this network lately.");
-  // Counted, never refused: past the breaker, `workBits` asks more of the next Mac instead.
-  await takeOne(env.DB, "registrations:everywhere", LIMITS.registrationsEverywhere, now());
-  const row: InstallationRow = { id: newId(), public_key: call.key, name, platform, created_at: at, last_seen_at: at };
+  const mine = (await env.DB.prepare("SELECT count(*) AS n FROM installations WHERE user_sub = ?1").bind(signIn.sub).first<{ n: number }>())?.n ?? 0;
+  if (mine >= PER_ACCOUNT.installations) {
+    throw new Reply(409, `This Apple Account has ${PER_ACCOUNT.installations} Macs with remote access already. Forget one first.`);
+  }
+  // Used once: a second registration with the same sign-in finds nothing.
+  const claimed = await env.DB.prepare("UPDATE sign_ins SET used_at = ?2 WHERE state = ?1 AND used_at IS NULL RETURNING state").bind(state, at).first();
+  if (!claimed) throw new Reply(403, "Sign in with Apple first.");
+  const row: InstallationRow = { id: newId(), public_key: call.key, user_sub: signIn.sub, name, platform, created_at: at, last_seen_at: at };
   // Two calls at once with one key: the first one's row stands, and both answer with it.
-  await env.DB.prepare("INSERT INTO installations (id, public_key, name, platform, created_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (public_key) DO NOTHING")
-    .bind(row.id, row.public_key, row.name, row.platform, row.created_at, row.last_seen_at)
+  await env.DB.prepare(
+    "INSERT INTO installations (id, public_key, user_sub, name, platform, created_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT (public_key) DO NOTHING",
+  )
+    .bind(row.id, row.public_key, row.user_sub, row.name, row.platform, row.created_at, row.last_seen_at)
     .run();
   const saved = await byKey(env.DB, call.key);
   if (!saved) throw new Error("The installation couldn't be saved.");
@@ -212,8 +301,13 @@ async function createEndpoint(request: Request, env: Env, deps: Deps, now: () =>
   // Creating, then removing, is what costs Cloudflare calls and the global limit: each
   // installation and each network may make only a few a day, so a few networks can't drain
   // `endpointsEverywhere` for everyone.
+  if (row.user_sub) {
+    const theirs = (await env.DB.prepare("SELECT count(*) AS n FROM endpoints e JOIN installations i ON i.id = e.installation_id WHERE i.user_sub = ?1").bind(row.user_sub).first<{ n: number }>())?.n ?? 0;
+    if (theirs >= PER_ACCOUNT.endpoints) throw new Reply(409, `This Apple Account has ${PER_ACCOUNT.endpoints} Macs with remote access on already. Forget one first.`);
+  }
   await limitEndpointChanges(env.DB, row, now());
   await limit(env.DB, `creations:installation:${row.id}`, LIMITS.creationsPerInstallation, now(), "This Mac turned remote access on too often today.");
+  if (row.user_sub) await limit(env.DB, `creations:account:${row.user_sub}`, LIMITS.creationsPerAccount, now(), "This Apple Account turned remote access on too often today.");
   await limit(env.DB, `creations:network:${network}`, LIMITS.creationsPerNetworkHour, now(), "Too many Macs on this network turned remote access on lately.");
   await limit(env.DB, `creations:network-day:${network}`, LIMITS.creationsPerNetworkDay, now(), "Too many Macs on this network turned remote access on today.");
   await limit(env.DB, "endpoints:everywhere", LIMITS.endpointsEverywhere, now(), "Too many Macs are turning remote access on right now.");
@@ -305,19 +399,6 @@ function whole(value: string | undefined, name: string, min: number, max: number
   return number;
 }
 
-/// The proof of work a new Mac needs now: REGISTRATION_WORK_BITS, more as endpoints near the
-/// cap and past the registration breaker.
-async function workBits(env: Env, now: Date): Promise<number> {
-  let bits = whole(env.REGISTRATION_WORK_BITS, "REGISTRATION_WORK_BITS", 1, MAX_WORK_BITS);
-  const cap = whole(env.MAX_ENDPOINTS, "MAX_ENDPOINTS", 1, 100_000);
-  const live = (await env.DB.prepare("SELECT count(*) AS n FROM endpoints").first<{ n: number }>())?.n ?? 0;
-  if (live >= cap * 0.8) bits += EXTRA_BITS.nearlyFull;
-  else if (live >= cap * 0.5) bits += EXTRA_BITS.halfFull;
-  if ((await counted(env.DB, "registrations:everywhere", LIMITS.registrationsEverywhere, now)) >= LIMITS.registrationsEverywhere.max) bits += EXTRA_BITS.busy;
-  // Never more than the Mac does, or past the breaker everyone would be refused.
-  return Math.min(bits, MAX_WORK_BITS);
-}
-
 /// The DNS record and the tunnel go at Cloudflare first, then the row: if Cloudflare refuses,
 /// the endpoint stays and the call fails, so nothing is left behind unknown.
 async function tearDown(db: D1Database, tunnels: TunnelAPI, endpoint: EndpointRow): Promise<void> {
@@ -345,8 +426,9 @@ export async function sweep(env: Env, deps: Deps): Promise<{ removed: number; re
   const now = (deps.now ?? (() => new Date()))();
   const seconds = Math.floor(now.getTime() / 1000);
   const unusedBefore = iso(new Date(now.getTime() - UNUSED_HOURS * 3_600_000));
-  const [, , unused] = await env.DB.batch([
+  const [, , , unused] = await env.DB.batch([
     env.DB.prepare("DELETE FROM nonces WHERE expires_at < ?1").bind(seconds),
+    env.DB.prepare("DELETE FROM sign_ins WHERE expires_at < ?1").bind(seconds),
     // Every window is an hour or less: a day-old one counts nothing.
     env.DB.prepare("DELETE FROM rate_limits WHERE window_start < ?1").bind(seconds - 86_400),
     env.DB.prepare("DELETE FROM installations WHERE created_at < ?1 AND NOT EXISTS (SELECT 1 FROM endpoints e WHERE e.installation_id = installations.id)").bind(unusedBefore),
@@ -440,20 +522,6 @@ async function spend(db: D1Database, call: Signed): Promise<void> {
   if (!fresh) throw new Reply(401, "That call was made already.");
 }
 
-/// The new Mac's proof of work (`register`), at `bits`. Every refusal says how many bits it
-/// needs now (`workBits`), so the Mac can work it out again.
-async function checkWork(call: Signed, bits: number, now: Date): Promise<void> {
-  const refuse = (said: string) => new Reply(403, said, {}, { workBits: bits });
-  const at = call.body.proofAt;
-  const proof = call.body.proof;
-  if (typeof at !== "string" || !/^\d{1,12}$/.test(at) || typeof proof !== "string" || !/^\d{1,20}$/.test(proof)) {
-    throw refuse("A new Mac needs a proof of work. Update Oby.");
-  }
-  if (Math.abs(Number(at) - Math.floor(now.getTime() / 1000)) > SKEW_SECONDS) throw refuse("That proof of work is too old.");
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${WORK_PREFIX}\n${call.key}\n${at}\n${proof}`));
-  if (leadingZeroBits(new Uint8Array(digest)) < bits) throw refuse("That proof of work doesn't check out.");
-}
-
 /// The installation the signing key belongs to; it was seen now.
 async function signedInstallation(request: Request, env: Env, now: () => Date): Promise<InstallationRow> {
   const call = await signed(request, env, now());
@@ -515,6 +583,12 @@ function parseJSON(bytes: Uint8Array): Record<string, unknown> {
 }
 
 const noStore = { "Cache-Control": "no-store" };
+
+function base64url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
 
 function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });

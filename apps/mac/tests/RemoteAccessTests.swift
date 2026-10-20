@@ -24,12 +24,31 @@ struct RemoteAccessTests {
 
     static let installation = #"{"id": "i1", "name": "MacBook", "platform": "macos", "createdAt": "2026-10-12T12:00:00.000Z", "lastSeenAt": null, "endpoint": null}"#
 
-    /// Turning on makes this Mac's key, registers by it with no sign-in, keeps the key and the
-    /// tunnel's token in the keychain and the hostname in the defaults, and runs cloudflared with
-    /// the token in its environment, never in its arguments. Every call is signed by the key. Off
-    /// keeps the hostname; Forget removes the installation, signed, and the key with it.
-    @Test @MainActor func turningOnSignsWithThisMacsKeyAndRunsTheTunnel() async throws {
+    static let signIn = #"{"url": "https://appleid.apple.com/auth/authorize?client_id=com.deskree.oby.signin&state=s1", "state": "s1"}"#
+    static let unregistered = #"{"error": "This Mac isn't registered. Turn remote access on again."}"#
+
+    /// Records what Apple's sheet was opened at, and ends it where `back` says.
+    final class Sheet {
+        var opened: [URL] = []
+        let back: URL?
+        init(_ back: String?) { self.back = back.map { URL(string: $0)! } }
+        func run(_ url: URL) async throws -> URL {
+            opened.append(url)
+            guard let back else { throw Shell.Failure(message: "Sign in with Apple was cancelled.") }
+            return back
+        }
+    }
+
+    /// Turning on makes this Mac's key, signs in with Apple (the sheet at the control plane's
+    /// authorization URL, coming back to oby-signin://done with the same state), registers with
+    /// that sign-in, keeps the key and the tunnel's token in the keychain and the hostname in the
+    /// defaults, and runs cloudflared with the token in its environment, never in its arguments.
+    /// Every call is signed by the key. Off keeps the hostname; Forget removes the installation,
+    /// signed, and the key with it.
+    @Test @MainActor func turningOnSignsInWithAppleAndRunsTheTunnel() async throws {
         let exchange = Exchange([
+            (410, Self.unregistered),
+            (201, Self.signIn),
             (201, #"{"installation": \#(Self.installation)}"#),
             (201, #"{"endpoint": {"hostname": "oby-abcdefghij0123456789.tetrix.pro", "tunnelId": "t1", "createdAt": "2026-10-12T12:00:01.000Z"}}"#),
             (200, #"{"token": "eyJ-run-token", "hostname": "oby-abcdefghij0123456789.tetrix.pro"}"#),
@@ -39,8 +58,9 @@ struct RemoteAccessTests {
         let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
         let launched = Launched()
         let runner = TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) })
+        let sheet = Sheet("oby-signin://done?state=s1")
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
-                                  secrets: secrets, defaults: defaults, runner: runner, workBits: 8)
+                                  secrets: secrets, defaults: defaults, runner: runner, authenticate: sheet.run)
         defer { remote.stop() }
         #expect(!remote.on)
         #expect(remote.status == "Off")
@@ -59,15 +79,14 @@ struct RemoteAccessTests {
         #expect(process.environment?["TUNNEL_TOKEN"] == "eyJ-run-token")
         #expect(remote.tunnel == .starting)
 
-        let requests = Array(exchange.requests.prefix(3))
-        #expect(requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == ["POST /v1/installations",
-                                                                                   "POST /v1/installations/self/endpoint", "GET /v1/installations/self/endpoint/token"])
-        let body = try JSONDecoder().decode([String: String].self, from: try #require(requests[0].httpBody))
-        #expect(body["platform"] == "macos")
-        // The registration brings a proof of work for this key, checked here as the Worker checks it.
-        let proofAt = try #require(body["proofAt"]), proof = try #require(body["proof"])
-        let hashed = SHA256.hash(data: Data("oby-register-v1\n\(ControlPlane.base64url(try MacKey.signer(saved).publicKey))\n\(proofAt)\n\(proof)".utf8))
-        #expect(MacKey.zeroBits(Array(hashed)) >= 8)
+        let requests = Array(exchange.requests.prefix(5))
+        #expect(requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == [
+            "GET /v1/installations/self", "POST /v1/auth/apple/start", "POST /v1/installations",
+            "POST /v1/installations/self/endpoint", "GET /v1/installations/self/endpoint/token",
+        ])
+        #expect(sheet.opened == [URL(string: "https://appleid.apple.com/auth/authorize?client_id=com.deskree.oby.signin&state=s1")!])
+        let body = try JSONDecoder().decode([String: String].self, from: try #require(requests[2].httpBody))
+        #expect(body == ["name": Host.current().localizedName ?? "Mac", "platform": "macos", "signIn": "s1"])
         // Each call's signature checks out against the key's public half, as the Worker checks it.
         let publicKey = try MacKey.signer(saved).publicKey
         for request in requests {
@@ -97,44 +116,24 @@ struct RemoteAccessTests {
         #expect(defaults.string(forKey: "remote.hostname") == nil)
     }
 
-    /// The control plane asks for more work (busy, or nearly full): the Mac works it out once more
-    /// at the bits it asks for, and is in.
-    @Test @MainActor func turningOnDoesMoreWorkWhenAsked() async throws {
-        let exchange = Exchange([
-            (403, #"{"error": "That proof of work doesn't check out.", "workBits": 10}"#),
-            (201, #"{"installation": \#(Self.installation)}"#),
-            (201, #"{"endpoint": {"hostname": "oby-abcdefghij0123456789.oby-devices.test", "tunnelId": "t1", "createdAt": "2026-10-12T12:00:01.000Z"}}"#),
-            (200, #"{"token": "eyJ-run-token", "hostname": "oby-abcdefghij0123456789.oby-devices.test"}"#),
-        ])
-        let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
-        defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
-        let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
-        let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
-                                  secrets: secrets, defaults: defaults,
-                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }), workBits: 8)
-        defer { remote.stop() }
-        await remote.turnOn()
-        #expect(remote.problem == nil)
-        #expect(remote.on)
-        let retried = try JSONDecoder().decode([String: String].self, from: try #require(exchange.requests[1].httpBody))
-        let key = ControlPlane.base64url(try MacKey.signer(try #require(try secrets.value(RemoteAccess.keyKey))).publicKey)
-        let hashed = SHA256.hash(data: Data("oby-register-v1\n\(key)\n\(try #require(retried["proofAt"]))\n\(try #require(retried["proof"]))".utf8))
-        #expect(MacKey.zeroBits(Array(hashed)) >= 10)
-    }
 
-    /// Asked for more than a Mac should spend, it stops and says what the control plane said.
-    @Test @MainActor func turningOnStopsWhenAskedForTooMuchWork() async throws {
-        let exchange = Exchange([(403, #"{"error": "That proof of work doesn't check out.", "workBits": 31}"#)])
-        let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
-        defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
-        let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
-        let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
-                                  secrets: secrets, defaults: defaults,
-                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }), workBits: 8)
-        await remote.turnOn()
-        #expect(!remote.on)
-        #expect(remote.problem == "That proof of work doesn't check out.")
-        #expect(exchange.requests.count == 1)
+
+    /// Cancelled at Apple, or sent back with another state: no registration, and Settings says why.
+    @Test @MainActor func aSignInThatDoesntFinishRegistersNothing() async throws {
+        for (back, said) in [(nil, "Sign in with Apple was cancelled."), ("oby-signin://done?state=someone-elses", "Sign in with Apple didn't finish. Try again."),
+                             ("oby-signin://failed?state=s1", "Sign in with Apple didn't finish. Try again.")] {
+            let exchange = Exchange([(410, Self.unregistered), (201, Self.signIn)])
+            let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
+            defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
+            let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
+            let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
+                                      secrets: secrets, defaults: defaults,
+                                      runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }), authenticate: Sheet(back).run)
+            await remote.turnOn()
+            #expect(!remote.on)
+            #expect(remote.problem == said)
+            #expect(exchange.requests.count == 2)
+        }
     }
 
     /// The control plane took the tunnel back (not connected for days): the check-in sees no
@@ -142,6 +141,7 @@ struct RemoteAccessTests {
     @Test @MainActor func aReclaimedTunnelIsSetUpAgainAtTheCheckIn() async throws {
         let exchange = Exchange([
             (200, #"{"installation": \#(Self.installation)}"#),
+            // Still registered: no sign-in, straight to a new endpoint.
             (200, #"{"installation": \#(Self.installation)}"#),
             (201, #"{"endpoint": {"hostname": "oby-newnewnewnew01234567.oby-devices.test", "tunnelId": "t2", "createdAt": "2026-11-12T12:00:01.000Z"}}"#),
             (200, #"{"token": "eyJ-new-token", "hostname": "oby-newnewnewnew01234567.oby-devices.test"}"#),
@@ -154,25 +154,21 @@ struct RemoteAccessTests {
         try secrets.save(try MacKey.make(), as: RemoteAccess.keyKey)
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
                                   secrets: secrets, defaults: defaults,
-                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }), workBits: 8)
+                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }),
+                                  authenticate: { _ in Issue.record("no sign-in sheet at a check-in"); return URL(string: "oby-signin://failed")! })
         defer { remote.stop() }
         await remote.checkIn()
         #expect(remote.problem == nil)
         #expect(remote.hostname == "oby-newnewnewnew01234567.oby-devices.test")
         #expect(exchange.requests.prefix(4).map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == [
-            "GET /v1/installations/self", "POST /v1/installations", "POST /v1/installations/self/endpoint", "GET /v1/installations/self/endpoint/token",
+            "GET /v1/installations/self", "GET /v1/installations/self", "POST /v1/installations/self/endpoint", "GET /v1/installations/self/endpoint/token",
         ])
     }
 
-    /// The control plane removed this Mac (idle for 30 days): the check-in registers it again,
-    /// on, with its new hostname and token.
-    @Test @MainActor func aForgottenMacRegistersAgainAtItsCheckIn() async throws {
-        let exchange = Exchange([
-            (410, #"{"error": "This Mac isn't registered. Turn remote access on again."}"#),
-            (201, #"{"installation": \#(Self.installation)}"#),
-            (201, #"{"endpoint": {"hostname": "oby-newnewnewnew01234567.tetrix.pro", "tunnelId": "t2", "createdAt": "2026-11-12T12:00:01.000Z"}}"#),
-            (200, #"{"token": "eyJ-new-token", "hostname": "oby-newnewnewnew01234567.tetrix.pro"}"#),
-        ])
+    /// The control plane removed this Mac (away 30 days): the check-in turns remote access off and
+    /// says to turn it on again, which signs in with Apple. Never a sheet out of the blue.
+    @Test @MainActor func aForgottenMacIsOffAfterItsCheckIn() async throws {
+        let exchange = Exchange([(410, Self.unregistered)])
         let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
         defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
         let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
@@ -180,21 +176,18 @@ struct RemoteAccessTests {
         defaults.set(true, forKey: "remote.enabled")
         try secrets.save(try MacKey.make(), as: RemoteAccess.keyKey)
         try secrets.save("eyJ-run-token", as: RemoteAccess.tokenKey)
-        let launched = Launched()
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
                                   secrets: secrets, defaults: defaults,
-                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) }), workBits: 8)
+                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }),
+                                  authenticate: { _ in Issue.record("no sign-in sheet at a check-in"); return URL(string: "oby-signin://failed")! })
         defer { remote.stop() }
 
         await remote.checkIn()
-        #expect(remote.problem == nil)
-        #expect(remote.on)
-        #expect(remote.hostname == "oby-newnewnewnew01234567.tetrix.pro")
-        #expect(try secrets.value(RemoteAccess.tokenKey) == "eyJ-new-token")
-        #expect(launched.processes.first?.environment?["TUNNEL_TOKEN"] == "eyJ-new-token")
-        #expect(exchange.requests.prefix(4).map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == [
-            "GET /v1/installations/self", "POST /v1/installations", "POST /v1/installations/self/endpoint", "GET /v1/installations/self/endpoint/token",
-        ])
+        #expect(!remote.on)
+        #expect(remote.hostname == nil)
+        #expect(!defaults.bool(forKey: "remote.enabled"))
+        #expect(remote.problem == "This Mac was away from remote access for 30 days. Turn it on again to sign in with Apple.")
+        #expect(exchange.requests.count == 1)
     }
 
     /// At launch with remote access on, the tunnel runs again from the keychain's token; with
@@ -227,15 +220,6 @@ struct RemoteAccessTests {
         #expect(launched.processes.count == 1)
     }
 
-    /// The proof of work is the Worker's (cloud/control-plane/src/app.ts, `checkWork`): these
-    /// answers come from Python's hashlib, outside both.
-    @Test func proofOfWorkMatchesTheWorkers() {
-        #expect(MacKey.work(key: "k", at: 1, bits: 8) == "37")
-        #expect(MacKey.work(key: "BKurq6s", at: 1_791_806_400, bits: 12) == "8876")
-        #expect(MacKey.zeroBits([0, 0x0f]) == 12)
-        // The most the control plane asks for (MAX_WORK_BITS: 22, plus 4 nearly full and 4 busy).
-        #expect(RemoteAccess.mostWorkBits == 30)
-    }
 
     /// The Worker's check (cloud/control-plane/src/app.ts, `signed`), in CryptoKit.
     static func verifies(_ request: URLRequest, publicKey: Data) throws -> Bool {

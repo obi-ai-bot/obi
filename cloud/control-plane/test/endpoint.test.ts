@@ -152,35 +152,48 @@ describe("what a tunnel may cost", () => {
     expect((await app.call(mac.mac, "POST", path)).status).toBe(201);
   });
 
-  it("a few networks can't drain the global limit: creations per network, 5 an hour and 10 a day", async () => {
+  it("one Apple Account can't drain the global limit: 5 live endpoints and 10 creations a day", async () => {
+    const app = testApp();
+    const path = "/v1/installations/self/endpoint";
+    const macs = [];
+    for (let i = 0; i < 6; i++) {
+      const mac = await Mac.make();
+      expect((await app.register(mac, "Mac", { "CF-Connecting-IP": `10.${i}.0.1` }, i < 5 ? "000444.drain" : "000555.other")).status).toBe(201);
+      macs.push(mac);
+    }
+    for (let i = 0; i < 4; i++) expect((await app.call(macs[i]!, "POST", path, undefined, { "CF-Connecting-IP": `10.${i}.0.1` })).status).toBe(201);
+    await app.fill(1, "fill", "000444.drain");
+    const sixth = await app.call(macs[4]!, "POST", path, undefined, { "CF-Connecting-IP": "10.4.0.1" });
+    expect(sixth.status).toBe(409);
+    expect(sixth.body.error).toBe("This Apple Account has 5 Macs with remote access on already. Forget one first.");
+    // Make and remove, so nothing stays live: what a drain would do. Ten a day per account.
+    await app.counted("creations:account:000444.drain", 10);
+    expect((await app.call(macs[0]!, "DELETE", path)).status).toBe(204);
+    const drain = await app.call(macs[0]!, "POST", path);
+    expect(drain.status).toBe(429);
+    expect(drain.body.error).toMatch(/^This Apple Account turned remote access on too often today\./);
+    // Another account isn't held back.
+    expect((await app.call(macs[5]!, "POST", path, undefined, { "CF-Connecting-IP": "10.5.0.1" })).status).toBe(201);
+    // Over everyone, 300 an hour: a drain needs 30 Apple Accounts.
+    expect(300 / 10).toBe(30);
+  });
+
+  it("limits creations per network as a backstop: 30 an hour, 100 a day", async () => {
     const app = testApp();
     const path = "/v1/installations/self/endpoint";
     const from = { "CF-Connecting-IP": "2001:db8:66:1::1" };
-    // Make and remove, so nothing stays live: what a drain would do.
-    let n = 0;
-    const cycle = async () => {
-      // Registered from addresses of its own, so only the endpoint limits are under test.
-      const mac = await Mac.make();
-      expect((await app.register(mac, "Mac", { "CF-Connecting-IP": `10.${++n}.0.1` })).status).toBe(201);
-      const made = await app.call(mac, "POST", path, undefined, from);
-      if (made.status === 201) expect((await app.call(mac, "DELETE", path, undefined, from)).status).toBe(204);
-      return made;
-    };
-    for (let i = 0; i < 5; i++) expect((await cycle()).status).toBe(201);
-    const sixth = await cycle();
-    expect(sixth.status).toBe(429);
-    expect(sixth.body.error).toMatch(/^Too many Macs on this network turned remote access on lately\./);
-    // Another network isn't held back.
-    const elsewhere = await registered(app);
-    expect((await app.call(elsewhere.mac, "POST", path, undefined, { "CF-Connecting-IP": "2001:db8:77::1" })).status).toBe(201);
-    app.time.advance(HOUR);
-    for (let i = 0; i < 5; i++) expect((await cycle()).status).toBe(201);
-    app.time.advance(HOUR);
-    const eleventh = await cycle();
-    expect(eleventh.status).toBe(429);
-    expect(eleventh.body.error).toMatch(/^Too many Macs on this network turned remote access on today\./);
-    // Over everyone, that's 300 an hour: a drain needs 60 networks' worth.
-    expect(300 / 5).toBe(60);
+    const mac = await Mac.make();
+    await app.register(mac, "Mac", { "CF-Connecting-IP": "10.1.0.1" });
+    await app.counted("creations:network:2001:db8:66::/48", 30);
+    const hour = await app.call(mac, "POST", path, undefined, from);
+    expect(hour.status).toBe(429);
+    expect(hour.body.error).toMatch(/^Too many Macs on this network turned remote access on lately\./);
+    await app.counted("creations:network:2001:db8:66::/48", 0);
+    await app.counted("creations:network-day:2001:db8:66::/48", 100);
+    const day = await app.call(mac, "POST", path, undefined, from);
+    expect(day.status).toBe(429);
+    expect(day.body.error).toMatch(/^Too many Macs on this network turned remote access on today\./);
+    expect((await app.call(mac, "POST", path, undefined, { "CF-Connecting-IP": "2001:db8:67::1" })).status).toBe(201);
   });
   it("limits new endpoints over everyone", async () => {
     const app = testApp();
@@ -222,36 +235,35 @@ describe("what a tunnel may cost", () => {
   it("fails closed on a cap that isn't a number", async () => {
     for (const cap of ["", "abc", "500x", "0"]) {
       const app = testApp({}, { MAX_ENDPOINTS: cap });
-      const mac = await Mac.make();
-      // Registering reads the cap too.
-      const answer = await app.register(mac);
+      const mac = await registered(app);
+      const answer = await app.call(mac.mac, "POST", "/v1/installations/self/endpoint");
       expect(answer.status, cap).toBe(503);
       expect(answer.body.error).toMatch(/^MAX_ENDPOINTS in wrangler\.jsonc isn't a whole number/);
     }
   });
-
-  it("holds back a network's unconnected endpoints, not its connected ones, and warns past 80% of the cap", async () => {
-    const app = testApp({}, { MAX_ENDPOINTS: "6" });
-    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("holds back a network's unconnected endpoints, not its connected ones", async () => {
+    const app = testApp();
     const path = "/v1/installations/self/endpoint";
-    const office = (i: number) => ({ "CF-Connecting-IP": `198.51.100.${i}` });
-    const macs = [];
-    for (let i = 0; i < 3; i++) {
-      macs.push(await registered(app));
-      expect((await app.call(macs[i]!.mac, "POST", path, undefined, office(i))).status).toBe(201);
-    }
-    const fourth = await registered(app);
-    const waiting = await app.call(fourth.mac, "POST", path, undefined, office(9));
+    await app.fill(20, "198.51.100.0/24");
+    const mac = await registered(app);
+    const waiting = await app.call(mac.mac, "POST", path, undefined, { "CF-Connecting-IP": "198.51.100.9" });
     expect(waiting.status).toBe(429);
     expect(waiting.body.error).toBe("Too many Macs on this network are turning remote access on right now. Try again in an hour.");
+    // They connect (the sweep saw them up): an office can have many more.
+    await env.DB.prepare("UPDATE endpoints SET connected_at = ?1").bind(app.time.now().toISOString()).run();
+    expect((await app.call(mac.mac, "POST", path, undefined, { "CF-Connecting-IP": "198.51.100.9" })).status).toBe(201);
+  });
+
+  it("warns past 80% of the cap", async () => {
+    const app = testApp({}, { MAX_ENDPOINTS: "25" });
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await app.fill(18);
+    const first = await registered(app);
+    expect((await app.call(first.mac, "POST", "/v1/installations/self/endpoint")).status).toBe(201);
     expect(warned).not.toHaveBeenCalled();
-    // The three connect (the sweep sees them up): a fourth Mac in the office is fine.
-    app.tunnels.connectAll(app.time.now().toISOString());
-    await sweep(env, { tunnels: app.tunnels, now: app.time.now });
-    expect((await app.call(fourth.mac, "POST", path, undefined, office(9))).status).toBe(201);
-    const fifth = await registered(app);
-    expect((await app.call(fifth.mac, "POST", path, undefined, { "CF-Connecting-IP": "203.0.113.1" })).status).toBe(201);
-    expect(warned).toHaveBeenCalledWith("endpoints: 5 of 6 alive, past 80% of MAX_ENDPOINTS");
+    const second = await registered(app);
+    expect((await app.call(second.mac, "POST", "/v1/installations/self/endpoint")).status).toBe(201);
+    expect(warned).toHaveBeenCalledWith("endpoints: 20 of 25 alive, past 80% of MAX_ENDPOINTS");
     warned.mockRestore();
   });
   it("limits token reads and endpoint removals over everyone", async () => {

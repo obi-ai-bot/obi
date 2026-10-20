@@ -17,9 +17,10 @@
     "DEVICE_DOMAIN": "",
     "PRODUCT_DOMAIN": "tetrix.pro",
     "HOSTNAME_PREFIX": "oby-",
-    // A new Mac's proof of work, in leading zero bits of SHA-256 (about 4 million hashes, a second
-    // or two on a Mac). Raise it only with the Mac app's RemoteAccess.workBits.
-    "REGISTRATION_WORK_BITS": "22",
+    // Sign in with Apple on the web (docs/remote-access.md): the Services ID, and the return URL
+    // registered for it at Apple. Not secrets: no private key is used, only Apple's identity token.
+    "APPLE_CLIENT_ID": "com.deskree.oby.signin",
+    "APPLE_REDIRECT_URI": "https://oby-control.tetrix.pro/v1/auth/apple/callback",
     // The most endpoints alive at once: under Cloudflare's tunnel limit for the account.
     "MAX_ENDPOINTS": "500",
     // What every tunnel routes to on the Mac: the gateway (#284). Nothing else is reachable.

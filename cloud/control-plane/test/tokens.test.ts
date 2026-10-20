@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { takeOne } from "../src/limits";
 import { env } from "cloudflare:test";
-import { addressBucket, leadingZeroBits, networkBucket, OPAQUE_ALPHABET, opaqueLabel, registrableDomain, tunnelSecret } from "../src/tokens";
+import { addressBucket, networkBucket, OPAQUE_ALPHABET, opaqueLabel, registrableDomain, tunnelSecret } from "../src/tokens";
 
 describe("tokens", () => {
   it("makes opaque labels of lowercase letters and digits", () => {
@@ -14,14 +14,6 @@ describe("tokens", () => {
     }
     expect(seen.size).toBe(50);
     expect(opaqueLabel(16)).toHaveLength(16);
-  });
-
-  it("counts leading zero bits", () => {
-    expect(leadingZeroBits(new Uint8Array([0xff]))).toBe(0);
-    expect(leadingZeroBits(new Uint8Array([0x00, 0x01]))).toBe(15);
-    expect(leadingZeroBits(new Uint8Array([0x00, 0x00, 0x80]))).toBe(16);
-    expect(leadingZeroBits(new Uint8Array([0x0f]))).toBe(4);
-    expect(leadingZeroBits(new Uint8Array([0, 0]))).toBe(16);
   });
 
   it("counts an IPv6 address by its /64, an IPv4 one as it is", () => {

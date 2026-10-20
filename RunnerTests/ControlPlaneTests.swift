@@ -56,7 +56,7 @@ struct ControlPlaneTests {
         ])
         let plane = exchange.plane()
         let key = Signed()
-        let registered = try await plane.register(key.signer, name: "MacBook", proofAt: 1_791_806_400, proof: "1234")
+        let registered = try await plane.register(key.signer, name: "MacBook", signIn: "state-1")
         #expect(registered.id == "i1")
         #expect(registered.endpoint == nil)
         let made = try await plane.createEndpoint(key.signer)
@@ -75,7 +75,7 @@ struct ControlPlaneTests {
             "GET /v1/installations/self", "DELETE /v1/installations/self/endpoint", "DELETE /v1/installations/self",
         ])
         let body = try #require(requests[0].httpBody)
-        #expect(try JSONDecoder().decode([String: String].self, from: body) == ["name": "MacBook", "platform": "macos", "proofAt": "1791806400", "proof": "1234"])
+        #expect(try JSONDecoder().decode([String: String].self, from: body) == ["name": "MacBook", "platform": "macos", "signIn": "state-1"])
         // Every call is signed, never a bearer; each nonce is new.
         for request in requests {
             #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
@@ -91,9 +91,18 @@ struct ControlPlaneTests {
         #expect(key.messages[5] == Data("oby-control-v1\nDELETE\n/v1/installations/self\n1791806400\n\(last)\n".utf8))
     }
 
+    @Test func startsASignInWithApple() async throws {
+        let exchange = Exchange([(201, #"{"url": "https://appleid.apple.com/auth/authorize?state=s1", "state": "s1"}"#)])
+        let key = Signed()
+        let started = try await exchange.plane().startAppleSignIn(key.signer)
+        #expect(started == ControlPlane.AppleSignIn(url: URL(string: "https://appleid.apple.com/auth/authorize?state=s1")!, state: "s1"))
+        #expect(exchange.requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == ["POST /v1/auth/apple/start"])
+        #expect(exchange.requests.first?.value(forHTTPHeaderField: "Oby-Signature") != nil)
+    }
+
     @Test func saysWhatTheControlPlaneSaid() async throws {
         let exchange = Exchange([
-            (403, #"{"error": "That proof of work doesn't check out.", "workBits": 26}"#),
+            (403, #"{"error": "Sign in with Apple first."}"#),
             (410, #"{"error": "This Mac isn't registered. Turn remote access on again."}"#),
             (502, "<html>bad gateway</html>"),
             (0, ""),
@@ -101,8 +110,8 @@ struct ControlPlaneTests {
         ])
         let plane = exchange.plane()
         let key = Signed().signer
-        await #expect(throws: ControlPlane.Failure(message: "That proof of work doesn't check out.", status: 403, workBits: 26)) {
-            try await plane.register(key, name: "Mac", proofAt: 1, proof: "0")
+        await #expect(throws: ControlPlane.Failure(message: "Sign in with Apple first.", status: 403)) {
+            try await plane.register(key, name: "Mac")
         }
         await #expect(throws: ControlPlane.Failure(message: "This Mac isn't registered. Turn remote access on again.", status: 410)) { try await plane.installation(key) }
         await #expect(throws: ControlPlane.Failure(message: "The control plane answered 502.", status: 502)) { try await plane.installation(key) }

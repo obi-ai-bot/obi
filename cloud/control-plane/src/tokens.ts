@@ -69,19 +69,6 @@ export function opaqueLabel(length = 20): string {
   return label;
 }
 
-/// How many zero bits `bytes` starts with.
-export function leadingZeroBits(bytes: Uint8Array): number {
-  let bits = 0;
-  for (const byte of bytes) {
-    if (byte === 0) {
-      bits += 8;
-      continue;
-    }
-    return bits + Math.clz32(byte) - 24;
-  }
-  return bits;
-}
-
 /// An IPv6 address's eight groups, `::` filled in, leading zeros dropped; null for IPv4.
 function ipv6Groups(address: string): string[] | null {
   if (!address.includes(":")) return null;
