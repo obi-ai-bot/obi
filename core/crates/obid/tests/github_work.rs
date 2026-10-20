@@ -433,7 +433,7 @@ fn each_item_carries_its_board_column_and_the_feed_goes_on_without_read_project(
     assert_eq!(feed["error"], Value::Null);
 
     // gh's login without read:project: GitHub fails the whole query, so obid reads again without
-    // boards, says how to fix it, and doesn't ask for boards again for a while.
+    // boards and says how to fix it (ticks skip boards for an hour; a refresh asks again).
     std::fs::write(gh.join("no-board"), "").unwrap();
     on_board(false);
     let calls = graphql_calls(&gh);
@@ -447,7 +447,19 @@ fn each_item_carries_its_board_column_and_the_feed_goes_on_without_read_project(
         "Board columns need gh's read:project scope: run gh auth refresh -s read:project"
     );
     let feed = refresh(&obid);
-    assert_eq!(graphql_calls(&gh), calls + 3, "one read, without boards");
+    assert_eq!(
+        graphql_calls(&gh),
+        calls + 4,
+        "a refresh asks for boards again"
+    );
     assert_eq!(feed["reviews"].as_array().unwrap().len(), 1);
     assert!(feed["error"].as_str().unwrap().contains("read:project"));
+
+    // Once the owner runs `gh auth refresh -s read:project`, a refresh reads boards at once.
+    std::fs::remove_file(gh.join("no-board")).unwrap();
+    on_board(true);
+    let feed = refresh(&obid);
+    assert_eq!(graphql_calls(&gh), calls + 5);
+    assert_eq!(feed["assigned"][0]["board"]["column"], "Todo", "{feed}");
+    assert_eq!(feed["error"], Value::Null);
 }

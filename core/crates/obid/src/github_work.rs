@@ -49,8 +49,9 @@ fragment work on SearchResultItem { \
 ... on PullRequest { number title updatedAt state isDraft reviewDecision author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } BOARD \
 commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }";
 
-/// Each item's boards and their Status column: needs gh's `read:project` scope.
-const BOARD: &str = "projectItems(first: 5) { nodes { project { title } \
+/// Each item's boards, but those it's archived from, and their Status column: needs gh's
+/// `read:project` scope.
+const BOARD: &str = "projectItems(first: 5, includeArchived: false) { nodes { project { title } \
 fieldValueByName(name: \"Status\") { ... on ProjectV2ItemFieldSingleSelectValue { name } } } }";
 
 /// What the feed says while gh's login can't read boards.
@@ -420,7 +421,8 @@ struct Seen {
     /// Whether obid read since it started: the first read sends no event (apps fetch the feed
     /// when they connect).
     read: bool,
-    /// gh's login couldn't read boards: no board read before then.
+    /// gh's login couldn't read boards: no board read before then. 0 once boards read; a time
+    /// already past (a refresh, another login) reads them at once without warning again.
     no_board_until: i64,
 }
 
@@ -552,6 +554,9 @@ impl Feed {
                         state.no_board_until = now + NO_BOARD_WAIT;
                     } else if !no_board {
                         state.no_board_until = 0;
+                    } else if state.kept.login.as_deref() != Some(login.as_str()) {
+                        // Another login may read boards: the next read asks.
+                        state.no_board_until = state.no_board_until.min(now);
                     }
                     state.error = partial
                         .map(|e| format!("GitHub left some of your work out: {e}"))
@@ -591,7 +596,14 @@ impl Feed {
     /// `POST /v1/github/work/refresh`: a read, unless one began within [`refresh_every`] (a
     /// paired phone can't spend GitHub's points by refreshing).
     pub async fn refresh(&self) -> Value {
-        if time::now() - self.lock().read_at < refresh_every() {
+        let now = time::now();
+        let soon = {
+            let mut state = self.lock();
+            // The owner may have just run `gh auth refresh -s read:project`: ask for boards.
+            state.no_board_until = state.no_board_until.min(now);
+            now - state.read_at < refresh_every()
+        };
+        if soon {
             return self.to_json();
         }
         self.read().await
@@ -1056,19 +1068,34 @@ mod tests {
             board("Oby — Roadmap", "Todo"),
             "on several boards, the first with a Status"
         );
+        let long = on(json!([{"project": {"title": "p".repeat(400)}, "fieldValueByName": {"name": "c".repeat(400)}}]))
+            .unwrap();
+        assert_eq!((long.project.len(), long.column.len()), (300, 300));
+        // A board the item is archived from is GitHub's to leave out.
+        assert!(BOARD.contains("includeArchived: false"));
         let (lists, _) = read(&answer(
             vec![],
             vec![node("obi-ai-bot/obi", 1, "2026-10-17T08:00:00Z")],
             1,
         ));
         assert_eq!(lists.assigned[0].board, None, "read without boards");
-        // GitHub saying the login lacks read:project isn't work left out.
-        let mut text: Value = serde_json::from_str(&answer(vec![], vec![], 0)).unwrap();
+        // GitHub saying the login lacks read:project, with its data and `projectItems: null`,
+        // isn't work left out: the items stay, without boards.
+        let mut issue = node("obi-ai-bot/obi", 640, "2026-10-17T08:00:00Z");
+        issue["projectItems"] = Value::Null;
+        let mut text: Value = serde_json::from_str(&answer(vec![], vec![issue], 1)).unwrap();
         text["errors"] = json!([{"type": "INSUFFICIENT_SCOPES", "message": "The 'projectItems' field requires one of the following scopes: ['read:project']"}]);
         match parse(&text.to_string()).unwrap() {
             Got::Read {
-                partial, no_board, ..
-            } => assert_eq!((partial, no_board), (None, true)),
+                lists,
+                partial,
+                no_board,
+                ..
+            } => {
+                assert_eq!((partial, no_board), (None, true));
+                assert_eq!(lists.assigned.len(), 1);
+                assert_eq!(lists.assigned[0].board, None);
+            }
             other => panic!("{other:?}"),
         }
     }
