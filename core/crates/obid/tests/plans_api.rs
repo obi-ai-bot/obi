@@ -309,7 +309,10 @@ fn retries_are_limited_to_transient_empty_failures() {
     let folder = Folder::new("brain-retries");
     let obid = started(&folder);
     queue(&obid, &["EXIT 0".into(), "EXIT 0".into()]);
-    assert_eq!(said(&obid, "hello")["kind"], "question");
+    // No brain answered: the turn says so, and rules don't guess.
+    let failed =
+        "Oby's brain couldn't answer: Claude Code failed, so nothing was started. Try again.";
+    assert_eq!(said(&obid, "hello")["text"], failed);
     assert_eq!(calls(&obid).len(), 2);
     let refused = records(&obid).pop().unwrap()["refused"].to_string();
     assert!(
@@ -321,7 +324,7 @@ fn retries_are_limited_to_transient_empty_failures() {
         &obid,
         &["FAIL 1 Please sign in".into(), reply("Never asked.")],
     );
-    assert_eq!(said(&obid, "hello")["kind"], "question");
+    assert_eq!(said(&obid, "hello")["text"], failed);
     assert_eq!(calls(&obid).len(), 3);
     let refused = records(&obid).pop().unwrap()["refused"].to_string();
     assert!(
@@ -437,10 +440,14 @@ fn both_brains_taking_too_long_say_so_and_start_nothing() {
     let mut config = config(&folder.0, &remote, &planner());
     let agents = planner().parent().unwrap().to_path_buf();
     config["agents"]["codex"] = json!({"bin": agents.join("fake-codex"), "accounts": []});
-    // Each brain gets half of a 6-second turn: Claude's two tries outlast it, and fake-codex never
-    // answers words with STALL in them.
-    config["turnBudget"] = json!(6);
-    let obid = start(&folder.0, &config, Some(&agents));
+    // Each brain thinks for 2 seconds of its own, well inside the turn: Claude's two tries outlast
+    // them, and fake-codex never answers words with STALL in them.
+    let obid = start_with(
+        &folder.0,
+        &config,
+        Some(&agents),
+        &[("OBID_BRAIN_SECONDS", "2")],
+    );
     let slow = format!("SLEEP 30 {}", fixes(&[18]));
     queue(&obid, &[slow.clone(), slow]);
     let answer = said(&obid, "fix fixture-app #18 STALL");
@@ -475,8 +482,12 @@ fn a_very_busy_mac_says_so_after_one_slow_brain() {
     let mut config = config(&folder.0, &remote, &planner());
     let agents = planner().parent().unwrap().to_path_buf();
     config["agents"]["codex"] = json!({"bin": agents.join("fake-codex"), "accounts": []});
-    config["turnBudget"] = json!(6);
-    let obid = start_with(&folder.0, &config, Some(&agents), &[("OBID_LOAD", "512.3")]);
+    let obid = start_with(
+        &folder.0,
+        &config,
+        Some(&agents),
+        &[("OBID_LOAD", "512.3"), ("OBID_BRAIN_SECONDS", "2")],
+    );
     let slow = format!("SLEEP 30 {}", reply("Late."));
     queue(&obid, &[slow.clone(), slow]);
     let answer = said(&obid, "how is it going?");
@@ -584,10 +595,13 @@ fn a_run_out_of_turns_is_a_failed_call_with_its_subtype() {
         &obid,
         &[result_line("error_max_turns", serde_json::Value::Null)],
     );
-    // Rules stand in: "hello" names no repository, so they ask.
-    assert_eq!(said(&obid, "hello")["kind"], "question");
+    // No brain answered: the turn says so, and rules don't guess.
+    assert_eq!(
+        said(&obid, "hello")["text"],
+        "Oby's brain couldn't answer: Claude Code failed, so nothing was started. Try again."
+    );
     let record = records(&obid).pop().unwrap();
-    assert_eq!(record["by"], "rules");
+    assert_eq!(record["by"], "none");
     let calls = record["calls"].as_array().unwrap();
     assert_eq!(calls.len(), 1, "{record}");
     assert_eq!(calls[0]["outcome"], "failed");
@@ -3819,13 +3833,17 @@ fn clone_fixture(folder: &Folder, obid: &Obid) -> PathBuf {
     clone
 }
 
-/// #543's acceptance: "run the tests in fixture-app", with its AGENTS.md naming its test command,
-/// dispatches a job whose check is that command; the brain read it in work.md, never in its
-/// prompt, with the vault's secrets taken out.
+/// #543's acceptance: "run the tests in fixture-app", with its AGENTS.md naming its test command
+/// and no check configured for it, dispatches a job whose check is that command; the brain read
+/// it in work.md, never in its prompt, with the vault's secrets taken out. (A configured check
+/// stands over it: `a_planned_check_replaces_the_repositorys_only_when_the_owner_said_it`.)
 #[test]
 fn run_the_tests_takes_the_check_from_the_repositorys_own_instructions() {
     let folder = Folder::new("brain-own-check");
-    let obid = started(&folder);
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    config["repos"][0]["check"] = serde_json::Value::Null;
+    let obid = start(&folder.0, &config, Some(planner().parent().unwrap()));
     commit_to_remote(&folder, &[("AGENTS.md", &rules())]);
     clone_fixture(&folder, &obid);
     queue(&obid, &["CHECK obi-e2e/fixture-app".into()]);

@@ -319,10 +319,15 @@ fn named_checks(said: &str) -> Vec<String> {
     for line in said.lines() {
         // ASCII lower case keeps every byte where it was, so `line` slices at the same places.
         let lower = line.to_ascii_lowercase();
-        for (at, _) in lower.match_indices("check:") {
+        // A whole word: `typecheck: true` names no check.
+        let word = |at: usize| at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric();
+        for (at, _) in lower.match_indices("check:").filter(|(at, _)| word(*at)) {
             take(&line[at + "check:".len()..]);
         }
-        for (at, _) in lower.match_indices("the check is ") {
+        for (at, _) in lower
+            .match_indices("the check is ")
+            .filter(|(at, _)| word(*at))
+        {
             take(&line[at + "the check is ".len()..]);
         }
         for (end, _) in lower.match_indices(" to check") {
@@ -1545,7 +1550,8 @@ mod tests {
     /// passing; the owner's own "Check: …" wins.
     #[test]
     fn a_configured_check_is_kept_unless_the_owner_named_another() {
-        let passing = "make isAdmin return true for owners, and test the node build";
+        let passing =
+            "make isAdmin return true for owners, and test the node build\ntypecheck: true";
         for check in ["true", "test", "node"] {
             assert_eq!(
                 kept_check(Some(check), Some("cargo test"), passing).as_deref(),

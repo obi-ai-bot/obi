@@ -790,11 +790,21 @@ pub async fn overloaded() -> Option<f64> {
     (load / cpus >= BUSY).then_some(load)
 }
 
-/// How long one brain may think: 20 seconds, 40 for a deep plan, half as long again when the Mac
-/// is very busy.
-pub fn budget(deep: bool, busy: bool) -> Duration {
-    let budget = Duration::from_secs(if deep { 40 } else { 20 });
+/// How long one brain may think: `quick` (20 seconds), twice that for a deep plan, half as long
+/// again when the Mac is very busy.
+pub fn budget(quick: Duration, deep: bool, busy: bool) -> Duration {
+    let budget = if deep { quick * 2 } else { quick };
     if busy { budget * 3 / 2 } else { budget }
+}
+
+/// A quick plan's time: 20 seconds, or what tests set in `OBID_BRAIN_SECONDS`, so a brain can
+/// run out of its own time well before the turn does.
+fn quick_budget() -> Duration {
+    let seconds = std::env::var("OBID_BRAIN_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    Duration::from_secs(seconds)
 }
 
 /// The least time an adapter is asked to think in: with less left, none is (#615). Tests may set
@@ -888,11 +898,14 @@ impl Planner {
             || context.turn_length.unwrap_or_else(|| said.chars().count()) > 600;
         // Claude keeps half of this for its one process retry: Sonnet gets enough for each try.
         let load = overloaded().await;
-        let budget = budget(deep, load.is_some());
+        let budget = budget(quick_budget(), deep, load.is_some());
         let model = if deep { DEEP_MODEL } else { QUICK_MODEL };
         // Each brain asked that failed, and whether it took too long; and whether one sent a plan.
         let mut unanswered: Vec<(String, bool)> = vec![];
         let mut planned = false;
+        // Whether a brain took too long only because the turn's own time ran out: then it's the
+        // turn's budget that ended it (`budget_spent`), not the brain.
+        let mut cut_short = false;
         for (i, adapter) in self.adapters.iter().enumerate() {
             // A read runs boxed: an adapter that can't goes unasked when another one follows.
             if quoted.is_some()
@@ -1015,11 +1028,12 @@ impl Planner {
                 );
             }
             if let Some(slow) = failed {
+                cut_short = slow && self.deadline.is_some_and(|turn| deadline >= turn);
                 unanswered.push((adapter.name().to_owned(), slow));
             }
         }
         // Every brain asked failed: rules would only guess, so the turn says why instead.
-        if !planned && !unanswered.is_empty() {
+        if !planned && !cut_short && !unanswered.is_empty() {
             return Planned {
                 plan: Plan::of(Action::Ignore, ""),
                 by: "none".into(),
@@ -1584,10 +1598,11 @@ pub mod tests {
     /// The normal path keeps its time; a very busy Mac gives each brain half as long again.
     #[test]
     fn a_busy_mac_gives_the_brain_longer() {
-        assert_eq!(budget(false, false), Duration::from_secs(20));
-        assert_eq!(budget(true, false), Duration::from_secs(40));
-        assert_eq!(budget(false, true), Duration::from_secs(30));
-        assert_eq!(budget(true, true), Duration::from_secs(60));
+        let quick = Duration::from_secs(20);
+        assert_eq!(budget(quick, false, false), Duration::from_secs(20));
+        assert_eq!(budget(quick, true, false), Duration::from_secs(40));
+        assert_eq!(budget(quick, false, true), Duration::from_secs(30));
+        assert_eq!(budget(quick, true, true), Duration::from_secs(60));
     }
 
     /// BrainSteadyTests.aLongRequestUsesSonnet
