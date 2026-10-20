@@ -239,8 +239,11 @@ function appleSetting(value: string | undefined, name: string): string {
 /// installation and its hostname (200). A new key brings `signIn` and `signInCode`: the state of a
 /// sign-in it started and the code its sheet came back with from Apple, used once; the
 /// installation belongs to that Apple Account. An account that has PER_ACCOUNT.installations Macs
-/// already loses the one it used longest ago (`evicted`): a fresh sign-in is its owner, and so the
-/// owner of a stolen account can take its Macs back without their keys.
+/// already loses the one it used longest ago (`evicted`), so a person with a new Mac isn't stuck.
+/// This is no recovery from a stolen Apple Account: an attacker who keeps calling stays the most
+/// recently used, so the owner's own Macs go first. A stolen account is recovered at Apple; what
+/// it can reach here is only remote access (a hostname to a gateway that needs a paired device's
+/// token), never a token or data.
 async function register(request: Request, env: Env, deps: Deps, now: () => Date): Promise<Response> {
   const call = await signed(request, env, now());
   const name = field(typeof call.body.name === "string" ? call.body.name.trim() : call.body.name, "name", /^[^\n\r]{1,64}$/, "1 to 64 characters");
@@ -263,21 +266,29 @@ async function register(request: Request, env: Env, deps: Deps, now: () => Date)
   if (!signIn || !code || (await sha256Hex(code)) !== signIn.code_hash) throw new Reply(403, "Sign in with Apple first.");
   await spend(env.DB, call);
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
-  await limit(env.DB, `registrations:account:${signIn.sub}`, LIMITS.registrationsPerAccount, now(), "This Apple Account set up too many Macs today.");
-  await limit(env.DB, `registrations:address:${addressBucket(address)}`, LIMITS.registrationsPerAddress, now(), "Too many Macs were set up from this network lately.");
-  await limit(env.DB, `registrations:network:${networkBucket(address)}`, LIMITS.registrationsPerNetwork, now(), "Too many Macs were set up from this network lately.");
-  // Used once: a second registration with the same sign-in finds nothing.
-  const claimed = await env.DB.prepare("UPDATE sign_ins SET used_at = ?2 WHERE state = ?1 AND used_at IS NULL RETURNING state").bind(state, at).first();
-  if (!claimed) throw new Reply(403, "Sign in with Apple first.");
+  const counted = [`registrations:account:${signIn.sub}`, `registrations:address:${addressBucket(address)}`, `registrations:network:${networkBucket(address)}`];
+  await limit(env.DB, counted[0]!, LIMITS.registrationsPerAccount, now(), "This Apple Account set up too many Macs today.");
+  await limit(env.DB, counted[1]!, LIMITS.registrationsPerAddress, now(), "Too many Macs were set up from this network lately.");
+  await limit(env.DB, counted[2]!, LIMITS.registrationsPerNetwork, now(), "Too many Macs were set up from this network lately.");
   // ponytail: counted, then inserted: two registrations at once for one account can both find
   // room and leave it a Mac over PER_ACCOUNT.installations; registrationsPerAccount bounds that.
   const theirs = await env.DB.prepare("SELECT * FROM installations WHERE user_sub = ?1 ORDER BY last_seen_at").bind(signIn.sub).all<InstallationRow>();
   let evicted: { name: string } | undefined;
   if (theirs.results.length >= PER_ACCOUNT.installations) {
     const oldest = theirs.results[0]!;
-    await remove(env.DB, deps.tunnels, oldest);
+    try {
+      await remove(env.DB, deps.tunnels, oldest);
+    } catch (error) {
+      // Cloudflare refused: nothing changed, so this try isn't counted and the sign-in, not claimed
+      // yet, works again.
+      await env.DB.batch(counted.map((key) => env.DB.prepare("UPDATE rate_limits SET count = count - 1 WHERE key = ?1 AND count > 0").bind(key)));
+      throw error;
+    }
     evicted = { name: oldest.name };
   }
+  // Used once: a second registration with the same sign-in finds nothing.
+  const claimed = await env.DB.prepare("UPDATE sign_ins SET used_at = ?2 WHERE state = ?1 AND used_at IS NULL RETURNING state").bind(state, at).first();
+  if (!claimed) throw new Reply(403, "Sign in with Apple first.");
   const row: InstallationRow = { id: newId(), public_key: call.key, user_sub: signIn.sub, name, platform, created_at: at, last_seen_at: at };
   // Two calls at once with one key: the first one's row stands, and both answer with it.
   await env.DB.prepare(

@@ -130,6 +130,30 @@ describe("installations", () => {
     expect(tenth.body.error).toMatch(/^This Apple Account set up too many Macs today\./);
   });
 
+  it("when the evicted Mac's teardown fails, nothing changes: not counted, and the sign-in works again", async () => {
+    const app = testApp();
+    const first = await Mac.make();
+    await app.register(first, "First", { "CF-Connecting-IP": "10.0.0.1" }, "000555.full");
+    await app.call(first, "POST", "/v1/installations/self/endpoint", undefined, { "CF-Connecting-IP": "10.0.0.1" });
+    app.time.advance(60_000);
+    for (let i = 1; i < 5; i++) await app.register(await Mac.make(), `Mac ${i}`, { "CF-Connecting-IP": `10.${i}.0.1` }, "000555.full");
+    const count = async () => (await env.DB.prepare("SELECT count FROM rate_limits WHERE key = 'registrations:account:000555.full'").first<{ count: number }>())?.count;
+    expect(await count()).toBe(5);
+    const mac = await Mac.make();
+    const from = { "CF-Connecting-IP": "10.9.0.1" };
+    const signedIn = await app.signIn(mac, "000555.full", from);
+    app.tunnels.refuse.deleteTunnel = "rate limited";
+    const failed = await app.call(mac, "POST", "/v1/installations", { name: "New", platform: "macos", ...signedIn }, from);
+    expect(failed.status).toBe(502);
+    expect(await count()).toBe(5);
+    expect((await app.call(first, "GET", "/v1/installations/self")).status).toBe(200);
+    app.tunnels.refuse = {};
+    const again = await app.call(mac, "POST", "/v1/installations", { name: "New", platform: "macos", ...signedIn }, from);
+    expect(again.status).toBe(201);
+    expect(again.body.evicted).toEqual({ name: "First" });
+    expect(await count()).toBe(6);
+  });
+
   it("evicting a Mac with a tunnel tears the tunnel down", async () => {
     const app = testApp();
     const first = await Mac.make();
