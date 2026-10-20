@@ -260,6 +260,9 @@ struct JobPageTests {
         let odd = try TranscriptDetail.read(Data(#"{"detail": {"input": {"file_path": "a.swift"}, "output": "nope"}}"#.utf8))
         #expect(odd.output == nil && odd.given == ["file_path: a.swift"])
         #expect(try TranscriptDetail.read(Data(#"{"n": 1}"#.utf8)) == TranscriptDetail())
+        // One file of the diff that can't be read is left out, never the others.
+        let diff = try TranscriptDetail.read(Data(#"{"detail": {"diff": [{"path": "a.swift"}, {"path": "b.swift", "patch": "+b"}]}}"#.utf8))
+        #expect(diff.diff == [TranscriptDetail.FileDiff(path: "b.swift", patch: "+b")])
     }
 
     /// A vault value or a redacted line shows as a chip with its name, never brackets or the value.

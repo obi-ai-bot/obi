@@ -12,8 +12,13 @@ final class LiveSession {
     @ObservationIgnored private let load: (Int?) async throws -> TranscriptPage
     @ObservationIgnored private let loadDetail: (Int) async throws -> TranscriptDetail
     private(set) var entries: [TranscriptEntry] = [] {
-        didSet { counts = Dictionary(uniqueKeysWithValues: TranscriptEntry.Filter.allCases.map { tab in (tab, entries.count(where: tab.takes)) }) }
+        didSet {
+            // More words for an entry never change what the filters count.
+            guard !appending else { return }
+            counts = Dictionary(uniqueKeysWithValues: TranscriptEntry.Filter.allCases.map { tab in (tab, entries.count(where: tab.takes)) })
+        }
     }
+    @ObservationIgnored private var appending = false
     /// How many entries each filter takes, kept as the entries change.
     private(set) var counts: [TranscriptEntry.Filter: Int] = [:]
     /// The entry the agent is writing into now: more words came in the last moment (`append`).
@@ -71,7 +76,9 @@ final class LiveSession {
         if let entry = event.entry {
             (entries, trimmed) = Self.kept(entries, trimmed: trimmed, adding: [entry])
         } else if let n = event.n, let append = event.append, let index = entries.firstIndex(where: { $0.n == n }) {
+            appending = true
             entries[index].text = (entries[index].text ?? entries[index].summary ?? "") + append
+            appending = false
             arrived(n)
         }
     }

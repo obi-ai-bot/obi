@@ -47,11 +47,12 @@ struct SessionView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, compact ? Tokens.gutter : Tokens.gutter).padding(.top, 8).padding(.bottom, 24)
             }
-            .defaultScrollAnchor(.bottom)
+            // It opens at the live end; content growing below doesn't move what you're reading.
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
             .scrollIndicators(.never)
-            // At the live end: within 48 points of the foot.
+            // At the live end: within 48 points of the foot, the inset under it (the iPhone's box) left out.
             .onScrollGeometryChange(for: Bool.self) { geometry in
-                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 48
+                geometry.contentOffset.y + geometry.containerSize.height - geometry.contentInsets.bottom >= geometry.contentSize.height - 48
             } action: { _, end in atEnd = end }
             // Stays at the live end while you're there, as a conversation does.
             .onChange(of: entries.last?.n) { if atEnd { reader.scrollTo("end", anchor: .bottom) } }
@@ -292,7 +293,7 @@ private struct SessionRow: View {
         return HStack(spacing: 8) {
             // A quiet check once done (Sangam's `.ss-tool-mark`), the working dot, red when it failed.
             Group {
-                if entry.failed { Circle().fill(Tokens.danger).frame(width: 8, height: 8).accessibilityLabel("Failed") }
+                if entry.failed { Circle().fill(Tokens.danger).frame(width: 8, height: 8).accessibilityElement().accessibilityLabel("Failed") }
                 else { WorkMarkView(mark: entry.running ? .working : .done, dot: 8) }
             }
             .frame(width: 12, height: 12)

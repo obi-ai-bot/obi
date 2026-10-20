@@ -460,7 +460,7 @@ nonisolated struct TranscriptDetail: Decodable, Equatable, Sendable {
         var exit: Int?
     }
 
-    struct FileDiff: Decodable, Equatable, Sendable {
+    struct FileDiff: Codable, Equatable, Sendable {
         var path: String?
         var patch: String
     }
@@ -482,7 +482,8 @@ nonisolated struct TranscriptDetail: Decodable, Equatable, Sendable {
         let keys = try decoder.container(keyedBy: Keys.self)
         input = try? keys.decodeIfPresent([String: JSONValue].self, forKey: .input)
         output = try? keys.decodeIfPresent(Output.self, forKey: .output)
-        diff = try? keys.decodeIfPresent([FileDiff].self, forKey: .diff)
+        // A file that can't be read is left out, never the rest of the diff.
+        diff = (try? keys.decodeIfPresent([Lenient<FileDiff>].self, forKey: .diff))?.compactMap(\.value)
     }
 
     /// From the answer: the entry, with its `detail`.
