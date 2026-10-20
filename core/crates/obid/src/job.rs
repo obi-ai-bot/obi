@@ -779,8 +779,6 @@ impl Job {
             "artifacts": self.artifacts.iter().map(|a| json!({"id": a.id, "version": a.version})).collect::<Vec<_>>(),
             "artifactProblems": self.artifact_problems,
             "followUpOf": self.follow_up_of,
-            "reason": self.reason,
-            "nextStep": self.next_step,
             "routine": self.routine.as_ref().map(|r| json!({"id": r.id, "name": r.name,
                 "scheduled": obi_protocol::time::format(r.scheduled), "catchUp": r.catch_up})),
             "supervised": supervised,
@@ -793,6 +791,10 @@ impl Job {
             // The agent's own words, quoted: never obid's.
             value["contextBy"] = json!("agent");
         }
+        // Why it stopped and its one next step (#725), out of the literal above: json!'s recursion
+        // limit.
+        value["reason"] = json!(self.reason);
+        value["nextStep"] = json!(self.next_step);
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
         }

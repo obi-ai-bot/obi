@@ -134,6 +134,7 @@ pub fn section(job: &Job, home: &Path) -> String {
     }
     if let Some(next) = &job.next_step {
         lines.push(format!("Next step: {next}"));
+    }
     // What its conversation did each time it stalled (super::supervisor), in obid's words.
     for step in &job.supervised {
         let started = if step.jobs.is_empty() {
