@@ -87,7 +87,7 @@ struct PairingView: View {
     }
 
     private var remoteHostname: String? {
-        guard remote?.step == .on, let hostname = remote?.hostname, MacLink.isHostname(hostname) else { return nil }
+        guard remote?.on == true, let hostname = remote?.hostname, MacLink.isHostname(hostname) else { return nil }
         return hostname
     }
 

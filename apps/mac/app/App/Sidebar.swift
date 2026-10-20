@@ -53,13 +53,6 @@ nonisolated enum SidebarSections {
     /// the main thread on name lookups.
     static let macName = SCDynamicStoreCopyComputerName(nil, nil) as String?
 
-    /// Under your name in the account menu: the Oby account's email once Remote access signed in,
-    /// else this Mac's name.
-    static func accountLine(email: String?, mac: String?) -> String {
-        if let email, !email.isEmpty { return email }
-        return mac ?? "This Mac"
-    }
-
     /// "WP" for Wellington Prado: the first letters of the first two names.
     static func initials(_ name: String) -> String {
         let parts = name.split(separator: " ").prefix(2).compactMap { $0.first }
@@ -385,15 +378,14 @@ private struct IconStrip: View {
         .background(alignment: .top) { WindowDragArea().frame(height: state.chrome.bar) }
     }
 
-    /// You (Sangam's account menu): your name and the Oby account's email, then Settings, which
-    /// opens on General unless one of its pages shows. There's no Oby login for the Mac itself, so
-    /// no Log out: Remote access signs its account out on its own page.
+    /// You (Sangam's account menu): your name and this Mac's name, then Settings, which opens on
+    /// General unless one of its pages shows. There's no Oby login, so no Log out.
     private var account: some View {
         let name = NSFullUserName()
         return Menu {
-            // Sangam's head: your name, the address under it.
+            // Sangam's head: your name, this Mac under it (there's no Oby account to show).
             Text(name)
-            Text(SidebarSections.accountLine(email: model.remote?.email, mac: SidebarSections.macName))
+            Text(SidebarSections.macName ?? "This Mac")
             Divider()
             Button("Settings") { withAnimation(Tokens.warm) { state.openSettings() } }
         } label: {

@@ -9,6 +9,14 @@ export interface Ingress {
   service: string;
 }
 
+/// Whether a tunnel has cloudflared connected, and when it last came up or went down (ISO
+/// times, null when it never did).
+export interface TunnelStatus {
+  connected: boolean;
+  activeAt: string | null;
+  inactiveAt: string | null;
+}
+
 export interface TunnelAPI {
   /// A remotely managed tunnel (its configuration lives at Cloudflare); returns its id.
   createTunnel(name: string, secret: string): Promise<{ id: string }>;
@@ -17,6 +25,9 @@ export interface TunnelAPI {
   deleteTunnel(id: string): Promise<void>;
   /// The token `cloudflared tunnel run` connects with.
   tunnelToken(id: string): Promise<string>;
+  tunnelStatus(id: string): Promise<TunnelStatus>;
+  /// The zone's own name: the device domain, when CF_ZONE_ID is the right zone.
+  zoneName(): Promise<string>;
   /// A proxied CNAME in the zone: `name` → `target`. Returns the record's id.
   createCNAME(name: string, target: string): Promise<{ id: string }>;
   deleteDNSRecord(id: string): Promise<void>;
@@ -63,6 +74,23 @@ export class CloudflareAPI implements TunnelAPI {
     return this.call<string>("read the tunnel's token", "GET", `/accounts/${this.account}/cfd_tunnel/${id}/token`);
   }
 
+  async tunnelStatus(id: string): Promise<TunnelStatus> {
+    const tunnel = await this.call<{ status?: string; conns_active_at?: string | null; conns_inactive_at?: string | null }>(
+      "read the tunnel's status",
+      "GET",
+      `/accounts/${this.account}/cfd_tunnel/${id}`,
+    );
+    return {
+      connected: tunnel.status === "healthy" || tunnel.status === "degraded",
+      activeAt: tunnel.conns_active_at ?? null,
+      inactiveAt: tunnel.conns_inactive_at ?? null,
+    };
+  }
+
+  async zoneName(): Promise<string> {
+    return (await this.call<{ name: string }>("read the zone", "GET", `/zones/${this.zone}`)).name;
+  }
+
   async createCNAME(name: string, target: string): Promise<{ id: string }> {
     const record = await this.call<{ id: string }>("add the DNS record", "POST", `/zones/${this.zone}/dns_records`, {
       type: "CNAME",
@@ -100,8 +128,8 @@ export class CloudflareAPI implements TunnelAPI {
   }
 }
 
-/// The API from the Worker's secrets; without them, one that says so when first used, so sign-in
-/// and installations still work in `wrangler dev` with only the email sender set.
+/// The API from the Worker's secrets; without them, one that says so when first used, so
+/// installations still work in `wrangler dev`.
 export function tunnelsFromEnv(env: Env): TunnelAPI {
   if (env.CF_API_TOKEN && env.CF_ACCOUNT_ID && env.CF_ZONE_ID) {
     return new CloudflareAPI(env.CF_API_TOKEN, env.CF_ACCOUNT_ID, env.CF_ZONE_ID);
@@ -114,6 +142,8 @@ export function tunnelsFromEnv(env: Env): TunnelAPI {
     configureTunnel: async () => missing(),
     deleteTunnel: async () => missing(),
     tunnelToken: async () => missing(),
+    tunnelStatus: async () => missing(),
+    zoneName: async () => missing(),
     createCNAME: async () => missing(),
     deleteDNSRecord: async () => missing(),
   };
