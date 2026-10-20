@@ -404,7 +404,8 @@ impl Connections {
         )
     }
 
-    /// Job `id`'s token, made the first time it's asked for.
+    /// Job `id`'s token, made the first time it's asked for. obid learns it as a secret: whatever
+    /// repeats it (the agent's MCP config read back, a header it prints) is masked everywhere.
     fn job_token(&self, id: &str) -> String {
         let mut tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
         tokens
@@ -417,6 +418,7 @@ impl Connections {
                     uuid::Uuid::new_v4().simple()
                 );
                 tokens.insert(token.clone(), id.to_owned());
+                crate::secrets::known().learn(&format!("job {id} MCP token"), &token);
                 token
             })
     }
@@ -426,6 +428,7 @@ impl Connections {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, job| job != id);
+        crate::secrets::known().forget(&format!("job {id} MCP token"));
         self.snapshots
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1721,6 +1724,14 @@ mod tests {
             .block_on(broker.close_job("job1"));
         let tokens = broker.tokens.lock().unwrap();
         assert!(!tokens.contains_key(&token) && tokens.contains_key(&other));
+        // A job's token is a secret obid knows while the job lives (#787): whatever repeats it
+        // (the agent's MCP config, read back) is masked.
+        let known = crate::secrets::known();
+        assert_eq!(
+            known.redact(&format!("x {other} y")),
+            "x [redacted: job job2 MCP token] y"
+        );
+        assert_eq!(known.redact(&token), token, "forgotten once its job closed");
     }
 
     /// A connections file with an entry no API request could have saved (edited by hand, or by

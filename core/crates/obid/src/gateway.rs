@@ -72,6 +72,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/jobs/*"),
     ("GET", "/v1/jobs/*/wait"),
     ("GET", "/v1/jobs/*/transcript"),
+    ("GET", "/v1/jobs/*/transcript/*"),
     ("GET", "/v1/jobs/*/report"),
     ("POST", "/v1/jobs/*/proposals/*/file"),
     ("POST", "/v1/jobs/*/stop"),

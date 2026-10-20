@@ -7,7 +7,7 @@ import Foundation
 nonisolated struct MacLink: Codable, Equatable, Sendable {
     /// What the Mac calls itself, as its Bonjour service is named.
     var name: String
-    /// The tunnel's hostname: oby-<opaque>.tetrix.pro.
+    /// The tunnel's hostname: oby-<opaque>.<the control plane's device domain>.
     var hostname: String
 
     /// Where the tunnel answers.
