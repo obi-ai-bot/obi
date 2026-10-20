@@ -354,6 +354,11 @@ main() {
         rm -f "$rw"
         hdiutil verify -quiet "$dmg"
     fi
+    # The checksum doesn't prove the copy is whole: the app inside must verify, every nested signature.
+    mnt="$(hdiutil attach -nobrowse -readonly -noautoopen "$dmg" | awk -F'\t' '/\/Volumes\//{print $NF}')"
+    [[ -n "$mnt" ]] || die "couldn't attach $dmg"
+    codesign --verify --deep --strict "$mnt/Oby.app" || { hdiutil detach "$mnt" -force -quiet; die "Oby.app in $dmg_name doesn't verify"; }
+    hdiutil detach "$mnt" -quiet || hdiutil detach "$mnt" -force -quiet
     if $dry_run; then
         codesign --force --sign - "$dmg"
         note "signed ad hoc, not notarized (dry run)"
