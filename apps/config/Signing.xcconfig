@@ -5,10 +5,10 @@
 // To override any of these on one Mac, write them in apps/config/Signing.local.xcconfig (gitignored).
 // CI's ad hoc flags (docs/ci.md) still win: command-line settings beat every xcconfig.
 
-OBY_TEAM_ID = PQKAL8E36D
+OBY_TEAM_ID = 3UV9W5SV7W
 
 OBY_MAC_BUNDLE_ID = com.deskree.oby
-OBY_IPHONE_BUNDLE_ID = dev.wellprado.oby
+OBY_IPHONE_BUNDLE_ID = com.deskree.oby
 
 // Where the Mac app looks for updates (apps/mac/app/Info.plist, SUFeedURL): the appcast scripts/release.sh
 // writes and uploads. "//" starts a comment in an xcconfig, so the empty $() keeps the URL whole.

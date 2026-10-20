@@ -1068,7 +1068,7 @@ Registers a device's publishing key, once per device: the iPhone's (named "iPhon
 Hands the runner a Live Activity push token, so it can keep the phone's Lock Screen and Dynamic Island current while the app is suspended:
 
 ```json
-{"token": "80a1f2…", "kind": "update", "topic": "dev.wellprado.oby", "environment": "development"}
+{"token": "80a1f2…", "kind": "update", "topic": "com.deskree.oby", "environment": "development"}
 ```
 
 - `token`: the push token in hex. `kind`: `"update"` for one activity's token, `"start"` for the app's push-to-start token (a newer one replaces the older for the same app and environment). `topic`: the app's bundle ID. `environment`: `"development"` (a build from Xcode) or `"production"` (TestFlight and the App Store).
@@ -1087,7 +1087,7 @@ Apple's answer `410` or `BadDeviceToken` drops a token. The runner keeps tokens 
 Hands the runner the app's device token, so it can tell the phone when a job needs you:
 
 ```json
-{"token": "5b0e9c…", "topic": "dev.wellprado.oby", "environment": "production"}
+{"token": "5b0e9c…", "topic": "com.deskree.oby", "environment": "production"}
 ```
 
 - `token`: the device token from `registerForRemoteNotifications`, in hex. `topic` and `environment` as for `/v1/activities`. The app sends it on every launch once notifications are allowed (it asks the first time something said on the phone starts a job).
@@ -1261,7 +1261,7 @@ The Watch approves with a turn of the crown, after showing the runner's sentence
 
 ### `POST /v1/notifications` on the Watch API
 
-The Watch's own push tokens: `{"token": "5b0e9c…", "topic": "dev.wellprado.oby.watchkitapp", "environment": "production", "kind": "alert"}`.
+The Watch's own push tokens: `{"token": "5b0e9c…", "topic": "com.deskree.oby.watchkitapp", "environment": "production", "kind": "alert"}`.
 
 - `kind` `"alert"` (the default) is the Watch app's device token. The runner sends it exactly the alerts and clearing pushes it sends the iPhone (`POST /v1/notifications` above), the same payload with the same `apns-collapse-id`, so the Watch shows each alert once.
 - `kind` `"widget"` is the complications' WidgetKit push token. When the number of jobs that need you or are working changes, the runner sends `{"aps": {"content-changed": true}}` (`apns-push-type: widgets`, topic `<topic>.push-type.widgets`), and the complications fetch the jobs themselves. A newer widget token replaces the Watch's older one.
