@@ -154,6 +154,9 @@ pub struct Turn {
     /// The last words the agent wrote this turn: its `result` carries none when its last message
     /// was a tool call (#764).
     pub last_words: String,
+    /// It ended with a background task of its own still running: it ended before the task did
+    /// (Claude Code's; crate::jobs).
+    pub left_running: bool,
 }
 
 impl Turn {
@@ -227,8 +230,8 @@ pub async fn run_turn(
 /// input takes one turn after another; `--max-turns` counts each on its own), and it comes back
 /// with the turn: a conversation's next turn skips starting it (docs/fast-replies.md). A `result`
 /// while a background task of the agent's still runs isn't the turn's end: it waits for the turn
-/// Claude Code starts by itself when the task ends, its quiet clock held meanwhile
-/// ([`Conn::holding`]), and the turn's `result` is that one's.
+/// Claude Code starts by itself when the task ends, the task standing for progress meanwhile as a
+/// change in the worktree does ([`Conn::holding`]), and the turn's `result` is that one's.
 pub async fn turn_on(
     mut conn: Conn,
     prompt: &str,
@@ -240,9 +243,9 @@ pub async fn turn_on(
 
     let mut turn = Turn::default();
     let mut api_key_source = None;
-    // The background tasks it started (Bash's `run_in_background`, Monitor, a background
-    // subagent), by id, with what each does, until Claude Code says each one ended.
-    let mut background: Vec<(String, String)> = Vec::new();
+    // What each of its background tasks still running does (Bash's `run_in_background`,
+    // Monitor), as Claude Code's last `background_tasks_changed` listed them.
+    let mut background: Vec<String> = Vec::new();
     // Its turn ended with some of them still running: it waits for them.
     let mut idle = false;
     loop {
@@ -281,19 +284,19 @@ pub async fn turn_on(
                                   "response": {"subtype": "success", "request_id": id, "response": response}}))
                     .await;
             }
+            // The whole list each time it changes. Its housekeeping (`ambient`) and the tasks it
+            // waits for in the turn itself (`awaited`) wake nothing after it.
             Some("system")
-                if message.get("subtype").and_then(Value::as_str) == Some("task_started") =>
+                if message.get("subtype").and_then(Value::as_str)
+                    == Some("background_tasks_changed") =>
             {
-                background.push((
-                    text_of(&message, "task_id"),
-                    text_of(&message, "description"),
-                ));
-            }
-            Some("system")
-                if message.get("subtype").and_then(Value::as_str) == Some("task_notification") =>
-            {
-                let ended = text_of(&message, "task_id");
-                background.retain(|(id, _)| *id != ended);
+                background = message["tasks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|t| t["ambient"] != true && t["awaited"] != true)
+                    .map(|t| text_of(t, "description"))
+                    .collect();
             }
             Some("system") if message.get("subtype").and_then(Value::as_str) == Some("init") => {
                 idle = false;
@@ -374,7 +377,7 @@ pub async fn turn_on(
                 // terminal (claude 2.1.302, 2026-10-20): with its input still open, a
                 // `task_notification` and then a turn of its own, `init` to `result`. So a turn
                 // that ends waiting on one isn't the end: the agent goes on when it's done.
-                if let Some((_, what)) = background.last() {
+                if let Some(what) = background.last() {
                     idle = true;
                     on_event(Event::Step(if what.is_empty() {
                         "Waiting for a background task".into()
@@ -392,6 +395,7 @@ pub async fn turn_on(
             _ => {}
         }
     }
+    turn.left_running = !background.is_empty();
     turn.timed_out = conn.timed_out;
     turn.quiet = conn.quiet_out;
     turn.stopped = conn.stopped;

@@ -173,29 +173,41 @@ fn a_job_waits_for_its_background_task() {
     assert!(job["stalled"].is_null(), "{job}");
 }
 
-/// Waiting counts as progress only while the task is alive: once it ended and the agent doesn't
-/// go on, the job stalls as a quiet one does.
+/// Waiting counts as progress only while the task is alive, and for 4 quiet windows at most with
+/// no word from the agent, as a change in the worktree does: once the task ended and the agent
+/// doesn't go on, or when it never ends (a server, a `--watch`), the job stalls as a quiet one does.
 #[test]
-fn a_finished_background_task_is_no_progress() {
+fn a_background_task_is_progress_only_for_a_while() {
     let (_folder, obid) = obid("long-background-silent");
-    let id = post_job(&obid, "BACKGROUND: 1000 SILENT");
-    let job = wait(&obid, &id);
-    assert_eq!(job["status"], "interrupted", "{job}");
-    assert_eq!(job["stalled"]["why"], "quiet", "{job}");
+    let silent = post_job(&obid, "BACKGROUND: 1000 SILENT");
+    let forever = post_job(&obid, "BACKGROUND: 0 FOREVER");
+    for id in [silent, forever] {
+        let job = wait(&obid, &id);
+        assert_eq!(job["status"], "interrupted", "{job}");
+        assert_eq!(job["stalled"]["why"], "quiet", "{job}");
+    }
 }
 
-/// An agent that ends its turn to wait for something obid can't see running (a `&` in a shell, or
-/// Codex) is told once to wait in the foreground, and goes on; one that ends waiting again needs
-/// you, never "nothing committed".
+/// A Claude Code that ends before its background task does (it exits, so nothing can wake it) is
+/// told once, in its session, to wait in the foreground, and goes on, the transcript saying it was
+/// Oby's words; one that ends that way again needs you, never "nothing committed".
 #[test]
-fn a_turn_that_ends_waiting_goes_on_or_needs_you() {
+fn a_turn_that_ends_before_its_task_goes_on_or_needs_you() {
     let (_folder, obid) = obid("long-waits");
-    let id = post_job(&obid, "WAITS");
+    let id = post_job(&obid, "BACKGROUND: 0 EXIT");
     let job = wait(&obid, &id);
     assert_eq!(job["status"], "done", "{job}");
     assert_eq!(job["summary"], "Built in the foreground.", "{job}");
+    let transcript = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript"), None);
+    assert!(
+        transcript
+            .text
+            .contains("Oby told Claude Code to wait for its work in the foreground"),
+        "{}",
+        transcript.text
+    );
 
-    let again = post_kind(&obid, "build", "WAITS ALWAYS");
+    let again = post_kind(&obid, "build", "BACKGROUND: 0 EXIT ALWAYS");
     let job = wait(&obid, &again);
     assert_eq!(job["status"], "interrupted", "{job}");
     let reason = job["reason"].as_str().unwrap();
