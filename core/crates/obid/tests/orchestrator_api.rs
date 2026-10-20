@@ -116,6 +116,25 @@ fn a_failed_job_is_read_then_retried_once() {
     );
 }
 
+/// An event the brain can't answer is left for the owner, saying why: never "didn't read its job".
+#[test]
+fn an_event_the_brain_cant_answer_escalates_saying_why() {
+    let folder = Folder::new("orchestrator-brain-failed");
+    let obid = started(&folder);
+    let id = failing(&obid);
+    queue(&obid, &["EXIT 15".into(), "EXIT 15".into()]);
+    let item = within(60, "it escalates", || escalations(&obid).pop());
+    assert!(
+        item["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Oby's brain couldn't answer this event: Claude Code failed."),
+        "{item}"
+    );
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["round"], 1);
+}
+
 /// An event whose job the brain can't match to it escalates and changes nothing.
 #[test]
 fn an_event_it_cant_match_escalates_and_changes_nothing() {

@@ -19,7 +19,7 @@ use super::actions::{self, Asked, Outcome, Talk};
 use super::find::{self, Finds};
 use super::orchestrator::{self, Orchestration};
 use super::plan::{Action, Plan};
-use super::planner::{Planner, Record, Room};
+use super::planner::{Planner, Record, Room, Unanswered};
 use super::read::{self, JobReads};
 use super::research;
 use super::rules::{self, Number};
@@ -304,6 +304,28 @@ fn finish(end: &End, done: &[String], looked: &[String]) -> Talk {
     } else {
         Talk::reply(words)
     }
+}
+
+/// What a turn says when no brain answered: which brain and how, what the turn did or looked
+/// at first, and what the owner can do.
+fn unanswered(failed: &Unanswered, done: &[String], looked: &[String]) -> Talk {
+    let why = failed.why();
+    Talk::reply(if !done.is_empty() {
+        format!(
+            "{} Then Oby's brain couldn't answer: {why}. Say “continue” for the rest.",
+            done.join(" ")
+        )
+    } else if !looked.is_empty() {
+        format!(
+            "Oby {}, then its brain couldn't answer: {why}. Say “continue” to pick up from there.",
+            listed(looked)
+        )
+    } else {
+        format!(
+            "Oby's brain couldn't answer: {why}, so nothing was started. {}",
+            failed.advice()
+        )
+    })
 }
 
 /// Adds what the turn looked at, once; an event turn, which `speaks` to no one, keeps none.
@@ -863,8 +885,9 @@ async fn run_with(
                 }
                 break 'step (End::Stopped, finish(&End::Stopped, &done, &looked));
             }
-            // The turn's budget ran out while the brain thought: its plan does nothing.
-            if Instant::now() >= deadline {
+            // The turn's budget ran out while the brain thought: its plan does nothing. A brain
+            // that failed meanwhile says so instead.
+            if Instant::now() >= deadline && planned.failed.is_none() {
                 planned
                     .refused
                     .push("the plan came after the turn's budget: nothing done".into());
@@ -872,6 +895,24 @@ async fn run_with(
                 break 'step (End::BudgetSpent, finish(&End::BudgetSpent, &done, &looked));
             }
             Record::new(&request, &planned).of(control, step).keep(home);
+            // No brain answered: the owner hears which and how, and an event waits for them.
+            if let Some(failed) = &planned.failed {
+                if let Some(orchestration) = orchestration {
+                    let escalation = orchestrator::Escalation {
+                        why: format!(
+                            "Oby's brain couldn't answer this event: {}. Oby recommends reviewing the job.",
+                            failed.why()
+                        ),
+                        reply: "My brain couldn't answer, so I left that event for you.",
+                    };
+                    orchestration.escalate(shared, &escalation);
+                    break 'step (
+                        End::BrainFailed,
+                        after(&done, Talk::reply(escalation.reply)),
+                    );
+                }
+                break 'step (End::BrainFailed, unanswered(failed, &done, &looked));
+            }
             if let Some(refusal) = super::rules::acting_refusal(&planned, step) {
                 break 'step (End::BrainFailed, after(&done, Talk::reply(refusal)));
             }

@@ -280,14 +280,17 @@ fn exhausted_retries_keep_exit_and_stderr_in_fallback_evidence() {
         &obid,
         &["EXIT 15 failure 1".into(), "EXIT 15 failure 2".into()],
     );
-    // Rules stand in: "hello" names no repository, so they ask.
+    // Rules don't guess: the turn says the brain failed.
     let answer = said(&obid, "hello");
-    assert_eq!(answer["kind"], "question", "{answer}");
-    assert_eq!(answer["question"]["text"], "Which repository?");
+    assert_eq!(
+        answer["text"],
+        "Oby's brain couldn't answer: Claude Code failed, so nothing was started. Try again.",
+        "{answer}"
+    );
     assert_eq!(calls(&obid).len(), 2);
     assert_eq!(ends(&obid), ["brain_failed"]);
     let record = records(&obid).pop().unwrap();
-    assert_eq!(record["by"], "rules");
+    assert_eq!(record["by"], "none");
     let refused = record["refused"].as_array().unwrap();
     assert_eq!(refused.len(), 1, "{refused:?}");
     for attempt in 1..=2 {
@@ -423,6 +426,72 @@ fn codex_plans_when_claude_cannot() {
             .unwrap()
             .starts_with("claude failed: claude returned no plan after retry")
     );
+}
+
+/// When both brains take too long, the reply says which and that nothing started, and is kept in
+/// the conversation.
+#[test]
+fn both_brains_taking_too_long_say_so_and_start_nothing() {
+    let folder = Folder::new("brain-both-slow");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    let agents = planner().parent().unwrap().to_path_buf();
+    config["agents"]["codex"] = json!({"bin": agents.join("fake-codex"), "accounts": []});
+    // Each brain gets half of a 6-second turn: Claude's two tries outlast it, and fake-codex never
+    // answers words with STALL in them.
+    config["turnBudget"] = json!(6);
+    let obid = start(&folder.0, &config, Some(&agents));
+    let slow = format!("SLEEP 30 {}", fixes(&[18]));
+    queue(&obid, &[slow.clone(), slow]);
+    let answer = said(&obid, "fix fixture-app #18 STALL");
+    let words = "Oby's brain couldn't answer: Claude Code and Codex both took too long, so nothing was started. Try again.";
+    assert_eq!(answer["text"], words, "{answer}");
+    assert_eq!(answer["jobs"], json!([]));
+    assert!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(last_oby_turn(&obid)["text"], words);
+    assert_eq!(ends(&obid), ["brain_failed"]);
+    let record = records(&obid).pop().unwrap();
+    assert_eq!(record["by"], "none");
+    let refused = record["refused"].to_string();
+    assert!(refused.contains("attempt 1: timeout"), "{refused}");
+    assert!(
+        refused.contains("codex failed: Codex took too long."),
+        "{refused}"
+    );
+}
+
+/// On a very busy Mac, once Claude has taken too long Codex isn't asked: it would crawl too, and
+/// the owner hears now, told why.
+#[test]
+fn a_very_busy_mac_says_so_after_one_slow_brain() {
+    let folder = Folder::new("brain-busy");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    let agents = planner().parent().unwrap().to_path_buf();
+    config["agents"]["codex"] = json!({"bin": agents.join("fake-codex"), "accounts": []});
+    config["turnBudget"] = json!(6);
+    let obid = start_with(&folder.0, &config, Some(&agents), &[("OBID_LOAD", "512.3")]);
+    let slow = format!("SLEEP 30 {}", reply("Late."));
+    queue(&obid, &[slow.clone(), slow]);
+    let answer = said(&obid, "how is it going?");
+    assert_eq!(
+        answer["text"],
+        "Oby's brain couldn't answer: Claude Code took too long, so nothing was started. The Mac is very busy (load 512): try again once it calms down.",
+        "{answer}"
+    );
+    let record = records(&obid).pop().unwrap();
+    let refused = record["refused"].to_string();
+    assert!(
+        refused.contains("codex skipped: the Mac is very busy"),
+        "{refused}"
+    );
+    assert_eq!(record["calls"].as_array().unwrap().len(), 2, "{record}");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3982,7 +4051,10 @@ fn no_extra_step_after_a_brain_failure() {
         &obid,
         "ask before anything on Vault secrets, then fix fixture-app #18",
     );
-    assert_eq!(answer["text"], "Vault secrets is in Ask mode now.");
+    assert_eq!(
+        answer["text"],
+        "Vault secrets is in Ask mode now. Then Oby's brain couldn't answer: Claude Code failed. Say “continue” for the rest."
+    );
     assert!(!checked(&obid));
     assert_eq!(calls(&obid).len(), 3);
     assert_eq!(ends(&obid), ["brain_failed"]);
@@ -4231,7 +4303,7 @@ fn a_brain_failure_after_research_says_what_was_looked_at() {
         &[search("Hello"), "EXIT 15".into(), "EXIT 15".into()],
     );
     let answer = said(&obid, "where does the app say hello?");
-    let words = "Oby searched obi-e2e/fixture-app for “Hello”, then couldn't think it through: say “continue” to pick up from there.";
+    let words = "Oby searched obi-e2e/fixture-app for “Hello”, then its brain couldn't answer: Claude Code failed. Say “continue” to pick up from there.";
     assert_eq!(answer["text"], words, "{answer}");
     assert_eq!(last_oby_turn(&obid)["text"], words);
     assert_eq!(ends(&obid), ["brain_failed"]);

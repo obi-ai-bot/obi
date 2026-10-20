@@ -1418,6 +1418,7 @@ async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Resul
         by: "harness".into(),
         refused: vec![],
         calls: vec![],
+        failed: None,
     };
     let asked = Asked {
         said: &session.said,
