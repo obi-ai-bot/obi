@@ -1028,7 +1028,8 @@ fn a_check_run_names_its_failing_tests_and_masks_the_vault() {
         json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt", "check": check}),
     );
     let job = ended(&obid, &id);
-    assert_eq!(job["status"], "failed", "{job}");
+    // Its check never passed: it needs you at its limit (#725).
+    assert_eq!(job["status"], "interrupted", "{job}");
     let checks = job["checks"].as_array().unwrap();
     assert_eq!(checks.len(), 1, "{job}");
     let run = &checks[0];
