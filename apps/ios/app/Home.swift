@@ -289,7 +289,8 @@ struct HomeChip: View {
 }
 
 /// One kind of work's page (Sangam's GroupView.tsx): its name, Running and Completed tabs with
-/// their counts, a card per task under the open tab, and under Completed the way to Archived.
+/// their counts (Review PR and Issues have To do first, for GitHub's items no job works on yet), a
+/// card per task under the open tab, and under Completed the way to Archived.
 struct KindPage: View {
     @Environment(Phone.self) private var phone
     @Environment(\.push) private var push
@@ -302,41 +303,36 @@ struct KindPage: View {
     private var connect: GitHubWork.Connect { gitHub ? .init(phone.gitHubWork) : .unknown }
     /// Routines only: each routine's next run.
     private var upcoming: [RunnerRoutine] { kind == .routines ? RunnerRoutine.upcoming(phone.routines) : [] }
-    private var waiting: [GitHubWork.Item] { gitHub ? phone.gitHubWork?.waiting(kind, later: phone.gitHubLater) ?? [] : [] }
+    /// To do is where the page opens, unless a job runs or needs you, only when it has something:
+    /// GitHub's items, or Connect GitHub.
+    private var opensOnToDo: Bool { gitHub && (!toDo.isEmpty || connect == .signedOut) }
+    private var toDo: [GitHubWork.Column] { gitHub ? phone.gitHubWork?.toDo(kind, later: phone.gitHubLater) ?? [] : [] }
 
     /// GitHub's sign-in is the Mac's alone: a paired phone never signs the Mac in to someone's GitHub.
     static let connectLine = "See the pull requests waiting for your review and the issues assigned to you here, and hand any of them to Oby in one tap. Connect GitHub on your Mac, in Settings › Connectors."
 
     var body: some View {
         let items = WorkList.ranked(phone.work.filter { $0.type == kind })
-        let tab = picked ?? (waiting.isEmpty ? WorkList.firstTab(items) : .running)
+        let tab = picked ?? WorkList.firstTab(items, toDo: opensOnToDo)
+        let columns = toDo
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
                 Text(kind.label).font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink)
                     .padding(.bottom, 12).accessibilityAddTraits(.isHeader)
-                LineTabs(tab: tab, counts: Dictionary(uniqueKeysWithValues: WorkList.Tab.allCases.map {
-                    ($0, WorkList.items(items, in: $0).count + ($0 == .running ? waiting.count + upcoming.count : 0))
-                })) {
+                LineTabs(tab: tab, counts: WorkList.counts(items, toDo: gitHub ? columns.reduce(0) { $0 + $1.items.count } : nil, upcoming: upcoming.count)) {
                     picked = $0
                 }
                 .padding(.bottom, 12)
                 let cards = WorkList.items(items, in: tab)
-                if tab == .running {
-                    // A routine waiting for its next run says when (Sangam's tasks.ts).
-                    ForEach(upcoming) { UpcomingRoutineCard(routine: $0) }
-                    if connect == .signedOut { ConnectGitHubCard(line: Self.connectLine, connect: nil) }
-                    ForEach(waiting) { item in
-                        GitHubCard(item: item, start: { try await phone.startGitHubWork(item.id) }, later: { phone.gitHubLater.insert(item.id) })
-                    }
-                    ForEach(phone.gitHubWork?.cut(kind) ?? [], id: \.self) { line in
-                        Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.horizontal, 4)
-                    }
-                    if let problem = phone.gitHubWork?.error {
-                        Text(verbatim: GitHubWork.plain(problem)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.horizontal, 4)
-                    }
+                if tab == .todo {
+                    GitHubToDo(kind: kind, work: phone.gitHubWork, columns: columns,
+                               connect: connect == .signedOut ? ConnectGitHubCard(line: Self.connectLine, connect: nil) : nil,
+                               start: { try await phone.startGitHubWork($0.id) }, later: { phone.gitHubLater.insert($0.id) })
                 }
+                // A routine waiting for its next run says when (Sangam's tasks.ts).
+                if tab == .running { ForEach(upcoming) { UpcomingRoutineCard(routine: $0) } }
                 ForEach(cards) { TaskCard(item: $0) }
-                if cards.isEmpty && (tab == .done || waiting.isEmpty && upcoming.isEmpty && connect != .signedOut) {
+                if tab != .todo && cards.isEmpty && (tab == .done || upcoming.isEmpty) {
                     Text(tab == .done ? "Nothing completed yet" : "Nothing running")
                         .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
                 }
@@ -351,7 +347,9 @@ struct KindPage: View {
         .obyPage()
         .navigationBarTitleDisplayMode(.inline)
         // The tab it opens on stays put while you're on it, so a task arriving doesn't switch it.
-        .onAppear { picked = picked ?? (waiting.isEmpty ? WorkList.firstTab(items) : .running) }
+        // On Review PR and Issues it waits for GitHub's list, so it doesn't settle on an empty Running first.
+        .onAppear { if !gitHub || phone.gitHubWork != nil { picked = picked ?? WorkList.firstTab(items, toDo: opensOnToDo) } }
+        .onChange(of: phone.gitHubWork == nil) { if picked == nil { picked = WorkList.firstTab(items, toDo: opensOnToDo) } }
         .refreshable { await phone.reload() }
         // Opening Review PR or Issues looks at GitHub again; the list arrives as an event.
         .task { if gitHub { await phone.refreshGitHubWork() } }

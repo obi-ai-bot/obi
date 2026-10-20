@@ -8,6 +8,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "check": "tsc --noEmit",
+    "test": "vitest run --config worker.vitest.ts",
     "migrate:local": "wrangler d1 migrations apply oby-control --local",
     "migrate:remote": "wrangler d1 migrations apply oby-control --remote"
   },

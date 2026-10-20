@@ -68,6 +68,7 @@ pub async fn run_turn(
         tools: HashMap::new(),
         current: String::new(),
         before: String::new(),
+        thinking: String::new(),
         notes: Vec::new(),
         plan_approved: false,
         tokens: crate::usage::Tokens::default(),
@@ -353,6 +354,36 @@ impl ToolCall {
     }
 }
 
+/// What an update's text content says (a call's output), when it has any.
+fn output_of(content: &Value) -> Option<String> {
+    let texts: Vec<&str> = content
+        .as_array()?
+        .iter()
+        .filter(|b| b["type"] == "content")
+        .filter_map(|b| b["content"]["text"].as_str())
+        .collect();
+    (!texts.is_empty()).then(|| texts.join("\n"))
+}
+
+/// An update's diffs as unified diffs, by path.
+fn patches(content: &Value) -> Vec<(String, String)> {
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| b["type"] == "diff")
+        .map(|b| {
+            let path = b["path"].as_str().unwrap_or("").to_owned();
+            let patch = crate::detail::replaced(
+                &path,
+                b["oldText"].as_str().unwrap_or(""),
+                b["newText"].as_str().unwrap_or(""),
+            );
+            (path, patch)
+        })
+        .collect()
+}
+
 /// The lines an update's diffs add and remove, when it has any.
 fn diff_lines(content: &Value) -> Option<(u64, u64)> {
     let count = |v: &Value| v.as_str().map_or(0, |s| s.lines().count() as u64);
@@ -463,6 +494,8 @@ struct Run<D, E> {
     /// What the agent said this turn: the message in progress, and the one before the last tool call.
     current: String,
     before: String,
+    /// Its thinking in progress: a thought once something else comes.
+    thinking: String,
     /// What obid declined, for the next prompt.
     notes: Vec<String>,
     /// The tool's plan was approved while it was in plan mode: it goes ahead in its agent mode.
@@ -472,6 +505,18 @@ struct Run<D, E> {
 }
 
 impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
+    /// The thinking so far, as one thought, once something else comes.
+    fn thought(&mut self) {
+        if !self.thinking.trim().is_empty() {
+            let text = std::mem::take(&mut self.thinking);
+            (self.on_event)(Event::Thought {
+                text,
+                seconds: None,
+            });
+        }
+        self.thinking.clear();
+    }
+
     fn signed_out(&self) -> String {
         format!(
             "{} · {} is signed out: sign in with {}'s own login on this account's folder (its configDir).",
@@ -633,6 +678,7 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
             .await?;
         match answer {
             Ok(answer) => {
+                self.thought();
                 if let Some(tokens) = crate::usage::acp_tokens(&answer) {
                     self.tokens = self.tokens.plus(&tokens);
                     (self.on_event)(Event::Tokens(self.tokens.clone()));
@@ -677,9 +723,19 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         match message["method"].as_str() {
             Some("session/update") => {
                 let update = &params["update"];
+                if update["sessionUpdate"] != "agent_thought_chunk" {
+                    self.thought();
+                }
                 match update["sessionUpdate"].as_str() {
                     Some("agent_message_chunk") if update["content"]["type"] == "text" => {
-                        self.current
+                        let chunk = update["content"]["text"].as_str().unwrap_or("");
+                        self.current.push_str(chunk);
+                        if !chunk.is_empty() {
+                            (self.on_event)(Event::Delta(chunk.to_owned()));
+                        }
+                    }
+                    Some("agent_thought_chunk") if update["content"]["type"] == "text" => {
+                        self.thinking
                             .push_str(update["content"]["text"].as_str().unwrap_or(""));
                     }
                     Some(kind @ ("tool_call" | "tool_call_update")) => {
@@ -713,6 +769,8 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                                 failed: status == "failed",
                                 exit: update["rawOutput"]["exitCode"].as_i64(),
                                 lines: diff_lines(&update["content"]),
+                                output: output_of(&update["content"]),
+                                patches: patches(&update["content"]),
                             });
                         }
                     }

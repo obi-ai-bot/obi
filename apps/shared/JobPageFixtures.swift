@@ -195,4 +195,43 @@ nonisolated enum JobPageFixture: String, CaseIterable, Sendable {
         }
     }
 }
+/// Sangam's sample session (#786's "#251 Attention queue") as obid would send it (#755, #784):
+/// two rounds, words, thinking, reads, a search, Tetrix, edits, a failed test run, your words, a
+/// to-do list, a call still running and words still being written. For previews and pictures.
+nonisolated enum SessionFixture {
+    static func entries(now: Date = .now) -> [TranscriptEntry] {
+        func at(_ minutesAgo: Double) -> Date { now.addingTimeInterval(-minutesAgo * 60) }
+        let tool = { (n: Int, ago: Double, tool: String, activity: String, summary: String, state: String, seconds: Double?) in
+            TranscriptEntry(n: n, at: at(ago), kind: "tool", tool: tool, summary: summary, state: state, seconds: seconds, activity: activity)
+        }
+        var edit1 = tool(7, 47, "Edit", "edit", "Edited Mac/App/LivePanel.swift", "done", 0.1); edit1.added = 4; edit1.removed = 2
+        var run = tool(8, 46, "Bash", "test", "Ran xcodebuild test -scheme Oby -only-testing:MacTests/LivePanelTests", "failed", 192); run.exit = 65
+        var edit2 = tool(14, 2, "Edit", "edit", "Edited Mac/App/LivePanel.swift", "done", 0.1); edit2.added = 12; edit2.removed = 5
+        return [
+            TranscriptEntry(n: 1, at: at(51), kind: "start", summary: "Round 1 on Cursor"),
+            TranscriptEntry(n: 2, at: at(51), kind: "said", text: "I'll read how the attention queue is built before changing anything."),
+            tool(3, 50, "Read", "read", "Read Engine/Inbox.swift", "done", 0.2),
+            tool(4, 50, "Grep", "search", "Searched for attentionItems", "done", 0.1),
+            tool(5, 49, "mcp__tetrix__impact", "tetrix", "Asked Tetrix what calls LivePanel.attentionItems", "done", 2.1),
+            TranscriptEntry(n: 6, at: at(48), kind: "said", text: "The queue sorts by `created`, newest first. Issue #251 wants the oldest waiting item on top, so I'll flip the sort and run the panel's tests."),
+            edit1, run,
+            TranscriptEntry(n: 9, at: at(42), kind: "thought", text: "Two failures. testStableOrder wants items created at the same second to keep inbox order, and Swift's sort isn't stable. testNeedsYouFirst wants questions above info items, which I filtered instead of sorting.", seconds: 9),
+            TranscriptEntry(n: 10, at: at(3), kind: "start", summary: "Round 2 on Cursor"),
+            TranscriptEntry(n: 11, at: at(3.5), kind: "you", summary: "Also keep the items that need me above the rest."),
+            TranscriptEntry(n: 12, at: at(3), kind: "said", text: "Round 1 sorted the queue by created date, but the tests want a stable order with the items that need you first. I'll sort by (needs you, created, index in the inbox) and run the tests again."),
+            TranscriptEntry(n: 13, at: at(3), kind: "plan", summary: "1 of 3 done", todos: [.init(text: "Make the sort stable", state: "done"),
+                                                                                                  .init(text: "Keep items that need you first", state: "running"),
+                                                                                                  .init(text: "Run LivePanelTests", state: "pending")]),
+            edit2,
+            tool(15, 0.05, "Read", "read", "Reading Engine/Inbox.swift", "running", nil),
+            TranscriptEntry(n: 16, at: at(0), kind: "said", text: "Checking how the inbox marks an item that needs you, so the sort reads the same flag the notch does"),
+        ]
+    }
+
+    /// What the failed test run's row opens into.
+    static let detail = TranscriptDetail(
+        input: ["command": .string("xcodebuild test -scheme Oby -only-testing:MacTests/LivePanelTests")],
+        output: .init(text: "Signing with team [vault: APPLE_TEAM_ID]\nTest Suite 'LivePanelTests' started\nTest Case '-[LivePanelTests testQueueOrder]' passed (0.012 seconds)\nTest Case '-[LivePanelTests testStableOrder]' failed (0.009 seconds)\n    XCTAssertEqual failed: (\"[b, a]\") is not equal to (\"[a, b]\")\nExecuted 9 tests, with 2 failures (0 unexpected) in 0.084 seconds\n** TEST FAILED **",
+                      lines: 1284, truncated: true, exit: 65))
+}
 #endif

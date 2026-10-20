@@ -149,6 +149,8 @@ struct ChatPageTests {
         #expect(AskKind.label("permission") == "Permission" && AskKind.label("limit") == "Out of usage")
         #expect(AskKind.label("failed") == "Failed" && AskKind.failed("failed") && AskKind.failed("merge"))
         #expect(!AskKind.failed("question") && !AskKind.failed("permission") && !AskKind.failed("review"))
+        // GitHub work obid offers to start is an offer, never a failure.
+        #expect(AskKind.label("github") == "Start it?" && !AskKind.failed("github"))
     }
 
     /// Typed words answer the card that asked for them in words; else Oby's own question while it
