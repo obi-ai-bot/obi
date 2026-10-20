@@ -72,7 +72,7 @@ export const PUBLIC_MAIL_DOMAINS = new Set([
   "icloud.com", "me.com", "mac.com",
   "proton.me", "protonmail.com", "pm.me",
   "aol.com",
-  "gmx.com", "gmx.net", "gmx.de", "gmx.at", "gmx.ch",
+  "gmx.com", "gmx.net", "gmx.de", "gmx.at", "gmx.ch", "web.de",
   "yandex.ru", "yandex.com", "ya.ru",
   "mail.ru", "qq.com", "163.com", "126.com",
 ]);

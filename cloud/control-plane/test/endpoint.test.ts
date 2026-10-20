@@ -177,6 +177,20 @@ describe("what a tunnel may cost", () => {
     expect(full.body.error).toBe("Accounts at cheap.example have 25 Macs with remote access on already. Forget one first.");
   });
 
+  it("two universities under ac.in don't share a bucket", async () => {
+    const app = testApp();
+    const path = "/v1/installations/self/endpoint";
+    for (let i = 0; i < 25; i++) await app.fill(1, `net-${i}`, await app.googleUser(`x-live-${i}`, "x.ac.in"));
+    const y = await Mac.make();
+    expect((await app.registerWithGoogle(y, "y-1", "student@y.ac.in", "y.ac.in", "10.1.0.1")).status).toBe(201);
+    expect(await env.DB.prepare("SELECT limit_domain FROM users WHERE sub = 'google:y-1'").first("limit_domain")).toBe("y.ac.in");
+    expect((await app.call(y, "POST", path, undefined, { "CF-Connecting-IP": "10.1.0.1" })).status).toBe(201);
+    // x.ac.in's own accounts are at its 25.
+    const x = await Mac.make();
+    expect((await app.registerWithGoogle(x, "x-1", "student@mail.x.ac.in", null, "10.2.0.1")).status).toBe(201);
+    expect((await app.call(x, "POST", path, undefined, { "CF-Connecting-IP": "10.2.0.1" })).status).toBe(409);
+  });
+
   it("a Workspace's accounts get the larger allowance from wrangler.jsonc; personal accounts on its addresses don't", async () => {
     const app = testApp({}, { WORKSPACE_DOMAIN_ENDPOINTS: "30", WORKSPACE_DOMAIN_REGISTRATIONS: "22" });
     const path = "/v1/installations/self/endpoint";

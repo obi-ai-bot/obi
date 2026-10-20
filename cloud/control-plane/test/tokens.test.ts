@@ -42,6 +42,27 @@ describe("tokens", () => {
     expect(registrableDomain("bad_label.example.com")).toBeNull();
   });
 
+  it("finds registrable domains by the Public Suffix List's ICANN section, not a short list", () => {
+    // Two-level suffixes a short list missed: each university or company is its own domain.
+    expect(registrableDomain("x.ac.in")).toBe("x.ac.in");
+    expect(registrableDomain("mail.y.ac.in")).toBe("y.ac.in");
+    expect(registrableDomain("ac.in")).toBeNull();
+    for (const suffix of ["ac.nz", "ac.za", "ac.il", "ac.kr", "edu.cn", "co.at", "com.pl", "org.nz", "net.nz", "ltd.uk", "com.pe"]) {
+      expect(registrableDomain(`a.b.${suffix}`), suffix).toBe(`b.${suffix}`);
+    }
+    // A wildcard (`*.ck`) and its exception (`!www.ck`).
+    expect(registrableDomain("a.b.ck")).toBe("a.b.ck");
+    expect(registrableDomain("b.ck")).toBeNull();
+    expect(registrableDomain("a.www.ck")).toBe("www.ck");
+    // Names a guess by shape would split are one domain: co.de and web.de are domains, not suffixes.
+    expect(registrableDomain("a.co.de")).toBe("co.de");
+    expect(registrableDomain("x.web.de")).toBe("web.de");
+    // The private section isn't used: github.io's users are one domain to the limits.
+    expect(registrableDomain("someone.github.io")).toBe("github.io");
+    // No rule: the last label is the suffix.
+    expect(registrableDomain("a.example.unlisted-tld")).toBe("example.unlisted-tld");
+  });
+
   it("makes tunnel secrets of 32 random bytes", () => {
     expect(atob(tunnelSecret())).toHaveLength(32);
     expect(tunnelSecret()).not.toBe(tunnelSecret());
