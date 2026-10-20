@@ -703,20 +703,39 @@ pub(super) fn started_by(job: &Job, conversation: &str, turn: &str) -> Option<St
 pub(super) fn follow_up(shared: &Arc<Shared>, job: &Job, new: NewJob) -> Outcome {
     let name = job.short_title();
     match shared.jobs.create(new) {
-        Ok(next) => Outcome::Started(
-            format!(
-                "{name} is finished, so I started a follow-up: {}. {} has it in {} on {}.",
-                next.short_title(),
-                tool_name(&next.agent),
-                next.repo_name(),
-                account_name(shared, &next.account)
-            ),
-            next.to_json(),
-        ),
+        Ok(next) => Outcome::Started(follow_up_line(shared, job, &next), next.to_json()),
         Err(refused) => Outcome::Failed(format!(
             "Couldn't start a follow-up of {name}: {}",
             refused.0
         )),
+    }
+}
+
+/// What Oby says once `next`, the follow-up of `job`, started.
+pub(crate) fn follow_up_line(shared: &Shared, job: &Job, next: &Job) -> String {
+    format!(
+        "{} is finished, so I started a follow-up: {}. {} has it in {} on {}.",
+        job.short_title(),
+        next.short_title(),
+        tool_name(&next.agent),
+        next.repo_name(),
+        account_name(shared, &next.account)
+    )
+}
+
+/// What Oby says once the owner's words for `job` (`POST /v1/jobs/{id}/messages`) reached
+/// `heard`: `job` itself, the follow-up they started, or the one already following it up.
+pub(crate) fn told_line(shared: &Shared, job: &Job, heard: &Job) -> String {
+    let name = job.short_title();
+    if heard.id == job.id {
+        format!("Told {name} what you said.")
+    } else if heard.heard.is_empty() {
+        follow_up_line(shared, job, heard)
+    } else {
+        format!(
+            "Already on it in {}, the follow-up of {name}: I told it what you said.",
+            heard.short_title()
+        )
     }
 }
 

@@ -92,17 +92,6 @@ struct TaskPageTests {
         #expect(TaskFacts.facts(running, mode: "plan").first { $0.name == "Mode" }?.value == "Plan")
     }
 
-    /// The page's box: Oby about the task while it runs, and once a finished one can pick its
-    /// session up (a follow-up), nothing while it's queued or can't.
-    @Test func thePagesBoxTalksToTheAgentWhenItCanListen() {
-        #expect(TaskFacts.box(job(.running)) == "Tell Oby about this task…")
-        #expect(TaskFacts.box(job(.queued)) == nil)
-        #expect(TaskFacts.box(job(.done)) == nil)
-        var resumable = job(.done)
-        resumable.session = "s"
-        #expect(TaskFacts.box(resumable) == "Tell Oby about this task…")
-    }
-
     /// A decision shows on the card and the page while the job waits on your OK or your answer.
     @Test func aDecisionShowsWhileTheJobWaitsOnYou() {
         var asking = job(.running)

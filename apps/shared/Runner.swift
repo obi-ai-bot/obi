@@ -1136,9 +1136,12 @@ nonisolated struct Runner: Sendable {
 
     /// Tells the job's agent something: the runner answers with the job, or with the follow-up a
     /// finished one gets (`followUpOf` set), except Try again's words, which pick its session up again.
-    func tell(_ id: String, _ text: String) async throws -> Job {
-        struct Body: Encodable { var text: String }
-        return try await call("POST", "v1/jobs/\(id)/messages", body: Body(text: text))
+    /// `conversation`: said on the task's page, the words and Oby's answer join the job's
+    /// conversation (obid only); `attachments` go with the follow-up.
+    func tell(_ id: String, _ text: String, conversation: Bool = false, attachments: [String] = []) async throws -> Job {
+        struct Body: Encodable { var text: String; var conversation: Bool?; var attachments: [String]? }
+        return try await call("POST", "v1/jobs/\(id)/messages",
+                              body: Body(text: text, conversation: conversation ? true : nil, attachments: attachments.isEmpty ? nil : attachments))
     }
     func models() async throws -> ModelSettings { try await call("GET", "v1/settings/models") }
     func modelOptions() async throws -> ModelOptions { try await call("GET", "v1/settings/models/options") }

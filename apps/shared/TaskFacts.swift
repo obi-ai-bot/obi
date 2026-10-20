@@ -88,10 +88,8 @@ nonisolated enum TaskFacts {
         return facts
     }
 
-    /// The page's box (Sangam's TaskView): words for Oby about the task while it can take them (it
-    /// runs, or a finished one can pick its session up, which starts a follow-up); nil when there's
-    /// nothing to tell.
-    static func box(_ job: Job) -> String? {
-        job.status == .running || (!job.isActive && job.resumable) ? "Tell Oby about this task…" : nil
-    }
+    /// The page's box (Sangam's TaskView), always there: words for Oby about the task, which it
+    /// passes on to the agent, or which start a follow-up of a finished one.
+    static let box = "Tell Oby about this task…"
+
 }
