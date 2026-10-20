@@ -6,19 +6,26 @@ import SwiftUI
 /// with the runner's own token (`POST /v1/pairing/invite`), which only this app holds: a phone
 /// reaching the gateway can redeem an invitation but can't mint one, and nothing on this Mac can
 /// read a file for it. The QR contains the gateway URL, the link JSON, and the one-time secret.
+/// The URL is a route a phone can reach the gateway by (`PairingRoute`): Remote access's hostname,
+/// or the gateway as `tailscale serve` publishes it on the tailnet.
 struct PairingView: View {
     let feed: RunnerFeed
     let remote: RemoteAccess?
     @Environment(\.openSettingsPage) private var openSettings
     @State private var invitation: GatewayInvitation?
+    /// The route the invitation was made for, shown with its QR.
+    @State private var invited: PairingRoute?
+    /// Nil until looked for once.
+    @State private var tailscale: String??
+    @State private var chosen: PairingRoute?
     @State private var devices: [PairedGatewayDevice] = []
     @State private var problem: String?
     @State private var busy = false
 
     var body: some View {
         SetGroup("Pair a device", problem: problem) {
-            if let invitation {
-                SetRow(about: "Valid for two minutes. The code is single-use. LAN pairing uses HTTP plus a device token.") {
+            if let invitation, let invited {
+                SetRow(about: "\(invited.label). Valid for two minutes. The code is single-use.") {
                     VStack(alignment: .leading, spacing: 8) {
                         if let image = Self.qr(invitation.qrText) {
                             Image(nsImage: image).interpolation(.none).resizable().frame(width: 180, height: 180)
@@ -28,20 +35,30 @@ struct PairingView: View {
                     }
                 }
             }
-            if remote != nil, !remoteOn {
-                // A phone pairs through Remote access: the button goes there, and comes back once it's on.
-                SetRow("Remote access is off", about: "Your iPhone reaches this Mac through Remote access. Allow it, then pair.") {
-                    Button("Allow Remote Access") { openSettings(.remote, spotlight: .remoteAccess) }
+            if tailscale != nil, routes.isEmpty {
+                // No way in yet: either route works, and the buttons check again once one is on.
+                SetRow("No way to reach this Mac yet", about: "Turn on Remote access, or publish the gateway on your tailnet: \(PairingRoute.serveCommand(port: PairingRoute.gatewayPort()))") {
+                    if remote != nil {
+                        Button("Allow Remote Access") { openSettings(.remote, spotlight: .remoteAccess) }
+                            .buttonStyle(.set)
+                    }
+                    Button("Check again") { Task { await findTailscale() } }
                         .buttonStyle(.set)
                 }
             } else {
-                SetRow("") {
+                if routes.count > 1 {
+                    SetRow("Pair over") {
+                        SetSelect("Pair over", selection: Binding { route } set: { chosen = $0 },
+                                  options: routes.map { (Optional($0), $0.label) })
+                    }
+                }
+                SetRow(routes.count == 1 ? route?.label ?? "" : "") {
                     Button(busy ? "Creating…" : invitation == nil ? "Pair a device" : "Create new invitation") {
                         openSettings.clear(.pairDevice)
                         Task { await create() }
                     }
                     .buttonStyle(.set)
-                    .disabled(busy)
+                    .disabled(busy || route == nil)
                 }
                 .spotlit(openSettings.spotlight == .pairDevice, id: .pairDevice)
             }
@@ -61,25 +78,42 @@ struct PairingView: View {
             }
         }
         .task { await loadDevices() }
+        .task { await findTailscale() }
+        // Back from Terminal, where `tailscale serve` may have just been run.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await findTailscale() }
+        }
     }
 
-    private var remoteOn: Bool { remote?.step == .on && remote?.hostname.map(MacLink.isHostname) == true }
+    private var remoteHostname: String? {
+        guard remote?.step == .on, let hostname = remote?.hostname, MacLink.isHostname(hostname) else { return nil }
+        return hostname
+    }
+
+    private var routes: [PairingRoute] { PairingRoute.routes(remote: remoteHostname, tailscale: tailscale ?? nil) }
+
+    /// The one the user picked while it's still there, else the first.
+    private var route: PairingRoute? { chosen.flatMap { routes.contains($0) ? $0 : nil } ?? routes.first }
+
+    private func findTailscale() async {
+        tailscale = .some(await PairingRoute.tailnetHost(port: PairingRoute.gatewayPort()))
+    }
 
     private func create() async {
         busy = true
         defer { busy = false }
         do {
             let name = Host.current().localizedName ?? "Mac"
-            guard let hostname = remote?.hostname, MacLink.isHostname(hostname),
-                  let advertisedURL = URL(string: "https://\(hostname)") else {
-                throw RunnerError(message: "Turn on Remote access before creating a pairing QR code.")
+            guard let route else {
+                throw RunnerError(message: "Turn on Remote access, or publish the gateway on your tailnet, before creating a pairing QR code.")
             }
             var request = try runnerRequest(path: "v1/pairing/invite", method: "POST")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONEncoder().encode(Invite(name: name, hostname: hostname, url: advertisedURL.absoluteString))
+            request.httpBody = try JSONEncoder().encode(Invite(name: name, hostname: route.hostname, url: "https://\(route.hostname)"))
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw RunnerError(message: "The runner refused to create a pairing invitation.") }
             invitation = try PairingPayloadDecoder.decodeInvitation(data)
+            invited = route
             problem = nil
         } catch { problem = error.localizedDescription }
     }
@@ -132,6 +166,85 @@ struct PairingView: View {
     }
 
     private struct Invite: Encodable { var name: String; var hostname: String; var url: String }
+}
+
+/// A way a phone reaches this Mac's gateway over HTTPS, as an invitation advertises it: its
+/// `hostname` is the link's, port included for Tailscale (docs/runner-api.md, "obid only: the
+/// gateway"). Never a Funnel URL: the gateway stays off the public internet.
+nonisolated enum PairingRoute: Hashable, Sendable {
+    /// Remote access's hostname (RemoteAccess).
+    case remote(String)
+    /// `host.tailnet.ts.net:port`, from `tailscale serve`.
+    case tailscale(String)
+
+    var hostname: String {
+        switch self { case .remote(let host), .tailscale(let host): host }
+    }
+
+    var label: String {
+        switch self {
+        case .remote(let host): "Through Remote access: \(host)"
+        case .tailscale(let host): "Over Tailscale: \(host)"
+        }
+    }
+
+    /// Remote access first when it's on, then the tailnet.
+    static func routes(remote: String?, tailscale: String?) -> [PairingRoute] {
+        [remote.map(PairingRoute.remote), tailscale.map(PairingRoute.tailscale)].compactMap { $0 }
+    }
+
+    static func serveCommand(port: Int) -> String { "tailscale serve --bg --https=8443 http://127.0.0.1:\(port)" }
+
+    /// The gateway's port in obid's configuration (`"gateway": "127.0.0.1:8810"`), else 8810.
+    static func gatewayPort(config: Data? = try? Data(contentsOf: FileManager.default.homeDirectoryForCurrentUser
+        .appending(path: "Library/Application Support/Oby/obid/config.json"))) -> Int {
+        guard let config, let object = try? JSONSerialization.jsonObject(with: config) as? [String: Any],
+              let gateway = object["gateway"] as? String, let port = gateway.split(separator: ":").last.flatMap({ Int($0) })
+        else { return 8810 }
+        return port
+    }
+
+    static let tailscaleCLIs = ["/usr/local/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]
+
+    /// The tailnet route to the gateway on `port`, from the first Tailscale CLI there is. Only
+    /// `status` runs: Oby never changes Tailscale's configuration.
+    static func tailnetHost(port: Int, clis: [String] = tailscaleCLIs) async -> String? {
+        guard let cli = clis.first(where: FileManager.default.isExecutableFile(atPath:)),
+              let output = try? await Shell.run([cli, "serve", "status", "--json"], timeout: 5),
+              output.status == 0 else { return nil }
+        return tailnetHost(serveStatus: output.out, port: port)
+    }
+
+    /// The `host:port` in `tailscale serve status --json` whose root proxies to the gateway on
+    /// 127.0.0.1:`port` (an HTTPS handler, or a TCP forward that ends TLS), tailnet only: one
+    /// that also allows Funnel is left out.
+    static func tailnetHost(serveStatus: Data, port: Int) -> String? {
+        guard let status = try? JSONDecoder().decode(ServeStatus.self, from: serveStatus) else { return nil }
+        let funnel = Set((status.AllowFunnel ?? [:]).filter(\.value).keys)
+        let gateway = { (target: String?) in
+            guard var target else { return false }
+            if let scheme = target.firstRange(of: "://") {
+                guard target.hasPrefix("http://") else { return false }
+                target = String(target[scheme.upperBound...])
+            }
+            return target == "127.0.0.1:\(port)" || target == "localhost:\(port)"
+        }
+        let web = (status.Web ?? [:]).filter { gateway($0.value.Handlers?["/"]?.Proxy) }.keys
+        let tcp = (status.TCP ?? [:]).compactMap { tcpPort, handler in
+            gateway(handler.TCPForward) ? handler.TerminateTLS.map { "\($0):\(tcpPort)" } : nil
+        }
+        return (Array(web) + tcp).filter { !funnel.contains($0) && MacLink.isHostname($0) }.sorted().first
+    }
+
+    /// The parts of Tailscale's ServeConfig that say where a port goes.
+    private struct ServeStatus: Decodable {
+        struct TCPHandler: Decodable { var TCPForward: String?; var TerminateTLS: String? }
+        struct Handler: Decodable { var Proxy: String? }
+        struct Web: Decodable { var Handlers: [String: Handler]? }
+        var TCP: [String: TCPHandler]?
+        var Web: [String: Web]?
+        var AllowFunnel: [String: Bool]?
+    }
 }
 
 struct GatewayInvitation: Decodable {
