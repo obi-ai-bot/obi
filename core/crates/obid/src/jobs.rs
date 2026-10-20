@@ -3055,6 +3055,7 @@ impl Jobs {
         }
         let _ = std::fs::remove_dir_all(self.temp_path(id));
         let _ = std::fs::remove_dir_all(self.login_path(id));
+        self.transcripts.remove(id);
         // Only a branch no other job uses, and only the clone's: what was pushed stays on the
         // remote.
         if !branch_stays && git::is_branch_name(&job.branch) {
@@ -3721,9 +3722,7 @@ impl Jobs {
         if tool == Tool::Codex
             && let Some((_, token)) = broker.or(tetrix.as_ref())
         {
-            // Whatever repeats it (a conversation's shell that read another process's
-            // environment) is redacted.
-            crate::secrets::known().learn(&format!("job {} MCP token", job.id), token);
+            // A secret obid knows since it made it (crate::connections::Connections::job_token).
             extra.push(("OBY_MCP_TOKEN", token.into()));
         }
         match (&account.config_dir, tool) {

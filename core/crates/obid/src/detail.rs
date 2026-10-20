@@ -3,7 +3,9 @@
 //! [`OUTPUT_LINES`] lines or [`OUTPUT_BYTES`], whichever is less) and an edit's unified diff. Masked
 //! before anything is written: the secrets obid holds, in every form it knows, become
 //! `[vault: NAME]` (`[redacted: NAME]` for obid's own); then a line the secret scan flags becomes
-//! `[redacted: <rule>]`, and only that line. It never reaches the brain.
+//! `[redacted: <rule>]`, and only that line, except where a secret goes on over lines: a private
+//! key hides through its END line, and a run of base64 or hex lines that holds one hides whole.
+//! Text is masked before it's cut short, never after. It never reaches the brain.
 
 use serde_json::{Value, json};
 
@@ -12,23 +14,124 @@ pub const OUTPUT_LINES: usize = 200;
 pub const OUTPUT_BYTES: usize = 64 * 1024;
 /// How long one string of a call's input, the agent's words or a diff may be.
 pub const TEXT_BYTES: usize = 64 * 1024;
+/// How much more than is kept is masked first, so a secret that crosses the cut is found whole.
+const MARGIN: usize = 16 * 1024;
 
 /// `text` as it may leave obid: the secrets obid holds out, then each line the secret scan
-/// flags replaced by `[redacted: <rule>]`. Line breaks stay.
+/// flags replaced by `[redacted: <rule>]`; a private key from its BEGIN line through its END line
+/// (or the end), and every line of a base64 or hex run over lines that a rule finds in. Line
+/// breaks stay. Bound the text before: the work grows with it.
 pub fn mask(text: &str) -> String {
     let text = vault_markers(&crate::secrets::known().redact(text));
-    let mut masked = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
-        let body = line.trim_end_matches(['\n', '\r']);
-        let rules = crate::scan::matches(body);
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let bodies: Vec<String> = lines
+        .iter()
+        .map(|l| l.trim_end_matches(['\n', '\r']).to_owned())
+        .collect();
+    let mut hidden: Vec<Option<Vec<String>>> = vec![None; lines.len()];
+    let mut i = 0;
+    while i < bodies.len() {
+        let rules = crate::scan::matches(&bodies[i]);
         if rules.is_empty() {
-            masked.push_str(line);
+            i += 1;
+            continue;
+        }
+        let last = if rules.iter().any(|r| r.starts_with("private key")) {
+            (i..bodies.len())
+                .find(|&j| key_end(&bodies[j]))
+                .unwrap_or(bodies.len() - 1)
         } else {
-            masked.push_str(&format!("[redacted: {}]", rules.join(", ")));
-            masked.push_str(&line[body.len()..]);
+            i
+        };
+        for line in &mut hidden[i..=last] {
+            line.get_or_insert_with(|| rules.clone());
+        }
+        i = last + 1;
+    }
+    // A token wrapped over lines is on no line whole. A word on its own line next to the run
+    // looks like part of it, so the run is tried with a line off either end too.
+    for marked in [false, true] {
+        for (first, last, joined) in crate::secrets::encoded_runs(&bodies, marked) {
+            let trimmed = |from: usize, to: usize| -> String {
+                bodies[from..=to]
+                    .iter()
+                    .map(|b| {
+                        b.trim_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ','))
+                    })
+                    .collect()
+            };
+            // The narrowest that holds a secret is what's hidden.
+            let mut tries: Vec<(usize, usize, String)> = Vec::new();
+            for (from, to) in [
+                (first + 1, last.saturating_sub(1)),
+                (first + 1, last),
+                (first, last.saturating_sub(1)),
+            ] {
+                if from < to && to <= last {
+                    tries.push((from, to, trimmed(from, to)));
+                }
+            }
+            tries.push((first, last, joined));
+            if let Some((from, to, mut rules)) = tries
+                .into_iter()
+                .map(|(from, to, text)| (from, to, crate::scan::matches(&text)))
+                .find(|(_, _, rules)| !rules.is_empty())
+            {
+                rules.dedup();
+                for line in &mut hidden[from..=to] {
+                    line.get_or_insert_with(|| rules.clone());
+                }
+            }
+        }
+    }
+    let mut masked = String::with_capacity(text.len());
+    for ((line, body), hidden) in lines.iter().zip(&bodies).zip(hidden) {
+        match hidden {
+            None => masked.push_str(line),
+            Some(rules) => {
+                masked.push_str(&format!("[redacted: {}]", rules.join(", ")));
+                masked.push_str(&line[body.len()..]);
+            }
         }
     }
     masked
+}
+
+/// A private key's last line: `-----END … PRIVATE KEY-----`.
+fn key_end(line: &str) -> bool {
+    line.contains("-----END") && line.contains("PRIVATE KEY")
+}
+
+/// A private key's first line.
+pub fn key_begins(line: &str) -> bool {
+    line.contains("-----BEGIN") && line.contains("PRIVATE KEY")
+}
+
+/// `text` masked, at most [`TEXT_BYTES`] (with `…` when it was longer): cut a little past that
+/// first, masked, then cut again, so a secret that crosses the cut is found whole.
+pub fn masked(text: &str) -> String {
+    if text.len() <= TEXT_BYTES {
+        return mask(text);
+    }
+    capped(&mask(prefix(text, TEXT_BYTES + MARGIN)))
+}
+
+/// The first `bytes` of `text` at most, at a character.
+fn prefix(text: &str, bytes: usize) -> &str {
+    let mut cut = bytes.min(text.len());
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &text[..cut]
+}
+
+/// The last `bytes` of `text` at most, at a character.
+fn suffix(text: &str, bytes: usize) -> &str {
+    let mut from = text.len().saturating_sub(bytes);
+    while !text.is_char_boundary(from) {
+        from += 1;
+    }
+    &text[from..]
 }
 
 /// `[redacted: vault NAME]` as `[vault: NAME]`: a vault secret says it's the vault's.
@@ -51,22 +154,19 @@ fn vault_markers(text: &str) -> String {
         .into_owned()
 }
 
-/// `text` cut to [`TEXT_BYTES`] at a character, with `…` when it was longer.
+/// Masked `text` cut to [`TEXT_BYTES`] at a character, with `…` when it was longer. Only for
+/// text already masked ([`masked`] for any other).
 pub fn capped(text: &str) -> String {
     if text.len() <= TEXT_BYTES {
         return text.to_owned();
     }
-    let mut cut = TEXT_BYTES;
-    while !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}…", &text[..cut])
+    format!("{}…", prefix(text, TEXT_BYTES))
 }
 
-/// A call's input with every string in it capped and masked.
+/// A call's input with every string in it masked and capped.
 pub fn input(value: &Value) -> Value {
     match value {
-        Value::String(text) => Value::String(mask(&capped(text))),
+        Value::String(text) => Value::String(masked(text)),
         Value::Array(items) => Value::Array(items.iter().map(input).collect()),
         Value::Object(fields) => {
             Value::Object(fields.iter().map(|(k, v)| (k.clone(), input(v))).collect())
@@ -78,39 +178,50 @@ pub fn input(value: &Value) -> Value {
 /// A call's output as it's kept: `{text, lines, truncated, exit}`, `text` its last
 /// [`OUTPUT_LINES`] lines (at most [`OUTPUT_BYTES`]), masked; `lines` the whole output's count.
 pub fn output(raw: &str, exit: Option<i64>) -> Value {
-    let all: Vec<&str> = raw.lines().collect();
+    let count = raw.lines().count();
+    // Only the end is read on: a few times what's kept, so a huge output costs no more to mask.
+    let tail = suffix(raw, OUTPUT_BYTES + 4 * MARGIN);
+    let mut all: Vec<&str> = tail.lines().collect();
+    let mut cut = false;
+    // A line the window starts inside is left out: what's left of a secret in it isn't one.
+    if tail.len() < raw.len() && !raw[..raw.len() - tail.len()].ends_with('\n') && !all.is_empty() {
+        all.remove(0);
+        cut = true;
+    }
     // A few lines more than are kept are masked, so a secret over lines that starts just above
-    // the cut is still found whole.
-    let from = all.len().saturating_sub(OUTPUT_LINES + 20);
+    // the cut is still found whole; and a private key from its BEGIN line, when it's in view.
+    let mut from = all.len().saturating_sub(OUTPUT_LINES + 20);
+    if let Some(begin) = (0..from)
+        .rev()
+        .take_while(|&j| !all[j].contains("-----END"))
+        .find(|&j| key_begins(all[j]))
+    {
+        from = begin;
+    }
     let masked = mask(&all[from..].join("\n"));
     let kept: Vec<&str> = masked.lines().collect();
     let mut kept = kept[kept.len().saturating_sub(OUTPUT_LINES)..].to_vec();
     let mut text = kept.join("\n");
-    let mut cut = false;
     while text.len() > OUTPUT_BYTES && kept.len() > 1 {
         kept.remove(0);
         text = kept.join("\n");
         cut = true;
     }
     if text.len() > OUTPUT_BYTES {
-        let mut from = text.len() - OUTPUT_BYTES;
-        while !text.is_char_boundary(from) {
-            from += 1;
-        }
-        text = text[from..].to_owned();
+        text = suffix(&text, OUTPUT_BYTES).to_owned();
         cut = true;
     }
     json!({
         "text": text,
-        "lines": all.len(),
-        "truncated": cut || all.len() > kept.len(),
+        "lines": count,
+        "truncated": cut || count > kept.len(),
         "exit": exit,
     })
 }
 
 /// A file change as `{path, patch}`, its patch masked and capped.
 pub fn patch(path: &str, patch: &str) -> Value {
-    json!({"path": mask(path), "patch": mask(&capped(patch))})
+    json!({"path": masked(path), "patch": masked(patch)})
 }
 
 /// The unified diff that replaces `old` with `new` in `path`, as one hunk (an edit names no line
@@ -249,5 +360,90 @@ mod tests {
             from_input("Write", &json!({"content": "hi\n"}), "n.txt").unwrap(),
             "--- a/n.txt\n+++ b/n.txt\n@@ -0,0 +1,1 @@\n+hi\n"
         );
+    }
+
+    #[test]
+    fn a_whole_private_key_hides_through_its_end() {
+        let body: Vec<String> = (0..6)
+            .map(|i| format!("b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB{i}AAAAMwAAAAtzc2gtZWQyNTUxOQ"))
+            .collect();
+        let text = format!(
+            "cat ~/.ssh/id_ed25519\n-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\ndone\n",
+            body.join("\n")
+        );
+        let masked = mask(&text);
+        let lines: Vec<&str> = masked.lines().collect();
+        assert_eq!(lines.len(), 10, "{masked}");
+        assert_eq!(lines[0], "cat ~/.ssh/id_ed25519");
+        for line in &lines[1..9] {
+            assert!(line.starts_with("[redacted: private key"), "{masked}");
+        }
+        assert_eq!(lines[9], "done");
+        // With no END in view, to the end.
+        let open = mask(&format!("-----BEGIN RSA PRIVATE KEY-----\n{}\n", body[0]));
+        assert!(!open.contains(&body[0]), "{open}");
+    }
+
+    #[test]
+    fn a_token_wrapped_over_lines_hides_whole() {
+        let token = ["ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"].concat();
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &token);
+        let wrapped: Vec<&str> = b64
+            .as_bytes()
+            .chunks(20)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        let masked = mask(&format!("before\n{}\nafter\n", wrapped.join("\n")));
+        for piece in &wrapped {
+            assert!(!masked.contains(piece), "{masked}");
+        }
+        assert!(
+            masked.starts_with("before\n") && masked.ends_with("after\n"),
+            "{masked}"
+        );
+    }
+
+    #[test]
+    fn a_secret_across_the_cut_is_found_before_the_cut() {
+        let value = ["cut-", "secret/", "Q7m2+a=b"].concat();
+        crate::secrets::known().learn("vault cut-test", &value);
+        let text = format!("{}{value} and more", "a".repeat(TEXT_BYTES - 6));
+        let kept = masked(&text);
+        crate::secrets::known().forget("vault cut-test");
+        assert!(!kept.contains(&value[..6]), "{}", &kept[kept.len() - 40..]);
+        assert!(kept.ends_with('…'));
+        // A call's input is masked whole too.
+        crate::secrets::known().learn("vault cut-test", &value);
+        let input = input(&json!({"content": text}));
+        crate::secrets::known().forget("vault cut-test");
+        assert!(!input["content"].as_str().unwrap().contains(&value[..6]));
+    }
+
+    #[test]
+    fn a_huge_output_costs_only_its_end() {
+        let token = ["ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"].concat();
+        // One 20 MB line, then a few: the long line is cut where the window starts, so it's left
+        // out, whatever its end held.
+        let raw = format!("{}{token}\nlast one\n", "x".repeat(20 * 1024 * 1024));
+        let started = std::time::Instant::now();
+        let out = output(&raw, None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(out["text"], "last one");
+        assert_eq!(
+            (&out["lines"], &out["truncated"]),
+            (&json!(2), &json!(true))
+        );
+        // A private key whose BEGIN is above the 200 lines kept is still found.
+        let key: String = (0..250)
+            .map(|i| format!("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo{i:03}\n"))
+            .collect();
+        let raw = format!("-----BEGIN PRIVATE KEY-----\n{key}-----END PRIVATE KEY-----\nok\n");
+        let out = output(&raw, None);
+        let text = out["text"].as_str().unwrap();
+        assert!(
+            !text.contains("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo"),
+            "{text}"
+        );
+        assert!(text.ends_with("\nok"));
     }
 }

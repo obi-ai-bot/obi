@@ -87,11 +87,15 @@ impl From<Entry> for Change {
 }
 
 /// The words the agent is writing: the entry they go to once a line is whole, and what's not
-/// whole yet (a line is masked only once it's whole, since the scan judges whole lines).
+/// out yet: the line not whole yet (a line is masked only once it's whole, since the scan judges
+/// whole lines), and whole lines held back while a secret could go on over them.
 #[derive(Default)]
 struct Writing {
     n: Option<u64>,
     pending: String,
+    /// The line being written went past [`crate::detail::TEXT_BYTES`]: dropped until it ends
+    /// (the whole message, masked, replaces the words when it ends).
+    skipping: bool,
 }
 
 /// One item of the agent's to-do list.
@@ -243,7 +247,7 @@ impl Transcripts {
                     .get(&n)
                     .cloned()
                     .map(|mut entry| {
-                        let text = crate::detail::mask(&crate::detail::capped(words));
+                        let text = crate::detail::masked(words);
                         entry.summary = crate::brain::briefing::line(&text, WORDS);
                         entry.text = Some(text);
                         vec![entry]
@@ -351,6 +355,7 @@ impl Transcripts {
                 Some(Writing {
                     n: Some(n),
                     pending,
+                    ..
                 }) => live
                     .now
                     .get(&n)
@@ -364,7 +369,9 @@ impl Transcripts {
                     })
                     .into_iter()
                     .collect(),
-                Some(Writing { n: None, pending }) => said(live, "said", &pending),
+                Some(Writing {
+                    n: None, pending, ..
+                }) => said(live, "said", &pending),
                 None => vec![],
             };
             let mut ended: Vec<Entry> = live
@@ -380,6 +387,16 @@ impl Transcripts {
             words.extend(ended);
             words
         })
+    }
+
+    /// A job deleted: its transcript and detail, in memory and in their files, and their folder.
+    pub fn remove(&self, job: &str) {
+        self.forget(job);
+        let _ = std::fs::remove_file(self.path(job));
+        let _ = std::fs::remove_file(self.detail_path(job));
+        if let Some(folder) = self.path(job).parent() {
+            let _ = std::fs::remove_dir(folder);
+        }
     }
 
     /// Drops what's held in memory for the job: its turn is over. The file has it all.
@@ -596,7 +613,7 @@ fn entry(live: &mut Live, kind: &str, tool: Option<&str>, summary: String) -> En
 
 /// An entry of words (`said`, `thought`, `you`): all of them, masked, and their first line.
 fn said(live: &mut Live, kind: &str, words: &str) -> Vec<Entry> {
-    let text = crate::detail::mask(&crate::detail::capped(words));
+    let text = crate::detail::masked(words);
     let summary = crate::brain::briefing::line(&text, WORDS);
     if summary.is_empty() {
         return vec![];
@@ -610,11 +627,31 @@ fn said(live: &mut Live, kind: &str, words: &str) -> Vec<Entry> {
 /// the first) as an append. The entries made, or the appends.
 fn writing(live: &mut Live, words: &str) -> (Vec<Entry>, Vec<Change>) {
     let open = live.writing.get_or_insert_with(Writing::default);
-    open.pending.push_str(words);
-    let Some(cut) = open.pending.rfind('\n') else {
+    for piece in words.split_inclusive('\n') {
+        if !open.skipping {
+            open.pending.push_str(piece);
+        }
+        let line = open.pending.rsplit('\n').next().unwrap_or("");
+        if !open.skipping && line.len() > crate::detail::TEXT_BYTES {
+            // A line this long isn't streamed: what's pending of it is dropped.
+            let start = open.pending.len() - line.len();
+            open.pending.truncate(start);
+            open.skipping = true;
+        }
+        if piece.ends_with('\n') {
+            open.skipping = false;
+        }
+    }
+    let ready = open.pending.rfind('\n').map_or(0, |cut| cut + 1);
+    let lines: Vec<&str> = open.pending[..ready].split_inclusive('\n').collect();
+    let out: usize = lines[..lines.len() - held(&lines)]
+        .iter()
+        .map(|l| l.len())
+        .sum();
+    if out == 0 {
         return (vec![], vec![]);
-    };
-    let lines: String = open.pending.drain(..=cut).collect();
+    }
+    let lines: String = open.pending.drain(..out).collect();
     let n = open.n;
     let text = crate::detail::mask(&lines);
     match n.and_then(|n| live.now.get_mut(&n)) {
@@ -635,6 +672,36 @@ fn writing(live: &mut Live, words: &str) -> (Vec<Entry>, Vec<Change>) {
             (entries, vec![])
         }
     }
+}
+
+/// How many of these whole lines, at the end, wait for more before they go out: a private key not
+/// ended yet (from its BEGIN line), and a run of base64 or hex lines (with the line before it,
+/// which a run can continue), since a secret over lines is only found once it's all there.
+fn held(lines: &[&str]) -> usize {
+    let open_key = lines
+        .iter()
+        .rposition(|l| crate::detail::key_begins(l))
+        .filter(|&begin| !lines[begin..].iter().any(|l| l.contains("-----END")))
+        .map_or(0, |begin| lines.len() - begin);
+    let encoded = lines
+        .iter()
+        .rev()
+        .take_while(|l| {
+            let text = l.trim_matches(|c: char| {
+                c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '\\' | '+' | '-' | '>')
+            });
+            !text.is_empty()
+                && text.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-')
+                })
+        })
+        .count();
+    let run = if encoded > 0 {
+        (encoded + 1).min(lines.len())
+    } else {
+        0
+    };
+    open_key.max(run)
 }
 
 fn plan(live: &mut Live, todos: Vec<Todo>) -> Entry {
@@ -1267,7 +1334,7 @@ mod tests {
             }
         }
         crate::secrets::known().forget("vault stream-test");
-        assert!(!out.contains(a) || !out.contains(b), "{out}");
+        assert!(!out.contains(a) && !out.contains(b), "{out}");
         assert!(out.contains("[vault: stream-test]"), "{out}");
     }
 
@@ -1375,5 +1442,67 @@ mod tests {
             t.detail("j", 1).unwrap().1.unwrap()["input"]["command"],
             "ls"
         );
+    }
+
+    #[test]
+    fn a_secret_over_lines_never_streams_in_halves() {
+        let t = transcripts("stream-key");
+        let stream = |piece: &str| -> String {
+            t.record("j", &Event::Delta(piece.into()), Path::new("/w"), None)
+                .iter()
+                .map(|change| format!("{change:?}"))
+                .collect()
+        };
+        let mut out = String::new();
+        out += &stream("Here it is:\n");
+        out += &stream("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+        out += &stream("b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ\n");
+        out += &stream("AAAAAAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAI\n");
+        assert!(!out.contains("b3BlbnNzaC1"), "{out}");
+        out += &stream("-----END OPENSSH PRIVATE KEY-----\nThat was it.\n");
+        assert!(
+            !out.contains("b3BlbnNzaC1") && !out.contains("AAAAAAAAAAEAAAAz"),
+            "{out}"
+        );
+        assert!(
+            out.contains("[redacted: private key") && out.contains("That was it."),
+            "{out}"
+        );
+        // A token in base64 over lines waits until a line that isn't.
+        let token = ["ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"].concat();
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &token);
+        let (one, two) = b64.split_at(28);
+        let mut out = String::new();
+        for piece in [format!("{one}\n"), format!("{two}\n"), "Done.\n".into()] {
+            for change in t.record("j", &Event::Delta(piece), Path::new("/w"), None) {
+                out.push_str(&format!("{change:?}"));
+            }
+        }
+        assert!(!out.contains(one) && !out.contains(two), "{out}");
+    }
+
+    #[test]
+    fn a_line_too_long_never_streams() {
+        let t = transcripts("stream-long");
+        let long = "x".repeat(crate::detail::TEXT_BYTES + 10);
+        assert!(t.rec("j", &Event::Delta(long.clone())).is_empty());
+        assert!(t.rec("j", &Event::Delta(format!("{long}\n"))).is_empty());
+        let live = t.live.lock().unwrap();
+        assert!(live["j"].writing.as_ref().unwrap().pending.is_empty());
+    }
+
+    #[test]
+    fn a_removed_transcript_is_gone() {
+        let t = transcripts("remove");
+        t.record(
+            "j",
+            &tool_event("a", "Bash", json!({"command": "ls"})),
+            Path::new("/w"),
+            None,
+        );
+        assert!(t.path("j").exists() && t.detail_path("j").exists());
+        t.remove("j");
+        assert!(!t.path("j").parent().unwrap().exists());
+        assert!(t.live.lock().unwrap().get("j").is_none());
     }
 }
