@@ -3682,11 +3682,11 @@ mod tests {
         assert!(is_base_url("http://localhost:8787"));
         assert!(is_base_url("http://[::1]:8787"));
         assert!(is_base_url("http://127.0.0.2"));
-        assert!(!is_base_url("http://obi-sphere.well0cp.workers.dev"));
+        assert!(!is_base_url("http://obysphere.deskree.com"));
         assert!(!is_base_url("http://10.0.0.5:8787"));
         assert!(!is_base_url("http://169.254.169.254"));
         assert!(!is_base_url("http://127.0.0.1.nip.io"));
-        assert!(is_base_url("https://obi-sphere.well0cp.workers.dev"));
+        assert!(is_base_url("https://obysphere.deskree.com"));
     }
 
     #[test]
