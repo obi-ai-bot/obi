@@ -857,7 +857,8 @@ impl Jobs {
                 // Oby's own retry, never words the owner said: so its step and note say.
                 self.update(id, |job| {
                     if let Some(notes) = job.notes.as_mut()
-                        && notes.last().map(String::as_str) == Some(crate::brain::actions::TRY_AGAIN)
+                        && notes.last().map(String::as_str)
+                            == Some(crate::brain::actions::TRY_AGAIN)
                     {
                         notes.pop();
                         notes.push(RESET_NOTE.into());
@@ -5271,7 +5272,10 @@ impl Jobs {
                                 .then_some(usage.full_until)
                                 .flatten()
                         })
-                        .map(|at| at.saturating_add(RESET_SLACK).min(now.saturating_add(RESET_MOST)))
+                        .map(|at| {
+                            at.saturating_add(RESET_SLACK)
+                                .min(now.saturating_add(RESET_MOST))
+                        })
                         .filter(|at| *at > now);
                     if resumes.is_some() {
                         reason.push_str(" Oby tries again by itself after the reset.");

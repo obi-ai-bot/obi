@@ -116,7 +116,10 @@ mod tests {
         assert_eq!(reset_in("You've hit your usage limit.", now), None);
         // A made-up wait saturates instead of overflowing.
         assert_eq!(
-            reset_in("in 9999999999999999999 hours and 99999999999999999 minutes", now),
+            reset_in(
+                "in 9999999999999999999 hours and 99999999999999999 minutes",
+                now
+            ),
             Some(i64::MAX)
         );
         assert_eq!(reset_in("Try again at 10:45 PM.", now), None);
