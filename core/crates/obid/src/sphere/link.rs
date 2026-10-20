@@ -165,18 +165,35 @@ async fn stopped(mut stopping: watch::Receiver<bool>) {
     }
 }
 
-/// A Sphere's base URL: `http://` or `https://`, a host and maybe a port, nothing after it.
+/// A Sphere's base URL: `https://`, a host and maybe a port, nothing after it. Plain `http://`
+/// only on this machine (a local Sphere, the e2e harness's), so the delegation and every token
+/// cross the network encrypted.
 fn is_base_url(url: &str) -> bool {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"));
-    rest.is_some_and(|host| {
-        !host.is_empty()
-            && host.len() <= 255
-            && host
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'))
-    })
+    let (rest, plain) = match url.strip_prefix("https://") {
+        Some(rest) => (rest, false),
+        None => match url.strip_prefix("http://") {
+            Some(rest) => (rest, true),
+            None => return false,
+        },
+    };
+    let valid = !rest.is_empty()
+        && rest.len() <= 255
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'));
+    valid && (!plain || is_loopback(rest))
+}
+
+/// `host[:port]` names this machine: `localhost`, `127.x.x.x` or `[::1]`.
+fn is_loopback(authority: &str) -> bool {
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// An id the Sphere makes (an invitation id) or a secret: what may go in a path or a body.
@@ -839,7 +856,7 @@ impl Link {
         let url = text_field(&map, "url")?.trim_end_matches('/');
         if !is_base_url(url) {
             return Err(invalid(format!(
-                "url is the Sphere's base URL, like http://127.0.0.1:8787, not {url:?}."
+                "url is the Sphere's base URL, https (http only on this machine), like https://sphere.example.com, not {url:?}."
             )));
         }
         let sphere = text_field(&map, "sphere")?;
@@ -935,7 +952,7 @@ impl Link {
         let url = text_field(&map, "url")?.trim_end_matches('/').to_owned();
         if !is_base_url(&url) {
             return Err(invalid(format!(
-                "url is the Sphere's base URL, like http://127.0.0.1:8787, not {url:?}."
+                "url is the Sphere's base URL, https (http only on this machine), like https://sphere.example.com, not {url:?}."
             )));
         }
         let sphere = text_field(&map, "sphere")?.to_owned();
@@ -3661,6 +3678,15 @@ mod tests {
         assert!(!is_base_url("ftp://x"));
         assert!(!is_base_url("http://"));
         assert!(!is_base_url("http://a?b"));
+        // Plain http only on this machine.
+        assert!(is_base_url("http://localhost:8787"));
+        assert!(is_base_url("http://[::1]:8787"));
+        assert!(is_base_url("http://127.0.0.2"));
+        assert!(!is_base_url("http://obi-sphere.well0cp.workers.dev"));
+        assert!(!is_base_url("http://10.0.0.5:8787"));
+        assert!(!is_base_url("http://169.254.169.254"));
+        assert!(!is_base_url("http://127.0.0.1.nip.io"));
+        assert!(is_base_url("https://obi-sphere.well0cp.workers.dev"));
     }
 
     #[test]

@@ -9,6 +9,8 @@ struct SphereSettingsView: View {
     @State private var sphere: SphereModel
     @State private var pasted = ""
     @State private var invite: InviteLink?
+    /// The owner said they trust a link's server that isn't the one Oby knows.
+    @State private var trusted = false
     @State private var newName = ""
     @State private var person = ""
     @State private var link: InviteLink?
@@ -42,13 +44,21 @@ struct SphereSettingsView: View {
     @ViewBuilder private var notJoined: some View {
         if let invite {
             // "Join Deskree" (onboarding.md section 4).
+            // The name and who sent it are only what the link says; the server is what joining trusts.
             SetGroup("Join \(invite.name)", problem: sphere.problem) {
-                SetRow(invite.by.isEmpty ? "You're invited." : "\(invite.by) invited you.",
+                SetRow(invite.by.isEmpty ? "The link says you're invited." : "The link says \(invite.by) invited you.",
                        about: "\(invite.name)'s Obys can ask yours for a review or a question. You decide what it answers.")
+                SetRow("Server") { SetCode(invite.host).textSelection(.enabled) }
+                if let warning = invite.warning {
+                    SetRow(about: warning) {
+                        Toggle("I trust \(invite.host)", isOn: $trusted).toggleStyle(.checkbox)
+                    }
+                }
                 SetRow("") {
                     HStack {
                         Button("Not now") { self.invite = nil }.buttonStyle(.set)
-                        Button("Join \(invite.name)") { sphere.run { try await sphere.join(invite) } }.buttonStyle(.set)
+                        Button("Join \(invite.name)") { sphere.run { try await sphere.join(invite) } }
+                            .buttonStyle(.set).disabled(invite.warning != nil && !trusted)
                     }
                 }
             }
@@ -57,8 +67,8 @@ struct SphereSettingsView: View {
                 SetRow("Invite link") { SetField("Invite link", text: $pasted, prompt: "https://…/join#…", width: 320) }
                 SetRow("") {
                     Button("Open") {
-                        if let found = InviteLink(pasted) { invite = found; sphere.problem = nil }
-                        else { sphere.problem = "That isn't an Obysphere invite link." }
+                        if let found = InviteLink(pasted) { invite = found; trusted = false; sphere.problem = nil }
+                        else { sphere.problem = "That isn't an Obysphere invite link with a public https address." }
                     }
                     .buttonStyle(.set).disabled(pasted.isEmpty)
                 }
@@ -77,6 +87,9 @@ struct SphereSettingsView: View {
             }
         }
     }
+
+    /// nspasteboard.org's marker for a secret on the clipboard.
+    static let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
 
     /// Its id from its name (Sangam's `slugOf`): lowercase letters, digits and single hyphens.
     static func slug(_ name: String) -> String {
@@ -111,8 +124,10 @@ struct SphereSettingsView: View {
             if let link {
                 SetRow { SetCode(link.link).textSelection(.enabled) } control: {
                     Button(copied ? "Copied" : "Copy") {
+                        // Concealed: clipboard managers that honour it don't keep the secret.
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(link.link, forType: .string)
+                        NSPasteboard.general.setString("", forType: Self.concealed)
                         copied = true
                     }
                     .buttonStyle(.set)

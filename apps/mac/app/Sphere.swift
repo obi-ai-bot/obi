@@ -122,8 +122,26 @@ nonisolated struct SphereServer: Sendable {
     static let tokenExchange = "urn:ietf:params:oauth:grant-type:token-exchange"
     static let jwtType = "urn:ietf:params:oauth:token-type:jwt"
 
+    /// Why the owner's signatures can't go to `url`, or nil: only https, to a public name. Not a
+    /// name on this Mac, the network it's on or the tailnet, and never an IP address, so a link
+    /// can't aim them at the Mac's own services. A public name that resolves to a private address
+    /// still gets through: the TLS certificate has to match it.
+    static func problem(_ url: URL) -> String? {
+        guard url.scheme == "https" else { return "An Obysphere's address starts with https://." }
+        let host = (url.host() ?? "").lowercased()
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        let top = labels.last.map(String.init) ?? ""
+        let named = labels.count >= 2 && !labels.contains(where: \.isEmpty)
+            && (top.allSatisfy { $0 >= "a" && $0 <= "z" } && top.count >= 2 || top.hasPrefix("xn--"))
+        let local = ["localhost", "local", "internal", "lan", "home.arpa", "ts.net"].contains { host == $0 || host.hasSuffix(".\($0)") }
+        return named && !local ? nil : "\(host.isEmpty ? "That address" : host) isn't a public Obysphere address."
+    }
+
+    static let session = URLSession(configuration: .ephemeral, delegate: NoRedirects(), delegateQueue: nil)
+
     func call(_ method: String, _ path: String, bearer: String? = nil, json: Any? = nil,
               form: [String: String]? = nil) async throws -> [String: Any] {
+        if let problem = Self.problem(base) { throw RunnerError(message: problem) }
         var request = URLRequest(url: base.appending(path: "v0.1").appending(path: path))
         request.httpMethod = method
         request.timeoutInterval = 30
@@ -139,7 +157,7 @@ nonisolated struct SphereServer: Sendable {
         }
         let data: Data, response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await Self.session.data(for: request)
         } catch {
             throw RunnerError(message: "The Obysphere at \(base.host() ?? base.absoluteString) can't be reached: \(error.localizedDescription)")
         }
@@ -155,14 +173,24 @@ nonisolated struct SphereServer: Sendable {
         return object
     }
 
-    /// The owner's own token for `sphere` (identity.md 4.3, no actor): `admin` too when they're its admin.
-    func ownerToken(owner: String, sphere: String, key: OwnerKey) async throws -> String {
+    /// The owner's own token for `sphere` (identity.md 4.3, no actor), for `scope`: `admin` only
+    /// to invite or set the Sphere up, `directory:read` to read it.
+    func ownerToken(owner: String, sphere: String, key: OwnerKey, scope: String) async throws -> String {
         let answer = try await call("POST", "oauth/token", form: [
             "grant_type": Self.tokenExchange, "subject_token_type": Self.jwtType,
-            "subject_token": try key.assertion(owner: owner, sphere: sphere, scope: "admin directory:read audit:read"),
+            "subject_token": try key.assertion(owner: owner, sphere: sphere, scope: scope),
         ])
         guard let token = answer["access_token"] as? String else { throw RunnerError(message: "The Obysphere gave no token.") }
         return token
+    }
+}
+
+/// Follows no redirect: one would carry the owner's signatures to another address.
+// ponytail: the completion-handler form; Swift 6.4 crashes emitting the async one's ObjC thunk.
+nonisolated final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }
 
@@ -193,7 +221,23 @@ nonisolated struct InviteLink: Equatable, Sendable {
         (self.server, self.sphere, self.name, self.by, self.owner, self.obi, self.id, self.secret) = (server, sphere, name, by, owner, obi, id, secret)
     }
 
-    /// The link as pasted, or nil when it isn't one.
+    /// The Sphere's address, as the Join screen shows it.
+    var host: String { server.host() ?? server.absoluteString }
+
+    /// What the Join screen warns of, or nil for the Obysphere server Oby knows. Everything else in
+    /// the link (its name, who sent it) is only what the link says.
+    // ponytail: one known server until `<name>.obysphere.com`; then any host under it.
+    var warning: String? {
+        server == SphereModel.defaultServer ? nil
+            : "This link is for \(host), not the Obysphere server Oby knows. Joining lets that server act for your Oby for 30 days. Join only if you trust \(host)."
+    }
+
+    /// Why this Mac's Oby can't use this link, or nil: it's for one owner.
+    func mismatch(owner mine: String) -> String? {
+        mine == owner ? nil : "This invite is for \(owner), and this Mac's Oby acts for \(mine). Ask \(by.isEmpty ? "the admin" : by) for one for \(mine)."
+    }
+
+    /// The link as pasted, or nil when it isn't one, or its address isn't a public https one.
     init?(_ text: String) {
         guard let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)), url.scheme == "https" || url.scheme == "http",
               let host = url.host(), url.path() == "/join", let fragment = url.fragment(percentEncoded: true) else { return nil }
@@ -202,7 +246,7 @@ nonisolated struct InviteLink: Equatable, Sendable {
         let items = Dictionary((parts.queryItems ?? []).map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
         var origin = URLComponents()
         (origin.scheme, origin.host, origin.port) = (url.scheme, host, url.port)
-        guard let server = origin.url, let sphere = items["sphere"], let owner = items["for"], let obi = items["obi"],
+        guard let server = origin.url, SphereServer.problem(server) == nil, let sphere = items["sphere"], let owner = items["for"], let obi = items["obi"],
               let id = items["id"], let secret = items["secret"], ![sphere, owner, obi, id, secret].contains(where: \.isEmpty) else { return nil }
         self.init(server: server, sphere: sphere, name: items["name"].flatMap { $0.isEmpty ? nil : $0 } ?? sphere,
                   by: items["by"] ?? "", owner: owner, obi: obi, id: id, secret: secret)
@@ -249,8 +293,8 @@ final class SphereModel {
         static func == (a: Request, b: Request) -> Bool { a.id == b.id && a.options == b.options }
     }
 
-    /// The test Sphere until Oby Cloud hosts `<name>.obysphere.com` (onboarding.md section 4).
-    nonisolated static let defaultServer = URL(string: "https://obi-sphere.well0cp.workers.dev")!
+    /// Deskree's Sphere (moved off workers.dev on 2026-10-20) until Oby Cloud hosts `<name>.obysphere.com` (onboarding.md section 4).
+    nonisolated static let defaultServer = URL(string: "https://obysphere.deskree.com")!
     /// What another Oby may ask this one (docs/runner-api.md, `POST /v1/obid/sphere/card`).
     nonisolated static let accepts = ["review_request", "question"]
     /// What each Obi's delegation grants it (identity.md 4.2).
@@ -305,7 +349,7 @@ final class SphereModel {
         membership = try await runner.call("GET", "v1/obid/sphere")
         canCreate = !joined && !((try? Self.operatorToken.names()) ?? []).isEmpty
         guard joined, let server, let owner, let sphere = membership?.sphere else { return }
-        let token = try await server.ownerToken(owner: owner, sphere: sphere, key: try OwnerKey.of(owner))
+        let token = try await server.ownerToken(owner: owner, sphere: sphere, key: try OwnerKey.of(owner), scope: "directory:read")
         let about = try await server.call("GET", "spheres/\(sphere)", bearer: token)
         name = about["name"] as? String
         admin = about["admin_owner"] as? String == owner
@@ -356,7 +400,7 @@ final class SphereModel {
         let server = SphereServer(base: url)
         _ = try await server.call("POST", "spheres", bearer: operatorToken,
                                   json: ["sphere": sphere, "name": name, "admin": ["owner": owner, "owner_key": key.publicKey]])
-        let token = try await server.ownerToken(owner: owner, sphere: sphere, key: key)
+        let token = try await server.ownerToken(owner: owner, sphere: sphere, key: key, scope: "admin")
         _ = try await server.call("PUT", "spheres/\(sphere)/policy", bearer: token, json: [
             "expected_version": 0,
             "rules": [["id": "everyone", "from_owner": "*", "to_owner": "*", "actions": ["review_request", "question"], "repos": ["*"]]],
@@ -368,7 +412,7 @@ final class SphereModel {
     /// A link for `person`'s Oby to join with (sphere-api.md section 4, "Invite"), for 7 days.
     func invite(_ person: String) async throws -> InviteLink {
         guard let server, let owner, let sphere = membership?.sphere else { throw RunnerError(message: "This Oby isn't in an Obysphere.") }
-        let token = try await server.ownerToken(owner: owner, sphere: sphere, key: try OwnerKey.of(owner))
+        let token = try await server.ownerToken(owner: owner, sphere: sphere, key: try OwnerKey.of(owner), scope: "admin")
         return try await invitation(server: server, token: token, sphere: sphere, name: name ?? sphere, by: owner, for: person)
     }
 
@@ -389,9 +433,7 @@ final class SphereModel {
     func join(_ invite: InviteLink) async throws {
         let runner = try runner()
         let membership: Membership = try await runner.call("GET", "v1/obid/sphere")
-        guard membership.owner == invite.owner else {
-            throw RunnerError(message: "This invite is for \(invite.owner), and this Mac's Oby acts for \(membership.owner). Ask \(invite.by.isEmpty ? "the admin" : invite.by) for one for \(membership.owner).")
-        }
+        if let mismatch = invite.mismatch(owner: membership.owner) { throw RunnerError(message: mismatch) }
         let key = try OwnerKey.of(membership.owner)
         let url = invite.server.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         _ = try await runner.send("POST", "v1/obid/sphere/key")
