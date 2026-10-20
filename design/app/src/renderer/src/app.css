@@ -810,6 +810,13 @@ button.crumb:hover { color: var(--ink); background: var(--hover); }
 .add-item-who { margin-right: 6px; color: var(--ink); }
 .add-check { flex: none; color: var(--ink); }
 .add-empty { margin: 8px 10px; color: var(--muted); font-size: var(--text-sm); }
+/* Run on another Mac (a preview): a Mac's line, and why it's free or not, under its name */
+.add-panel button.add-place { height: 46px; }
+.add-panel button.add-place:disabled { opacity: 0.5; cursor: default; background: none; }
+.add-item-about { display: block; color: var(--muted); font-size: var(--text-sm); }
+.add-note { margin: 6px 10px 4px; color: var(--muted); font-size: var(--text-sm); }
+/* usage shared with you, under your own accounts */
+.usage-shared { margin: 10px 0 2px 8px; color: var(--label); font-size: var(--text-sm); }
 /* usage: a gauge; a dot at its top right while an account is past 80% (yellow) or 90% (red) */
 .composer-usage { position: relative; }
 /* just past the gauge's top right corner, clear of its line */
@@ -1392,6 +1399,7 @@ button.connector { width: 100%; text-align: left; }
 .set-about { color: var(--muted); font-size: var(--text-sm); line-height: 1.45; }
 .set-control { flex: none; display: flex; align-items: center; gap: 8px; }
 .set-control-top { align-self: flex-start; }
+.set-share { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 320px; }  /* who, and how much (Sharing, a preview) */
 .set-value { color: var(--text); font-size: var(--text-base); display: inline-flex; align-items: center; gap: 6px; }
 .set-none { color: var(--muted); }
 .set-plain { color: var(--text); }
