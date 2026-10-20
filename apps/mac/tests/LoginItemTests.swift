@@ -92,25 +92,56 @@ struct LoginItemTests {
         #expect(item.status == .notFound || item.status == .notRegistered)
     }
 
-    /// At launch: registered when nothing is, registered again when a stale registration says
-    /// `.enabled` after a signing-team change or while obid doesn't run, else left alone (#790).
+    /// At launch: registered when nothing is, registered again after a signature change or while
+    /// obid doesn't run, whatever macOS says of a stale registration (#790; the 0.2.0 install of
+    /// 2026-10-20, Apple Development to Developer ID), else left alone.
     @Test func atLaunchRegistersAgainOnlyWhenStale() {
-        func decide(_ status: SMAppService.Status, teamChanged: Bool = false, runs: Bool = true,
+        func decide(_ status: SMAppService.Status, signingChanged: Bool = false, runs: Bool = true,
                     onThisMac: Bool = true, byScript: Bool = false) -> RunnerLoginItem.AtLaunch {
-            RunnerLoginItem.atLaunch(onThisMac: onThisMac, byScript: byScript, status: status, teamChanged: teamChanged, runs: runs)
+            RunnerLoginItem.atLaunch(onThisMac: onThisMac, byScript: byScript, status: status, signingChanged: signingChanged, runs: runs)
+        }
+        func reregisters(_ decision: RunnerLoginItem.AtLaunch) -> Bool {
+            if case .reregister = decision { true } else { false }
         }
         #expect(decide(.notRegistered) == .register)
-        #expect(decide(.notRegistered, teamChanged: true, runs: false) == .register)
+        #expect(decide(.notRegistered, signingChanged: true, runs: false) == .register)
         #expect(decide(.enabled) == .nothing)
-        if case .reregister = decide(.enabled, teamChanged: true) {} else { Issue.record("a team change re-registers") }
-        if case .reregister = decide(.enabled, runs: false) {} else { Issue.record("obid down re-registers") }
-        // Approval stays the user's step; a build without the item has nothing to register.
-        #expect(decide(.requiresApproval, teamChanged: true, runs: false) == .nothing)
-        #expect(decide(.notFound, teamChanged: true, runs: false) == .nothing)
+        #expect(reregisters(decide(.enabled, signingChanged: true)))
+        #expect(reregisters(decide(.enabled, runs: false)))
+        // A registration macOS lost track of, while launchd still refuses obid, is registered again.
+        #expect(reregisters(decide(.notFound, runs: false)))
+        #expect(reregisters(decide(.notFound, signingChanged: true)))
+        #expect(decide(.notFound) == .nothing)
+        // Approval stays the user's step.
+        #expect(decide(.requiresApproval, signingChanged: true, runs: false) == .nothing)
         // A remote runner, or install.sh's obid, serves this Mac instead.
-        #expect(decide(.enabled, teamChanged: true, runs: false, onThisMac: false) == .nothing)
+        #expect(decide(.enabled, signingChanged: true, runs: false, onThisMac: false) == .nothing)
         #expect(decide(.notRegistered, byScript: true) == .nothing)
         #expect(RunnerLoginItem.launchd("com.deskree.oby.nothing.\(UUID().uuidString)") == nil)
+    }
+
+    /// A team or kind of certificate is recorded at every launch; only a change from one on record counts.
+    @Test func signingChangesAreRecorded() throws {
+        let suite = "oby-login-item-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let key = RunnerLoginItem.kindKey
+        #expect(!RunnerLoginItem.changed("Apple Development", key: key, in: defaults))
+        #expect(!RunnerLoginItem.changed("Apple Development", key: key, in: defaults))
+        #expect(RunnerLoginItem.changed("Developer ID Application", key: key, in: defaults))
+        // Ad hoc says nothing, and keeps what's on record.
+        #expect(!RunnerLoginItem.changed(nil, key: key, in: defaults))
+        #expect(!RunnerLoginItem.changed("Developer ID Application", key: key, in: defaults))
+        #expect(RunnerLoginItem.kind(of: "Developer ID Application: Deskree Technologies Inc. (3UV9W5SV7W)") == "Developer ID Application")
+        #expect(RunnerLoginItem.kind(of: "Apple Development: Someone (47H6K3VA5H)") == "Apple Development")
+        #expect(RunnerLoginItem.kind(of: "ad hoc") == nil)
+    }
+
+    /// A copy macOS runs from App Translocation never registers obid (its folder vanishes).
+    @Test func translocatedCopiesAreKnown() {
+        #expect(RunnerLoginItem.translocated("/private/var/folders/x1/abc/T/AppTranslocation/3F2A-11/d/Oby.app"))
+        #expect(!RunnerLoginItem.translocated("/Applications/Oby.app"))
+        #expect(!RunnerLoginItem.translocated(Bundle.main.bundlePath))
     }
 
     /// What's missing is named, so a build that forgot the phase says so.
