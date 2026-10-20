@@ -23,6 +23,8 @@ struct GroupPane: View {
     /// GitHub's part of the page: only Review PR and Issues have one.
     private var gitHub: Bool { kind == .review || kind == .issues }
     private var connect: GitHubWork.Connect { gitHub ? .init(feed.gitHubWork) : .unknown }
+    /// Routines only: each routine's next run.
+    private var upcoming: [RunnerRoutine] { kind == .routines ? RunnerRoutine.upcoming(feed.routines) : [] }
     private var waiting: [GitHubWork.Item] { gitHub ? feed.gitHubWork?.waiting(kind, later: feed.gitHubLater) ?? [] : [] }
 
     static let connectLine = "See the pull requests waiting for your review and the issues assigned to you here, and hand any of them to Oby in one click. Signing in uses GitHub's own page; GitHub's CLI keeps the login."
@@ -33,13 +35,15 @@ struct GroupPane: View {
                 Text(kind.label).font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink)
                     .padding(.bottom, 16).accessibilityAddTraits(.isHeader)
                 LineTabs(tab: tab, counts: Dictionary(uniqueKeysWithValues: WorkList.Tab.allCases.map {
-                    ($0, WorkList.items(items, in: $0).count + ($0 == .running ? waiting.count : 0))
+                    ($0, WorkList.items(items, in: $0).count + ($0 == .running ? waiting.count + upcoming.count : 0))
                 })) {
                     picked = $0
                 }
                 .padding(.bottom, 16)
                 let cards = WorkList.items(ranked, in: tab)
                 if tab == .running {
+                    // A routine waiting for its next run says when (Sangam's tasks.ts).
+                    ForEach(upcoming) { UpcomingRoutineCard(routine: $0) }
                     if connect == .signedOut {
                         ConnectGitHubCard(line: Self.connectLine, connect: onConnectGitHub)
                     }
@@ -57,7 +61,7 @@ struct GroupPane: View {
                 ForEach(cards) { item in
                     TaskCardView(item: item, model: model) { onOpenJob(item.job.job.id, item.job.local) }
                 }
-                if cards.isEmpty && (tab == .done || waiting.isEmpty && connect != .signedOut) {
+                if cards.isEmpty && (tab == .done || waiting.isEmpty && upcoming.isEmpty && connect != .signedOut) {
                     Text(tab == .done ? "Nothing completed yet" : "Nothing running")
                         .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
                 }

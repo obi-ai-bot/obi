@@ -366,6 +366,13 @@ pub struct NewJob {
     pub earlier: Option<String>,
     #[serde(default)]
     pub start_from: Option<String>,
+    /// The routine whose run it is (crate::routines).
+    #[serde(default)]
+    pub routine: Option<crate::job::RoutineMark>,
+    /// One part of a stalled job's split (crate::brain::supervisor): its parts follow it up side
+    /// by side, each on a branch of its own. Never from the API, never kept.
+    #[serde(skip)]
+    pub split: bool,
 }
 
 /// Who tells a job something, which decides what words for one that ended do (the owner's
@@ -520,6 +527,8 @@ pub struct Jobs {
     plugins: std::sync::OnceLock<Arc<crate::plugins::Plugins>>,
     /// The connected-app broker: job-scoped MCP config and use records.
     connections: std::sync::OnceLock<Arc<crate::connections::Connections>>,
+    /// The routines, for the owner's Confirm of one the brain planned (crate::routines).
+    routines: std::sync::OnceLock<Arc<crate::routines::Routines>>,
     /// Oby's Tetrix login: every owner's job's agent gets Tetrix through obid (crate::tetrix).
     tetrix: std::sync::OnceLock<Arc<crate::tetrix::Tetrix>>,
     /// Where a job's `.obi/artifacts/` is published when it ends.
@@ -598,6 +607,7 @@ impl Jobs {
             permissions: Mutex::new(kept),
             plugins: std::sync::OnceLock::new(),
             connections: std::sync::OnceLock::new(),
+            routines: std::sync::OnceLock::new(),
             tetrix: std::sync::OnceLock::new(),
             artifacts: std::sync::OnceLock::new(),
             api_url: Mutex::new(api_url),
@@ -681,6 +691,14 @@ impl Jobs {
     }
 
     /// Where jobs' artifacts go (once; without it, a job publishes none).
+    pub fn use_routines(&self, routines: Arc<crate::routines::Routines>) {
+        let _ = self.routines.set(routines);
+    }
+
+    pub fn routines(&self) -> Option<&Arc<crate::routines::Routines>> {
+        self.routines.get()
+    }
+
     pub fn use_artifacts(&self, artifacts: Arc<crate::artifacts::Artifacts>) {
         let _ = self.artifacts.set(artifacts);
     }
@@ -1753,7 +1771,18 @@ impl Jobs {
     }
 
     /// Makes a job the owner described whole, queued.
-    pub fn create(self: &Arc<Self>, new: NewJob) -> Result<Job, Refused> {
+    /// Whether `create` would take `new`, without making it: its repository, kind, task, title,
+    /// tool and account, rounds, check, mode, files, base and model, as `create` checks them.
+    /// A routine is checked so when it's saved (crate::routines).
+    pub fn vet(&self, new: &NewJob) -> Result<(), Refused> {
+        self.vetted(new).map(|_| ())
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn vetted(
+        &self,
+        new: &NewJob,
+    ) -> Result<(Repo, Tool, crate::config::Account, Option<Vec<String>>), Refused> {
         let repo = self
             .repo(&new.repo)
             .ok_or_else(|| Refused(format!("{} isn't a repository obid knows.", new.repo)))?
@@ -1808,6 +1837,11 @@ impl Jobs {
                 tool.name()
             )));
         }
+        Ok((repo, tool, account, files))
+    }
+
+    pub fn create(self: &Arc<Self>, new: NewJob) -> Result<Job, Refused> {
+        let (repo, tool, account, files) = self.vetted(&new)?;
         let id = self.new_id();
         let mut job = Job::new(
             id.clone(),
@@ -1844,6 +1878,7 @@ impl Jobs {
             .start_from
             .filter(|b| new.follow_up_of.is_some() && git::is_branch_name(b));
         job.follow_up_of = new.follow_up_of;
+        job.routine = new.routine;
         job.mode = Some(if job.read_only() {
             Mode::Plan.as_str().to_owned()
         } else {
@@ -1875,7 +1910,10 @@ impl Jobs {
                 .values()
                 .filter(|j| j.status.is_active())
                 .collect();
-            if let Some(other) = active.iter().find(|j| j.follow_up_of == job.follow_up_of) {
+            if let Some(other) = active
+                .iter()
+                .find(|j| !new.split && j.follow_up_of == job.follow_up_of)
+            {
                 return Err(Refused(format!(
                     "{} (job {}) is following it up already: tell that one instead.",
                     other.short_title(),
@@ -2237,11 +2275,11 @@ impl Jobs {
             }
             job.finished = None;
             job.dismissed = None;
+            job.archived = None;
             if past_safety(job) {
                 job.ran_secs = None;
                 job.budget_from = Some(spent(job));
             }
-            job.archived = None;
             job.limit = None;
             job.reason = None;
             job.next_step = None;
@@ -2778,6 +2816,32 @@ impl Jobs {
         self.events.send("job", dismissed.to_json());
         self.changed.notify_waiters();
         Some(Ok(dismissed))
+    }
+
+    /// Records what the conversation that owns the job did about it when it stalled
+    /// (crate::brain::supervisor): a second part of the same turn's split joins its entry.
+    pub fn supervised(&self, id: &str, entry: crate::job::Supervision) -> Option<Job> {
+        let job = {
+            let mut state = self.lock();
+            let job = state.jobs.get_mut(id)?;
+            match job
+                .supervised
+                .iter_mut()
+                .find(|s| s.turn == entry.turn && s.decision == entry.decision)
+            {
+                Some(same) => {
+                    same.jobs.extend(entry.jobs);
+                    same.count = entry.count;
+                }
+                None => job.supervised.push(entry),
+            }
+            job.clone()
+        };
+        if let Err(e) = self.store.save(&job) {
+            tracing::error!("can't keep job {id}: {e}");
+        }
+        self.events.send("job", job.to_json());
+        Some(job)
     }
 
     /// Archives a job that ended and needs nothing, or unarchives it (`archived` false), adding
@@ -7443,7 +7507,14 @@ pub fn not_continuable(job: &Job) -> Option<&'static str> {
 /// request is open (publishing updates it), else on a branch of its own.
 pub fn follow_up(job: &Job, words: &str) -> NewJob {
     let unmerged = job.commits.unwrap_or(0) > 0 && !job.merged();
-    let title = crate::brain::briefing::line(&format!("Follow-up: {}", job.short_title()), 60);
+    // A follow-up of a follow-up keeps one "Follow-up: ".
+    let title = crate::brain::briefing::line(
+        &format!(
+            "Follow-up: {}",
+            job.short_title().trim_start_matches("Follow-up: ")
+        ),
+        60,
+    );
     let commits = job.commits.unwrap_or(0);
     let mut did = vec![
         format!(

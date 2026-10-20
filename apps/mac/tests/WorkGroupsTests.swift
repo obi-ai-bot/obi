@@ -30,6 +30,9 @@ struct WorkGroupsTests {
         #expect(WorkType.of(review: false, issue: nil, requester: nil) == .tasks)
         #expect(WorkType.of(review: true, issue: nil, requester: "Wellington") == .teammate("Wellington"))
         #expect(WorkType.of(review: false, issue: nil, requester: " ") == .tasks)
+        // A routine's run goes under Routines, whatever it does (#395, Sangam's tasks.ts).
+        #expect(WorkType.of(review: true, issue: 12, requester: nil, routine: true) == .routines)
+        #expect(WorkType.routines.label == "Routines")
         #expect([WorkType.review, .issues, .teammate("Wellington"), .tasks].map(\.label) == ["Review PR", "Issues", "Wellington", "Tasks"])
     }
 

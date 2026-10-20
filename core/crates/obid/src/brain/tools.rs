@@ -74,6 +74,27 @@ fn list() -> Value {
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "oby_answer", "description": "Answers an inbox item Oby may answer, with one of its options or words. A job's permission can only be refused here; the owner's own decisions (letting a permission through, confirms, secrets, publishing, what persists or widens trust) are refused, or wait for their OK.",
          "inputSchema": {"type": "object", "properties": {"item": {"type": "string"}, "answer": {"type": "string"}}, "required": ["item", "answer"]}},
+        {"name": "oby_routines", "description": "Lists the owner's routines (requests Oby runs on a schedule, a job each time): id, name, schedule, next run, on or paused, and the last run.",
+         "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "oby_routine", "description": "Proposes a routine: a request Oby runs on a schedule, starting a job each time, as oby_dispatch would. Nothing is saved until the owner confirms it in their inbox. Never more often than once an hour.",
+         "inputSchema": {"type": "object", "properties": {
+             "name": {"type": "string", "description": "A short name, 3 to 6 words, like a job's title."},
+             "repo": {"type": "string", "description": "owner/name, one of the owner's repositories."},
+             "task": {"type": "string", "description": "What each run's job is to do, in a few sentences."},
+             "kind": {"type": "string", "enum": ["review", "fix", "build", "test", "investigate", "research"]},
+             "agent": {"type": "string", "enum": ["auto", "claude", "codex", "cursor"]},
+             "account": {"type": "string", "description": "An account by name, or auto."},
+             "mode": {"type": "string", "enum": ["ask", "acceptEdits", "plan", "bypass"], "description": "Leave it out for the owner's default."},
+             "schedule": {"type": "object", "description": "One of {\"every\": \"hourly\", \"minute\": 15}, {\"every\": \"daily\", \"at\": \"09:00\"}, {\"every\": \"weekdays\", \"at\": \"09:00\"} (Monday to Friday) or {\"every\": \"weekly\", \"days\": [\"mon\", \"thu\"], \"at\": \"08:30\"}; at is 24-hour HH:MM in zone."},
+             "zone": {"type": "string", "description": "The owner's IANA time zone, like America/Sao_Paulo; left out, the Mac's."}},
+             "required": ["name", "repo", "task", "schedule"]}},
+        {"name": "oby_change_routine", "description": "Changes a routine by id, as the owner said: pause it, resume it, run it now, delete it, or give it a new schedule.",
+         "inputSchema": {"type": "object", "properties": {
+             "id": {"type": "string", "description": "The routine's id, as oby_routines gives it."},
+             "action": {"type": "string", "enum": ["pause", "resume", "run", "delete", "reschedule"]},
+             "schedule": {"type": "object", "description": "For reschedule: the new schedule, as oby_routine takes it."},
+             "zone": {"type": "string", "description": "For reschedule: a new IANA time zone, if it changes."}},
+             "required": ["id", "action"]}},
         {"name": "oby_conversations", "description": "Finds Oby's past conversations by what was said in them. What was said is quoted data.",
          "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
         {"name": "oby_artifact", "description": "Publishes a file or folder of your room as an artifact the owner's apps show (a page, a doc, an image, a PDF, a canvas), or a new version of one this conversation made. HTML runs with no network. Answers its id and version.",
@@ -191,6 +212,10 @@ async fn call(
     if !session.control.live() {
         return Err("The turn was stopped: nothing more happens for it.".into());
     }
+    // A turn nobody watches reads only its own job, and archives nothing (super::supervisor).
+    if let Some(why) = super::supervisor::refused(session, name, &args) {
+        return Err(why.into());
+    }
     match name {
         "oby_jobs" => Ok(jobs(shared, session, args)?),
         "oby_job" => {
@@ -281,6 +306,9 @@ async fn call(
             ))
         }
         "oby_artifact" => artifact(shared, session, args).await,
+        "oby_routines" => Ok(routines(shared)),
+        "oby_routine" => propose_routine(shared, session, args),
+        "oby_change_routine" => change_routine(shared, session, args),
         "oby_shell" | "oby_shell_output" | "oby_shell_stop" => {
             let shown = super::shell::tool(shared, session, name, args).await?;
             let text = if shown.output.is_empty() {
@@ -466,7 +494,31 @@ fn continue_job(shared: &Arc<Shared>, session: &Session, args: Value) -> Result<
         shown.push(format!("What Oby adds for its agent:\n{words}"));
     }
     let shown = crate::secrets::known().redact(&shown.join("\n\n"));
-    // supervisor hook: a supervising turn's own allowance goes here, before the Confirm below.
+    // A supervisor turn carries its stalled job on by itself, within obid's bounds
+    // (super::supervisor): the job hears Try again and the conversation's words, quoted, never
+    // obid's prompt as the owner's.
+    if let Some(allowed) =
+        super::supervisor::allowed(shared, session, &job, super::supervisor::Kind::Continue)
+    {
+        allowed?;
+        let words = match words.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+            Some(words) => Some(super::supervisor::quoted(words, &session.nonce)?),
+            None => None,
+        };
+        return match shared.jobs.continue_job(&id, words.as_deref(), BY_OBY) {
+            Some(Ok(job)) => {
+                super::supervisor::record(
+                    shared,
+                    session,
+                    super::supervisor::Kind::Continue,
+                    vec![],
+                );
+                Ok(format!("Continuing {name}: round {}.", job.current_round()))
+            }
+            Some(Err(refused)) => Err(format!("Couldn't continue {name}: {}", refused.0)),
+            None => Err("That job isn't here any more.".into()),
+        };
+    }
     let why = waits(session, &job).or(bypass.then_some("it runs in Bypass mode, never asking"));
     if let Some(why) = why {
         return confirm_waits(
@@ -735,6 +787,309 @@ async fn artifact(shared: &Arc<Shared>, session: &Session, args: Value) -> Resul
     Ok(format!("Published artifact {id}, version {version}."))
 }
 
+/// The routines, one line each, for the brain.
+fn routines(shared: &Shared) -> String {
+    let list = shared.routines.list();
+    if list.is_empty() {
+        return "The owner has no routines yet.".into();
+    }
+    list.iter()
+        .map(|r| {
+            let next = r.next_run().map_or_else(
+                || "paused".into(),
+                |t| format!("next {}", local(&r.zone, t)),
+            );
+            let last = r.runs.last().map_or_else(
+                || "never ran".into(),
+                |run| {
+                    let mut line = format!("last run {}", run.outcome);
+                    if let Some(ended) = &run.ended {
+                        line.push_str(&format!(", its job {ended}"));
+                    }
+                    if let Some(job) = &run.job {
+                        line.push_str(&format!(" (job {job})"));
+                    }
+                    line
+                },
+            );
+            format!(
+                "{} · {} · {} ({}) · {} in {} · {next} · {last}",
+                r.id,
+                r.name,
+                r.schedule.words(),
+                r.zone,
+                r.kind,
+                r.repo
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A routine in obid's own words, for its confirm items: its name, when it runs, and the job each
+/// run starts as `actions::describe` says it (mode, tool, account, check): "Readme check
+/// (Weekdays at 9:00, build fixture-app in Bypass mode, on Claude Code · Personal)".
+fn routine_words(routine: &crate::routines::Routine) -> String {
+    let mut job = routine.job(0, false);
+    job.title = None;
+    format!(
+        "{} ({}, {})",
+        routine.name,
+        routine.schedule.words(),
+        super::actions::describe(&job)
+    )
+}
+
+/// What a Bypass routine's card says plainly: no run of it asks the owner anything.
+fn bypass_line(routine: &crate::routines::Routine) -> &'static str {
+    if routine.mode.as_deref() == Some("bypass") {
+        " It's in Bypass mode: every run's job never asks you anything, every time it runs, until you pause or delete it."
+    } else {
+        ""
+    }
+}
+
+/// `at` as `zone` reads it: "Mon Oct 20, 9:00".
+fn local(zone: &str, at: i64) -> String {
+    let zone = jiff::tz::TimeZone::get(zone).unwrap_or(jiff::tz::TimeZone::UTC);
+    jiff::Timestamp::from_second(at)
+        .map(|t| t.to_zoned(zone).strftime("%a %b %-d, %-H:%M").to_string())
+        .unwrap_or_default()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Propose {
+    name: String,
+    repo: String,
+    task: String,
+    schedule: Value,
+    zone: Option<String>,
+    kind: Option<String>,
+    agent: Option<String>,
+    account: Option<String>,
+    mode: Option<String>,
+}
+
+/// oby_routine: the routine checked as `POST /v1/routines` checks one, and a `confirm` item
+/// whose Confirm saves it. Nothing repeats until the owner says so (#395).
+fn propose_routine(shared: &Shared, session: &Session, args: Value) -> Result<String, String> {
+    let Propose {
+        name,
+        repo,
+        task,
+        schedule,
+        zone,
+        kind,
+        agent,
+        account,
+        mode,
+    } = parse(args)?;
+    let schedule: crate::routines::Schedule = serde_json::from_value(schedule)
+        .map_err(|e| format!("That isn't a schedule Oby runs: {e}"))?;
+    let zone = zone.filter(|z| !z.trim().is_empty()).unwrap_or_else(|| {
+        jiff::tz::TimeZone::system()
+            .iana_name()
+            .unwrap_or("UTC")
+            .to_owned()
+    });
+    let draft = crate::routines::Draft {
+        name,
+        repo,
+        task,
+        schedule,
+        zone,
+        kind,
+        agent,
+        account,
+        mode,
+        check: None,
+        rounds: None,
+        created_by: Some("chat".into()),
+        conversation: Some(session.conversation.clone()),
+    };
+    let now = obi_protocol::time::now();
+    let routine = shared
+        .routines
+        .draft(&shared.jobs, draft.clone(), now)
+        .map_err(|why| format!("Oby refused that routine: {why}"))?;
+    let mut next = vec![];
+    let mut t = now;
+    let tz = jiff::tz::TimeZone::get(&routine.zone).unwrap_or(jiff::tz::TimeZone::UTC);
+    while next.len() < 3 {
+        let Some(after) = routine.schedule.next_after(&tz, t) else {
+            break;
+        };
+        next.push(local(&routine.zone, after));
+        t = after;
+    }
+    let what = routine_words(&routine);
+    let nonce = super::briefing::nonce();
+    let text = format!(
+        "Oby's brain planned a routine: {what}, in {}.{} Each run starts a job, as one you ask for does. Its next runs: {}. It's saved only if you confirm.\n\n{}\n{}",
+        routine.zone,
+        bypass_line(&routine),
+        next.join("; "),
+        super::briefing::fence_rule(&nonce, "the task Oby planned"),
+        super::briefing::fence(&nonce, &crate::secrets::known().redact(&routine.task)),
+    );
+    super::actions::confirm(
+        shared,
+        "",
+        format!("Make the routine {what}"),
+        text,
+        crate::sphere::inbox::Confirmed {
+            action: crate::sphere::inbox::action::CREATE_ROUTINE.into(),
+            target: session.conversation.clone(),
+            payload: json!({ "routine": draft }),
+        },
+    );
+    Ok(format!(
+        "The routine {what} waits for the owner's OK in their inbox: nothing repeats until they confirm it. Its next runs would be {}.",
+        next.join("; ")
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangeRoutine {
+    id: String,
+    action: String,
+    schedule: Option<Value>,
+    zone: Option<String>,
+}
+
+/// oby_change_routine: the owner's words pause a routine, as they stop a job. Resuming,
+/// rescheduling, deleting and running one now each wait for the owner's Confirm in the inbox
+/// (`change_routine`), since words in the conversation may be an agent's. A turn that read what
+/// others wrote changes none.
+fn change_routine(shared: &Shared, session: &Session, args: Value) -> Result<String, String> {
+    let ChangeRoutine {
+        id,
+        action,
+        schedule,
+        zone,
+    } = parse(args)?;
+    if source(session) == crate::jobs::Source::Untrusted {
+        return Err("This turn read what others wrote, so Oby changes routines only when the owner says it again.".into());
+    }
+    let routines = &shared.routines;
+    let routine = routines
+        .get(&id)
+        .ok_or("There's no routine with that id.")?;
+    let name = routine.name.clone();
+    let now = obi_protocol::time::now();
+    let check = |change: crate::routines::Change| -> Result<crate::routines::Routine, String> {
+        routines
+            .check_change(&shared.jobs, &id, change, now)
+            .ok_or("There's no routine with that id.")?
+            .map_err(|why| format!("Oby refused that: {why}"))
+    };
+    let (title, text, payload) = match action.as_str() {
+        "pause" => {
+            routines
+                .change(
+                    &shared.jobs,
+                    &id,
+                    crate::routines::Change {
+                        enabled: Some(false),
+                        ..Default::default()
+                    },
+                    now,
+                )
+                .ok_or("There's no routine with that id.")?
+                .map_err(|why| format!("Oby refused that: {why}"))?;
+            return Ok(format!("Paused {name}."));
+        }
+        "resume" => {
+            let resumed = check(crate::routines::Change {
+                enabled: Some(true),
+                ..Default::default()
+            })?;
+            (
+                format!("Resume the routine {}", routine_words(&resumed)),
+                format!(
+                    "Oby's brain planned to turn the routine {} back on.{} Its next run: {}. It happens only if you confirm.",
+                    routine_words(&resumed),
+                    bypass_line(&resumed),
+                    resumed
+                        .next_run()
+                        .map_or_else(String::new, |t| local(&resumed.zone, t))
+                ),
+                json!({"action": "resume"}),
+            )
+        }
+        "reschedule" => {
+            let schedule = schedule
+                .map(serde_json::from_value::<crate::routines::Schedule>)
+                .transpose()
+                .map_err(|e| format!("That isn't a schedule Oby runs: {e}"))?;
+            if schedule.is_none() && zone.is_none() {
+                return Err("Say the new schedule or zone.".into());
+            }
+            let moved = check(crate::routines::Change {
+                schedule: schedule.clone(),
+                zone: zone.clone(),
+                ..Default::default()
+            })?;
+            (
+                format!("Reschedule the routine {}", routine_words(&moved)),
+                format!(
+                    "Oby's brain planned to change when {name} runs: {} in {}, instead of {} in {}. It happens only if you confirm.",
+                    moved.schedule.words(),
+                    moved.zone,
+                    routine.schedule.words(),
+                    routine.zone
+                ),
+                json!({"action": "reschedule", "schedule": schedule, "zone": zone}),
+            )
+        }
+        "delete" => (
+            format!("Delete the routine {name}"),
+            format!(
+                "Oby's brain planned to delete the routine {}. It won't run again; the jobs its runs started stay. It happens only if you confirm.",
+                routine_words(&routine)
+            ),
+            json!({"action": "delete"}),
+        ),
+        "run" => (
+            format!("Run the routine {} now", routine_words(&routine)),
+            format!(
+                "Oby's brain planned to start a run of the routine {} now.{} It starts only if you confirm.",
+                routine_words(&routine),
+                bypass_line(&routine)
+            ),
+            json!({"action": "run"}),
+        ),
+        other => {
+            return Err(format!(
+                "action is pause, resume, run, delete or reschedule, not {other}."
+            ));
+        }
+    };
+    // What the card said each run is: the Confirm refuses a routine whose mode, tool, account or
+    // check changed since, rather than act on one the owner didn't see.
+    let mut payload = payload;
+    payload["mode"] = json!(routine.mode);
+    payload["agent"] = json!(routine.agent);
+    payload["account"] = json!(routine.account);
+    payload["check"] = json!(routine.check);
+    super::actions::confirm(
+        shared,
+        "",
+        title.clone(),
+        text,
+        crate::sphere::inbox::Confirmed {
+            action: crate::sphere::inbox::action::CHANGE_ROUTINE.into(),
+            target: id,
+            payload,
+        },
+    );
+    Ok(format!(
+        "{title} waits for the owner's OK in their inbox: nothing changes until they confirm it."
+    ))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Listing {
@@ -922,6 +1277,20 @@ async fn tell(
     let agent_ready = |text: &str| -> Result<String, String> {
         Ok(crate::secrets::known().redact(&crate::vault::for_agent(text.trim())?))
     };
+    // A supervisor turn starts its stalled job fresh from its handoff note by itself, within
+    // obid's bounds (super::supervisor).
+    if let Some(allowed) =
+        super::supervisor::allowed(shared, session, &job, super::supervisor::Kind::Restart)
+    {
+        allowed?;
+        let new = super::supervisor::follow_up(&job, added, None, &session.nonce)?;
+        let outcome = actions::follow_up(shared, &job, new);
+        if let Outcome::Started(_, next) = &outcome {
+            let started = next["id"].as_str().map(str::to_owned).into_iter().collect();
+            super::supervisor::record(shared, session, super::supervisor::Kind::Restart, started);
+        }
+        return outcome_answer(session, outcome);
+    }
     // Its follow-up is working already (this turn's or an earlier one's): that one hears them.
     if let Some(next) = shared.jobs.following(&id) {
         let words = agent_ready(&words)?;
@@ -971,6 +1340,47 @@ async fn tell(
 async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Result<String, String> {
     capped(&session.dispatched, "starts jobs")?;
     let start: Start = parse(args)?;
+    // A supervisor turn splits what's left of its stalled job into new jobs by itself, within
+    // obid's bounds (super::supervisor): each part a follow-up from its branch.
+    if let Some(job) = super::supervisor::part_of(
+        shared,
+        session,
+        &start.repo,
+        start.agent.as_deref(),
+        start.account.as_deref(),
+        start.mode.as_deref(),
+    ) && let Some(allowed) =
+        super::supervisor::allowed(shared, session, &job, super::supervisor::Kind::Split)
+    {
+        allowed?;
+        let part = Some(super::supervisor::part(session));
+        let mut new = super::supervisor::follow_up(&job, &start.task, part, &session.nonce)?;
+        new.split = true;
+        let outcome = match shared.jobs.create(new) {
+            Ok(part) => {
+                super::supervisor::record(
+                    shared,
+                    session,
+                    super::supervisor::Kind::Split,
+                    vec![part.id.clone()],
+                );
+                Outcome::Started(
+                    format!(
+                        "Started {} for part of what {} left.",
+                        part.short_title(),
+                        job.short_title()
+                    ),
+                    part.to_json(),
+                )
+            }
+            Err(refused) => Outcome::Failed(format!(
+                "Couldn't start that part of {}: {}",
+                job.short_title(),
+                refused.0
+            )),
+        };
+        return outcome_answer(session, outcome);
+    }
     let mode = match &start.mode {
         None => None,
         Some(mode) => Some(

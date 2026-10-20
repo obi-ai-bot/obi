@@ -18,6 +18,7 @@ pub mod recap;
 pub mod research;
 pub mod rules;
 pub mod shell;
+pub mod supervisor;
 pub mod tools;
 pub mod turn;
 
@@ -620,6 +621,7 @@ fn validate_turns(input: Option<Vec<InputTurn>>) -> Result<Option<Vec<Turn>>, Ap
             conversation: String::new(),
             ended: false,
             artifacts: vec![],
+            routine: None,
         });
     }
     Ok(Some(out))

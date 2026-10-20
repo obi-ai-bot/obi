@@ -40,6 +40,7 @@ pub mod process;
 pub mod publish;
 pub mod review;
 pub mod routes;
+pub mod routines;
 pub mod sandbox;
 pub mod scan;
 pub mod secrets;
@@ -264,6 +265,8 @@ pub async fn serve(
         }
     })?;
     jobs.use_artifacts(artifacts.clone());
+    let routines = Arc::new(routines::Routines::open(&config.home, events.clone()));
+    jobs.use_routines(routines.clone());
     let github =
         github_work::Feed::open(config.clone(), jobs.clone(), link.clone(), events.clone());
     let shared = Arc::new(api::Shared {
@@ -279,6 +282,7 @@ pub async fn serve(
         events,
         conversations,
         artifacts,
+        routines,
         turns: brain::turn::Turns::default(),
         harness: brain::harness::Sessions::default(),
         presence: brain::recap::Presence::default(),
@@ -347,8 +351,13 @@ pub async fn serve(
     brain::shell::reap_leftovers(&shared.config.home);
     // A deleted conversation's waiting Claude Code ends with it.
     brain::harness::end_warm_with_conversations(shared.clone());
+    // Routines run on their schedules (#395).
+    shared.routines.attach(&shared);
+    routines::spawn(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
     brain::orchestrator::spawn(shared.clone());
+    // A job a conversation started that stalls goes back to that conversation, which decides.
+    brain::supervisor::spawn(shared.clone());
     // Every event a plug-in emits becomes a `pluginEvent` inbox item. The receiver ends once
     // the host has shut down.
     if let Some(mut events) = plugins.take_events() {
