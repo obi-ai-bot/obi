@@ -69,6 +69,30 @@ export function opaqueLabel(length = 20): string {
   return label;
 }
 
+/// How many zero bits `bytes` starts with.
+export function leadingZeroBits(bytes: Uint8Array): number {
+  let bits = 0;
+  for (const byte of bytes) {
+    if (byte === 0) {
+      bits += 8;
+      continue;
+    }
+    return bits + Math.clz32(byte) - 24;
+  }
+  return bits;
+}
+
+/// What a client's address counts as for rate limits: an IPv4 address as it is, an IPv6 one by
+/// its /64 (one home or one server gets a whole /64, so each of its addresses isn't a network).
+export function addressBucket(address: string): string {
+  if (!address.includes(":")) return address;
+  const [head = "", tail = ""] = address.toLowerCase().split("::", 2);
+  const left = head ? head.split(":") : [];
+  const right = address.includes("::") && tail ? tail.split(":") : [];
+  const groups = address.includes("::") ? [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right] : left;
+  return `${groups.slice(0, 4).map((group) => group.replace(/^0+(?=.)/, "")).join(":")}::/64`;
+}
+
 export function newId(): string {
   return crypto.randomUUID();
 }

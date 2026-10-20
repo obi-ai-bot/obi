@@ -40,7 +40,7 @@ struct RemoteAccessTests {
         let launched = Launched()
         let runner = TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) })
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
-                                  secrets: secrets, defaults: defaults, runner: runner)
+                                  secrets: secrets, defaults: defaults, runner: runner, workBits: 8)
         defer { remote.stop() }
         #expect(!remote.on)
         #expect(remote.status == "Off")
@@ -62,8 +62,12 @@ struct RemoteAccessTests {
         let requests = Array(exchange.requests.prefix(3))
         #expect(requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == ["POST /v1/installations",
                                                                                    "POST /v1/installations/self/endpoint", "GET /v1/installations/self/endpoint/token"])
-        let body = try #require(requests[0].httpBody)
-        #expect(try JSONDecoder().decode([String: String].self, from: body)["platform"] == "macos")
+        let body = try JSONDecoder().decode([String: String].self, from: try #require(requests[0].httpBody))
+        #expect(body["platform"] == "macos")
+        // The registration brings a proof of work for this key, checked here as the Worker checks it.
+        let proofAt = try #require(body["proofAt"]), proof = try #require(body["proof"])
+        let hashed = SHA256.hash(data: Data("oby-register-v1\n\(ControlPlane.base64url(try MacKey.signer(saved).publicKey))\n\(proofAt)\n\(proof)".utf8))
+        #expect(MacKey.zeroBits(Array(hashed)) >= 8)
         // Each call's signature checks out against the key's public half, as the Worker checks it.
         let publicKey = try MacKey.signer(saved).publicKey
         for request in requests {
@@ -97,7 +101,7 @@ struct RemoteAccessTests {
     /// on, with its new hostname and token.
     @Test @MainActor func aForgottenMacRegistersAgainAtItsCheckIn() async throws {
         let exchange = Exchange([
-            (404, #"{"error": "This Mac isn't registered. Turn remote access on again."}"#),
+            (410, #"{"error": "This Mac isn't registered. Turn remote access on again."}"#),
             (201, #"{"installation": \#(Self.installation)}"#),
             (201, #"{"endpoint": {"hostname": "oby-newnewnewnew01234567.tetrix.pro", "tunnelId": "t2", "createdAt": "2026-11-12T12:00:01.000Z"}}"#),
             (200, #"{"token": "eyJ-new-token", "hostname": "oby-newnewnewnew01234567.tetrix.pro"}"#),
@@ -107,12 +111,12 @@ struct RemoteAccessTests {
         let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
         defaults.set("oby-abcdefghij0123456789.tetrix.pro", forKey: "remote.hostname")
         defaults.set(true, forKey: "remote.enabled")
-        try secrets.save(MacKey.make(), as: RemoteAccess.keyKey)
+        try secrets.save(try MacKey.make(), as: RemoteAccess.keyKey)
         try secrets.save("eyJ-run-token", as: RemoteAccess.tokenKey)
         let launched = Launched()
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
                                   secrets: secrets, defaults: defaults,
-                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) }))
+                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) }), workBits: 8)
         defer { remote.stop() }
 
         await remote.checkIn()
@@ -127,19 +131,23 @@ struct RemoteAccessTests {
     }
 
     /// At launch with remote access on, the tunnel runs again from the keychain's token; with
-    /// the token gone, it says so and stays off.
+    /// the token gone, it says so and stays off. The email sign-in's leftovers go.
     @Test @MainActor func startsAgainFromTheKeychain() throws {
         let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
         defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
         let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
         defaults.set(true, forKey: "remote.enabled")
         try secrets.save("eyJ-run-token", as: RemoteAccess.tokenKey)
+        for name in RemoteAccess.oldSecrets { try secrets.save("old", as: name) }
+        for key in RemoteAccess.oldDefaults { defaults.set("old", forKey: key) }
         let launched = Launched()
         let plane = ControlPlane(base: URL(string: "https://oby-control.test")!) { _ in (Data(), 500) }
         let remote = RemoteAccess(plane: plane, secrets: secrets, defaults: defaults,
                                   runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) }))
         #expect(remote.on)
         remote.start()
+        #expect(try secrets.names().sorted() == [RemoteAccess.tokenKey])
+        #expect(RemoteAccess.oldDefaults.allSatisfy { defaults.object(forKey: $0) == nil })
         #expect(launched.processes.first?.environment?["TUNNEL_TOKEN"] == "eyJ-run-token")
         #expect(remote.tunnel == .starting)
 
@@ -150,6 +158,14 @@ struct RemoteAccessTests {
         #expect(!again.on)
         #expect(again.problem?.contains("keychain") == true)
         #expect(launched.processes.count == 1)
+    }
+
+    /// The proof of work is the Worker's (cloud/control-plane/src/app.ts, `checkWork`): these
+    /// answers come from Python's hashlib, outside both.
+    @Test func proofOfWorkMatchesTheWorkers() {
+        #expect(MacKey.work(key: "k", at: 1, bits: 8) == "37")
+        #expect(MacKey.work(key: "BKurq6s", at: 1_791_806_400, bits: 12) == "8876")
+        #expect(MacKey.zeroBits([0, 0x0f]) == 12)
     }
 
     /// The Worker's check (cloud/control-plane/src/app.ts, `signed`), in CryptoKit.

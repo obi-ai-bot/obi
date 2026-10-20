@@ -1,6 +1,9 @@
 -- No accounts (2026-10-20): a Mac is known by the P-256 key it made, and signs every call with
 -- it. The email sign-in's tables go; no installation was ever registered under them (the Worker
--- wasn't deployed), so nothing is carried over.
+-- wasn't deployed), so nothing is carried over. If a copy of the old Worker did run somewhere and
+-- made endpoints, the tunnels (named oby-<installation id>) and their CNAME records stay at
+-- Cloudflare after this: remove them by hand in the dashboard (Zero Trust › Networks › Tunnels,
+-- and the zone's DNS records) before or after applying it. This migration can't reach them.
 
 DROP TABLE endpoints;
 DROP TABLE installation_credentials;

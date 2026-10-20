@@ -70,10 +70,13 @@ nonisolated struct ControlPlane: Sendable {
 
     // MARK: This installation, signed by its key
 
-    /// Registers this Mac by its key; the same key again keeps its installation and hostname.
-    func register(_ signer: Signer, name: String, platform: String = "macos") async throws -> Installation {
+    /// Registers this Mac by its key; the same key again keeps its installation and hostname. A
+    /// new key brings a proof of work made at `proofAt` (Unix seconds); the Mac app makes it
+    /// (apps/mac/app/RemoteAccess.swift, `MacKey.work`), since this file does no crypto.
+    func register(_ signer: Signer, name: String, proofAt: Int, proof: String, platform: String = "macos") async throws -> Installation {
         struct Answer: Decodable { var installation: Installation }
-        let answer: Answer = try await call("POST", "v1/installations", body: ["name": name, "platform": platform], signer: signer)
+        let body = ["name": name, "platform": platform, "proofAt": String(proofAt), "proof": proof]
+        let answer: Answer = try await call("POST", "v1/installations", body: body, signer: signer)
         return answer.installation
     }
 

@@ -10,7 +10,8 @@ export default defineConfig(async () => {
     plugins: [
       cloudflareTest({
         wrangler: { configPath: "./wrangler.jsonc" },
-        miniflare: { bindings: { TEST_MIGRATIONS: migrations } },
+        // The tests' own device domain and an easy proof of work.
+        miniflare: { bindings: { TEST_MIGRATIONS: migrations, DEVICE_DOMAIN: "oby-devices.test", REGISTRATION_WORK_BITS: "8" } },
       }),
     ],
     test: { setupFiles: ["./test/setup.ts"] },

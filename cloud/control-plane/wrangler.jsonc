@@ -11,14 +11,23 @@
   // Plain settings. Secrets (the Cloudflare API token, the account and zone ids) are never
   // here: `wrangler secret put`, or .dev.vars for `wrangler dev`.
   "vars": {
-    // The zone the devices' hostnames live in, and their prefix: oby-<opaque>.tetrix.pro.
-    "DOMAIN": "tetrix.pro",
+    // The zone the devices' hostnames live in: a registrable domain of their own, never under
+    // PRODUCT_DOMAIN, since anyone running Oby gets a name there (docs/remote-access.md). Empty
+    // until the owner registers one; CF_ZONE_ID is that zone's id. No endpoint is made until then.
+    "DEVICE_DOMAIN": "",
+    "PRODUCT_DOMAIN": "tetrix.pro",
     "HOSTNAME_PREFIX": "oby-",
+    // A new Mac's proof of work, in leading zero bits of SHA-256 (about 4 million hashes, a second
+    // or two on a Mac). Raise it only with the Mac app's RemoteAccess.workBits.
+    "REGISTRATION_WORK_BITS": "22",
+    // The most endpoints alive at once: under Cloudflare's tunnel limit for the account.
+    "MAX_ENDPOINTS": "500",
     // What every tunnel routes to on the Mac: the gateway (#284). Nothing else is reachable.
     "GATEWAY": "http://127.0.0.1:8810"
   },
-  // Every hour: spent nonces go, and installations idle for 30 days with their tunnels (src/app.ts, `sweep`).
-  "triggers": { "crons": ["23 * * * *"] },
+  // Every 10 minutes: spent nonces and old rate-limit windows go, installations with no endpoint
+  // after a day, and installations idle for 30 days with their tunnels (src/app.ts, `sweep`).
+  "triggers": { "crons": ["*/10 * * * *"] },
   "d1_databases": [
     {
       "binding": "DB",

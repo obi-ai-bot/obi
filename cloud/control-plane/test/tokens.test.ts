@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { takeOne } from "../src/limits";
 import { env } from "cloudflare:test";
-import { OPAQUE_ALPHABET, opaqueLabel, tunnelSecret } from "../src/tokens";
+import { addressBucket, leadingZeroBits, OPAQUE_ALPHABET, opaqueLabel, tunnelSecret } from "../src/tokens";
 
 describe("tokens", () => {
   it("makes opaque labels of lowercase letters and digits", () => {
@@ -14,6 +14,23 @@ describe("tokens", () => {
     }
     expect(seen.size).toBe(50);
     expect(opaqueLabel(16)).toHaveLength(16);
+  });
+
+  it("counts leading zero bits", () => {
+    expect(leadingZeroBits(new Uint8Array([0xff]))).toBe(0);
+    expect(leadingZeroBits(new Uint8Array([0x00, 0x01]))).toBe(15);
+    expect(leadingZeroBits(new Uint8Array([0x00, 0x00, 0x80]))).toBe(16);
+    expect(leadingZeroBits(new Uint8Array([0x0f]))).toBe(4);
+    expect(leadingZeroBits(new Uint8Array([0, 0]))).toBe(16);
+  });
+
+  it("counts an IPv6 address by its /64, an IPv4 one as it is", () => {
+    expect(addressBucket("203.0.113.7")).toBe("203.0.113.7");
+    expect(addressBucket("2001:db8:1:2::1")).toBe("2001:db8:1:2::/64");
+    expect(addressBucket("2001:0DB8:0001:0002:ffff:ffff:ffff:ffff")).toBe("2001:db8:1:2::/64");
+    expect(addressBucket("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(addressBucket("::1")).toBe("0:0:0:0::/64");
+    expect(addressBucket("2001:db8:1:3::1")).not.toBe(addressBucket("2001:db8:1:2::1"));
   });
 
   it("makes tunnel secrets of 32 random bytes", () => {

@@ -56,7 +56,7 @@ struct ControlPlaneTests {
         ])
         let plane = exchange.plane()
         let key = Signed()
-        let registered = try await plane.register(key.signer, name: "MacBook")
+        let registered = try await plane.register(key.signer, name: "MacBook", proofAt: 1_791_806_400, proof: "1234")
         #expect(registered.id == "i1")
         #expect(registered.endpoint == nil)
         let made = try await plane.createEndpoint(key.signer)
@@ -75,7 +75,7 @@ struct ControlPlaneTests {
             "GET /v1/installations/self", "DELETE /v1/installations/self/endpoint", "DELETE /v1/installations/self",
         ])
         let body = try #require(requests[0].httpBody)
-        #expect(try JSONDecoder().decode([String: String].self, from: body) == ["name": "MacBook", "platform": "macos"])
+        #expect(try JSONDecoder().decode([String: String].self, from: body) == ["name": "MacBook", "platform": "macos", "proofAt": "1791806400", "proof": "1234"])
         // Every call is signed, never a bearer; each nonce is new.
         for request in requests {
             #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
@@ -93,14 +93,14 @@ struct ControlPlaneTests {
 
     @Test func saysWhatTheControlPlaneSaid() async throws {
         let exchange = Exchange([
-            (404, #"{"error": "This Mac isn't registered. Turn remote access on again."}"#),
+            (410, #"{"error": "This Mac isn't registered. Turn remote access on again."}"#),
             (502, "<html>bad gateway</html>"),
             (0, ""),
             (200, "not json"),
         ])
         let plane = exchange.plane()
         let key = Signed().signer
-        await #expect(throws: ControlPlane.Failure(message: "This Mac isn't registered. Turn remote access on again.", status: 404)) { try await plane.installation(key) }
+        await #expect(throws: ControlPlane.Failure(message: "This Mac isn't registered. Turn remote access on again.", status: 410)) { try await plane.installation(key) }
         await #expect(throws: ControlPlane.Failure(message: "The control plane answered 502.", status: 502)) { try await plane.installation(key) }
         await #expect(throws: ControlPlane.Failure(message: "The control plane didn't answer.", status: 0)) { try await plane.installation(key) }
         await #expect(throws: ControlPlane.Failure(message: "The control plane's answer couldn't be read.", status: 0)) { try await plane.installation(key) }

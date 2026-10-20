@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { tunnelsFromEnv } from "../src/cloudflare";
 import type { Env } from "../src/env";
-import { Mac, testApp } from "./helpers";
+import { HOUR, Mac, testApp } from "./helpers";
 
 async function registered(app: ReturnType<typeof testApp>) {
   const mac = await Mac.make();
@@ -17,7 +17,7 @@ describe("the installation's tunnel", () => {
     const created = await app.call(mac.mac, "POST", "/v1/installations/self/endpoint");
     expect(created.status).toBe(201);
     const hostname = created.body.endpoint.hostname as string;
-    expect(hostname).toMatch(/^oby-[a-z0-9]{20}\.tetrix\.pro$/);
+    expect(hostname).toMatch(/^oby-[a-z0-9]{20}\.oby-devices\.test$/);
     expect(created.body.endpoint.tunnelId).toBe("tunnel-1");
 
     expect(app.tunnels.ops()).toEqual(["createTunnel", "configureTunnel", "createCNAME"]);
@@ -93,10 +93,70 @@ describe("the installation's tunnel", () => {
   });
 
   it("without Cloudflare's secrets, says what to set", async () => {
-    const app = testApp({ tunnels: tunnelsFromEnv({ DOMAIN: "tetrix.pro" } as Env) });
+    const app = testApp({ tunnels: tunnelsFromEnv({} as Env) });
     const mac = await registered(app);
     const failed = await app.call(mac.mac, "POST", "/v1/installations/self/endpoint");
     expect(failed.status).toBe(503);
     expect(failed.body.error).toContain("CF_API_TOKEN, CF_ACCOUNT_ID and CF_ZONE_ID");
+  });
+});
+
+describe("what a tunnel may cost", () => {
+  it("makes no hostname until the devices have a domain of their own", async () => {
+    for (const domain of ["", "tetrix.pro", "devices.tetrix.pro", "pro"]) {
+      const app = testApp({}, { DEVICE_DOMAIN: domain });
+      const mac = await registered(app);
+      const refused = await app.call(mac.mac, "POST", "/v1/installations/self/endpoint");
+      expect(refused.status, domain).toBe(503);
+      expect(refused.body.error).toMatch(/DEVICE_DOMAIN|device domain/);
+      expect(app.tunnels.calls).toEqual([]);
+    }
+  });
+
+  it("caps the endpoints alive at once", async () => {
+    const app = testApp({}, { MAX_ENDPOINTS: "1" });
+    const first = await registered(app);
+    expect((await app.call(first.mac, "POST", "/v1/installations/self/endpoint")).status).toBe(201);
+    const second = await registered(app);
+    const full = await app.call(second.mac, "POST", "/v1/installations/self/endpoint");
+    expect(full.status).toBe(503);
+    expect(full.body.error).toBe("Remote access is full right now. Try again later.");
+    expect(app.tunnels.tunnels.size).toBe(1);
+    // The first one asking again still gets its own.
+    expect((await app.call(first.mac, "POST", "/v1/installations/self/endpoint")).status).toBe(200);
+  });
+
+  it("limits each installation's tunnel changes and token reads", async () => {
+    const app = testApp();
+    const mac = await registered(app);
+    for (let i = 0; i < 5; i++) {
+      const path = "/v1/installations/self/endpoint";
+      expect((await app.call(mac.mac, i % 2 ? "DELETE" : "POST", path)).status).toBe(i % 2 ? 204 : 201);
+    }
+    const sixth = await app.call(mac.mac, "DELETE", "/v1/installations/self/endpoint");
+    expect(sixth.status).toBe(429);
+    expect(sixth.body.error).toMatch(/^This Mac changed its tunnel too often\./);
+    // Asking for the endpoint it has costs Cloudflare nothing, so it isn't counted.
+    expect((await app.call(mac.mac, "POST", "/v1/installations/self/endpoint")).status).toBe(200);
+    for (let i = 0; i < 30; i++) expect((await app.call(mac.mac, "GET", "/v1/installations/self/endpoint/token")).status).toBe(200);
+    const greedy = await app.call(mac.mac, "GET", "/v1/installations/self/endpoint/token");
+    expect(greedy.status).toBe(429);
+    expect(greedy.body.error).toMatch(/^This Mac asked for its tunnel's token too often\./);
+    app.time.advance(HOUR);
+    expect((await app.call(mac.mac, "GET", "/v1/installations/self/endpoint/token")).status).toBe(200);
+    // Another Mac isn't held back by this one.
+    const other = await registered(app);
+    expect((await app.call(other.mac, "POST", "/v1/installations/self/endpoint")).status).toBe(201);
+  });
+
+  it("limits new endpoints over everyone", async () => {
+    const app = testApp();
+    const window = Math.floor(app.time.now().getTime() / 1000);
+    await env.DB.prepare("INSERT INTO rate_limits (key, window_start, count) VALUES ('endpoints:everywhere', ?1, 60)").bind(window).run();
+    const mac = await registered(app);
+    const busy = await app.call(mac.mac, "POST", "/v1/installations/self/endpoint");
+    expect(busy.status).toBe(429);
+    expect(busy.body.error).toMatch(/^Too many Macs are turning remote access on right now\./);
+    expect(app.tunnels.calls).toEqual([]);
   });
 });

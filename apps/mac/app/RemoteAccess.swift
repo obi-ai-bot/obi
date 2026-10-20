@@ -31,10 +31,13 @@ final class RemoteAccess {
     /// How often a Mac with a hostname tells the control plane it's still here: one idle for 30
     /// days loses its installation (cloud/control-plane, `sweep`).
     static let checkInEvery = Duration.seconds(24 * 60 * 60)
+    /// The email sign-in's keychain items and defaults (before 2026-10-20), removed at launch.
+    static let oldSecrets = ["control-plane-session", "installation-credential"]
+    static let oldDefaults = ["remote.email", "remote.installation", "remote.clientID"]
 
     /// Remote access is on: the tunnel runs, or tries to.
     private(set) var on: Bool
-    /// This Mac's hostname, once it has one: oby-<opaque>.tetrix.pro.
+    /// This Mac's hostname, once it has one: oby-<opaque>.<the control plane's device domain>.
     private(set) var hostname: String?
     private(set) var tunnel = TunnelState.off
     private(set) var busy = false
@@ -46,10 +49,14 @@ final class RemoteAccess {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored let runner: TunnelRunner
     @ObservationIgnored private var checkIns: Task<Void, Never>?
+    /// A new Mac's proof of work, in leading zero bits: at least the control plane's
+    /// REGISTRATION_WORK_BITS (cloud/control-plane/wrangler.jsonc). Tests pass fewer.
+    @ObservationIgnored private let workBits: Int
 
     init(plane: ControlPlane = ControlPlane(), secrets: any VaultStore = KeychainVault(service: RemoteAccess.service),
-         defaults: UserDefaults = .standard, runner: TunnelRunner = TunnelRunner()) {
+         defaults: UserDefaults = .standard, runner: TunnelRunner = TunnelRunner(), workBits: Int = 22) {
         self.plane = plane
+        self.workBits = workBits
         self.secrets = secrets
         self.defaults = defaults
         self.runner = runner
@@ -74,6 +81,9 @@ final class RemoteAccess {
     /// Remote access was on: the tunnel runs again with the keychain's token. With a hostname, on
     /// or off, this Mac checks in now and once a day, so its installation isn't removed as idle.
     func start() {
+        // ponytail: once the email sign-in's leftovers are gone from every Mac, drop this.
+        for name in Self.oldSecrets { try? secrets.remove(name) }
+        for key in Self.oldDefaults { defaults.removeObject(forKey: key) }
         if on {
             if let token = (try? secrets.value(Self.tokenKey)) ?? nil {
                 runner.start(token: token)
@@ -109,7 +119,7 @@ final class RemoteAccess {
     func checkIn() async {
         do {
             _ = try await plane.installation(try signer())
-        } catch let failure as ControlPlane.Failure where failure.status == 404 {
+        } catch let failure as ControlPlane.Failure where failure.status == 410 {
             hostname = nil
             defaults.removeObject(forKey: "remote.hostname")
             guard on else { return }
@@ -130,7 +140,11 @@ final class RemoteAccess {
     func turnOn() async {
         await attempt {
             let signer = try signer()
-            _ = try await plane.register(signer, name: Host.current().localizedName ?? "Mac")
+            // A new Mac's proof of work, off the main thread: a second or two.
+            let at = Int(plane.now().timeIntervalSince1970)
+            let key = ControlPlane.base64url(signer.publicKey), bits = workBits
+            let proof = await Task.detached(priority: .userInitiated) { MacKey.work(key: key, at: at, bits: bits) }.value
+            _ = try await plane.register(signer, name: Host.current().localizedName ?? "Mac", proofAt: at, proof: proof)
             let endpoint = try await plane.createEndpoint(signer)
             let token = try await plane.tunnelToken(signer)
             try secrets.save(token.token, as: Self.tokenKey)
@@ -160,7 +174,7 @@ final class RemoteAccess {
             if let saved = try secrets.value(Self.keyKey) {
                 do {
                     try await plane.forget(try MacKey.signer(saved))
-                } catch let failure as ControlPlane.Failure where failure.status == 404 {
+                } catch let failure as ControlPlane.Failure where failure.status == 410 {
                     // Removed already (idle, or forgotten before): nothing to remove.
                 }
             }
@@ -176,7 +190,7 @@ final class RemoteAccess {
     /// This Mac's key, made the first time it's needed.
     private func signer() throws -> ControlPlane.Signer {
         if let saved = try secrets.value(Self.keyKey) { return try MacKey.signer(saved) }
-        let saved = MacKey.make()
+        let saved = try MacKey.make()
         try secrets.save(saved, as: Self.keyKey)
         return try MacKey.signer(saved)
     }
@@ -199,11 +213,37 @@ final class RemoteAccess {
 /// Enclave's wrapped key (only this Mac's Secure Enclave can use it, and the private key never
 /// leaves it), or "sw:" and a software key's raw bytes on a Mac with no Secure Enclave.
 nonisolated enum MacKey {
-    static func make() -> String {
-        if SecureEnclave.isAvailable, let key = try? SecureEnclave.P256.Signing.PrivateKey() {
-            return "se:" + key.dataRepresentation.base64EncodedString()
+    /// A new key: the Secure Enclave's on a Mac that has one, and if it can't make one, that's an
+    /// error to show, never a quiet step down to a software key.
+    static func make() throws -> String {
+        if SecureEnclave.isAvailable {
+            return "se:" + (try SecureEnclave.P256.Signing.PrivateKey()).dataRepresentation.base64EncodedString()
         }
         return "sw:" + P256.Signing.PrivateKey().rawRepresentation.base64EncodedString()
+    }
+
+    /// A new Mac's proof of work (cloud/control-plane/src/app.ts, `checkWork`): the first decimal
+    /// answer such that SHA-256 of "oby-register-v1", the key, `at` and the answer, a line each,
+    /// starts with `bits` zero bits.
+    static func work(key: String, at: Int, bits: Int) -> String {
+        var start = SHA256()
+        start.update(data: Data("oby-register-v1\n\(key)\n\(at)\n".utf8))
+        var answer = 0
+        while true {
+            var hash = start
+            hash.update(data: Data(String(answer).utf8))
+            if zeroBits(Array(hash.finalize())) >= bits { return String(answer) }
+            answer += 1
+        }
+    }
+
+    static func zeroBits(_ bytes: [UInt8]) -> Int {
+        var bits = 0
+        for byte in bytes {
+            if byte != 0 { return bits + byte.leadingZeroBitCount }
+            bits += 8
+        }
+        return bits
     }
 
     static func signer(_ saved: String) throws -> ControlPlane.Signer {

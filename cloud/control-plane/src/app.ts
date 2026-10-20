@@ -4,13 +4,17 @@
 // call can't be sent again or changed on the way. `handle` takes the Cloudflare API as `deps`, so
 // the tests pass a fake.
 //
+// Anyone can run Oby, so anyone can get a hostname: the hostnames live on a domain of their own
+// (DEVICE_DOMAIN, never the product's), a new Mac pays a proof of work, new Macs and Cloudflare
+// calls are rate-limited, live endpoints are capped, and unused or idle installations are swept.
+//
 // Nothing secret is kept: D1 holds public keys, and a tunnel's run token is fetched from
 // Cloudflare when the Mac asks.
 
 import { CloudflareError, CloudflareSetupError, type TunnelAPI } from "./cloudflare";
 import type { Env } from "./env";
 import { type Limit, takeOne } from "./limits";
-import { canonicalKey, newId, opaqueLabel, tunnelSecret, verifyP256 } from "./tokens";
+import { addressBucket, canonicalKey, leadingZeroBits, newId, opaqueLabel, tunnelSecret, verifyP256 } from "./tokens";
 
 export interface Deps {
   tunnels: TunnelAPI;
@@ -22,14 +26,25 @@ export interface Deps {
 export const SKEW_SECONDS = 5 * 60;
 /// An installation no call was signed for in this long is removed, with its tunnel and hostname.
 export const IDLE_DAYS = 30;
-/// How many idle installations one sweep removes: each is two Cloudflare calls.
+/// An installation that never made an endpoint is removed after this long.
+export const UNUSED_HOURS = 24;
+/// How many idle installations with endpoints one sweep removes: each is two Cloudflare calls,
+/// under the Workers free plan's 50 per run. Every 10 minutes, that's 120 an hour, twice
+/// `endpointsEverywhere`, so the sweep keeps up with what can be made.
 export const SWEEP_BATCH = 20;
-/// New installations, per address and over everyone. A key is one installation, so the key can't
-/// make more; registering the same key again isn't counted.
+/// New installations, per network (an IPv6 /64 is one) and over everyone; a key is one
+/// installation, and registering the same key again isn't counted. The global one is a circuit
+/// breaker behind the proof of work, high enough that strangers can't lock real Macs out
+/// cheaply. Then each installation's Cloudflare calls, and new endpoints over everyone.
 export const LIMITS = {
   registrationsPerAddress: { max: 5, windowSeconds: 60 * 60 } satisfies Limit,
-  registrationsEverywhere: { max: 60, windowSeconds: 60 * 60 } satisfies Limit,
+  registrationsEverywhere: { max: 1000, windowSeconds: 60 * 60 } satisfies Limit,
+  endpointChangesPerInstallation: { max: 5, windowSeconds: 60 * 60 } satisfies Limit,
+  tokenReadsPerInstallation: { max: 30, windowSeconds: 60 * 60 } satisfies Limit,
+  endpointsEverywhere: { max: 60, windowSeconds: 60 * 60 } satisfies Limit,
 };
+/// What a new Mac's proof of work hashes, before its key, its time and its answer, a line each.
+export const WORK_PREFIX = "oby-register-v1";
 /// What the Mac signs, before the body's bytes: the version, then one field a line.
 export const SIGNED_PREFIX = "oby-control-v1";
 
@@ -61,10 +76,13 @@ interface EndpointRow {
   created_at: string;
 }
 
-/// A call whose signature checked out: the key that signed it and its JSON body.
+/// A call whose signature checked out: the key that signed it, its JSON body, and its nonce,
+/// not spent yet (`spend`).
 interface Signed {
   key: string;
   body: Record<string, unknown>;
+  nonce: string;
+  timestamp: number;
 }
 
 export async function handle(request: Request, env: Env, deps: Deps): Promise<Response> {
@@ -97,7 +115,9 @@ async function route(request: Request, env: Env, deps: Deps, now: () => Date): P
 // MARK: Installations
 
 /// Registers the Mac whose key signed the call (201), or, the same key again, keeps its
-/// installation and its hostname (200).
+/// installation and its hostname (200). A new key also brings a proof of work: `proof`, a
+/// decimal answer such that SHA-256 of WORK_PREFIX, the key, `proofAt` (Unix seconds, within
+/// five minutes) and the answer, a line each, starts with REGISTRATION_WORK_BITS zero bits.
 async function register(request: Request, env: Env, now: () => Date): Promise<Response> {
   const call = await signed(request, env, now());
   const name = field(typeof call.body.name === "string" ? call.body.name.trim() : call.body.name, "name", /^[^\n\r]{1,64}$/, "1 to 64 characters");
@@ -105,10 +125,13 @@ async function register(request: Request, env: Env, now: () => Date): Promise<Re
   const at = iso(now());
   const existing = await byKey(env.DB, call.key);
   if (existing) {
+    await spend(env.DB, call);
     await env.DB.prepare("UPDATE installations SET name = ?2, platform = ?3, last_seen_at = ?4 WHERE id = ?1").bind(existing.id, name, platform, at).run();
     return json({ installation: await publicInstallation(env.DB, { ...existing, name, platform, last_seen_at: at }) });
   }
-  const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  await checkWork(call, env, now());
+  await spend(env.DB, call);
+  const address = addressBucket(request.headers.get("CF-Connecting-IP") ?? "unknown");
   await limit(env.DB, `registrations:address:${address}`, LIMITS.registrationsPerAddress, now(), "Too many Macs were set up from this network lately.");
   await limit(env.DB, "registrations:everywhere", LIMITS.registrationsEverywhere, now(), "Too many Macs are being set up right now.");
   const row: InstallationRow = { id: newId(), public_key: call.key, name, platform, created_at: at, last_seen_at: at };
@@ -129,6 +152,7 @@ async function showSelf(request: Request, env: Env, now: () => Date): Promise<Re
 /// Forget This Mac: the tunnel and the record go at Cloudflare, then the installation.
 async function forget(request: Request, env: Env, deps: Deps, now: () => Date): Promise<Response> {
   const row = await signedInstallation(request, env, now);
+  if (await endpointOf(env.DB, row.id)) await limitEndpointChanges(env.DB, row, now());
   await remove(env.DB, deps.tunnels, row);
   return new Response(null, { status: 204 });
 }
@@ -139,7 +163,12 @@ async function createEndpoint(request: Request, env: Env, deps: Deps, now: () =>
   const row = await signedInstallation(request, env, now);
   const existing = await endpointOf(env.DB, row.id);
   if (existing) return json({ endpoint: publicEndpoint(existing) });
-  const hostname = `${env.HOSTNAME_PREFIX}${opaqueLabel()}.${env.DOMAIN}`;
+  const domain = deviceDomain(env);
+  const live = await env.DB.prepare("SELECT count(*) AS n FROM endpoints").first<{ n: number }>();
+  if ((live?.n ?? 0) >= Number(env.MAX_ENDPOINTS || 500)) throw new Reply(503, "Remote access is full right now. Try again later.");
+  await limitEndpointChanges(env.DB, row, now());
+  await limit(env.DB, "endpoints:everywhere", LIMITS.endpointsEverywhere, now(), "Too many Macs are turning remote access on right now.");
+  const hostname = `${env.HOSTNAME_PREFIX}${opaqueLabel()}.${domain}`;
   const tunnel = await deps.tunnels.createTunnel(`oby-${row.id}`, tunnelSecret());
   try {
     // Only the gateway, and nothing else on the Mac, is reachable through the tunnel.
@@ -169,6 +198,7 @@ async function endpointToken(request: Request, env: Env, deps: Deps, now: () => 
   const row = await signedInstallation(request, env, now);
   const endpoint = await endpointOf(env.DB, row.id);
   if (!endpoint) throw new Reply(404, "This installation has no tunnel yet.");
+  await limit(env.DB, `tokens:installation:${row.id}`, LIMITS.tokenReadsPerInstallation, now(), "This Mac asked for its tunnel's token too often.");
   const token = await deps.tunnels.tunnelToken(endpoint.tunnel_id);
   return json({ token, hostname: endpoint.hostname }, 200, noStore);
 }
@@ -176,8 +206,28 @@ async function endpointToken(request: Request, env: Env, deps: Deps, now: () => 
 async function removeEndpoint(request: Request, env: Env, deps: Deps, now: () => Date): Promise<Response> {
   const row = await signedInstallation(request, env, now);
   const endpoint = await endpointOf(env.DB, row.id);
-  if (endpoint) await tearDown(env.DB, deps.tunnels, endpoint);
+  if (endpoint) {
+    await limitEndpointChanges(env.DB, row, now());
+    await tearDown(env.DB, deps.tunnels, endpoint);
+  }
   return new Response(null, { status: 204 });
+}
+
+/// Making or removing an installation's endpoint: each is Cloudflare calls on the account's one
+/// API token, so one installation can't spend its rate limit for everyone.
+async function limitEndpointChanges(db: D1Database, row: InstallationRow, now: Date): Promise<void> {
+  await limit(db, `endpoints:installation:${row.id}`, LIMITS.endpointChangesPerInstallation, now, "This Mac changed its tunnel too often.");
+}
+
+/// DEVICE_DOMAIN, once it's set to a domain apart from the product's: until then, no endpoint.
+function deviceDomain(env: Env): string {
+  const domain = (env.DEVICE_DOMAIN ?? "").trim().toLowerCase();
+  const product = (env.PRODUCT_DOMAIN ?? "").trim().toLowerCase();
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain)) throw new Reply(503, "No device domain is set up: set DEVICE_DOMAIN in wrangler.jsonc to a domain of its own.");
+  if (product && (domain === product || domain.endsWith(`.${product}`) || product.endsWith(`.${domain}`))) {
+    throw new Reply(503, "DEVICE_DOMAIN can't be the product's domain or share it: register a domain of its own.");
+  }
+  return domain;
 }
 
 /// The DNS record and the tunnel go at Cloudflare first, then the row: if Cloudflare refuses,
@@ -195,14 +245,22 @@ async function remove(db: D1Database, tunnels: TunnelAPI, row: InstallationRow):
   await db.prepare("DELETE FROM installations WHERE id = ?1").bind(row.id).run();
 }
 
-// MARK: The hourly sweep
+// MARK: The sweep
 
-/// Cron's job (wrangler.jsonc): spent nonces go, and so do installations no Mac has signed a
-/// call for in IDLE_DAYS, their tunnels and hostnames with them. One Cloudflare refused is tried
-/// again next hour.
-export async function sweep(env: Env, deps: Deps): Promise<{ removed: number; failed: number }> {
+/// Cron's job, every 10 minutes (wrangler.jsonc): spent nonces and rate-limit windows a day old
+/// go; installations that never made an endpoint go after UNUSED_HOURS, in one statement; and up
+/// to SWEEP_BATCH installations no Mac has signed a call for in IDLE_DAYS go with their tunnels
+/// and hostnames. One that Cloudflare refuses is tried again next time.
+export async function sweep(env: Env, deps: Deps): Promise<{ removed: number; failed: number; unused: number }> {
   const now = (deps.now ?? (() => new Date()))();
-  await env.DB.prepare("DELETE FROM nonces WHERE expires_at < ?1").bind(Math.floor(now.getTime() / 1000)).run();
+  const seconds = Math.floor(now.getTime() / 1000);
+  const unusedBefore = iso(new Date(now.getTime() - UNUSED_HOURS * 3_600_000));
+  const [, , unused] = await env.DB.batch([
+    env.DB.prepare("DELETE FROM nonces WHERE expires_at < ?1").bind(seconds),
+    // Every window is an hour or less: a day-old one counts nothing.
+    env.DB.prepare("DELETE FROM rate_limits WHERE window_start < ?1").bind(seconds - 86_400),
+    env.DB.prepare("DELETE FROM installations WHERE created_at < ?1 AND NOT EXISTS (SELECT 1 FROM endpoints e WHERE e.installation_id = installations.id)").bind(unusedBefore),
+  ]);
   const cutoff = iso(new Date(now.getTime() - IDLE_DAYS * 86_400_000));
   const idle = await env.DB.prepare("SELECT * FROM installations WHERE last_seen_at < ?1 ORDER BY last_seen_at LIMIT ?2").bind(cutoff, SWEEP_BATCH).all<InstallationRow>();
   let removed = 0;
@@ -216,7 +274,7 @@ export async function sweep(env: Env, deps: Deps): Promise<{ removed: number; fa
       console.error(`sweep: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  return { removed, failed };
+  return { removed, failed, unused: unused?.meta.changes ?? 0 };
 }
 
 // MARK: Who's asking
@@ -224,7 +282,9 @@ export async function sweep(env: Env, deps: Deps): Promise<{ removed: number; fa
 /// Checks the call's signature: `Oby-Key` (the Mac's P-256 public key, X9.63, base64url),
 /// `Oby-Timestamp` (Unix seconds), `Oby-Nonce` and `Oby-Signature` (ECDSA P-256 with SHA-256,
 /// r‖s, base64url) over SIGNED_PREFIX, the method, the path, the timestamp and the nonce, a line
-/// each, then the body's bytes. Each nonce works once per key while its timestamp is fresh.
+/// each, then the body's bytes. Each nonce works once per key while its timestamp is fresh: the
+/// caller spends it (`spend`) once it knows the call is about something that exists, so keys
+/// with no installation can't fill the table.
 async function signed(request: Request, env: Env, now: Date): Promise<Signed> {
   const header = (name: string) => request.headers.get(name) ?? "";
   const key = canonicalKey(header("Oby-Key"));
@@ -244,19 +304,36 @@ async function signed(request: Request, env: Env, now: Date): Promise<Signed> {
   message.set(head);
   message.set(body, head.length);
   if (!(await verifyP256(key, signature, message))) throw new Reply(401, "The signature doesn't match this Mac's key.");
-  const fresh = await env.DB.prepare("INSERT INTO nonces (public_key, nonce, expires_at) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING RETURNING nonce")
-    .bind(key, nonce, Number(timestamp) + SKEW_SECONDS)
+  return { key, body: body.length ? parseJSON(body) : {}, nonce, timestamp: Number(timestamp) };
+}
+
+/// The call's nonce, used: the same call again is refused.
+async function spend(db: D1Database, call: Signed): Promise<void> {
+  const fresh = await db.prepare("INSERT INTO nonces (public_key, nonce, expires_at) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING RETURNING nonce")
+    .bind(call.key, call.nonce, call.timestamp + SKEW_SECONDS)
     .first();
   if (!fresh) throw new Reply(401, "That call was made already.");
-  return { key, body: body.length ? parseJSON(body) : {} };
+}
+
+/// The new Mac's proof of work (`register`).
+async function checkWork(call: Signed, env: Env, now: Date): Promise<void> {
+  const at = call.body.proofAt;
+  const proof = call.body.proof;
+  if (typeof at !== "string" || !/^\d{1,12}$/.test(at) || typeof proof !== "string" || !/^\d{1,20}$/.test(proof)) {
+    throw new Reply(403, "A new Mac needs a proof of work. Update Oby.");
+  }
+  if (Math.abs(Number(at) - Math.floor(now.getTime() / 1000)) > SKEW_SECONDS) throw new Reply(403, "That proof of work is too old.");
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${WORK_PREFIX}\n${call.key}\n${at}\n${proof}`));
+  if (leadingZeroBits(new Uint8Array(digest)) < Number(env.REGISTRATION_WORK_BITS || 22)) throw new Reply(403, "That proof of work doesn't check out.");
 }
 
 /// The installation the signing key belongs to; it was seen now.
 async function signedInstallation(request: Request, env: Env, now: () => Date): Promise<InstallationRow> {
   const call = await signed(request, env, now());
   const row = await byKey(env.DB, call.key);
-  // 404, not 401: the signature was good, and the Mac should register again.
-  if (!row) throw new Reply(404, "This Mac isn't registered. Turn remote access on again.");
+  // 410, apart from 401 (a bad signature) and 404 (no such route): the Mac should register again.
+  if (!row) throw new Reply(410, "This Mac isn't registered. Turn remote access on again.");
+  await spend(env.DB, call);
   const at = iso(now());
   await env.DB.prepare("UPDATE installations SET last_seen_at = ?2 WHERE id = ?1").bind(row.id, at).run();
   return { ...row, last_seen_at: at };

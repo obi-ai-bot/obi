@@ -3,9 +3,10 @@
 // Mac app does (Engine/ControlPlane.swift).
 
 import { env } from "cloudflare:test";
-import { type Deps, handle, SIGNED_PREFIX } from "../src/app";
+import { type Deps, handle, SIGNED_PREFIX, WORK_PREFIX } from "../src/app";
 import { CloudflareError, type Ingress, type TunnelAPI } from "../src/cloudflare";
 import type { Env } from "../src/env";
+import { leadingZeroBits } from "../src/tokens";
 
 export class FakeTunnels implements TunnelAPI {
   calls: { op: string; args: unknown[] }[] = [];
@@ -98,7 +99,22 @@ export function base64url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export function testApp(overrides: Partial<Deps> = {}) {
+/// A proof of work for `key` at `at`, as the Mac makes one (apps/mac/app/RemoteAccess.swift,
+/// `MacKey.work`): the first answer whose hash starts with the Worker's zero bits; with `valid`
+/// false, the first answer that doesn't.
+export async function work(key: string, at: number, valid = true): Promise<string> {
+  for (let answer = 0; ; answer++) {
+    if ((await checks(key, at, String(answer))) === valid) return String(answer);
+  }
+}
+
+/// Whether `answer` is a proof of work for `key` at `at`, at the Worker's bits.
+export async function checks(key: string, at: number, answer: string): Promise<boolean> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${WORK_PREFIX}\n${key}\n${at}\n${answer}`));
+  return leadingZeroBits(new Uint8Array(digest)) >= Number(env.REGISTRATION_WORK_BITS);
+}
+
+export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env> = {}) {
   const tunnels = new FakeTunnels();
   let at = new Date("2026-10-12T12:00:00.000Z");
   const time = {
@@ -116,7 +132,7 @@ export function testApp(overrides: Partial<Deps> = {}) {
       headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...headers },
       body,
     });
-    const response = await handle(request, env, deps);
+    const response = await handle(request, { ...env, ...envOverrides }, deps);
     const text = await response.text();
     return { status: response.status, headers: response.headers, body: text ? JSON.parse(text) : null };
   }
@@ -128,9 +144,10 @@ export function testApp(overrides: Partial<Deps> = {}) {
     return raw(method, path, text, { ...signed, ...headers });
   }
 
-  /// Registers `mac` and returns the answer: `installation`.
+  /// Registers `mac`, with its proof of work, and returns the answer: `installation`.
   async function register(mac: Mac, name = "Wellington's MacBook Pro", headers: Record<string, string> = {}): Promise<Answer> {
-    return call(mac, "POST", "/v1/installations", { name, platform: "macos" }, headers);
+    const at = Math.floor(time.now().getTime() / 1000);
+    return call(mac, "POST", "/v1/installations", { name, platform: "macos", proofAt: String(at), proof: await work(mac.publicKey, at) }, headers);
   }
 
   return { raw, call, register, tunnels, time };

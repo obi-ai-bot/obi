@@ -1,5 +1,6 @@
+import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { MINUTE, Mac, testApp } from "./helpers";
+import { MINUTE, Mac, testApp, work } from "./helpers";
 
 describe("signed calls", () => {
   it("refuses a call with no signature", async () => {
@@ -49,9 +50,17 @@ describe("signed calls", () => {
     expect(replayed.body.error).toBe("That call was made already.");
     // Another key may use the same nonce.
     const other = await Mac.make();
-    expect((await app.raw("POST", "/v1/installations", '{"name":"Mac","platform":"macos"}',
-      await other.headers("POST", "/v1/installations", '{"name":"Mac","platform":"macos"}', seconds, "the-same-nonce-0001"))).status).toBe(201);
+    const body = JSON.stringify({ name: "Mac", platform: "macos", proofAt: String(seconds), proof: await work(other.publicKey, seconds) });
+    expect((await app.raw("POST", "/v1/installations", body, await other.headers("POST", "/v1/installations", body, seconds, "the-same-nonce-0001"))).status).toBe(201);
     expect((await app.raw("GET", "/v1/installations/self", undefined, { ...signed, "Oby-Nonce": "short" })).status).toBe(401);
+  });
+
+  it("keeps no nonce for a key with no installation", async () => {
+    const app = testApp();
+    const stranger = await Mac.make();
+    for (let i = 0; i < 3; i++) expect((await app.call(stranger, "GET", "/v1/installations/self")).status).toBe(410);
+    expect((await app.call(stranger, "POST", "/v1/installations", { name: "Mac", platform: "macos" })).status).toBe(403);
+    expect((await env.DB.prepare("SELECT count(*) AS n FROM nonces").first<{ n: number }>())?.n).toBe(0);
   });
 
   it("takes a timestamp within five minutes of the Worker's clock", async () => {
@@ -75,7 +84,7 @@ describe("signed calls", () => {
     const app = testApp();
     const mac = await Mac.make();
     const seconds = Math.floor(app.time.now().getTime() / 1000);
-    const body = '{"name":"Mac","platform":"macos"}';
+    const body = JSON.stringify({ name: "Mac", platform: "macos", proofAt: String(seconds), proof: await work(mac.publicKey, seconds) });
     const signed = await mac.headers("POST", "/v1/installations", body, seconds);
     for (const key of [`${mac.publicKey}=`, mac.publicKey.slice(0, -2), `A${mac.publicKey.slice(1)}`, "not a key"]) {
       expect((await app.raw("POST", "/v1/installations", body, { ...signed, "Oby-Key": key })).status).toBe(401);
