@@ -79,6 +79,12 @@ pub mod action {
     pub const DISMISS_JOB: &str = "dismiss_job";
     /// Try another conversation's job again (#631): `target` the job.
     pub const RETRY_JOB: &str = "retry_job";
+    /// Make the routine the brain planned (#395): `target` the conversation that planned it,
+    /// `payload` `{"routine": <the routine as POST /v1/routines takes it>}`.
+    pub const CREATE_ROUTINE: &str = "create_routine";
+    /// Change a routine the brain named (#395): `target` the routine, `payload`
+    /// `{"action": "resume" | "delete" | "run" | "reschedule", "schedule", "zone"}`.
+    pub const CHANGE_ROUTINE: &str = "change_routine";
     /// Continue a job in its own session (`oby_continue_job`): `target` the job, `payload`
     /// `{"words": "…"}` or null.
     pub const CONTINUE_JOB: &str = "continue_job";

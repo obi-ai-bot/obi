@@ -2703,6 +2703,82 @@ impl Link {
                 Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
                 None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
             },
+            inbox::action::CREATE_ROUTINE => {
+                let draft: crate::routines::Draft =
+                    serde_json::from_value(confirmed.payload["routine"].clone())
+                        .map_err(|_| api(StatusCode::CONFLICT, "That routine's plan was lost."))?;
+                let routines = self
+                    .jobs
+                    .routines()
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "obid keeps no routines."))?;
+                routines
+                    .create(&self.jobs, draft, time::now())
+                    .map(|_| ())
+                    .map_err(|why| api(StatusCode::UNPROCESSABLE_ENTITY, why))
+            }
+            inbox::action::CHANGE_ROUTINE => {
+                use crate::routines::{Change, NotRun};
+                let routines = self
+                    .jobs
+                    .routines()
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "obid keeps no routines."))?;
+                let gone = || api(StatusCode::CONFLICT, "That routine is gone.");
+                // The card named its mode, tool, account and check: one changed since is a routine
+                // the owner didn't see.
+                let current = routines.get(target).ok_or_else(gone)?;
+                let payload = &confirmed.payload;
+                if payload["mode"] != serde_json::json!(current.mode)
+                    || payload["agent"] != serde_json::json!(current.agent)
+                    || payload["account"] != serde_json::json!(current.account)
+                    || payload["check"] != serde_json::json!(current.check)
+                {
+                    return Err(api(
+                        StatusCode::CONFLICT,
+                        "The routine's mode, tool, account or check changed since Oby asked: ask again.",
+                    ));
+                }
+                let now = time::now();
+                let change = |change: Change| match routines.change(&self.jobs, target, change, now)
+                {
+                    None => Err(gone()),
+                    Some(Err(why)) => Err(api(StatusCode::UNPROCESSABLE_ENTITY, why)),
+                    Some(Ok(_)) => Ok(()),
+                };
+                match confirmed.payload["action"].as_str() {
+                    Some("resume") => change(Change {
+                        enabled: Some(true),
+                        ..Default::default()
+                    }),
+                    Some("reschedule") => change(Change {
+                        schedule: serde_json::from_value(confirmed.payload["schedule"].clone())
+                            .ok(),
+                        zone: confirmed.payload["zone"].as_str().map(str::to_owned),
+                        ..Default::default()
+                    }),
+                    Some("delete") => routines.delete(target).then_some(()).ok_or_else(gone),
+                    Some("run") => {
+                        // Off the async threads: a run takes the routines' firing lock.
+                        let (routines, target) = (routines.clone(), target.to_owned());
+                        let ran = tokio::task::spawn_blocking(move || routines.run(&target, now))
+                            .await
+                            .map_err(|_| {
+                                api(StatusCode::INTERNAL_SERVER_ERROR, "The run stopped.")
+                            })?;
+                        match ran {
+                            Ok(_) => Ok(()),
+                            Err(NotRun::NoRoutine) => Err(gone()),
+                            Err(NotRun::Busy) => Err(api(
+                                StatusCode::CONFLICT,
+                                "Its previous run is still going.",
+                            )),
+                            Err(NotRun::Refused(why)) => {
+                                Err(api(StatusCode::UNPROCESSABLE_ENTITY, why))
+                            }
+                        }
+                    }
+                    _ => Err(api(StatusCode::CONFLICT, "That change was lost.")),
+                }
+            }
             inbox::action::RETRY_JOB => {
                 if self.jobs.get(target).is_some_and(|j| j.status.is_active()) {
                     return Err(api(StatusCode::CONFLICT, "That job is running again."));
