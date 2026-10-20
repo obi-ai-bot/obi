@@ -300,6 +300,8 @@ struct KindPage: View {
     /// GitHub's part of the page: only Review PR and Issues have one.
     private var gitHub: Bool { kind == .review || kind == .issues }
     private var connect: GitHubWork.Connect { gitHub ? .init(phone.gitHubWork) : .unknown }
+    /// Routines only: each routine's next run.
+    private var upcoming: [RunnerRoutine] { kind == .routines ? RunnerRoutine.upcoming(phone.routines) : [] }
     private var waiting: [GitHubWork.Item] { gitHub ? phone.gitHubWork?.waiting(kind, later: phone.gitHubLater) ?? [] : [] }
 
     /// GitHub's sign-in is the Mac's alone: a paired phone never signs the Mac in to someone's GitHub.
@@ -313,13 +315,15 @@ struct KindPage: View {
                 Text(kind.label).font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink)
                     .padding(.bottom, 12).accessibilityAddTraits(.isHeader)
                 LineTabs(tab: tab, counts: Dictionary(uniqueKeysWithValues: WorkList.Tab.allCases.map {
-                    ($0, WorkList.items(items, in: $0).count + ($0 == .running ? waiting.count : 0))
+                    ($0, WorkList.items(items, in: $0).count + ($0 == .running ? waiting.count + upcoming.count : 0))
                 })) {
                     picked = $0
                 }
                 .padding(.bottom, 12)
                 let cards = WorkList.items(items, in: tab)
                 if tab == .running {
+                    // A routine waiting for its next run says when (Sangam's tasks.ts).
+                    ForEach(upcoming) { UpcomingRoutineCard(routine: $0) }
                     if connect == .signedOut { ConnectGitHubCard(line: Self.connectLine, connect: nil) }
                     ForEach(waiting) { item in
                         GitHubCard(item: item, start: { try await phone.startGitHubWork(item.id) }, later: { phone.gitHubLater.insert(item.id) })
@@ -332,7 +336,7 @@ struct KindPage: View {
                     }
                 }
                 ForEach(cards) { TaskCard(item: $0) }
-                if cards.isEmpty && (tab == .done || waiting.isEmpty && connect != .signedOut) {
+                if cards.isEmpty && (tab == .done || waiting.isEmpty && upcoming.isEmpty && connect != .signedOut) {
                     Text(tab == .done ? "Nothing completed yet" : "Nothing running")
                         .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
                 }

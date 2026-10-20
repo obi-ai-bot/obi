@@ -622,7 +622,10 @@ fn a_new_sign_in_forgets_how_the_account_paid() {
     within(15, "the account signed in", || {
         (account(&obid, &id)?["signedIn"] == true).then_some(())
     });
-    let kept: Value = serde_json::from_slice(&std::fs::read(&usage).unwrap()).unwrap();
-    assert!(kept[&id]["priced"].is_null(), "{kept}");
+    // signedIn can show before the sign-in's own end forgets `priced`: wait for the file.
+    let kept = within(15, "the sign-in forgot how the account paid", || {
+        let kept: Value = serde_json::from_slice(&std::fs::read(&usage).ok()?).ok()?;
+        kept[&id]["priced"].is_null().then_some(kept)
+    });
     assert_eq!(kept[&id]["fiveHour"], 0.3);
 }

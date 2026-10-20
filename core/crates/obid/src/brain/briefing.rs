@@ -1069,6 +1069,7 @@ mod tests {
             conversation: String::new(),
             ended: false,
             artifacts: vec![],
+            routine: None,
         };
         Briefing {
             turns: vec![turn("user", "how is it going?"), turn("oby", "Fine.")],
@@ -1474,6 +1475,7 @@ mod tests {
                 conversation: String::new(),
                 ended: false,
                 artifacts: vec![],
+                routine: None,
             })
             .collect();
         let text = briefing.text();

@@ -305,6 +305,10 @@ pub struct Job {
     /// for a follow-up of work that isn't merged. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_from: Option<String>,
+    /// What the conversation that owns it did by itself each time it stalled
+    /// (crate::brain::supervisor), oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supervised: Vec<Supervision>,
     /// Its change against `start_commit` after each round, oldest first (#736): `diff` in the API.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diffs: Vec<crate::facts::Diff>,
@@ -348,6 +352,36 @@ pub struct Job {
     /// Every time its tool or account was changed (`oby_change_job`), oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub moves: Vec<Move>,
+    /// The routine whose run started it (crate::routines), or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine: Option<RoutineMark>,
+}
+
+/// Which routine's run a job is (docs/runner-api.md, "obid only: routines"): the routine, its
+/// name when the run started, the time it was due, and whether it ran late.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineMark {
+    pub id: String,
+    pub name: String,
+    /// When the run was due, in seconds since the epoch.
+    pub scheduled: i64,
+    pub catch_up: bool,
+}
+
+/// One decision of the conversation about a job of its that stalled (crate::brain::supervisor).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Supervision {
+    pub at: i64,
+    /// `continue`, `restart` or `split`; `asked` when it left the next step to the owner.
+    pub decision: String,
+    /// The jobs it started: the restart, or the split's parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<String>,
+    /// Its turn in the conversation.
+    pub turn: String,
+    /// The automatic steps across the job's tree with this one; for `asked`, those taken before.
+    pub count: usize,
 }
 
 /// One thing changed about a job after it started, in obid's own words.
@@ -466,6 +500,7 @@ impl Job {
             resumes_at: None,
             earlier: None,
             start_from: None,
+            supervised: Vec::new(),
             diffs: Vec::new(),
             checks: Vec::new(),
             scan: None,
@@ -477,6 +512,7 @@ impl Job {
             usage: None,
             usage_seen: None,
             window_share: None,
+            routine: None,
             ran_secs: None,
             budget_from: None,
         }
@@ -654,6 +690,16 @@ impl Job {
     /// The job as the runner API shows it.
     pub fn to_json(&self) -> Value {
         let date = |t: Option<i64>| t.map(obi_protocol::time::format);
+        // Out of the object below, which is as big as json! takes.
+        let supervised: Vec<Value> = self
+            .supervised
+            .iter()
+            .map(|s| {
+                json!({"at": obi_protocol::time::format(s.at), "decision": s.decision,
+                       "jobs": s.jobs, "turn": s.turn, "count": s.count,
+                       "of": crate::brain::supervisor::MOST})
+            })
+            .collect();
         // `title` is the derived one, always a string, as the Swift runner sends it.
         let mut value = json!({
             "id": self.id,
@@ -738,9 +784,9 @@ impl Job {
             "artifacts": self.artifacts.iter().map(|a| json!({"id": a.id, "version": a.version})).collect::<Vec<_>>(),
             "artifactProblems": self.artifact_problems,
             "followUpOf": self.follow_up_of,
-            "reason": self.reason,
-            "nextStep": self.next_step,
-            "resumesAt": date(self.resumes_at),
+            "routine": self.routine.as_ref().map(|r| json!({"id": r.id, "name": r.name,
+                "scheduled": obi_protocol::time::format(r.scheduled), "catchUp": r.catch_up})),
+            "supervised": supervised,
         });
         if let Some(activity) = &self.activity {
             value["activity"] = activity.clone();
@@ -750,6 +796,11 @@ impl Job {
             // The agent's own words, quoted: never obid's.
             value["contextBy"] = json!("agent");
         }
+        // Why it stopped and its one next step (#725), out of the literal above: json!'s recursion
+        // limit.
+        value["reason"] = json!(self.reason);
+        value["nextStep"] = json!(self.next_step);
+        value["resumesAt"] = json!(date(self.resumes_at));
         if let Some(step) = self.publish_step {
             value["publishStep"] = json!(step.as_str());
         }
@@ -1197,11 +1248,13 @@ mod tests {
             "reason",
             "nextStep",
             "resumesAt",
+            "routine",
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's fifteen.
-        assert_eq!(object.len(), 80);
+        // The Swift runner's 65 keys, obid's sixteen, and `supervised`.
+        assert_eq!(object.len(), 82);
+        assert_eq!(value["supervised"], json!([]));
         assert_eq!(value["archived"], Value::Null);
         assert_eq!(value["changes"], json!([]));
         assert_eq!(value["artifacts"], json!([]));

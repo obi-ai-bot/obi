@@ -66,6 +66,10 @@ final class RunnerFeed {
     var tetrix: TetrixStatus?
     /// What each job carries that Engine's Job doesn't read yet (its mode, the permission it waits
     /// on, its question's recommended option and plan), by job id.
+    /// Counts the `routine` events (#395): Settings › Routines reads the routines again on each.
+    private(set) var routineChanges = 0
+    /// obid's routines (#395), for the next runs on Home's Routines page; none from a runner without.
+    private(set) var routines: [RunnerRoutine] = []
     private(set) var extras: [String: RunnerJobExtras] = [:] {
         didSet { capturePermissions() }
     }
@@ -337,10 +341,12 @@ final class RunnerFeed {
                         // History is an enhancement: an older runner or failed history request must not take chat offline.
                         let history = try? await runner.inboxWithWords(state: "done")
                         let tetrix = try? await runner.tetrix()
+                        let routines = try? await runner.routines()
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
                         host = status.runner.host
                         version = status.runner.version
+                        if let routines { self.routines = routines ?? [] }
                         clearedAt = status.clearedAt
                         accounts = status.accounts
                         self.tetrix = tetrix
@@ -389,6 +395,9 @@ final class RunnerFeed {
                     case .artifact(let artifact): conversation.apply(artifact)
                     case .github(let work): apply(work)
                     case .conversation(let change): conversations.apply(change)
+                    case .routine:
+                        routineChanges += 1
+                        Task { if let routines = try? await runner.routines() { self.routines = routines ?? [] } }
                     }
                 }
             } catch {

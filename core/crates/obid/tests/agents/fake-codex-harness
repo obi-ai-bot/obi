@@ -59,7 +59,8 @@ if (argv.slice(-2).join(" ") === "features list") {
   for (const name of ["apps", "browser_use", "browser_use_external", "browser_use_full_cdp_access", "code_mode_host", "computer_use",
                       "daemon_auto_start", "hooks", "image_generation", "in_app_browser", "in_app_local_automation", "multi_agent", "plugins",
                       "shell_snapshot", "shell_tool", "skill_mcp_dependency_install", "unified_exec", "view_image",
-                      "workspace_dependencies", "worktrees"])
+                      "workspace_dependencies", "worktrees", "memories", "external_agent_memory_import",
+                      "guardian_conversation_history_tools", "analytics_plan_history"])
     process.stdout.write(`${name.padEnd(41)}stable             ${off(name) ? "false" : "true"}\n`);
   process.exit(0);
 }

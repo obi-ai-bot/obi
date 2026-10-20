@@ -28,6 +28,7 @@ struct SettingsScreen: View {
                 connectors
                 RunnerModelsSections(options: options, models: phone.models, save: phone.setModels)
                 PermissionsSection(runner: phone.runner, defaultMode: phone.defaultMode, setDefault: phone.setDefaultMode)
+                RoutinesSection(runner: phone.runner, changes: phone.routineChanges)
                 NotificationsSection { UIApplication.shared.registerForRemoteNotifications() }
                 VoiceSection(speaks: Binding(get: { phone.speakReplies }, set: { phone.speakReplies = $0 }))
                 SetGroup("Appearance") {
