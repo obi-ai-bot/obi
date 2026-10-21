@@ -243,6 +243,20 @@ pub fn router(shared: Arc<Shared>) -> Router {
             "/v1/obid/sphere/exchanges/{id}",
             get(crate::sphere::routes::exchange),
         )
+        .route("/v1/memory", get(crate::memory::get))
+        .route(
+            "/v1/memory/{id}",
+            axum::routing::delete(crate::memory::remove),
+        )
+        .route("/v1/memory/find", post(crate::memory::find))
+        .route(
+            "/v1/memory/suggestions/{id}/remember",
+            post(crate::memory::remember),
+        )
+        .route(
+            "/v1/memory/suggestions/{id}/dismiss",
+            post(crate::memory::dismiss),
+        )
         .route("/v1/obid/plugins", get(crate::plugins::list))
         .route(
             "/v1/obid/plugins/{id}",

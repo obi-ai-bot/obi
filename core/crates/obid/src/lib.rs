@@ -35,6 +35,7 @@ pub mod job;
 pub mod jobs;
 pub mod limits;
 pub mod logs;
+pub mod memory;
 pub mod obi_dir;
 pub mod permissions;
 pub mod plugins;

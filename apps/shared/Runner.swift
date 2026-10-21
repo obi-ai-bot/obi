@@ -1214,6 +1214,38 @@ nonisolated struct Runner: Sendable {
         try await send("DELETE", "v1/routines/\(id)")
     }
 
+    // MARK: Memory (obid only, #378)
+
+    /// obid's memories and the suggestions waiting for an answer, or nil from a runner with no
+    /// memory (the Swift runner).
+    func memory() async throws -> RunnerMemoryList? {
+        do {
+            return try await call("GET", "v1/memory")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// Find what I keep repeating: obid reads the owner's conversations and the reviews on merged
+    /// pull requests, and answers with what it could suggest. It takes a while.
+    func findMemories() async throws -> RunnerMemoryFound {
+        try await call("POST", "v1/memory/find", timeout: 150)
+    }
+
+    /// Remember: the owner's yes to a suggestion; obid answers with the memory it saved.
+    func remember(_ suggestion: String) async throws -> RunnerMemory {
+        try await call("POST", "v1/memory/suggestions/\(suggestion)/remember")
+    }
+
+    /// Not this: the suggestion goes, and nothing is saved.
+    func dismissSuggestion(_ suggestion: String) async throws {
+        try await send("POST", "v1/memory/suggestions/\(suggestion)/dismiss")
+    }
+
+    func deleteMemory(_ id: String) async throws {
+        try await send("DELETE", "v1/memory/\(id)")
+    }
+
     // MARK: Conversations (obid only, #493)
 
     /// obid's conversations, pinned first, then newest; with `query`, the ones that hold its words.
@@ -1878,6 +1910,54 @@ nonisolated struct TeammatePRs: Codable, Equatable, Sendable {
 }
 
 /// A routine as obid lists it: a saved request it runs on a schedule, a job each time.
+/// One memory obid keeps (docs/runner-api.md, "obid only: memory").
+nonisolated struct RunnerMemory: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    /// `user` or `project`.
+    var scope: String
+    var repo: String?
+    var kind: String
+    var title: String
+    var text: String
+    /// Where it came from, in obid's words: "You said it in 3 conversations".
+    var from: String
+    var created: Date
+}
+
+/// A memory obid could keep, waiting for Remember or Not this.
+nonisolated struct RunnerMemorySuggestion: Codable, Identifiable, Equatable, Sendable {
+    struct Source: Codable, Equatable, Sendable {
+        var quote: String
+        /// `You, in “Release planning”` or `A review on obi-ai-bot/obi#12`.
+        var place: String
+        var link: URL?
+    }
+
+    var id: String
+    var scope: String
+    var repo: String?
+    var title: String
+    var text: String
+    var from: String
+    var sources: [Source]
+}
+
+nonisolated struct RunnerMemoryList: Codable, Equatable, Sendable {
+    var memories: [RunnerMemory]
+    var suggestions: [RunnerMemorySuggestion]
+}
+
+nonisolated struct RunnerMemoryFound: Codable, Equatable, Sendable {
+    struct Read: Codable, Equatable, Sendable {
+        var conversations: Int
+        var pullRequests: Int
+    }
+
+    var suggestions: [RunnerMemorySuggestion]
+    var read: Read
+    var problems: [String]
+}
+
 nonisolated struct RunnerRoutine: Codable, Identifiable, Equatable, Sendable {
     struct Run: Codable, Equatable, Sendable {
         var scheduled: Date

@@ -1399,6 +1399,8 @@ dependencies = [
  "gethostname",
  "getrandom 0.4.3",
  "hex",
+ "icu_normalizer",
+ "icu_properties",
  "jiff",
  "jsonschema",
  "libc",
