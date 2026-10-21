@@ -9,7 +9,7 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 image=$(cd "${1:?usage: smoke.sh <image dir>}" && pwd)
 work=$(mktemp -d)
-trap 'pkill -f "$work/obi-vm" 2>/dev/null; rm -rf "$work"' EXIT
+trap 'pkill -f "$work/obi-vm" 2>/dev/null || true; rm -rf "$work"' EXIT
 pass() { echo "  PASS  $*"; }
 fail() { echo "  FAIL  $*"; exit 1; }
 vms() { pgrep -f com.apple.Virtualization.VirtualMachine | sort | tr '\n' ' '; }
