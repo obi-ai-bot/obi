@@ -476,8 +476,10 @@ final class RunnerFeed {
             .appending(path: "Oby", directoryHint: .isDirectory).appending(path: "runner-feed.json")
     }
 
-    /// Where `keep` writes (tests use a folder of their own).
-    @ObservationIgnored var keptFile = RunnerFeed.keptURL
+    /// Where `keep` writes: `keptURL`, or, while Oby hosts tests, a temporary file of this feed's
+    /// own, so no test ever reads or deletes the user's.
+    @ObservationIgnored var keptFile = NSClassFromString("XCTestCase") == nil ? RunnerFeed.keptURL
+        : FileManager.default.temporaryDirectory.appending(path: "RunnerFeed-\(UUID().uuidString)").appending(path: "runner-feed.json")
 
     /// The window shows what was kept, not what the runner says now: actions wait (`acting`).
     private(set) var showingKept = false
@@ -498,11 +500,15 @@ final class RunnerFeed {
     }
 
     /// What `keep` saved for `url`, shown until the runner answers; whether it was. Nothing from
-    /// another runner, and nothing the app can't read any more (an older or newer shape).
+    /// another runner (followed since, while Oby was closed), and nothing the app can't read any
+    /// more (an older or newer shape): that file goes.
     func showKept(for url: String) -> Bool {
-        guard let data = try? Data(contentsOf: keptFile),
-              let kept = try? JSONDecoder().decode(Kept.self, from: data), kept.url == url,
-              let (list, extras) = try? Runner.jobsWithExtras(kept.jobs) else { return false }
+        guard let data = try? Data(contentsOf: keptFile) else { return false }
+        guard let kept = try? JSONDecoder().decode(Kept.self, from: data), kept.url == url,
+              let (list, extras) = try? Runner.jobsWithExtras(kept.jobs) else {
+            try? FileManager.default.removeItem(at: keptFile)
+            return false
+        }
         jobs = list
         self.extras = extras
         if let (items, words) = try? kept.inbox.map(Runner.inboxWithWords) {
@@ -644,14 +650,14 @@ final class RunnerFeed {
 
     /// The runner's exact sentence for publishing a job: Publish shows it, and Touch ID approves it.
     func publishAction(_ id: String) async throws -> String {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to publish it.") }
+        let runner = try acting()
         return try await runner.publishAction(id)
     }
 
     /// Publishes a runner's job with that sentence, after Touch ID; the runner pushes and opens the pull request.
     @discardableResult
     func publish(_ id: String, action: String) async throws -> URL {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to publish it.") }
+        let runner = try acting()
         let url = try await device.publish(id, action: action, with: runner)
         // Its event brings the rest; until then it's published here too.
         if var job = jobs.first(where: { $0.id == id }) {

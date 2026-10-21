@@ -49,18 +49,21 @@ struct RunnerKeptTests {
         }
     }
 
-    /// Another runner's answers, or a file that doesn't read (another shape, or jobs that don't
-    /// decode), show nothing.
-    @Test func anotherRunnersOrUnreadableAnswersAreNotShown() throws {
+    /// Another runner's answers (followed since, while Oby was closed), or a file that doesn't read
+    /// (another shape, or jobs that don't decode), show nothing, and the file goes.
+    @Test func anotherRunnersOrUnreadableAnswersAreNotShownAndGo() throws {
         let folder = folder()
         defer { try? FileManager.default.removeItem(at: folder) }
         feed(in: folder).keep(Self.kept)
         let other = feed(in: folder)
         #expect(!other.showKept(for: "https://tetrix-lab:8790"))
         #expect(other.jobs.isEmpty && !other.showingKept)
+        #expect(!FileManager.default.fileExists(atPath: other.keptFile.path))
 
+        feed(in: folder).keep(Self.kept)
         try Data("{not json".utf8).write(to: other.keptFile)
         #expect(!feed(in: folder).showKept(for: Self.url))
+        #expect(!FileManager.default.fileExists(atPath: other.keptFile.path))
 
         var wrong = Self.kept
         wrong.jobs = Data(#"{"jobs": "not a list"}"#.utf8)
@@ -68,6 +71,13 @@ struct RunnerKeptTests {
         let unread = feed(in: folder)
         #expect(!unread.showKept(for: Self.url))
         #expect(unread.jobs.isEmpty && !unread.showingKept)
+        #expect(!FileManager.default.fileExists(atPath: unread.keptFile.path))
+    }
+
+    /// While Oby hosts tests, a feed never points at the user's own file.
+    @Test func aTestsFeedNeverUsesTheUsersFile() {
+        #expect(RunnerFeed().keptFile != RunnerFeed.keptURL)
+        #expect(RunnerFeed().keptFile != RunnerFeed().keptFile)
     }
 
     /// Following another runner drops the last one's answers from the disk, and what shows of them;
