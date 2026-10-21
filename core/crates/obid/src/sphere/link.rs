@@ -1234,12 +1234,40 @@ impl Link {
             if !self.pins.check_card(obi, card_seq) {
                 continue;
             }
-            for key in member["keys"].as_array().into_iter().flatten() {
+            // The Obi key is the one the card signs: a current key the Sphere lists must be it.
+            // Older keys (with `valid_until_seq`) only check entries signed before they ended.
+            let (card_id, card_key) = (
+                params.and_then(|p| p["key_id"].as_str()).unwrap_or(""),
+                params.and_then(|p| p["public_key"].as_str()).unwrap_or(""),
+            );
+            let keys: Vec<&Value> = member["keys"].as_array().into_iter().flatten().collect();
+            let current: Vec<&&Value> = keys
+                .iter()
+                .filter(|k| k["valid_until_seq"].as_u64().is_none())
+                .collect();
+            if current.len() != 1
+                || current[0]["key_id"] != card_id
+                || current[0]["public_key"] != card_key
+            {
+                tracing::warn!(
+                    "sphere: the Sphere lists a key for {obi} that its card doesn't sign ({}): not trusted",
+                    current
+                        .iter()
+                        .filter_map(|k| k["key_id"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                continue;
+            }
+            for key in keys {
                 let (Some(id), Some(public_key)) =
                     (key["key_id"].as_str(), key["public_key"].as_str())
                 else {
                     continue;
                 };
+                if id == card_id && key["valid_until_seq"].as_u64().is_some() {
+                    continue;
+                }
                 directory.keys.insert(
                     id.to_owned(),
                     DirectoryKey {
@@ -1530,11 +1558,17 @@ impl Link {
             self.drop_message(&id, "a request for an exchange obid has already");
             return;
         }
-        // The sender's owner comes from the directory, never from the message.
-        let owner = state.directory.members.get(&from).map(|m| m.owner.clone());
+        // The sender's owner comes from the directory, never from the message; a removed member
+        // is never admitted.
+        let owner = state
+            .directory
+            .members
+            .get(&from)
+            .filter(|m| m.active)
+            .map(|m| m.owner.clone());
         let Some(owner) = owner else {
             drop(state);
-            self.drop_message(&id, "its sender isn't in the directory");
+            self.drop_message(&id, "its sender isn't an active member in the directory");
             return;
         };
         let accepts = state
@@ -3791,6 +3825,15 @@ impl Link {
         };
         self.save_exchange(&exchange);
         self.outbox.notify_one();
+    }
+
+    /// Whether `obi` is an active member in the directory obid trusts.
+    pub(super) fn member_active(&self, obi: &str) -> bool {
+        self.lock()
+            .directory
+            .members
+            .get(obi)
+            .is_some_and(|m| m.active)
     }
 
     pub(super) fn host_progress(&self, cid: &str, progress: &str) {

@@ -13,6 +13,7 @@ pub mod link;
 pub mod membership;
 pub mod pins;
 pub mod routes;
+mod sealed;
 pub mod sharing;
 pub mod vm;
 

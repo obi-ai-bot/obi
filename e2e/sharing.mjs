@@ -280,7 +280,10 @@ async function main() {
   const audit = expect(await call(`${sphereUrl}/v0.1/spheres/${SPHERE}/audit`, { token: await admin() }), 200, "the audit chain");
   const verdict = spec.verifyChain({ sphere: SPHERE, entries: audit.entries }, { keys: Object.fromEntries((expect(await call(`${sphereUrl}/v0.1/spheres/${SPHERE}/members`, { token: await admin() }), 200, "members").members).flatMap((m) => m.keys.map((k) => [k.key_id, { obi: m.obi, public_key: k.public_key, valid_from_seq: k.valid_from_seq, valid_until_seq: k.valid_until_seq }]))) });
   if (!verdict.ok) fail(`the audit chain doesn't verify: ${verdict.message}`);
-  pass(`the audit chain verifies: ${audit.entries.map((e) => e.envelope.type).join(", ")}`);
+  // Nothing in it says when Wellington came back to his Mac.
+  const progress = audit.entries.filter((e) => e.envelope.type === "run_progress").map((e) => e.envelope.body.state);
+  if (progress.some((s) => s === "paused" || s === "resumed")) fail(`the chain says when the owner came back: ${progress.join(", ")}`);
+  pass(`the audit chain verifies: ${audit.entries.map((e) => e.envelope.type).join(", ")} (progress: ${progress.join(", ")})`);
 }
 
 let ok = false;
