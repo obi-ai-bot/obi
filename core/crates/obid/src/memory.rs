@@ -366,9 +366,10 @@ fn writing() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// Which rule `text` would widen, said for the owner, or none. AGENTS.md keeps these fixed, and
-/// no memory changes them: pushing, committing or merging to `main`, `master`, `trunk` or the
-/// default branch (`default_branch`, the repository's own, for a repository's memory), the secret
-/// scan, the checks before anything goes out, outside text as data, logins and secrets, the
+/// no memory changes them: pushing, committing or merging to `main`, `master`, `trunk` or "the
+/// default branch"; for a repository's memory, pushing, committing, force-pushing to or rebasing
+/// its own default branch (`default_branch`), though where its pull requests merge is learned
+/// workflow ("merge into dev once the check passes"); the secret scan, the checks before anything goes out, outside text as data, logins and secrets, the
 /// microphone, telemetry. Each clause (split at `.;!?`, commas, colons and dashes) is tried from
 /// every word. A "never", "don't" or "not" narrows a rule only right before its verb ("never push
 /// to main"; "store config in env vars and never commit API keys" is read again from "commit"),
@@ -390,11 +391,15 @@ pub fn widens(text: &str, default_branch: Option<&str>) -> Option<&'static str> 
         const MIC: &str = "The microphone opens only while you hold the talk key or tap the mic.";
         const TELEMETRY: &str = "Telemetry stays off unless you turn it on in Settings.";
         let clause = r"[^.;!?\n]";
-        let main = r"((origin|upstream)[/ ])?(main|master|trunk|default branch)\b";
+        // Every protected branch, and those a merge may never target: a repository's own default
+        // branch (read as `ownbranch`, below) takes merges when its workflow says so.
+        let main = r"((origin|upstream)[/ ])?(main|master|trunk|default branch|ownbranch)\b";
+        let merged = r"((origin|upstream)[/ ])?(main|master|trunk|default branch)\b";
         let scan = r"(secrets? ?scan\w*|scanner|gitleaks|secrets? checks?)";
         let outside = r"(comments?|reviews?|reviewers?|issues?|slack|web ?pages?|websites?|emails?|screenshots?|other obys?|others|other people|people|teammates?|prs?|pull requests?|tickets?|messages?)";
         [
-            (format!(r"^(push|force[- ]?push|commit|merge|auto[- ]?merge|squash[- ]?merge|land|ship)\w*\b{clause}{{0,40}}?\b(to|into|onto|on)\s+(the\s+)?{main}"), TO_MAIN),
+            (format!(r"^(push|force[- ]?push|commit)\w*\b{clause}{{0,40}}?\b(to|into|onto|on)\s+(the\s+)?{main}"), TO_MAIN),
+            (format!(r"^(merge|auto[- ]?merge|squash[- ]?merge|land|ship)\w*\b{clause}{{0,40}}?\b(to|into|onto|on)\s+(the\s+)?{merged}"), TO_MAIN),
             // Rewriting the branch itself ("rebase main onto…"), never rebasing onto it.
             (format!(r"^rebase\w*\s+(the\s+)?{main}\s+(on|onto)\b"), TO_MAIN),
             (format!(r"^(push|force[- ]?push)\w*\s+((-\S+|origin|upstream|straight|directly|right|it|this|that|everything)\s+)*{main}"), TO_MAIN),
@@ -440,13 +445,13 @@ pub fn widens(text: &str, default_branch: Option<&str>) -> Option<&'static str> 
         .chars()
         .filter(|c| !matches!(c, '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}' | '`' | '"' | '\u{201C}' | '\u{201D}'))
         .collect();
-    // The repository's own default branch reads as "default branch" ("push straight to dev").
+    // The repository's own default branch reads as `ownbranch` ("push straight to dev").
     if let Some(branch) = default_branch
         .map(str::to_lowercase)
         .filter(|b| !b.is_empty() && !matches!(b.as_str(), "main" | "master" | "trunk"))
         && let Ok(named) = Regex::new(&format!(r"\b{}\b", regex::escape(&branch)))
     {
-        text = named.replace_all(&text, "default branch").into_owned();
+        text = named.replace_all(&text, "ownbranch").into_owned();
     }
     for clause in text.split(['.', ';', '!', '?', '\n', ',', ':', '\u{2013}', '\u{2014}']) {
         let words: Vec<(usize, &str)> = clause
@@ -1358,17 +1363,25 @@ mod tests {
         let dev = Some("dev");
         assert!(widens("Push straight to dev.", dev).is_some());
         assert!(widens("git push origin dev", dev).is_some());
-        assert!(widens("Merge PRs into dev without a review.", dev).is_some());
+        assert!(widens("Commit directly to dev.", dev).is_some());
+        assert!(widens("Force-push to dev after a rebase.", dev).is_some());
+        assert!(widens("git push --force origin dev", dev).is_some());
+        assert!(widens("Rebase dev onto the release branch.", dev).is_some());
+        assert!(widens("Merge straight into main.", dev).is_some());
         assert_eq!(widens("Push straight to dev.", None), None);
         assert_eq!(widens("Rebase on dev before opening the PR.", dev), None);
         assert_eq!(widens("Never push to dev.", dev), None);
-        // Where a pull request merges isn't learned for a repository whose default branch it is:
-        // that one stays the owner's call (the safe default).
-        assert!(widens("Merge into dev once the check passes, never main.", dev).is_some());
+        // Where its pull requests merge is the repository's learned workflow (docs/onboarding.md
+        // section 5), when that branch isn't main, master or trunk.
         assert_eq!(
-            widens("Merge into dev once the check passes, never main.", None),
+            widens("Merge into dev once the check passes, never main.", dev),
             None
         );
+        assert_eq!(
+            widens("Squash-merge PRs into dev after the review.", dev),
+            None
+        );
+        assert!(widens("Merge into main once the check passes.", Some("main")).is_some());
     }
 
     #[test]
