@@ -287,6 +287,8 @@ final class RunnerFeed {
         loop?.cancel()
         loop = nil
         guard local || Self.runner(url) != nil else { return }
+        // At launch: the runner's last answers until it answers again.
+        if first { showKept(for: url) }
         loop = Task {
             if !first { try? await Task.sleep(for: .seconds(1)) }
             await run()
@@ -337,14 +339,27 @@ final class RunnerFeed {
                 for try await event in runner.events() {
                     switch event {
                     case .connected:
+                        // Side by side, not one after another: none of these waits for another.
                         // Status every time: a Clear done while the connection was down is in it.
-                        let status = try await runner.status()
-                        let (list, extras) = try await runner.jobsWithExtras()
-                        let (items, words) = try await runner.inboxWithWords()
+                        async let statusAnswer = runner.status()
+                        async let jobsAnswer = runner.jobsAnswer()
+                        async let inboxAnswer = runner.inboxAnswer()
                         // History is an enhancement: an older runner or failed history request must not take chat offline.
-                        let history = try? await runner.inboxWithWords(state: "done")
-                        let tetrix = try? await runner.tetrix()
-                        let routines = try? await runner.routines()
+                        async let historyAnswer = try? runner.inboxWithWords(state: "done")
+                        async let tetrixAnswer = try? runner.tetrix()
+                        async let routinesAnswer = try? runner.routines()
+                        async let conversationsAnswer: Data? = local ? runner.conversationsAnswer(limit: 200) : nil
+                        async let gitHubRead: Void = readGitHub { try await runner.gitHubWork() }
+                        let status = try await statusAnswer
+                        let jobsData = try await jobsAnswer
+                        let (list, extras) = try Runner.jobsWithExtras(jobsData)
+                        let inboxData = try await inboxAnswer
+                        let (items, words) = try inboxData.map(Runner.inboxWithWords) ?? ([], [:])
+                        let conversationsData = try await conversationsAnswer
+                        let history = await historyAnswer
+                        let tetrix = await tetrixAnswer
+                        let routines = await routinesAnswer
+                        await gitHubRead
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
                         host = status.runner.host
@@ -357,7 +372,6 @@ final class RunnerFeed {
                         cleanup = status.cleanup
                         github = status.github
                         checkRuns = status.checks
-                        await readGitHub { try await runner.gitHubWork() }
                         #if DEBUG
                         if let sample = GitHubWork.sample { gitHubWork = sample }
                         #endif
@@ -372,7 +386,7 @@ final class RunnerFeed {
                             inboxWords = pastWords.merging(words, uniquingKeysWith: { _, fresh in fresh })
                         } else { inboxWords.merge(words, uniquingKeysWith: { _, fresh in fresh }) }
                         // obid's conversations before the thread, which reads the one shown.
-                        try await conversations.load(from: runner, planning: local)
+                        conversations.take(try conversationsData.map(Runner.conversations))
                         // The thread's latest page every time too: what was said from the iPhone
                         // while the connection was down is in it.
                         await conversation.reload()
@@ -380,6 +394,7 @@ final class RunnerFeed {
                         if let liveSession { Task { await liveSession.catchUp() } }
                         connection = .live
                         wait = 1
+                        keep(Kept(url: url ?? "", jobs: jobsData, inbox: inboxData, conversations: conversationsData))
                         Self.ask()
                         checks.look(runner)
                         register(runner)
@@ -414,9 +429,67 @@ final class RunnerFeed {
                 if !down { Logger.feed.error("following the runner failed: \(error.localizedDescription, privacy: .public)") }
                 connection = .offline(error.localizedDescription)
             }
-            try? await Task.sleep(for: .seconds(wait))
+            await pause(wait)
             wait = min(wait * 2, 30)
         }
+    }
+
+    /// Whether Oby's window is on screen (ObyApp): then a dropped runner is tried again within
+    /// `openWindowWait`, however long the wait has grown.
+    @ObservationIgnored var windowOpen: () -> Bool = { false }
+    static let openWindowWait = 5.0
+
+    /// Waits `seconds` before the next try, in steps of at most `openWindowWait`, and stops after
+    /// a step once the window is open. With it closed that's a wake every 5 seconds while the
+    /// runner is down, nothing while it's up.
+    private func pause(_ seconds: Double) async {
+        var left = seconds
+        repeat {
+            let step = min(left, Self.openWindowWait)
+            try? await Task.sleep(for: .seconds(step))
+            left -= step
+        } while left > 0 && !Task.isCancelled && !windowOpen()
+    }
+
+    // MARK: Kept for the next launch
+
+    /// The runner's last answers for its jobs, inbox and conversations, as they came. Oby shows them
+    /// at launch while the runner starts or the connection comes up, and the first connection
+    /// replaces them. Only for the runner they came from (`url`). obid took secrets out of them
+    /// before they left it; the file is the user's alone (0600), in Oby's own folder.
+    struct Kept: Codable {
+        var url: String
+        var jobs: Data
+        var inbox: Data?
+        var conversations: Data?
+    }
+
+    static var keptFile: URL { LocalRunner.appRoot.appending(path: "runner-feed.json") }
+
+    private func keep(_ kept: Kept) {
+        Task.detached(priority: .utility) {
+            do {
+                try FileManager.default.createDirectory(at: LocalRunner.appRoot, withIntermediateDirectories: true)
+                try RunnerLoginItem.writePrivately(try JSONEncoder().encode(kept), to: Self.keptFile)
+            } catch {
+                Logger.feed.error("keeping the runner's answers for the next launch failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// What `keep` saved for `url`, shown until the runner answers. Nothing from another runner,
+    /// and nothing the app can't read any more (an older or newer shape).
+    private func showKept(for url: String) {
+        guard let data = try? Data(contentsOf: Self.keptFile),
+              let kept = try? JSONDecoder().decode(Kept.self, from: data), kept.url == url,
+              let (list, extras) = try? Runner.jobsWithExtras(kept.jobs) else { return }
+        jobs = list
+        self.extras = extras
+        if let (items, words) = try? kept.inbox.map(Runner.inboxWithWords) {
+            inbox = items
+            inboxWords = words
+        }
+        if local, let list = try? kept.conversations.map(Runner.conversations) { conversations.take(list) }
     }
 
     /// Registers this Mac's publishing key, as the iPhone does on each connection. A runner whose
