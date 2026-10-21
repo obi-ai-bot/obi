@@ -113,7 +113,56 @@ pub fn masked(text: &str) -> String {
     if text.len() <= TEXT_BYTES {
         return mask(text);
     }
-    capped(&mask(prefix(text, TEXT_BYTES + MARGIN)))
+    // Masking can shrink the text enough to bring a piece cut off at the end under the cap, and
+    // what's left of a secret there isn't one: back to the last character no token holds, and
+    // off a run of base64 or hex lines at the end, which a wrapped secret could go on past.
+    let reach = prefix(text, TEXT_BYTES + MARGIN);
+    let end = reach
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !token_char(c))
+        .map_or(0, |(at, c)| at + c.len_utf8());
+    let mut whole = &reach[..end];
+    let lines: Vec<&str> = whole.split_inclusive('\n').collect();
+    let run: usize = lines[lines.len() - encoded_tail(&lines)..]
+        .iter()
+        .map(|l| l.len())
+        .sum();
+    whole = &whole[..whole.len() - run];
+    let kept = capped(&mask(whole));
+    if kept.ends_with('…') {
+        kept
+    } else {
+        format!("{kept}…")
+    }
+}
+
+/// A character a token can hold (base64, hex, URL-encoded, a JWT's dots).
+fn token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-' | '.' | '~' | '%')
+}
+
+/// How many of these lines, at the end, are a run of base64 or hex, with the line before it
+/// (which a run can continue): a secret wrapped over them is only whole once the run has ended.
+pub fn encoded_tail(lines: &[&str]) -> usize {
+    let run = lines
+        .iter()
+        .rev()
+        .take_while(|l| {
+            let text = l.trim_matches(|c: char| {
+                c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '\\' | '+' | '-' | '>')
+            });
+            !text.is_empty()
+                && text.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-')
+                })
+        })
+        .count();
+    if run > 0 {
+        (run + 1).min(lines.len())
+    } else {
+        0
+    }
 }
 
 /// The first `bytes` of `text` at most, at a character.
@@ -454,5 +503,58 @@ mod tests {
             "{text}"
         );
         assert!(text.ends_with("\nok"));
+    }
+
+    /// Text that masking shrinks a lot: lines of a vault value, `sep` after each, to a few bytes
+    /// short of where the first cut falls (TEXT_BYTES + MARGIN), padded with `pad` to there.
+    fn shrinking(value: &str, sep: char, pad: char, short: usize) -> String {
+        let mut text = String::new();
+        while text.len() + value.len() + 1 < TEXT_BYTES + MARGIN - short - 40 {
+            text.push_str(value);
+            text.push(sep);
+        }
+        while text.len() < TEXT_BYTES + MARGIN - short {
+            text.push(pad);
+        }
+        text
+    }
+
+    #[test]
+    fn a_piece_cut_off_never_slips_under_the_cap() {
+        let value = ["shrink-", "secret/"].concat() + &"Q7m2+a=b".repeat(12);
+        let token = ["ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"].concat();
+        crate::secrets::known().learn("vault shrink-test", &value);
+        // A token the first cut falls inside, 8 bytes in: after a line break, and on one line
+        // with no space or line break at all (commas between the values).
+        let cases = [
+            (shrinking(&value, '\n', ' ', 8), token.clone()),
+            (shrinking(&value, ',', ',', 8), token.clone()),
+        ];
+        let mut kept = Vec::new();
+        for (mut text, tail) in cases {
+            assert!(text.len() + 8 == TEXT_BYTES + MARGIN);
+            text.push_str(&tail);
+            text.push_str(" and the rest\n");
+            kept.push(masked(&text));
+        }
+        // A token in base64 wrapped over lines, the cut at a line break inside the run.
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &token);
+        let wrapped: Vec<&str> = b64
+            .as_bytes()
+            .chunks(20)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        let mut text = shrinking(&value, '\n', '\n', 2 * 21);
+        text.push_str(&format!("{}\nafter\n", wrapped.join("\n")));
+        kept.push(masked(&text));
+        crate::secrets::known().forget("vault shrink-test");
+        for kept in &kept {
+            assert!(kept.len() < TEXT_BYTES, "it shrank: {}", kept.len());
+            assert!(!kept.contains("ghp_"), "{}", &kept[kept.len() - 80..]);
+            for piece in &wrapped {
+                assert!(!kept.contains(piece), "{}", &kept[kept.len() - 80..]);
+            }
+            assert!(kept.ends_with('…'));
+        }
     }
 }

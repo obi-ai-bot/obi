@@ -96,6 +96,9 @@ struct Writing {
     /// The line being written went past [`crate::detail::TEXT_BYTES`]: dropped until it ends
     /// (the whole message, masked, replaces the words when it ends).
     skipping: bool,
+    /// What's held back went past [`crate::detail::TEXT_BYTES`] (a message mostly of base64, a
+    /// key that never ends): the message streams no more, and its whole text replaces it.
+    stopped: bool,
 }
 
 /// One item of the agent's to-do list.
@@ -350,7 +353,9 @@ impl Transcripts {
     /// The turn is over: a call that never ended (the agent was stopped or died) failed.
     pub fn end_turn(&self, job: &str) -> Vec<Entry> {
         self.note(job, |live| {
-            // Words it was writing that never came whole: what came is what it said.
+            // Words it was writing that never came whole: what came is what it said, masked, held
+            // back lines and all. A message that stopped streaming (what it held passed the cap)
+            // dropped what it held then, on purpose: past the cap, it's not kept.
             let mut words: Vec<Entry> = match live.writing.take() {
                 Some(Writing {
                     n: Some(n),
@@ -627,6 +632,9 @@ fn said(live: &mut Live, kind: &str, words: &str) -> Vec<Entry> {
 /// the first) as an append. The entries made, or the appends.
 fn writing(live: &mut Live, words: &str) -> (Vec<Entry>, Vec<Change>) {
     let open = live.writing.get_or_insert_with(Writing::default);
+    if open.stopped {
+        return (vec![], vec![]);
+    }
     for piece in words.split_inclusive('\n') {
         if !open.skipping {
             open.pending.push_str(piece);
@@ -649,6 +657,11 @@ fn writing(live: &mut Live, words: &str) -> (Vec<Entry>, Vec<Change>) {
         .map(|l| l.len())
         .sum();
     if out == 0 {
+        // Held back past the cap, it would be read again at every delta: it waits for the end.
+        if open.pending.len() > crate::detail::TEXT_BYTES {
+            open.pending.clear();
+            open.stopped = true;
+        }
         return (vec![], vec![]);
     }
     let lines: String = open.pending.drain(..out).collect();
@@ -683,25 +696,7 @@ fn held(lines: &[&str]) -> usize {
         .rposition(|l| crate::detail::key_begins(l))
         .filter(|&begin| !lines[begin..].iter().any(|l| l.contains("-----END")))
         .map_or(0, |begin| lines.len() - begin);
-    let encoded = lines
-        .iter()
-        .rev()
-        .take_while(|l| {
-            let text = l.trim_matches(|c: char| {
-                c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '\\' | '+' | '-' | '>')
-            });
-            !text.is_empty()
-                && text.bytes().all(|b| {
-                    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-')
-                })
-        })
-        .count();
-    let run = if encoded > 0 {
-        (encoded + 1).min(lines.len())
-    } else {
-        0
-    };
-    open_key.max(run)
+    open_key.max(crate::detail::encoded_tail(lines))
 }
 
 fn plan(live: &mut Live, todos: Vec<Todo>) -> Entry {
@@ -1511,5 +1506,37 @@ mod tests {
         t.remove("j");
         assert!(!t.path("j").parent().unwrap().exists());
         assert!(t.live.lock().unwrap().get("j").is_none());
+    }
+
+    #[test]
+    fn held_text_past_the_cap_stops_the_stream() {
+        let t = transcripts("held-cap");
+        assert_eq!(
+            t.rec("j", &Event::Delta("Here's the blob:\n".into())).len(),
+            1
+        );
+        // Line after line of base64: held back, never out, until past the cap.
+        let line = format!("{}\n", "QUJD".repeat(19));
+        let mut out = 0;
+        for _ in 0..(crate::detail::TEXT_BYTES / line.len() + 10) {
+            out += t
+                .record("j", &Event::Delta(line.clone()), Path::new("/w"), None)
+                .len();
+        }
+        assert_eq!(out, 0);
+        {
+            let live = t.live.lock().unwrap();
+            let writing = live["j"].writing.as_ref().unwrap();
+            assert!(writing.stopped && writing.pending.is_empty());
+        }
+        // More words of it stream no more; the whole message replaces them.
+        assert!(t.rec("j", &Event::Delta("and more\n".into())).is_empty());
+        let whole = t.rec("j", &Event::Said("Here's the blob:\nshort now".into()));
+        assert_eq!(
+            (whole[0].n, whole[0].text.as_deref()),
+            (1, Some("Here's the blob:\nshort now"))
+        );
+        // The next message streams again.
+        assert_eq!(t.rec("j", &Event::Delta("Next.\n".into()))[0].n, 2);
     }
 }
