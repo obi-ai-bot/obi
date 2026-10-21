@@ -58,11 +58,12 @@ struct WindowScreens {
         try await work()
     }
 
-    func shoot(_ name: String, model: IslandModel, state: ChatState, sidebar: Bool = true) async throws {
-        try await withPanel(open: sidebar) { try await picture(name, model: model, state: state) }
+    /// `hover`: where the pointer rests for the picture, from the window's top left.
+    func shoot(_ name: String, model: IslandModel, state: ChatState, sidebar: Bool = true, hover: CGPoint? = nil) async throws {
+        try await withPanel(open: sidebar) { try await picture(name, model: model, state: state, hover: hover) }
     }
 
-    private func picture(_ name: String, model: IslandModel, state: ChatState) async throws {
+    private func picture(_ name: String, model: IslandModel, state: ChatState, hover: CGPoint? = nil) async throws {
         // Oby itself, from the app's bundled character, once it has drawn.
         let character = ObyCharacter(query: "embed&size=1.23")
         let window = ChatWindow.make(ChatView(model: model, state: state, character: character))
@@ -72,6 +73,13 @@ struct WindowScreens {
         ChatWindow.measureLights(window, into: state)
         for _ in 0..<50 where !character.ready { try await Task.sleep(for: .milliseconds(100)) }
         try await Task.sleep(for: .milliseconds(1200))
+        if let hover, let height = window.contentView?.bounds.height,
+           let moved = NSEvent.mouseEvent(with: .mouseMoved, location: NSPoint(x: hover.x, y: height - hover.y), modifierFlags: [],
+                                          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                                          eventNumber: 0, clickCount: 0, pressure: 0) {
+            window.sendEvent(moved)
+            try await Task.sleep(for: .milliseconds(500))
+        }
         try await save(name, window: window)
     }
 
@@ -209,6 +217,11 @@ struct WindowScreens {
         let state = ChatState(defaults: .scratch)
         state.trail.start(.group(screen.hasPrefix("issues") ? .issues : screen.hasPrefix("review") ? .review : .tasks))
         try await shoot("mac-tasks-\(screen)", model: busy(open: screen.hasSuffix("running")), state: state)
+    }
+
+    /// The pointer on Issues' name in the side panel: the name lit as a link (the owner's addition, 2026-10-21).
+    @Test func sidebarNameHovered() async throws {
+        try await shoot("mac-sidebar-name-hover", model: busy(open: true), state: ChatState(defaults: .scratch), hover: CGPoint(x: 88, y: 342))
     }
 
     /// Home with the owner's work, the side panel open: the ways to the page.
