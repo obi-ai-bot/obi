@@ -233,12 +233,13 @@ pub fn admit(link: &Arc<Link>, cid: String, asked: bool) {
     tokio::spawn(async move {
         let decided = decide(&link, &cid, asked).await;
         match decided {
+            // The reason only: no words go in the chain (spec protocol.md section 4, rule 9). Why,
+            // in this owner's words, goes to obid's own log.
             Decision::Decline(reason, note) => {
-                let mut body = json!({"reason": reason});
                 if let Some(note) = note {
-                    body["note"] = json!(note);
+                    tracing::info!("sphere: declined {cid} ({reason}): {note}");
                 }
-                link.host_reply(&cid, "decline", body, "declined");
+                link.host_reply(&cid, "decline", json!({"reason": reason}), "declined");
             }
             Decision::Ask => link.host_ask(&cid),
             Decision::Accept => {

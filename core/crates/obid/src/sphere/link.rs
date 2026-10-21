@@ -1234,6 +1234,11 @@ impl Link {
             if !self.pins.check(owner, owner_key, now) {
                 continue;
             }
+            // Never an older card than one trusted before (a key rotated away coming back).
+            let card_seq = params.and_then(|p| p["card_seq"].as_u64()).unwrap_or(0);
+            if !self.pins.check_card(obi, card_seq) {
+                continue;
+            }
             for key in member["keys"].as_array().into_iter().flatten() {
                 let (Some(id), Some(public_key)) =
                     (key["key_id"].as_str(), key["public_key"].as_str())
