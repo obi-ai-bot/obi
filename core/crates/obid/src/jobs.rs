@@ -4361,7 +4361,6 @@ impl Jobs {
                     branch: &job.branch,
                     title: job.title.as_deref().unwrap_or(&job.task),
                     size: "small",
-                    start_commit: job.start_commit.as_deref(),
                     grant: on.grant.as_deref(),
                     config_dir: on_account.as_deref(),
                 };

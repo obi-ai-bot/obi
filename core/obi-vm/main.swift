@@ -332,8 +332,12 @@ case "run":
     verifyImage(options)
     // The VM process starts with the VZVirtualMachine, so the ones before it are looked at first;
     // one obi-vm starts a VM at a time (a lock), so the one that appears is this one's.
-    let lock = open("/private/tmp/obi-vm-\(getuid()).lock", O_CREAT | O_RDWR, 0o600)
-    if lock >= 0 { flock(lock, LOCK_EX) }
+    // The lock is in this user's own temporary folder (0700, whatever the environment says), never
+    // a shared path another user could hold; no lock, no VM.
+    var temp = [CChar](repeating: 0, count: Int(PATH_MAX))
+    guard confstr(_CS_DARWIN_USER_TEMP_DIR, &temp, temp.count) > 0 else { fail("no private folder for the start lock") }
+    let lock = open(String(cString: temp) + "obi-vm.lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+    guard lock >= 0, flock(lock, LOCK_EX) == 0 else { fail("couldn't take the start lock") }
     let before = vmProcesses()
     let runner: Runner
     do { runner = try Runner(options) } catch { fail("\(error)") }
@@ -348,7 +352,7 @@ case "run":
         case .success:
             let new = vmProcesses().subtracting(before)
             runner.process = new.count == 1 ? new.first : nil
-            if lock >= 0 { flock(lock, LOCK_UN); close(lock) }
+            flock(lock, LOCK_UN); close(lock)
             // The owner always comes first: lowest CPU priority, throttled I/O, once it runs (the
             // image's check and the VM's start, at it, take minutes on a busy Mac).
             setpriority(PRIO_DARWIN_PROCESS, 0, PRIO_DARWIN_BG)
