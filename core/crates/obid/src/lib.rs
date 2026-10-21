@@ -20,6 +20,7 @@ pub mod config;
 pub mod conn;
 pub mod connections;
 pub mod conversation;
+pub mod decisions;
 pub mod detail;
 pub mod devices;
 pub mod events;
