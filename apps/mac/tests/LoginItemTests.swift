@@ -92,13 +92,14 @@ struct LoginItemTests {
         #expect(item.status == .notFound || item.status == .notRegistered)
     }
 
-    /// At launch: registered when nothing is, registered again after a signature change or while
-    /// obid doesn't run, whatever macOS says of a stale registration (#790; the 0.2.0 install of
-    /// 2026-10-20, Apple Development to Developer ID), else left alone.
+    /// At launch: registered when nothing is, registered again while obid doesn't run whatever
+    /// macOS says of a stale registration (#790; the 0.2.0 install of 2026-10-20, Apple Development
+    /// to Developer ID), else left alone, and never from a copy that may not register.
     @Test func atLaunchRegistersAgainOnlyWhenStale() {
         func decide(_ status: SMAppService.Status, signingChanged: Bool = false, runs: Bool = true,
-                    onThisMac: Bool = true, byScript: Bool = false) -> RunnerLoginItem.AtLaunch {
-            RunnerLoginItem.atLaunch(onThisMac: onThisMac, byScript: byScript, status: status, signingChanged: signingChanged, runs: runs)
+                    onThisMac: Bool = true, byScript: Bool = false, mayRegister: Bool = true) -> RunnerLoginItem.AtLaunch {
+            RunnerLoginItem.atLaunch(onThisMac: onThisMac, byScript: byScript, mayRegister: mayRegister, status: status,
+                                     signingChanged: signingChanged, runs: runs)
         }
         func reregisters(_ decision: RunnerLoginItem.AtLaunch) -> Bool {
             if case .reregister = decision { true } else { false }
@@ -106,17 +107,23 @@ struct LoginItemTests {
         #expect(decide(.notRegistered) == .register)
         #expect(decide(.notRegistered, signingChanged: true, runs: false) == .register)
         #expect(decide(.enabled) == .nothing)
-        #expect(reregisters(decide(.enabled, signingChanged: true)))
         #expect(reregisters(decide(.enabled, runs: false)))
+        // The launch-constraint refusal: a new kind of certificate, and obid down.
+        #expect(reregisters(decide(.enabled, signingChanged: true, runs: false)))
+        // Debug and the installed app take turns: a working obid stays up.
+        #expect(decide(.enabled, signingChanged: true) == .nothing)
         // A registration macOS lost track of, while launchd still refuses obid, is registered again.
         #expect(reregisters(decide(.notFound, runs: false)))
-        #expect(reregisters(decide(.notFound, signingChanged: true)))
         #expect(decide(.notFound) == .nothing)
         // Approval stays the user's step.
         #expect(decide(.requiresApproval, signingChanged: true, runs: false) == .nothing)
         // A remote runner, or install.sh's obid, serves this Mac instead.
         #expect(decide(.enabled, signingChanged: true, runs: false, onThisMac: false) == .nothing)
         #expect(decide(.notRegistered, byScript: true) == .nothing)
+        // A translocated or not-installed copy never takes the registration.
+        #expect(decide(.notRegistered, mayRegister: false) == .nothing)
+        #expect(decide(.enabled, runs: false, mayRegister: false) == .nothing)
+        #expect(decide(.notFound, signingChanged: true, runs: false, mayRegister: false) == .nothing)
         #expect(RunnerLoginItem.launchd("com.deskree.oby.nothing.\(UUID().uuidString)") == nil)
     }
 
@@ -137,11 +144,23 @@ struct LoginItemTests {
         #expect(RunnerLoginItem.kind(of: "ad hoc") == nil)
     }
 
-    /// A copy macOS runs from App Translocation never registers obid (its folder vanishes).
-    @Test func translocatedCopiesAreKnown() {
-        #expect(RunnerLoginItem.translocated("/private/var/folders/x1/abc/T/AppTranslocation/3F2A-11/d/Oby.app"))
-        #expect(!RunnerLoginItem.translocated("/Applications/Oby.app"))
-        #expect(!RunnerLoginItem.translocated(Bundle.main.bundlePath))
+    /// The installed app registers obid only from Applications; a Debug build from anywhere but a
+    /// translocated copy or a mounted disk image.
+    @Test func onlyAnInstalledCopyRegisters() {
+        let home = "/Users/someone"
+        func may(_ path: String, debug: Bool = false) -> Bool { RunnerLoginItem.mayRegister(path, home: home, debug: debug) }
+        #expect(may("/Applications/Oby.app"))
+        #expect(may("/Users/someone/Applications/Oby.app"))
+        let translocated = "/private/var/folders/x1/abc/T/AppTranslocation/3F2A-11/d/Oby.app"
+        for path in [translocated, "/Volumes/Oby/Oby.app", "/Users/someone/Downloads/Oby.app",
+                     "/Users/other/Applications/Oby.app", "/Applications/../Users/someone/Downloads/Oby.app"] {
+            #expect(!may(path), "\(path)")
+        }
+        #expect(may("/Users/someone/Library/Developer/Xcode/DerivedData/Oby/Build/Products/Debug/Oby.app", debug: true))
+        #expect(!may(translocated, debug: true))
+        #expect(!may("/Volumes/Oby/Oby.app", debug: true))
+        // The test host is a Debug build in DerivedData.
+        #expect(RunnerLoginItem.mayRegister())
     }
 
     /// What's missing is named, so a build that forgot the phase says so.

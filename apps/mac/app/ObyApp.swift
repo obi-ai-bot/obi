@@ -112,24 +112,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // obid as This Mac's engine: the Swift runner an older build registered goes, and the
         // engine is registered when nothing else serves this Mac (apps/mac/app/LoginItem.swift).
         RunnerLoginItem().reconcile(onThisMac: UserDefaults.standard.bool(forKey: RunnerFeed.thisMacKey))
-        // Opened straight from the disk image or Downloads, macOS runs a temporary copy: no engine, no updates.
-        if RunnerLoginItem.translocated() { askToMoveToApplications() }
+        // Outside Applications (opened from the disk image or Downloads): no engine, no updates.
+        if !RunnerLoginItem.mayRegister() { askToMoveToApplications() }
         // Scheduled update checks (apps/mac/app/Updater.swift), in the build that ships. A Debug build from
         // Xcode checks only when asked, so a release never replaces it quietly.
         #if !DEBUG
-        if !RunnerLoginItem.translocated() { island.updater.start() }
+        if RunnerLoginItem.mayRegister() { island.updater.start() }
         #endif
         // Opened by hand (Finder, Spotlight, the Dock, `open`), Oby comes up in front with its window, as
         // any Mac app does; started at login, it waits in the menu bar.
         if !FirstLaunch.done { firstLaunch.show() } else if !launchedAtLogin { chat.show(home: true) }
     }
 
-    /// Sangam's design has no screen for this, so a plain alert (apps/mac/app/LoginItem.swift, `translocated`).
+    /// Sangam's design has no screen for this, so a plain alert (apps/mac/app/LoginItem.swift, `mayRegister`).
     private func askToMoveToApplications() {
         NSApp.activate()
         let alert = NSAlert()
         alert.messageText = "Move Oby to Applications"
-        alert.informativeText = "Oby is running from a temporary copy macOS made, so its engine can’t start and updates can’t install. Quit Oby, drag it into Applications, and open it from there."
+        alert.informativeText = RunnerLoginItem.moveToApplications
         alert.addButton(withTitle: "Quit")
         alert.addButton(withTitle: "Not Now")
         if alert.runModal() == .alertFirstButtonReturn { NSApp.terminate(nil) }

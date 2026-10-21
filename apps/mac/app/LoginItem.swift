@@ -60,7 +60,7 @@ final class RunnerLoginItem {
     func register() {
         refresh()
         guard !byScript else { return }
-        guard !Self.translocated() else {
+        guard Self.mayRegister() else {
             problem = Self.moveToApplications
             return
         }
@@ -94,7 +94,8 @@ final class RunnerLoginItem {
     /// Violation", seen the same day when the Developer ID 0.2.0 replaced an Apple Development
     /// build of the same team): it's registered again once when the app's team or kind of
     /// certificate changed since the last launch, or when obid neither answers nor runs. Not from
-    /// a translocated copy: its registration would point at a folder that vanishes.
+    /// a copy outside Applications (`mayRegister`): its registration would point at a folder that
+    /// vanishes.
     func reconcile(onThisMac: Bool) {
         retireSwiftRunner()
         refresh()
@@ -102,13 +103,15 @@ final class RunnerLoginItem {
         // Both recorded at every launch, so neither may skip the other.
         let teamChanged = Self.changed(signing.team, key: Self.teamKey)
         let kindChanged = Self.changed(signing.kind, key: Self.kindKey)
-        guard onThisMac, !byScript, !Self.translocated() else { return }
+        let mayRegister = Self.mayRegister()
+        guard onThisMac, !byScript, mayRegister else { return }
         let status = status
         let signingChanged = teamChanged || kindChanged
         Task {
-            let checks = status != .notRegistered && status != .requiresApproval && !signingChanged
+            let checks = status != .notRegistered && status != .requiresApproval
             let runs = checks ? await Self.obidRuns() : true
-            switch Self.atLaunch(onThisMac: onThisMac, byScript: byScript, status: status, signingChanged: signingChanged, runs: runs) {
+            switch Self.atLaunch(onThisMac: onThisMac, byScript: byScript, mayRegister: mayRegister, status: status,
+                                 signingChanged: signingChanged, runs: runs) {
             case .nothing: break
             case .register: register()
             case .reregister(let why): reregister(because: why)
@@ -119,17 +122,22 @@ final class RunnerLoginItem {
     /// What launch does about obid's login item.
     nonisolated enum AtLaunch: Equatable { case nothing, register, reregister(String) }
 
-    /// Registers when nothing is; registers again when the app's signature changed or obid doesn't
-    /// run (`runs`), whatever macOS says of the registration (`.enabled`, or `.notFound` for one it
-    /// lost track of). Waiting for approval: nothing, that's the user's step, and Settings › Runner
-    /// shows it.
-    nonisolated static func atLaunch(onThisMac: Bool, byScript: Bool, status: SMAppService.Status, signingChanged: Bool, runs: Bool) -> AtLaunch {
-        guard onThisMac, !byScript else { return .nothing }
+    /// Registers when nothing is; registers again when obid doesn't run (`runs`), whatever macOS
+    /// says of the registration (`.enabled`, or `.notFound` for one it lost track of). A signature
+    /// change alone never does: Debug (Apple Development) and the installed app (Developer ID)
+    /// share one bundle ID, so switching between them would take a working obid down at every
+    /// launch; a launch constraint launchd enforces shows as obid not running anyway. Waiting for
+    /// approval: nothing, that's the user's step, and Settings › Runner shows it. A copy that may
+    /// not register (`mayRegister`) leaves the registration alone.
+    nonisolated static func atLaunch(onThisMac: Bool, byScript: Bool, mayRegister: Bool, status: SMAppService.Status,
+                                     signingChanged: Bool, runs: Bool) -> AtLaunch {
+        guard onThisMac, !byScript, mayRegister else { return .nothing }
         switch status {
         case .requiresApproval: return .nothing
         case .notRegistered: return .register
-        case _ where signingChanged: return .reregister("Oby's signing team or kind of certificate changed since the last launch")
-        case _ where !runs: return .reregister("obid doesn't answer on 127.0.0.1:\(LocalRunner.port) and launchd doesn't run it")
+        case _ where !runs:
+            return .reregister("obid doesn't answer on 127.0.0.1:\(LocalRunner.port) and launchd doesn't run it"
+                + (signingChanged ? ", and Oby's signing team or kind of certificate changed since the last launch" : ""))
         default: return .nothing
         }
     }
@@ -182,14 +190,28 @@ final class RunnerLoginItem {
         summary.range(of: ": ").map { String(summary[..<$0.lowerBound]) }
     }
 
-    /// Whether macOS runs this copy from App Translocation's temporary folder (the app was opened,
-    /// quarantined, straight from the disk image or Downloads): a registration would point at a copy
-    /// that vanishes, and Sparkle can't replace it. Oby asks to be moved to Applications (ObyApp).
-    nonisolated static func translocated(_ path: String = Bundle.main.bundlePath) -> Bool {
-        path.contains("/AppTranslocation/")
+    /// Whether this copy may register obid: the installed app only from /Applications or
+    /// ~/Applications. Anywhere else (App Translocation's temporary copy of an app opened,
+    /// quarantined, from the disk image or Downloads; a mounted disk image; an old copy in
+    /// Downloads) the registration would point at a copy that goes away, and Sparkle can't
+    /// replace it: Oby asks to be moved to Applications instead (ObyApp). A Debug build runs from
+    /// DerivedData, so it may register from anywhere but those temporary places.
+    nonisolated static func mayRegister(_ path: String = Bundle.main.bundlePath,
+                                        home: String = FileManager.default.homeDirectoryForCurrentUser.path,
+                                        debug: Bool = isDebug) -> Bool {
+        let path = URL(filePath: path).standardizedFileURL.path
+        if path.contains("/AppTranslocation/") || path.hasPrefix("/Volumes/") { return false }
+        if debug { return true }
+        return ["/Applications/", URL(filePath: home).appending(path: "Applications").path + "/"].contains { path.hasPrefix($0) }
     }
 
-    static let moveToApplications = "Oby is running from a temporary copy macOS made, so its engine can’t start. Quit Oby, drag it into Applications, and open it from there."
+    #if DEBUG
+    nonisolated static let isDebug = true
+    #else
+    nonisolated static let isDebug = false
+    #endif
+
+    static let moveToApplications = "Oby is running from outside Applications, so its engine can’t start and updates can’t install. Quit Oby, drag it into Applications, and open it from there."
 
     /// Whether obid runs: it answers on 127.0.0.1 within about 5 seconds, or launchd says it's
     /// running (still starting). A job launchd lacks, or one it couldn't spawn, doesn't run.
@@ -245,6 +267,11 @@ final class RunnerLoginItem {
     /// Moves install.sh's obid into Oby: stops its launch agent, removes the agent's file, and
     /// registers the app's obid, which uses the same configuration, home, jobs and token.
     func moveFromScript() {
+        // Before install.sh's obid stops: from here the app's obid couldn't take over.
+        guard Self.mayRegister() else {
+            problem = Self.moveToApplications
+            return
+        }
         guard byScript else { return register() }
         do {
             let data = try Data(contentsOf: scriptAgent)
