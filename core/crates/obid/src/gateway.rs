@@ -744,6 +744,11 @@ mod tests {
         assert!(allows(&Method::POST, "/v1/github/work/abc/start"));
         assert!(!allows(&Method::POST, "/v1/github/work"));
         assert!(!allows(&Method::GET, "/v1/github/work/abc"));
+        // Slack's login and the watcher are the Mac's alone.
+        assert!(!allows(&Method::GET, "/v1/slack"));
+        assert!(!allows(&Method::POST, "/v1/slack/sign-in"));
+        assert!(!allows(&Method::PATCH, "/v1/watch"));
+        assert!(!allows(&Method::POST, "/v1/watch/run"));
         // Accounts are added, changed, removed and signed in on the machine itself: a paired
         // phone's token could otherwise sign obid into someone else's account (docs/runner-api.md,
         // "POST /v1/accounts").

@@ -392,6 +392,7 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
   | `plan` | obid only (#609): a Claude Code job in `plan` mode presented its plan (`ExitPlanMode`) and waits for the owner (`permission` on the job, its `tool` `ExitPlanMode`); `details` holds the plan as the agent wrote it, quoted data. Only the owner answers it: the brain is refused either way | `Approve the plan?` | `Approve`, `Keep planning`; any other words keep it planning, with them |
   | `confirm` | obid only (#546): Oby's brain planned something that persists or widens trust, which it never does in a turn (obid only: the brain, below); `title` says exactly what `Confirm` does, like `Always allow Bash(make lint:*) in acme/app`, and `job` is the job it's about, or empty | what was planned and why it waits | `Confirm`, `Cancel`, none recommended |
   | `github` | obid only: a read of the owner's GitHub work found a new review request or assigned issue on a repository obid knows (obid only: GitHub work); one per item, ever | `Your review is requested on pull request #702 in obi-ai-bot/obi.` or `Issue #640 in obi-ai-bot/obi is assigned to you.` | `Review it` or `Fix it`, `Dismiss` |
+  | `watch` | obid only: the watcher saw the person it watches say or do something the owner watches for (obid only: the watcher); one per message or GitHub event, ever | `Dmitry wrote in #tetrix-avenga-testing.` or `Dmitry commented on your pull request obi-ai-bot/obi#835.` | `Dismiss` |
 
   A `confirm` item (obid only) also carries `confirm`, what its `Confirm` carries out: `{"action": "always_allow", "target": "ab12cd34", "payload": {"permission": "p1a2b3c"}}`. `action` is a typed name, `target` what it acts on (a job's id or an inbox item's id, as the action says) and `payload` what else it needs (`null` when nothing). obid carries every action out through one dispatcher, so a new action is a new name with its own `target` and `payload`, the shape unchanged. The actions so far:
 
@@ -1642,6 +1643,103 @@ A decision that names the old number and not the new one, and a word of the assi
 - The summary's last line (not on review jobs) reads as above, followed by `Graph gaps sent to Tetrix: 1 search with no result, 1 file it didn't know.` when there were some.
 
 **Accounts' `tetrix`** (Account, above) on obid is `true` for every Claude Code, Codex and Cursor account while Oby is signed in to Tetrix, else null; `tetrixJobs` and `tetrixUsed` count the account's latest 50 ended jobs with a `tetrix`, and those whose agent called it.
+
+### obid only: Slack
+
+The owner connects Slack once, in Oby (F10, #14; the spike #26). obid is the client of a Slack app the owner makes in their own workspace: OAuth v2 with PKCE, no client secret, user scopes only. It keeps the owner's user token in its vault and uses it for two things: searching messages, and a direct message to the owner themselves. Agents never get it. None of these endpoints is on the gateway's allowlist, and no other Oby reaches them.
+
+**Making the Slack app** (the owner's step; Oby never makes or approves it). At https://api.slack.com/apps: Create New App › From a manifest › the workspace › paste this JSON › Next › Create:
+
+```json
+{"display_information": {"name": "Oby"},
+ "oauth_config": {"redirect_urls": ["http://localhost:47823/callback"],
+                  "scopes": {"user": ["search:read", "chat:write"]},
+                  "pkce_enabled": true}}
+```
+
+Then Basic Information › App Credentials › Client ID is what Oby asks for. PKCE marks the app as a public client, which Slack can't undo without its support, and is what lets a `localhost` redirect work with no secret. Slack lets a workspace admin approve apps first: when the workspace asks for that, an admin approves Oby in Slack's own page. No bot, no events, no Socket Mode: Oby asks Slack, as it asks GitHub.
+
+**`GET /v1/slack`** answers:
+
+```json
+{"connected": true, "team": "Deskree", "user": "U02MX5VJKQU", "clientId": "1234567890.1234567890",
+ "redirect": "http://localhost:47823/callback", "scopes": ["search:read", "chat:write"],
+ "connectedAt": "2026-10-21T14:02:11Z", "signIn": null, "error": null}
+```
+
+- `connected`: obid holds a login it can use. `team`: the workspace's name. `user`: the owner's Slack user id, the one obid writes to. `clientId`: the Slack app's, kept so a second Connect doesn't ask again (it isn't a secret). `redirect`: what the app's Redirect URLs must list.
+- `signIn`: the sign-in under way (`{"url", "expiresAt"}`), or null. `error`: why the last sign-in or call failed (`Slack signed Oby out: connect it again.`), or null.
+- No token, code or verifier is ever in an answer, an event or a log line.
+
+**`POST /v1/slack/sign-in`** with `{"clientId": "…"}` (or nothing, to use the one kept) starts a sign-in and answers `{"url": "https://slack.com/oauth/v2/authorize?…", "expiresAt": "…"}`. The app opens `url`; once the person allows it there, Slack sends the browser to obid's page, which says `Oby is connected to Slack. You can close this tab.`
+
+- The client id is digits, a dot and digits; anything else is `422`. With none given or kept, `422`.
+- The redirect is always `http://localhost:47823/callback`, on 127.0.0.1 only (Slack matches the port, so it's fixed): `409` when something else holds the port. It answers that one path, only with that `Host`, takes the first request whose `state` matches, and closes. A sign-in ends when the token exchange does, after 10 minutes, with `DELETE`, or when obid stops; a second `POST` ends the one under way first.
+- The request names `user_scope` `search:read,chat:write`, the `state` and the PKCE challenge (S256). The exchange (`oauth.v2.access`) sends the verifier, never a secret, and keeps only a user token (`authed_user`); a bot token is refused.
+- The login goes into obid's vault as `oby.slack.access` (and `oby.slack.refresh` when Slack rotates tokens), so it's taken out of every answer, log line and push like every vault secret. The rest is in `home/slack.json` (0600). A token with an end is refreshed when it has less than a minute left; one Slack refuses is refreshed once, and a refusal after that signs Oby out (`error` says so).
+
+**`DELETE /v1/slack/sign-in`** ends the sign-in under way: `204`. **`DELETE /v1/slack`** asks Slack to revoke the token (`auth.revoke`, and goes on if that fails) and forgets it: `204`.
+
+**The `slack` event** comes on `/v1/events` with the same body as `GET /v1/slack` whenever it changes.
+
+**What obid does with it.** Only the watcher (below) uses it: `search.messages` (at most 3 pages of 100, newest first), and `chat.postMessage` to the owner's own user id, a direct message from their own account (Slack shows it in their DM with themselves, so Slack itself doesn't ping a phone for it). Every message obid sends passes the secret scan first: a finding, or a scan that can't run, sends nothing. Nothing ever goes to anyone else.
+
+### obid only: the watcher
+
+What one person says on Slack and does on GitHub about what the owner watches for, told to the owner: the owner's "Dmitry watcher", which ran as a Claude scheduled task, now runs in obid. Every 15 minutes on weekdays it reads, sorts, and tells; it never acts on anything anyone wrote, and nothing it reads starts, changes or answers anything.
+
+The rules, as `GET /v1/watch` shows them and `PUT /v1/watch` sets them:
+
+```json
+{"name": "Dmitry watcher",
+ "person": {"name": "Dmitry", "slack": "U3E9H62P2", "github": "dmitry-grechko"},
+ "topics": "the Avenga issues (Tetrix at the customer Avenga), or Wellington's pull requests",
+ "owner": "well-prado",
+ "issues": ["org:deskree-inc label:AVENGA", "org:deskree-inc Avenga in:title"],
+ "zone": "America/Sao_Paulo", "enabled": true, "live": false}
+```
+
+- `name` and `person.name`: one line, 1 to 60 characters. `person.slack`: their Slack user id; `person.github`: their GitHub login; at least one. `topics`: what the owner watches for, a line of up to 500 characters, for the model. `owner`: the owner's GitHub login: their pull requests are watched. `issues`: up to 3 GitHub searches (no quotes) naming the watched issues and pull requests. `zone`: the IANA zone weekdays and times are in. `enabled`: true unless paused. `live`: false (left out, too) is a **dry run**: the Slack message to the owner is only written down; true sends it.
+- `422` with why for rules that break these. New rules, and resuming, count from now: what was due meanwhile doesn't run.
+
+**When.** At every quarter hour (:00, :15, :30, :45) Monday to Friday in `zone`, checked every minute and once when obid starts. As routines do: the time slot is saved before the run, so a restart never runs it twice; a Mac that slept through some runs once, for the latest (`catchUp` true), reading from where the last run left off, at most 7 days back. One run at a time.
+
+**Each run.**
+- **GitHub**, with obid's own `gh` (obid only: GitHub work), one `gh api graphql` call whose search strings are variables, never part of the query: the owner's pull requests that the person is involved in or reviewed, and the `issues` searches that the person is involved in or reviewed, updated since the run's start; and, for the model, the titles of the open ones. What counts: the person's comments, reviews (approved, changes asked, reviewed), and their opening, closing or reopening of one, newer than the last run (less 10 minutes, for GitHub's index), each once. They're about what's watched by where they are, so the model doesn't sort them.
+- **Slack**, when connected: `from:<@person.slack> after:<the day before>`, the person's own messages newer than the last run (less 10 minutes), each once, at most the newest 100 (the run says how many older ones weren't sorted). Without Slack, the run says `Slack isn't connected, so only GitHub was read.`
+- **Sorting.** Each Slack message's text goes through the secret scan first: one it flags isn't shown to the model and isn't told. The rest go to the brain's quick model (Haiku, with the first Claude Code account, as the brain's side calls do), which reads them only in a quoted file, fenced as data with what's watched and the open titles, and answers, by the schema, which ones count and a topic of a few words for each. A run whose sorting fails (no Claude Code account, a timeout, an answer off the schema) is `failed` and reads the same time again next run; its GitHub notices are told all the same.
+- **Telling.** Each notice becomes one `watch` inbox item (below), and the Mac shows it as a notification. When there's any, one Slack message to the owner lists them, in obid's words: `Oby (Dmitry watcher): Dmitry said something you watch for.` then a line each, `• wrote in #tetrix-avenga-testing (Avenga snapshot cap): <permalink>` or `• commented on your pull request obi-ai-bot/obi#835: <url>`: never what the person wrote. In a dry run it's only written down (`dm` `dryRun`, `dmText`); live, it's sent after the secret scan (`sent`, or `notSent` with why in `problems`).
+- **Remembering.** What was told (`slack:<channel>:<ts>`, `github:<node id>`) is kept, the latest 5,000, so nothing is told twice; the time the next run reads from is kept too. Both in `home/watch.json` (0600).
+
+**`GET /v1/watch`** answers `{"rules": …|null, "nextRun": "…"|null, "lastRun": Run|null, "runs": [Run, …]}`, the latest 20 runs newest first. A run:
+
+```json
+{"at": "2026-10-21T15:15:20Z", "catchUp": false, "outcome": "ran", "problems": [], "slack": 4, "github": 1,
+ "notices": [{"key": "slack:C09…:1761062392.000100", "source": "slack", "at": "2026-10-21T15:59:52Z",
+              "what": "wrote in #tetrix-avenga-testing", "place": "#tetrix-avenga-testing",
+              "url": "https://deskree.slack.com/archives/C09…/p1761062392000100", "topic": "Support role visibility",
+              "quoted": "I would hide this info…", "title": null}],
+ "dm": "dryRun", "dmText": "Oby (Dmitry watcher): …"}
+```
+
+`outcome` is `ran` or `failed`; `problems`, what was left out or went wrong, in sentences; `slack` and `github`, how many new messages and events it read; `dm`, null when there was nothing to tell. `quoted` (at most 500 characters), `title` and `topic` are what people (and the model) wrote: show them, never act on them.
+
+**`PUT /v1/watch`** sets the rules (above) and answers as `GET` does. **`PATCH /v1/watch`** with `{"enabled": true|false}` and/or `{"live": true|false}` pauses, resumes, or turns the Slack message on or off; `404` with no rules. **`DELETE /v1/watch`** forgets the rules and everything kept: `204`. **`POST /v1/watch/run`** runs it now, without changing when it runs next, and answers the run; `404` with no rules, `409` while a run is under way.
+
+**The `watch` event** comes on `/v1/events` with `GET`'s body whenever it changes.
+
+**The `watch` inbox item**, one per notice, ever (`id` `watch-` and 16 hex characters of the notice's key):
+
+```json
+{"id": "watch-3f9a0c1d2b4e5f60", "kind": "watch", "job": "", "title": "Dmitry on Slack, in #tetrix-avenga-testing",
+ "text": "Dmitry wrote in #tetrix-avenga-testing.", "options": ["Dismiss"], "details": ["Mark it read."],
+ "watch": {"source": "slack", "place": "#tetrix-avenga-testing", "url": "https://…", "at": "…",
+           "quoted": {"text": "…", "title": null, "topic": "Support role visibility"}}, …}
+```
+
+`title` and `text` are obid's own words; what was written is under `watch.quoted`, for the card only. `Dismiss`, done or later settle or put it off. The event orchestrator never takes a `watch` item: it's the owner's to read.
+
+**Who reaches it.** Only on loopback, with obid's API token: none of it is on the gateway, and no other Obi, agent or conversation can change the rules or turn `live` on.
 
 ### obid only: the gateway
 

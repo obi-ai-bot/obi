@@ -565,6 +565,7 @@ fn ask_owner(
         confirm: None,
         start: None,
         github: None,
+        watch: None,
     });
     // Kept last: once the job says it was asked, the owner's item is there.
     asked(shared, job, turn, taken);
