@@ -232,7 +232,7 @@ async function main() {
     if (joined.state !== "joined" || !made.keyId) fail(`${who} didn't join`);
     obids[who] = { api, dir, home, obi };
   }
-  execFileSync(OBID, ["vault", "--config", join(obids.host.dir, "config.json"), "add", "anthropic-api-key"], { input: hostKey });
+  execFileSync(OBID, ["vault", "--config", join(obids.host.dir, "config.json"), "add", "anthropic-api-key.stub"], { input: hostKey }); // the key of the share of its account "stub"
   const mac = expect(await obids.host.api("/obid/sharing/mac"), 200, "the host's sharing");
   if (mac.settings.on !== false) fail("sharing isn't off by default");
   const on = expect(await obids.host.api("/obid/sharing/mac", { method: "PUT", body: { ...mac.settings, on: true } }), 200, "sharing on");
