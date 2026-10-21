@@ -3507,19 +3507,28 @@ impl Jobs {
     }
 
     /// The git directories of the job's worktree (its own and the common one), only when they're
-    /// obid's: the clone's `.git`, and a folder directly in its `worktrees/`. The worktree's `.git`
-    /// is the agent's to write, and could name any repository.
+    /// obid's: the clone's `.git`, and a folder directly in its `worktrees/` whose `gitdir` names
+    /// this worktree (never another job's). The worktree's `.git` is the agent's to write, and
+    /// could name any repository.
     async fn own_git_dirs(&self, id: &str) -> Result<(PathBuf, PathBuf), String> {
         let job = self.get(id).ok_or("the job is gone")?;
-        let (admin, common) = git::worktree_dirs(&self.worktree_path(id))
+        let worktree = self.worktree_path(id);
+        let (admin, common) = git::worktree_dirs(&worktree)
             .await
             .map_err(|e| e.to_string())?;
         let ours = git::clone_path(&self.config.home, &job.repo)
             .join(".git")
             .canonicalize();
-        match (admin.canonicalize(), common.canonicalize(), ours) {
-            (Ok(admin), Ok(common), Ok(ours))
-                if common == ours && admin.parent() == Some(ours.join("worktrees").as_path()) =>
+        let this = worktree.join(".git").canonicalize();
+        match (admin.canonicalize(), common.canonicalize(), ours, this) {
+            (Ok(admin), Ok(common), Ok(ours), Ok(this))
+                if common == ours
+                    && admin.parent() == Some(ours.join("worktrees").as_path())
+                    && std::fs::read_to_string(admin.join("gitdir"))
+                        .ok()
+                        .and_then(|named| Path::new(named.trim()).canonicalize().ok())
+                        .as_ref()
+                        == Some(&this) =>
             {
                 Ok((admin, common))
             }
@@ -3653,6 +3662,7 @@ impl Jobs {
     /// Takes obid's own `wip:` commit back out as the job runs again: what it held is uncommitted,
     /// as the agent left it. One the job started from (a follow-up's) stays.
     async fn unkeep_wip(&self, id: &str, start_commit: &str) -> Result<(), String> {
+        self.own_git_dirs(id).await?;
         let worktree = self.worktree_path(id);
         let head = git::git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
             .await
@@ -3733,9 +3743,12 @@ impl Jobs {
                 // What it committed itself ends here, before obid's `wip:` commit, which never
                 // counts: counted once keep_commits has its objects in the clone.
                 let worktree = self.worktree_path(id);
-                let own_head = git::git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
-                    .await
-                    .unwrap_or_default();
+                let own_head = match self.own_git_dirs(id).await {
+                    Ok(_) => git::git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
+                        .await
+                        .unwrap_or_default(),
+                    Err(_) => String::new(),
+                };
                 if *signal.borrow() != Signal::Shutdown
                     && !keeps_none
                     && let Err(e) = self.keep_wip(id).await
@@ -10468,9 +10481,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A worktree whose `.git` the agent pointed at a repository of its own stays, even one at the
-    /// job's start, and git never runs there; an object folder the agent made a link is refused,
-    /// and nothing is made where it leads.
+    /// A worktree whose `.git` the agent pointed at a repository of its own, or at another job's
+    /// folder in obid's clone, stays, even one at the job's start, and git never runs there; an
+    /// object folder the agent made a link is refused, and nothing is made where it leads.
     #[tokio::test]
     async fn a_worktree_obid_doesnt_own_stays() {
         let (root, clone, base, jobs) = cleanup_home("foreign", true);
@@ -10489,12 +10502,21 @@ mod tests {
         std::fs::create_dir_all(&elsewhere).unwrap();
         let admin = clone.join(".git/worktrees/linked");
         std::os::unix::fs::symlink(&elsewhere, admin.join("objects")).unwrap();
-        for job in [pointed, linked] {
+        // A job's `.git` naming another job's folder in the clone: that one is the other's.
+        let (sibling, sibling_tree) = ended(&jobs, &clone, &base, "sibling", now);
+        let (other, _) = ended(&jobs, &clone, &base, "other", now);
+        let gitdir = format!("gitdir: {}\n", clone.join(".git/worktrees/other").display());
+        std::fs::write(sibling_tree.join(".git"), gitdir).unwrap();
+        // The other job holds work, so only its own worktree's state could let it go.
+        let mut other = other;
+        other.published = Some("https://github.com/o/r/pull/2".into());
+        for job in [pointed, linked, sibling, other] {
             jobs.lock().jobs.insert(job.id.clone(), job);
         }
 
         assert_eq!(jobs.clean_worktrees(now, None).await, 0);
         assert!(pointed_tree.join(".git").exists() && linked_tree.join(".git").exists());
+        assert!(sibling_tree.join(".git").exists());
         assert!(!elsewhere.join("info").exists());
         let mut kept = jobs.cleaned().kept;
         kept.sort_by(|a, b| a.job.cmp(&b.job));
@@ -10508,6 +10530,9 @@ mod tests {
         );
         assert_eq!(kept[1].job, "pointed");
         assert_eq!(kept[1].why, NOT_OUR_GIT);
+        assert_eq!(kept[2].job, "sibling");
+        assert_eq!(kept[2].why, NOT_OUR_GIT);
+        assert_eq!(kept.len(), 3);
         let _ = std::fs::remove_dir_all(&root);
     }
 
