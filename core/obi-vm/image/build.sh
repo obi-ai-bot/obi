@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the guest image into $1 (default ./out): vmlinuz, initrd, root.img and image.json with
-# their SHA-256s. Needs Docker (any arm64 engine; OrbStack on this Mac).
+# their SHA-256s, which obi-vm checks before every boot. Needs Docker (any arm64 engine; OrbStack on this Mac).
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 out=${1:-$here/out}
@@ -12,7 +12,7 @@ docker cp -L "$id:/boot/vmlinuz-$(docker run --rm --platform linux/arm64 obi-gue
 docker cp -L "$id:/boot/initrd.img-$(docker run --rm --platform linux/arm64 obi-guest-image sh -c 'ls /lib/modules')" "$out/initrd"
 docker export "$id" > "$out/root.tar"
 # An ext4 root made from the files, in a container that has mke2fs; read-only in every VM.
-docker run --rm --platform linux/arm64 -v "$out:/out" debian:bookworm sh -c '
+docker run --rm --platform linux/arm64 -v "$out:/out" debian:bookworm@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61 sh -c '
   set -e; apt-get update -qq >/dev/null; apt-get install -y -qq e2fsprogs >/dev/null
   mkdir /r && tar -xpf /out/root.tar -C /r --exclude=boot --exclude=.dockerenv
   rm /out/root.tar
