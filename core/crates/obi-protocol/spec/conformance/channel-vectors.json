@@ -1,0 +1,61 @@
+{
+  "description": "Known answers for the job channel (protocol.md section 13). x25519 keys are raw 32 bytes, base64url; hello_bytes are the UTF-8 bytes each side sent, base64url; frames are the bytes on the wire.",
+  "guest": {
+    "obi": "obi-b",
+    "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
+    "public_key": "h0N1imyuq1rRFqca2MG9WIbmY4HFUvtr0utDYJvrlsE",
+    "x25519_private": "vdg2V9o8UIOFhbPuJ4Leb_mwN1Mh3YB5Q530jsr0FMk",
+    "hello": {
+      "protocol": "obi/0.1 channel",
+      "sphere": "conf-sphere",
+      "correlation_id": "bfd5de05-35df-8959-8b68-75fe64935b8d",
+      "obi": "obi-b",
+      "role": "guest",
+      "x25519": "sJQOELTsw5kh4YAvaxZltxVoKllYrVupEahrjUpvwHY",
+      "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
+      "signature": "JPEDt3ok9wGQqISJpI8p5_KKZzwwqrdCgTowy_EVy0zHrFGUWWw7HkPmcZ_G59BwS76JwVOMRDpArnQwjhZvDw"
+    },
+    "hello_bytes": "eyJjb3JyZWxhdGlvbl9pZCI6ImJmZDVkZTA1LTM1ZGYtODk1OS04YjY4LTc1ZmU2NDkzNWI4ZCIsImtleV9pZCI6ImVkMjU1MTk6SC05eUZsOVBTTkNyVDlYZklKZ3ZTNTdoLUprOHRLcmZYeWNSM1N6bWl2byIsIm9iaSI6Im9iaS1iIiwicHJvdG9jb2wiOiJvYmkvMC4xIGNoYW5uZWwiLCJyb2xlIjoiZ3Vlc3QiLCJzaWduYXR1cmUiOiJKUEVEdDNvazl3R1FxSVNKcEk4cDVfS0taend3cXJkQ2dUb3d5X0VWeTB6SHJGR1VXV3c3SGtQbWNaX0c1OUJ3Uzc2SndWT01SRHBBcm5Rd2poWnZEdyIsInNwaGVyZSI6ImNvbmYtc3BoZXJlIiwieDI1NTE5Ijoic0pRT0VMVHN3NWtoNFlBdmF4Wmx0eFZvS2xsWXJWdXBFYWhyalVwdndIWSJ9"
+  },
+  "host": {
+    "obi": "obi-a",
+    "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
+    "public_key": "ntsfB6eWkZc1OaiYP3IQWc8ULKnQgLnlTcEu78Ix1kM",
+    "x25519_private": "FPHODp2wPAKtiUhilBh6XMCXNGjfxxkntWKTUWGGqpw",
+    "hello": {
+      "protocol": "obi/0.1 channel",
+      "sphere": "conf-sphere",
+      "correlation_id": "bfd5de05-35df-8959-8b68-75fe64935b8d",
+      "obi": "obi-a",
+      "role": "host",
+      "x25519": "rqd2hmlGTsh7DXaNtOfYkCkqHRuxCJu-AGMkDjkJwgw",
+      "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
+      "signature": "U-56VB5ByMbmToJG90VqFRU3eFjLw_7CpotrPhm0cVAx4uG7h_tv-80kEIEB6-Zy3ywZ-U67FidGOoUDysBOAA"
+    },
+    "hello_bytes": "eyJjb3JyZWxhdGlvbl9pZCI6ImJmZDVkZTA1LTM1ZGYtODk1OS04YjY4LTc1ZmU2NDkzNWI4ZCIsImtleV9pZCI6ImVkMjU1MTk6ejZXTG12TzJURzRMYUFuMnBwUVhLTjJQbzVOSlZ5V0VtNFJJRmdNQnMtTSIsIm9iaSI6Im9iaS1hIiwicHJvdG9jb2wiOiJvYmkvMC4xIGNoYW5uZWwiLCJyb2xlIjoiaG9zdCIsInNpZ25hdHVyZSI6IlUtNTZWQjVCeU1ibVRvSkc5MFZxRlJVM2VGakx3XzdDcG90clBobTBjVkF4NHVHN2hfdHYtODBrRUlFQjYtWnkzeXdaLVU2N0ZpZEdPb1VEeXNCT0FBIiwic3BoZXJlIjoiY29uZi1zcGhlcmUiLCJ4MjU1MTkiOiJycWQyaG1sR1RzaDdEWGFOdE9mWWtDa3FIUnV4Q0p1LUFHTWtEamtKd2d3In0"
+  },
+  "shared": "6LUaH-Yq6GU9D4caCDxgP94FaD5Y8AbFMQ1pa3pOg2Q",
+  "salt": "O2g5Q-W5RDj8k3oY3R43A3RkKgm9sug6nGXW6gJVdj8",
+  "guest_to_host": "18lEK8uvo9KZ1Yh6bTYUF84EI0gNmZ2SMrc8Mgt0qr0",
+  "host_to_guest": "stJJdufM2GLtmRXQHYLEDNgbu97ZXUpvGPoIoHGQUfs",
+  "nonce_0": "AAAAAAAAAAAAAAAA",
+  "nonce_258": "AAAAAAAAAAAAAAEC",
+  "frames": [
+    {
+      "direction": "guest>host",
+      "counter": 0,
+      "stream": 2,
+      "kind": 0,
+      "payload": "eyJ0eXBlIjoiYnVuZGxlIiwic2hhMjU2IjoiOTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OSIsImJ5dGVzIjo0ODIxM30",
+      "wire": "2rixDgy1qHKR5rv6Ym3GxUyF4c-oSVEtXFM9G07o3G0BDOPbZV_kWFXAKld6aipHSklJf62Eyo9V0TSO4HW-f9-A3Ce0Ss-VM794tucJZaUDQIKOvzWXtuV7yOpw9eB1IVOEz4-1jSkqnhWqrVgifMkw_TsafsYkd20y3Mg49gM"
+    },
+    {
+      "direction": "host>guest",
+      "counter": 258,
+      "stream": 3,
+      "kind": 1,
+      "payload": "bW9kZWwgYW5zd2VyIGJ5dGVz",
+      "wire": "fNt-VD0ErUlfJT267e8e0rC-XXFjwLOiD8VK0sJBc9gCaVOEFlSU"
+    }
+  ]
+}

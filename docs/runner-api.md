@@ -2049,6 +2049,8 @@ obid checks the card (identity.md 2.2, checks 1 to 5 and 7), that it carries obi
 
 `409` when already joined; `422` with why for a card or delegation that fails a check; `502` `{"error": "The Sphere refused it: invitation_invalid: …"}` when the Sphere answers an error (its `code` and `message`, quoted); `504` when the Sphere can't be reached.
 
+**Pinned owner keys** (spec identity.md, "Pinning, in every Obi"). obid trusts a member's card, and so its Obi key and a job channel's hello, only when the card verifies with the owner key obid pinned for that owner the first time it saw one (`home/sphere/pins.json`, 0600), whatever key the Sphere bound. A member whose owner key changes is left out of the directory obid uses (its messages dropped, no channel) until the owner compares the new key's fingerprint with that person and accepts it. **`GET /v1/obid/sphere/pins`**: `[{"owner", "fingerprint": "ed25519:…", "firstSeen", "changedTo": "ed25519:…" | null}]`. **`POST /v1/obid/sphere/pins/{owner}`** with `{"fingerprint": "<the new key's, as compared>"}` trusts the changed key (`422` for any other fingerprint, or no change), and reads the directory again.
+
 ### obid only: Obi-to-Obi exchanges
 
 An **exchange** is one request and its replies (spec `protocol.md`, "Exchanges"), as this Obi sees it.
