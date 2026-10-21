@@ -79,6 +79,14 @@ async fn pair(host_folder: &Folder, guest_folder: &Folder, mac: Value, scenario:
         json!({"stub": {"priced": "api"}}).to_string(),
     )
     .unwrap();
+    // The tests send a teammate's jobs back to back; `limit_requests` keeps the 15 minutes.
+    let mut mac = mac;
+    let limited = mac
+        .as_object_mut()
+        .unwrap()
+        .remove("limit_requests")
+        .is_some();
+    host_config["guestRequestEvery"] = json!(if limited { 900 } else { 0 });
     let host = start(&host_folder.0, &host_config, None);
     vault_add(&host_folder.0, HOST_KEY);
 
@@ -533,7 +541,9 @@ async fn with_sharing_off_or_the_mac_busy_a_job_is_declined_with_the_reason() {
             remote.to_str().unwrap(),
             work.to_str().unwrap(),
         ]);
+        // Marked `-diff` (no text diff), as a repository may mark its secrets: scanned all the same.
         std::fs::write(work.join("deploy.env"), format!("GITHUB_TOKEN={token}\n")).unwrap();
+        std::fs::write(work.join(".gitattributes"), "deploy.env -diff\n").unwrap();
         let w = work.to_str().unwrap();
         git(&["-C", w, "add", "-A"]);
         git(&["-C", w, "commit", "-q", "-m", "Deploy settings"]);
@@ -763,5 +773,57 @@ async fn a_share_of_an_api_account_runs_on_its_mac_with_its_key_metered_until_us
             ),
         );
         assert_eq!(refused.status, 422, "{}", refused.text);
+    });
+}
+
+/// One run_request per teammate every 15 minutes: a second one at once is declined however the
+/// Mac is, so requests can't probe when Wellington is at it (the owner's decision of 2026-10-21).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_request_within_15_minutes_is_declined() {
+    let (hf, gf) = (
+        Folder::new("share-often-host"),
+        Folder::new("share-often-guest"),
+    );
+    let p = pair(
+        &hf,
+        &gf,
+        json!({"who": "everyone", "limit_requests": true}),
+        json!({}),
+    )
+    .await;
+    tokio::task::block_in_place(|| {
+        within(40, "Wellington's Mac in the list", || {
+            get(&p.guest, "/v1/obid/sharing/macs")
+                .as_array()
+                .filter(|m| !m.is_empty())
+                .cloned()
+        });
+        // The owner is at the Mac: the first is declined for that.
+        std::fs::write(
+            hf.0.join("env-home/fake-signals.json"),
+            json!({"idleSeconds": 3, "onAC": true, "lowPower": false, "thermal": "nominal"})
+                .to_string(),
+        )
+        .unwrap();
+        let declined = |job: &str| {
+            within(60, "the job declined", || {
+                let j = get(&p.guest, &format!("/v1/jobs/{job}"));
+                (j["status"] == "interrupted").then_some(j)
+            })
+        };
+        let first = declined(&send_job(&p.guest));
+        // The owner has left: the Mac is free, and the next one at once is declined all the same.
+        std::fs::write(
+            hf.0.join("env-home/fake-signals.json"),
+            json!({"idleSeconds": 3600, "onAC": true, "lowPower": false, "thermal": "nominal"})
+                .to_string(),
+        )
+        .unwrap();
+        let _ = (first, declined(&send_job(&p.guest)));
+        let log = p.host.log();
+        assert!(
+            log.contains("one run_request per teammate every 15 minutes"),
+            "{log}"
+        );
     });
 }
