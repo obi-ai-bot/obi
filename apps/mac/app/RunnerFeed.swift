@@ -141,13 +141,6 @@ final class RunnerFeed {
     func apply(_ work: GitHubWork) { gitHubWork = work }
 
     /// Has obid read GitHub again (opening Review PR or Issues); the feed it answers replaces this one.
-    /// The worktrees' disk space from a fresh status (Settings › Runner): obid leaves it out until
-    /// it has measured them, which can be after the connection's status.
-    func refreshCleanup() async {
-        guard let runner, let status = try? await runner.status() else { return }
-        cleanup = status.cleanup
-    }
-
     func refreshGitHubWork() async {
         guard let runner else { return }
         #if DEBUG
@@ -398,6 +391,7 @@ final class RunnerFeed {
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     case .tetrix(let status): tetrix = status
+                    case .cleanup(let measured): cleanup = measured
                     // obid names each turn's, step's and word's conversation: the window shows one (#493).
                     case .turn(let turn, let extras):
                         if conversations.shows(turn.conversation) { conversation.apply(turn, extras) }

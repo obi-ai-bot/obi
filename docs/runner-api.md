@@ -478,7 +478,7 @@ There's no draft to confirm any more: the work the brain plans starts as it's pl
 
 `permissions.mode` is Settings › Permissions: the mode new jobs get (`PUT /v1/settings/permissions`). Older runners don't send the key.
 
-`cleanup` is the runner's job-worktree disk usage and cleanup status. `path` is the worktree folder, `bytes` is its allocated disk usage, and `lastRun` is when the last cleanup pass completed, or null before the first pass. The runner runs cleanup at startup and every three hours. It removes a worktree only for a settled job finished more than 24 hours ago (merged, closed, dismissed or stopped), or immediately after an Oby review job has a verdict; open pull requests, jobs needing the user, queued or waiting jobs, and worktrees in use by an agent, check, publish or merge are kept. Older runners don't send the key. obid answers before it has measured a big worktrees folder (it waits for the walk 200 ms at most) and leaves `cleanup` out until the walk ends; ask status again to see it.
+`cleanup` is the runner's job-worktree disk usage and cleanup status. `path` is the worktree folder, `bytes` is its allocated disk usage, and `lastRun` is when the last cleanup pass completed, or null before the first pass. The runner runs cleanup at startup and every three hours. It removes a worktree only for a settled job finished more than 24 hours ago (merged, closed, dismissed or stopped), or immediately after an Oby review job has a verdict; open pull requests, jobs needing the user, queued or waiting jobs, and worktrees in use by an agent, check, publish or merge are kept. Older runners don't send the key. obid answers before it has measured a big worktrees folder (it waits for the walk 200 ms at most) and leaves `cleanup` out until the walk ends, then sends it as the `cleanup` event.
 
 `runner.version` is the running API version. `runner.update` adds `{"commit": "<dev SHA>", "waiting": "<candidate SHA>", "phase": "draining"}` for Settings › Runner. `commit` is the running executable's dev commit, or null before its first self-install or after an untracked manual install. `waiting` is null when no update is pending. `phase` is `idle`, `building`, `ready` (built and tested, waiting for its turn to restart), `draining`, `restarting` or `failed`. Clients of older runners accept an absent `update`; refresh status to observe progress.
 
@@ -864,6 +864,9 @@ data: [ …Account ]
 event: clear
 data: {"clearedAt": "2026-10-10T08:12:00Z"}
 
+event: cleanup
+data: {"path": "/srv/nvme/oby/jobs", "bytes": 8912896, "lastRun": null}
+
 event: inbox
 data: { …InboxItem }
 
@@ -896,6 +899,7 @@ data: {"text": "Two jobs are done. Pick a base branch needs you.", "since": "202
 - `stalled` (obid only) comes once when a job stalls (`limit`, above), with the job as its `job` event carries it, `stalled` and the handoff note included: what the conversation supervises (continue, split or restart).
 - `transcript` (obid only) comes with each transcript entry that comes or changes: `{"job": "<id>", "entry": {…}}`, and with each line the agent writes: `{"job": "<id>", "n": 9, "append": "…"}` (add it to entry `n`'s `text`), the entry as `GET /v1/jobs/{id}/transcript` has it. Update by `n`: a call comes again under its `n` when it ends. These events have a queue of their own in obid, so a busy job's calls never push another event (a job's end, say) out of a slow app's backlog; an app that falls behind on them fetches the transcript again with `after`.
 - `accounts` comes when accounts are added, renamed or removed and a sign-in ends (obid only: accounts), and when sign-ins, usage, reset times, running counts, `fullUntil`, a lifted reserve (`reserveLiftedUntil`) or Tetrix (`tetrix`, `tetrixJobs`, `tetrixUsed`) change.
+- `cleanup` (obid only) comes once obid has measured the job worktrees after it started answering, with what `status.cleanup` says from then on (above).
 - `clear` comes when Clear done is pressed on any app (`POST /v1/clear`): hide the settled jobs that finished by `clearedAt`.
 - `inbox` comes with every inbox item that arrives or changes: answered, done or put off, on any app, or settled by itself. Replace the item with that `id`; one whose `state` is `done` leaves the inbox.
   obid sends the item as it is when the event goes out, one event at a time, so the events for one item never go back to an older state and the last one is the item as `GET /v1/inbox` lists it (the same goes for `exchange` events, obid only: Obi-to-Obi exchanges, below). Two changes close together can come as two events that both carry the newer state: an item answered as soon as it arrives may never be seen `open`.

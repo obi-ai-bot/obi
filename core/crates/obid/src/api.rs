@@ -644,6 +644,16 @@ pub struct CleanupJson {
     pub last_run: Option<String>,
 }
 
+/// `status.cleanup`, and the `cleanup` event: nothing until the worktrees are measured.
+pub fn cleanup_json(cleanup: &Cleanup) -> Option<CleanupJson> {
+    cleanup.bytes().map(|bytes| CleanupJson {
+        path: cleanup.path.to_string_lossy().into_owned(),
+        bytes,
+        // obid has no cleanup pass yet; when it does, it sets this and calls `remeasure`.
+        last_run: None,
+    })
+}
+
 /// How many jobs run at once until Settings changes it (Engine/Jobs.swift, `JobSlots.standard`).
 pub const MAX_RUNNING: u32 = 6;
 
@@ -727,12 +737,7 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         permissions: ModeJson {
             mode: shared.jobs.default_mode().as_str(),
         },
-        cleanup: shared.cleanup.bytes().map(|bytes| CleanupJson {
-            path: shared.cleanup.path.to_string_lossy().into_owned(),
-            bytes,
-            // obid has no cleanup pass yet; when it does, it sets this and calls `remeasure`.
-            last_run: None,
-        }),
+        cleanup: cleanup_json(&shared.cleanup),
         claude_keychain: KeychainJson {
             on: crate::jobs::keychain_on(),
             auto: crate::jobs::keychain_auto(),
