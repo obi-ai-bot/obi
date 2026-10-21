@@ -67,6 +67,7 @@ class MainActivity : FragmentActivity() {
     /** A notification was tapped: open its job, and publish it if that's what was tapped. */
     private fun opened(intent: Intent) {
         val job = intent.getStringExtra(Notifications.EXTRA_JOB) ?: return
+        if (!Notifications.ours(this, intent)) return
         phone.open(job, intent.getBooleanExtra(Notifications.EXTRA_PUBLISH, false))
         intent.removeExtra(Notifications.EXTRA_JOB)
     }

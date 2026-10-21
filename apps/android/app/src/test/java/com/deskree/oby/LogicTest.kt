@@ -102,6 +102,13 @@ class LogicTest {
         assertEquals("one two ", shown)
     }
 
+    @Test fun plainHttpOnlyToHomeAddresses() {
+        listOf("192.168.1.20", "10.0.0.2", "172.20.1.1", "169.254.3.4", "mac.local", "fd12:3456::1", "[fd00::2]", "fe80::1%wlan0")
+            .forEach { assertTrue(it, GatewayEnvelope.isLocal(it)) }
+        listOf("8.8.8.8", "172.32.0.1", "2001:db8::1", "fec0::1", "fd00::g", "example.com", "1.2.3")
+            .forEach { assertFalse(it, GatewayEnvelope.isLocal(it)) }
+    }
+
     @Test fun anApprovalSignsWhatTheRunnerChecks() {
         assertEquals("oby-publish\nj1\nPush it\n2026-10-20T17:51:00Z", String(Approval.message("j1", "Push it", "2026-10-20T17:51:00Z")))
     }

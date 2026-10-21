@@ -104,6 +104,9 @@ class Runner(val base: String, private val token: String?, private val refused: 
 
         val client: OkHttpClient = OkHttpClient.Builder()
             .addInterceptor(localOnlyCleartext)
+            // A redirect would skip the interceptor: obid never sends one, as its own client follows none.
+            .followRedirects(false)
+            .followSslRedirects(false)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(45, TimeUnit.SECONDS)
             .build()

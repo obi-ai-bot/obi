@@ -162,6 +162,9 @@ class Phone(val context: Context) {
             prefs.edit().remove("mac.link").remove("gateway.expiresAt").apply()
             GatewayTokenStore.remove(context)
             pairedUntil = null
+            // No alerts for an unpaired phone: Firebase forgets this token, and a new pairing gets a new one.
+            if (Notifications.configured(context)) com.google.firebase.messaging.FirebaseMessaging.getInstance().deleteToken()
+            pushToken = null
         }
         restoreQueuedMessages(offlineQueueTarget)
         if (started) finder.find(value?.name) { lan = it; reroute() }

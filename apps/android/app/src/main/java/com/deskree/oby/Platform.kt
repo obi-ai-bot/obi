@@ -86,7 +86,9 @@ class MacFinder(context: Context) {
         nsd.resolveService(info, object : NsdManager.ResolveListener {
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) { report(null, found) }
             override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
-                val host = serviceInfo.host?.hostAddress?.substringBefore('%') ?: return report(null, found)
+                // The Mac's IPv4 address when it has one: an IPv6 link-local one needs a zone a URL can't carry.
+                val address = if (android.os.Build.VERSION.SDK_INT >= 34) serviceInfo.hostAddresses.minByOrNull { it !is java.net.Inet4Address } else serviceInfo.host
+                val host = address?.hostAddress?.substringBefore('%') ?: return report(null, found)
                 report(RemoteRoute.lanURL(host, serviceInfo.port), found)
             }
         })
@@ -132,7 +134,24 @@ object Notifications {
     const val WORK = "work"
     const val EXTRA_JOB = "job"
     const val EXTRA_PUBLISH = "publish"
+    private const val EXTRA_NONCE = "nonce"
     private const val ALERT = 1
+
+    /** This install's secret, carried by Oby's own notification taps: MainActivity is exported, so another app's intent without it opens nothing. */
+    private fun nonce(context: Context): String {
+        val prefs = Store.prefs(context)
+        prefs.getString("notifications.nonce", null)?.let { return it }
+        val bytes = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+        val made = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        prefs.edit().putString("notifications.nonce", made).apply()
+        return made
+    }
+
+    /** Whether `intent` is a tap on one of Oby's own notifications. */
+    fun ours(context: Context, intent: Intent): Boolean {
+        val given = intent.getStringExtra(EXTRA_NONCE) ?: return false
+        return java.security.MessageDigest.isEqual(given.toByteArray(), nonce(context).toByteArray())
+    }
 
     fun channels(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -153,6 +172,7 @@ object Notifications {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(EXTRA_JOB, job)
             putExtra(EXTRA_PUBLISH, publish)
+            putExtra(EXTRA_NONCE, nonce(context))
         }
         return PendingIntent.getActivity(context, (job + publish).hashCode(), intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     }
@@ -205,6 +225,9 @@ class ObyMessaging : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
+        // Unpaired, the phone shows nothing: the Mac drops its token too, but a message may be on its way.
+        val prefs = Store.prefs(this)
+        if (!prefs.contains("mac.link") && !prefs.contains("runner.url")) return
         val data = message.data
         data["clear"]?.let { Notifications.clear(this, setOf(it)); return }
         val job = data["job"] ?: return

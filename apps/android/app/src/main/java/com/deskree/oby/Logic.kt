@@ -810,10 +810,15 @@ data class GatewayEnvelope(val url: String, val link: MacLink, val secret: Strin
             return envelope
         }
 
-        /** Plain HTTP only to a home-network address. */
+        /** Plain HTTP only to a home-network address: IPv4's private ranges, or IPv6's unique local (fc00::/7) and link-local (fe80::/10). */
         fun isLocal(host: String): Boolean {
-            val h = host.lowercase().trim('[', ']')
+            val h = host.lowercase().trim('[', ']').substringBefore('%')
             if (h.endsWith(".local")) return true
+            if (':' in h) {
+                if (!h.all { it.isDigit() || it in 'a'..'f' || it == ':' || it == '.' }) return false
+                val first = h.substringBefore(':').toIntOrNull(16) ?: return false
+                return first and 0xfe00 == 0xfc00 || first and 0xffc0 == 0xfe80
+            }
             val parts = h.split(".").mapNotNull { it.toIntOrNull()?.takeIf { n -> n in 0..255 } }
             if (parts.size != 4 || h.split(".").size != 4) return false
             return parts[0] == 10 || (parts[0] == 172 && parts[1] in 16..31) || (parts[0] == 192 && parts[1] == 168) ||
