@@ -32,7 +32,7 @@ const MAX_MINUTES: u64 = 120;
 
 /// The request headers a relayed model call keeps (spec protocol.md section 13): every other one,
 /// any credential among them, is dropped.
-const HEADERS: [&str; 6] = [
+pub(super) const HEADERS: [&str; 6] = [
     "content-type",
     "accept",
     "anthropic-version",

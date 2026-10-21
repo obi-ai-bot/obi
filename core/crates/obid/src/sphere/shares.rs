@@ -332,6 +332,55 @@ impl Usage {
     }
 }
 
+/// The server tools a call on a share may use: web search, which its usage reports and obid
+/// prices. Any other (web fetch, code execution, an MCP server, a container's skills) costs what
+/// obid can't meter, so the call is refused. Tools the agent runs itself cost only tokens.
+const CLIENT_TOOL_TYPES: [&str; 5] = ["custom", "bash_", "text_editor_", "computer_", "memory_"];
+
+/// Why a call on a share can't be metered, or none.
+pub fn unmeterable(body: &Value) -> Option<String> {
+    if body.get("mcp_servers").is_some() || body.get("container").is_some() {
+        return Some("MCP servers and containers can't be metered on a share".into());
+    }
+    for tool in body["tools"].as_array().into_iter().flatten() {
+        let kind = tool["type"].as_str().unwrap_or("custom");
+        if !kind.starts_with("web_search_")
+            && !CLIENT_TOOL_TYPES.iter().any(|t| kind.starts_with(t))
+        {
+            return Some(format!(
+                "the server tool {kind} can't be metered on a share"
+            ));
+        }
+    }
+    None
+}
+
+/// The most a call can cost, in micro-dollars: every byte of the request as a token written to a
+/// 1-hour cache (the dearest input), all its `max_tokens` as output, and every web search it allows
+/// (20 when it doesn't say). None when the model has no price or the call says no `max_tokens`.
+pub fn worst(model: &str, body: &Value, bytes: usize) -> Option<u64> {
+    let searches = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| {
+            t["type"]
+                .as_str()
+                .is_some_and(|k| k.starts_with("web_search_"))
+        })
+        .map(|t| t["max_uses"].as_u64().unwrap_or(20))
+        .sum();
+    Usage {
+        model: model.into(),
+        cache_write_1h: bytes as u64,
+        output: body["max_tokens"].as_u64()?,
+        searches,
+        fast: body["speed"] == "fast",
+        ..Usage::default()
+    }
+    .micros()
+}
+
 /// Reads a model answer as it streams by, for its usage: server-sent events (`data: {…}` lines) or
 /// one JSON body. It never changes what passes.
 #[derive(Default)]
@@ -339,6 +388,8 @@ pub struct Meter {
     partial: Vec<u8>,
     whole: Vec<u8>,
     pub usage: Usage,
+    /// Whether the answer said its usage at all.
+    reported: bool,
 }
 
 /// The most of a non-streamed answer the meter keeps to read its usage.
@@ -375,19 +426,21 @@ impl Meter {
         if let Some(model) = message["model"].as_str() {
             self.usage.model = model.into();
         }
+        self.reported |= message["usage"].is_object() || event["usage"].is_object();
         self.usage.take(&message["usage"]);
         self.usage.take(&event["usage"]);
     }
 
-    /// The usage once the answer ended.
-    pub fn finish(mut self) -> Usage {
+    /// The usage once the answer ended, or none when it never said.
+    pub fn finish(mut self) -> Option<Usage> {
         if let Ok(answer) = serde_json::from_slice::<Value>(&self.whole) {
             if let Some(model) = answer["model"].as_str() {
                 self.usage.model = model.into();
             }
+            self.reported |= answer["usage"].is_object();
             self.usage.take(&answer["usage"]);
         }
-        self.usage
+        self.reported.then_some(self.usage)
     }
 }
 
@@ -449,6 +502,21 @@ mod tests {
         assert_eq!(g.offer(0)["share"], 50);
         assert!(g.roll(time::parse("2026-11-01T00:00:01Z").unwrap()));
         assert!(g.used.is_empty() && g.extra == 0);
+    }
+
+    #[test]
+    fn a_calls_worst_case_and_what_cant_be_metered() {
+        let body = json!({"model": "claude-opus-5-5", "max_tokens": 1000, "tools": [{"type": "web_search_20250305", "max_uses": 2}, {"name": "Read"}]});
+        // 1,000 bytes at $8 (a 1-hour cache write), 1,000 output at $20, 2 searches at a cent.
+        assert_eq!(
+            worst("claude-opus-5-5", &body, 1000),
+            Some(8000 + 20_000 + 20_000)
+        );
+        assert_eq!(worst("claude-opus-5-5", &json!({}), 10), None);
+        assert!(unmeterable(&body).is_none());
+        assert!(unmeterable(&json!({"tools": [{"type": "code_execution_20250825"}]})).is_some());
+        assert!(unmeterable(&json!({"mcp_servers": []})).is_some());
+        assert!(unmeterable(&json!({"tools": [{"type": "bash_20250124"}]})).is_none());
     }
 
     #[test]
@@ -524,7 +592,7 @@ mod tests {
         for chunk in text.as_bytes().chunks(7) {
             meter.feed(chunk);
         }
-        let usage = meter.finish();
+        let usage = meter.finish().unwrap();
         assert_eq!(
             (usage.input, usage.output, usage.cache_read),
             (1000, 500, 10_000)
@@ -541,7 +609,11 @@ mod tests {
                 .to_string()
                 .as_bytes(),
         );
-        assert_eq!(meter.finish().micros(), Some(2_000_000));
+        assert_eq!(meter.finish().unwrap().micros(), Some(2_000_000));
+        // An answer that never says its usage.
+        let mut silent = Meter::new("claude-opus-5-5");
+        silent.feed(b"data: {\"type\": \"ping\"}\n\n");
+        assert!(silent.finish().is_none());
         assert_eq!(prices("claude-fable-5-1-20261001").unwrap().0, 10.0);
         assert_eq!(prices("claude-fable-5").unwrap().2, 1.0);
         assert!(prices("gpt-5").is_none());

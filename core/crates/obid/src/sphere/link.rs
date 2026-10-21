@@ -4381,6 +4381,9 @@ impl Link {
             (grant, state.sharing.clone())
         };
         self.save_sharing(&sharing);
+        // A job running on it for someone it's no longer for comes back.
+        self.hosting
+            .stop_on_share(&grant.id, |owner| grant.offered_to(owner));
         self.sync_shares_soon(true);
         Ok(grant.to_json(now))
     }
@@ -4397,6 +4400,8 @@ impl Link {
             state.sharing.clone()
         };
         self.save_sharing(&sharing);
+        // Taken back: a job running on it comes back at once.
+        self.hosting.stop_on_share(id, |_| false);
         self.sync_shares_soon(true);
         Ok(())
     }
@@ -4539,6 +4544,24 @@ impl Link {
             self.share_used_item(&g, owner, now);
         }
         left
+    }
+
+    /// Gives back `micros` counted on `grant` for `owner` (a call's worst case, past what it cost).
+    pub(super) fn refund(&self, grant: &str, owner: &str, micros: u64) {
+        if micros == 0 {
+            return;
+        }
+        let sharing = {
+            let mut state = self.lock();
+            let Some(g) = state.sharing.grants.iter_mut().find(|g| g.id == grant) else {
+                return;
+            };
+            if let Some(used) = g.used.get_mut(owner) {
+                *used = used.saturating_sub(micros);
+            }
+            state.sharing.clone()
+        };
+        self.save_sharing(&sharing);
     }
 
     /// The owner's own job on `account` cost `usd` (Claude Code's `total_cost_usd`): it counts
