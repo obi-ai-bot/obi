@@ -292,10 +292,11 @@ async function main() {
   const verdict = spec.verifyChain({ sphere: SPHERE, entries: audit.entries }, { keys: Object.fromEntries((expect(await call(`${sphereUrl}/v0.1/spheres/${SPHERE}/members`, { token: await admin() }), 200, "members").members).flatMap((m) => m.keys.map((k) => [k.key_id, { obi: m.obi, public_key: k.public_key, valid_from_seq: k.valid_from_seq, valid_until_seq: k.valid_until_seq }]))) });
   if (!verdict.ok) fail(`the audit chain doesn't verify: ${verdict.message}`);
   pass(`the audit chain verifies: ${audit.entries.map((e) => e.envelope.type).join(", ")}`);
-  // Metadata only (#810): the job's words never reach the chain; a run_progress is a pause or a resume.
+  // Metadata only (#810): the job's words never reach the chain, and no run_progress says when
+  // Wellington came back to his Mac.
   if (JSON.stringify(audit.entries).includes("saying hello")) fail("the job's words are in the audit chain");
   const progress = audit.entries.filter((e) => e.envelope.type === "run_progress").map((e) => e.envelope.body.state);
-  if (progress.join() !== "paused,resumed") fail(`the chain's run_progress: ${progress.join()}`);
+  if (progress.length) fail(`the chain's run_progress: ${progress.join()}`);
   for (const who of ["guest", "host"]) {
     const mine = expect(await obids[who].api("/obid/sphere/audit"), 200, `${who}'s audit`);
     if (!mine.verified || !mine.entries.some((e) => e.type === "result" && e.host)) fail(`${who}'s obid's check of the chain: ${JSON.stringify(mine).slice(0, 300)}`);

@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aws_lc_rs::digest;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -26,11 +25,12 @@ use futures_util::StreamExt;
 use obi_protocol::time;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Notify, Semaphore, mpsc, watch};
 
 use super::Link;
 use super::channel::{self, Event, Frame, Kind, Role};
 use super::inbox::Item;
+use super::sealed::{self, Sealed};
 use super::sharing::Mac;
 use super::vm::{self, Image, Place, Size, Vm};
 
@@ -49,8 +49,12 @@ const STATUS_EVERY: i64 = 600;
 const STATUS_LIFE: i64 = 900;
 /// The most the guest may send back: transcript, commits, a model call's body.
 const MAX_TRANSCRIPT: usize = 64 * 1024 * 1024;
-const MAX_COMMITS: usize = 1024 * 1024 * 1024;
+/// The longest line of the transcript.
+const MAX_LINE: usize = 4 * 1024 * 1024;
+const MAX_COMMITS: u64 = 1024 * 1024 * 1024;
 const MAX_MODEL_BODY: usize = 32 * 1024 * 1024;
+/// The most model calls the VM has on their way at once (each body is held until it's sent).
+const CALLS_AT_ONCE: usize = 4;
 /// The inbox's answers to a teammate's ask.
 pub const ALLOW: &str = "Allow";
 pub const DECLINE: &str = "Decline";
@@ -137,7 +141,12 @@ struct Running {
 pub struct Hosting {
     running: Mutex<HashMap<String, Running>>,
     published: Mutex<Option<(Value, i64)>>,
+    /// The calls on each share under way, by grant: at most SHARE_CALLS_AT_ONCE.
+    share_calls: Mutex<HashMap<String, Arc<Semaphore>>>,
 }
+
+/// The most calls on one share at once, whichever jobs make them.
+const SHARE_CALLS_AT_ONCE: usize = 2;
 
 /// Whether now is inside "Nights and weekends": 19:00 to 7:00 on weekdays, and all weekend.
 fn in_schedule() -> bool {
@@ -157,6 +166,19 @@ fn free(mac: &Mac, signals: &vm::Signals) -> bool {
 }
 
 impl Hosting {
+    /// A place for one call on `grant`, held until its answer is counted; none when the share
+    /// has as many under way as it may.
+    fn share_call(&self, grant: &str) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let calls = self
+            .share_calls
+            .lock()
+            .unwrap()
+            .entry(grant.to_owned())
+            .or_insert_with(|| Arc::new(Semaphore::new(SHARE_CALLS_AT_ONCE)))
+            .clone();
+        calls.try_acquire_owned().ok()
+    }
+
     /// The jobs running here, for `GET /v1/obid/sharing/mac`.
     pub fn jobs_json(&self) -> Value {
         let running = self.running.lock().unwrap();
@@ -286,14 +308,15 @@ async fn decide(link: &Arc<Link>, cid: &str, asked: bool) -> Decision {
         if share.left_for(&owner) < super::shares::START_AT_LEAST_MICROS {
             return Decision::Decline("share_used", None);
         }
-        if !matches!(
-            crate::vault::value(super::guest::key_name("claude")),
-            Ok(Some(_))
-        ) {
+        if !matches!(crate::vault::value(&share.key_name()), Ok(Some(_))) {
             return Decision::Decline("not_free", Some("The account's key isn't on this Mac now."));
         }
     }
-    if !mac.on || !(mac.offered_to(&owner) || grant.is_some()) || mac.work != "any" {
+    if !link.member_active(&exchange.peer)
+        || !mac.on
+        || !(mac.offered_to(&owner) || grant.is_some())
+        || mac.work != "any"
+    {
         return Decision::Decline("policy", None);
     }
     let setup = link.hosting_setup();
@@ -401,14 +424,23 @@ struct Shared {
     request: Value,
     /// The disk key, handed to the guest once, on its own socket.
     key: Vec<u8>,
+    /// Who sent it: the Obi and its owner, as the directory said.
+    peer: String,
+    owner: String,
     author: Mutex<Value>,
     /// The job's words, from the guest on the channel (never in the request).
     words: Mutex<Option<String>>,
     /// What its model calls cost on a share so far, in micro-dollars.
     cost: Arc<std::sync::atomic::AtomicU64>,
-    bundle: PathBuf,
+    /// The guest's code, sealed (its own key, in memory only), once it came whole.
+    bundle: Mutex<Option<Arc<Sealed>>>,
+    bundle_path: PathBuf,
     bundle_ok: watch::Sender<bool>,
-    commits: PathBuf,
+    /// The job's commits, sealed, as the VM last sent them; one upload at a time.
+    commits: Mutex<Option<Arc<Sealed>>>,
+    commits_path: PathBuf,
+    uploading: tokio::sync::Mutex<()>,
+    calls: Semaphore,
     /// Model calls waiting for their answer, by stream.
     pending: Mutex<HashMap<u32, mpsc::Sender<Frame>>>,
     next_stream: AtomicU32,
@@ -521,14 +553,20 @@ async fn with_place(
         channel: channel.clone(),
         request: request.clone(),
         key,
+        peer: exchange.peer.clone(),
+        owner: exchange.peer_owner.clone().unwrap_or_default(),
         author: Mutex::new(
             json!({"name": exchange.peer_owner.clone().unwrap_or_default(), "email": "oby@users.noreply.github.com"}),
         ),
         words: Mutex::new(None),
         cost: Arc::default(),
-        bundle: place.dir.join("in.bundle"),
+        bundle: Mutex::new(None),
+        bundle_path: place.dir.join("in.bundle"),
         bundle_ok,
-        commits: place.dir.join("out.bundle"),
+        commits: Mutex::new(None),
+        commits_path: place.dir.join("out.bundle"),
+        uploading: tokio::sync::Mutex::new(()),
+        calls: Semaphore::new(CALLS_AT_ONCE),
         pending: Mutex::new(HashMap::new()),
         next_stream: AtomicU32::new(1),
         ready,
@@ -597,14 +635,15 @@ async fn with_place(
         return Ok(());
     }
     // The commits back to their owner, before the reply that ends the exchange closes the channel.
-    let commits = std::fs::metadata(&shared.commits)
-        .ok()
-        .filter(|m| m.len() > 0)
-        .map(|m| m.len());
+    let commits = shared
+        .commits
+        .lock()
+        .unwrap()
+        .clone()
+        .filter(|c| c.bytes > 0);
     let mut sent_commits = None;
-    if let Some(bytes) = commits {
-        let data = std::fs::read(&shared.commits).map_err(|e| e.to_string())?;
-        let sha = hex::encode(digest::digest(&digest::SHA256, &data).as_ref());
+    if let Some(sealed) = &commits {
+        let (sha, bytes) = (&sealed.sha256, sealed.bytes);
         sent_commits = Some(json!({"sha256": sha, "bytes": bytes}));
         for _ in 0..5 {
             let _ = shared.ready.subscribe().wait_for(|r| *r).await;
@@ -617,7 +656,10 @@ async fn with_place(
                     &json!({"type": "commits", "sha256": sha, "bytes": bytes}),
                 ))
                 .await;
-            shared.channel.send_data(stream, &data).await;
+            let mut pieces = std::pin::pin!(sealed.read());
+            while let Some(Ok(piece)) = pieces.next().await {
+                shared.channel.send_data(stream, &piece).await;
+            }
             shared
                 .channel
                 .send(Frame::new(stream, Kind::End, Vec::new()))
@@ -630,9 +672,9 @@ async fn with_place(
             }
         }
     }
-    let head = sent_commits
+    let head = commits
         .as_ref()
-        .and_then(|_| head_of(&shared.commits, request["branch"].as_str().unwrap_or("")));
+        .and_then(|c| head_of(&c.head, request["branch"].as_str().unwrap_or("")));
     let done = shared.done.lock().unwrap().clone();
     let repo = request["repo"].clone();
     let minutes_ran = (time::now() - started) / 60;
@@ -668,7 +710,7 @@ async fn with_place(
 
 /// Reads the channel: the guest's bundle and control messages, the answers to model calls.
 async fn pump(shared: Arc<Shared>, mut events: mpsc::Receiver<Event>) {
-    let mut bundle: Option<(u32, tokio::fs::File, digest::Context, u64)> = None;
+    let mut bundle: Option<(u32, sealed::Writer)> = None;
     while let Some(event) = events.recv().await {
         match event {
             Event::Ready => {
@@ -730,37 +772,32 @@ async fn pump(shared: Arc<Shared>, mut events: mpsc::Receiver<Event>) {
                         if frame.value().is_some_and(|v| v["type"] == "bundle")
                             && !*shared.bundle_ok.borrow() =>
                     {
-                        if let Ok(file) = tokio::fs::File::create(&shared.bundle).await {
-                            bundle = Some((
-                                frame.stream,
-                                file,
-                                digest::Context::new(&digest::SHA256),
-                                0,
-                            ));
+                        if let Ok(writer) = sealed::Writer::create(&shared.bundle_path).await {
+                            bundle = Some((frame.stream, writer));
                         }
                     }
                     Kind::Data => {
-                        if let Some((stream, file, hash, bytes)) = bundle.as_mut()
+                        if let Some((stream, writer)) = bundle.as_mut()
                             && *stream == frame.stream
                         {
-                            hash.update(&frame.payload);
-                            *bytes += frame.payload.len() as u64;
                             let expected = shared.request["bundle"]["bytes"].as_u64().unwrap_or(0);
-                            if *bytes > expected || file.write_all(&frame.payload).await.is_err() {
+                            if writer.bytes + frame.payload.len() as u64 > expected
+                                || writer.write(&frame.payload).await.is_err()
+                            {
                                 bundle = None;
                             }
                         }
                     }
                     Kind::End => {
-                        if let Some((stream, mut file, hash, bytes)) = bundle.take()
+                        if let Some((stream, writer)) = bundle.take()
                             && stream == frame.stream
+                            && let Ok(sealed) = writer.finish().await
                         {
-                            let _ = file.flush().await;
-                            let sha = hex::encode(hash.finish().as_ref());
                             let want = &shared.request["bundle"];
-                            if want["sha256"].as_str() == Some(sha.as_str())
-                                && want["bytes"].as_u64() == Some(bytes)
+                            if want["sha256"].as_str() == Some(sealed.sha256.as_str())
+                                && want["bytes"].as_u64() == Some(sealed.bytes)
                             {
+                                *shared.bundle.lock().unwrap() = Some(Arc::new(sealed));
                                 let _ = shared.bundle_ok.send_replace(true);
                                 shared
                                     .channel
@@ -858,9 +895,10 @@ async fn job(State(shared): State<Arc<Shared>>) -> Response {
 }
 
 async fn bundle(State(shared): State<Arc<Shared>>) -> Response {
-    match tokio::fs::read(&shared.bundle).await {
-        Ok(bytes) => bytes.into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    let sealed = shared.bundle.lock().unwrap().clone();
+    match sealed {
+        Some(sealed) => Body::from_stream(sealed.read()).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -888,17 +926,40 @@ async fn transcript(State(shared): State<Arc<Shared>>, request: Request) -> Resp
                     .await;
             }
         }
+        if partial.len() > MAX_LINE {
+            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        }
     }
     StatusCode::OK.into_response()
 }
 
+/// The job's commits, sealed as they come, at most 1 GiB; one upload at a time.
 async fn commits(State(shared): State<Arc<Shared>>, request: Request) -> Response {
-    match axum::body::to_bytes(request.into_body(), MAX_COMMITS).await {
-        Ok(bytes) => match tokio::fs::write(&shared.commits, &bytes).await {
-            Ok(()) => StatusCode::OK.into_response(),
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        },
-        Err(_) => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+    let Ok(_one) = shared.uploading.try_lock() else {
+        return (StatusCode::CONFLICT, "one upload at a time").into_response();
+    };
+    *shared.commits.lock().unwrap() = None;
+    let Ok(mut writer) = sealed::Writer::create(&shared.commits_path).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let mut body = request.into_body().into_data_stream();
+    while let Some(chunk) = body.next().await {
+        let Ok(chunk) = chunk else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        if writer.bytes + chunk.len() as u64 > MAX_COMMITS {
+            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        }
+        if writer.write(&chunk).await.is_err() {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+    match writer.finish().await {
+        Ok(sealed) => {
+            *shared.commits.lock().unwrap() = Some(Arc::new(sealed));
+            StatusCode::OK.into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -938,6 +999,13 @@ async fn model_call(State(shared): State<Arc<Shared>>, request: Request) -> Resp
     if !*shared.ready.borrow() {
         return (StatusCode::SERVICE_UNAVAILABLE, "the channel isn't up").into_response();
     }
+    let Ok(_call) = shared.calls.try_acquire() else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many model calls at once",
+        )
+            .into_response();
+    };
     // The guest's placeholders and the hop-by-hop headers stay here.
     let headers: Vec<Value> = request
         .headers()
@@ -1032,6 +1100,12 @@ async fn metered_call(
             "obid doesn't relay that path on a share",
         );
     }
+    let Some(place) = link.hosting.share_call(grant) else {
+        return model_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many calls on the share at once.",
+        );
+    };
     let headers: Vec<(String, String)> = request
         .headers()
         .iter()
@@ -1076,7 +1150,7 @@ async fn metered_call(
         link.count_use(grant, owner, worst);
         reserved = worst;
     }
-    let key = match crate::vault::value(super::guest::key_name("claude")) {
+    let key = match crate::vault::value(&share.key_name()) {
         Ok(Some(key)) => key,
         _ => {
             link.refund(grant, owner, reserved);
@@ -1087,7 +1161,17 @@ async fn metered_call(
         }
     };
     let url = format!("{}{path}", super::guest::upstream(link, "claude"));
-    let http = reqwest::Client::new();
+    // A redirect would take the key somewhere else.
+    let Ok(http) = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
+        link.refund(grant, owner, reserved);
+        return model_error(
+            StatusCode::BAD_GATEWAY,
+            "obid couldn't call the model's API.",
+        );
+    };
     let mut upstream = if method == "GET" {
         http.get(url)
     } else {
@@ -1107,9 +1191,14 @@ async fn metered_call(
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut answer = Response::builder().status(status);
     for (name, value) in response.headers() {
+        // The key holder's organization stays here too.
         if !matches!(
             name.as_str(),
-            "content-length" | "transfer-encoding" | "connection" | "set-cookie"
+            "content-length"
+                | "transfer-encoding"
+                | "connection"
+                | "set-cookie"
+                | "anthropic-organization-id"
         ) {
             answer = answer.header(name.as_str(), value.as_bytes());
         }
@@ -1124,6 +1213,8 @@ async fn metered_call(
     );
     let cost = shared.cost.clone();
     tokio::spawn(async move {
+        // The share's place is held until the answer is counted.
+        let _place = place;
         let mut meter = super::shares::Meter::new(&model);
         loop {
             match response.chunk().await {
@@ -1262,27 +1353,39 @@ async fn watch_job(
                     coming_back = Some(("sharing_off".into(), tokio::time::Instant::now() + GRACE));
                     continue;
                 }
-                let Ok(signals) = vm::signals(helper).await else { continue };
+                // A teammate removed from the Sphere, or no longer one this Mac is offered to (on a
+                // share, the share is the yes: stop_on_share ends it when it's taken back).
+                if !link.member_active(&shared.peer)
+                    || (shared.grant.is_none() && !mac.offered_to(&shared.owner))
+                {
+                    let _ = shared.back.send_replace(Some("sharing_off".into()));
+                    coming_back = Some(("sharing_off".into(), tokio::time::Instant::now() + GRACE));
+                    continue;
+                }
+                // Signals that can't be read hold the job, as the owner at the Mac does.
+                let signals = vm::signals(helper).await.ok();
+                let fit = signals.as_ref().is_some_and(vm::Signals::fit);
+                let idle = signals.as_ref().map_or(0, |s| s.idle_seconds);
                 let scheduled = mac.when.iter().any(|w| w == "schedule") && in_schedule();
-                let here = signals.idle_seconds < HERE_WITHIN;
-                let hold = !signals.fit() || (!scheduled && here);
+                let here = idle < HERE_WITHIN;
+                let hold = !fit || (!scheduled && here);
                 match paused_at {
                     None if hold => {
                         if vm.command("pause").await {
                             tracing::info!("sphere: the guest job {cid} paused: the owner is at the Mac");
                             paused_at = Some(now);
+                            // Shown here only: a `paused` in the chain would say when the owner
+                            // came back to the Mac.
                             link.hosting.set_state(cid, "paused");
-                            link.host_progress(cid, "paused");
                         }
                     }
                     Some(at) => {
-                        let left_alone = signals.fit() && (scheduled || signals.idle_seconds >= RESUME_AFTER);
+                        let left_alone = fit && (scheduled || idle >= RESUME_AFTER);
                         if left_alone {
                             tracing::info!("sphere: the guest job {cid} resumed");
                             vm.command("resume").await;
                             paused_at = None;
                             link.hosting.set_state(cid, "running");
-                            link.host_progress(cid, "resumed");
                         } else if now - at >= RETURN_AFTER {
                             vm.command("resume").await;
                             paused_at = None;
@@ -1292,7 +1395,7 @@ async fn watch_job(
                     }
                     None => {
                         // Inside the schedule with the owner at the Mac: it yields to them.
-                        let want = scheduled && signals.idle_seconds < 60;
+                        let want = scheduled && idle < 60;
                         if want != background && vm.command(if want { "background" } else { "foreground" }).await {
                             background = want;
                         }
@@ -1314,17 +1417,19 @@ fn note_usage(shared: &Shared, event: &Value) -> bool {
     true
 }
 
-/// The commit the job's branch ends at in a bundle, read with `git bundle list-heads`.
-fn head_of(bundle: &Path, branch: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["bundle", "list-heads"])
-        .arg(bundle)
-        .arg(format!("refs/heads/{branch}"))
-        .output()
-        .ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    let sha = text.split_whitespace().next()?;
-    (sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then(|| sha.to_owned())
+/// The commit the job's branch ends at, from a bundle's header (its first line, then `-<sha>`
+/// prerequisites, `@` capabilities and `<sha> <ref>` heads, to a blank line).
+fn head_of(header: &[u8], branch: &str) -> Option<String> {
+    let text = String::from_utf8_lossy(header);
+    let want = format!("refs/heads/{branch}");
+    text.lines()
+        .skip(1)
+        .take_while(|l| !l.is_empty())
+        .filter_map(|l| l.split_once(' '))
+        .find(|(sha, name)| {
+            *name == want && sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+        .map(|(sha, _)| sha.to_owned())
 }
 
 /// obid's own log of what each guest job used of this Mac (`home/sharing-log.jsonl`).
@@ -1490,6 +1595,28 @@ mod tests {
         assert!(theirs.exists());
         clean_leftovers(&other);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_share_takes_two_calls_at_once() {
+        let hosting = Hosting::default();
+        let (a, b) = (hosting.share_call("g-1"), hosting.share_call("g-1"));
+        assert!(a.is_some() && b.is_some());
+        assert!(hosting.share_call("g-1").is_none());
+        assert!(hosting.share_call("g-2").is_some());
+        drop(a);
+        assert!(hosting.share_call("g-1").is_some());
+    }
+
+    #[test]
+    fn the_branchs_head_is_read_from_the_bundles_header() {
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        let header = format!(
+            "# v3 git bundle\n@object-format=sha1\n-{a} base\n{a} refs/heads/main\n{b} refs/heads/oby/fix\n\nPACK"
+        );
+        assert_eq!(head_of(header.as_bytes(), "oby/fix"), Some(b));
+        assert_eq!(head_of(header.as_bytes(), "main"), Some(a));
+        assert_eq!(head_of(header.as_bytes(), "other"), None);
     }
 
     #[test]

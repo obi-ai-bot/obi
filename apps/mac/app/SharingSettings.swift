@@ -223,7 +223,7 @@ struct SharingSettingsView: View {
         guard let grant, grant.who != "nobody" else { return "Not shared" }
         let whom = grant.who == "everyone" ? "Everyone" : RunnerMac.person(grant.who)
         var line = "\(whom) used \(Int(usedPercent(grant).rounded()))% of \(grant.share + grant.extra)% this month"
-        if !key { line += ". Put its key in Oby’s vault as anthropic-api-key to share it" }
+        if !(grant.keyInVault ?? key) { line += ". Put its key in Oby’s vault as \(grant.keyName ?? "anthropic-api-key") to share it" }
         if !macOn { line += ". Their jobs run on this Mac: share this Mac too" }
         return line
     }

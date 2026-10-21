@@ -281,6 +281,8 @@ final class SphereModel {
         /// shows since, waiting for your OK (obid's `GET /v1/obid/sphere/pins`).
         var fingerprint: String? = nil
         var changedTo: String? = nil
+        /// Whether you compared their key with them and accepted it.
+        var verified = false
         var id: String { obi }
     }
 
@@ -289,6 +291,7 @@ final class SphereModel {
         var owner: String
         var fingerprint: String
         var changedTo: String?
+        var verified: Bool?
     }
 
     /// An `obiRequest` inbox item (docs/runner-api.md, "Obi-to-Obi requests in the inbox"). Its
@@ -383,6 +386,7 @@ final class SphereModel {
             let pin = pins.first { $0.owner == members[index].owner }
             members[index].fingerprint = pin?.fingerprint
             members[index].changedTo = pin?.changedTo
+            members[index].verified = pin?.verified ?? false
         }
         ownFingerprint = try? OwnerKey.of(owner).keyId
         let inbox = (try JSONSerialization.jsonObject(with: try await runner.send("GET", "v1/inbox"))) as? [[String: Any]] ?? []
@@ -514,8 +518,9 @@ final class SphereModel {
 
     /// Answers a request with one of its options (`POST /v1/inbox/{id}/answer`).
     /// You compared `member`'s new key with them: obid trusts it from now on.
+    /// Accepts their changed key, or verifies the one pinned: only after you compared it with them.
     func acceptKey(_ member: Member) async throws {
-        guard let fingerprint = member.changedTo else { return }
+        guard let fingerprint = member.changedTo ?? member.fingerprint else { return }
         _ = try await raw(try runner(), "POST", "v1/obid/sphere/pins/\(member.owner)", ["fingerprint": fingerprint])
         try await refresh()
     }

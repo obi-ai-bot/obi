@@ -14,13 +14,15 @@
 //! job's own check and secret scan before anything is published, under this owner.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use aws_lc_rs::digest;
 use serde_json::{Value, json};
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 
 use super::Link;
 use super::channel::{self, Event, Frame, Kind, Role};
@@ -32,6 +34,18 @@ const MAX_WORDS: usize = 20_000;
 
 /// The most a job may run on the other Mac, as its `run_request` asks.
 const MAX_MINUTES: u64 = 120;
+/// The most model calls the other Mac may have relayed at once.
+const CALLS_AT_ONCE: usize = 4;
+/// The most tokens a job on the other Mac may spend of this owner's account, as the answers say
+/// (cache reads count a tenth); past it, no call is relayed.
+// ponytail: one budget for every job; per job size, or the owner's own, if real jobs reach it.
+const MAX_TOKENS: u64 = 10_000_000;
+/// The most model calls the other Mac may have open (still sending their request) at once.
+const MAX_OPEN: usize = 8;
+const MAX_MODEL_BODY: usize = 32 * 1024 * 1024;
+const MAX_COMMITS: u64 = 1024 * 1024 * 1024;
+/// The longest transcript line kept; a longer one is skipped.
+const MAX_LINE: usize = 4 * 1024 * 1024;
 
 /// The request headers a relayed model call keeps (spec protocol.md section 13): every other one,
 /// any credential among them, is dropped.
@@ -76,15 +90,6 @@ impl Login {
     pub fn lasts(&self, seconds: u64) -> bool {
         self.expires_ms
             .is_none_or(|t| t > (obi_protocol::time::now().max(0) as u64 + seconds) * 1000)
-    }
-}
-
-/// The vault secret each agent's company API key is kept under.
-pub fn key_name(agent: &str) -> &'static str {
-    if agent == "codex" {
-        "openai-api-key"
-    } else {
-        "anthropic-api-key"
     }
 }
 
@@ -240,8 +245,27 @@ async fn run_in(
     on_event: &mut impl FnMut(AgentEvent),
 ) -> Result<Turn, String> {
     let bundle = dir.join("in.bundle");
+    // Only the job's code goes, never the repository's history (only what the job adds was
+    // scanned): one commit of its tree with no parent. What comes back is replayed onto base_sha.
+    let snapshot = crate::git::run(
+        worktree,
+        &[
+            "commit-tree".as_ref(),
+            format!("{base_sha}^{{tree}}").as_ref(),
+            "-m".as_ref(),
+            "The job's code".as_ref(),
+        ],
+        &[
+            ("GIT_AUTHOR_NAME", "Oby"),
+            ("GIT_AUTHOR_EMAIL", "oby@users.noreply.github.com"),
+            ("GIT_COMMITTER_NAME", "Oby"),
+            ("GIT_COMMITTER_EMAIL", "oby@users.noreply.github.com"),
+        ],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     let tag = format!("refs/obi-guest/{}", uuid::Uuid::new_v4().simple());
-    git(worktree, &["update-ref", &tag, base_sha]).await?;
+    git(worktree, &["update-ref", &tag, &snapshot]).await?;
     let made = git(
         worktree,
         &["bundle", "create", "-q", &bundle.to_string_lossy(), &tag],
@@ -252,7 +276,7 @@ async fn run_in(
     let bytes = std::fs::read(&bundle).map_err(|e| e.to_string())?;
     let sha = hex::encode(digest::digest(&digest::SHA256, &bytes).as_ref());
     let mut body = json!({"title": ask.title, "agent": ask.agent, "repo": ask.repo,
-                          "base_branch": ask.base_branch, "base_sha": base_sha, "branch": ask.branch,
+                          "base_branch": ask.base_branch, "base_sha": snapshot, "branch": ask.branch,
                           "bundle": {"sha256": sha, "bytes": bytes.len()}, "size": ask.size, "max_minutes": 120});
     if let Some(model) = ask.model {
         body["model"] = json!(model);
@@ -318,11 +342,20 @@ async fn run_in(
     let mut session = Session::new(ask.agent, worktree);
     let author = author_of(link, worktree).await;
     let upstream = upstream(link, ask.agent);
-    let http = reqwest::Client::new();
+    // A redirect would take the owner's login somewhere else.
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+    let calls = Arc::new(Semaphore::new(CALLS_AT_ONCE));
+    let spent = Arc::new(AtomicU64::new(0));
     let mut bundle_sent = false;
-    let mut models: HashMap<u32, (Value, Vec<u8>)> = HashMap::new();
-    let mut commits: Option<(u32, Vec<u8>, String, u64)> = None;
+    // An open model call: what it asks, its body so far, and whether that went past the limit.
+    let mut models: HashMap<u32, (Value, Vec<u8>, bool)> = HashMap::new();
+    // The commits as they come: their stream, the file, its hash, bytes so far, the sha and size named.
+    let mut commits: Option<(u32, std::fs::File, digest::Context, u64, String, u64)> = None;
     let commits_file = dir.join("out.bundle");
+    let commits_part = dir.join("out.bundle.part");
     let mut got_commits: Option<String> = None;
     let mut poll = tokio::time::interval(Duration::from_millis(500));
     let mut ended_at: Option<tokio::time::Instant> = None;
@@ -358,34 +391,51 @@ async fn run_in(
                             Kind::Open => {
                                 let Some(open) = frame.value() else { continue };
                                 match open["type"].as_str() {
-                                    Some("model") => { models.insert(frame.stream, (open, Vec::new())); }
+                                    Some("model") if models.len() >= MAX_OPEN => {
+                                        let channel = channel.clone();
+                                        tokio::spawn(async move {
+                                            refuse(&channel, frame.stream, 429, "too many model calls at once").await;
+                                        });
+                                    }
+                                    Some("model") => { models.insert(frame.stream, (open, Vec::new(), false)); }
                                     Some("transcript") => {
                                         session.stream = Some(frame.stream);
                                         session.partial.clear();
+                                        session.skipping = false;
                                     }
                                     Some("commits") => {
                                         let want = open["bytes"].as_u64().unwrap_or(0);
-                                        commits = Some((frame.stream, Vec::new(), open["sha256"].as_str().unwrap_or("").to_owned(), want));
+                                        commits = None;
+                                        if want <= MAX_COMMITS && let Ok(file) = std::fs::File::create(&commits_part) {
+                                            commits = Some((frame.stream, file, digest::Context::new(&digest::SHA256), 0,
+                                                            open["sha256"].as_str().unwrap_or("").to_owned(), want));
+                                        }
                                     }
                                     _ => {}
                                 }
                             }
                             Kind::Data => {
-                                if let Some((_, body)) = models.get_mut(&frame.stream) {
-                                    if body.len() + frame.payload.len() <= 32 * 1024 * 1024 {
+                                if let Some((_, body, over)) = models.get_mut(&frame.stream) {
+                                    if body.len() + frame.payload.len() <= MAX_MODEL_BODY {
                                         body.extend_from_slice(&frame.payload);
+                                    } else {
+                                        *over = true;
+                                        body.clear();
                                     }
                                 } else if session.stream == Some(frame.stream) {
                                     session.read(&frame.payload, on_event);
-                                } else if let Some((stream, data, _, want)) = commits.as_mut()
+                                } else if let Some((stream, file, hash, got, _, want)) = commits.as_mut()
                                     && *stream == frame.stream
-                                    && (data.len() as u64) + (frame.payload.len() as u64) <= *want
                                 {
-                                    data.extend_from_slice(&frame.payload);
+                                    *got += frame.payload.len() as u64;
+                                    hash.update(&frame.payload);
+                                    if *got > *want || file.write_all(&frame.payload).is_err() {
+                                        commits = None;
+                                    }
                                 }
                             }
                             Kind::End => {
-                                if let Some((open, body)) = models.remove(&frame.stream) {
+                                if let Some((open, body, too_big)) = models.remove(&frame.stream) {
                                     // On a share, the other Mac makes the calls: none is relayed from here.
                                     let Some(current) = login.as_mut() else {
                                         channel.send(Frame::new(frame.stream, Kind::Reset, b"not relayed on a share".to_vec())).await;
@@ -395,23 +445,35 @@ async fn run_in(
                                     // other Mac can't keep spending this owner's account.
                                     let over = link.exchange(&cid).is_none_or(|e| e.ended())
                                         || accepted.elapsed() > Duration::from_secs(MAX_MINUTES * 60);
+                                    let spent_all = spent.load(Ordering::Relaxed) >= MAX_TOKENS;
+                                    let permit = calls.clone().try_acquire_owned().ok();
                                     if !current.lasts(300) {
                                         *current = Login::read(ask.config_dir).unwrap_or_else(|| current.clone());
                                     }
                                     let channel = channel.clone();
-                                    let http = http.clone();
+                                    let (http, spent) = (http.clone(), spent.clone());
                                     let (upstream, token) = (upstream.clone(), current.access_token.clone());
                                     tokio::spawn(async move {
                                         if over {
                                             refuse(&channel, frame.stream, 403, "the job's time on that Mac is over").await;
+                                        } else if spent_all {
+                                            refuse(&channel, frame.stream, 403, "the job used all the tokens it may").await;
+                                        } else if too_big {
+                                            refuse(&channel, frame.stream, 413, "the call is too big to relay").await;
+                                        } else if permit.is_none() {
+                                            refuse(&channel, frame.stream, 429, "too many model calls at once").await;
                                         } else {
-                                            relay(&channel, &http, &upstream, &token, frame.stream, &open, body).await;
+                                            let used = relay(&channel, &http, &upstream, &token, frame.stream, &open, body).await;
+                                            spent.fetch_add(used, Ordering::Relaxed);
                                         }
+                                        drop(permit);
                                     });
-                                } else if let Some((stream, data, want_sha, _)) = commits.take()
+                                } else if let Some((stream, file, hash, got, want_sha, want)) = commits.take()
                                     && stream == frame.stream
-                                    && sha_of(&data) == want_sha
-                                    && std::fs::write(&commits_file, &data).is_ok()
+                                    && got == want
+                                    && hex::encode(hash.finish().as_ref()) == want_sha
+                                    && file.sync_all().is_ok()
+                                    && std::fs::rename(&commits_part, &commits_file).is_ok()
                                 {
                                     got_commits = Some(want_sha);
                                     channel.send(Frame::json(0, Kind::Data, &json!({"commits": "received"}))).await;
@@ -419,6 +481,9 @@ async fn run_in(
                             }
                             Kind::Reset => {
                                 models.remove(&frame.stream);
+                                if commits.as_ref().is_some_and(|c| c.0 == frame.stream) {
+                                    commits = None;
+                                }
                             }
                         }
                     }
@@ -466,7 +531,7 @@ async fn run_in(
     if let (Some(named), Some(got)) = (&named, &got_commits)
         && named == got
     {
-        count = apply(worktree, &commits_file, ask.branch, base_sha).await?;
+        count = apply(worktree, &commits_file, ask.branch, base_sha, &snapshot).await?;
     } else if named.is_some() {
         return Ok(failed(&format!(
             "The commits from {}'s Mac didn't arrive whole, so obid kept none of them.",
@@ -579,9 +644,15 @@ async fn author_of(link: &Link, worktree: &Path) -> Value {
     json!({"name": name, "email": email})
 }
 
-/// Takes the job's commits from the bundle into its worktree: only commits on top of where it
-/// started, on the job's own branch.
-async fn apply(worktree: &Path, bundle: &Path, branch: &str, base: &str) -> Result<usize, String> {
+/// Takes the job's commits from the bundle into its worktree: only commits on top of the snapshot
+/// it went with, on the job's own branch, replayed onto `base` (along the first parent).
+async fn apply(
+    worktree: &Path,
+    bundle: &Path,
+    branch: &str,
+    base: &str,
+    snapshot: &str,
+) -> Result<usize, String> {
     let file = bundle.to_string_lossy().into_owned();
     git(worktree, &["bundle", "verify", "-q", &file])
         .await
@@ -598,7 +669,7 @@ async fn apply(worktree: &Path, bundle: &Path, branch: &str, base: &str) -> Resu
     )
     .await?;
     let head = git(worktree, &["rev-parse", "FETCH_HEAD"]).await?;
-    if git(worktree, &["merge-base", "--is-ancestor", base, &head])
+    if git(worktree, &["merge-base", "--is-ancestor", snapshot, &head])
         .await
         .is_err()
     {
@@ -607,13 +678,60 @@ async fn apply(worktree: &Path, bundle: &Path, branch: &str, base: &str) -> Resu
                 .into(),
         );
     }
-    git(worktree, &["reset", "-q", "--hard", &head]).await?;
-    let count = git(
+    let list = git(
         worktree,
-        &["rev-list", "--count", &format!("{base}..{head}")],
+        &[
+            "rev-list",
+            "--reverse",
+            "--first-parent",
+            &format!("{snapshot}..{head}"),
+        ],
     )
     .await?;
-    Ok(count.parse().unwrap_or(0))
+    let mut parent = base.to_owned();
+    let mut count = 0;
+    for commit in list.lines() {
+        let who = git(
+            worktree,
+            &[
+                "log",
+                "-1",
+                "--date=raw",
+                "--format=%an%x00%ae%x00%ad%x00%cn%x00%ce%x00%cd",
+                commit,
+            ],
+        )
+        .await?;
+        let who: Vec<&str> = who.split('\0').collect();
+        let [an, ae, ad, cn, ce, cd] = who[..] else {
+            return Err("a commit that came back has no author".into());
+        };
+        let message = git(worktree, &["log", "-1", "--format=%B", commit]).await?;
+        parent = crate::git::run(
+            worktree,
+            &[
+                "commit-tree".as_ref(),
+                format!("{commit}^{{tree}}").as_ref(),
+                "-p".as_ref(),
+                parent.as_ref(),
+                "-m".as_ref(),
+                message.as_ref(),
+            ],
+            &[
+                ("GIT_AUTHOR_NAME", an),
+                ("GIT_AUTHOR_EMAIL", ae),
+                ("GIT_AUTHOR_DATE", ad),
+                ("GIT_COMMITTER_NAME", cn),
+                ("GIT_COMMITTER_EMAIL", ce),
+                ("GIT_COMMITTER_DATE", cd),
+            ],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        count += 1;
+    }
+    git(worktree, &["reset", "-q", "--hard", &parent]).await?;
+    Ok(count)
 }
 
 /// A model call answered here with an error, never sent on.
@@ -644,7 +762,8 @@ async fn relay(
     stream: u32,
     open: &Value,
     body: Vec<u8>,
-) {
+) -> u64 {
+    let asked = body.len();
     let method = open["method"].as_str().unwrap_or("");
     let path = open["path"].as_str().unwrap_or("");
     let refuse = |status: u16, why: &str| {
@@ -660,7 +779,7 @@ async fn relay(
         channel
             .send(Frame::new(stream, Kind::End, Vec::new()))
             .await;
-        return;
+        return 0;
     }
     let mut request = match method {
         "GET" => http.get(format!("{upstream}{path}")),
@@ -698,7 +817,7 @@ async fn relay(
             channel
                 .send(Frame::new(stream, Kind::End, Vec::new()))
                 .await;
-            return;
+            return 0;
         }
     };
     let headers: Vec<Value> = response
@@ -707,18 +826,24 @@ async fn relay(
         .filter(|(n, _)| {
             !matches!(
                 n.as_str(),
-                "content-length" | "transfer-encoding" | "connection" | "set-cookie"
+                "content-length"
+                    | "transfer-encoding"
+                    | "connection"
+                    | "set-cookie"
+                    | "anthropic-organization-id"
             )
         })
         .filter_map(|(n, v)| v.to_str().ok().map(|v| json!([n.as_str(), v])))
         .collect();
     channel.send(Frame::json(stream, Kind::Open, &json!({"type": "model_response", "status": response.status().as_u16(), "headers": headers}))).await;
     let mut response = response;
+    let mut tokens = Tokens::default();
     loop {
         match response.chunk().await {
             Ok(Some(chunk)) => {
+                tokens.feed(&chunk);
                 if !channel.send_data(stream, &chunk).await {
-                    return;
+                    return tokens.total(asked);
                 }
             }
             Ok(None) => break,
@@ -730,13 +855,72 @@ async fn relay(
                         b"the model's answer broke off".to_vec(),
                     ))
                     .await;
-                return;
+                return tokens.total(asked);
             }
         }
     }
     channel
         .send(Frame::new(stream, Kind::End, Vec::new()))
         .await;
+    tokens.total(asked)
+}
+
+/// The tokens a relayed answer says it used: the most each count reached in its stream's events
+/// (`data: {…}` lines; a stream's counts are cumulative) or in its body.
+#[derive(Default)]
+struct Tokens {
+    partial: Vec<u8>,
+    input: u64,
+    output: u64,
+    cache_write: u64,
+    cache_read: u64,
+    reported: bool,
+}
+
+impl Tokens {
+    fn feed(&mut self, chunk: &[u8]) {
+        self.partial.extend_from_slice(chunk);
+        while let Some(at) = self.partial.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.partial.drain(..=at).collect();
+            self.line(&line);
+        }
+        if self.partial.len() > MAX_LINE {
+            self.partial.clear();
+        }
+    }
+
+    fn line(&mut self, line: &[u8]) {
+        let line = line.strip_prefix(b"data:").unwrap_or(line);
+        let Ok(event) = serde_json::from_slice::<Value>(line.trim_ascii()) else {
+            return;
+        };
+        for usage in [
+            &event["usage"],
+            &event["message"]["usage"],
+            &event["response"]["usage"],
+        ] {
+            if !usage.is_object() {
+                continue;
+            }
+            let n = |k: &str| usage[k].as_u64().unwrap_or(0);
+            self.reported = true;
+            self.input = self.input.max(n("input_tokens") + n("prompt_tokens"));
+            self.output = self.output.max(n("output_tokens") + n("completion_tokens"));
+            self.cache_write = self.cache_write.max(n("cache_creation_input_tokens"));
+            self.cache_read = self.cache_read.max(n("cache_read_input_tokens"));
+        }
+    }
+
+    /// What the call counts against the job's budget; an answer that never said, a conservative
+    /// guess from what it asked (`asked` bytes, about 3 to a token, and a long answer).
+    fn total(mut self, asked: usize) -> u64 {
+        let rest = std::mem::take(&mut self.partial);
+        self.line(&rest);
+        if !self.reported {
+            return asked as u64 / 3 + 32_000;
+        }
+        self.input + self.output + self.cache_write + self.cache_read / 10
+    }
 }
 
 /// The transcript as it comes: its lines, read into the job's events.
@@ -744,6 +928,8 @@ struct Session {
     agent: String,
     stream: Option<u32>,
     partial: Vec<u8>,
+    /// Inside a line longer than MAX_LINE, which is skipped (and still counted).
+    skipping: bool,
     lines: usize,
     turn: Turn,
     _worktree: PathBuf,
@@ -755,6 +941,7 @@ impl Session {
             agent: agent.into(),
             stream: None,
             partial: Vec::new(),
+            skipping: false,
             lines: 0,
             turn: Turn::default(),
             _worktree: worktree.to_owned(),
@@ -762,10 +949,22 @@ impl Session {
     }
 
     fn read(&mut self, bytes: &[u8], on_event: &mut impl FnMut(AgentEvent)) {
-        self.partial.extend_from_slice(bytes);
-        while let Some(at) = self.partial.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.partial.drain(..=at).collect();
+        for piece in bytes.split_inclusive(|b| *b == b'\n') {
+            if !self.skipping {
+                self.partial.extend_from_slice(piece);
+            }
+            if piece.last() != Some(&b'\n') {
+                if self.partial.len() > MAX_LINE {
+                    self.partial.clear();
+                    self.skipping = true;
+                }
+                continue;
+            }
             self.lines += 1;
+            let line = std::mem::take(&mut self.partial);
+            if std::mem::take(&mut self.skipping) {
+                continue;
+            }
             let Ok(message) = serde_json::from_slice::<Value>(&line) else {
                 continue;
             };
@@ -945,8 +1144,35 @@ mod tests {
     }
 
     #[test]
-    fn each_agent_has_its_own_key_in_the_vault() {
-        assert_eq!(key_name("claude"), "anthropic-api-key");
-        assert_eq!(key_name("codex"), "openai-api-key");
+    fn a_transcript_line_past_the_limit_is_skipped_and_still_counted() {
+        let mut session = Session::new("claude", Path::new("/tmp"));
+        let mut events = Vec::new();
+        session.read(&vec![b'x'; MAX_LINE + 10], &mut |e| events.push(e));
+        assert!(session.partial.is_empty());
+        let next = format!(
+            "yyy\n{}\n",
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}})
+        );
+        session.read(next.as_bytes(), &mut |e| events.push(e));
+        assert_eq!(session.lines, 2);
+        assert_eq!(events, vec![AgentEvent::Said("hi".into())]);
+    }
+
+    #[test]
+    fn a_relayed_answers_tokens_come_from_its_stream_or_its_body() {
+        let mut stream = Tokens::default();
+        stream.feed(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":",
+        );
+        stream.feed(
+            b"{\"input_tokens\":100,\"cache_read_input_tokens\":1000,\"output_tokens\":1}}}\n\n",
+        );
+        stream.feed(b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":50}}\n\n");
+        assert_eq!(stream.total(0), 100 + 50 + 100);
+        let mut body = Tokens::default();
+        body.feed(br#"{"usage": {"input_tokens": 7, "output_tokens": 3}}"#);
+        assert_eq!(body.total(0), 10);
+        // An answer that never says: what it asked, and a long answer.
+        assert_eq!(Tokens::default().total(3_000), 1_000 + 32_000);
     }
 }

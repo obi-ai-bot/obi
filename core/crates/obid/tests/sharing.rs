@@ -135,12 +135,12 @@ async fn pair(host_folder: &Folder, guest_folder: &Folder, mac: Value, scenario:
     }
 }
 
-/// Puts `key` in the obid's vault as `anthropic-api-key`.
+/// Puts `key` in the obid's vault as the key of its account `stub`'s share.
 fn vault_add(folder: &Path, key: &str) {
     let mut add = std::process::Command::new(OBID)
         .args(["vault", "--config"])
         .arg(folder.join("config.json"))
-        .args(["add", "anthropic-api-key"])
+        .args(["add", "anthropic-api-key.stub"])
         .stdin(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -242,6 +242,11 @@ async fn a_job_runs_on_a_teammates_mac_with_the_owners_own_key_and_comes_back_wi
     // The job's words reached its agent on the channel, and never the chain (#810).
     assert!(
         seen.contains("words ") && seen.contains("Say hello in guest.txt"),
+        "{seen}"
+    );
+    // Only the job's code went, as one commit with no parent: none of the repository's history.
+    assert!(
+        seen.contains(r#"base "The job's code" parents "" commits 1"#),
         "{seen}"
     );
     // The key is nowhere on Wellington's side, and the relay saw only sealed frames.
@@ -566,6 +571,7 @@ async fn a_share_of_an_api_account_runs_on_its_mac_with_its_key_metered_until_us
         // Only the account that pays per token can be shared; the key is in Wellington's vault.
         let sharing = get(&p.host, "/v1/obid/sharing/grants");
         assert_eq!(sharing["key"], true);
+        assert!(sharing["grants"].as_array().unwrap().is_empty());
         assert_eq!(sharing["accounts"][0]["plan"], "api", "{sharing}");
         let refused = call(
             &p.host,
@@ -587,6 +593,10 @@ async fn a_share_of_an_api_account_runs_on_its_mac_with_its_key_metered_until_us
         );
         assert_eq!(put.status, 200, "{}", put.text);
         assert_eq!(put.body["limitCents"], 100);
+        // Each share's key is its account's own in the vault.
+        assert_eq!(put.body["keyName"], "anthropic-api-key.stub");
+        let listed = get(&p.host, "/v1/obid/sharing/grants");
+        assert_eq!(listed["grants"][0]["keyInVault"], true, "{listed}");
         let grant = put.body["id"].as_str().unwrap().to_owned();
         let shared = within(40, "the share on Sangam's Oby", || {
             let s = get(&p.guest, "/v1/obid/sharing/shared");

@@ -56,6 +56,28 @@ pub struct Grant {
 }
 
 impl Grant {
+    /// The vault secret this share's key is kept under: one per account the owner shares
+    /// (`anthropic-api-key.<account>`), or `anthropic-api-key` for one with no account.
+    pub fn key_name(&self) -> String {
+        let Some(account) = &self.account else {
+            return "anthropic-api-key".into();
+        };
+        let safe: String = account
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        format!("anthropic-api-key.{safe}")
+            .chars()
+            .take(64)
+            .collect()
+    }
+
     /// Starts the meter again when a new period began; whether it did.
     pub fn roll(&mut self, now: i64) -> bool {
         let (start, _) = period(now, self.resets_day);
@@ -108,7 +130,7 @@ impl Grant {
             "share": self.share, "extra": self.extra, "budgetCents": self.budget_cents, "resetsDay": self.resets_day,
             "resets": time::format(self.resets(now)), "limitCents": self.limit_micros() / 10_000,
             "usedCents": self.used.iter().map(|(who, m)| (who.clone(), json!(cents(*m)))).collect::<serde_json::Map<_, _>>(),
-            "created": time::format(self.created),
+            "created": time::format(self.created), "keyName": self.key_name(),
         })
     }
 }
@@ -482,6 +504,19 @@ mod tests {
             time::parse("2026-10-21T16:00:00Z").unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn each_accounts_share_has_its_own_key_in_the_vault() {
+        let mut g = grant();
+        assert_eq!(g.key_name(), "anthropic-api-key");
+        g.account = Some("deskree".into());
+        assert_eq!(g.key_name(), "anthropic-api-key.deskree");
+        g.account = Some("a b/c".into());
+        assert_eq!(g.key_name(), "anthropic-api-key.a-b-c");
+        g.account = Some("x".repeat(100));
+        assert_eq!(g.key_name().len(), 64);
+        assert!(crate::vault::name_problem(&g.key_name()).is_none());
     }
 
     #[test]

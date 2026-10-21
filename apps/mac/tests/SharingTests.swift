@@ -63,7 +63,7 @@ struct SharingTests {
         let obid = RunnerStub { request in
             switch (request.method, request.path) {
             case ("GET", "/v1/obid/sharing/macs"):
-                (200, #"[{"obi": "obi-wellington", "owner": "wellington", "free": true, "freeAt": null, "size": "small", "agents": ["claude"]},{"obi": "obi-dima", "owner": "dima", "free": false, "freeAt": null, "size": "small", "agents": ["claude"]}]"#)
+                (200, #"[{"obi": "obi-wellington", "owner": "wellington", "free": true, "freeAt": null, "size": "small", "agents": ["claude"], "verified": true},{"obi": "obi-dima", "owner": "dima", "free": false, "freeAt": null, "size": "small", "agents": ["claude"], "verified": false}]"#)
             case ("PATCH", "/v1/jobs/j1"):
                 (200, #"{"id": "j1", "request": "x", "agent": "claude", "account": "stub", "repo": "o/r", "branch": "b", "kind": "build", "task": "x", "status": "interrupted", "step": "", "summary": "", "created": "2026-10-21T16:00:00Z", "runsOn": null}"#)
             default: (404, "")
@@ -72,7 +72,7 @@ struct SharingTests {
         let macs = try await obid.runner.macs()
         #expect(macs.map(\.name) == ["Wellington’s Mac", "Dima’s Mac"])
         #expect(MessageBox.placeLine(macs[0]) == "Wellington’s Mac · Free")
-        #expect(MessageBox.placeLine(macs[1]) == "Dima’s Mac · Busy")
+        #expect(MessageBox.placeLine(macs[1]) == "Dima’s Mac · Busy · unverified")
         _ = try? await obid.runner.place("j1", on: nil)
         // Run it here sends runsOn as null, not left out.
         #expect(String(data: obid.requests.last?.body ?? Data(), encoding: .utf8) == #"{"runsOn":null}"#)
@@ -134,6 +134,10 @@ struct SharingTests {
         #expect(SharingSettingsView.usageAbout(nil, key: true, macOn: true) == "Not shared")
         #expect(SharingSettingsView.whoOptions(members: [], who: "sangam").map(\.1) == ["Nobody", "Everyone", "Sangam"])
         #expect(SharingSettingsView.usageAbout(grant, key: false, macOn: false).hasSuffix("share this Mac too"))
+        // Each share names its own key in the vault.
+        var missing = grant
+        (missing.keyName, missing.keyInVault) = ("anthropic-api-key.deskree", false)
+        #expect(SharingSettingsView.usageAbout(missing, key: true, macOn: true).contains("Put its key in Oby’s vault as anthropic-api-key.deskree"))
         _ = try await obid.runner.setGrant(account: "deskree", who: "everyone", share: 50, budgetCents: 40000)
         #expect(obid.requests.last?.json?.keys.sorted() == ["account", "budgetCents", "resetsDay", "share", "who"])
         let shared = try #require(try await obid.runner.sharedWithMe())
@@ -176,6 +180,8 @@ struct SharingTests {
     @Test func eachMembersKeyFingerprintShowsAndAChangedKeyWaitsForYou() {
         var member = SphereModel.Member(obi: "obi-ernesto", owner: "ernesto", name: "Ernesto's Oby", active: true, accepts: [],
                                         fingerprint: "ed25519:abc")
+        #expect(SphereSettingsView.memberAbout(member) == "ernesto · key ed25519:abc · unverified")
+        member.verified = true
         #expect(SphereSettingsView.memberAbout(member) == "ernesto · key ed25519:abc")
         member.changedTo = "ed25519:xyz"
         #expect(SphereSettingsView.memberAbout(member).hasPrefix("ernesto · their key changed to ed25519:xyz. Your Oby doesn't trust them"))
