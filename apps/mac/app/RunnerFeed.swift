@@ -73,6 +73,10 @@ final class RunnerFeed {
     /// The teammates' Macs a job can run on (#808), as obid last listed them; each list goes to `onMacs`.
     private(set) var macs: [RunnerMac] = [] { didSet { if macs != oldValue { onMacs?(macs) } } }
     var onMacs: (([RunnerMac]) -> Void)?
+    /// The shares of their API accounts teammates gave this owner (#809), read with the Macs; each
+    /// list goes to `onShares`.
+    private(set) var shares: [RunnerShares.Share] = [] { didSet { if shares != oldValue { onShares?(shares) } } }
+    var onShares: (([RunnerShares.Share]) -> Void)?
     /// The teammate's Obi whose Mac the next words' jobs run on, taken by the next `plan` (the
     /// message box's "Run on another Mac"; Engine's Desk, frozen, doesn't carry it).
     // ponytail: one message at a time from this Mac, so a slot is enough; a queue if sends overlap.
@@ -359,13 +363,16 @@ final class RunnerFeed {
                         version = status.runner.version
                         if let routines { self.routines = routines ?? [] }
                         macs = (try? await runner.macs()) ?? []
-                        // A teammate's Mac goes free or busy without an event here: read again each minute.
+                        shares = (try? await runner.sharedWithMe())?.shares ?? []
+                        // A teammate's Mac goes free or busy, and a share's use changes, without an
+                        // event here: read again each minute.
                         macsTask?.cancel()
                         macsTask = Task { [weak self] in
                             while !Task.isCancelled {
                                 try? await Task.sleep(for: .seconds(60))
                                 guard let self, let list = try? await runner.macs() else { continue }
                                 self.macs = list
+                                if let shared = try? await runner.sharedWithMe() { self.shares = shared.shares }
                             }
                         }
                         clearedAt = status.clearedAt

@@ -31,6 +31,10 @@ struct TaskActions {
     /// this Mac's own jobs.
     var runHere: (() async throws -> Void)? = nil
     var later: (() async throws -> Bool)? = nil
+    /// The shares of their API accounts teammates gave you that this job's agent can run on
+    /// (#809), and moving it onto one; none for this Mac's own jobs.
+    var shares: [RunnerShares.Share] = []
+    var useShare: ((RunnerShares.Share) async throws -> Void)? = nil
 
     /// The + is there where the files can go: obid on this Mac, and a finished job, whose words
     /// start a follow-up (a job at work takes words only).
@@ -111,6 +115,10 @@ struct TaskActions {
                 case .permission(let id): feed.laterPermission(id); return true
                 case nil: return false
                 }
+            },
+            shares: feed.shares.filter { $0.agent == job.agent && $0.left > 0 },
+            useShare: { share in
+                if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.place(job.id, on: share.from, grant: share.grant) }) }
             })
     }
 
@@ -190,6 +198,24 @@ struct TaskDecision: View {
                         }
                     }, onLater: onLater)
                 .id("\(job.id)-\(job.finished?.timeIntervalSince1970 ?? 0)")
+        } else if job.nextStepOffered != nil, let resumes = job.resumes, actions.extras?.runsOn == nil,
+                  let share = actions.shares.first, let useShare = actions.useShare {
+            // Its account is full (Sangam's "Your Claude is full until 4 PM", #809): run it on a
+            // teammate's share of their API account, on their Mac, or wait for the reset.
+            let use = Self.useShareLabel(share)
+            AskCard(kind: "Out of usage", title: Self.fullTitle(job, until: resumes), happened: Self.shareLine(share),
+                    options: CardOption.of([use, Self.waitLabel], recommended: 0), busy: busy,
+                    onChoose: { option in
+                        run {
+                            if option.answer == use {
+                                try await useShare(share)
+                                try await actions.message(Job.tryAgainWords)
+                            } else {
+                                _ = try await actions.later?()
+                            }
+                        }
+                    }, onLater: onLater)
+                .id("\(job.id)-share-\(job.finished?.timeIntervalSince1970 ?? 0)")
         } else if let next = job.nextStepOffered {
             AskCard(kind: job.needsYouKind, title: job.line, happened: job.resumesLine, options: CardOption.of([next], recommended: 0), busy: busy,
                     onChoose: { _ in run { try await actions.message(Job.tryAgainWords) } }, onLater: onLater)
@@ -198,6 +224,23 @@ struct TaskDecision: View {
     }
 
     static let runHereLabel = "Run it here"
+    static let waitLabel = "Wait for the reset"
+
+    /// "Use Wellington’s share".
+    static func useShareLabel(_ share: RunnerShares.Share) -> String { "Use \(RunnerMac.person(share.owner))’s share" }
+
+    /// "Your Claude is full until 4 PM".
+    static func fullTitle(_ job: Job, until: Date) -> String {
+        let tool = job.agent == "codex" ? "Codex" : job.agent == "cursor" ? "Cursor" : "Claude"
+        return "Your \(tool) is full until \(until.formatted(date: .omitted, time: .shortened))"
+    }
+
+    /// "Wellington shares 30% of Deskree API’s month with you, and 18% is left. It would run on
+    /// Wellington’s Mac, on that account, and you get the pull request."
+    static func shareLine(_ share: RunnerShares.Share) -> String {
+        let name = RunnerMac.person(share.owner)
+        return "\(name) shares \(share.share)% of \(share.account)’s month with you, and \(share.left)% is left. It would run on \(name)’s Mac, on that account, and you get the pull request."
+    }
 
     private func run(_ work: @escaping () async throws -> Void) {
         busy = true

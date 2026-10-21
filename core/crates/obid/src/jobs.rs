@@ -4260,6 +4260,7 @@ impl Jobs {
             jobs.transcribed(id, entries);
             match event {
                 AgentEvent::Tokens(tokens) => {
+                    let mut own_cost = None;
                     jobs.update(id, |job| {
                         // Claude Code's counts are its session's so far, the turns it resumed
                         // included: this turn's own are what grew since the session's last ones.
@@ -4274,6 +4275,9 @@ impl Jobs {
                         } else {
                             tokens
                         };
+                        if job.runs_on.is_none() {
+                            own_cost = own.cost_usd.map(|usd| (job.account.clone(), usd));
+                        }
                         job.usage = Some(before.plus(&own));
                         if let Some(ran) = ran_secs {
                             job.ran_secs = Some(ran());
@@ -4284,6 +4288,12 @@ impl Jobs {
                             let _ = cut.send(Signal::Stop);
                         }
                     });
+                    // The owner's own job on an account they share counts against its month (#809).
+                    if let Some((account, usd)) = own_cost
+                        && let Some(link) = jobs.link.get().and_then(std::sync::Weak::upgrade)
+                    {
+                        link.count_own(&account, usd);
+                    }
                 }
                 AgentEvent::Usage(usage) => {
                     let (was, now) = jobs.usage.record(&job.account, &usage);
@@ -4346,6 +4356,7 @@ impl Jobs {
                     title: job.title.as_deref().unwrap_or(&job.task),
                     size: "small",
                     start_commit: job.start_commit.as_deref(),
+                    grant: on.grant.as_deref(),
                 };
                 return crate::sphere::guest::run_turn(
                     &link,

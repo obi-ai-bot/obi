@@ -236,7 +236,26 @@ async fn decide(link: &Arc<Link>, cid: &str, asked: bool) -> Decision {
     };
     let owner = exchange.peer_owner.clone().unwrap_or_default();
     let mac = link.mac();
-    if !mac.on || !mac.offered_to(&owner) || mac.work != "any" {
+    // On a share of the owner's API account (#809): the share is the owner's yes to that person,
+    // for as long as there's money left on it this month.
+    let body = &exchange.request["body"];
+    let grant = body["account"]["grant"].as_str();
+    if let Some(grant) = grant {
+        let Some(share) = link.grant_for(grant, &owner, body["agent"].as_str().unwrap_or(""))
+        else {
+            return Decision::Decline("policy", Some("There's no such share for you any more."));
+        };
+        if share.left_for(&owner) < super::shares::START_AT_LEAST_MICROS {
+            return Decision::Decline("share_used", None);
+        }
+        if !matches!(
+            crate::vault::value(super::guest::key_name("claude")),
+            Ok(Some(_))
+        ) {
+            return Decision::Decline("not_free", Some("The account's key isn't on this Mac now."));
+        }
+    }
+    if !mac.on || !(mac.offered_to(&owner) || grant.is_some()) || mac.work != "any" {
         return Decision::Decline("policy", None);
     }
     let setup = link.hosting_setup();
@@ -256,7 +275,7 @@ async fn decide(link: &Arc<Link>, cid: &str, asked: bool) -> Decision {
     if !signals.fit() || (!asked && !free(&mac, &signals)) {
         return Decision::Decline("not_free", None);
     }
-    if !asked && !mac.allows_without_asking(&owner) {
+    if !asked && !mac.allows_without_asking(&owner) && grant.is_none() {
         return Decision::Ask;
     }
     Decision::Accept
@@ -325,6 +344,11 @@ pub fn ask_item(
 
 /// What the job's sockets and the channel share.
 struct Shared {
+    link: Arc<Link>,
+    cid: String,
+    /// On a share of the owner's API account: its grant and the job's owner. Its model calls go
+    /// from here with the owner's key ([`metered_call`]), never back on the channel.
+    grant: Option<(String, String)>,
     channel: channel::Channel,
     request: Value,
     /// The disk key, handed to the guest once.
@@ -438,7 +462,16 @@ async fn with_place(
     let (bundle_ok, mut bundle_seen) = watch::channel(false);
     let (ready, _) = watch::channel(false);
     let (back, _) = watch::channel(None);
+    let grant = request["account"]["grant"].as_str().map(|g| {
+        (
+            g.to_owned(),
+            exchange.peer_owner.clone().unwrap_or_default(),
+        )
+    });
     let shared = Arc::new(Shared {
+        link: link.clone(),
+        cid: cid.to_owned(),
+        grant,
         channel: channel.clone(),
         request: request.clone(),
         key,
@@ -496,6 +529,9 @@ async fn with_place(
         }
     };
     let (ended, host, started) = outcome;
+    if shared.grant.is_some() {
+        link.sync_shares_soon(true);
+    }
     if ended == "cancelled" {
         channel.close().await;
         pump.abort();
@@ -816,6 +852,9 @@ async fn model_call(State(shared): State<Arc<Shared>>, request: Request) -> Resp
     if !model_path_allowed(&method, &path) {
         return (StatusCode::FORBIDDEN, "obid doesn't relay that path").into_response();
     }
+    if let Some((grant, owner)) = shared.grant.clone() {
+        return metered_call(&shared, &grant, &owner, method, path, request).await;
+    }
     if !*shared.ready.borrow() {
         return (StatusCode::SERVICE_UNAVAILABLE, "the channel isn't up").into_response();
     }
@@ -879,6 +918,151 @@ async fn model_call(State(shared): State<Arc<Shared>>, request: Request) -> Resp
     }
     response
         .body(body)
+        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+/// An Anthropic-shaped error the agent in the VM stops on (a 4xx it doesn't retry).
+fn model_error(status: StatusCode, message: &str) -> Response {
+    let body =
+        json!({"type": "error", "error": {"type": "invalid_request_error", "message": message}});
+    (status, axum::Json(body)).into_response()
+}
+
+/// A model call on a share (#809): sent from this Mac with the owner's own key, which never
+/// reaches the VM; metered at list price as its answer streams back. The call in flight finishes
+/// when the share runs out; the next is refused, and the job comes back (`share_used`).
+async fn metered_call(
+    shared: &Shared,
+    grant: &str,
+    owner: &str,
+    method: String,
+    path: String,
+    request: Request,
+) -> Response {
+    let link = &shared.link;
+    let label = match link.grant_for(grant, owner, "claude") {
+        None => return model_error(StatusCode::FORBIDDEN, "The share was taken back."),
+        Some(g) if g.left_for(owner) == 0 => {
+            link.hosting.stop(Some(&shared.cid), "share_used");
+            return model_error(
+                StatusCode::PAYMENT_REQUIRED,
+                &format!("The share of {} is used for this month.", g.label),
+            );
+        }
+        Some(g) => g.label,
+    };
+    let headers: Vec<(String, String)> = request
+        .headers()
+        .iter()
+        .filter(|(name, _)| {
+            !matches!(
+                name.as_str(),
+                "host"
+                    | "authorization"
+                    | "x-api-key"
+                    | "connection"
+                    | "content-length"
+                    | "transfer-encoding"
+                    | "accept-encoding"
+                    | "cookie"
+            )
+        })
+        .filter_map(|(n, v)| {
+            v.to_str()
+                .ok()
+                .map(|v| (n.as_str().to_owned(), v.to_owned()))
+        })
+        .collect();
+    let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_MODEL_BODY).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    // Only a model obid can price is called on a share; counting tokens and listing models cost
+    // nothing.
+    let model = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v["model"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let costs = path.starts_with("/v1/messages") && !path.starts_with("/v1/messages/count_tokens");
+    if costs && super::shares::prices(&model).is_none() {
+        return model_error(
+            StatusCode::BAD_REQUEST,
+            &format!("obid can't meter {model} on the share of {label}: pick another model."),
+        );
+    }
+    let key = match crate::vault::value(super::guest::key_name("claude")) {
+        Ok(Some(key)) => key,
+        _ => {
+            return model_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The account's key isn't on this Mac now.",
+            );
+        }
+    };
+    let url = format!("{}{path}", super::guest::upstream(link, "claude"));
+    let http = reqwest::Client::new();
+    let mut upstream = if method == "GET" {
+        http.get(url)
+    } else {
+        http.post(url).body(body)
+    };
+    for (name, value) in headers {
+        upstream = upstream.header(name, value);
+    }
+    let Ok(mut response) = upstream.header("x-api-key", key).send().await else {
+        return model_error(
+            StatusCode::BAD_GATEWAY,
+            "The model's API couldn't be reached.",
+        );
+    };
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut answer = Response::builder().status(status);
+    for (name, value) in response.headers() {
+        if !matches!(
+            name.as_str(),
+            "content-length" | "transfer-encoding" | "connection" | "set-cookie"
+        ) {
+            answer = answer.header(name.as_str(), value.as_bytes());
+        }
+    }
+    // Read to its end here, whether or not the agent stays for it, so every call is counted.
+    let (tx, rx) = mpsc::channel::<Result<Vec<u8>, std::io::Error>>(64);
+    let (link, cid, grant, owner) = (
+        link.clone(),
+        shared.cid.clone(),
+        grant.to_owned(),
+        owner.to_owned(),
+    );
+    tokio::spawn(async move {
+        let mut meter = super::shares::Meter::new(&model);
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    meter.feed(&chunk);
+                    let _ = tx.send(Ok(chunk.to_vec())).await;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    let _ = tx
+                        .send(Err(std::io::Error::other("the model's answer broke off")))
+                        .await;
+                    break;
+                }
+            }
+        }
+        if costs
+            && let Some(micros) = meter.finish().micros()
+            && micros > 0
+            && link.count_use(&grant, &owner, micros) == 0
+        {
+            link.hosting.stop(Some(&cid), "share_used");
+        }
+    });
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    answer
+        .body(Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 

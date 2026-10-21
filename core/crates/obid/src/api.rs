@@ -283,6 +283,18 @@ pub fn router(shared: Arc<Shared>) -> Router {
         )
         .route("/v1/obid/sharing/macs", get(crate::sphere::routes::macs))
         .route(
+            "/v1/obid/sharing/grants",
+            get(crate::sphere::routes::grants).put(crate::sphere::routes::put_grant),
+        )
+        .route(
+            "/v1/obid/sharing/grants/{id}",
+            axum::routing::delete(crate::sphere::routes::delete_grant),
+        )
+        .route(
+            "/v1/obid/sharing/shared",
+            get(crate::sphere::routes::shared_with_me),
+        )
+        .route(
             "/v1/obid/sphere/membership",
             axum::routing::put(crate::sphere::routes::renew),
         )

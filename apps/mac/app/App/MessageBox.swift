@@ -214,7 +214,7 @@ struct MessageBox: View {
 
     /// Always there where the box talks to Oby, even before an account reports usage (docs/mac-design.md B3).
     @ViewBuilder private var gauge: some View {
-        if let usage { UsageGauge(rows: usage) }
+        if let usage { UsageGauge(rows: usage, shares: tray.shares) }
     }
 
     /// What the end slot holds: Stop while a turn is under way, the microphone while the box is
@@ -372,6 +372,8 @@ extension IslandModel {
 /// is past 80% (yellow) or 90% (red); a click shows each account's week, and the way to Accounts.
 private struct UsageGauge: View {
     let rows: [UsageRow]
+    /// The shares teammates gave you (#809): Sangam's "Shared with you", under your own accounts.
+    var shares: [RunnerShares.Share] = []
     @State private var open = false
     @Environment(\.openSettingsPage) private var openSettings
 
@@ -417,6 +419,26 @@ private struct UsageGauge: View {
                             }
                             Text(row.week == nil ? "–" : Usage.percent(used)).font(Tokens.font(Tokens.textBase)).monospacedDigit()
                                 .foregroundStyle(level == .over ? Tokens.over : level == .high ? Tokens.full : Tokens.text)
+                                .frame(minWidth: 32, alignment: .trailing)
+                        }
+                        SetMeter(used: used * 100)
+                    }
+                }
+                .padding(8)
+            }
+            if !shares.isEmpty {
+                Text("Shared with you").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.label).padding(.leading, 8).padding(.top, 8)
+            }
+            ForEach(shares) { share in
+                // The bar is your share of its month, filled with what you've used of it.
+                let used = Double(share.share - share.left) / Double(max(share.share, 1))
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "person.crop.circle").font(Tokens.font(13)).frame(width: 16).foregroundStyle(Tokens.muted)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(share.name).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.ink).fadeOut()
+                            Text("Your \(share.share)% of its month").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fixedSize()
+                            Text("\(share.left)% left").font(Tokens.font(Tokens.textBase)).monospacedDigit().foregroundStyle(Tokens.text)
                                 .frame(minWidth: 32, alignment: .trailing)
                         }
                         SetMeter(used: used * 100)

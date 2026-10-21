@@ -301,7 +301,7 @@ final class SphereModel {
     nonisolated static let obiScopes = "send:review_request send:question reply receive directory:read audit:read"
     /// The same, and sending a job to a teammate's Mac (#797): asked for only once the owner shares
     /// or sends one, since a Sphere from before it refuses a scope it doesn't know.
-    nonisolated static let sharingScopes = "send:review_request send:question send:run_request reply receive directory:read audit:read"
+    nonisolated static let sharingScopes = "send:review_request send:question send:run_request send:share_offer reply receive directory:read audit:read"
 
     private let feed: RunnerFeed
     private(set) var membership: Membership?
@@ -464,7 +464,7 @@ final class SphereModel {
         let key = try OwnerKey.of(membership.owner)
         let made = try await raw(runner, "POST", "v1/obid/sphere/card", [
             "url": url, "sphere": sphere, "obiId": obi, "name": "\(membership.owner)'s Oby",
-            "ownerKey": key.publicKey, "accepts": sharing ? Self.accepts + ["run_request"] : Self.accepts,
+            "ownerKey": key.publicKey, "accepts": sharing ? Self.accepts + ["run_request", "share_offer"] : Self.accepts,
         ])
         guard let card = made["card"] as? [String: Any] else { throw RunnerError(message: "obid made no card.") }
         _ = try await raw(runner, "PUT", "v1/obid/sphere/membership", [

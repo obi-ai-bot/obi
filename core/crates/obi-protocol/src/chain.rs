@@ -9,7 +9,8 @@ use crate::jcs::{self, JcsError};
 use crate::keys::{self, sha256};
 use crate::{
     AUDIT_HASH_PREFIX, CLOCK_SKEW_SECONDS, Keys, REPLY_TYPES, REQUEST_TYPES, RUN_REPLY_TYPES,
-    Rejection, TERMINAL_TYPES, ZERO_HASH, envelope, schema, time,
+    Rejection, SENDER_REPLY_TYPES, SHARE_REPLY_TYPES, TERMINAL_TYPES, ZERO_HASH, envelope, schema,
+    time,
 };
 
 /// An entry's hash: SHA-256, lower-case hex, over `obi/0.1 audit\n` and the canonical JSON of
@@ -58,16 +59,27 @@ pub fn exchange_problem(
     };
     let kind = text(reply, "type");
     let asked = text(request, "type");
-    // run_cancel is the one reply the request's own sender sends, to its receiver.
-    if kind == "run_cancel" {
+    // run_cancel, share_status and share_revoke are the replies the request's own sender sends,
+    // to its receiver.
+    if SENDER_REPLY_TYPES.contains(&kind) {
         if request.get("from") != reply.get("from") || request.get("to") != reply.get("to") {
-            return Some("only the request's sender cancels it, to its receiver".into());
+            return Some(format!(
+                "only the request's sender sends a {kind}, to its receiver"
+            ));
         }
     } else if request.get("from") != reply.get("to") || request.get("to") != reply.get("from") {
         return Some("only the request's receiver replies, to its sender".into());
     }
     if RUN_REPLY_TYPES.contains(&kind) && asked != "run_request" {
         return Some(format!("a {kind} belongs to a run_request, not a {asked}"));
+    }
+    // A share_offer's exchange takes share_status, share_revoke and decline, and they belong to it
+    // alone (a decline to any request).
+    if asked == "share_offer" && !SHARE_REPLY_TYPES.contains(&kind) {
+        return Some(format!("a share_offer takes no {kind}"));
+    }
+    if asked != "share_offer" && kind != "decline" && SHARE_REPLY_TYPES.contains(&kind) {
+        return Some(format!("a {kind} belongs to a share_offer, not a {asked}"));
     }
     if earlier
         .iter()

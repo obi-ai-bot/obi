@@ -100,4 +100,74 @@ struct SharingTests {
         let review = Data(String(decoding: item, as: UTF8.self).replacingOccurrences(of: #""type": "run_request""#, with: #""type": "review_request""#).utf8)
         #expect(InboxItem.runner(review) == nil)
     }
+
+    // MARK: Sharing your usage (#809)
+
+    static let grants = #"""
+    {"grants": [{"id": "g-0123456789ab", "agent": "claude", "label": "Deskree API", "account": "deskree", "who": "sangam", "share": 30, "extra": 0,
+                 "budgetCents": 40000, "resetsDay": 1, "resets": "2026-11-01T00:00:00Z", "limitCents": 12000,
+                 "usedCents": {"sangam": 3600, "wellington": 9000}, "created": "2026-10-21T16:00:00Z"}],
+     "accounts": [{"id": "deskree", "agent": "claude", "name": "Deskree API", "plan": "api", "why": null},
+                  {"id": "personal", "agent": "claude", "name": "Personal", "plan": "personal", "why": "A personal plan is for you alone."}],
+     "key": true}
+    """#
+
+    @Test func sharesOfAnAPIAccountAreReadAndSetAndKeptAccountsSayWhy() async throws {
+        let obid = RunnerStub { request in
+            switch (request.method, request.path) {
+            case ("GET", "/v1/obid/sharing/grants"): (200, Self.grants)
+            case ("PUT", "/v1/obid/sharing/grants"):
+                (200, #"{"id": "g-0123456789ab", "label": "Deskree API", "account": "deskree", "who": "everyone", "share": 50, "extra": 0, "budgetCents": 40000, "resetsDay": 1, "resets": "2026-11-01T00:00:00Z", "limitCents": 20000, "usedCents": {}}"#)
+            case ("GET", "/v1/obid/sharing/shared"):
+                (200, #"{"shares": [{"grant": "g-0123456789ab", "from": "obi-wellington", "owner": "wellington", "agent": "claude", "account": "Deskree API", "share": 30, "limitCents": 12000, "usedCents": 4800, "resets": "2026-11-01T00:00:00Z"}], "takesShares": true}"#)
+            default: (404, "")
+            }
+        }
+        let grants = try #require(try await obid.runner.sharingGrants())
+        #expect(grants.key && grants.accounts.filter { $0.why == nil }.map(\.name) == ["Deskree API"])
+        let grant = try #require(grants.grants.first)
+        // 9% of the month is Sangam's ($36 of $400); Wellington's own jobs count apart.
+        #expect(SharingSettingsView.usedPercent(grant) == 9)
+        #expect(SharingSettingsView.usageAbout(grant, key: true, macOn: true) == "Sangam used 9% of 30% this month")
+        #expect(SharingSettingsView.usageAbout(nil, key: true, macOn: true) == "Not shared")
+        #expect(SharingSettingsView.whoOptions(members: [], who: "sangam").map(\.1) == ["Nobody", "Everyone", "Sangam"])
+        #expect(SharingSettingsView.usageAbout(grant, key: false, macOn: false).hasSuffix("share this Mac too"))
+        _ = try await obid.runner.setGrant(account: "deskree", who: "everyone", share: 50, budgetCents: 40000)
+        #expect(obid.requests.last?.json?.keys.sorted() == ["account", "budgetCents", "resetsDay", "share", "who"])
+        let shared = try #require(try await obid.runner.sharedWithMe())
+        let share = try #require(shared.shares.first)
+        #expect(share.name == "Wellington’s Deskree API" && share.left == 18)
+
+        let swift = RunnerStub { _ in (404, #"{"error": "Not found."}"#) }
+        #expect(try await swift.runner.sharingGrants() == nil)
+        #expect(try await swift.runner.sharedWithMe() == nil)
+    }
+
+    @Test func aFullAccountOffersATeammatesShareAndAJobGoesOnIt() async throws {
+        let share = RunnerShares.Share(grant: "g-0123456789ab", from: "obi-wellington", owner: "wellington", agent: "claude", account: "Deskree API",
+                                       share: 30, limitCents: 12000, usedCents: 4800, resets: .now)
+        #expect(TaskDecision.useShareLabel(share) == "Use Wellington’s share")
+        #expect(TaskDecision.shareLine(share) == "Wellington shares 30% of Deskree API’s month with you, and 18% is left. It would run on Wellington’s Mac, on that account, and you get the pull request.")
+        let obid = RunnerStub { request in
+            (200, #"{"id": "j1", "request": "x", "agent": "claude", "account": "stub", "repo": "o/r", "branch": "b", "kind": "build", "task": "x", "status": "interrupted", "step": "", "summary": "", "created": "2026-10-21T16:00:00Z"}"#)
+        }
+        _ = try? await obid.runner.place("j1", on: "obi-wellington", grant: "g-0123456789ab")
+        #expect(String(data: obid.requests.last?.body ?? Data(), encoding: .utf8) == #"{"runsOn":{"grant":"g-0123456789ab","obi":"obi-wellington"}}"# ||
+                String(data: obid.requests.last?.body ?? Data(), encoding: .utf8) == #"{"runsOn":{"obi":"obi-wellington","grant":"g-0123456789ab"}}"#)
+        _ = try? await obid.runner.place("j1", on: "obi-wellington")
+        #expect(String(data: obid.requests.last?.body ?? Data(), encoding: .utf8) == #"{"runsOn":"obi-wellington"}"#)
+    }
+
+    @Test func aUsedShareIsAnOutOfUsageCardWithItsOwnAnswers() throws {
+        let item = Data(#"""
+        {"id": "share-used-g-1-sangam-0", "kind": "obiRequest", "job": "", "title": "Sangam used the share of Deskree API",
+         "text": "All 30% of this month’s share is used ($120 of $400).", "options": ["Share 20% more this month", "Leave it"],
+         "details": null, "recommended": 1, "created": "2026-10-21T16:00:00Z", "done": null, "later": null, "answer": null,
+         "obi": {"type": "share_used", "grant": "g-1", "fromOwner": "sangam"}}
+        """#.utf8)
+        let read = try #require(InboxItem.runner(item))
+        #expect(read.kind == .limit)
+        #expect(read.options == ["Share 20% more this month", "Leave it"])
+        #expect(read.line(now: read.created).hasPrefix("Out of usage · Sangam used the share of Deskree API"))
+    }
 }

@@ -232,19 +232,11 @@ pub async fn rename(
     let place = match map.get("runsOn") {
         None => None,
         Some(Value::Null) => Some(None),
-        Some(Value::String(obi)) => {
-            let owner = shared.link.run_host(obi).ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    format!("{obi} isn't a teammate's Mac that takes jobs."),
-                )
-            })?;
-            Some(Some(crate::job::RunsOn {
-                obi: obi.clone(),
-                owner,
-            }))
+        Some(place) => {
+            Some(Some(shared.link.runs_on(place).map_err(|m| {
+                ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, m)
+            })?))
         }
-        Some(_) => return Err(bad()),
     };
     if let Some(place) = place {
         match shared.jobs.place(&id, place) {
@@ -387,17 +379,13 @@ pub async fn dispatch(
     // On a teammate's Mac (#797): their Obi, which must take run_request.
     match job.get("runsOn") {
         None | Some(Value::Null) => {}
-        Some(Value::String(obi)) => {
-            let owner = shared.link.run_host(obi).ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    format!("{obi} isn't a teammate's Mac that takes jobs."),
-                )
-            })?;
-            new.runs_on = Some(crate::job::RunsOn {
-                obi: obi.clone(),
-                owner,
-            });
+        Some(place @ (Value::String(_) | Value::Object(_))) => {
+            new.runs_on = Some(
+                shared
+                    .link
+                    .runs_on(place)
+                    .map_err(|m| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, m))?,
+            );
         }
         Some(_) => {
             return Err(ApiError::new(

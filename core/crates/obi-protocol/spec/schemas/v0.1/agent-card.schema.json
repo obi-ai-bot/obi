@@ -124,7 +124,7 @@
     "skills": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 4,
+      "maxItems": 5,
       "items": {
         "$ref": "#/$defs/skill"
       },
@@ -204,7 +204,7 @@
             "accepts": {
               "type": "array",
               "minItems": 1,
-              "maxItems": 4,
+              "maxItems": 5,
               "uniqueItems": true,
               "items": {
                 "$ref": "common.schema.json#/$defs/request_type"

@@ -34,6 +34,7 @@ final class IslandModel {
         self.availability = availability
         self.updater = updater
         feed.onMacs = { [tray] in tray.macs = $0 }
+        feed.onShares = { [tray] in tray.shares = $0 }
     }
 
     /// Both chat surfaces read and send through this model.

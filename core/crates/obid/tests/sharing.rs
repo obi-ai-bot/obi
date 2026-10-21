@@ -12,9 +12,10 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use support::*;
 
-const HOST_SCOPES: &str =
-    "send:review_request send:question send:run_request reply receive directory:read audit:read";
+const HOST_SCOPES: &str = "send:review_request send:question send:run_request send:share_offer reply receive directory:read audit:read";
 const API_KEY: &str = "test-company-api-key-for-obid-tests-only-7f3a9c";
+/// Wellington's company key, which Sangam's jobs on Wellington's share run on.
+const HOST_KEY: &str = "test-host-company-key-for-obid-tests-only-2b81d4";
 
 /// The model's API, as the guest's obid calls it: answers every `POST /v1/messages`, keeping each
 /// call's `x-api-key`.
@@ -23,14 +24,17 @@ async fn model_api() -> (String, Arc<Mutex<Vec<String>>>) {
     let seen = keys.clone();
     let app = axum::Router::new().route(
         "/v1/messages",
-        axum::routing::post(move |headers: axum::http::HeaderMap| {
+        axum::routing::post(move |headers: axum::http::HeaderMap, body: axum::Json<Value>| {
             let seen = seen.clone();
             async move {
                 let key = headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
                 seen.lock().unwrap().push(key);
-                axum::Json(json!({"id": "msg_1", "type": "message", "role": "assistant", "model": "fake",
+                // An Opus call costs $1.20 at list price (300,000 tokens in at $4 a million).
+                let model = body["model"].as_str().unwrap_or("fake").to_owned();
+                let input = if model.starts_with("claude-opus") { 300_000 } else { 10 };
+                axum::Json(json!({"id": "msg_1", "type": "message", "role": "assistant", "model": model,
                                   "content": [{"type": "text", "text": "Hello from the model"}],
-                                  "stop_reason": "end_turn", "usage": {"input_tokens": 10, "output_tokens": 4}}))
+                                  "stop_reason": "end_turn", "usage": {"input_tokens": input, "output_tokens": 4}}))
             }
         }),
     );
@@ -65,23 +69,23 @@ async fn pair(host_folder: &Folder, guest_folder: &Folder, mac: Value, scenario:
     let mut host_config = config(&host_folder.0, &remote, &stub_agent());
     host_config["vmHelper"] = json!(fake_vm);
     host_config["vmImage"] = json!(vm);
+    host_config["guestModelApi"] = json!(api);
+    // Wellington's Claude Code account pays per token, as its tool once said.
+    std::fs::create_dir_all(host_folder.0.join("home")).unwrap();
+    std::fs::write(
+        host_folder.0.join("home/usage.json"),
+        json!({"stub": {"priced": "api"}}).to_string(),
+    )
+    .unwrap();
     let host = start(&host_folder.0, &host_config, None);
+    vault_add(&host_folder.0, HOST_KEY);
 
     let remote = fixture(&guest_folder.0.join("fixture"));
     let mut guest_config = config(&guest_folder.0, &remote, &stub_agent());
     guest_config["owner"] = json!("sangam");
     guest_config["guestModelApi"] = json!(api);
     let guest = start(&guest_folder.0, &guest_config, None);
-    let mut add = std::process::Command::new(OBID)
-        .args(["vault", "--config"])
-        .arg(guest_folder.0.join("config.json"))
-        .args(["add", "anthropic-api-key"])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::io::Write::write_all(add.stdin.as_mut().unwrap(), API_KEY.as_bytes()).unwrap();
-    drop(add.stdin.take());
-    assert!(add.wait().unwrap().success());
+    vault_add(&guest_folder.0, API_KEY);
 
     tokio::task::block_in_place(|| {
         join_as(
@@ -97,7 +101,7 @@ async fn pair(host_folder: &Folder, guest_folder: &Folder, mac: Value, scenario:
             &sphere,
             &Owner::new("sangam"),
             "obi-sangam",
-            &["review_request"],
+            &["review_request", "share_offer"],
             HOST_SCOPES,
         );
         let mut settings =
@@ -118,6 +122,20 @@ async fn pair(host_folder: &Folder, guest_folder: &Folder, mac: Value, scenario:
         keys,
         vm,
     }
+}
+
+/// Puts `key` in the obid's vault as `anthropic-api-key`.
+fn vault_add(folder: &Path, key: &str) {
+    let mut add = std::process::Command::new(OBID)
+        .args(["vault", "--config"])
+        .arg(folder.join("config.json"))
+        .args(["add", "anthropic-api-key"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(add.stdin.as_mut().unwrap(), key.as_bytes()).unwrap();
+    drop(add.stdin.take());
+    assert!(add.wait().unwrap().success());
 }
 
 fn get(obid: &Obid, target: &str) -> Value {
@@ -454,5 +472,200 @@ async fn with_sharing_off_or_the_mac_busy_a_job_is_declined_with_the_reason() {
             .map(|e| e["body"]["reason"].clone())
             .collect();
         assert_eq!(reasons, vec![json!("not_free"), json!("policy")]);
+    });
+}
+
+/// Sangam's job on Wellington's share of an API account (#809).
+fn send_on_share(guest: &Obid, grant: &str) -> String {
+    let made = call(
+        guest,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "build", "task": "Say hello in guest.txt", "title": "Say hello",
+                             "model": "claude-opus-5-5", "runsOn": {"obi": "obi-wellington", "grant": grant}}}),
+        ),
+    );
+    assert_eq!(made.status, 201, "{}", made.text);
+    assert_eq!(made.body["runsOn"]["grant"], grant);
+    made.body["id"].as_str().unwrap().to_owned()
+}
+
+fn ended(guest: &Obid, job: &str) -> Value {
+    within(90, "the job to end", || {
+        let j = get(guest, &format!("/v1/jobs/{job}"));
+        (j["status"] != "running" && j["status"] != "queued").then_some(j)
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_share_of_an_api_account_runs_on_its_mac_with_its_key_metered_until_used_then_revoked() {
+    let (hf, gf) = (
+        Folder::new("share-api-host"),
+        Folder::new("share-api-guest"),
+    );
+    let p = pair(&hf, &gf, json!({"who": "people", "people": []}), json!({})).await;
+    tokio::task::block_in_place(|| {
+        // Only the account that pays per token can be shared; the key is in Wellington's vault.
+        let sharing = get(&p.host, "/v1/obid/sharing/grants");
+        assert_eq!(sharing["key"], true);
+        assert_eq!(sharing["accounts"][0]["plan"], "api", "{sharing}");
+        let refused = call(
+            &p.host,
+            "PUT",
+            "/v1/obid/sharing/grants",
+            Some(
+                &json!({"account": "nobody", "who": "sangam", "share": 10, "budgetCents": 1000, "resetsDay": 1}),
+            ),
+        );
+        assert_eq!(refused.status, 422);
+        // 10% of a $10 month for Sangam: $1.
+        let put = call(
+            &p.host,
+            "PUT",
+            "/v1/obid/sharing/grants",
+            Some(
+                &json!({"account": "stub", "who": "sangam", "share": 10, "budgetCents": 1000, "resetsDay": 1}),
+            ),
+        );
+        assert_eq!(put.status, 200, "{}", put.text);
+        assert_eq!(put.body["limitCents"], 100);
+        let grant = put.body["id"].as_str().unwrap().to_owned();
+        let shared = within(40, "the share on Sangam's Oby", || {
+            let s = get(&p.guest, "/v1/obid/sharing/shared");
+            s["shares"].as_array().filter(|s| !s.is_empty()).cloned()
+        });
+        assert_eq!(shared[0]["grant"], grant.as_str());
+        assert_eq!(shared[0]["account"], "Stub");
+        assert_eq!(
+            (shared[0]["share"].clone(), shared[0]["limitCents"].clone()),
+            (json!(10), json!(100))
+        );
+
+        // The first job runs there, on Wellington's key, though Wellington's Mac is offered to
+        // nobody: the share is the yes. Its one call costs $1.20: the call finishes, and the share
+        // is used.
+        let first = ended(&p.guest, &send_on_share(&p.guest, &grant));
+        let reason = first["reason"].as_str().unwrap_or("");
+        assert!(
+            first["status"] == "done"
+                || reason.contains("your share of Wellington's account is used"),
+            "{first}\n{}",
+            p.guest.log()
+        );
+        assert_eq!(first["commits"], 1, "{first}");
+        assert_eq!(*p.keys.lock().unwrap(), vec![HOST_KEY.to_owned()]);
+        let seen = std::fs::read_to_string(p.vm.join("guest.log")).unwrap();
+        assert!(seen.contains("model 200 Hello from the model"), "{seen}");
+        // Both meters say $1.21 ($1.20008, rounded up).
+        let grants = get(&p.host, "/v1/obid/sharing/grants");
+        assert_eq!(grants["grants"][0]["usedCents"]["sangam"], 121, "{grants}");
+        within(40, "Sangam's meter", || {
+            let s = get(&p.guest, "/v1/obid/sharing/shared");
+            (s["shares"][0]["usedCents"] == 121).then_some(())
+        });
+        // Wellington hears it, and the next job isn't taken.
+        let item = within(20, "the share-used card", || {
+            get(&p.host, "/v1/inbox")
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["obi"]["type"] == "share_used")
+                .cloned()
+        });
+        assert_eq!(item["title"], "Sangam used the share of Stub");
+        assert_eq!(
+            item["options"],
+            json!(["Share 20% more this month", "Leave it"])
+        );
+        let second = ended(&p.guest, &send_on_share(&p.guest, &grant));
+        assert_eq!(second["status"], "interrupted");
+        assert_eq!(
+            second["reason"],
+            "Your share of Wellington's account is used for this month. Run it on your own account instead."
+        );
+        assert_eq!(p.keys.lock().unwrap().len(), 1, "no call was made for it");
+
+        // 20% more this month: $3, $1.80 left, and the next job runs.
+        let more = call(
+            &p.host,
+            "POST",
+            &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
+            Some(&json!({"answer": "Share 20% more this month"})),
+        );
+        assert_eq!(more.status, 200, "{}", more.text);
+        within(40, "the larger share on Sangam's Oby", || {
+            let s = get(&p.guest, "/v1/obid/sharing/shared");
+            (s["shares"][0]["limitCents"] == 300).then_some(())
+        });
+        let third = ended(&p.guest, &send_on_share(&p.guest, &grant));
+        assert_eq!(third["status"], "done", "{third}");
+
+        // The key is nowhere on Sangam's side or in the VM's folder, and the relay saw no clear text.
+        assert!(
+            holding(&gf.0, HOST_KEY).is_empty(),
+            "{:?}",
+            holding(&gf.0, HOST_KEY)
+        );
+        assert!(holding(&p.vm, HOST_KEY).is_empty());
+        let relayed = p.sphere.lock().relayed.clone();
+        assert!(
+            !relayed
+                .windows(HOST_KEY.len())
+                .any(|w| w == HOST_KEY.as_bytes())
+        );
+        let recorded = p.sphere.recorded();
+        assert!(recorded.iter().all(|e| !e.to_string().contains(HOST_KEY)));
+        let types: Vec<&str> = recorded
+            .iter()
+            .map(|e| e["type"].as_str().unwrap())
+            .collect();
+        assert!(
+            types.contains(&"share_offer") && types.contains(&"share_status"),
+            "{types:?}"
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|e| e["type"] == "run_request"
+                    && e["body"]["account"]["grant"] == grant.as_str())
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|e| e["type"] == "decline" && e["body"]["reason"] == "share_used")
+        );
+
+        // Taken back: Sangam's Oby stops showing it, and no job can be placed on it.
+        assert_eq!(
+            call(
+                &p.host,
+                "DELETE",
+                &format!("/v1/obid/sharing/grants/{grant}"),
+                None
+            )
+            .status,
+            204
+        );
+        within(40, "the share gone from Sangam's Oby", || {
+            let s = get(&p.guest, "/v1/obid/sharing/shared");
+            s["shares"].as_array().filter(|s| s.is_empty()).map(|_| ())
+        });
+        assert!(
+            p.sphere
+                .recorded()
+                .iter()
+                .any(|e| e["type"] == "share_revoke")
+        );
+        let refused = call(
+            &p.guest,
+            "POST",
+            "/v1/jobs",
+            Some(
+                &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "build", "task": "x", "title": "x",
+                                                "runsOn": {"obi": "obi-wellington", "grant": grant}}}),
+            ),
+        );
+        assert_eq!(refused.status, 422, "{}", refused.text);
     });
 }

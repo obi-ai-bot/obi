@@ -141,6 +141,10 @@ pub struct Stalled {
 pub struct RunsOn {
     pub obi: String,
     pub owner: String,
+    /// On a share of that teammate's API account (#809): its grant. The job's model calls are
+    /// theirs, on their Mac.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<String>,
 }
 
 /// A job as obid keeps it (`home/jobs/<id>.json`).
@@ -816,11 +820,13 @@ impl Job {
         // limit.
         value["reason"] = json!(self.reason);
         // "on Wellington's Mac" on its card (Sangam's design, #808).
-        value["runsOn"] = json!(
-            self.runs_on
-                .as_ref()
-                .map(|r| json!({"obi": r.obi, "owner": r.owner}))
-        );
+        value["runsOn"] = json!(self.runs_on.as_ref().map(|r| {
+            let mut place = json!({"obi": r.obi, "owner": r.owner});
+            if let Some(grant) = &r.grant {
+                place["grant"] = json!(grant);
+            }
+            place
+        }));
         value["nextStep"] = json!(self.next_step);
         value["resumesAt"] = json!(date(self.resumes_at));
         if let Some(step) = self.publish_step {

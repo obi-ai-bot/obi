@@ -522,7 +522,7 @@ One turn of the conversation with Oby: words become work that starts, a question
 
 `attachments`, when present, is a list of file paths in the runner's own attachments folder. The runner resolves `..` and symlinks before accepting them; a path outside that folder returns `422` naming the refused file. Accepted paths are checked again before they are copied into the job's input folder, including jobs restored after a restart: `.oby/inputs` on the Swift runner and `.obi/inputs` on `obid`.
 
-`runsOn` (obid only, #808), when present, is a teammate's Obi whose Mac the jobs these words start run on (the message box's "Run on another Mac"): an active member whose card takes `run_request`, else `422`. Each job it starts has that `runsOn` ([obid only: sharing this Mac](#obid-only-sharing-this-mac)).
+`runsOn` (obid only, #808), when present, is a teammate's Obi whose Mac the jobs these words start run on (the message box's "Run on another Mac"): an active member whose card takes `run_request`, else `422`; or `{"obi", "grant"}`, on a share of their API account they gave this owner ([obid only: sharing your usage](#obid-only-sharing-your-usage)). Each job it starts has that `runsOn` ([obid only: sharing this Mac](#obid-only-sharing-this-mac)).
 
 To answer the brain's question, send the original words with the answer:
 
@@ -2304,6 +2304,33 @@ The runner status (`free`, `slots`, `size`, `agents`, `kinds`, `for`: `*`, or `p
 - every model call the agent makes there comes back on the channel, and obid sends it to the model's API from this Mac with the owner's company API key from the vault, `anthropic-api-key` (Claude Code) or `openai-api-key` (Codex): it never leaves this Mac. Without it the job can't run there, saying so.
 - the transcript comes back as it goes, read into the job's events; the commits come back at the end, are checked against what the reply names and that they build on the job's code, and land in the job's worktree. Then the job goes on here: its check, its secret scan, its pull request.
 - a job that comes back early needs its owner: `Came back from wellington's Mac: wellington is back at that Mac. It ran 18 minutes there and came back with its notes and 2 commits. Try again to send it back there, or run it here.` Stopping the job sends `run_cancel`.
+
+### obid only: sharing your usage
+
+A share of a company-paid API account the owner holds the key to, for a teammate (#798, #809; spec `protocol.md` sections 5.14 to 5.16 and 16). Only an account that pays per token can be shared: a personal plan or a seat never is (its terms are for one person). obid meters Anthropic API keys only, so far: OpenAI's prices aren't in obid yet, and Cursor's team balance has no meter obid can read. The teammate's jobs on it run on this Mac, in a VM, as a teammate's job does ([obid only: sharing this Mac](#obid-only-sharing-this-mac)), and obid adds the account's key to their model calls here, outside the VM: the key, `anthropic-api-key` in Oby's vault, never leaves this Mac.
+
+**`GET /v1/obid/sharing/grants`**: the owner's shares, their accounts as Settings › Sharing sorts them, and whether the key is in the vault:
+
+```json
+{"grants": [{"id": "g-0123456789ab", "agent": "claude", "label": "Deskree API", "account": "deskree", "who": "sangam",
+             "share": 30, "extra": 0, "budgetCents": 40000, "resetsDay": 1, "resets": "2026-11-01T00:00:00Z",
+             "limitCents": 12000, "usedCents": {"sangam": 2310, "wellington": 9000}, "created": "…"}],
+ "accounts": [{"id": "deskree", "agent": "claude", "name": "Deskree API", "plan": "api", "why": null},
+              {"id": "personal", "agent": "claude", "name": "Personal", "plan": "personal", "why": "A personal plan is for you alone: its terms don’t let anyone else’s work run on it."}],
+ "key": true}
+```
+
+An account's `plan` is what its tool said about how it pays (`api`, `personal`; `seat` for Cursor; `unknown` until its first job): obid never reads a login to find out. `why` is null for an account that can be shared (Sangam's "Share your usage"), else why it's kept (his "Kept for you"). `usedCents` is this period's use by owner, the owner's own jobs on that account included (their `total_cost_usd`): a share is a ceiling for that person, never money set aside, and nobody's jobs pass the month's budget.
+
+**`PUT /v1/obid/sharing/grants`** with exactly `account` (one whose `why` is null), `who` (`nobody`, `everyone`, or one owner), `share` (10 to 100, percent of the month), `budgetCents` (the account's month, $1 to $1,000,000) and `resetsDay` (1 to 28, the day it starts again, UTC): one share per account, new or changed (its meter kept). Answers the share. Only the owner changes shares, here; nothing another Obi sends can. Kept in `home/sharing.json`. `422` with why.
+
+**`DELETE /v1/obid/sharing/grants/{id}`**: taken back from everyone at once (`204`, `404`).
+
+**What goes out.** Each teammate a share is for, whose card takes `share_offer`, gets one (`share`, `limit_cents`, `resets`; never the key or the budget's other uses); `share_status` follows after each job on it, when the share changes or its month starts again, and at most hourly otherwise; `share_revoke` when it's taken back or no longer for them. obid checks every 30 seconds.
+
+**A job on a share.** The teammate sends `run_request` with `account: {grant}`. obid takes it when the share is that person's and has at least $0.50 left (else `decline` `share_used`), the key is in the vault, and this Mac is shared and free as for any teammate's job; the share is the owner's yes, so nobody is asked. Each model call goes from here with the key: only a model obid can price (list prices of 2026-10-06; another answers `400`), metered from its response's `usage` (input, output, cache reads and writes, web searches, fast mode) as it streams by, read to its end even when the agent leaves. When the share runs out, the call in flight finishes, the next is refused (`402`), and the job comes back (`run_return`, `share_used`). The owner then gets an `obiRequest` item `{person} used the share of {account}` (`obi.type` `share_used`) with `Share 20% more this month` (this month only, never past all of it) and `Leave it`.
+
+**The teammate's side.** **`GET /v1/obid/sharing/shared`**: `{"shares": [{"grant", "from", "owner", "agent", "account", "share", "limitCents", "usedCents", "resets"}], "takesShares": true}`, the shares teammates gave this owner as their last `share_status` left them, until a `share_revoke`; `takesShares` says whether this Obi's card accepts `share_offer` (the Mac app adds it when the owner turns sharing on). A job goes on a share with `"runsOn": {"obi": "<their Obi>", "grant": "<grant>"}` on `POST /v1/jobs`, `POST /v1/plans` or `PATCH /v1/jobs/{id}` (`422` for a share that isn't this owner's); its Job's `runsOn` has the `grant`. No model call comes back here: none is relayed, and the owner's own key isn't needed.
 
 ### obid only: plug-ins
 

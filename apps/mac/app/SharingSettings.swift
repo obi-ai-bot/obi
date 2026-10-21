@@ -2,19 +2,23 @@ import SwiftUI
 
 /// Settings › Sharing (Sangam's SettingsView.tsx `Sharing`, #808; docs/runner-api.md, "obid only:
 /// sharing this Mac"): this Mac's spare time for the people in your Obysphere. Their jobs run here
-/// in a sealed VM of their own, with their own AI accounts; off until you turn it on. "Share your
-/// usage" and "Kept for you" come with #809.
+/// in a sealed VM of their own, with their own AI accounts; off until you turn it on. Share your
+/// usage gives someone a share of a company API account's month, and Kept for you says why the
+/// other accounts aren't shared (#809, docs/runner-api.md, "obid only: sharing your usage").
 struct SharingSettingsView: View {
     let feed: RunnerFeed
     @State private var sphere: SphereModel
     @State private var mac: RunnerSharingMac?
+    @State private var grants: RunnerGrants?
     @State private var problem: String?
     @State private var busy = false
+    @State private var renewed = false
 
-    init(feed: RunnerFeed, mac: RunnerSharingMac? = nil) {
+    init(feed: RunnerFeed, mac: RunnerSharingMac? = nil, grants: RunnerGrants? = nil) {
         self.feed = feed
         _sphere = State(initialValue: SphereModel(feed: feed))
         _mac = State(initialValue: mac)
+        _grants = State(initialValue: grants)
     }
 
     /// "Deskree": the Obysphere's name, as Sangam's words have it.
@@ -29,6 +33,10 @@ struct SharingSettingsView: View {
             if let mac {
                 thisMac(mac)
                 if mac.settings.on { onThisMac(mac) }
+                if let grants {
+                    shareYourUsage(grants, mac: mac)
+                    keptForYou(grants)
+                }
             } else {
                 SetGroup(problem: problem) {
                     SetRow(feed.runner == nil ? "Set the runner's address first." : "This runner doesn't share its Mac.", quiet: true)
@@ -124,6 +132,113 @@ struct SharingSettingsView: View {
         return "\(agent) on \(RunnerMac.person(guest.fromOwner))’s account · \(repo) · \(minutes) min\(paused)"
     }
 
+    // MARK: Share your usage, Kept for you
+
+    static func usageFooter(_ team: String) -> String {
+        "Only an account \(team) pays by use can be shared. A shared job runs on this Mac, on that account: they get the results and the pull request, and its key never leaves this Mac. Once their share is used, Oby takes no more of their jobs on it and finishes the one running."
+    }
+    static let shares = [10, 20, 30, 50, 75, 100]
+    // ponytail: preset months; a field when someone's month isn't one of these.
+    static let budgets = [100, 200, 400, 1000, 2000, 5000, 10000]
+
+    private func shareYourUsage(_ grants: RunnerGrants, mac: RunnerSharingMac) -> some View {
+        let shareable = grants.accounts.filter { $0.why == nil }
+        let members = sphere.members.filter(\.active).map(\.owner).filter { $0 != sphere.membership?.owner }
+        return SetGroup("Share your usage", footer: Self.usageFooter(team)) {
+            if shareable.isEmpty { SetRow("No account \(team) pays by use", quiet: true) }
+            ForEach(shareable) { account in
+                let grant = grants.grants.first { $0.account == account.id }
+                let who = grant?.who ?? "nobody"
+                // Sangam's row: the tool's mark, the account, what was used, and the meter under it.
+                SetRow(controlOnTop: true) {
+                    HStack(alignment: .top, spacing: 10) {
+                        AgentMark(agent: account.agent).font(Tokens.font(13)).frame(width: 16).foregroundStyle(Tokens.muted).padding(.top, 2)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("\(Usage.tool(account.agent)) · \(account.name)")
+                            SetAbout(Self.usageAbout(grant, key: grants.key, macOn: mac.settings.on))
+                            if let grant, who != "nobody" { SetMeter(used: Self.usedPercent(grant) * 100 / Double(max(grant.share + grant.extra, 1))) }
+                        }
+                    }
+                } control: {
+                    VStack(alignment: .trailing, spacing: 8) {
+                        SetSelect("Share \(account.name) with", selection: Binding(get: { who }, set: { share(account, who: $0, grant) }),
+                                  options: Self.whoOptions(members: members, who: who))
+                        if let grant, who != "nobody" {
+                            SetSelect("How much of its month", selection: Binding(get: { grant.share }, set: { share(account, share: $0, grant) }),
+                                      options: Self.shares.map { ($0, "\($0)% of its month") })
+                            SetSelect("Its month", selection: Binding(get: { grant.budgetCents / 100 }, set: { share(account, budget: $0, grant) }),
+                                      options: Self.budgets.map { ($0, "$\($0) a month") })
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func keptForYou(_ grants: RunnerGrants) -> some View {
+        let kept = grants.accounts.filter { $0.why != nil }
+        return Group {
+            if !kept.isEmpty {
+                SetGroup("Kept for you") {
+                    ForEach(kept) { account in
+                        SetRow {
+                            HStack(alignment: .top, spacing: 10) {
+                                AgentMark(agent: account.agent).font(Tokens.font(13)).frame(width: 16).foregroundStyle(Tokens.muted).padding(.top, 2)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("\(Usage.tool(account.agent)) · \(account.name)")
+                                    if let why = account.why { SetAbout(why) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Nobody, Everyone, then each member by name; the one it's shared with even when they've left.
+    static func whoOptions(members: [String], who: String) -> [(String, String)] {
+        let people = members.contains(who) || ["nobody", "everyone"].contains(who) ? members : members + [who]
+        return [("nobody", "Nobody"), ("everyone", "Everyone")] + people.map { ($0, RunnerMac.person($0)) }
+    }
+
+    /// What a share's teammates used this month, in percent of its month: one person's, or
+    /// everyone's together.
+    static func usedPercent(_ grant: RunnerGrants.Grant, owner: String? = nil) -> Double {
+        let theirs = grant.usedCents.filter { grant.who == "everyone" ? $0.key != owner : $0.key == grant.who }.values.reduce(0, +)
+        return Double(theirs) * 100 / Double(max(grant.budgetCents, 1))
+    }
+
+    /// "Not shared", or "Sangam used 9% of 30% this month" (Sangam's words), and what the share
+    /// still needs: the key in the vault, this Mac shared.
+    static func usageAbout(_ grant: RunnerGrants.Grant?, key: Bool, macOn: Bool) -> String {
+        guard let grant, grant.who != "nobody" else { return "Not shared" }
+        let whom = grant.who == "everyone" ? "Everyone" : RunnerMac.person(grant.who)
+        var line = "\(whom) used \(Int(usedPercent(grant).rounded()))% of \(grant.share + grant.extra)% this month"
+        if !key { line += ". Put its key in Oby’s vault as anthropic-api-key to share it" }
+        if !macOn { line += ". Their jobs run on this Mac: share this Mac too" }
+        return line
+    }
+
+    private func share(_ account: RunnerGrants.Account, who: String? = nil, share: Int? = nil, budget: Int? = nil, _ grant: RunnerGrants.Grant?) {
+        let who = who ?? grant?.who ?? "nobody"
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                guard let runner = feed.runner else { return }
+                // A first share re-signs the card and delegation, so this Oby may offer one (send:share_offer).
+                if grant.map({ $0.who == "nobody" }) ?? true, who != "nobody" { try await sphere.renew(sharing: true) }
+                _ = try await runner.setGrant(account: account.id, who: who, share: share ?? grant?.share ?? 20,
+                                              budgetCents: (budget ?? (grant?.budgetCents ?? 40000) / 100) * 100, resetsDay: grant?.resetsDay ?? 1)
+                self.grants = try await runner.sharingGrants()
+                problem = nil
+            } catch {
+                problem = error.localizedDescription
+            }
+        }
+    }
+
     // MARK: Settings as Sangam's menus have them
 
     /// obid's `when` as the menu's one choice, and back.
@@ -156,7 +271,14 @@ struct SharingSettingsView: View {
         guard let runner = feed.runner else { return }
         do {
             mac = try await runner.sharingMac()
+            grants = try await runner.sharingGrants()
             if sphere.name == nil { try? await sphere.refresh() }
+            // So teammates can share their usage with you, the card takes share_offer: added the
+            // first time this page opens (a Sphere from before it refuses it, and nothing changes).
+            if mac != nil, sphere.membership != nil, (try? await runner.sharedWithMe())?.takesShares == false, !renewed {
+                renewed = true
+                try? await sphere.renew(sharing: true)
+            }
         } catch {
             problem = error.localizedDescription
         }

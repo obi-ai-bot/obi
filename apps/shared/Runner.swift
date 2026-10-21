@@ -428,6 +428,12 @@ extension InboxItem {
             object["kind"] = Kind.start.rawValue
             return (try? JSONSerialization.data(withJSONObject: object)).flatMap { try? Runner.decoder.decode(InboxItem.self, from: $0) }
         }
+        // A teammate used the share of an API account you gave them (#809): Sangam's "Sangam used
+        // the share of Deskree API", an Out of usage card with its own answers.
+        if object["kind"] as? String == "obiRequest", (object["obi"] as? [String: Any])?["type"] as? String == "share_used" {
+            object["kind"] = Kind.limit.rawValue
+            return (try? JSONSerialization.data(withJSONObject: object)).flatMap { try? Runner.decoder.decode(InboxItem.self, from: $0) }
+        }
         guard object["kind"] as? String == RunnerConfirm.kind, object["confirm"] is [String: Any] else { return nil }
         object["kind"] = Kind.start.rawValue
         return (try? JSONSerialization.data(withJSONObject: object)).flatMap { try? Runner.decoder.decode(InboxItem.self, from: $0) }
@@ -1226,16 +1232,48 @@ nonisolated struct Runner: Sendable {
     }
 
     /// Moves a job that isn't running to a teammate's Mac, or back to this one (nil): Run it here.
-    func place(_ id: String, on obi: String?) async throws -> Job {
+    /// With a `grant`, on the share of their API account they gave this owner (#809).
+    func place(_ id: String, on obi: String?, grant: String? = nil) async throws -> Job {
+        struct Share: Encodable { var obi: String; var grant: String }
         struct Body: Encodable {
             var runsOn: String?
+            var share: Share?
             func encode(to encoder: any Encoder) throws {
                 var keys = encoder.container(keyedBy: CodingKeys.self)
-                try keys.encode(runsOn, forKey: .runsOn)
+                if let share { try keys.encode(share, forKey: .runsOn) } else { try keys.encode(runsOn, forKey: .runsOn) }
             }
             enum CodingKeys: String, CodingKey { case runsOn }
         }
-        return try await call("PATCH", "v1/jobs/\(id)", body: Body(runsOn: obi))
+        let share = obi.flatMap { obi in grant.map { Share(obi: obi, grant: $0) } }
+        return try await call("PATCH", "v1/jobs/\(id)", body: Body(runsOn: obi, share: share))
+    }
+
+    // MARK: Sharing your usage (obid only, #798, #809)
+
+    /// The owner's shares of their company API accounts, their accounts as Sharing sorts them, and
+    /// whether the key is in Oby's vault; nil from a runner that doesn't share.
+    func sharingGrants() async throws -> RunnerGrants? {
+        do {
+            return try await call("GET", "v1/obid/sharing/grants")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// A share of `account`'s month for `who` (nobody, everyone, or one owner).
+    func setGrant(account: String, who: String, share: Int, budgetCents: Int, resetsDay: Int = 1) async throws -> RunnerGrants.Grant {
+        struct Body: Encodable { var account: String; var who: String; var share: Int; var budgetCents: Int; var resetsDay: Int }
+        return try await call("PUT", "v1/obid/sharing/grants",
+                              body: Body(account: account, who: who, share: share, budgetCents: budgetCents, resetsDay: resetsDay))
+    }
+
+    /// The shares teammates gave this owner; nil from a runner that doesn't share.
+    func sharedWithMe() async throws -> RunnerShares? {
+        do {
+            return try await call("GET", "v1/obid/sharing/shared")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
     }
 
     // MARK: Routines (obid only, #395)
@@ -2033,6 +2071,60 @@ nonisolated struct RunnerMac: Codable, Equatable, Sendable, Identifiable {
     var name: String { "\(RunnerMac.person(owner))’s Mac" }
     /// An owner id as a name: `wellington` is Wellington.
     static func person(_ owner: String) -> String { owner.prefix(1).uppercased() + owner.dropFirst() }
+}
+
+/// `GET /v1/obid/sharing/grants` (docs/runner-api.md, "obid only: sharing your usage").
+nonisolated struct RunnerGrants: Codable, Equatable, Sendable {
+    /// A share of one of the owner's company API accounts.
+    struct Grant: Codable, Equatable, Sendable, Identifiable {
+        var id: String
+        var label: String
+        var account: String?
+        var who: String
+        var share: Int
+        var extra: Int
+        var budgetCents: Int
+        var resetsDay: Int
+        var resets: Date
+        var limitCents: Int
+        /// This month's use by owner, the owner's own jobs on the account included.
+        var usedCents: [String: Int]
+    }
+    /// One of the owner's accounts: `why` is nil for one that can be shared, else why it's kept.
+    struct Account: Codable, Equatable, Sendable, Identifiable {
+        var id: String
+        var agent: String
+        var name: String
+        var plan: String
+        var why: String?
+    }
+    var grants: [Grant]
+    var accounts: [Account]
+    /// Whether the key the shares run on is in Oby's vault.
+    var key: Bool
+}
+
+/// `GET /v1/obid/sharing/shared`: the shares teammates gave this owner.
+nonisolated struct RunnerShares: Codable, Equatable, Sendable {
+    struct Share: Codable, Equatable, Sendable, Identifiable {
+        var grant: String
+        /// Their Obi, whose Mac jobs on it run on.
+        var from: String
+        var owner: String
+        var agent: String
+        var account: String
+        var share: Int
+        var limitCents: Int
+        var usedCents: Int
+        var resets: Date
+        var id: String { grant }
+        /// "Wellington’s Deskree API".
+        var name: String { "\(RunnerMac.person(owner))’s \(account)" }
+        /// Of its month, in percent: the share, and what's left of it.
+        var left: Int { limitCents == 0 ? 0 : max(0, share * (limitCents - usedCents) / limitCents) }
+    }
+    var shares: [Share]
+    var takesShares: Bool
 }
 
 nonisolated struct RunnerMemoryList: Codable, Equatable, Sendable {

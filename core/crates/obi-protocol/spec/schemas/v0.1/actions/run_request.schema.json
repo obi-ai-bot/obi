@@ -58,6 +58,19 @@
       "type": "integer",
       "minimum": 5,
       "maximum": 480
+    },
+    "account": {
+      "description": "Run it on a share the receiver's owner gave this owner (protocol.md 5.14) instead of this owner's own account: the receiver adds its own key, and the model's calls stay on its Mac.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "grant"
+      ],
+      "properties": {
+        "grant": {
+          "$ref": "../common.schema.json#/$defs/grant_id"
+        }
+      }
     }
   }
 }

@@ -43,6 +43,8 @@ final class Tray {
     var place: RunnerMac?
     /// The teammates' Macs the + offers, as the runner last listed them.
     var macs: [RunnerMac] = []
+    /// The shares of their API accounts teammates gave you (#809), for the usage panel.
+    var shares: [RunnerShares.Share] = []
     /// Why the last capture or paste didn't work, until one does.
     var problem: Problem?
     private(set) var capturing = false

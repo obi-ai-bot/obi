@@ -36,7 +36,7 @@ pub fn key_name(agent: &str) -> &'static str {
 }
 
 /// Where each agent's model API is.
-fn upstream(link: &Link, agent: &str) -> String {
+pub(super) fn upstream(link: &Link, agent: &str) -> String {
     link.model_api_base().unwrap_or_else(|| {
         if agent == "codex" {
             "https://api.openai.com".into()
@@ -58,6 +58,9 @@ pub struct Ask<'a> {
     pub title: &'a str,
     pub size: &'a str,
     pub start_commit: Option<&'a str>,
+    /// On a share of the teammate's API account (#809): its grant. Its model calls are made on
+    /// their Mac with their key, so none comes back here.
+    pub grant: Option<&'a str>,
 }
 
 async fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -73,12 +76,15 @@ pub async fn run_turn(
     mut signal: watch::Receiver<Signal>,
     mut on_event: impl FnMut(AgentEvent),
 ) -> Result<Turn, String> {
-    let api_key = crate::vault::value(key_name(ask.agent))?.ok_or_else(|| {
-        format!(
-            "Running on another Mac needs your company's API key in Oby's vault as {}: only an API-key account runs on someone else's Mac.",
-            key_name(ask.agent)
-        )
-    })?;
+    let api_key = match ask.grant {
+        Some(_) => None,
+        None => Some(crate::vault::value(key_name(ask.agent))?.ok_or_else(|| {
+            format!(
+                "Running on another Mac needs your company's API key in Oby's vault as {}: only an API-key account runs on someone else's Mac.",
+                key_name(ask.agent)
+            )
+        })?),
+    };
     on_event(AgentEvent::Step(format!(
         "Packing the code for {}'s Mac",
         ask.host_owner
@@ -139,7 +145,7 @@ pub async fn run_turn(
         &ask,
         worktree,
         prompt,
-        &api_key,
+        api_key.as_deref(),
         &base_sha,
         &dir,
         &mut signal,
@@ -156,7 +162,7 @@ async fn run_in(
     ask: &Ask<'_>,
     worktree: &Path,
     prompt: &str,
-    api_key: &str,
+    api_key: Option<&str>,
     base_sha: &str,
     dir: &Path,
     signal: &mut watch::Receiver<Signal>,
@@ -179,6 +185,9 @@ async fn run_in(
                           "bundle": {"sha256": sha, "bytes": bytes.len()}, "size": ask.size, "max_minutes": 120});
     if let Some(model) = ask.model {
         body["model"] = json!(model);
+    }
+    if let Some(grant) = ask.grant {
+        body["account"] = json!({"grant": grant});
     }
     // A Mac that says it's busy isn't asked: the job waits until it's free (Sangam's "Wait for
     // Wellington's Mac"), up to a day.
@@ -305,9 +314,14 @@ async fn run_in(
                             }
                             Kind::End => {
                                 if let Some((open, body)) = models.remove(&frame.stream) {
+                                    // On a share, the other Mac makes the calls: none is relayed from here.
+                                    let Some(key) = api_key.map(str::to_owned) else {
+                                        channel.send(Frame::new(frame.stream, Kind::Reset, b"not relayed on a share".to_vec())).await;
+                                        continue;
+                                    };
                                     let channel = channel.clone();
                                     let http = http.clone();
-                                    let (upstream, key, agent) = (upstream.clone(), api_key.to_owned(), ask.agent.to_owned());
+                                    let (upstream, agent) = (upstream.clone(), ask.agent.to_owned());
                                     tokio::spawn(async move {
                                         relay(&channel, &http, &upstream, &agent, &key, frame.stream, &open, body).await;
                                     });
@@ -384,6 +398,10 @@ async fn run_in(
             Some("time_limit") => "it reached its time limit there".to_owned(),
             Some("sharing_off") => format!("{} turned sharing off", ask.host_owner),
             Some("shutdown") => "that Mac shut down".to_owned(),
+            Some("share_used") => format!(
+                "your share of {}'s account is used for this month",
+                ask.host_owner
+            ),
             _ => format!("{} stopped it", ask.host_owner),
         };
         let text = format!(
@@ -446,6 +464,9 @@ fn declined(ex: &super::exchange::Exchange, host_owner: &str) -> Turn {
             format!("{host_owner} said no to running it on their Mac. Run it here instead.")
         }
         "policy" => format!("{host_owner}'s Mac doesn't take your jobs. Run it here instead."),
+        "share_used" => format!(
+            "Your share of {host_owner}'s account is used for this month. Run it on your own account instead."
+        ),
         "expired" => {
             format!("{host_owner}'s Mac didn't answer in time. Try again, or run it here.")
         }

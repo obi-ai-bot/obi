@@ -166,6 +166,8 @@ pub struct Link {
     tokening: tokio::sync::Mutex<()>,
     /// One key, card or join call at a time.
     joining: tokio::sync::Mutex<()>,
+    /// One pass over the shares of the owner's API accounts at a time (crate::sphere::shares).
+    shares_sync: tokio::sync::Mutex<()>,
     following: AtomicBool,
     stopping: watch::Receiver<bool>,
     /// Teammates' jobs on this Mac (crate::sphere::hosting).
@@ -373,6 +375,7 @@ impl Link {
             saving: Mutex::new(()),
             tokening: tokio::sync::Mutex::new(()),
             joining: tokio::sync::Mutex::new(()),
+            shares_sync: tokio::sync::Mutex::new(()),
             following: AtomicBool::new(false),
             stopping,
             hosting: super::hosting::Hosting::default(),
@@ -921,12 +924,14 @@ impl Link {
         if accepts.is_empty() {
             return Err(invalid("accepts names at least one request type.".into()));
         }
-        if let Some(other) = accepts
-            .iter()
-            .find(|a| !matches!(a.as_str(), "review_request" | "question" | "run_request"))
-        {
+        if let Some(other) = accepts.iter().find(|a| {
+            !matches!(
+                a.as_str(),
+                "review_request" | "question" | "run_request" | "share_offer"
+            )
+        }) {
             return Err(invalid(format!(
-                "obid takes review_request, question and run_request in this version, not {other}."
+                "obid takes review_request, question, run_request and share_offer in this version, not {other}."
             )));
         }
         if obi_protocol::keys::key_id_of(owner_key).is_none() {
@@ -1404,7 +1409,8 @@ impl Link {
         let Some(exchange) = state.exchanges.get_mut(cid).filter(|e| {
             e.peer == from
                 && (e.direction == "outgoing"
-                    || (kind == "run_cancel" && e.direction == "incoming"))
+                    || (obi_protocol::SENDER_REPLY_TYPES.contains(&kind)
+                        && e.direction == "incoming"))
         }) else {
             drop(state);
             self.drop_message(&id, "a reply to no request of this Obi's");
@@ -1453,6 +1459,8 @@ impl Link {
             }
             // The sender called its job off: it stops here at once.
             "run_cancel" => exchange.state = "cancelled".into(),
+            // A teammate took their share back.
+            "share_revoke" => exchange.state = "revoked".into(),
             _ => {}
         }
         exchange.updated = time::now();
@@ -1517,7 +1525,10 @@ impl Link {
         let mut decisions_changed = false;
         let mut answer_by_itself = None;
         let mut admit = false;
-        if accepts.contains(&kind) && kind == "run_request" {
+        if accepts.contains(&kind) && kind == "share_offer" {
+            // A share of a teammate's API account: shown in "Shared with you" until its revoke.
+            exchange.state = "offered".into();
+        } else if accepts.contains(&kind) && kind == "run_request" {
             // Decided by the owner's sharing rules, which read the Mac: off this lock.
             exchange.state = "admitting".into();
             admit = true;
@@ -2039,7 +2050,7 @@ impl Link {
             let due: Vec<String> = state
                 .exchanges
                 .values()
-                .filter(|e| e.expires_at().is_some_and(|t| t <= now))
+                .filter(|e| e.expires_at().is_some_and(|t| t <= now) && e.kind != "share_offer")
                 .filter(|e| match e.direction.as_str() {
                     "incoming" => e.state == "inbox" || e.state == "answering",
                     _ => e.state == "sent" || e.state == "accepted",
@@ -2401,7 +2412,7 @@ impl Link {
         let kind = text_field(&map, "type")?.to_owned();
         if !obi_protocol::REQUEST_TYPES.contains(&kind.as_str()) {
             return Err(invalid(format!(
-                "type is review_request, question, handoff or run_request, not {kind}."
+                "type is review_request, question, handoff, run_request or share_offer, not {kind}."
             )));
         }
         let action = map
@@ -2463,6 +2474,15 @@ impl Link {
             }
             if !member.accepts.contains(&kind) {
                 return Err(invalid(format!("{to}'s card doesn't accept {kind}.")));
+            }
+            if kind == "share_offer"
+                && !state.sharing.grants.iter().any(|g| {
+                    g.id == action["grant"].as_str().unwrap_or("") && g.offered_to(&member.owner)
+                })
+            {
+                return Err(invalid(
+                    "obid offers only a share its owner set in Settings › Sharing.".into(),
+                ));
             }
             let key = state
                 .key
@@ -3266,6 +3286,21 @@ impl Link {
             }
             item
         };
+        let share_used = self
+            .lock()
+            .inbox
+            .get(id)
+            .filter(|i| {
+                i.done.is_none() && i.obi.as_ref().is_some_and(|o| o["type"] == "share_used")
+            })
+            .cloned();
+        if let Some(item) = share_used {
+            match given {
+                Given::Answer(answer) => return self.answer_share_used(item, Some(answer)),
+                Given::Done => return self.answer_share_used(item, None),
+                Given::Later(_) => {}
+            }
+        }
         if let Some(item) = github {
             return match given {
                 Given::Answer(answer) => self.answer_github(item, Some(answer), None).await,
@@ -3743,7 +3778,7 @@ impl Link {
             if !state_now.is_empty() {
                 exchange.state = state_now.into();
             }
-            if matches!(kind, "result" | "run_return") {
+            if matches!(kind, "result" | "run_return" | "share_status") {
                 exchange.result = Some(body);
             }
             exchange.updated = time::now();
@@ -3950,6 +3985,7 @@ impl Link {
                     _ = tick.tick() => {
                         if link.lock().membership.as_ref().is_some_and(|m| m.state == "joined") {
                             super::hosting::publish_status(&link).await;
+                            link.sync_shares(false).await;
                         }
                     }
                     () = stopped(link.stopping.clone()) => return,
@@ -4224,6 +4260,411 @@ pub(crate) fn every_text(body: &Value) -> Vec<(String, String)> {
     let mut out = Vec::new();
     walk(body, String::new(), &mut out);
     out
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shares of the owner's API accounts (#809, crate::sphere::shares)
+
+/// The answers to "Sangam used the share of Deskree API" (Sangam's design).
+pub const SHARE_MORE: &str = "Share 20% more this month";
+pub const LEAVE_IT: &str = "Leave it";
+
+/// "1st", "2nd", "23rd": a day of the month as Sangam's words have it.
+fn ordinal(day: u8) -> String {
+    let suffix = match (day % 10, day % 100) {
+        (1, n) if n != 11 => "st",
+        (2, n) if n != 12 => "nd",
+        (3, n) if n != 13 => "rd",
+        _ => "th",
+    };
+    format!("{day}{suffix}")
+}
+
+impl Link {
+    /// The owner's shares with each one's period started again when it turned; kept when it did.
+    fn rolled_grants(&self, now: i64) -> Vec<super::shares::Grant> {
+        let (grants, changed) = {
+            let mut state = self.lock();
+            let mut changed = false;
+            for grant in &mut state.sharing.grants {
+                changed |= grant.roll(now);
+            }
+            (
+                state.sharing.grants.clone(),
+                changed.then(|| state.sharing.clone()),
+            )
+        };
+        if let Some(sharing) = changed {
+            self.save_sharing(&sharing);
+        }
+        grants
+    }
+
+    /// `GET /v1/obid/sharing/grants`'s shares.
+    pub fn grants_json(&self) -> Value {
+        let now = time::now();
+        json!(
+            self.rolled_grants(now)
+                .iter()
+                .map(|g| g.to_json(now))
+                .collect::<Vec<_>>()
+        )
+    }
+
+    /// `PUT /v1/obid/sharing/grants`: a share of `label`'s account, new or changed (one per
+    /// account); its offers, statuses and revokes go out at once.
+    pub fn put_grant(self: &Arc<Self>, body: &Value, label: &str) -> Result<Value, ApiError> {
+        let now = time::now();
+        let mut body = body.clone();
+        body["label"] = json!(label);
+        body["agent"] = json!("claude");
+        let account = body["account"].as_str().unwrap_or("").to_owned();
+        if body["who"] == self.config.owner {
+            return Err(api(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "A share is for someone else.",
+            ));
+        }
+        let (grant, sharing) = {
+            let mut state = self.lock();
+            let kept = state
+                .sharing
+                .grants
+                .iter()
+                .position(|g| g.account.as_deref() == Some(&account));
+            let grant =
+                super::shares::grant_from(&body, kept.map(|i| &state.sharing.grants[i]), now)
+                    .map_err(|m| api(StatusCode::UNPROCESSABLE_ENTITY, m))?;
+            match kept {
+                Some(i) => state.sharing.grants[i] = grant.clone(),
+                None => state.sharing.grants.push(grant.clone()),
+            }
+            (grant, state.sharing.clone())
+        };
+        self.save_sharing(&sharing);
+        self.sync_shares_soon(true);
+        Ok(grant.to_json(now))
+    }
+
+    /// `DELETE /v1/obid/sharing/grants/{id}`: taken back from everyone at once.
+    pub fn delete_grant(self: &Arc<Self>, id: &str) -> Result<(), ApiError> {
+        let sharing = {
+            let mut state = self.lock();
+            let before = state.sharing.grants.len();
+            state.sharing.grants.retain(|g| g.id != id);
+            if state.sharing.grants.len() == before {
+                return Err(api(StatusCode::NOT_FOUND, "There's no such share."));
+            }
+            state.sharing.clone()
+        };
+        self.save_sharing(&sharing);
+        self.sync_shares_soon(true);
+        Ok(())
+    }
+
+    pub(super) fn sync_shares_soon(self: &Arc<Self>, now: bool) {
+        let link = self.clone();
+        tokio::spawn(async move { link.sync_shares(now).await });
+    }
+
+    /// Brings every teammate's view of the owner's shares up to date: a `share_offer` to each
+    /// teammate a share is for and who hasn't one open, a `share_revoke` where it's gone or no
+    /// longer for them, and a `share_status` when what they used changed (at once when `now`, a
+    /// job on it having ended, else at most hourly) or the share itself did.
+    pub(super) async fn sync_shares(self: &Arc<Self>, now_please: bool) {
+        let _one = self.shares_sync.lock().await;
+        let now = time::now();
+        let grants = self.rolled_grants(now);
+        // Who's in the Sphere now, and whose card takes shares: fresh when there's a share.
+        if !grants.is_empty()
+            && now - self.lock().directory_read > 15
+            && self.lock().membership.is_some()
+            && let Err(e) = self.read_directory().await
+        {
+            self.note_error(&e);
+        }
+        let (members, open) = {
+            let state = self.lock();
+            let Some(me) = state
+                .membership
+                .as_ref()
+                .filter(|m| m.state == "joined")
+                .map(|m| m.obi_id.clone())
+            else {
+                return;
+            };
+            let members: Vec<(String, String)> = state
+                .directory
+                .members
+                .iter()
+                .filter(|(obi, m)| {
+                    **obi != me && m.active && m.accepts.iter().any(|a| a == "share_offer")
+                })
+                .map(|(obi, m)| (obi.clone(), m.owner.clone()))
+                .collect();
+            let open: Vec<Exchange> = state
+                .exchanges
+                .values()
+                .filter(|e| e.kind == "share_offer" && e.direction == "outgoing" && !e.ended())
+                .cloned()
+                .collect();
+            (members, open)
+        };
+        for exchange in &open {
+            let id = exchange.request["body"]["grant"].as_str().unwrap_or("");
+            let owner = exchange.peer_owner.clone().unwrap_or_default();
+            let still = members.iter().any(|(obi, _)| *obi == exchange.peer);
+            match grants
+                .iter()
+                .find(|g| g.id == id)
+                .filter(|g| still && g.offered_to(&owner))
+            {
+                None => self.host_reply(
+                    &exchange.correlation_id,
+                    "share_revoke",
+                    json!({"grant": id}),
+                    "revoked",
+                ),
+                Some(grant) => {
+                    let status = grant.status(&owner, now);
+                    let last = exchange.result.clone().unwrap_or_else(|| {
+                        let offer = &exchange.request["body"];
+                        json!({"grant": id, "used_cents": 0, "limit_cents": offer["limit_cents"], "resets": offer["resets"]})
+                    });
+                    let changed = |k: &str| status[k] != last[k];
+                    let due = now_please || now - exchange.updated >= super::shares::STATUS_EVERY;
+                    if changed("limit_cents") || changed("resets") || (changed("used_cents") && due)
+                    {
+                        self.host_reply(&exchange.correlation_id, "share_status", status, "");
+                    }
+                }
+            }
+        }
+        for grant in grants.iter().filter(|g| g.who != "nobody") {
+            for (obi, owner) in members.iter().filter(|(_, owner)| grant.offered_to(owner)) {
+                let offered = open
+                    .iter()
+                    .any(|e| e.peer == *obi && e.request["body"]["grant"] == grant.id.as_str());
+                if offered {
+                    continue;
+                }
+                match self
+                    .send_request(
+                        obi,
+                        "share_offer",
+                        grant.offer(now),
+                        obi_protocol::MAX_LIFETIME_SECONDS,
+                    )
+                    .await
+                {
+                    Ok(_) => tracing::info!("sphere: offered {owner} a share of {}", grant.label),
+                    Err(e) => self.note_error(format!(
+                        "offering {owner} a share of {}: {}",
+                        grant.label, e.message
+                    )),
+                }
+            }
+        }
+    }
+
+    /// The share `grant` a job from `owner`'s Obi may run on, for `agent`.
+    pub(super) fn grant_for(
+        &self,
+        grant: &str,
+        owner: &str,
+        agent: &str,
+    ) -> Option<super::shares::Grant> {
+        self.rolled_grants(time::now())
+            .into_iter()
+            .find(|g| g.id == grant && g.agent == agent && g.offered_to(owner))
+    }
+
+    /// A call on `grant` by `owner`'s job cost `micros`: counted, and when it used the share up,
+    /// the owner hears it (Sangam's "Sangam used the share of Deskree API"). What's left.
+    pub(super) fn count_use(&self, grant: &str, owner: &str, micros: u64) -> u64 {
+        let now = time::now();
+        let (left, used_up, sharing) = {
+            let mut state = self.lock();
+            let Some(g) = state.sharing.grants.iter_mut().find(|g| g.id == grant) else {
+                return 0;
+            };
+            g.roll(now);
+            let had = g.left_for(owner);
+            *g.used.entry(owner.to_owned()).or_default() += micros;
+            let left = g.left_for(owner);
+            let used_up = (had > 0 && left == 0).then(|| g.clone());
+            (left, used_up, state.sharing.clone())
+        };
+        self.save_sharing(&sharing);
+        if let Some(g) = used_up {
+            self.share_used_item(&g, owner, now);
+        }
+        left
+    }
+
+    /// The owner's own job on `account` cost `usd` (Claude Code's `total_cost_usd`): it counts
+    /// against the month of every share of that account.
+    pub fn count_own(&self, account: &str, usd: f64) {
+        if usd.is_nan() || usd <= 0.0 {
+            return;
+        }
+        let micros = (usd * 1_000_000.0).ceil() as u64;
+        let ids: Vec<String> = self
+            .lock()
+            .sharing
+            .grants
+            .iter()
+            .filter(|g| g.account.as_deref() == Some(account))
+            .map(|g| g.id.clone())
+            .collect();
+        let owner = self.config.owner.clone();
+        for id in ids {
+            self.count_use(&id, &owner, micros);
+        }
+    }
+
+    /// "Sangam used the share of Deskree API": once a period for each person and share.
+    fn share_used_item(&self, grant: &super::shares::Grant, owner: &str, now: i64) {
+        if owner == self.config.owner {
+            return;
+        }
+        let name = super::hosting::person(owner);
+        let id = format!("share-used-{}-{owner}-{}", grant.id, grant.period);
+        let item = Item {
+            id: id.clone(),
+            kind: "obiRequest".into(),
+            job: String::new(),
+            title: format!("{name} used the share of {}", grant.label),
+            text: format!(
+                "All {}% of this month’s share is used (${} of ${}). The job that was running finished; Oby takes no more of {name}’s jobs on it until the {}.",
+                (grant.share + grant.extra).min(100),
+                grant.limit_micros() / 1_000_000,
+                grant.budget_cents / 100,
+                ordinal(grant.resets_day)
+            ),
+            options: vec![SHARE_MORE.into(), LEAVE_IT.into()],
+            details: None,
+            recommended: Some(1),
+            created: now,
+            done: None,
+            later: None,
+            answer: None,
+            obi: Some(json!({"type": "share_used", "grant": grant.id, "fromOwner": owner})),
+            plugin: None,
+            arrived: None,
+            confirm: None,
+            start: None,
+            github: None,
+        };
+        {
+            let mut state = self.lock();
+            if state.inbox.contains_key(&id) {
+                return;
+            }
+            state.inbox.insert(id, item.clone());
+        }
+        self.save_item(&item);
+    }
+
+    /// The owner's answer to "… used the share": 20% more this month (never past all of it), or
+    /// leave it.
+    fn answer_share_used(
+        self: &Arc<Self>,
+        mut item: Item,
+        answer: Option<String>,
+    ) -> Result<Value, ApiError> {
+        if let Some(a) = answer
+            .as_deref()
+            .filter(|a| *a != SHARE_MORE && *a != LEAVE_IT)
+        {
+            return Err(api(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("The answer is {SHARE_MORE} or {LEAVE_IT}, not {a}."),
+            ));
+        }
+        let grant = item
+            .obi
+            .as_ref()
+            .and_then(|o| o["grant"].as_str())
+            .unwrap_or("")
+            .to_owned();
+        let sharing = {
+            let mut state = self.lock();
+            let mut sharing = None;
+            if answer.as_deref() == Some(SHARE_MORE)
+                && let Some(g) = state.sharing.grants.iter_mut().find(|g| g.id == grant)
+            {
+                g.extra = (g.extra + 20).min(100 - g.share);
+                sharing = Some(state.sharing.clone());
+            }
+            item.done = Some(time::now());
+            item.answer = answer;
+            state.inbox.insert(item.id.clone(), item.clone());
+            sharing
+        };
+        self.save_item(&item);
+        if let Some(sharing) = sharing {
+            self.save_sharing(&sharing);
+            self.sync_shares_soon(true);
+        }
+        Ok(item.to_json())
+    }
+
+    /// `GET /v1/obid/sharing/shared`: the shares teammates gave this owner.
+    pub fn shared_with_me_json(&self) -> Value {
+        let exchanges: Vec<Exchange> = self.lock().exchanges.values().cloned().collect();
+        let mut list = super::shares::shared_with_me(&exchanges);
+        list.sort_by(|a, b| a["owner"].as_str().cmp(&b["owner"].as_str()));
+        json!(list)
+    }
+
+    /// A job's place from the API's `runsOn`: a teammate's Obi id, or `{obi, grant}` for a share
+    /// of their API account they gave this owner.
+    pub fn runs_on(&self, place: &Value) -> Result<crate::job::RunsOn, String> {
+        let (obi, grant) = match place {
+            Value::String(obi) => (obi.as_str(), None),
+            Value::Object(map) if map.keys().all(|k| k == "obi" || k == "grant") => (
+                map.get("obi").and_then(Value::as_str).unwrap_or(""),
+                map.get("grant").and_then(Value::as_str),
+            ),
+            _ => {
+                return Err(
+                    "runsOn is a teammate's Obi id, or {obi, grant} for a share they gave you."
+                        .into(),
+                );
+            }
+        };
+        let owner = self
+            .run_host(obi)
+            .ok_or_else(|| format!("{obi} isn't a teammate's Mac that takes jobs."))?;
+        if let Some(grant) = grant {
+            let offered = self.shared_with_me_json();
+            if !offered
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|s| s["grant"] == grant && s["from"] == obi)
+            {
+                return Err(format!(
+                    "{} hasn't shared that account with you.",
+                    super::hosting::person(&owner)
+                ));
+            }
+        }
+        Ok(crate::job::RunsOn {
+            obi: obi.to_owned(),
+            owner,
+            grant: grant.map(str::to_owned),
+        })
+    }
+
+    /// Whether this Obi's card takes teammates' shares (`share_offer`).
+    pub fn takes_shares(&self) -> bool {
+        self.lock()
+            .membership
+            .as_ref()
+            .is_some_and(|m| m.accepts().iter().any(|a| a == "share_offer"))
+    }
 }
 
 #[cfg(test)]

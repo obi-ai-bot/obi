@@ -290,6 +290,9 @@ pub struct Sharing {
     pub limits: Limits,
     #[serde(default)]
     pub mac: Mac,
+    /// Shares of the owner's company API accounts (#809, [`super::shares`]).
+    #[serde(default)]
+    pub grants: Vec<super::shares::Grant>,
 }
 
 impl Sharing {

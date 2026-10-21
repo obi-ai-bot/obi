@@ -16,7 +16,8 @@
         "time_limit",
         "stopped",
         "sharing_off",
-        "shutdown"
+        "shutdown",
+        "share_used"
       ]
     },
     "minutes": {

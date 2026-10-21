@@ -56,7 +56,7 @@ struct Request {
     id: Option<String>,
     /// The teammate's Obi whose Mac this message's jobs run on ("Run on another Mac", #808).
     #[serde(rename = "runsOn")]
-    runs_on: Option<String>,
+    runs_on: Option<Value>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,19 +110,13 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
     };
     let turns = validate_turns(req.turns)?;
     let runs_on = match &req.runs_on {
-        None => None,
-        Some(obi) => {
-            let owner = shared.link.run_host(obi).ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    format!("{obi} isn't a teammate's Mac that takes jobs."),
-                )
-            })?;
-            Some(crate::job::RunsOn {
-                obi: obi.clone(),
-                owner,
-            })
-        }
+        None | Some(Value::Null) => None,
+        Some(place) => Some(
+            shared
+                .link
+                .runs_on(place)
+                .map_err(|m| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, m))?,
+        ),
     };
     // The owner's message: after more than 30 minutes away, the answer starts with a recap (#594).
     let now = obi_protocol::time::now();

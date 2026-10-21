@@ -195,11 +195,11 @@
     },
     "action_type": {
       "description": "Every action type. There is no free-text message type.",
-      "enum": ["review_request", "question", "handoff", "run_request", "status", "accept", "decline", "result", "answer", "run_progress", "run_return", "run_cancel"]
+      "enum": ["review_request", "question", "handoff", "run_request", "status", "accept", "decline", "result", "answer", "run_progress", "run_return", "run_cancel", "share_offer", "share_status", "share_revoke"]
     },
     "request_type": {
       "description": "The action types that start an exchange.",
-      "enum": ["review_request", "question", "handoff", "run_request"]
+      "enum": ["review_request", "question", "handoff", "run_request", "share_offer"]
     },
     "agent": {
       "description": "The coding agent a run_request runs: its own CLI, with the member's own account.",
@@ -225,6 +225,19 @@
         "sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
         "bytes": { "type": "integer", "minimum": 1, "maximum": 2147483648 }
       }
+    },
+    "grant_id": {
+      "description": "A share of an API account its key holder gives (protocol.md 5.14): `g-` and 12 lower-case hex. Opaque to everyone but the key holder's Obi.",
+      "type": "string",
+      "minLength": 14,
+      "maxLength": 14,
+      "pattern": "^g-[0-9a-f]{12}$"
+    },
+    "cents": {
+      "description": "An amount of US dollars in whole cents.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000000
     },
     "host_use": {
       "description": "What a guest job used of the Mac it ran on.",
