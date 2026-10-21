@@ -1,8 +1,9 @@
 import Foundation
 
-/// One thing Oby is connected to, or can connect now, as Settings › Connectors lists it (#498): a
-/// coding tool's account, Tetrix, the runner's GitHub login, an obid plug-in or one of the
-/// runner's connections. Each comes from something that exists; nothing here is a placeholder.
+/// One service on Settings › Connectors, one row each as Sangam's `CONNECTORS` has them (#498): a coding
+/// tool (connected while one of its accounts is signed in), Tetrix, GitHub, a service Oby can't connect
+/// yet (`soon`), then an obid plug-in or one of the runner's connections. Connected is only said of
+/// what was checked; a service that's coming is never said to be connected.
 nonisolated struct Connector: Identifiable, Equatable, Sendable {
     /// Whether it works, as far as Oby can tell. Connected is only said of what was checked.
     enum State: Equatable, Sendable {
@@ -18,10 +19,8 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
 
     /// What a button does. Each one runs something real.
     enum Action: Equatable, Sendable {
-        /// Oby forgets this Mac's account, deleting the home it made for it (Settings › Accounts' Remove).
-        case removeAccount(Account)
-        /// The tool's own login, in Terminal, with the account's home.
-        case signIn(Account)
+        /// Settings › Accounts, where a tool's accounts are added, signed in and removed.
+        case accounts
         /// obid signs in to this Tetrix for every agent (`POST /v1/tetrix/sign-in`): Tetrix's own page.
         case connectTetrix(TetrixStatus.Server)
         /// Asks for another Tetrix's MCP address, then connects it as `connectTetrix` does.
@@ -62,15 +61,27 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
     var way: Way?
     /// A second button after `way`'s: "Another Tetrix…".
     var also: Way? = nil
-    /// The SF Symbol in front of it.
-    var symbol: String
+    /// The SF Symbol in front of it, where it has no brand mark.
+    var symbol = "link"
+    /// Its brand's mark in the asset catalog (Brands/, from Sangam's brands.tsx).
+    var brand: String? = nil
+    /// A service Oby can't connect yet: listed under Available, as the design does, saying so.
+    var soon = false
 
     var connected: Bool { state == .connected }
 
-    /// Whether every word of `query` is in its name, what it does or where it is, whatever the
-    /// case or accents. An empty query matches every one.
+    /// The row's tooltip: how it's signed in and, once connected, how to disconnect it where Oby has
+    /// no button (the row shows those steps only while it isn't connected).
+    var tip: String {
+        if soon { return "Oby can't connect \(name) yet." }
+        if connected, case .steps(let steps) = way { return "\(how)\n\(steps)" }
+        return how
+    }
+
+    /// Whether every word of `query` is in its name or what it does, as the design searches, whatever
+    /// the case or accents. An empty query matches every one.
     func matches(_ query: String) -> Bool {
-        let text = "\(name) \(about) \(place)"
+        let text = "\(name) \(about)"
         return query.split(whereSeparator: \.isWhitespace).allSatisfy {
             text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil
         }
@@ -80,6 +91,20 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
 nonisolated enum Connectors {
     static let thisMac = "This Mac"
     static let tetrixAbout = TetrixStatus.about
+    static let gitHubAbout = "Repos, pull requests and checks"
+
+    /// The coding tools, a row each as the design names them: agent, name, line and mark.
+    static let tools = [("claude", "Claude", "Run jobs in Claude Code", "claude"),
+                        ("codex", "ChatGPT", "Run jobs in Codex, ask ChatGPT", "openai"),
+                        ("cursor", "Cursor", "Run jobs in Cursor", "cursor")]
+
+    /// The design's services Oby can't connect yet (Deskree Ops #502, Slack #26, Gmail #501, Google
+    /// Meet #503, Zoom #504): id, name, line and mark.
+    static let coming = [("deskree", "Deskree Ops", "Projects, deploys and incidents", "deskree"),
+                         ("slack", "Slack", "Read and send messages", "slack"),
+                         ("gmail", "Gmail", "Read and manage your email", "gmail"),
+                         ("meet", "Google Meet", "Join meetings and keep the notes", "meet"),
+                         ("zoom", "Zoom", "Join meetings and keep the notes", "zoom")]
 
     /// What the runner said about itself, for the page: nil parts are what it doesn't say (an
     /// older runner, or obid, which lists no connections yet, #444).
@@ -141,47 +166,67 @@ nonisolated enum Connectors {
         return lists
     }
 
-    /// Everything this Mac and its runner are connected to, and what's set up but not connected
-    /// yet: the coding tools' accounts, Tetrix, GitHub, then the runner's connections.
-    static func list(mac: [AccountState], runner: RunnerState?) -> [Connector] {
-        // The runner on this Mac lists this Mac's own accounts: once is enough, with this Mac's buttons.
-        let runnerAccounts = (runner?.accounts ?? []).filter { account in
-            !(runner?.local == true && mac.contains { $0.account.id == account.account.id })
+    /// The accounts jobs run on, from where Settings › Accounts lists them (`AccountPlaces`): with obid
+    /// on this Mac only obid's, never this Mac's own `accounts.json` beside it, which names the same
+    /// logins under other ids; with a remote runner this Mac's and the runner's; with none, this Mac's.
+    /// `runner` is nil while the runner doesn't answer: with obid on this Mac that's nil too, as nothing is known yet.
+    static func accounts(mac: [AccountState], runner: [AccountState]?, local: Bool, hasRunner: Bool) -> [AccountState]? {
+        let places = AccountPlaces.of(local: local, runner: hasRunner)
+        if places == [.runner], runner == nil { return nil }
+        return places.flatMap { $0 == .mac ? mac : runner ?? [] }
+    }
+
+    /// Every service, in the design's order: Deskree Ops, Tetrix, GitHub, the coding tools, then the
+    /// rest the design shows, and after them what the runner adds (obid's plug-ins, its connections).
+    /// `accounts` are the ones jobs run on (`accounts(mac:runner:local:hasRunner:)`), nil while the runner
+    /// that holds them doesn't answer; `runner` is nil while it doesn't answer. Then what it holds says it waits for it.
+    static func list(accounts: [AccountState]?, runner: RunnerState?) -> [Connector] {
+        let soon = coming.map { id, name, about, brand in
+            Connector(id: id, name: name, about: about, place: thisMac, how: "Coming soon", state: .available, way: nil, brand: brand, soon: true)
         }
-        var list = mac.map { account($0, place: thisMac, runner: nil) }
-        if let runner { list += runnerAccounts.map { account($0, place: runner.name, runner: runner.name) } }
-        // obid's own Tetrix replaces its older plug-in of the same name: one Tetrix row.
-        let plugins = (runner?.plugins ?? []).filter { runner?.tetrix == nil || $0.id != "tetrix" }
-        if let runner { list += plugins.map { plugin($0, place: runner.name) } }
+        var list = [soon[0]]
         if let runner, let status = runner.tetrix { list.append(tetrix(status, place: runner.name, local: runner.local)) }
+        else if let runner, let old = runner.plugins?.first(where: { $0.id == "tetrix" }) { list.append(plugin(old, place: runner.name)) }
+        else { list.append(untilRunner(id: "tetrix", name: "Tetrix", about: tetrixAbout, brand: "tetrix", runner: runner?.name)) }
         if let runner, let login = runner.gitHubLogin { list.append(gitHub(login, place: runner.name)) }
         else if let runner, let github = runner.github { list.append(gitHub(github, checks: runner.checks, place: runner.name)) }
-        if let runner { list += (runner.connections ?? []).map { connection($0, place: runner.name) } }
+        else { list.append(untilRunner(id: "github", name: "GitHub", about: gitHubAbout, brand: "github", runner: runner?.name)) }
+        list += tools.map { agent, name, about, brand in
+            accounts.map { tool(agent, name: name, about: about, brand: brand, accounts: $0) }
+                ?? untilRunner(id: agent, name: name, about: about, brand: brand, runner: nil)
+        }
+        list += soon.dropFirst()
+        if let runner {
+            list += (runner.plugins ?? []).filter { $0.id != "tetrix" }.map { plugin($0, place: runner.name) }
+            list += (runner.connections ?? []).map { connection($0, place: runner.name) }
+        }
         return list
     }
 
-    /// The page's groups, each in `list`'s order, with only what matches `query`; empty ones are left out.
+    /// The page's groups, as the design has them: Connected, then Available (everything else, what it
+    /// needs said on its row), each in `list`'s order, with only what matches `query`; empty ones are left out.
     static func groups(_ list: [Connector], query: String) -> [Group] {
         let shown = list.filter { $0.matches(query) }
-        return [("Connected", Connector.State.connected), ("Needs attention", .broken), ("Not confirmed", .unconfirmed), ("Available", .available)]
-            .map { title, state in Group(title: title, items: shown.filter { $0.state == state }) }
+        return [Group(title: "Connected", items: shown.filter(\.connected)), Group(title: "Available", items: shown.filter { !$0.connected })]
             .filter { !$0.items.isEmpty }
     }
 
-    /// A coding tool's account. This Mac's have buttons; the runner's are set up on its machine.
-    static func account(_ state: AccountState, place: String, runner: String?) -> Connector {
-        let tool = Usage.tool(state.account.agent)
-        let way: Connector.Way = switch (state.signedIn, runner) {
-        case (true, nil): .button("Disconnect…", .removeAccount(state.account))
-        case (false, nil): .button("Sign In", .signIn(state.account))
-        case (true, let runner?):
-            .steps("To disconnect it, take it out of accounts.json in OBY_HOME on \(runner), or sign out with \(tool)'s own logout in its home.")
-        case (false, let runner?):
-            .steps("Sign it in on \(runner) with \(tool)'s own login, in this account's home.")
-        }
-        return Connector(id: "account-\(place)-\(state.account.id)", name: state.account.heading, about: "Runs jobs in \(tool)",
-                         place: place, how: state.signedIn ? signedIn(tool: tool, label: state.label) : "Not signed in",
-                         state: state.signedIn ? .connected : .available, way: way, symbol: Usage.symbol(state.account.agent))
+    /// A coding tool: connected while one of its accounts is signed in, saying which by name (never a
+    /// login's email). Its accounts are added, signed in and removed in Settings › Accounts.
+    static func tool(_ agent: String, name: String, about: String, brand: String, accounts: [AccountState]) -> Connector {
+        let own = accounts.filter { $0.account.agent == agent }
+        let signedIn = own.filter(\.signedIn).map(\.account.name)
+        let how = !signedIn.isEmpty ? "Signed in with \(Usage.tool(agent))'s own login: " + signedIn.joined(separator: ", ")
+            : own.isEmpty ? "No \(Usage.tool(agent)) account yet" : "Not signed in: " + own.map(\.account.name).joined(separator: ", ")
+        return Connector(id: agent, name: name, about: about, place: thisMac, how: how, state: signedIn.isEmpty ? .available : .connected,
+                         way: .button(signedIn.isEmpty ? "Connect" : "Manage Accounts…", .accounts), brand: brand)
+    }
+
+    /// What the runner holds (Tetrix, GitHub, obid's accounts) while it doesn't answer (`runner` nil), or one that doesn't say.
+    static func untilRunner(id: String, name: String, about: String, brand: String, runner: String?) -> Connector {
+        Connector(id: id, name: name, about: about, place: runner ?? thisMac, how: "Oby's runner holds it", state: .available,
+                  way: .steps(runner.map { "\($0) doesn't say: it needs a newer runner." } ?? "Shows here once Oby's runner answers (Settings › Runner)."),
+                  brand: brand)
     }
 
     /// Tetrix, held by obid for every agent of every account: one sign-in, on Tetrix's own page.
@@ -191,7 +236,7 @@ nonisolated enum Connectors {
     static func tetrix(_ status: TetrixStatus, place: String, local: Bool) -> Connector {
         let row = { (state: Connector.State, way: Connector.Way?, also: Connector.Way?) in
             Connector(id: "tetrix", name: "Tetrix", about: tetrixAbout, place: place, how: status.how, state: state,
-                      way: way, also: also, symbol: "point.3.connected.trianglepath.dotted")
+                      way: way, also: also, brand: "tetrix")
         }
         let there = local ? nil : Connector.Way.steps("Connect or disconnect it on \(place) itself, with Oby there: Tetrix's sign-in comes back to that machine.")
         switch status.state {
@@ -221,7 +266,7 @@ nonisolated enum Connectors {
                          place: place, how: "A plug-in of obid's\(plugin.version.map { " (\($0))" } ?? "") · \(said)", state: state,
                          way: plugin.enabled ? .button("Disconnect", .disablePlugin(plugin.id))
                                              : .button("Connect…", .enablePlugin(id: plugin.id, needsURL: plugin.id == "tetrix")),
-                         symbol: plugin.id == "tetrix" ? "point.3.connected.trianglepath.dotted" : "puzzlepiece.extension")
+                         symbol: "puzzlepiece.extension", brand: plugin.id == "tetrix" ? "tetrix" : nil)
     }
 
     /// What a plug-in of these kinds gives (docs/ARCHITECTURE.md 5.1).
@@ -249,9 +294,9 @@ nonisolated enum Connectors {
         let steps = app
             ? "To disconnect the app, unset OBY_GITHUB_APP_ID on \(there) and restart the runner: its calls then go as your gh login. gh auth logout there signs that out too, and then Oby can't clone, push or open pull requests."
             : "To disconnect it, run gh auth logout on \(there). Oby can't clone, push or open pull requests until you sign in again with gh auth login."
-        return Connector(id: "github", name: "GitHub", about: "Repositories, pull requests and checks", place: place,
+        return Connector(id: "github", name: "GitHub", about: gitHubAbout, place: place,
                          how: how + (runs.map { " \($0)" } ?? ""), state: app ? .connected : .unconfirmed, way: .steps(steps),
-                         symbol: "arrow.triangle.branch")
+                         brand: "github")
     }
 
     /// GitHub as obid's gh is signed in to it (`GET /v1/github`): connected as its user, or a button
@@ -260,19 +305,19 @@ nonisolated enum Connectors {
         let there = place == thisMac ? "this Mac" : place
         if login.signedIn {
             let who = login.user.map { " as \($0)" } ?? ""
-            return Connector(id: "github", name: "GitHub", about: "Repositories, pull requests and checks", place: place,
+            return Connector(id: "github", name: "GitHub", about: gitHubAbout, place: place,
                              how: "Signed in with GitHub's own login\(who). Oby clones, pushes and opens pull requests with it.",
                              state: .connected, way: .steps("To disconnect it, run gh auth logout on \(there)."),
-                             symbol: "arrow.triangle.branch")
+                             brand: "github")
         }
         guard login.gh else {
-            return Connector(id: "github", name: "GitHub", about: "Repositories, pull requests and checks", place: place,
+            return Connector(id: "github", name: "GitHub", about: gitHubAbout, place: place,
                              how: "\(place == thisMac ? "This Mac" : place) has no GitHub CLI for Oby to sign in with.",
-                             state: .broken, way: nil, symbol: "arrow.triangle.branch")
+                             state: .broken, way: nil, brand: "github")
         }
-        return Connector(id: "github", name: "GitHub", about: "Repositories, pull requests and checks", place: place,
+        return Connector(id: "github", name: "GitHub", about: gitHubAbout, place: place,
                          how: "Not signed in: Oby can't clone private repositories, push or open pull requests. Signing in uses GitHub's own page.",
-                         state: .available, way: .button("Sign In…", .signInGitHub), symbol: "arrow.triangle.branch")
+                         state: .available, way: .button("Sign In…", .signInGitHub), brand: "github")
     }
 
     /// An app or API the runner's agents use through its broker, with the secret it sends, by name.
@@ -285,8 +330,7 @@ nonisolated enum Connectors {
             : "Its vault secret \(connection.secret) is missing, so agents' calls fail: add it on the runner with oby-runner vault add \(connection.secret)"
         return Connector(id: "connection-\(connection.name)", name: connection.name,
                          about: connection.mcp != nil ? "MCP server at \(host)" : "API at \(host)", place: place, how: how,
-                         state: connection.secretSaved ? .connected : .broken, way: .button("Disconnect…", .disconnect(connection.name)),
-                         symbol: "link")
+                         state: connection.secretSaved ? .connected : .broken, way: .button("Disconnect…", .disconnect(connection.name)))
     }
 
     /// What the page says while the runner doesn't answer, when its rows are left out; nil while it does.
@@ -302,10 +346,5 @@ nonisolated enum Connectors {
     /// What obid takes as Tetrix's MCP URL (plugins/tetrix/obi-plugin.json): HTTPS, with a host.
     static func isURL(_ text: String) -> Bool {
         text.lowercased().hasPrefix("https://") && URL(string: text)?.host()?.isEmpty == false
-    }
-
-    /// "Signed in with Claude Code's own login · Max": the plan, never the email the label carries.
-    static func signedIn(tool: String, label: String?) -> String {
-        "Signed in with \(tool)'s own login" + (Usage.plan(label).map { " · \($0)" } ?? "")
     }
 }

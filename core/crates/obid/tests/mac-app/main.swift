@@ -95,6 +95,10 @@ do {
                 say("done")
                 exit(0)
             }
+        case .jobDeleted(let id):
+            // RunnerFeed drops it from the list: a job followed here goes too.
+            say("event job-deleted \(id)")
+            if id == following { following = nil }
         case .inbox(let item, _):
             say("event inbox \(item.id)")
         case .accounts(let accounts):

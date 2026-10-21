@@ -30,6 +30,8 @@ use crate::sandbox::{self, Sandbox, Spec};
 use crate::store::{self, Store};
 use crate::{acp, codex, git, policy, review};
 
+/// How long the decision check may wait on Tetrix before a job publishes (crate::decisions).
+const DECISIONS_WITHIN: Duration = Duration::from_secs(30);
 /// How often, at most, a working job's `activity` and `context` are saved and sent.
 const ACTIVITY_EVERY: Duration = Duration::from_secs(1);
 /// How long a review another Obi asked for may take. The owner's own jobs have no such clock: they
@@ -3028,6 +3030,15 @@ impl Jobs {
         })?))
     }
 
+    /// Renames a job (`PATCH /v1/jobs/{id}`), whatever it's doing: the apps call it `title` from
+    /// now on. `title` is already one line of 1 to 60 characters.
+    pub fn rename(&self, id: &str, title: String) -> Option<Job> {
+        self.update(id, |job| {
+            job.title = Some(title);
+            job.changed("Renamed by you".into());
+        })
+    }
+
     /// Why the job `id` can't be deleted now, when it can't (see [`undeletable_in`]).
     pub fn undeletable(&self, id: &str) -> Option<Refused> {
         let state = self.lock();
@@ -5155,6 +5166,12 @@ impl Jobs {
         }
         // What the secret scan found the last time it blocked publishing: the same again stops.
         let mut blocked_before: Option<Vec<crate::publish::Found>> = None;
+        // The decision check gave its one round (crate::decisions), in this run or before a restart.
+        let mut decided_before = self
+            .get(id)
+            .and_then(|j| j.tetrix)
+            .and_then(|t| t.decisions)
+            .is_some_and(|d| d.asked);
         // The turn only the owner's words started after the work's: its reply leaves the job's
         // summary to the work (#699).
         let mut noted = false;
@@ -5641,6 +5658,46 @@ impl Jobs {
                 });
                 return Ok(());
             }
+            // Before it goes out: what it changes against earlier sessions' decisions. One round
+            // to put it back or say why; what's left goes into the pull request, never a block.
+            let conflicts = self
+                .decision_check(id, &head, &start_commit, decided_before, signal)
+                .await;
+            // Tetrix may take a while: stopped meanwhile, nothing more.
+            if *signal.borrow() != Signal::Run {
+                return Ok(());
+            }
+            if !conflicts.is_empty() && !decided_before {
+                decided_before = true;
+                let quoted = crate::decisions::quoted(&conflicts, &crate::brain::briefing::nonce());
+                let written = crate::obi_dir::folder(&worktree, "inputs").and_then(|dir| {
+                    crate::obi_dir::write_new(&dir, crate::decisions::FILE, quoted.as_bytes())
+                });
+                // Without the quoted file the round can't be told what was decided: it goes out
+                // as it is, the conflicts listed in the pull request.
+                if let Err(e) = written {
+                    tracing::warn!("job {id}: the decisions weren't quoted: {e}");
+                    self.update(id, |job| {
+                        if let Some(d) = job.tetrix.as_mut().and_then(|t| t.decisions.as_mut()) {
+                            d.asked = false;
+                        }
+                    });
+                } else {
+                    message = crate::decisions::prompt(&conflicts);
+                    self.lock().wrapping.remove(id);
+                    self.update(id, |job| {
+                        job.phase = Some(Phase::Work);
+                        job.publish_step = None;
+                        job.round = Some(job.current_round() + 1);
+                        job.step = format!(
+                            "Round {} of {}: a change goes against an earlier decision",
+                            job.current_round(),
+                            job.max_rounds().max(job.current_round())
+                        );
+                    });
+                    continue 'rounds;
+                }
+            }
             self.update(id, |job| {
                 job.commits = Some(commits);
                 job.pushed = pushed;
@@ -5832,6 +5889,104 @@ impl Jobs {
             job.tetrix = Some(ended);
             job.outgoing.extend(outgoing);
         });
+    }
+
+    /// The decision check (crate::decisions) of job `id`'s change from `start` to `head`, read in
+    /// obid's own clone as the secret scan reads it: the numbers it changes that earlier Tetrix
+    /// sessions decided otherwise, kept in its `tetrix`. Nothing without Tetrix through Oby, and
+    /// Tetrix isn't asked when no line's only change is a number.
+    async fn decision_check(
+        &self,
+        id: &str,
+        head: &str,
+        start: &str,
+        asked: bool,
+        signal: &watch::Receiver<Signal>,
+    ) -> Vec<crate::decisions::Conflict> {
+        let (Some(job), Some(tetrix), Some(connections)) =
+            (self.get(id), self.tetrix.get(), self.connections.get())
+        else {
+            return Vec::new();
+        };
+        let (Some(seen), Some(repo)) = (job.tetrix.clone(), self.repo(&job.repo)) else {
+            return Vec::new();
+        };
+        if !tetrix.connected() || start.is_empty() {
+            return Vec::new();
+        }
+        let clone = git::clone_path(&self.config.home, &repo.repo);
+        let range = format!("{start}..{head}");
+        let mut args = vec!["diff", "-U0"];
+        args.extend_from_slice(crate::publish::DIFF);
+        args.push(&range);
+        let Ok(mut diff) = crate::publish::git_in(&clone, &args).await else {
+            return Vec::new();
+        };
+        if diff.len() > crate::decisions::DIFF_MAX {
+            let mut cut = crate::decisions::DIFF_MAX;
+            while !diff.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            diff.truncate(cut);
+        }
+        let (files, changes) = crate::decisions::pick(crate::decisions::changes(&diff));
+        if changes.is_empty() {
+            return Vec::new();
+        }
+        // Never the job's own sessions: its agent's, and the graph gaps obid saved for it.
+        let own: Vec<String> = seen
+            .saved
+            .iter()
+            .chain(&seen.gaps.session)
+            .cloned()
+            .collect();
+        // One deadline for all of it, and a stop ends it at once.
+        let mut stop = signal.clone();
+        let stopped = async move {
+            loop {
+                if *stop.borrow_and_update() != Signal::Run {
+                    break;
+                }
+                if stop.changed().await.is_err() {
+                    break;
+                }
+            }
+        };
+        let read = tokio::select! {
+            read = tokio::time::timeout(DECISIONS_WITHIN, tetrix.digests(connections, &job, &files, &own)) => read,
+            _ = stopped => return Vec::new(),
+        };
+        let (digests, error) = match read {
+            Ok(digests) => (digests, None),
+            Err(_) => (
+                Vec::new(),
+                Some(format!(
+                    "Tetrix didn't answer within {} seconds: nothing was checked.",
+                    DECISIONS_WITHIN.as_secs()
+                )),
+            ),
+        };
+        // Out of time after the author's round: what the first check found still stands, and
+        // still goes into the pull request.
+        let (sessions, conflicts) = match seen.decisions.filter(|_| error.is_some()) {
+            Some(earlier) => (earlier.sessions, earlier.conflicts),
+            None => (
+                digests.iter().map(|d| d.session.clone()).collect(),
+                crate::decisions::conflicts(&changes, &digests),
+            ),
+        };
+        let decisions = crate::decisions::Decisions {
+            sessions,
+            conflicts: conflicts.clone(),
+            asked: asked || !conflicts.is_empty(),
+            error,
+        };
+        self.update(id, |job| {
+            if let Some(tetrix) = job.tetrix.as_mut() {
+                tetrix.decisions = Some(decisions);
+            }
+        });
+        conflicts
     }
 
     /// Ends the job `id` done with `commits` (and `pushed` of them on its pull request), then

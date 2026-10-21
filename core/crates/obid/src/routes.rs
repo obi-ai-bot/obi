@@ -192,6 +192,38 @@ pub async fn archive(
     }
 }
 
+/// `PATCH /v1/jobs/{id}`: `{"title": "…"}` renames the job, one line of 1 to 60 characters once
+/// trimmed (as a new job's `title`).
+pub async fn rename(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Rename {
+        title: String,
+    }
+    let rename: Rename = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "The body is {\"title\": \"…\"}."))?;
+    let title = rename.title.trim().to_owned();
+    if title.is_empty()
+        || title.chars().count() > 60
+        || title
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "title is one line of 1 to 60 characters.",
+        ));
+    }
+    match shared.jobs.rename(&id, title) {
+        None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+        Some(job) => Ok(json(StatusCode::OK, job.to_json())),
+    }
+}
+
 /// `DELETE /v1/jobs/{id}`: a job that ended goes for good, its worktree and local branch with it;
 /// nothing pushed is touched.
 pub async fn delete(

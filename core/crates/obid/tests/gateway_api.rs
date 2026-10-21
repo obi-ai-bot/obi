@@ -513,3 +513,60 @@ fn a_wait_through_the_gateway_starts_at_once() {
     let (rest, _) = read_until(&mut wait, 20, |seen| seen.contains(&id));
     assert!(rest.contains(&id), "{rest}");
 }
+
+/// A phone's FCM token is kept with the paired device that handed it over through the gateway,
+/// and revoking the device drops it: a lost phone gets no more alerts.
+#[test]
+fn revoking_a_device_drops_its_push_token() {
+    use aws_lc_rs::encoding::AsDer;
+    use base64::Engine as _;
+    let folder = Folder::new("gateway-push");
+    let obid = started(&folder);
+    let key = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
+    let der = base64::engine::general_purpose::STANDARD.encode(key.as_der().unwrap().as_ref());
+    let label = ["PRIVATE", "KEY"].join(" ");
+    let account = json!({"type": "service_account", "project_id": "oby-test",
+        "private_key": format!("-----BEGIN {label}-----\n{der}\n-----END {label}-----\n"),
+        "client_email": "push@oby-test.iam.gserviceaccount.com",
+        "token_uri": "https://oauth2.googleapis.com/token"});
+    let mut child = Command::new(OBID)
+        .args(["vault", "--config"])
+        .arg(folder.0.join("config.json"))
+        .args(["add", "oby.fcm.serviceAccount"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(account.to_string().as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+
+    let token = paired(&obid);
+    let fcm =
+        json!({"token": "fcm-token:lost-phone", "platform": "fcm", "topic": "com.deskree.oby"});
+    let answer = through(&obid, Some(&token), "POST", "/v1/notifications", Some(&fcm));
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    assert_eq!(answer.body, json!({"push": true}));
+    let id = call(&obid, "GET", "/v1/pairing/devices", None).body[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let file = obid.home.join("push/fcm.json");
+    let kept: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(
+        kept,
+        json!([{"token": "fcm-token:lost-phone", "device": id}])
+    );
+
+    let revoked = call(&obid, "DELETE", &format!("/v1/pairing/devices/{id}"), None);
+    assert_eq!(revoked.status, 204, "{}", revoked.text);
+    let kept: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(kept, json!([]));
+}
