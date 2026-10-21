@@ -41,6 +41,7 @@ pub mod plugins;
 pub mod policy;
 pub mod process;
 pub mod publish;
+pub mod push;
 pub mod review;
 pub mod routes;
 pub mod routines;
@@ -276,6 +277,7 @@ pub async fn serve(
     jobs.use_routines(routines.clone());
     let github =
         github_work::Feed::open(config.clone(), jobs.clone(), link.clone(), events.clone());
+    let pushes = push::Push::open(&config.home);
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -300,6 +302,7 @@ pub async fn serve(
         tetrix,
         pages: web::Sessions::default(),
         github_work: github.clone(),
+        push: pushes,
         stopping: stopping_rx.clone(),
     });
     let app = api::router(shared.clone());
@@ -336,6 +339,8 @@ pub async fn serve(
     jobs.resume();
     link.start();
     github.spawn(stopping_rx.clone());
+    // Job alerts to Android phones through FCM (crate::push).
+    push::spawn(shared.clone());
     // A tool reported an account's usage: every app hears the accounts as they are now.
     {
         let shared = shared.clone();
