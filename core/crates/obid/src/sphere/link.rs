@@ -4807,6 +4807,7 @@ impl Link {
             confirm: None,
             start: None,
             github: None,
+            watch: None,
         };
         {
             let mut state = self.lock();
