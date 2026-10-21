@@ -13,7 +13,10 @@ docker cp -L "$id:/boot/initrd.img-$(docker run --rm --platform linux/arm64 obi-
 docker export "$id" > "$out/root.tar"
 # An ext4 root made from the files, in a container that has mke2fs; read-only in every VM.
 docker run --rm --platform linux/arm64 -v "$out:/out" debian:bookworm@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61 sh -c '
-  set -e; apt-get update -qq >/dev/null; apt-get install -y -qq e2fsprogs >/dev/null
+  set -e
+  rm -f /etc/apt/sources.list.d/debian.sources
+  echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261020T000000Z bookworm main" > /etc/apt/sources.list
+  apt-get update -qq >/dev/null; apt-get install -y -qq e2fsprogs >/dev/null
   mkdir /r && tar -xpf /out/root.tar -C /r --exclude=boot --exclude=.dockerenv
   rm /out/root.tar
   rm -rf /r/dev/* /r/proc/* /r/sys/*
