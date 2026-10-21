@@ -187,9 +187,9 @@ private fun GitHubCard(item: GitHubWork.Item, start: suspend () -> Unit, later: 
         HorizontalDivider(color = c.divider)
         Spacer(Modifier.height(14.dp))
         AskCard(item.label, item.headline,
-                (item.action?.let { listOf(CardOption(it, it, item.actionDetail, recommended = true)) } ?: emptyList()) +
+                (item.action?.let { listOf(CardOption(it, it, recommended = true)) } ?: emptyList()) +
                     (if (item.page == null) emptyList() else listOf(CardOption("Open on GitHub", "open"))),
-                happened = item.note, busy = busy, onLater = later,
+                happened = item.note, busy = busy, onLater = later, explains = false,
                 onChoose = { option ->
                     if (option.answer == "open") item.page?.let(open) else {
                         busy = true

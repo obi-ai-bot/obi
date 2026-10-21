@@ -229,6 +229,13 @@ impl Snapshot {
         redacted(&self.needles, text, self.label)
     }
 
+    /// Whether redacting `text` ([`Secrets::redact`]), then looking for what is left
+    /// ([`Secrets::names_in`]), could change it: [`Snapshot::holds`], or `text` decoded whole holds
+    /// a value. False means both leave it as it is, so a caller may skip them.
+    pub fn touches(&self, text: &str) -> bool {
+        self.holds(text) || !hits(&self.needles, text).is_empty()
+    }
+
     /// Whether [`Snapshot::redact`] would change `text`, told cheaply. Nothing changes until a
     /// needle is found in `text` as it is, or a run in it decodes to one; and text over lines is
     /// left to [`Snapshot::redact`] itself, whose joined runs are no part of `text` as it is.

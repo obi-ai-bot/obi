@@ -16,22 +16,28 @@ resources="$contents/Resources/obid"
 mkdir -p "$helpers" "$agents" "$resources"
 
 # Xcode's build variables would point cargo at the wrong SDK, so it builds in a clean environment.
+# scripts/release.sh passes OBY_CARGO_TARGET_DIR, a target directory kept between releases.
+target_dir="${OBY_CARGO_TARGET_DIR:-$root/core/target}"
 build=(env -i HOME="$HOME" PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-  cargo build --quiet --release -p obid --manifest-path "$root/core/Cargo.toml")
+  cargo build --quiet --release -p obid --manifest-path "$root/core/Cargo.toml" --target-dir "$target_dir")
 
-# Both architectures when this Mac's Rust has both; a release needs them.
+# Both architectures when this Mac's Rust has both, in one cargo run so they compile side by side;
+# a release needs them.
+targets=()
 slices=()
 for target in aarch64-apple-darwin x86_64-apple-darwin; do
   libdir=$(env -i HOME="$HOME" PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \
     rustc --print target-libdir --target "$target" 2>/dev/null || true)
   if [[ -n "$libdir" ]] && ls "$libdir"/libstd-* > /dev/null 2>&1; then
-    "${build[@]}" --target "$target"
-    slices+=("$root/core/target/$target/release/obid")
+    targets+=(--target "$target")
+    slices+=("$target_dir/$target/release/obid")
   fi
 done
 if (( ${#slices} == 0 )); then
   "${build[@]}"
-  slices=("$root/core/target/release/obid")
+  slices=("$target_dir/release/obid")
+else
+  "${build[@]}" "${targets[@]}"
 fi
 if [[ "${CONFIGURATION:-Debug}" == Release ]] && (( ${#slices} < 2 )); then
   echo "error: a release of Oby needs obid for arm64 and x86_64: rustup target add aarch64-apple-darwin x86_64-apple-darwin" >&2

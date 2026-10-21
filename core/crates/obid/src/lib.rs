@@ -34,6 +34,7 @@ pub mod github_work;
 pub mod job;
 pub mod jobs;
 pub mod limits;
+pub mod listen;
 pub mod logs;
 pub mod memory;
 pub mod obi_dir;
@@ -50,6 +51,7 @@ pub mod sandbox;
 pub mod scan;
 pub mod secrets;
 pub mod settings;
+pub mod slack;
 pub mod sphere;
 pub mod store;
 pub mod teammates;
@@ -58,6 +60,7 @@ pub mod token;
 pub mod transcript;
 pub mod usage;
 pub mod vault;
+pub mod watch;
 pub mod web;
 
 use std::future::Future;
@@ -79,6 +82,16 @@ pub const JOBS_GRACE: Duration = Duration::from_secs(2);
 /// seconds after `shutdown` before it is killed, docs/ARCHITECTURE.md 5.3, step 6; they stop at
 /// once, side by side with the jobs, from the moment obid is told to stop).
 pub const PLUGINS_GRACE: Duration = Duration::from_secs(8);
+
+/// How long obid waits for the worktrees' measurement before it answers anyway (`serve`).
+pub const MEASURE_FIRST: Duration = Duration::from_millis(200);
+
+/// How long after it starts obid runs its first cleanup pass, out of the way of the apps' first
+/// calls.
+pub const CLEAN_FIRST: Duration = Duration::from_secs(30);
+
+/// How often the cleanup pass runs when no job settles meanwhile.
+pub const CLEAN_EVERY: Duration = Duration::from_secs(3 * 60 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
@@ -148,18 +161,38 @@ fn keep_private(folder: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The cleanup pass (docs/runner-api.md, `cleanup`): [`CLEAN_FIRST`] after obid starts, then
+/// whenever a job may have settled, and every [`CLEAN_EVERY`] for the jobs that settle as time
+/// passes. A pass that removed a worktree measures the folder again, unless obid is stopping
+/// (`cancelled`).
+async fn keep_worktrees_clean(shared: Arc<api::Shared>, cancelled: Arc<AtomicBool>) {
+    tokio::time::sleep(CLEAN_FIRST).await;
+    loop {
+        let now = obi_protocol::time::now();
+        if shared.jobs.clean_worktrees(now, shared.cleared.at()).await > 0 {
+            let (shared, cancelled) = (shared.clone(), cancelled.clone());
+            let _ =
+                tokio::task::spawn_blocking(move || shared.cleanup.remeasure_unless(&cancelled))
+                    .await;
+        }
+        shared.jobs.wait_to_clean(CLEAN_EVERY).await;
+    }
+}
+
 /// Serves the API on `config.listen` until `stop` resolves, then lets requests under way finish
 /// for at most [`SHUTDOWN_GRACE`]. `ready` is told the address once obid is listening.
 ///
-/// Before it answers, obid measures `home/worktrees` (`status.cleanup.bytes`), which walks every
-/// worktree and can take a while. A `stop` that resolves meanwhile ends that walk and returns at
-/// once, without `ready` being told anything: a stop while starting is a stop, not a wait.
+/// It measures `home/worktrees` (`status.cleanup.bytes`), a walk of every worktree, while it
+/// starts: it waits for it at most [`MEASURE_FIRST`], then answers and lets the walk finish in
+/// the background. A `stop` that resolves while it waits ends the walk and returns at once,
+/// without `ready` being told anything: a stop while starting is a stop, not a wait.
 pub async fn serve(
     config: Config,
     token: String,
     stop: impl Future<Output = ()> + Send + 'static,
     ready: impl FnOnce(SocketAddr),
 ) -> Result<(), StartError> {
+    let mut stopwatch = Stopwatch::new();
     let address = config.listen;
     let listener = tokio::net::TcpListener::bind(address)
         .await
@@ -177,23 +210,27 @@ pub async fn serve(
         None => None,
     };
     let host = gethostname::gethostname().to_string_lossy().into_owned();
-    let home = config.home.clone();
+    let cleanup = Arc::new(api::Cleanup::unmeasured(&config.home));
     let cancelled = Arc::new(AtomicBool::new(false));
-    let measuring = {
-        let cancelled = cancelled.clone();
-        tokio::task::spawn_blocking(move || api::Cleanup::measure_unless(&home, &cancelled))
+    // However `serve` returns (a stop, a start that fails, the end), the walk ends with it.
+    let _end_walk = SetOnDrop(cancelled.clone());
+    let mut measuring = {
+        let (cleanup, cancelled) = (cleanup.clone(), cancelled.clone());
+        tokio::task::spawn_blocking(move || cleanup.remeasure_unless(&cancelled))
     };
     let mut stop = Box::pin(stop);
-    let cleanup = tokio::select! {
+    let measured = tokio::select! {
         // A stop that is there already wins over a measurement that is done too.
         biased;
         () = &mut stop => {
-            cancelled.store(true, Ordering::Relaxed);
             tracing::info!("stopped while starting");
             return Ok(());
         }
-        measured = measuring => measured.map_err(|e| StartError::Serve(std::io::Error::other(e)))?,
+        // A few worktrees are measured before the first answer; the owner's 20 GB took 4 to 28
+        // seconds, so obid doesn't wait for those.
+        measured = tokio::time::timeout(MEASURE_FIRST, &mut measuring) => measured.ok(),
     };
+    stopwatch.lap("worktrees");
     // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
     secrets::known().learn("api-token", &token);
     // claudeKeychain as the owner set it; left out, on by itself on macOS when Claude Code's default
@@ -209,6 +246,7 @@ pub async fn serve(
         jobs::keep_keychain_logins();
     }
     vault::install(&config.home, &config.vault);
+    stopwatch.lap("vault");
     // What the accounts API changed, over the configuration's accounts, before anything uses them;
     // and what sign-ins cut short by the last stop left behind.
     config.agents.open(&config.home);
@@ -216,7 +254,16 @@ pub async fn serve(
     github_login::sweep(&config.home);
     // What an older obid's boxes could have left in the accounts' folders (#655), said once.
     jobs::check_account_folders(&config.agents.get());
+    stopwatch.lap("accounts");
     let events = events::Events::new();
+    // The walk's end: said to the apps when it comes after obid answers (`cleanup`), and in the
+    // log when it failed.
+    match measured {
+        Some(walked) => log_walk(walked),
+        None => {
+            tokio::spawn(walk_ended(measuring, events.clone(), cleanup.clone()));
+        }
+    }
     let sandbox = std::env::current_exe()
         .map_err(|e| format!("obid can't find its own executable: {e}"))
         .and_then(|obid| sandbox::Sandbox::detect(&obid));
@@ -227,6 +274,7 @@ pub async fn serve(
         ),
         Ok(_) => {}
     }
+    stopwatch.lap("sandbox");
     let jobs = jobs::Jobs::open(config.clone(), events.clone(), sandbox).map_err(|source| {
         StartError::Jobs {
             path: config.home.join("jobs"),
@@ -234,6 +282,7 @@ pub async fn serve(
         }
     })?;
     jobs.set_api_address(bound);
+    stopwatch.lap("jobs");
     let (stopping_tx, stopping_rx) = tokio::sync::watch::channel(false);
     let link = sphere::Link::open(
         config.clone(),
@@ -247,7 +296,9 @@ pub async fn serve(
     })?;
     // The plug-ins obid ships, installed where missing (disabled), then the host, which starts
     // the ones the owner enabled without waiting for them.
+    stopwatch.lap("sphere");
     let plugins = Arc::new(plugins::Plugins::start(&config).await);
+    stopwatch.lap("plug-ins");
     jobs.use_plugins(plugins.clone());
     let cleared = clear::Cleared::open(&config.home);
     let devices = devices::Devices::open(&config.home);
@@ -280,6 +331,13 @@ pub async fn serve(
     let github =
         github_work::Feed::open(config.clone(), jobs.clone(), link.clone(), events.clone());
     let pushes = push::Push::open(&config.home);
+    let slack = slack::Slack::open(
+        &config.home,
+        vault::shared().expect("the vault is installed first"),
+        events.clone(),
+    );
+    let watch = watch::Watch::open(&config.home, events.clone());
+    let listen = listen::Listen::open(&config.home, events.clone());
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -304,6 +362,9 @@ pub async fn serve(
         tetrix,
         pages: web::Sessions::default(),
         github_work: github.clone(),
+        slack,
+        watch,
+        listen,
         push: pushes,
         stopping: stopping_rx.clone(),
     });
@@ -313,7 +374,10 @@ pub async fn serve(
         stop.await;
         let _ = stopping_tx.send(true);
     });
+    stopwatch.lap("the rest");
     ready(bound);
+    // How long each step took, so a slow start names its step.
+    tracing::info!("{}", stopwatch.line());
     // The gateway (crate::gateway): paired phones' calls, forwarded to the same router.
     if let Some(listener) = gateway {
         let address = listener.local_addr().map_err(StartError::Serve)?;
@@ -343,6 +407,8 @@ pub async fn serve(
     github.spawn(stopping_rx.clone());
     // Job alerts to Android phones through FCM (crate::push).
     push::spawn(shared.clone());
+    // The worktrees' cleanup pass, in the background: never before the first answer.
+    tokio::spawn(keep_worktrees_clean(shared.clone(), cancelled.clone()));
     // A tool reported an account's usage: every app hears the accounts as they are now.
     {
         let shared = shared.clone();
@@ -368,6 +434,10 @@ pub async fn serve(
     // Routines run on their schedules (#395).
     shared.routines.attach(&shared);
     routines::spawn(shared.clone());
+    // The watcher, every 15 minutes on weekdays (crate::watch).
+    watch::spawn(shared.clone());
+    // The Slack channels the owner picked, live and caught up every 15 minutes (crate::listen).
+    listen::spawn(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
     brain::orchestrator::spawn(shared.clone());
     // A job a conversation started that stalls goes back to that conversation, which decides.
@@ -399,6 +469,7 @@ pub async fn serve(
                 }
             }
             let _ = stopped_at.set(tokio::time::Instant::now());
+            cancelled.store(true, Ordering::Relaxed);
             shared.sign_ins.kill_all();
             shared.github.kill();
             shared.harness.end_all_warm();
@@ -437,6 +508,77 @@ pub async fn serve(
         );
     }
     result
+}
+
+/// How long each of `serve`'s steps took until obid answers, said in one line (`obid started in
+/// 312 ms: worktrees 202, vault 3, …`), as each turn's stopwatch line is (docs/fast-replies.md).
+struct Stopwatch {
+    started: std::time::Instant,
+    last: std::time::Instant,
+    laps: Vec<(&'static str, u128)>,
+}
+
+impl Stopwatch {
+    fn new() -> Stopwatch {
+        let now = std::time::Instant::now();
+        Stopwatch {
+            started: now,
+            last: now,
+            laps: Vec::new(),
+        }
+    }
+
+    /// `step` ended now.
+    fn lap(&mut self, step: &'static str) {
+        let now = std::time::Instant::now();
+        self.laps.push((step, (now - self.last).as_millis()));
+        self.last = now;
+    }
+
+    fn line(&self) -> String {
+        let laps: Vec<String> = self
+            .laps
+            .iter()
+            .map(|(step, ms)| format!("{step} {ms}"))
+            .collect();
+        format!(
+            "obid started in {} ms: {} (ms)",
+            self.started.elapsed().as_millis(),
+            laps.join(", ")
+        )
+    }
+}
+
+/// Sets its flag when dropped: what ends the worktrees' walk when `serve` returns.
+struct SetOnDrop(Arc<AtomicBool>);
+
+impl Drop for SetOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// A walk of the worktrees that panicked (or was cancelled by the runtime) is said in the log.
+fn log_walk(walked: Result<(), tokio::task::JoinError>) {
+    if let Err(e) = walked {
+        tracing::error!("measuring the job worktrees failed: {e}");
+    }
+}
+
+/// A walk that outlasted [`MEASURE_FIRST`], once it ends: its number goes to the apps as the
+/// `cleanup` event, as `status.cleanup` says it from then on. Nothing for a walk that failed or
+/// was cut short.
+async fn walk_ended(
+    walk: tokio::task::JoinHandle<()>,
+    events: events::Events,
+    cleanup: Arc<api::Cleanup>,
+) {
+    let walked = walk.await;
+    let ended = walked.is_ok();
+    log_walk(walked);
+    if let Some(json) = ended.then(|| api::cleanup_json(&cleanup)).flatten() {
+        events.send("cleanup", serde_json::to_value(json).unwrap_or_default());
+    }
 }
 
 /// SIGTERM and SIGINT, caught. [`StopSignal::install`] replaces their default action (end the
@@ -481,5 +623,47 @@ impl StopSignal {
             let _ = &mut self;
             let _ = tokio::signal::ctrl_c().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// A walk that ends after obid answers goes to the apps as `cleanup`; one that panics or is
+    /// cut short sends nothing.
+    #[tokio::test]
+    async fn a_late_walk_is_sent_as_cleanup() {
+        let events = events::Events::new();
+        let mut heard = events.subscribe();
+        let cleanup = Arc::new(api::Cleanup::unmeasured(Path::new("/nonexistent/obid")));
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let walk = {
+            let cleanup = cleanup.clone();
+            tokio::task::spawn_blocking(move || {
+                wait.recv().unwrap();
+                cleanup.remeasure();
+            })
+        };
+        let ended = tokio::spawn(walk_ended(walk, events.clone(), cleanup.clone()));
+        go.send(()).unwrap();
+        ended.await.unwrap();
+        let event = heard.recv().await.unwrap();
+        assert_eq!(event.name, "cleanup");
+        assert_eq!(
+            event.data,
+            serde_json::json!({"path": "/nonexistent/obid/worktrees", "bytes": 0, "lastRun": null, "kept": []})
+        );
+
+        let silent = Arc::new(api::Cleanup::unmeasured(Path::new("/nonexistent/obid")));
+        let cut_short = {
+            let silent = silent.clone();
+            tokio::task::spawn_blocking(move || silent.remeasure_unless(&AtomicBool::new(true)))
+        };
+        walk_ended(cut_short, events.clone(), silent.clone()).await;
+        let panicked = tokio::task::spawn_blocking(|| panic!("a walk that fails"));
+        walk_ended(panicked, events.clone(), silent).await;
+        assert!(heard.try_recv().is_err(), "nothing more was sent");
     }
 }

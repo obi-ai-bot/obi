@@ -570,3 +570,60 @@ fn revoking_a_device_drops_its_push_token() {
     let kept: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     assert_eq!(kept, json!([]));
 }
+
+/// A channel listener's review waiting for Approve, in obid's home before it starts.
+fn seed_listener_review(config: &Value) {
+    let config = obid::config::Config::parse(&config.to_string()).unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let events = obid::events::Events::new();
+        let jobs = obid::jobs::Jobs::open(config.clone(), events.clone(), Err("no sandbox".into()))
+            .unwrap();
+        let (_stop, stopping) = tokio::sync::watch::channel(false);
+        let link = obid::sphere::Link::open(config, jobs, events, stopping).unwrap();
+        let notice = obid::watch::Notice {
+            key: "review:obi-ai-bot/obi#835".into(),
+            source: "slack".into(),
+            ..Default::default()
+        };
+        let mut item = obid::sphere::inbox::watch_item("listen", "", &notice, 1_792_501_200);
+        item.id = "listen-review-0123456789abcdef".into();
+        item.options = vec!["Approve".into(), "Dismiss".into()];
+        link.add_items(vec![item]);
+    });
+}
+
+/// A phone can't Approve a channel listener's review, which it doesn't show yet, however the
+/// item's id is spelled in the path; its Dismiss goes through.
+#[test]
+fn a_phone_cant_approve_a_listeners_review() {
+    let folder = Folder::new("gateway-listen-approve");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &agent());
+    config["gateway"] = json!("127.0.0.1:0");
+    seed_listener_review(&config);
+    let obid = start(&folder.0, &config, None);
+    let token = paired(&obid);
+    for target in [
+        "/v1/inbox/listen-review-0123456789abcdef/answer",
+        "/v1/inbox/listen%2Dreview-0123456789abcdef/answer",
+        "/v1/inbox/%6Cisten-review-0123456789abcdef/answer",
+    ] {
+        let answer = through(
+            &obid,
+            Some(&token),
+            "POST",
+            target,
+            Some(&json!({"answer": "Approve"})),
+        );
+        assert_eq!(answer.status, 403, "{target}: {}", answer.text);
+    }
+    let dismissed = through(
+        &obid,
+        Some(&token),
+        "POST",
+        "/v1/inbox/listen%2Dreview-0123456789abcdef/answer",
+        Some(&json!({"answer": "Dismiss"})),
+    );
+    assert_eq!(dismissed.status, 200, "{}", dismissed.text);
+    assert_eq!(dismissed.body["state"], "done");
+}

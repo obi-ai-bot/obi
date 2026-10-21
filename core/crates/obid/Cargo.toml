@@ -41,6 +41,11 @@ icu_properties = { version = "2.3.0", default-features = false, features = ["com
 # The gateway calls obid's own router in process (src/gateway.rs).
 tower = { version = "0.5.3", default-features = false, features = ["util"] }
 uuid.workspace = true
+# Slack's Socket Mode (src/listen.rs): one WebSocket, over the rustls that reqwest already builds,
+# with the platform's own roots as reqwest has them.
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "__rustls-tls"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-platform-verifier = "0.7.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The vault's Keychain store (src/vault.rs), as the Swift runner's KeychainVault.
