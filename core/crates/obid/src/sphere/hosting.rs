@@ -391,6 +391,7 @@ pub fn ask_item(
         confirm: None,
         start: None,
         github: None,
+        watch: None,
     }
 }
 
