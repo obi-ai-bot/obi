@@ -1219,13 +1219,19 @@ impl Link {
                 );
                 continue;
             }
+            self.pins.keep_key(obi, card_id, card_key);
             for key in keys {
                 let (Some(id), Some(public_key)) =
                     (key["key_id"].as_str(), key["public_key"].as_str())
                 else {
                     continue;
                 };
-                if id == card_id && key["valid_until_seq"].as_u64().is_some() {
+                let older = key["valid_until_seq"].as_u64().is_some();
+                if older && (id == card_id || !self.pins.knows_key(obi, id, public_key)) {
+                    // Only a key a card obid trusted signed: the Sphere can't add one of its own.
+                    tracing::warn!(
+                        "sphere: the Sphere lists an older key for {obi} no card obid trusted signed: not used"
+                    );
                     continue;
                 }
                 directory.keys.insert(
@@ -1358,7 +1364,15 @@ impl Link {
             now: Some(time::now()),
             sphere: state.membership.as_ref().map(|m| m.sphere.clone()),
             receiver: state.membership.as_ref().map(|m| m.obi_id.clone()),
-            keys: state.directory.keys.clone(),
+            // A live message is signed with its sender's current key, the one its card signs;
+            // older keys only check old chain entries.
+            keys: state
+                .directory
+                .keys
+                .iter()
+                .filter(|(_, k)| k.valid_until_seq.is_none())
+                .map(|(id, k)| (id.clone(), k.clone()))
+                .collect(),
             seq: Some(delivery.seq),
             seen_ids: Vec::new(),
         };
