@@ -521,7 +521,8 @@ pub fn github_read(
                         .or(url)
                         .map(str::to_owned),
                     topic: None,
-                    quoted: cut(body, QUOTED),
+                    // Whole (up to 16,000 characters): it's scanned before it's cut (read).
+                    quoted: cut(body, 16_000),
                     title: Some(cut(title, 200)),
                 });
             };
@@ -811,16 +812,42 @@ where
     match got {
         Ok(mut got) => {
             run.github = got.notices.len();
-            // What people wrote reaches the phone in the inbox item: the secret scan first.
-            let bodies: Vec<String> = got.notices.iter().map(|n| n.quoted.clone()).collect();
-            let flagged = scan_each(&bodies, scratch).await;
-            for (n, notice) in got.notices.iter_mut().enumerate() {
-                if notice.quoted.is_empty() {
-                    continue;
+            // What people wrote, and the titles, reach the phone in the inbox item: the secret
+            // scan first, on the whole text before it's cut, in one scan a line apart.
+            let named: Vec<(String, String)> = got
+                .notices
+                .iter()
+                .enumerate()
+                .flat_map(|(n, notice)| {
+                    [
+                        (format!("B{n}"), format!("{}{SEPARATOR}", notice.quoted)),
+                        (
+                            format!("T{n}"),
+                            format!("{}{SEPARATOR}", notice.title.as_deref().unwrap_or("")),
+                        ),
+                    ]
+                })
+                .collect();
+            let names: Vec<String> = named.iter().map(|(name, _)| name.clone()).collect();
+            let flagged = match crate::store::make_private_dir(scratch) {
+                Err(e) => Err(format!("its folder: {e}")),
+                Ok(()) => {
+                    let verdict = crate::scan::scan(&named, scratch).await;
+                    let _ = std::fs::remove_dir_all(scratch);
+                    flagged_names(verdict, &names)
                 }
-                match &flagged {
-                    Ok(flagged) if !flagged.contains(&n) => {}
-                    _ => notice.quoted = LEFT_OUT.into(),
+            };
+            for (n, notice) in got.notices.iter_mut().enumerate() {
+                let out = |name: String| flagged.as_ref().is_ok_and(|f| !f.contains(&name));
+                notice.quoted = if notice.quoted.is_empty() {
+                    String::new()
+                } else if out(format!("B{n}")) {
+                    cut(&notice.quoted, QUOTED)
+                } else {
+                    LEFT_OUT.into()
+                };
+                if notice.title.is_some() && !out(format!("T{n}")) {
+                    notice.title = Some(LEFT_OUT.into());
                 }
             }
             if let Err(why) = flagged {
@@ -858,11 +885,12 @@ where
                     run.problems.push(format!("Slack wasn't read: {why}"));
                 }
                 Ok((found, all)) => {
-                    if !all {
-                        // The rest is read next time, from the same cursor.
-                        complete = false;
+                    // Slack gives the newest 300: older ones in the window can't be reached by
+                    // reading again, so they're said, and the cursor moves on all the same.
+                    let oldest = found.iter().map(|m| m.at).fold(f64::INFINITY, f64::min);
+                    if !all && oldest >= from {
                         run.problems.push(
-                            "Slack found more than 300 messages: the rest are read next time."
+                            "Slack had more than 300 messages since the last run: older ones weren't read."
                                 .into(),
                         );
                     }
@@ -1225,10 +1253,16 @@ impl Watch {
                 return false;
             };
             let resumed = enabled == Some(true) && !rules.enabled;
+            // Paused, or the Slack message turned off: a run under way sends and keeps nothing.
+            let stopped =
+                enabled == Some(false) && rules.enabled || live == Some(false) && rules.live;
             rules.live = live.unwrap_or(rules.live);
             rules.enabled = enabled.unwrap_or(rules.enabled);
+            let zone = rules.zone();
+            if stopped {
+                kept.generation += 1;
+            }
             if resumed {
-                let zone = rules.zone();
                 kept.slot = slot_at_or_before(&zone, now);
                 kept.since = Some(now as f64);
                 kept.generation += 1;
@@ -2107,5 +2141,123 @@ mod tests {
         watch.lock().since = Some(50.0);
         watch.set(rules(), 900).unwrap();
         assert_eq!(watch.lock().since, Some(900.0));
+    }
+
+    /// Slack's newest 300 don't reach back to the last run: said, and the cursor moves on (reading
+    /// again would give the same 300). Overflow older than the last run is nothing missed.
+    #[tokio::test]
+    async fn past_slacks_300_the_cursor_moves_on() {
+        let home = scratch("watch-300");
+        let since = at("2026-10-20T13:10:00Z") as f64;
+        let now = at("2026-10-20T13:15:00Z");
+        let page = |first: i64| {
+            json!({"ok": true, "messages": {"paging": {"pages": 5}, "matches": [
+            {"ts": format!("{first}.000100"), "user": "U3E9H62P2", "text": "x", "channel": {"id": "C1", "name": "x"}}]}})
+        };
+        let none = |_: String, _: String, _: String| async {
+            Ok(r#"{"messages":[{"n":1,"about":false,"topic":""}]}"#.to_owned())
+        };
+        // The oldest fetched is inside the window: some may be missed.
+        let api = stub(HashMap::from([("search.messages", page(1_792_501_500))])).await;
+        let slack = connected(&home, api.url.clone());
+        let done = read(
+            &rules(),
+            since,
+            now,
+            &BTreeSet::new(),
+            Some(&slack),
+            &home.join("scan"),
+            |_, _| ok_github(),
+            none,
+        )
+        .await;
+        assert_eq!(done.since, Some(now as f64));
+        assert!(
+            done.run
+                .problems
+                .iter()
+                .any(|p| p.contains("older ones weren't read"))
+        );
+        // The oldest fetched is before the window: nothing in it was missed.
+        let api = stub(HashMap::from([("search.messages", page(1_792_400_000))])).await;
+        let slack = connected(&home, api.url.clone());
+        let done = read(
+            &rules(),
+            since,
+            now,
+            &BTreeSet::new(),
+            Some(&slack),
+            &home.join("scan"),
+            |_, _| ok_github(),
+            none,
+        )
+        .await;
+        assert!(!done.run.problems.iter().any(|p| p.contains("older ones")));
+    }
+
+    /// A secret past the 500 characters a notice keeps is found all the same, and a title with one
+    /// is left out too.
+    #[tokio::test]
+    async fn githubs_texts_are_scanned_whole_and_titles_too() {
+        let home = scratch("watch-whole");
+        let mut answer = github_answer();
+        answer["data"]["a0"]["nodes"][0]["comments"]["nodes"][0]["body"] = json!(format!(
+            "{} token AKIA{}",
+            "x".repeat(495),
+            "QWERTYUIOPASDFGH"
+        ));
+        answer["data"]["w0"]["nodes"][0]["title"] =
+            json!(format!("leaked AKIA{}", "QWERTYUIOPASDFGH"));
+        let text = answer.to_string();
+        let mut github_only = rules();
+        github_only.person.slack = None;
+        let done = read(
+            &github_only,
+            at("2026-10-20T13:10:00Z") as f64,
+            at("2026-10-20T13:15:00Z"),
+            &BTreeSet::new(),
+            None,
+            &home.join("scan"),
+            |_, _| async { Ok(text) },
+            sorted_answer,
+        )
+        .await;
+        let shown = serde_json::to_string(&done.run.notices).unwrap();
+        assert!(!shown.contains("AKIA"), "{shown}");
+        assert!(
+            done.run
+                .notices
+                .iter()
+                .any(|n| n.title.as_deref() == Some(LEFT_OUT))
+        );
+        assert!(
+            done.run
+                .notices
+                .iter()
+                .any(|n| n.quoted == "Looks good, ship it" || n.quoted.is_empty())
+        );
+    }
+
+    /// Paused, or the Slack message turned off, while a run reads: it sends and keeps nothing.
+    #[test]
+    fn pausing_or_turning_live_off_ends_a_run_under_way() {
+        let home = scratch("watch-pause-gen");
+        let watch = Watch::open(&home, crate::events::Events::new());
+        let mut live = rules();
+        live.live = true;
+        watch.set(live, 0).unwrap();
+        let before = watch.lock().generation;
+        watch.change(None, Some(false), 10);
+        assert!(watch.lock().generation > before);
+        let before = watch.lock().generation;
+        watch.change(Some(false), None, 20);
+        assert!(watch.lock().generation > before);
+        let before = watch.lock().generation;
+        watch.change(None, Some(true), 30);
+        assert_eq!(
+            watch.lock().generation,
+            before,
+            "turning it on stops nothing"
+        );
     }
 }

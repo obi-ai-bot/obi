@@ -322,7 +322,11 @@ impl Slack {
             connected_at: Some(obi_protocol::time::format(obi_protocol::time::now())),
             error: None,
         })
-        .map_err(internal)
+        .map_err(|why| {
+            // Never half a login: the tokens kept go too.
+            self.forget(Some(why.clone()));
+            internal(why)
+        })
     }
 
     /// Forgets both tokens (the app stays installed in Slack). `error` says why, when the owner
