@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ArrowUp, Check, ChevronLeft, File, Gauge, ListChecks, Plus, Search, Settings, X } from 'lucide-react';
+import { ArrowUp, Check, ChevronLeft, File, Gauge, Laptop, ListChecks, Plus, Search, Settings, X } from 'lucide-react';
 import { ObyIcon, OwnerAvatar } from './ObyFace';
-import { AGENTS, OBYS, type Attachments } from './mock';
+import { AGENTS, OBYS, PLACES, SHARED_WITH_ME, type Attachments } from './mock';
 import MessageEditor, { type EditorHandle, type MentionKey } from './MessageEditor';
 import { mentioned } from './textTokens';
 import StatusDot from './StatusDot';
@@ -13,9 +13,10 @@ import { useScrollThumb } from './useScrollThumb';
 
 // What a message carries besides its words: files or photos (a photo with a
 // small preview of itself), tasks attached. (Other Obys are brought in by name,
-// in the words: @Wellington.)
-type Attached = { kind: 'file'; name: string; preview?: string } | { kind: 'task'; id: string };
-type View = 'root' | 'oby' | 'task' | 'usage';
+// in the words: @Wellington.) place: the Mac it runs on, when not this one
+// (one at a time: picking another replaces it).
+type Attached = { kind: 'file'; name: string; preview?: string } | { kind: 'task'; id: string } | { kind: 'place'; name: string };
+type View = 'root' | 'oby' | 'task' | 'where' | 'usage';
 const same = (a: Attached, b: Attached) =>
   a.kind === 'task' ? b.kind === 'task' && a.id === b.id : a.kind === b.kind && a.name === (b as { name: string }).name;
 const keyOf = (a: Attached) => (a.kind === 'task' ? `task:${a.id}` : `${a.kind}:${a.name}`);
@@ -100,7 +101,8 @@ export default function Composer({ placeholder, label, onSend, home = false, hid
     setHiddenAbove(t.scrollTop > 0);
   }, [attached.length]);
   const add = (...picked: Attached[]) => {
-    setAttached((all) => [...all, ...picked.filter((a) => !all.some((x) => same(x, a)))]);
+    const place = picked.some((a) => a.kind === 'place');
+    setAttached((all) => [...all.filter((x) => !place || x.kind !== 'place'), ...picked.filter((a) => !(a.kind === 'place' && !a.name) && !all.some((x) => same(x, a)))]);
     setView(null);
     box.current?.focus();
   };
@@ -133,6 +135,7 @@ export default function Composer({ placeholder, label, onSend, home = false, hid
         files: attached.flatMap((a) => (a.kind === 'file' ? [{ name: a.name, preview: a.preview }] : [])),
         obys: mentioned(b.text()),
         jobs: attached.flatMap((a) => (a.kind === 'task' ? [a.id] : [])),
+        on: attached.find((a) => a.kind === 'place')?.name,
       });
       b.clear();
       setFilled(false);
@@ -204,8 +207,9 @@ export default function Composer({ placeholder, label, onSend, home = false, hid
                 return (
                   <span key={keyOf(a)} className="composer-tag">
                     {a.kind === 'task' && <ListChecks size={13} strokeWidth={1.8} />}
+                    {a.kind === 'place' && <Laptop size={13} strokeWidth={1.8} />}
                     {a.kind === 'file' && (a.preview ? <img className="composer-tag-thumb" src={a.preview} alt="" /> : <File size={13} strokeWidth={1.8} />)}
-                    <span className="composer-tag-text">{a.kind === 'task' ? t?.title : a.name}</span>
+                    <span className="composer-tag-text">{a.kind === 'task' ? t?.title : a.kind === 'place' ? `On ${a.name}` : a.name}</span>
                     <button type="button" aria-label="Remove" onClick={() => { if (a.kind === 'file' && a.preview) URL.revokeObjectURL(a.preview); setAttached((all) => all.filter((x) => !same(x, a))); }}><X size={12} strokeWidth={2} /></button>
                   </span>
                 );
@@ -289,7 +293,7 @@ function AddPanel({ view, tasks, onView, onBlur, onFiles, onPick, onPickOby, isP
   const menu = useRef<HTMLDivElement>(null);
   const was = useRef<View>(view);
   useEffect(() => {
-    if (view === 'root') menu.current?.querySelectorAll('button')[was.current === 'oby' ? 1 : was.current === 'task' ? 2 : 0]?.focus();
+    if (view === 'root') menu.current?.querySelectorAll('button')[was.current === 'oby' ? 1 : was.current === 'task' ? 2 : was.current === 'where' ? 3 : 0]?.focus();
     was.current = view;
   }, [view]);
   const onMenuKey = (e: React.KeyboardEvent) => {
@@ -316,6 +320,8 @@ function AddPanel({ view, tasks, onView, onBlur, onFiles, onPick, onPickOby, isP
         <button type="button" role="menuitem" tabIndex={-1} onClick={onFiles}><File size={16} strokeWidth={1.6} />Add files or photos</button>
         <button type="button" role="menuitem" tabIndex={-1} onClick={() => onView('oby')}><ObyIcon size={16} />Add other Obys<kbd className="add-hint">@</kbd></button>
         <button type="button" role="menuitem" tabIndex={-1} onClick={() => onView('task')}><ListChecks size={16} strokeWidth={1.6} />Attach tasks</button>
+        {/* Sharing (a preview): run it on a teammate's Mac that's free, with your own accounts */}
+        <button type="button" role="menuitem" tabIndex={-1} onClick={() => onView('where')}><Laptop size={16} strokeWidth={1.6} />Run on another Mac</button>
       </div>
     );
   }
@@ -323,8 +329,14 @@ function AddPanel({ view, tasks, onView, onBlur, onFiles, onPick, onPickOby, isP
   const q = query.trim().toLowerCase();
   const obys = obysFor(q);
   const found = tasks.filter((t) => `${t.who ?? ''} ${t.title}`.toLowerCase().includes(q));
-  // Enter takes the first match
-  const pickFirst = () => (view === 'oby' ? obys[0] && onPickOby(obys[0].name) : found[0] && onPick({ kind: 'task', id: found[0].id }));
+  const places = PLACES.filter((p) => p.name.toLowerCase().includes(q));
+  // Enter takes the first match (a Mac: the first that's free)
+  const pickFirst = () => {
+    if (view === 'oby') return obys[0] && onPickOby(obys[0].name);
+    if (view === 'where') { const p = places.find((x) => x.free); return p && onPick({ kind: 'place', name: p.name }); }
+    return found[0] && onPick({ kind: 'task', id: found[0].id });
+  };
+  const hint = { oby: 'Search Obys', task: 'Search tasks', where: 'Search Macs' }[view as 'oby' | 'task' | 'where'];
   return (
     <div className="add-panel is-search" onBlur={onBlur}>
       <div className="add-search">
@@ -336,8 +348,8 @@ function AddPanel({ view, tasks, onView, onBlur, onFiles, onPick, onPickOby, isP
           onChange={(e) => setQuery(e.target.value)}
           // Enter takes the first match
           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); pickFirst(); } }}
-          placeholder={view === 'oby' ? 'Search Obys' : 'Search tasks'}
-          aria-label={view === 'oby' ? 'Search Obys' : 'Search tasks'}
+          placeholder={hint}
+          aria-label={hint}
         />
       </div>
       <div ref={list} className="add-list" role="listbox" onScroll={onScroll}>
@@ -358,7 +370,20 @@ function AddPanel({ view, tasks, onView, onBlur, onFiles, onPick, onPickOby, isP
             </button>
           );
         })}
-        {((view === 'oby' && !obys.length) || (view === 'task' && !found.length)) && <p className="add-empty">Nothing matches “{query.trim()}”</p>}
+        {/* this Mac, then the Macs shared with you: who's away, or when one is free */}
+        {view === 'where' && places.map((p) => {
+          const a: Attached = { kind: 'place', name: p.name };
+          const here = p.name === 'This Mac';
+          return (
+            <button type="button" role="option" aria-selected={isPicked(a)} aria-disabled={!p.free || undefined} disabled={!p.free} key={p.name} className="add-place" onClick={() => onPick(here ? { kind: 'place', name: '' } : a)}>
+              {p.owner ? <OwnerAvatar name={p.owner} size={22} /> : <Laptop size={16} strokeWidth={1.6} />}
+              <span className="add-item-text">{p.name}<span className="add-item-about">{p.about}</span></span>
+              {isPicked(a) && <Check size={14} strokeWidth={1.8} className="add-check" />}
+            </button>
+          );
+        })}
+        {view === 'where' && <p className="add-note">Your job runs there with your own accounts: your logins stay on this Mac.</p>}
+        {((view === 'oby' && !obys.length) || (view === 'task' && !found.length) || (view === 'where' && !places.length)) && <p className="add-empty">Nothing matches “{query.trim()}”</p>}
       </div>
       <div {...thumbProps} />
     </div>
@@ -436,6 +461,22 @@ function UsagePanel({ onClose, onBlur }: { onClose: () => void; onBlur: (e: Reac
               <span className={`usage-used ${fullness(a.used)}`.trim()}>{a.used}%</span>
             </span>
             <span className="set-meter"><span className={fullness(a.used)} style={{ width: `${a.used}%` }} /></span>
+          </span>
+        </div>
+      ))}
+      {/* Sharing (a preview): a part of a teammate's usage shared with you; the bar
+          is your share, filled with what you've used of it */}
+      {SHARED_WITH_ME.length > 0 && <p className="usage-shared">Shared with you</p>}
+      {SHARED_WITH_ME.map((x) => (
+        <div key={`${x.owner}-${x.account}`} className="usage-row">
+          <OwnerAvatar name={x.owner} size={16} badge={false} />
+          <span className="usage-text">
+            <span className="usage-line">
+              <span className="usage-name">{x.owner}’s {x.account}</span>
+              <span className="usage-about">Your {x.share}% of its month</span>
+              <span className={`usage-used ${fullness((100 * x.used) / x.share)}`.trim()}>{x.share - x.used}% left</span>
+            </span>
+            <span className="set-meter"><span className={fullness((100 * x.used) / x.share)} style={{ width: `${(100 * x.used) / x.share}%` }} /></span>
           </span>
         </div>
       ))}

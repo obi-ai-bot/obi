@@ -302,7 +302,7 @@ function ThreadTask({ task, current, onOpen }: { task: Task; current: boolean; o
       </span>
       <span className="msg-task-meta">
         {task.status === 'running' ? (j.status === 'queued' ? 'Queued' : 'Running') : task.status === 'needs' ? 'Needs you' : 'Done'}
-        {' · '}{AGENTS[j.agent].name} · {j.account}{repo && <> · {repo}</>}
+        {' · '}{AGENTS[j.agent].name} · {j.account}{j.on && <> · on {j.on}</>}{repo && <> · {repo}</>}
       </span>
       {task.status === 'done' && resultLine(task)}
     </span>
