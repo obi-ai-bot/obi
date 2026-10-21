@@ -1167,6 +1167,9 @@ pub async fn answers(request: Request, next: Next) -> Response {
     let frames = body
         .into_data_stream()
         .map(move |frame| match frame {
+            // obid's own keepalive carries nothing to scrub: no check, so an idle stream never
+            // reads the Keychain (it did 4 times every 15 seconds, at each `:ping`).
+            Ok(bytes) if keepalive(&bytes, events) => Some(Ok(bytes)),
             Ok(bytes) => {
                 vault.check().ok()?;
                 let clean = if events {
@@ -1181,6 +1184,13 @@ pub async fn answers(request: Request, next: Next) -> Response {
         .take_while(|frame| std::future::ready(frame.is_some()))
         .filter_map(std::future::ready);
     Response::from_parts(parts, Body::from_stream(frames))
+}
+
+/// A frame obid writes only to keep a stream open: the spaces `GET /v1/jobs/{id}/wait` sends
+/// while it waits, and on the event stream the `:ping` comment (routes.rs, `events`).
+fn keepalive(frame: &[u8], events: bool) -> bool {
+    let text = frame.trim_ascii();
+    text.is_empty() || (events && (text == b":ping" || text == b": ping"))
 }
 
 /// Whether `request` only stops work and sends nothing anywhere: `POST /v1/stop-all`,
@@ -1659,6 +1669,37 @@ mod tests {
             scrub_in_full(&vault, &mut answer);
             let full = serde_json::to_vec(&answer).unwrap();
             assert_eq!(fast.unwrap_or(bytes), full);
+        }
+    }
+
+    /// Only obid's own keepalives go through a stream unchecked: whitespace, and on the event
+    /// stream the bare `:ping` comment. Anything with words in it is checked and scrubbed.
+    #[test]
+    fn only_keepalives_skip_the_check() {
+        for (frame, events) in [
+            (&b" "[..], false),
+            (b"\n", false),
+            (b":ping\n\n", true),
+            (b": ping\n\n", true),
+        ] {
+            assert!(
+                keepalive(frame, events),
+                "{:?}",
+                String::from_utf8_lossy(frame)
+            );
+        }
+        for (frame, events) in [
+            (&b":ping\n\n"[..], false),
+            (b":ping sk-test-value\n\n", true),
+            (b": other\n\n", true),
+            (b"event: job\ndata: {}\n\n", true),
+            (b"{\"id\": \"j\"}", false),
+        ] {
+            assert!(
+                !keepalive(frame, events),
+                "{:?}",
+                String::from_utf8_lossy(frame)
+            );
         }
     }
 

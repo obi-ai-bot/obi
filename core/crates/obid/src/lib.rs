@@ -189,6 +189,7 @@ pub async fn serve(
     stop: impl Future<Output = ()> + Send + 'static,
     ready: impl FnOnce(SocketAddr),
 ) -> Result<(), StartError> {
+    let mut stopwatch = Stopwatch::new();
     let address = config.listen;
     let listener = tokio::net::TcpListener::bind(address)
         .await
@@ -226,6 +227,7 @@ pub async fn serve(
         // seconds, so obid doesn't wait for those.
         measured = tokio::time::timeout(MEASURE_FIRST, &mut measuring) => measured.ok(),
     };
+    stopwatch.lap("worktrees");
     // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
     secrets::known().learn("api-token", &token);
     // claudeKeychain as the owner set it; left out, on by itself on macOS when Claude Code's default
@@ -241,6 +243,7 @@ pub async fn serve(
         jobs::keep_keychain_logins();
     }
     vault::install(&config.home, &config.vault);
+    stopwatch.lap("vault");
     // What the accounts API changed, over the configuration's accounts, before anything uses them;
     // and what sign-ins cut short by the last stop left behind.
     config.agents.open(&config.home);
@@ -248,6 +251,7 @@ pub async fn serve(
     github_login::sweep(&config.home);
     // What an older obid's boxes could have left in the accounts' folders (#655), said once.
     jobs::check_account_folders(&config.agents.get());
+    stopwatch.lap("accounts");
     let events = events::Events::new();
     // The walk's end: said to the apps when it comes after obid answers (`cleanup`), and in the
     // log when it failed.
@@ -267,6 +271,7 @@ pub async fn serve(
         ),
         Ok(_) => {}
     }
+    stopwatch.lap("sandbox");
     let jobs = jobs::Jobs::open(config.clone(), events.clone(), sandbox).map_err(|source| {
         StartError::Jobs {
             path: config.home.join("jobs"),
@@ -274,6 +279,7 @@ pub async fn serve(
         }
     })?;
     jobs.set_api_address(bound);
+    stopwatch.lap("jobs");
     let (stopping_tx, stopping_rx) = tokio::sync::watch::channel(false);
     let link = sphere::Link::open(
         config.clone(),
@@ -287,7 +293,9 @@ pub async fn serve(
     })?;
     // The plug-ins obid ships, installed where missing (disabled), then the host, which starts
     // the ones the owner enabled without waiting for them.
+    stopwatch.lap("sphere");
     let plugins = Arc::new(plugins::Plugins::start(&config).await);
+    stopwatch.lap("plug-ins");
     jobs.use_plugins(plugins.clone());
     let cleared = clear::Cleared::open(&config.home);
     let devices = devices::Devices::open(&config.home);
@@ -353,7 +361,10 @@ pub async fn serve(
         stop.await;
         let _ = stopping_tx.send(true);
     });
+    stopwatch.lap("the rest");
     ready(bound);
+    // How long each step took, so a slow start names its step.
+    tracing::info!("{}", stopwatch.line());
     // The gateway (crate::gateway): paired phones' calls, forwarded to the same router.
     if let Some(listener) = gateway {
         let address = listener.local_addr().map_err(StartError::Serve)?;
@@ -480,6 +491,45 @@ pub async fn serve(
         );
     }
     result
+}
+
+/// How long each of `serve`'s steps took until obid answers, said in one line (`obid started in
+/// 312 ms: worktrees 202, vault 3, …`), as each turn's stopwatch line is (docs/fast-replies.md).
+struct Stopwatch {
+    started: std::time::Instant,
+    last: std::time::Instant,
+    laps: Vec<(&'static str, u128)>,
+}
+
+impl Stopwatch {
+    fn new() -> Stopwatch {
+        let now = std::time::Instant::now();
+        Stopwatch {
+            started: now,
+            last: now,
+            laps: Vec::new(),
+        }
+    }
+
+    /// `step` ended now.
+    fn lap(&mut self, step: &'static str) {
+        let now = std::time::Instant::now();
+        self.laps.push((step, (now - self.last).as_millis()));
+        self.last = now;
+    }
+
+    fn line(&self) -> String {
+        let laps: Vec<String> = self
+            .laps
+            .iter()
+            .map(|(step, ms)| format!("{step} {ms}"))
+            .collect();
+        format!(
+            "obid started in {} ms: {} (ms)",
+            self.started.elapsed().as_millis(),
+            laps.join(", ")
+        )
+    }
 }
 
 /// Sets its flag when dropped: what ends the worktrees' walk when `serve` returns.
