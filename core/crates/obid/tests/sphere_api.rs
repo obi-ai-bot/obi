@@ -1184,3 +1184,36 @@ async fn a_member_whose_listed_key_isnt_the_cards_isnt_trusted() {
     let refused = ask();
     assert_eq!(refused.status, 422, "{}", refused.text);
 }
+
+/// A Sphere that adds an older key of its own to a member, valid for every seq, and signs a request
+/// as that member with it: no card obid trusted signed that key, so the message is dropped, and a
+/// live message is checked with the current card key only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_older_key_the_sphere_adds_signs_nothing() {
+    let folder = Folder::new("older-key");
+    let (sphere, obid, ernesto) = setup(&folder, &stub_agent(), None).await;
+    let mallory = obi_protocol::keys::Keypair::from_seed_string("a Sphere operator's older key");
+    {
+        let mut state = sphere.lock();
+        let member = state
+            .members
+            .iter_mut()
+            .find(|m| m["obi"] == "obi-ernesto")
+            .unwrap();
+        member["keys"].as_array_mut().unwrap().push(json!({
+            "key_id": mallory.key_id(), "public_key": mallory.public_key(),
+            "valid_from_seq": 1, "valid_until_seq": 1_000_000_000u64}));
+    }
+    let mut unsigned = ernesto.request("obi-wellington", "review_request", brief(), 3600);
+    unsigned.as_object_mut().unwrap().remove("signature");
+    unsigned["key_id"] = json!(mallory.key_id());
+    let forged = obi_protocol::envelope::sign(unsigned.as_object().unwrap(), &mallory).unwrap();
+    sphere.inject("obi-wellington", forged.clone());
+    within(20, "the forged delivery acknowledged", || {
+        sphere.all_acked("obi-wellington").then_some(())
+    });
+    tokio::task::block_in_place(|| {
+        assert_eq!(get(&obid, "/v1/inbox"), json!([]));
+        assert_eq!(get(&obid, "/v1/obid/sphere/exchanges"), json!([]));
+    });
+}

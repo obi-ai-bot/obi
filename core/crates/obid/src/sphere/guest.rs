@@ -32,8 +32,32 @@ use crate::process::Signal;
 /// The most a job's words may be on the channel (spec protocol.md section 13).
 const MAX_WORDS: usize = 20_000;
 
-/// The most a job may run on the other Mac, as its `run_request` asks.
+/// The most a job may run on other Macs, all its rounds together, as its `run_request` asks.
 const MAX_MINUTES: u64 = 120;
+
+/// What each job spent on other Macs so far, all its rounds together, by repository and branch:
+/// tokens and seconds. The budget and the time limit are the job's, not a round's.
+// ponytail: in memory; an obid restart starts a job's count again. Kept in the job when that matters.
+static SPENT: std::sync::LazyLock<std::sync::Mutex<HashMap<String, (u64, u64)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Adds a round's tokens and seconds to its job's count as the round ends, however it ends.
+struct Spending {
+    job: String,
+    tokens: Arc<AtomicU64>,
+    since: Option<tokio::time::Instant>,
+    seconds_before: u64,
+}
+
+impl Drop for Spending {
+    fn drop(&mut self) {
+        let seconds = self.seconds_before + self.since.map_or(0, |s| s.elapsed().as_secs());
+        SPENT.lock().unwrap().insert(
+            self.job.clone(),
+            (self.tokens.load(Ordering::Relaxed), seconds),
+        );
+    }
+}
 /// The most model calls the other Mac may have relayed at once.
 const CALLS_AT_ONCE: usize = 4;
 /// The most tokens a job on the other Mac may spend of this owner's account, as the answers say
@@ -115,7 +139,6 @@ pub struct Ask<'a> {
     pub branch: &'a str,
     pub title: &'a str,
     pub size: &'a str,
-    pub start_commit: Option<&'a str>,
     /// On a share of the teammate's API account (#809): its grant. Its model calls are made on
     /// their Mac with their key, so none comes back here.
     pub grant: Option<&'a str>,
@@ -171,16 +194,25 @@ pub async fn run_turn(
         .await?;
     }
     let base_sha = git(worktree, &["rev-parse", "HEAD"]).await?;
-    // What the job adds to the repository goes through the secret scan before it leaves.
-    let since = ask.start_commit.unwrap_or(&base_sha);
-    let diff = git(
+    // Everything that leaves goes through the secret scan first: the whole tree the snapshot
+    // carries, as one diff from the empty tree, not only what the job added.
+    let empty = crate::git::run_bytes(
         worktree,
         &[
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            &format!("{since}..HEAD"),
+            "hash-object".as_ref(),
+            "-t".as_ref(),
+            "tree".as_ref(),
+            "--stdin".as_ref(),
         ],
+        &[],
+        Some(Vec::new()),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let empty = String::from_utf8_lossy(&empty).trim().to_owned();
+    let tree = git(
+        worktree,
+        &["diff", "--no-color", "--no-ext-diff", &empty, "HEAD"],
     )
     .await?;
     // The job's words go too, on the channel (never in the request, so never in the chain): the
@@ -193,7 +225,7 @@ pub async fn run_turn(
     let scratch = link.home().join("tmp");
     let _ = std::fs::create_dir_all(&scratch);
     let outgoing = [
-        ("the job's changes".into(), diff),
+        ("the job's code".into(), tree),
         ("the job's words".into(), prompt.to_owned()),
     ];
     match crate::scan::scan(&outgoing, &scratch).await {
@@ -245,8 +277,23 @@ async fn run_in(
     on_event: &mut impl FnMut(AgentEvent),
 ) -> Result<Turn, String> {
     let bundle = dir.join("in.bundle");
-    // Only the job's code goes, never the repository's history (only what the job adds was
-    // scanned): one commit of its tree with no parent. What comes back is replayed onto base_sha.
+    let job = format!("{}#{}", ask.repo, ask.branch);
+    let (tokens_before, seconds_before) =
+        SPENT.lock().unwrap().get(&job).copied().unwrap_or((0, 0));
+    if tokens_before >= MAX_TOKENS || seconds_before >= MAX_MINUTES * 60 {
+        return Ok(failed(
+            "This job used all the time and tokens it may on other Macs: run it here.",
+        ));
+    }
+    let left = MAX_MINUTES * 60 - seconds_before;
+    let mut spending = Spending {
+        job,
+        tokens: Arc::new(AtomicU64::new(tokens_before)),
+        since: None,
+        seconds_before,
+    };
+    // Only the job's code goes, never the repository's history: one commit of its tree (the tree
+    // scanned) with no parent. What comes back is replayed onto base_sha.
     let snapshot = crate::git::run(
         worktree,
         &[
@@ -277,7 +324,7 @@ async fn run_in(
     let sha = hex::encode(digest::digest(&digest::SHA256, &bytes).as_ref());
     let mut body = json!({"title": ask.title, "agent": ask.agent, "repo": ask.repo,
                           "base_branch": ask.base_branch, "base_sha": snapshot, "branch": ask.branch,
-                          "bundle": {"sha256": sha, "bytes": bytes.len()}, "size": ask.size, "max_minutes": 120});
+                          "bundle": {"sha256": sha, "bytes": bytes.len()}, "size": ask.size, "max_minutes": left.div_ceil(60)});
     if let Some(model) = ask.model {
         body["model"] = json!(model);
     }
@@ -331,6 +378,7 @@ async fn run_in(
         }
     }
     let accepted = tokio::time::Instant::now();
+    spending.since = Some(accepted);
     on_event(AgentEvent::Step(format!(
         "Running on {}'s Mac",
         ask.host_owner
@@ -348,7 +396,7 @@ async fn run_in(
         .build()
         .map_err(|e| e.to_string())?;
     let calls = Arc::new(Semaphore::new(CALLS_AT_ONCE));
-    let spent = Arc::new(AtomicU64::new(0));
+    let spent = spending.tokens.clone();
     let mut bundle_sent = false;
     // An open model call: what it asks, its body so far, and whether that went past the limit.
     let mut models: HashMap<u32, (Value, Vec<u8>, bool)> = HashMap::new();
@@ -444,7 +492,7 @@ async fn run_in(
                                     // Not once the exchange is over or the job's minutes are up: the
                                     // other Mac can't keep spending this owner's account.
                                     let over = link.exchange(&cid).is_none_or(|e| e.ended())
-                                        || accepted.elapsed() > Duration::from_secs(MAX_MINUTES * 60);
+                                        || accepted.elapsed() > Duration::from_secs(left);
                                     let spent_all = spent.load(Ordering::Relaxed) >= MAX_TOKENS;
                                     let permit = calls.clone().try_acquire_owned().ok();
                                     if !current.lasts(300) {

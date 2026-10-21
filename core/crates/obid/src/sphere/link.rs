@@ -1370,13 +1370,19 @@ impl Link {
                 );
                 continue;
             }
+            self.pins.keep_key(obi, card_id, card_key);
             for key in keys {
                 let (Some(id), Some(public_key)) =
                     (key["key_id"].as_str(), key["public_key"].as_str())
                 else {
                     continue;
                 };
-                if id == card_id && key["valid_until_seq"].as_u64().is_some() {
+                let older = key["valid_until_seq"].as_u64().is_some();
+                if older && (id == card_id || !self.pins.knows_key(obi, id, public_key)) {
+                    // Only a key a card obid trusted signed: the Sphere can't add one of its own.
+                    tracing::warn!(
+                        "sphere: the Sphere lists an older key for {obi} no card obid trusted signed: not used"
+                    );
                     continue;
                 }
                 directory.keys.insert(
@@ -1514,7 +1520,15 @@ impl Link {
             now: Some(time::now()),
             sphere: state.membership.as_ref().map(|m| m.sphere.clone()),
             receiver: state.membership.as_ref().map(|m| m.obi_id.clone()),
-            keys: state.directory.keys.clone(),
+            // A live message is signed with its sender's current key, the one its card signs;
+            // older keys only check old chain entries.
+            keys: state
+                .directory
+                .keys
+                .iter()
+                .filter(|(_, k)| k.valid_until_seq.is_none())
+                .map(|(id, k)| (id.clone(), k.clone()))
+                .collect(),
             seq: Some(delivery.seq),
             seen_ids: Vec::new(),
         };
@@ -4761,14 +4775,25 @@ impl Link {
     /// A call on `grant` by `owner`'s job cost `micros`: counted, and when it used the share up,
     /// the owner hears it (Sangam's "Sangam used the share of Deskree API"). What's left.
     pub(super) fn count_use(&self, grant: &str, owner: &str, micros: u64) -> u64 {
+        self.count(grant, owner, micros, false).unwrap_or(0)
+    }
+
+    /// Counts `micros` on `grant` for `owner` only when the share has that much left, checked
+    /// under the same lock; whether it did.
+    pub(super) fn reserve(&self, grant: &str, owner: &str, micros: u64) -> bool {
+        self.count(grant, owner, micros, true).is_some()
+    }
+
+    fn count(&self, grant: &str, owner: &str, micros: u64, only_if_room: bool) -> Option<u64> {
         let now = time::now();
         let (left, used_up, sharing) = {
             let mut state = self.lock();
-            let Some(g) = state.sharing.grants.iter_mut().find(|g| g.id == grant) else {
-                return 0;
-            };
+            let g = state.sharing.grants.iter_mut().find(|g| g.id == grant)?;
             g.roll(now);
             let had = g.left_for(owner);
+            if only_if_room && had < micros {
+                return None;
+            }
             *g.used.entry(owner.to_owned()).or_default() += micros;
             let left = g.left_for(owner);
             let used_up = (had > 0 && left == 0).then(|| g.clone());
@@ -4778,7 +4803,7 @@ impl Link {
         if let Some(g) = used_up {
             self.share_used_item(&g, owner, now);
         }
-        left
+        Some(left)
     }
 
     /// Gives back `micros` counted on `grant` for `owner` (a call's worst case, past what it cost).
