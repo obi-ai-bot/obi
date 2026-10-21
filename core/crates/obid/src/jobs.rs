@@ -5796,13 +5796,19 @@ impl Jobs {
     }
 
     /// Teammates' open pull requests that change `files` of `job`, with their diffs of them: not
-    /// for another Oby's job or a review, and none on a branch of obid's own jobs (crate::teammates).
+    /// for another Oby's job or a review, nor where obid opens no pull request (a remote that
+    /// isn't GitHub, as publishing decides), and none on a branch of obid's own jobs
+    /// (crate::teammates).
     async fn teammates_on(
         &self,
         job: &Job,
         files: &[String],
     ) -> Option<Vec<(crate::teammates::Pr, String)>> {
-        if job.obi.is_some() || job.kind == "review" {
+        let on_github = self.repo(&job.repo).is_some_and(|repo| {
+            repo.pull_requests
+                .unwrap_or_else(|| crate::github::is_remote(&repo.remote))
+        });
+        if job.obi.is_some() || job.kind == "review" || !on_github {
             return None;
         }
         let skip: Vec<String> = self
