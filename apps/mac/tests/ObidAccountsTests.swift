@@ -37,6 +37,12 @@ struct ObidAccountsTests {
         let accounts = try status(#"[{"id": "personal", "agent": "claude", "name": "Personal", "label": null, "signedIn": true, "running": 0}]"#).accounts
         #expect(accounts.filter(\.signedIn).map(\.account.id) == ["personal"])
     }
+
+    /// obid sends who pays for each account; Settings shows it.
+    @Test func obidsPayerReads() throws {
+        let accounts = try status(#"[{"id": "a1b2c3d4", "agent": "codex", "name": "Personal", "payer": "Wellington", "signedIn": false, "running": 0}]"#).accounts
+        #expect(accounts.first?.account.payer == "Wellington")
+    }
 }
 
 /// Sangam's usage rows on Settings › Accounts (docs/mac-design.md B2), and which accounts show (C1).
@@ -100,12 +106,6 @@ struct AccountRowsTests {
         #expect(AccountPlaces.of(local: true, runner: true) == [.runner])
         #expect(AccountPlaces.of(local: false, runner: true) == [.mac, .runner])
         #expect(AccountPlaces.of(local: false, runner: false) == [.mac])
-    }
-
-    /// obid sends who pays for each account; Settings shows it.
-    @Test func obidsPayerReads() throws {
-        let accounts = try status(#"[{"id": "a1b2c3d4", "agent": "codex", "name": "Personal", "payer": "Wellington", "signedIn": false, "running": 0}]"#).accounts
-        #expect(accounts.first?.account.payer == "Wellington")
     }
 
     /// The Mac opens a sign-in page obid answers only when it's https on the tool's own site, with
