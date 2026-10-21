@@ -219,6 +219,8 @@ struct SidebarView: View {
         return VStack(alignment: .leading, spacing: 1) {
             GroupHead(group: group, open: open) {
                 withAnimation(Tokens.warm) { state.folded.formSymmetricDifference([group.id]) }
+            } onOpen: {
+                if let kind = group.type { state.trail.start(.group(kind)) }
             }
             if open {
                 ForEach(shown.rows) { TaskRow(item: $0, model: model, state: state) }
@@ -234,38 +236,56 @@ struct SidebarView: View {
 }
 
 /// A group's label row: 12-point label, a chevron right after it (down while open, up folded),
-/// then at the right the orange dot (folded) and the count.
+/// then at the right the orange dot (folded) and the count. A kind of work's name opens its page,
+/// the one Home's chip opens (the owner's addition to Sangam's design, 2026-10-21); the chevron and
+/// the rest of the row fold it, as in his design. A status group (grouped by status) only folds.
 private struct GroupHead: View {
     let group: WorkList.Group<SidebarSections.JobRow>
     let open: Bool
     let onToggle: () -> Void
+    let onOpen: () -> Void
     @State private var hovering = false
+    @State private var hoveringName = false
 
     var body: some View {
-        Button(action: onToggle) {
-            HStack(spacing: 4) {
-                Text(group.label).font(Tokens.font(Tokens.textSm)).lineLimit(1).layoutPriority(1)
-                Image(systemName: "chevron.down").font(Tokens.font(9, .semibold))
-                    .rotationEffect(.degrees(open ? 0 : 180)).accessibilityHidden(true)
-                Spacer(minLength: 4)
-                if !open && group.needs > 0 {
-                    Circle().fill(Tokens.needs).frame(width: 6, height: 6)
-                        .accessibilityLabel("\(group.needs) need\(group.needs == 1 ? "s" : "") you")
+        HStack(spacing: 0) {
+            if group.type != nil {
+                // The name as a link: ink, underlined, and a hand on hover; its own click.
+                Button(action: onOpen) {
+                    Text(group.label).font(Tokens.font(Tokens.textSm)).lineLimit(1).underline(hoveringName)
+                        .foregroundStyle(hoveringName ? Tokens.ink : hovering ? Tokens.text : Tokens.label)
+                        .padding(.leading, 10).padding(.trailing, 4).frame(height: 26).contentShape(Rectangle())
                 }
-                if group.count > 0 {
-                    Text("\(group.count)").font(Tokens.font(Tokens.textSm)).monospacedDigit()
-                        .accessibilityLabel("\(group.count) \(group.countLabel)")
-                }
+                .buttonStyle(.plain)
+                .onHover { hoveringName = $0 }
+                .pointerStyle(.link)
+                .help("Open \(group.label)")
+                .accessibilityLabel("Open \(group.label)")
+                .layoutPriority(1)
             }
-            .foregroundStyle(hovering ? Tokens.text : Tokens.label)
-            .padding(.horizontal, 10).frame(height: 26)
-            .contentShape(Rectangle())
+            Button(action: onToggle) {
+                HStack(spacing: 4) {
+                    if group.type == nil { Text(group.label).font(Tokens.font(Tokens.textSm)).lineLimit(1).layoutPriority(1) }
+                    Image(systemName: "chevron.down").font(Tokens.font(9, .semibold))
+                        .rotationEffect(.degrees(open ? 0 : 180))
+                    Spacer(minLength: 4)
+                    if !open && group.needs > 0 { Circle().fill(Tokens.needs).frame(width: 6, height: 6) }
+                    if group.count > 0 { Text("\(group.count)").font(Tokens.font(Tokens.textSm)).monospacedDigit() }
+                }
+                .foregroundStyle(hovering && !hoveringName ? Tokens.text : Tokens.label)
+                .padding(.leading, group.type == nil ? 10 : 0).padding(.trailing, 10).frame(height: 26)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(open ? "Hide" : "Show") \(group.label)")
+            .accessibilityValue([group.count > 0 ? "\(group.count) \(group.countLabel)" : nil,
+                                 group.needs > 0 ? "\(group.needs) need\(group.needs == 1 ? "s" : "") you" : nil].compactMap { $0 }.joined(separator: ", "))
         }
-        .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(Tokens.fade, value: hovering)
+        .animation(Tokens.fade, value: hoveringName)
+        .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isHeader)
-        .accessibilityValue(open ? "Open" : "Folded")
     }
 }
 

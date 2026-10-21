@@ -168,16 +168,39 @@ private struct TasksColumn: View {
                         .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.horizontal, 12)
                 }
                 ForEach(groups) { group in
-                    HStack {
-                        Text(group.label).accessibilityAddTraits(.isHeader)
-                        Spacer()
-                        // A kind's open tasks, as his panel counts them.
-                        if group.count > 0 { Text("\(group.count)").monospacedDigit() }
+                    let folded = phone.panelFolded.contains(group.id)
+                    // A kind's name opens its page, as Home's chip does (the owner's addition to
+                    // Sangam's design, 2026-10-21); the chevron and the rest of the row fold it.
+                    HStack(spacing: 0) {
+                        if let kind = group.type {
+                            Button { open(.kind(kind)) } label: {
+                                Text(group.label).padding(.leading, 12).padding(.trailing, 6).frame(height: 36).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Open \(group.label)")
+                        }
+                        Button { withAnimation(Tokens.warm) { phone.panelFolded.formSymmetricDifference([group.id]) } } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "chevron.down").font(Tokens.font(9, .semibold)).rotationEffect(.degrees(folded ? 180 : 0))
+                                Spacer(minLength: 4)
+                                if folded && group.needs > 0 { Circle().fill(Tokens.needs).frame(width: 6, height: 6) }
+                                // A kind's open tasks, as his panel counts them.
+                                if group.count > 0 { Text("\(group.count)").monospacedDigit() }
+                            }
+                            .padding(.trailing, 12).frame(height: 36).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(folded ? "Show" : "Hide") \(group.label)")
+                        .accessibilityValue(group.count > 0 ? "\(group.count) \(group.countLabel)" : "")
                     }
                     .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.label)
-                    .padding(.horizontal, 12).frame(height: 26).padding(.top, 8)
-                    ForEach(WorkList.shown(group, more: false).rows) { item in
-                        Button { open(.task(item.id)) } label: { PanelTaskRow(item: item) }.buttonStyle(.plain)
+                    .padding(.top, 4)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityAddTraits(.isHeader)
+                    if !folded {
+                        ForEach(WorkList.shown(group, more: false).rows) { item in
+                            Button { open(.task(item.id)) } label: { PanelTaskRow(item: item) }.buttonStyle(.plain)
+                        }
                     }
                 }
                 // What needs you with no task on Home, always reachable here too.
