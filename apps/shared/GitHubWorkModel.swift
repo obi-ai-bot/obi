@@ -168,15 +168,6 @@ extension GitHubWork.Item {
     /// The card's label over the headline: Sangam's "Start it?" when it can start, else where it is.
     var label: String { action == nil ? (list == .mine ? "Your pull request" : "On GitHub") : "Start it?" }
 
-    /// What the start button does, said under the choices as obid's own inbox item says it.
-    var actionDetail: String? {
-        switch list {
-        case .reviews: "Starts Oby's review of it. Nothing is posted on GitHub."
-        case .assigned: "Starts a fix job on it, which opens a pull request when its check passes."
-        case .mine: nil
-        }
-    }
-
     /// Where your own pull request stands: "Changes requested, checks failed."
     var state: String? {
         let review: String? = switch reviewDecision {
@@ -310,13 +301,25 @@ extension GitHubWork {
 
 #if DEBUG
 extension GitHubWork {
-    /// Debug builds launched with `-ObySampleGitHub YES` (or `signedOut`): made-up GitHub work in
+    /// Debug builds launched with `-ObySampleGitHub YES` (or `signedOut`, or `busy`: 9 reviews and
+    /// 51 issues on a board's columns, the owner's shape on 2026-10-21): made-up GitHub work in
     /// place of obid's, for screenshots of Review PR and Issues. Nothing is sent.
     /// ponytail: fixed items, enough for screenshots.
     static var sample: GitHubWork? {
         switch UserDefaults.standard.string(forKey: "ObySampleGitHub") {
         case "signedOut": return GitHubWork(signedIn: false)
         case nil, "NO": return nil
+        case "busy":
+            let now = Date.now, columns = ["In progress", "Todo", "Backlog"]
+            return GitHubWork(signedIn: true, login: "well-prado", items: (0..<9).map { n in
+                Item(id: "rv\(n)", list: .reviews, repo: "deskree-inc/tetrix-ee", number: 420 - n, title: "Review request \(n + 1)",
+                     url: "https://github.com/deskree-inc/tetrix-ee/pull/\(420 - n)", author: ["Ernesto", "Dima", "Daniel"][n % 3],
+                     updated: now.addingTimeInterval(Double(n + 1) * -1700))
+            } + (0..<51).map { n in
+                Item(id: "is\(n)", list: .assigned, repo: "deskree-inc/obi", number: 800 - n, title: "Roadmap issue \(n + 1)",
+                     url: "https://github.com/deskree-inc/obi/issues/\(800 - n)", author: "well-prado", updated: now.addingTimeInterval(Double(n + 1) * -2400),
+                     board: n < 47 ? .init(project: "Oby — Roadmap", column: columns[n < 3 ? 0 : n < 17 ? 1 : 2]) : nil)
+            })
         default:
             let now = Date.now
             return GitHubWork(signedIn: true, login: "well-prado", items: [

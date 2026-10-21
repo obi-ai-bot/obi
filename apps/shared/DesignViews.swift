@@ -29,6 +29,8 @@ struct AskCard: View {
     /// Under the choices: what your own words do, as a link to type them below.
     var hint: String? = nil
     var onHint: (() -> Void)? = nil
+    /// The line under the choices saying what each does; off where Sangam's card has none (GitHub's).
+    var explains = true
     let onChoose: (CardOption) -> Void
     var onLater: (() -> Void)? = nil
     var onOpen: (() -> Void)? = nil
@@ -80,7 +82,7 @@ struct AskCard: View {
                 }
                 .padding(.top, 14)
                 // What each choice does, the recommended one marked, and the rule Always allow saves.
-                let explained = options.filter { $0.detail != nil || $0.recommended }
+                let explained = explains ? options.filter { $0.detail != nil || $0.recommended } : []
                 if !explained.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(Array(explained.enumerated()), id: \.offset) { _, option in
@@ -530,6 +532,7 @@ struct LineTabs: View {
     let counts: [WorkList.Tab: Int]
     let onPick: (WorkList.Tab) -> Void
     @Namespace private var line
+    @State private var hovered: WorkList.Tab?
 
     var body: some View {
         HStack(spacing: 24) {
@@ -537,7 +540,7 @@ struct LineTabs: View {
                 Button { withAnimation(Tokens.warm) { onPick(each) } } label: {
                     HStack(spacing: 6) {
                         Text(each.rawValue).font(Tokens.font(Tokens.textBase))
-                            .foregroundStyle(tab == each ? Tokens.ink : Tokens.muted)
+                            .foregroundStyle(tab == each ? Tokens.ink : hovered == each ? Tokens.text : Tokens.muted)
                         Text("\(counts[each] ?? 0)").font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(Tokens.muted)
                     }
                     .frame(height: 36)
@@ -550,6 +553,8 @@ struct LineTabs: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .onHover { hovered = $0 ? each : hovered == each ? nil : hovered }
+                .animation(Tokens.fade, value: hovered)
                 .accessibilityAddTraits(tab == each ? .isSelected : [])
             }
         }

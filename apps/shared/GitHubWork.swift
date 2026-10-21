@@ -40,9 +40,9 @@ struct GitHubCard: View {
             .padding(.leading, 26).padding(.top, 4)
             VStack(alignment: .leading, spacing: 0) {
                 AskCard(kind: item.label, title: item.headline, happened: item.note,
-                        options: (item.action.map { [CardOption(label: $0, answer: $0, detail: item.actionDetail, recommended: true)] } ?? [])
+                        options: (item.action.map { [CardOption(label: $0, answer: $0, recommended: true)] } ?? [])
                             + (item.page == nil ? [] : [CardOption(label: "Open on GitHub", answer: "open")]),
-                        busy: busy,
+                        busy: busy, explains: false,
                         onChoose: { option in
                             if option.answer == "open" { item.page.map { openURL($0) }; return }
                             busy = true
