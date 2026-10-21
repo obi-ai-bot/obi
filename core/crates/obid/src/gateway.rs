@@ -641,7 +641,7 @@ async fn scrubbed(
 
 /// Events about logins and the watcher, which only the Mac's own Settings uses: Tetrix's and
 /// Slack's sign-ins, and the watcher's rules and runs (what people wrote, quoted).
-const MAC_ONLY_EVENTS: &[&str] = &["tetrix", "slack", "watch"];
+const MAC_ONLY_EVENTS: &[&str] = &["tetrix", "slack", "watch", "listen"];
 
 /// `text`, a piece of the event stream, without the frames of [`MAC_ONLY_EVENTS`]. The stream
 /// comes a frame at a time, each ending with a blank line.
@@ -774,6 +774,8 @@ mod tests {
         assert!(!allows(&Method::POST, "/v1/slack/sign-in"));
         assert!(!allows(&Method::PATCH, "/v1/watch"));
         assert!(!allows(&Method::POST, "/v1/watch/run"));
+        assert!(!allows(&Method::PUT, "/v1/listen"));
+        assert!(!allows(&Method::POST, "/v1/listen/catch-up"));
         // Accounts are added, changed, removed and signed in on the machine itself: a paired
         // phone's token could otherwise sign obid into someone else's account (docs/runner-api.md,
         // "POST /v1/accounts").

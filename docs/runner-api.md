@@ -393,6 +393,7 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
   | `confirm` | obid only (#546): Oby's brain planned something that persists or widens trust, which it never does in a turn (obid only: the brain, below); `title` says exactly what `Confirm` does, like `Always allow Bash(make lint:*) in acme/app`, and `job` is the job it's about, or empty | what was planned and why it waits | `Confirm`, `Cancel`, none recommended |
   | `github` | obid only: a read of the owner's GitHub work found a new review request or assigned issue on a repository obid knows (obid only: GitHub work); one per item, ever | `Your review is requested on pull request #702 in obi-ai-bot/obi.` or `Issue #640 in obi-ai-bot/obi is assigned to you.` | `Review it` or `Fix it`, `Dismiss` |
   | `watch` | obid only: the watcher saw the person it watches say or do something the owner watches for (obid only: the watcher); one per message or GitHub event, ever | `Dmitry wrote in #tetrix-avenga-testing.` or `Dmitry commented on your pull request obi-ai-bot/obi#835.` | `Dismiss` |
+  | `listen` | obid only: the channel listener heard a message that needs the owner, sent the day's digest, or has a review it started ready (obid only: the channel listener); one per message, digest or review, ever | `Ernesto asked you something in #reviews.`, `Slack digest: 4 message(s) in #reviews didn't need you.` or `Oby reviewed pull request #835 in obi-ai-bot/obi, as Ernesto asked in #reviews.` | `Dismiss`; a review's: `Approve`, `Dismiss` |
 
   A `confirm` item (obid only) also carries `confirm`, what its `Confirm` carries out: `{"action": "always_allow", "target": "ab12cd34", "payload": {"permission": "p1a2b3c"}}`. `action` is a typed name, `target` what it acts on (a job's id or an inbox item's id, as the action says) and `payload` what else it needs (`null` when nothing). obid carries every action out through one dispatcher, so a new action is a new name with its own `target` and `payload`, the shape unchanged. The actions so far:
 
@@ -1331,7 +1332,7 @@ The Watch API doesn't pass pieces on to the runner's speech service (`POST /v1/s
 - **Push to main:** not for anyone, not even with an approval.
 - **Force-push, except a rebase of its own branch:** only an `oby/` branch the runner made, only over the commit it pushed there last (`--force-with-lease`), never `main` or `dev` ([`GET /v1/jobs/{id}/publish`](#get-v1jobsidpublish)).
 - **Merge, except into `dev` after the Mac check:** the runner squash-merges a pull request it opened only into `dev`, only when Oby's review approved it, the Mac check passed on the same commit and the secret scan is clean (Mac check, above). Never into `main`.
-- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. No comment goes out: Oby's own review of its own pull request and the Mac check's results on it are check runs (an Apple check posts nothing), and the `oby-failure` issues its post-mortems file in Oby's own repository (Engine/Failures.swift) are updated in place, all after the secret scan; no agent posts to GitHub, and no GitHub review, approval or comment goes on anyone else's work.
+- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. No comment goes out, but a review the owner approved (obid only: the channel listener): Oby's own review of its own pull request and the Mac check's results on it are check runs (an Apple check posts nothing), and the `oby-failure` issues its post-mortems file in Oby's own repository (Engine/Failures.swift) are updated in place, all after the secret scan; no agent posts to GitHub, and no GitHub review, approval or comment goes on anyone else's work.
 - **Research jobs never commit or publish.** Proposed issues are filed only after the user taps to file them.
 - **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
 - **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.
@@ -1652,32 +1653,39 @@ The owner connects Slack once, in Oby (F10, #14; the spike #26), with their work
 
 - User token scopes: `search:read` (the watcher's reads, through `search.messages`). An app made for more (`channels:history`, `groups:history`, `im:history`, `mpim:history`, the `:read` scopes, `users:read`) works the same; obid doesn't use them.
 - Bot token scopes: `chat:write` and `im:write` (the direct message to the owner).
+- For the channel listener (below) only: Socket Mode on, an app-level token (`xapp-…`, scope `connections:write`), and the user events `message.channels` and `message.groups` (Event Subscriptions › Subscribe to events on behalf of users; the user token's `channels:history` and `groups:history` cover them).
 
-No redirect URL, no PKCE, no client secret, no events and no Socket Mode: obid asks Slack, as it asks GitHub. OAuth & Permissions › OAuth Tokens has the two tokens, `xoxp-…` (User OAuth Token) and `xoxb-…` (Bot User OAuth Token).
+No redirect URL, no PKCE and no client secret. Without the listener, no events and no Socket Mode: obid asks Slack, as it asks GitHub. OAuth & Permissions › OAuth Tokens has the two tokens, `xoxp-…` (User OAuth Token) and `xoxb-…` (Bot User OAuth Token).
 
 **`GET /v1/slack`** answers:
 
 ```json
-{"connected": true, "team": "Deskree", "user": "U02MX5VJKQU", "bot": "U0BOT1234",
+{"connected": true, "team": "Deskree", "user": "U02MX5VJKQU", "bot": "U0BOT1234", "socket": true,
  "connectedAt": "2026-10-21T14:02:11Z", "error": null}
 ```
 
-- `connected`: obid holds both tokens and Slack took them. `team`: the workspace's name. `user`: the user token's Slack user id, the owner, the only person obid writes to. `bot`: the app's bot user id.
+- `connected`: obid holds both tokens and Slack took them. `team`: the workspace's name. `user`: the user token's Slack user id, the owner, the only person obid writes to. `bot`: the app's bot user id. `socket`: whether obid holds the app-level token the channel listener needs.
 - `error`: why Oby was signed out (`Slack refused Oby's tokens: paste new ones in Settings › Connectors › Slack.`), or null.
 - No token is ever in an answer, an event or a log line.
 
-**`PUT /v1/slack`** with `{"user": "xoxp-…", "bot": "xoxb-…"}` (the owner pastes them in Settings › Connectors › Slack) checks both and keeps them, answering as `GET` does:
+**`PUT /v1/slack`** with `{"user": "xoxp-…", "bot": "xoxb-…"}`, and `"app": "xapp-…"` for the channel listener (the owner pastes them in Settings › Connectors › Slack), checks them and keeps them, answering as `GET` does:
 
 - Each is its kind (`xoxp-` and `xoxb-`, 20 to 512 printable characters), else `422`.
+<<<<<<< HEAD
 - obid asks Slack's `auth.test` with each: the user token must be a person's (no `bot_id`), the bot token a bot's (`bot_id`), both of the same workspace (`team_id`). A token Slack refuses is `422` (`Slack refused the bot token.`); Slack out of reach is `502`. Nothing is kept until both pass.
 - They go into obid's vault as `oby.slack.user` and `oby.slack.bot`, so they're taken out of every answer, log line and push like every vault secret (obid only: the vault). Who they are is in `home/slack.json` (0600).
 - A token Slack refuses later (`invalid_auth`, `token_revoked`, …) signs Oby out, the tokens forgotten and `error` saying so, as long as the vault still holds the one Slack refused: a refusal that comes back after new tokens were pasted signs nothing out. A `PUT` that can't keep every token keeps none.
+=======
+- obid asks Slack's `auth.test` with each: the user token must be a person's (no `bot_id`), the bot token a bot's (`bot_id`), both of the same workspace (`team_id`). A token Slack refuses is `422` (`Slack refused the bot token.`); Slack out of reach is `502`. An app-level token is `xapp-` and has no `auth.test`: obid opens a Socket Mode connection with it (`apps.connections.open`, which must answer a `wss://` address on slack.com) and uses that address never. Nothing is kept until all pass; a `PUT` without `app` forgets the one obid held.
+- They go into obid's vault as `oby.slack.user`, `oby.slack.bot` and `oby.slack.app`, so they're taken out of every answer, log line and push like every vault secret (obid only: the vault). Who they are is in `home/slack.json` (0600).
+- A token Slack refuses later (`invalid_auth`, `token_revoked`, …) signs Oby out: both are forgotten and `error` says so.
+>>>>>>> d4497427 (feat(obid): the Slack channel listener (Socket Mode))
 
-**`DELETE /v1/slack`** forgets both tokens: `204`. The app stays installed in Slack; uninstalling it there revokes them.
+**`DELETE /v1/slack`** forgets the tokens: `204`. The app stays installed in Slack; uninstalling it there revokes them.
 
 **The `slack` event** comes on `/v1/events` with the same body as `GET /v1/slack` whenever it changes. The gateway leaves it out of a phone's event stream.
 
-**What obid does with them.** Only the watcher (below) uses them: `search.messages` with the user token (at most 3 pages of 100, newest first), and, with the bot token, `conversations.open` with the owner's user id, then `chat.postMessage` in that direct message. Every message obid sends passes the secret scan first: a finding, or a scan that can't run, sends nothing. Nothing ever goes to anyone else.
+**What obid does with them.** The watcher and the channel listener (below): `search.messages`, `conversations.history`, `conversations.info` and `users.info` with the user token; with the bot token, `conversations.open` with the owner's user id, then `chat.postMessage` in that direct message; with the app-level token, `apps.connections.open` and the Socket Mode connection it opens. Every message obid sends passes the secret scan first: a finding, or a scan that can't run, sends nothing. Nothing ever goes to anyone else.
 
 ### obid only: the watcher
 
@@ -1735,6 +1743,33 @@ The rules, as `GET /v1/watch` shows them and `PUT /v1/watch` sets them:
 `title` and `text` are obid's own words; what was written is under `watch.quoted`, for the card only. `Dismiss`, done or later settle or put it off. The event orchestrator never takes a `watch` item, and the conversation's brain can't settle one: it's the owner's to read.
 
 **Who reaches it.** Only on loopback, with obid's API token: none of it is on the gateway, and no other Obi, agent or conversation can change the rules or turn `live` on.
+
+### obid only: the channel listener
+
+The Slack channels the owner picks, heard live, sorted, and acted on only in ways that can't do harm by themselves: a read-only review, a ping, a digest. Teammates ask Claude to post their review requests in Slack; Claude posts them as the person, ending with a footer, `Sent by Claude`. The footer is plain text anyone can type: it decides only whether a review starts, and a review only reads.
+
+**Settings**, as `GET /v1/listen` shows them and `PUT /v1/listen` sets them:
+
+```json
+{"channels": ["C0123ABCD"], "footer": "Sent by Claude", "digest": "17:00", "zone": "America/Sao_Paulo", "enabled": true, "live": false}
+```
+
+- `channels`: 1 to 20 Slack channel ids. obid asks Slack for each one's name (`conversations.info`, which is also the check that the owner can read it) and keeps `[{"id", "name"}]`. `footer`: what a request ends with, one line of up to 60 characters (left out, `Sent by Claude`). `digest`: when the day's digest goes, `HH:MM` on weekdays in `zone` (left out, `17:00`). `enabled`: true unless paused. `live`: false (left out, too) is a dry run: the Slack messages to the owner are only written to the log; true sends them.
+- `422` with why for settings that break these, or a channel Slack doesn't know; `409` while Slack isn't connected. A new channel is read from now; resuming (`PATCH {"enabled": true}`) reads every channel from now.
+
+**Hearing.** While the settings are on and obid holds the app-level token (obid only: Slack), obid keeps one Socket Mode connection (`apps.connections.open`, then the `wss://` address it answers, with the platform's own roots). It acks every envelope as it comes (`{"envelope_id": …}`), takes `events_api` envelopes whose event is a `message` in a listened channel, and reconnects when Slack says `disconnect`, when the connection closes, breaks or says nothing for 5 minutes, when the settings or the tokens change, with a backoff from 1 second to 5 minutes after a failure. Every 15 minutes, and as `POST /v1/listen/catch-up` asks, obid also reads each channel since the newest message it handled there (`conversations.history`, at most a day back): the catch-up for a Mac that slept or a connection that dropped. Only people's own new messages count (no edits, joins or bots' posts), never the owner's own, each once (`slack:<channel>:<ts>`, the latest 5,000 kept).
+
+**Sorting.** New messages are sorted in batches of up to 50: each text through the secret scan first (a flagged one isn't shown to the model or acted on), then the brain's quick model reads them in a quoted file, fenced as data, with who wrote them (`users.info`) and where, and answers each one's `kind`, `review` (asks for a pull request's review), `owner` (needs the owner) or `other`, and a topic, made plain as the watcher's is. An answer that doesn't sort every message exactly once fails the batch, and nothing of it is kept: the catch-up reads it again.
+
+**Acting.**
+- **A review** starts only when the model says `review`, the message's last line ends with the footer's words (Slack's markup and a link's label aside, whatever the case), and it links a pull request (`https://github.com/<owner>/<name>/pull/<n>`) in one of obid's `repos`. Nothing else of the message is used: the job is Oby's review of that pull request exactly as `POST /v1/github/work/{id}/start` starts one (obid only: GitHub work), read-only, its task and title obid's own words, what people wrote on GitHub quoted; the Slack message never reaches the agent. One review per pull request and head commit (`gh pr view --json state,headRefOid`; a closed one isn't reviewed), so the same request, or the same pull request asked twice, starts one job.
+- **A request that doesn't qualify** (no footer, no link, a repository obid doesn't work in, or a review that couldn't start), and every `owner` message, tells the owner now: a `listen` inbox item and one Slack message from the app's bot, `Oby (Slack): this needs you.` then a line each in obid's words with the topic and the message's link (`https://slack.com/archives/<channel>/p<ts>`), never what was written.
+- **Everything else** waits for the digest: on weekdays at `digest` in `zone`, once a day, one `listen` item (`Slack digest: 4 message(s) in #reviews didn't need you.`) and one Slack message listing them the same way. At most 100 wait.
+- **A finished review.** Once a review's job ends `done`, its `listen` item offers `Approve` and `Dismiss` (`job` the review job, `watch.pr` the pull request), and the owner gets a Slack message saying it's ready. `Approve` (the owner's own answer: the conversation's brain is refused, and the event orchestrator never takes a `listen` item) posts the job's summary on the pull request as a comment review with obid's `gh` (`gh pr review <n> -R <repo> --comment --body-file …`), after the secret scan: a finding, or a scan that can't run, posts nothing and the item stays open (`502`, `Nothing was posted: …`). Nothing is ever posted any other way. A review whose job didn't end `done` is left to its job's own report.
+
+**`GET /v1/listen`** answers `{"settings": …|null, "socket": "connected"|"connecting"|"off"|"<why it isn't>", "digestWaiting": 3, "digestSent": "2026-10-21", "reviews": […], "handled": […]}`: the latest 20 reviews it started (`repo`, `number`, `sha`, `job`, `key`, `place`, `url`, `person`, `state` `running`, `ready` or `ended`, `at`) and the latest 50 messages it handled (`key`, `at`, `kind` `review`, `owner`, `other` or `flagged`, and `outcome` in obid's words). **`PUT /v1/listen`** sets the settings. **`PATCH /v1/listen`** with `{"enabled"}` and/or `{"live"}`; `404` with none set. **`DELETE /v1/listen`** forgets them and everything kept: `204`. **`POST /v1/listen/catch-up`** reads every channel now and answers `{"sorted": <n>, "listen": …}`; `404` with none set, `502` when Slack can't be read. All of it is in `home/listen.json` (0600); a file obid can't read is moved aside to `listen.json.unreadable`.
+
+**The `listen` event** comes on `/v1/events` with `GET`'s body whenever it changes. The gateway leaves it out of a phone's event stream, and none of these endpoints is on its allowlist.
 
 ### obid only: the gateway
 

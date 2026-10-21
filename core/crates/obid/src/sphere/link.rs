@@ -579,7 +579,24 @@ impl Link {
         {
             let mut state = self.lock();
             for notice in notices {
-                let item = inbox::watch_item(person, notice, now);
+                let item = inbox::watch_item("watch", person, notice, now);
+                if !state.inbox.contains_key(&item.id) {
+                    state.inbox.insert(item.id.clone(), item.clone());
+                    changed.push(item);
+                }
+            }
+        }
+        for item in &changed {
+            self.save_item(item);
+        }
+    }
+
+    /// Items obid made (crate::listen): each one that never was in the inbox, open or done.
+    pub fn add_items(&self, items: Vec<Item>) {
+        let mut changed = Vec::new();
+        {
+            let mut state = self.lock();
+            for item in items {
                 if !state.inbox.contains_key(&item.id) {
                     state.inbox.insert(item.id.clone(), item.clone());
                     changed.push(item);
@@ -3204,6 +3221,47 @@ impl Link {
                 Given::Later(_) => {}
             }
         }
+        // A listener's review (crate::listen): Approve posts it on GitHub, with no lock held, so
+        // the answer claims the item first; when nothing was posted it's open again.
+        let approving = {
+            let mut state = self.lock();
+            let item = state
+                .inbox
+                .get(id)
+                .filter(|i| {
+                    i.done.is_none()
+                        && i.kind == "listen"
+                        && i.options.iter().any(|o| o == crate::listen::APPROVE)
+                })
+                .cloned();
+            match (item, &given) {
+                (Some(item), Given::Answer(a)) if a == crate::listen::APPROVE => {
+                    if let Some(kept) = state.inbox.get_mut(id) {
+                        kept.done = Some(time::now());
+                    }
+                    Some(item)
+                }
+                _ => None,
+            }
+        };
+        if let Some(mut item) = approving {
+            return match crate::listen::post_review(&self.config.home, &self.jobs, &item).await {
+                Ok(()) => {
+                    item.done = Some(time::now());
+                    item.answer = Some(crate::listen::APPROVE.into());
+                    self.lock().inbox.insert(item.id.clone(), item.clone());
+                    self.save_item(&item);
+                    Ok(item.to_json())
+                }
+                Err(why) => {
+                    self.lock().inbox.insert(item.id.clone(), item.clone());
+                    Err(api(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Nothing was posted: {why}."),
+                    ))
+                }
+            };
+        }
         // An offer of GitHub work: its start reads GitHub first, with no lock held, so its start
         // answer claims the item under the lock (done), as Start does: nothing settles it
         // meanwhile, and a second answer finds it done.
@@ -3282,7 +3340,7 @@ impl Link {
                 return Ok(item.to_json());
             }
             // A plug-in's event and the watcher's notice only say something: Dismiss settles them.
-            if matches!(item.kind.as_str(), "pluginEvent" | "watch") {
+            if matches!(item.kind.as_str(), "pluginEvent" | "watch" | "listen") {
                 drop(state);
                 return match given {
                     Given::Answer(answer) => self.answer_plugin_event(item, Some(answer), None),

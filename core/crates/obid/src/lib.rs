@@ -34,6 +34,7 @@ pub mod github_work;
 pub mod job;
 pub mod jobs;
 pub mod limits;
+pub mod listen;
 pub mod logs;
 pub mod memory;
 pub mod obi_dir;
@@ -336,6 +337,7 @@ pub async fn serve(
         events.clone(),
     );
     let watch = watch::Watch::open(&config.home, events.clone());
+    let listen = listen::Listen::open(&config.home, events.clone());
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -362,6 +364,7 @@ pub async fn serve(
         github_work: github.clone(),
         slack,
         watch,
+        listen,
         push: pushes,
         stopping: stopping_rx.clone(),
     });
@@ -433,6 +436,8 @@ pub async fn serve(
     routines::spawn(shared.clone());
     // The watcher, every 15 minutes on weekdays (crate::watch).
     watch::spawn(shared.clone());
+    // The Slack channels the owner picked, live and caught up every 15 minutes (crate::listen).
+    listen::spawn(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
     brain::orchestrator::spawn(shared.clone());
     // A job a conversation started that stalls goes back to that conversation, which decides.

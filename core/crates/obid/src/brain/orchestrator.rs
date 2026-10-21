@@ -207,7 +207,7 @@ impl Seen {
             // Already the owner's to decide: escalating would only leave a second item for it.
             || matches!(item.kind.as_str(), "confirm" | "start" | "permission" | "plan" | "question" | "github")
             // What someone said, told to the owner: never the brain's to act on.
-            || item.kind == "watch"
+            || matches!(item.kind.as_str(), "watch" | "listen")
         {
             return vec![];
         }

@@ -907,6 +907,8 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
         "confirm" => Owners::Refuse("only you can confirm it, in your inbox.".into()),
         // What someone said, told to the owner: theirs to read, not the brain's to settle.
         "watch" => Owners::Refuse("it's for you to read, in your inbox.".into()),
+        // A review the listener started: Approve posts on GitHub, which only the owner does.
+        "listen" => Owners::Refuse("only you can approve or dismiss it, in your inbox.".into()),
         // A job's plan is the owner's to approve or send back, either way (#609).
         "plan" => Owners::Refuse(
             "it's a job's plan: only you can approve it or send it back, in your inbox.".into(),
@@ -1399,6 +1401,17 @@ mod tests {
         assert_eq!(
             owners_call(&notice, "Dismiss", None),
             Owners::Refuse("it's for you to read, in your inbox.".into())
+        );
+        // A listener's review: Approve posts on GitHub, the owner's alone.
+        let review = item(
+            "listen",
+            "listen-review-1",
+            "Review ready: obi #835",
+            &["Approve", "Dismiss"],
+        );
+        assert_eq!(
+            owners_call(&review, "Approve", None),
+            Owners::Refuse("only you can approve or dismiss it, in your inbox.".into())
         );
     }
 
