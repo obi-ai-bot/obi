@@ -143,6 +143,30 @@ pub const SCHEMAS: &[(&str, &str)] = &[
         include_str!("../spec/schemas/v0.1/wire/sphere.schema.json"),
     ),
     (
+        "actions/run_request",
+        include_str!("../spec/schemas/v0.1/actions/run_request.schema.json"),
+    ),
+    (
+        "actions/run_progress",
+        include_str!("../spec/schemas/v0.1/actions/run_progress.schema.json"),
+    ),
+    (
+        "actions/run_return",
+        include_str!("../spec/schemas/v0.1/actions/run_return.schema.json"),
+    ),
+    (
+        "actions/run_cancel",
+        include_str!("../spec/schemas/v0.1/actions/run_cancel.schema.json"),
+    ),
+    (
+        "runner-status",
+        include_str!("../spec/schemas/v0.1/runner-status.schema.json"),
+    ),
+    (
+        "channel-hello",
+        include_str!("../spec/schemas/v0.1/channel-hello.schema.json"),
+    ),
+    (
         "wire/token.response",
         include_str!("../spec/schemas/v0.1/wire/token.response.schema.json"),
     ),

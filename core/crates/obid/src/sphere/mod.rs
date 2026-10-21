@@ -3,6 +3,7 @@
 //! limits that answer them, and the routes that serve them.
 
 pub mod answering;
+pub mod channel;
 pub mod decisions;
 pub mod exchange;
 pub mod inbox;

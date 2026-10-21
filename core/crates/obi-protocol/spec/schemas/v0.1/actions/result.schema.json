@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/obi-ai-bot/obi-sphere/raw/main/spec/schemas/v0.1/actions/result.schema.json",
   "title": "result body",
-  "description": "Finishes a review_request or a handoff: a review's verdict and findings, or a handoff's outcome. `for` says which. A question is answered by `answer`, never by a result.",
+  "description": "Finishes a review_request, a handoff or a run_request: a review's verdict and findings, a handoff's outcome, or a guest job's. `for` says which. A question is answered by `answer`, never by a result.",
   "oneOf": [
     {
       "title": "result of a review_request",
@@ -36,6 +36,21 @@
         "pr": { "$ref": "../common.schema.json#/$defs/pr_number" },
         "acceptance": { "$ref": "../common.schema.json#/$defs/acceptance_results" },
         "by_rule": { "$ref": "../common.schema.json#/$defs/rule_id" },
+        "summary": { "$ref": "../common.schema.json#/$defs/block_text", "x-obi-text": "data", "minLength": 1, "maxLength": 4000 }
+      }
+    },
+    {
+      "title": "result of a run_request",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["for", "outcome", "repo", "host"],
+      "properties": {
+        "for": { "const": "run_request" },
+        "outcome": { "enum": ["done", "failed"] },
+        "repo": { "$ref": "../common.schema.json#/$defs/repo" },
+        "commits": { "$ref": "../common.schema.json#/$defs/bundle", "description": "The job's commits, a git bundle on the job channel. Absent when it made none." },
+        "head_sha": { "$ref": "../common.schema.json#/$defs/sha" },
+        "host": { "$ref": "../common.schema.json#/$defs/host_use" },
         "summary": { "$ref": "../common.schema.json#/$defs/block_text", "x-obi-text": "data", "minLength": 1, "maxLength": 4000 }
       }
     }

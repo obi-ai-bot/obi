@@ -195,11 +195,47 @@
     },
     "action_type": {
       "description": "Every action type. There is no free-text message type.",
-      "enum": ["review_request", "question", "handoff", "status", "accept", "decline", "result", "answer"]
+      "enum": ["review_request", "question", "handoff", "run_request", "status", "accept", "decline", "result", "answer", "run_progress", "run_return", "run_cancel"]
     },
     "request_type": {
       "description": "The action types that start an exchange.",
-      "enum": ["review_request", "question", "handoff"]
+      "enum": ["review_request", "question", "handoff", "run_request"]
+    },
+    "agent": {
+      "description": "The coding agent a run_request runs: its own CLI, with the member's own account.",
+      "enum": ["claude", "codex"]
+    },
+    "model_id": {
+      "description": "A model name as the agent's CLI takes it.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    "box_size": {
+      "description": "The size of a guest job's VM: small is 4 cores, 8 GB and 30 GB of disk; large is 6 cores, 12 GB and 60 GB.",
+      "enum": ["small", "large"]
+    },
+    "bundle": {
+      "description": "A git bundle that travels on the exchange's job channel (protocol.md section 13), named by its SHA-256 and size.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "bytes"],
+      "properties": {
+        "sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 2147483648 }
+      }
+    },
+    "host_use": {
+      "description": "What a guest job used of the Mac it ran on.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wall_seconds", "cpu_seconds", "peak_memory_mb"],
+      "properties": {
+        "wall_seconds": { "type": "integer", "minimum": 0, "maximum": 2592000 },
+        "cpu_seconds": { "type": "integer", "minimum": 0, "maximum": 2592000000 },
+        "peak_memory_mb": { "type": "integer", "minimum": 0, "maximum": 1048576 }
+      }
     },
     "severity": {
       "description": "How much a finding matters, highest first: blocker > major > minor > nit.",

@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use crate::jcs::{self, JcsError};
 use crate::keys::{self, sha256};
 use crate::{
-    AUDIT_HASH_PREFIX, CLOCK_SKEW_SECONDS, Keys, REPLY_TYPES, REQUEST_TYPES, Rejection,
-    TERMINAL_TYPES, ZERO_HASH, envelope, schema, time,
+    AUDIT_HASH_PREFIX, CLOCK_SKEW_SECONDS, Keys, REPLY_TYPES, REQUEST_TYPES, RUN_REPLY_TYPES,
+    Rejection, TERMINAL_TYPES, ZERO_HASH, envelope, schema, time,
 };
 
 /// An entry's hash: SHA-256, lower-case hex, over `obi/0.1 audit\n` and the canonical JSON of
@@ -56,8 +56,18 @@ pub fn exchange_problem(
     let Some(request) = request.filter(|r| REQUEST_TYPES.contains(&text(r, "type"))) else {
         return Some("replies to no earlier request".into());
     };
-    if request.get("from") != reply.get("to") || request.get("to") != reply.get("from") {
+    let kind = text(reply, "type");
+    let asked = text(request, "type");
+    // run_cancel is the one reply the request's own sender sends, to its receiver.
+    if kind == "run_cancel" {
+        if request.get("from") != reply.get("from") || request.get("to") != reply.get("to") {
+            return Some("only the request's sender cancels it, to its receiver".into());
+        }
+    } else if request.get("from") != reply.get("to") || request.get("to") != reply.get("from") {
         return Some("only the request's receiver replies, to its sender".into());
+    }
+    if RUN_REPLY_TYPES.contains(&kind) && asked != "run_request" {
+        return Some(format!("a {kind} belongs to a run_request, not a {asked}"));
     }
     if earlier
         .iter()
@@ -66,8 +76,6 @@ pub fn exchange_problem(
         return Some("the exchange already ended".into());
     }
     let accepted = earlier.iter().any(|e| text(e, "type") == "accept");
-    let kind = text(reply, "type");
-    let asked = text(request, "type");
     if kind == "accept" && accepted {
         return Some("accepted twice".into());
     }
@@ -81,6 +89,10 @@ pub fn exchange_problem(
                 "a {asked} is answered by a result only after an accept"
             ));
         }
+    }
+    // A run_return comes back only from a job that was accepted.
+    if kind == "run_return" && !accepted {
+        return Some("a run_request is answered by a run_return only after an accept".into());
     }
     // An answer answers a question, and nothing else; an accept before it is allowed, not needed.
     if kind == "answer" && asked != "question" {

@@ -23,6 +23,7 @@ nix.workspace = true
 p256.workspace = true
 reqwest.workspace = true
 tokio-stream.workspace = true
+tokio-tungstenite.workspace = true
 getrandom.workspace = true
 gethostname.workspace = true
 hex.workspace = true
@@ -49,3 +50,7 @@ security-framework = "3.7.0"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The channel's tests relay it through a WebSocket server of their own.
+axum = { workspace = true, features = ["ws"] }
