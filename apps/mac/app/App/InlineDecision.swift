@@ -149,13 +149,20 @@ struct InlineNotice: View {
     let feed: RunnerFeed
     var keyboardEnabled = false
     var focusRequest = 0
+    /// Opens a job's page: a review the item can't show offers its job ("Open the job to read it").
+    var onOpen: (_ job: String) -> Void = { _ in }
     @Environment(\.openURL) private var openURL
     @State private var busy = false
     @State private var problem: String?
 
-    /// Slack's or GitHub's, by the link's host (a GitHub notice of the watcher's links GitHub).
+    /// Slack's or GitHub's mark, by where obid says it came from (`watch.source`).
     static func brand(_ notice: WatchNotice) -> String {
-        notice.url?.host()?.lowercased().hasSuffix("github.com") == true ? "github" : "slack"
+        notice.source == "github" ? "github" : "slack"
+    }
+
+    /// Whether it offers its job's page: a review it doesn't show (flagged, empty, unscanned).
+    static func opensJob(_ notice: WatchNotice) -> Bool {
+        !notice.job.isEmpty && notice.review == nil
     }
 
     /// Its choices: Approve says what it posts.
@@ -175,7 +182,8 @@ struct InlineNotice: View {
                     hint: notice.url.map { _ in brand == "github" ? "Open on GitHub" : "Open in Slack" },
                     onHint: notice.url.map { url in { openURL(url) } },
                     onChoose: { settle(answer: $0.answer) },
-                    onLater: { settle(later: .now.addingTimeInterval(3600)) })
+                    onLater: { settle(later: .now.addingTimeInterval(3600)) },
+                    onOpen: Self.opensJob(notice) ? { onOpen(notice.job) } : nil)
             if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.top, 8) }
         }
         .padding(16)

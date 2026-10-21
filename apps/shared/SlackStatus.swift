@@ -85,18 +85,20 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
     var later: Date?
     /// The message's or the pull request's page: https on slack.com or github.com only.
     var url: URL?
+    /// Where it came from, as obid says (`watch.source`): `slack` or `github`.
+    var source: String
     /// On a listener's finished review (`watch.review`): exactly what Approve posts on GitHub, the
     /// review an agent wrote, after obid's secret scan. Shown as plain text, never as Markdown.
     var review: String?
 
     private enum Keys: String, CodingKey { case kind, id, job, title, text, options, created, done, later, watch }
-    private struct Place: Decodable { var url: String?; var pr: PR?; var review: String? }
+    private struct Place: Decodable { var source: String?; var url: String?; var pr: PR?; var review: String? }
     private struct PR: Decodable { var url: String? }
 
     init(kind: String = "watch", id: String, job: String = "", title: String, text: String, options: [String] = ["Dismiss"], created: Date,
-         done: Date? = nil, later: Date? = nil, url: URL? = nil, review: String? = nil) {
+         done: Date? = nil, later: Date? = nil, url: URL? = nil, source: String = "slack", review: String? = nil) {
         (self.kind, self.id, self.job, self.title, self.text, self.options) = (kind, id, job, title, text, options)
-        (self.created, self.done, self.later, self.url, self.review) = (created, done, later, url, review)
+        (self.created, self.done, self.later, self.url, self.source, self.review) = (created, done, later, url, source, review)
     }
 
     init(from decoder: any Decoder) throws {
@@ -113,6 +115,7 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
         let place = try? keys.decodeIfPresent(Place.self, forKey: .watch)
         url = (place?.pr?.url ?? place?.url).flatMap(Self.link)
         review = place?.review
+        source = place?.source ?? "slack"
     }
 
     /// `text` as a link the card may open: https, no login, on slack.com or github.com (or a
