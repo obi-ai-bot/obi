@@ -355,6 +355,24 @@ fn the_token_budget_stalls_and_only_the_owners_confirm_carries_on() {
             answer.text
         );
     }
+    // Its Confirm takes words only: files with them are refused, rather than dropped.
+    let file = obid.home.join("attachments/shot.png");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"png").unwrap();
+    let with_files = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(
+            &json!({"text": "start it again from scratch", "attachments": [file.to_str().unwrap()]}),
+        ),
+    );
+    assert_eq!(with_files.status, 422, "{}", with_files.text);
+    assert!(
+        with_files.text.contains("takes words only"),
+        "{}",
+        with_files.text
+    );
     let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
     assert_eq!(job["status"], "interrupted", "{job}");
     assert!(job["followUpOf"].is_null());

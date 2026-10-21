@@ -518,16 +518,25 @@ pub async fn send_accounts(shared: &Arc<Shared>) {
 
 const NEW_SHAPE: &str =
     "{\"agent\": \"claude\" | \"codex\" | \"cursor\", \"name\": \"…\", \"payer\": \"…\"}";
+const DEFAULT_SHAPE: &str = "{\"agent\": \"claude\" | \"codex\", \"default\": true}";
 
 /// `POST /v1/accounts`: a new account for Claude Code, Codex or Cursor, in a folder obid makes,
 /// `home/accounts/<id>` (0700). `201` with the Account.
 pub async fn add(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
-    let map = object(&body, &["agent", "name", "payer"], NEW_SHAPE)?;
+    let map = object(&body, &["agent", "name", "payer", "default"], NEW_SHAPE)?;
     let agent = text_field(&map, "agent")?
         .ok_or_else(|| unprocessable(format!("agent is missing: the body is {NEW_SHAPE}.")))?;
     let tool = Tool::from_id(agent).ok_or_else(|| {
         unprocessable(format!("agent is claude, codex or cursor, not {agent:?}."))
     })?;
+    if map.contains_key("default") {
+        if map.len() != 2 || map.get("default") != Some(&Value::Bool(true)) {
+            return Err(unprocessable(format!(
+                "The tool's own login comes back with {DEFAULT_SHAPE}."
+            )));
+        }
+        return restore_default(shared, tool).await;
+    }
     let text = text_field(&map, "name")?
         .ok_or_else(|| unprocessable(format!("name is missing: the body is {NEW_SHAPE}.")))?;
     let payer = payer(map.get("payer"))?;
@@ -562,6 +571,63 @@ pub async fn add(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Respo
     Ok(answer(
         StatusCode::CREATED,
         json_now(&shared, tool, added.account()).await,
+    ))
+}
+
+/// `POST /v1/accounts` `{"agent", "default": true}`: the tool's own login (`default`, `codex`),
+/// removed earlier, listed again, as it was before: no folder, signed in with the tool itself.
+/// `201` with the Account; `409` while it's listed, or when it was never one of the tool's.
+async fn restore_default(shared: Arc<Shared>, tool: Tool) -> Result<Response, ApiError> {
+    let Some(own) = implicit(tool).into_iter().next() else {
+        return Err(unprocessable(
+            "Cursor has no login of its own outside an account: add one with a name.",
+        ));
+    };
+    // The configuration may name an account with that id and a folder of its own: that one isn't
+    // the tool's own login, and doesn't come back here.
+    let seeded = find(&shared.config.agents.read().seed, &own.id);
+    if seeded.is_some_and(|(_, a)| a.config_dir.is_some()) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "obid's configuration gives {} a folder of its own: it isn't {}'s own login, and can't be added back here.",
+                own.id,
+                tool.name()
+            ),
+        ));
+    }
+    shared.config.agents.change(|agents, saved| {
+        if find(agents, &own.id).is_some() {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                format!("{}'s own login is listed already.", tool.name()),
+            ));
+        }
+        if all(agents).len() >= MOST_ACCOUNTS {
+            return Err(unprocessable(format!(
+                "obid keeps at most {MOST_ACCOUNTS} accounts: remove one first."
+            )));
+        }
+        if !saved.removed.contains(&own.id) {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                format!(
+                    "{}'s own login wasn't removed here: obid's configuration names the tool's accounts.",
+                    tool.name()
+                ),
+            ));
+        }
+        saved.removed.retain(|id| id != &own.id);
+        saved.changed.remove(&own.id);
+        Ok(())
+    })?;
+    // Alone, an empty list is the tool's own login again, with nothing listed for it.
+    let (tool, account) = find(&shared.config.agents.get(), &own.id).unwrap_or((tool, own.clone()));
+    tracing::info!("account {}: the tool's own login is back", own.id);
+    send_accounts(&shared).await;
+    Ok(answer(
+        StatusCode::CREATED,
+        json_now(&shared, tool, account).await,
     ))
 }
 

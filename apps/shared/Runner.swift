@@ -605,18 +605,19 @@ nonisolated struct ModelOptions: Codable, Equatable, Sendable {
 typealias RunnerAccount = Account
 #else
 /// On the Mac the runner's accounts are read into Engine's own AccountState (the runner keeps
-/// their `payer` and `home` to itself), so the brain can tell their usage too (Engine/Conversation.swift).
+/// their `home` to itself; obid sends `payer`), so the brain can tell their usage too (Engine/Conversation.swift).
 typealias RunnerAccount = AccountState
 
 extension AccountState: Decodable {
     private enum Keys: String, CodingKey {
-        case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed, reserveLiftedUntil
+        case id, agent, name, payer, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed, reserveLiftedUntil
     }
 
     init(from decoder: any Decoder) throws {
         let keys = try decoder.container(keyedBy: Keys.self)
         self.init(account: Account(id: try keys.decode(String.self, forKey: .id), agent: try keys.decode(String.self, forKey: .agent),
-                                   name: try keys.decode(String.self, forKey: .name), payer: "", home: nil),
+                                   name: try keys.decode(String.self, forKey: .name),
+                                   payer: try keys.decodeIfPresent(String.self, forKey: .payer) ?? "", home: nil),
                   label: try keys.decodeIfPresent(String.self, forKey: .label),
                   fiveHour: try keys.decodeIfPresent(Double.self, forKey: .fiveHour),
                   sevenDay: try keys.decodeIfPresent(Double.self, forKey: .sevenDay),
@@ -683,6 +684,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     #if os(macOS)
     /// With what Engine's Job doesn't read yet (RunnerJobExtras), when it could be read.
     case job(Job, RunnerJobExtras?)
+    /// A job was deleted, here or on another app (obid only): it leaves every list.
+    case jobDeleted(String)
     #else
     case job(Job)
     #endif
@@ -1053,6 +1056,19 @@ nonisolated struct Runner: Sendable {
     func stopAll() async throws -> StoppedJobs { try await call("POST", "v1/stop-all") }
     /// Lets go of a job that needs the user: it then needs nothing. No signature: nothing goes out.
     func dismiss(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/dismiss") }
+    /// Renames a job (obid only, `PATCH /v1/jobs/{id}`): one line of 1 to 60 characters.
+    func rename(_ id: String, to title: String) async throws -> Job {
+        struct Body: Encodable { var title: String }
+        return try await call("PATCH", "v1/jobs/\(id)", body: Body(title: title))
+    }
+    /// Archives a job that ended and needs nothing, or unarchives it (obid only).
+    func archive(_ id: String, _ archived: Bool = true) async throws -> Job {
+        struct Body: Encodable { var archived: Bool }
+        return try await call("POST", "v1/jobs/\(id)/archive", body: Body(archived: archived))
+    }
+    /// Deletes a job that ended, for good (obid only): its record, worktree and local branch in
+    /// obid's clone. Nothing pushed is touched: its branch and pull request stay on GitHub.
+    func deleteJob(_ id: String) async throws { try await send("DELETE", "v1/jobs/\(id)") }
     /// Clear done: the runner records now, and every app hides the jobs that finished by then.
     func clear() async throws -> Date {
         let answer: ClearedAt = try await call("POST", "v1/clear")
@@ -1136,9 +1152,12 @@ nonisolated struct Runner: Sendable {
 
     /// Tells the job's agent something: the runner answers with the job, or with the follow-up a
     /// finished one gets (`followUpOf` set), except Try again's words, which pick its session up again.
-    func tell(_ id: String, _ text: String) async throws -> Job {
-        struct Body: Encodable { var text: String }
-        return try await call("POST", "v1/jobs/\(id)/messages", body: Body(text: text))
+    /// `conversation`: said on the task's page, the words and Oby's answer join the job's
+    /// conversation (obid only); `attachments` go with the follow-up.
+    func tell(_ id: String, _ text: String, conversation: Bool = false, attachments: [String] = []) async throws -> Job {
+        struct Body: Encodable { var text: String; var conversation: Bool?; var attachments: [String]? }
+        return try await call("POST", "v1/jobs/\(id)/messages",
+                              body: Body(text: text, conversation: conversation ? true : nil, attachments: attachments.isEmpty ? nil : attachments))
     }
     func models() async throws -> ModelSettings { try await call("GET", "v1/settings/models") }
     func modelOptions() async throws -> ModelOptions { try await call("GET", "v1/settings/models/options") }
@@ -1445,6 +1464,43 @@ nonisolated struct Runner: Sendable {
     func endGitHubSignIn() async throws {
         _ = try await send("DELETE", "v1/github/sign-in")
     }
+
+    // MARK: obid's accounts (docs/runner-api.md, "obid only: accounts"): loopback only, so only obid on this Mac
+
+    /// Adds an account: obid makes its folder, and it's signed in with `startAccountSignIn`.
+    func addAccount(agent: String, name: String, payer: String) async throws -> RunnerAccount {
+        struct Body: Encodable { var agent: String; var name: String; var payer: String? }
+        return try await call("POST", "v1/accounts", body: Body(agent: agent, name: name, payer: payer.isEmpty ? nil : payer))
+    }
+
+    /// Lists the tool's own login again (`default`, `codex`) after it was removed here.
+    func restoreDefaultLogin(agent: String) async throws -> RunnerAccount {
+        struct Body: Encodable { var agent: String; var `default` = true }
+        return try await call("POST", "v1/accounts", body: Body(agent: agent))
+    }
+
+    /// Takes the account out of Oby. The tool's own login, and the account with its provider, stay.
+    func removeAccount(_ id: String) async throws {
+        _ = try await send("DELETE", "v1/accounts/\(Self.segment(id))")
+    }
+
+    /// Runs the tool's own login for the account on obid (or answers the one under way).
+    func startAccountSignIn(_ id: String) async throws -> AccountSignIn {
+        try await call("GET", "v1/accounts/\(Self.segment(id))/sign-in")
+    }
+
+    /// The code Claude Code's page showed, for its login on obid: once.
+    func sendAccountCode(_ id: String, _ code: String) async throws -> RunnerAccount {
+        struct Body: Encodable { var code: String }
+        return try await call("POST", "v1/accounts/\(Self.segment(id))/sign-in", body: Body(code: code), timeout: 75)
+    }
+
+    /// Ends the account's sign-in under way, if any.
+    func endAccountSignIn(_ id: String) async throws {
+        _ = try await send("DELETE", "v1/accounts/\(Self.segment(id))/sign-in")
+    }
+
+    private static func segment(_ id: String) -> String { id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id }
     #endif
 
     /// Server-Sent Events until the connection drops; the caller reconnects.
@@ -1677,6 +1733,28 @@ nonisolated struct GitHubLogin: Decodable, Equatable, Sendable {
     var signIn: GitHubSignIn?
 }
 
+/// A tool's own login for one of obid's accounts, under way (`GET /v1/accounts/{id}/sign-in`): its
+/// page, the one-time code to type there (Codex), or whether the page ends with a code to send back
+/// (Claude Code).
+nonisolated struct AccountSignIn: Decodable, Equatable, Sendable {
+    var account: String
+    var url: URL
+    var userCode: String?
+    var pasteCode: Bool
+    var expiresAt: String?
+
+    /// The tool's own sites, as obid takes the link from its login: the Mac opens nothing else.
+    static let sites = ["claude": ["claude.com", "claude.ai", "anthropic.com"], "codex": ["openai.com", "chatgpt.com"],
+                        "cursor": ["cursor.com", "cursor.sh"]]
+
+    /// Whether it's a page the Mac opens for `agent`: https on the tool's own site, with no login or port.
+    func opens(for agent: String) -> Bool {
+        guard url.scheme == "https", url.user == nil, url.password == nil, url.port == nil,
+              let host = url.host()?.lowercased() else { return false }
+        return (Self.sites[agent] ?? []).contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+}
+
 /// gh's own sign-in under way: GitHub's device page, the code to type there, when it runs out.
 nonisolated struct GitHubSignIn: Decodable, Equatable, Sendable {
     var url: URL
@@ -1742,6 +1820,11 @@ nonisolated enum MoveChoice {
     }
 }
 
+#if os(macOS)
+/// obid's `job` event for a job that was deleted.
+private nonisolated struct DeletedJob: Decodable { var id: String; var deleted: Bool }
+#endif
+
 /// Turns Server-Sent Events lines into events. Unknown events and pings are skipped.
 nonisolated struct EventParser {
     private var name = ""
@@ -1754,7 +1837,10 @@ nonisolated struct EventParser {
             let json = Data(data.utf8)
             switch name {
             #if os(macOS)
-            case "job": return (try? Runner.decoder.decode(Job.self, from: json)).map { RunnerEvent.job($0, try? Runner.decoder.decode(RunnerJobExtras.self, from: json)) }
+            case "job":
+                // obid's `{"id", "deleted": true}`: the job was deleted, on any app.
+                if let gone = try? Runner.decoder.decode(DeletedJob.self, from: json), gone.deleted { return .jobDeleted(gone.id) }
+                return (try? Runner.decoder.decode(Job.self, from: json)).map { RunnerEvent.job($0, try? Runner.decoder.decode(RunnerJobExtras.self, from: json)) }
             #else
             case "job": return (try? Runner.decoder.decode(Job.self, from: json)).map(RunnerEvent.job)
             #endif
@@ -1795,6 +1881,32 @@ nonisolated struct RoutineMark: Codable, Equatable, Sendable {
 
     /// What a job's card and page say: "From routine: Review open PRs" (Sangam's design).
     var line: String { "From routine: \(name)" }
+}
+
+/// Teammates' open pull requests that change a job's files (obid only: docs/runner-api.md,
+/// "obid only: teammates' pull requests"). Titles are what people wrote: never shown as obid's words.
+nonisolated struct TeammatePRs: Codable, Equatable, Sendable {
+    struct PR: Codable, Equatable, Sendable {
+        var number: Int
+        var author: String
+        var files: [String]
+        /// After the job's commits: the code both change, empty when only files are shared.
+        var clash: [String]?
+    }
+    var prs: [PR]
+
+    /// What a job's page says under its head: "Also changed in @alice's #812 (src/jobs.rs)", or
+    /// "Same code changed in …" once the check after its commits found some; nil when none.
+    var line: String? {
+        guard !prs.isEmpty else { return nil }
+        let same = prs.contains { !($0.clash ?? []).isEmpty }
+        let who = prs.map { "@\($0.author)'s #\($0.number)" }
+        var files: [String] = []
+        for file in prs.flatMap(\.files) where !files.contains(file) { files.append(file) }
+        let named = who.count < 3 ? who.joined(separator: " and ") : who.dropLast().joined(separator: ", ") + " and " + who.last!
+        let shown = files.prefix(3).joined(separator: ", ") + (files.count > 3 ? " and \(files.count - 3) more" : "")
+        return "\(same ? "Same code changed in" : "Also changed in") \(named) (\(shown))"
+    }
 }
 
 /// A routine as obid lists it: a saved request it runs on a schedule, a job each time.

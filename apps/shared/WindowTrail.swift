@@ -5,6 +5,8 @@ import Foundation
 /// conversation list (#493) shows only when the runner on this Mac is obid; there's no Obysphere yet.
 nonisolated enum WindowStep: Hashable, Sendable {
     case group(WorkType)
+    /// Archived (Sangam's ArchiveView): the done tasks that left Home.
+    case archived
     case job(id: String, local: Bool)
     case session(id: String)
     case talk

@@ -192,6 +192,38 @@ pub async fn archive(
     }
 }
 
+/// `PATCH /v1/jobs/{id}`: `{"title": "…"}` renames the job, one line of 1 to 60 characters once
+/// trimmed (as a new job's `title`).
+pub async fn rename(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Rename {
+        title: String,
+    }
+    let rename: Rename = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "The body is {\"title\": \"…\"}."))?;
+    let title = rename.title.trim().to_owned();
+    if title.is_empty()
+        || title.chars().count() > 60
+        || title
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "title is one line of 1 to 60 characters.",
+        ));
+    }
+    match shared.jobs.rename(&id, title) {
+        None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+        Some(job) => Ok(json(StatusCode::OK, job.to_json())),
+    }
+}
+
 /// `DELETE /v1/jobs/{id}`: a job that ended goes for good, its worktree and local branch with it;
 /// nothing pushed is touched.
 pub async fn delete(
@@ -641,19 +673,64 @@ pub async fn message(
     if shared.jobs.get(&id).is_none() {
         return Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB));
     }
-    let text = serde_json::from_slice::<Value>(&body)
-        .ok()
-        .and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_owned))
-        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "The body is {\"text\": \"…\"}."))?;
-    match shared.jobs.message(&id, &text, crate::jobs::Source::Owner) {
-        None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
-        Some(Err(refused)) => Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
-        // A follow-up it started; one already working heard the words, and is a 200.
-        Some(Ok(job)) if job.id != id && job.heard.is_empty() => {
-            Ok(json(StatusCode::CREATED, job.to_json()))
+    let bad = || ApiError::new(StatusCode::BAD_REQUEST, "The body is {\"text\": \"…\"}.");
+    let value = serde_json::from_slice::<Value>(&body).map_err(|_| bad())?;
+    let text = value.get("text").and_then(Value::as_str).ok_or_else(bad)?;
+    let attachments = match value.get("attachments") {
+        None | Some(Value::Null) => vec![],
+        Some(Value::Array(items)) => {
+            let paths = items
+                .iter()
+                .map(|p| p.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "attachments are paths."))?;
+            crate::brain::validate_attachments(&shared.config.home, &paths)?
         }
-        Some(Ok(job)) => Ok(json(StatusCode::OK, job.to_json())),
+        Some(_) => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "attachments are paths.",
+            ));
+        }
+    };
+    let say = value.get("conversation").and_then(Value::as_bool) == Some(true);
+    let first = shared.jobs.get(&id);
+    let answer = shared
+        .jobs
+        .message_attaching(&id, text, crate::jobs::Source::Owner, &attachments);
+    let job = match answer {
+        None => return Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+        Some(Err(refused)) => {
+            return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, refused.0));
+        }
+        Some(Ok(job)) => job,
+    };
+    // Said on the task's page (Sangam's TaskView): the words and Oby's answer go on the end of the
+    // job's conversation, which the app opens, as if said there.
+    if let Some((first, conversation)) = first
+        .filter(|_| say)
+        .and_then(|j| j.conversation.clone().map(|c| (j, c)))
+    {
+        let said = shared
+            .conversations
+            .append(&conversation, "user", text.trim().to_owned(), vec![])
+            .and_then(|_| {
+                let line = crate::brain::actions::told_line(&shared, &first, &job);
+                shared
+                    .conversations
+                    .append(&conversation, "oby", line, vec![job.id.clone()])
+            });
+        if let Err(e) = said {
+            tracing::info!("words for job {id}; conversation {conversation} wasn't told: {e:?}");
+        }
     }
+    // A follow-up it started; one already working heard the words, and is a 200.
+    let status = if job.id != id && job.heard.is_empty() {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok(json(status, job.to_json()))
 }
 
 /// `GET /v1/jobs/{id}/publish`: what publishing the job by hand would do, in obid's one sentence,

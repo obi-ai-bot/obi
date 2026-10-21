@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="channel_jobs">Precisa de você</string>
+    <string name="channel_jobs_about">Uma tarefa está pronta para publicar, falhou ou espera sua resposta.</string>
+    <string name="channel_work">Trabalhando agora</string>
+    <string name="channel_work_about">A tarefa em que um agente está, enquanto o Oby está aberto.</string>
+    <string name="action_publish">Publicar</string>
+    <string name="action_open">Abrir</string>
+    <string name="mic_rationale">Oby escuta quando você toca no microfone para ditar, até você tocar em parar ou por até 60 segundos.</string>
+</resources>

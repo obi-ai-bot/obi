@@ -353,6 +353,14 @@ struct AccountsSettingsView: View {
     @State private var name = ""
     @State private var payer = ""
     @State private var removing: Account?
+    /// One of obid's accounts, asked about before it goes.
+    @State private var removingRunner: Account?
+    /// The tools' own logins removed here (`default`, `codex`), comma-separated: Add an account
+    /// offers them back.
+    @AppStorage("ObyRemovedOwnLogins") private var removedOwnLogins = ""
+    private var removedOwn: Set<String> { Set(removedOwnLogins.split(separator: ",").map(String.init)) }
+    /// The tool's own login for one of obid's accounts, under way in its sheet.
+    @State private var signingIn: ShownAccountSignIn?
     @State private var problem: String?
 
     private var places: [AccountPlaces] { AccountPlaces.of(local: feed.local, runner: feed.runner != nil) }
@@ -372,22 +380,38 @@ struct AccountsSettingsView: View {
             addAccount
         }
         if places.contains(.runner) {
-            // obid's own accounts, signed in on it through each tool's own login. Adding, signing in and
-            // removing them come with obid's accounts API (docs/mac-design.md A2, A3): their buttons go
-            // in this row's `buttons`, and the add form after this list.
+            // obid's own accounts, signed in on it through each tool's own login. Its accounts API is
+            // loopback only (docs/runner-api.md, "obid only: accounts"): a runner elsewhere lists them here,
+            // and they're added, signed in and removed on that machine.
             AccountSections(feed.local ? "Accounts on this Mac" : "Accounts on \(feed.name)", items: feed.accounts, id: \.account.id,
                             usage: \.usage, place: both ? "on \(feed.name)" : nil) { state in
-                AccountUsageRow(state: state) { lift in
+                AccountUsageRow(state: state, payer: state.account.payer) { lift in
                     // The runner's "accounts" event brings the change back.
                     guard let runner = feed.runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
                     _ = try await runner.liftReserve(state.account.id, lift)
-                } buttons: {}
+                } buttons: {
+                    if feed.local {
+                        if !state.signedIn {
+                            Button("Sign In") { signIn(state.account) }.buttonStyle(.set)
+                        }
+                        Button("Remove", role: .destructive) { removingRunner = state.account }.buttonStyle(.set)
+                    }
+                }
             }
+            if feed.local { runnerAddAccount }
         }
     }
 
-    /// Adds to this Mac's own accounts, which only Oby on this Mac uses.
-    private var addAccount: some View {
+    /// The tool picked has an own login (Claude Code, Codex) removed here that obid doesn't list.
+    private var restorable: String? {
+        guard let id = Self.ownLogins[agent], removedOwn.contains(id),
+              !feed.accounts.contains(where: { $0.account.id == id }) else { return nil }
+        return Job.agentNames[agent] ?? agent
+    }
+
+    /// The add form (Sangam's "Add an account"): the tool, a name, who pays. `restore` names a tool
+    /// whose own login can come back, beside Add Account (obid on this Mac).
+    private func addForm(restore: String? = nil, _ add: @escaping () async throws -> Void) -> some View {
         SetGroup("Add an account", problem: problem) {
             SetRow("Tool", about: agent == "cursor" && !CursorFacts.separateLogins ? "\(CursorFacts.oneLogin): one Cursor account." : nil) {
                 SetSelect("Tool", selection: $agent, options: [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor")])
@@ -396,15 +420,38 @@ struct AccountsSettingsView: View {
             SetRow("Paid by") { SetField("Paid by", text: $payer, prompt: "Wellington") }
             SetRow("") {
                 Button("Add Account") {
-                    attempt {
-                        try store.add(agent: agent, name: name.trimmingCharacters(in: .whitespaces), payer: payer.trimmingCharacters(in: .whitespaces))
-                        name = ""
-                        payer = ""
+                    Task {
+                        do {
+                            try await add()
+                            name = ""
+                            payer = ""
+                            problem = nil
+                        } catch { problem = error.localizedDescription }
                     }
                 }
                 .buttonStyle(.set)
                 .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                if let restore {
+                    Button("Use \(restore)'s Own Login") {
+                        Task {
+                            do {
+                                guard let runner = feed.runner else { throw RunnerError(message: "Oby isn't connected to its runner on this Mac yet.") }
+                                let back = try await runner.restoreDefaultLogin(agent: agent)
+                                removedOwnLogins = removedOwn.subtracting([back.account.id]).sorted().joined(separator: ",")
+                                problem = nil
+                            } catch { problem = error.localizedDescription }
+                        }
+                    }
+                    .buttonStyle(.set)
+                }
             }
+        }
+    }
+
+    /// Adds to this Mac's own accounts, which only Oby on this Mac uses.
+    private var addAccount: some View {
+        addForm {
+            try store.add(agent: agent, name: name.trimmingCharacters(in: .whitespaces), payer: payer.trimmingCharacters(in: .whitespaces))
         }
         .task { await store.refresh() }
         // Kept beyond Sangam's mock: removing deletes the account's settings folder and its login, so
@@ -422,6 +469,82 @@ struct AccountsSettingsView: View {
         }
     }
 
+    /// Adds to obid's accounts on this Mac: obid makes its folder, and its row then offers Sign In.
+    /// The tool's own login, once removed here, comes back with its own button.
+    private var runnerAddAccount: some View {
+        addForm(restore: restorable) {
+            guard let runner = feed.runner else { throw RunnerError(message: "Oby isn't connected to its runner on this Mac yet.") }
+            _ = try await runner.addAccount(agent: agent, name: name.trimmingCharacters(in: .whitespaces),
+                                            payer: payer.trimmingCharacters(in: .whitespaces))
+        }
+        // Kept beyond Sangam's mock, which removes at once: what goes and what stays, first.
+        .confirmationDialog("Remove \(removingRunner?.name ?? "this account") from Oby?",
+                            isPresented: Binding(get: { removingRunner != nil }, set: { if !$0 { removingRunner = nil } }),
+                            presenting: removingRunner) { account in
+            Button("Remove", role: .destructive) { remove(account) }
+        } message: { account in
+            Text(Self.removeNote(account))
+        }
+        .sheet(item: $signingIn) { shown in
+            AccountSignInSheet(shown: shown, feed: feed) { signingIn = nil }
+        }
+    }
+
+    /// The ids obid gives each tool's own login (core/crates/obid/src/accounts.rs `implicit`).
+    static let ownLogins = ["claude": "default", "codex": "codex"]
+
+    /// What removing one of obid's accounts does, and what it leaves.
+    static func removeNote(_ account: Account) -> String {
+        let (tool, provider) = switch account.agent {
+        case "codex": ("Codex", "OpenAI")
+        case "cursor": ("Cursor", "Cursor")
+        default: ("Claude Code", "Anthropic")
+        }
+        if ownLogins[account.agent] == account.id {
+            return "Oby stops using \(tool)'s own login on this Mac; nothing of it is deleted. Bring it back here any time with Use \(tool)'s Own Login, under Add an account."
+        }
+        // Claude Code keeps an account's login in the Keychain on a Mac (docs/runner-api.md): obid leaves it.
+        let kept = account.agent == "claude" ? " Its Keychain item for this account stays too; Keychain Access removes it." : ""
+        // One obid made has eight hex digits; any other is in obid's configuration.
+        let made = account.id.wholeMatch(of: /[0-9a-f]{8}/) != nil
+        let back = made ? "" : " It's in obid's configuration, so it can't be added back here."
+        return "Oby stops using it, and deletes the folder it made for it, if any. \(tool)'s own login on this Mac, and your account with \(provider), stay as they are: sign out there to end them.\(kept)\(back)"
+    }
+
+    private func remove(_ account: Account) {
+        Task {
+            do {
+                guard let runner = feed.runner else { throw RunnerError(message: "Oby isn't connected to its runner on this Mac yet.") }
+                try await runner.removeAccount(account.id)
+                if Self.ownLogins[account.agent] == account.id {
+                    removedOwnLogins = removedOwn.union([account.id]).sorted().joined(separator: ",")
+                }
+                problem = nil
+            } catch { problem = error.localizedDescription }
+        }
+    }
+
+    /// The tool's own login on obid: its page opens in the browser, and the sheet waits for it.
+    private func signIn(_ account: Account) {
+        Task {
+            do {
+                guard let runner = feed.runner else { throw RunnerError(message: "Oby isn't connected to its runner on this Mac yet.") }
+                let signIn = try await runner.startAccountSignIn(account.id)
+                guard signIn.opens(for: account.agent) else {
+                    try? await runner.endAccountSignIn(account.id)
+                    throw RunnerError(message: "\(feed.name) answered with a page that isn't \((Job.agentNames[account.agent] ?? account.agent))'s own sign-in, so Oby opened nothing.")
+                }
+                if let code = signIn.userCode {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(code, forType: .string)
+                }
+                NSWorkspace.shared.open(signIn.url)
+                signingIn = ShownAccountSignIn(account: account, signIn: signIn)
+                problem = nil
+            } catch { problem = error.localizedDescription }
+        }
+    }
+
     private func attempt(_ action: () throws -> Void) {
         do {
             try action()
@@ -429,6 +552,89 @@ struct AccountsSettingsView: View {
         } catch {
             problem = error.localizedDescription
         }
+    }
+}
+
+/// One of obid's accounts with its sign-in under way, as a sheet's item.
+struct ShownAccountSignIn: Identifiable {
+    let account: Account
+    let signIn: AccountSignIn
+    var id: String { account.id }
+}
+
+/// The tool's own login for one of obid's accounts, waiting for the person on the tool's page: the
+/// code to type there (Codex, already on the clipboard), or a field for the code the page ends with
+/// (Claude Code); the page again; Cancel. Oby only hands the code to the tool's login, once.
+private struct AccountSignInSheet: View {
+    let shown: ShownAccountSignIn
+    let feed: RunnerFeed
+    let close: () -> Void
+    @State private var code = ""
+    @State private var sending = false
+    @State private var problem: String?
+
+    private var tool: String { Job.agentNames[shown.account.agent] ?? shown.account.agent }
+    private var signedIn: Bool { feed.accounts.first { $0.account.id == shown.account.id }?.signedIn == true }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Sign in to \(tool)").font(Tokens.font(17, .semibold)).foregroundStyle(Tokens.ink)
+            if let userCode = shown.signIn.userCode {
+                Text("\(tool)'s page opened in your browser. Type this code there; it's on your clipboard.")
+                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).multilineTextAlignment(.center)
+                Text(userCode).font(Tokens.mono(30)).foregroundStyle(Tokens.ink).textSelection(.enabled)
+                    .accessibilityLabel("Code \(userCode.map(String.init).joined(separator: " "))")
+            } else if shown.signIn.pasteCode {
+                Text("\(tool)'s page opened in your browser. Sign in as \(shown.account.name), then paste the code it shows.")
+                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).multilineTextAlignment(.center)
+                SetField("Code", text: $code, prompt: "Paste the code").onSubmit(send).disabled(sending)
+            } else {
+                Text("\(tool)'s page opened in your browser. Sign in there as \(shown.account.name).")
+                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).multilineTextAlignment(.center)
+            }
+            if !shown.signIn.pasteCode || sending {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Waiting for \(tool)").font(Tokens.font(13)).foregroundStyle(Tokens.muted)
+                }
+            }
+            if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).multilineTextAlignment(.center) }
+            HStack(spacing: 8) {
+                Button("Cancel", action: cancel).buttonStyle(.set).keyboardShortcut(.cancelAction)
+                Button("Open the Page Again") { NSWorkspace.shared.open(shown.signIn.url) }.buttonStyle(.set)
+                if shown.signIn.pasteCode {
+                    Button("Sign In", action: send).buttonStyle(.set).keyboardShortcut(.defaultAction)
+                        .disabled(sending || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .padding(.top, 6)
+            Text("\(tool) keeps the login, in Oby's folder for \(shown.account.name). Oby never reads it; it only learns that it worked.")
+                .font(Tokens.font(12)).foregroundStyle(Tokens.muted).multilineTextAlignment(.center)
+        }
+        .padding(26)
+        .frame(width: 420)
+        .background(Tokens.surface)
+        // Codex and Cursor end by themselves: obid's `accounts` event says it's signed in.
+        .onChange(of: signedIn) { if signedIn { close() } }
+    }
+
+    private func send() {
+        let code = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty, !sending, let runner = feed.runner else { return }
+        sending = true
+        Task {
+            defer { sending = false }
+            do {
+                _ = try await runner.sendAccountCode(shown.account.id, code)
+                close()
+            } catch { problem = error.localizedDescription }
+        }
+    }
+
+    private func cancel() {
+        close()
+        let id = shown.account.id
+        Task { try? await feed.runner?.endAccountSignIn(id) }
     }
 }
 
@@ -487,13 +693,14 @@ struct AccountUsageRow<Buttons: View>: View {
     }
 }
 
-/// Settings › Connectors (#498): everything Oby is connected to, on this Mac and on the runner,
-/// each with how it's signed in and how to disconnect it, then what needs attention, what isn't
-/// confirmed and what's set up but not connected, with a search over all of it
-/// (apps/mac/app/Connectors.swift).
+/// Settings › Connectors (#498), as Sangam's SettingsView.tsx `Connectors`: a search, then Connected and
+/// Available, one row per service with its brand's mark, its name and a line on it, and at the right
+/// "Connected" or its button (apps/mac/app/Connectors.swift). How it's signed in is the row's tooltip;
+/// Disconnect and the rest are in its context menu, so the row stays as clean as the design's.
 struct ConnectorsSettingsView: View {
     let store: AccountStore
     let feed: RunnerFeed
+    @Environment(\.openSettingsPage) private var openSettings
     @State private var query = ""
     /// What the runner lists besides its status, once it answers, and each list it couldn't read.
     @State private var lists = Connectors.Lists()
@@ -513,27 +720,27 @@ struct ConnectorsSettingsView: View {
 
     var body: some View {
         let groups = Connectors.groups(list, query: query)
-        VStack(alignment: .leading, spacing: 8) {
-            SearchField(text: $query, prompt: "Search connectors")
-            // The runner's rows are left out while it doesn't answer: they'd be out of date.
-            if feed.runner != nil, let note = Connectors.waiting(for: feed.name, feed.connection) {
-                SetAbout(note, color: Tokens.needs).padding(.horizontal, 16)
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                SearchField(text: $query, prompt: "Search connectors")
+                // What the runner holds (Tetrix, GitHub, its accounts) waits for it to answer: it'd be out of date.
+                if feed.runner != nil, let note = Connectors.waiting(for: feed.name, feed.connection) {
+                    SetAbout(note, color: Tokens.needs).padding(.horizontal, 16)
+                }
+                ForEach(lists.problems, id: \.self) { problem in
+                    SetAbout(problem, color: Tokens.danger).padding(.horizontal, 16)
+                }
             }
-            ForEach(lists.problems, id: \.self) { problem in
-                SetAbout(problem, color: Tokens.danger).padding(.horizontal, 16)
+            .padding(.bottom, 24)
+            ForEach(groups, id: \.title) { group in
+                SetGroup(group.title) { ForEach(group.items, content: row) }
+            }
+            if groups.isEmpty {
+                let typed = query.trimmingCharacters(in: .whitespaces)
+                Text("No connector matches “\(typed)”")
+                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.horizontal, 16).padding(.bottom, 24)
             }
         }
-        .padding(.bottom, 24)
-        ForEach(groups, id: \.title) { group in
-            SetGroup(group.title) { ForEach(group.items, content: row) }
-        }
-        if groups.isEmpty {
-            let typed = query.trimmingCharacters(in: .whitespaces)
-            Text(typed.isEmpty ? "Nothing is set up yet." : "No connector matches “\(typed)”")
-                .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.horizontal, 16).padding(.bottom, 24)
-        }
-        SetAbout("Each tool signs in through its own login, and Tetrix once for every agent: Oby never reads or shows a login, and Tetrix's stays with \(feed.local ? "obid on this Mac" : feed.name). Agents reach the runner's connections through Oby, never seeing their secrets.")
-            .padding(.horizontal, 16)
         .task { await store.refresh() }
         // Back from signing in or out, in Terminal.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -592,51 +799,66 @@ struct ConnectorsSettingsView: View {
         let runner = (feed.runner == nil && !staged) || feed.connection != .live ? nil : Connectors.RunnerState(
             name: feed.name, local: feed.local, accounts: feed.accounts, github: feed.github, checks: feed.checkRuns,
             gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: feed.tetrix)
-        return Connectors.list(mac: store.accounts, runner: runner)
+        let accounts = Connectors.accounts(mac: store.accounts, runner: runner?.accounts, local: feed.local,
+                                           hasRunner: feed.runner != nil || staged)
+        return Connectors.list(accounts: accounts, runner: runner)
     }
 
     private var typedURL: String { url.trimmingCharacters(in: .whitespaces) }
 
-    /// Sangam's connector row: its mark, its name with what it does and where, how it's signed in;
-    /// at the right whether it's connected and its button.
+    /// Sangam's connector row (`.set-connector`): its mark, its name over its line; under them only what
+    /// needs doing (what's wrong, or what to do where Oby has no button); at the right "Connected", its
+    /// button, or "Coming soon".
     private func row(_ connector: Connector) -> some View {
-        SetRow(controlOnTop: true) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: connector.symbol)
-                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
-                    .frame(width: 20)
-                    .padding(.top, 1)
-                    .accessibilityHidden(true)
+        let buttons = [connector.way, connector.also].compactMap { way -> (String, Connector.Action)? in
+            if case .button(let label, let action) = way { (label, action) } else { nil }
+        }
+        // Connected, every button is in the context menu; otherwise the first is on the row.
+        let onRow = connector.connected ? nil : buttons.first
+        return SetRow {
+            HStack(spacing: 12) {
+                mark(connector).frame(width: 24, height: 24).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(connector.name)
-                    SetAbout("\(connector.about) · \(connector.place)")
-                    SetAbout(connector.how, color: connector.state == .broken ? Tokens.needs : Tokens.muted)
-                    if case .steps(let steps) = connector.way {
-                        SetAbout(steps)
-                    }
-                    if let problem = problems[connector.id] {
-                        SetAbout(problem, color: Tokens.danger)
-                    }
+                    SetAbout(connector.about)
+                    if connector.state == .broken { SetAbout(connector.how, color: Tokens.needs) }
+                    if !connector.connected, case .steps(let steps) = connector.way { SetAbout(steps) }
+                    if let problem = problems[connector.id] { SetAbout(problem, color: Tokens.danger) }
                 }
             }
         } control: {
-            switch connector.state {
-            case .connected:
-                Label("Connected", systemImage: "checkmark").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text)
-            case .broken:
-                Label("Not working", systemImage: "exclamationmark.triangle").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.needs)
-            case .unconfirmed:
-                SetValue("Not confirmed")
-            case .available: EmptyView()
-            }
-            ForEach([connector.way, connector.also].compactMap { way -> (String, Connector.Action)? in
-                if case .button(let label, let action) = way { (label, action) } else { nil }
-            }, id: \.0) { label, action in
-                Button(label) { perform(action, connector) }
+            if connector.connected {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark").font(Tokens.font(12, .medium)).foregroundStyle(Tokens.muted)
+                    Text("Connected").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text)
+                }
+                .accessibilityElement(children: .combine)
+            } else if connector.soon {
+                SetValue("Coming soon")
+            } else if let button = onRow {
+                Button(button.0) { perform(button.1, connector) }
                     .buttonStyle(.set)
                     .disabled(busy)
-                    .accessibilityLabel("\(label.replacingOccurrences(of: "…", with: "")) \(connector.name), \(connector.place)")
+                    .accessibilityLabel("\(button.0.replacingOccurrences(of: "…", with: "")) \(connector.name)")
+            } else if connector.state == .unconfirmed {
+                SetValue("Not confirmed")
             }
+        }
+        .contentShape(Rectangle())
+        .help(connector.tip)
+        .contextMenu {
+            ForEach(buttons.filter { $0.0 != onRow?.0 }, id: \.0) { label, action in
+                Button(label) { perform(action, connector) }.disabled(busy)
+            }
+        }
+    }
+
+    /// The brand's own mark (Sangam's brands.tsx, in its colours), or a symbol for what has none.
+    @ViewBuilder private func mark(_ connector: Connector) -> some View {
+        if let brand = connector.brand {
+            Image("Brands/\(brand)").resizable().scaledToFit()
+        } else {
+            Image(systemName: connector.symbol).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
         }
     }
 
@@ -657,8 +879,8 @@ struct ConnectorsSettingsView: View {
     /// A button: what takes something away asks first; signing in or out opens Terminal.
     private func perform(_ action: Connector.Action, _ connector: Connector) {
         switch action {
-        case .removeAccount, .disablePlugin, .disconnect, .disconnectTetrix: confirming = connector
-        case .signIn(let account): attempt(connector.id) { try store.signIn(account) }
+        case .disablePlugin, .disconnect, .disconnectTetrix: confirming = connector
+        case .accounts: openSettings(.accounts)
         case .connectTetrix(let server): signInToTetrix(server, row: connector.id)
         case .connectOtherTetrix:
             url = ""
@@ -679,7 +901,6 @@ struct ConnectorsSettingsView: View {
     private func disconnect(_ connector: Connector) {
         guard case .button(_, let action) = connector.way else { return }
         switch action {
-        case .removeAccount(let account): attempt(connector.id) { try store.remove(account) }
         case .disablePlugin(let id): setPlugin(id, enabled: false, row: connector.id)
         case .disconnectTetrix:
             guard feed.local, let runner = feed.runner else { return }
@@ -717,9 +938,6 @@ struct ConnectorsSettingsView: View {
     private func warning(_ connector: Connector) -> String {
         guard case .button(_, let action) = connector.way else { return "" }
         switch action {
-        case .removeAccount(let account):
-            return account.home == nil ? "Oby stops using it. Its login stays in \(Usage.tool(account.agent))'s own settings."
-                                       : "Oby removes this account and deletes its settings folder, with its login."
         case .disablePlugin:
             return "\(feed.name) stops it and everything it started, and agents no longer get its tools."
         case .disconnect:
@@ -863,16 +1081,6 @@ struct ConnectorsSettingsView: View {
                 if !login.signedIn { problems["github"] = "GitHub's sign-in ended without signing in." }
                 gitHubSignIn = nil
             }
-        }
-    }
-
-    /// Runs a row's button, keeping what went wrong under that row.
-    private func attempt(_ row: String, _ action: () throws -> Void) {
-        do {
-            try action()
-            problems[row] = nil
-        } catch {
-            problems[row] = error.localizedDescription
         }
     }
 }

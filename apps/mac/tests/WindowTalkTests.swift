@@ -13,10 +13,6 @@ struct WindowTalkTests {
         #expect(ListeningLine.hint(finishing: true, handsFree: true, key: "Control-Option") == "Writing it down…")
     }
 
-    @Test func completedSaysWhereClearDoneIs() {
-        #expect(GroupPane.archivedLine.contains("Clear done (in Home's ⋮)"))
-    }
-
     /// The owner's decision on #528: listening, thinking, then speaking, only while a turn started by
     /// the talk key is under way, and not over a window that shows it already.
     @Test func thePillShowsOnlyForATalkTurnTheWindowIsNotShowing() {

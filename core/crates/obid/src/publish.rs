@@ -381,7 +381,7 @@ fn longest_backticks(text: &str) -> usize {
 }
 
 /// Text as inline code, whatever backticks it holds.
-fn code(text: &str) -> String {
+pub(crate) fn code(text: &str) -> String {
     let ticks = "`".repeat(longest_backticks(text) + 1);
     format!("{ticks} {text} {ticks}")
 }
@@ -430,8 +430,16 @@ pub fn body(job: &Job, closes: bool) -> String {
         ),
         _ => String::new(),
     };
+    // What the decision check left after the author's round (crate::decisions).
+    let decided = job
+        .tetrix
+        .as_ref()
+        .and_then(|t| t.decisions.as_ref())
+        .and_then(|d| crate::decisions::line(&d.conflicts))
+        .map(|line| format!("\n{line}"))
+        .unwrap_or_default();
     format!(
-        "{}\n\nWhat the user asked for:\n\n{request}\n\n{check}\n- Secret scan: clean.{jobs}{issue}\n\nby Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby never merges it: a person does.",
+        "{}\n\nWhat the user asked for:\n\n{request}\n\n{check}\n- Secret scan: clean.{decided}{jobs}{issue}\n\nby Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby never merges it: a person does.",
         rounds.join("\n\n")
     )
 }
@@ -508,7 +516,7 @@ pub struct Target {
 
 /// The options every diff the scan reads takes: no attribute or driver can hide what the push
 /// sends, files named as they are.
-const DIFF: &[&str] = &[
+pub(crate) const DIFF: &[&str] = &[
     "--no-color",
     "--ignore-submodules=none",
     "--no-ext-diff",
@@ -520,7 +528,7 @@ const DIFF: &[&str] = &[
 ];
 
 /// git in the clone, reading objects as they are (no replacements) and names as they are.
-async fn git_in(clone: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) async fn git_in(clone: &Path, args: &[&str]) -> Result<String, String> {
     let mut all = vec!["--no-replace-objects", "-c", "core.quotePath=false"];
     all.extend_from_slice(args);
     let all: Vec<&std::ffi::OsStr> = all.iter().map(std::ffi::OsStr::new).collect();
