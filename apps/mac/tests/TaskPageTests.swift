@@ -92,6 +92,55 @@ struct TaskPageTests {
         #expect(TaskFacts.facts(running, mode: "plan").first { $0.name == "Mode" }?.value == "Plan")
     }
 
+    /// The page's box is on every task (Sangam's TaskView); the + only where the files can go:
+    /// obid on this Mac, and a finished task, whose words start a follow-up.
+    @Test func thePagesBoxTakesFilesOnlyForAFollowUp() {
+        #expect(TaskFacts.box == "Tell Oby about this task…")
+        #expect(TaskActions.attaches(job(.done), runnerHere: true))
+        #expect(TaskActions.attaches(job(.failed), runnerHere: true))
+        #expect(!TaskActions.attaches(job(.running), runnerHere: true))
+        #expect(!TaskActions.attaches(job(.queued), runnerHere: true))
+        #expect(!TaskActions.attaches(job(.done), runnerHere: false))
+    }
+
+    /// Oby's answer to words said on the page, in Sangam's words (tasks.ts `relay`), as obid says it.
+    @Test func obyAnswersTheBoxInSangamsWords() {
+        let running = job(.running)
+        #expect(TaskFacts.relay(running, heard: running, account: "Deskree") == "Passed to Claude Code. It’ll pick that up after its current step.")
+        var loop = running
+        loop.rounds = 3
+        #expect(TaskFacts.relay(loop, heard: loop, account: "Deskree") == "Passed to Claude Code. It’ll pick that up after this round.")
+        let done = job(.done)
+        var next = job(.queued)
+        next.id = "k"
+        next.followUpOf = done.id
+        #expect(TaskFacts.relay(done, heard: next, account: "Deskree") == "This one’s finished, so I started a follow-up. Claude Code has it in tetrix-ee on Deskree.")
+        // Its follow-up already at work heard them.
+        next.notes = ["add a test"]
+        #expect(TaskFacts.relay(done, heard: next, account: "Deskree").hasPrefix("Passed to Claude Code."))
+    }
+
+    /// Words said on the page open the job's conversation when one is kept; else they stay on the
+    /// page with Oby's answer.
+    @Test func wordsOpenTheConversationWhenThereIsOne() {
+        #expect(TaskPage.afterTold(hasConversation: true) == .conversation)
+        #expect(TaskPage.afterTold(hasConversation: false) == .page)
+    }
+
+    /// Later puts off the job's open inbox item, else the permission it waits on; nothing else's.
+    @Test func laterPutsOffTheJobsOwnDecision() {
+        let now = Date.now
+        var answered = InboxItem(id: "old", kind: .question, job: "j", title: "Job", text: "Which?", options: [], created: now)
+        answered.done = now
+        let other = InboxItem(id: "other", kind: .question, job: "x", title: "Other", text: "Which?", options: [], created: now)
+        let open = InboxItem(id: "open", kind: .question, job: "j", title: "Job", text: "Which?", options: [], created: now)
+        #expect(TaskActions.laterTarget("j", inbox: [answered, other, open]) == .item("open"))
+        let asks = RunnerFeed.PermissionRecord(job: "j", permission: RunnerPermission(id: "p1", tool: "Bash", title: "Run swift test"), created: now)
+        #expect(TaskActions.laterTarget("j", inbox: [answered, other], permissions: [asks]) == .permission("j/p1"))
+        #expect(TaskActions.laterTarget("j", inbox: [other]) == nil)
+        #expect(TaskFacts.laterReply == "Okay, it’ll wait. I’ll bring it back up in an hour.")
+    }
+
     /// A decision shows on the card and the page while the job waits on your OK or your answer.
     @Test func aDecisionShowsWhileTheJobWaitsOnYou() {
         var asking = job(.running)

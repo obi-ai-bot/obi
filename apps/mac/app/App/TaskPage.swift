@@ -25,8 +25,21 @@ struct TaskActions {
     var tell: ((String, [String]) async throws -> Job)? = nil
     /// The box's +: only obid on this Mac reads the tray's files, and only a follow-up takes them.
     var attaches = false
-    /// Puts its decision off an hour (Later on its inbox item, as the conversation's cards do).
+    /// Puts its decision off an hour (Later on its inbox item, as the conversation's cards do); nil
+    /// where nothing offers Later.
     var later: (() async throws -> Void)? = nil
+
+    /// The + is there where the files can go: obid on this Mac, and a finished job, whose words
+    /// start a follow-up (a job at work takes words only).
+    static func attaches(_ job: Job, runnerHere: Bool) -> Bool { runnerHere && !job.isActive }
+
+    /// What Later puts off: the job's open inbox item, else the permission it waits on.
+    enum LaterTarget: Equatable { case item(String), permission(String) }
+
+    static func laterTarget(_ job: String, inbox: [InboxItem], permissions: [RunnerFeed.PermissionRecord] = []) -> LaterTarget? {
+        if let item = inbox.first(where: { $0.job == job && $0.done == nil }) { return .item(item.id) }
+        return permissions.first { $0.job == job && $0.done == nil }.map { .permission($0.id) }
+    }
 
     @MainActor static func of(_ job: Job, local: Bool, model: IslandModel) -> TaskActions {
         let desk = model.desk, feed = model.feed
@@ -48,9 +61,18 @@ struct TaskActions {
                                             proposals: saved.proposals.map { ResearchProposal(index: $0.index, repo: $0.repo, title: $0.title, body: $0.body, labels: $0.labels, filed: $0.filed, filedAt: $0.filedAt) })
                 },
                 fileProposal: { index, start in try await fileLocalProposal(job, index: index, start: start, desk: desk) },
-                tell: { text, _ in try desk.message(job.id, text); return job },
-                later: desk.inbox.first(where: { $0.job == job.id && $0.done == nil }).map { item in
-                    { _ = try await desk.answer(item.id, .later(.now.addingTimeInterval(3600))) }
+                tell: { text, _ in
+                    try desk.message(job.id, text)
+                    // The thread the window opens on it gets the words and Oby's answer, as obid's conversation does.
+                    if model.hasConversation(of: job.id, local: true) {
+                        let account = desk.accounts.accounts.first { $0.account.id == job.account }?.account.name ?? job.account
+                        desk.told(text, reply: TaskFacts.relay(job, heard: job, account: account), job: job.id)
+                    }
+                    return job
+                },
+                later: {
+                    guard case .item(let id) = laterTarget(job.id, inbox: desk.inbox) else { return }
+                    _ = try await desk.answer(id, .later(.now.addingTimeInterval(3600)))
                 })
         }
         return TaskActions(
@@ -77,17 +99,14 @@ struct TaskActions {
                 feed.apply(heard)
                 return heard
             },
-            attaches: feed.local,
-            later: later(job, feed: feed))
-    }
-
-    /// Later on the job's open inbox item, else on the permission it waits on.
-    @MainActor private static func later(_ job: Job, feed: RunnerFeed) -> (() async throws -> Void)? {
-        if let item = feed.inbox.first(where: { $0.job == job.id && $0.done == nil }) {
-            return { try await feed.settle(item.id, later: .now.addingTimeInterval(3600)) }
-        }
-        guard let record = feed.permissionHistory.first(where: { $0.job == job.id && $0.done == nil }) else { return nil }
-        return { feed.laterPermission(record.id) }
+            attaches: attaches(job, runnerHere: feed.local),
+            later: {
+                switch laterTarget(job.id, inbox: feed.inbox, permissions: feed.permissionHistory) {
+                case .item(let id): try await feed.settle(id, later: .now.addingTimeInterval(3600))
+                case .permission(let id): feed.laterPermission(id)
+                case nil: break
+                }
+            })
     }
 
     /// Files one of this Mac's research report's proposed issues, after the secret scan, and starts
@@ -222,7 +241,8 @@ struct TaskCardView: View {
             if item.status == .needs {
                 VStack(alignment: .leading, spacing: 0) {
                     if TaskDecision.shows(job, extras: actions.extras) {
-                        TaskDecision(job: job, actions: actions, busy: $busy, problem: $problem)
+                        TaskDecision(job: job, actions: actions, busy: $busy, problem: $problem,
+                                     onLater: actions.later.map { later in { Task { try? await later() } } })
                     } else {
                         Text(job.badge.text).font(Tokens.font(Tokens.textSm, .medium))
                             .foregroundStyle(job.badge.tone == .red ? Tokens.danger : Tokens.needs)
@@ -341,9 +361,12 @@ struct TaskPage: View {
     var voice: Voice? = nil
     var talkKeyListening = false
     /// The words went: the job that heard them (a follow-up a finished one started), for the
-    /// window to open its conversation, as Sangam's `tellFromTask` does.
-    var onTold: (Job) -> Void = { _ in }
+    /// window to open its conversation, as Sangam's `tellFromTask` does. False when it has none
+    /// kept: then the words and Oby's answer show here.
+    var onTold: (Job) -> Bool = { _ in false }
     @State private var moving = false
+    /// The last words said here and Oby's answer, where no conversation keeps them (or Later's).
+    @State private var exchange: (said: String, reply: String)?
     @State private var busy = false
     @State private var problem: String?
     @State private var note = ""
@@ -362,6 +385,12 @@ struct TaskPage: View {
     private var needs: Bool { TaskDecision.shows(job, extras: actions.extras) && job.isActive }
     private var failure: Bool { TaskPage.failure(job) && !TaskDecision.shows(job, extras: actions.extras) }
 
+    /// Where words said on the page lead (Sangam's tellFromTask): the job's conversation when one
+    /// is kept, else they stay here with Oby's answer under them.
+    enum AfterTold: Equatable { case conversation, page }
+
+    static func afterTold(hasConversation: Bool) -> AfterTold { hasConversation ? .conversation : .page }
+
     /// It ended without finishing and you haven't let it go: the page leads with what failed.
     static func failure(_ job: Job) -> Bool {
         (job.status == .failed || job.status == .interrupted) && job.dismissed == nil
@@ -374,7 +403,12 @@ struct TaskPage: View {
                     header
                     if TaskDecision.shows(job, extras: actions.extras) {
                         TaskDecision(job: job, actions: actions, busy: $busy, problem: $problem, box: true,
-                                     onLater: actions.later.map { later in { run { try await later(); onBack?() } } })
+                                     onLater: actions.later.map { later in {
+                                         run {
+                                             try await later()
+                                             exchange = ("Later", TaskFacts.laterReply)
+                                         }
+                                     } })
                             .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 18)
                             .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
                     } else if failure {
@@ -418,6 +452,14 @@ struct TaskPage: View {
                 .padding(.horizontal, Tokens.gutter).padding(.top, 8).padding(.bottom, 32)
             }
             .scrollIndicators(.never)
+            if let exchange {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("You: \(exchange.said)").foregroundStyle(Tokens.text)
+                    Text("Oby: \(exchange.reply)").foregroundStyle(Tokens.muted)
+                }
+                .font(Tokens.font(Tokens.textSm)).textSelection(.enabled)
+                .frame(maxWidth: Tokens.column, alignment: .leading).padding(.horizontal, Tokens.gutter + 12).padding(.top, 8)
+            }
             if let noteProblem {
                 Text(noteProblem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger)
                     .frame(maxWidth: Tokens.column, alignment: .leading).padding(.horizontal, Tokens.gutter + 12).padding(.top, 8)
@@ -685,7 +727,10 @@ struct TaskPage: View {
                     if !files.isEmpty { tray.clear() }
                     note = ""
                     noteProblem = nil
-                    onTold(heard)
+                    if !onTold(heard) {
+                        let account = actions.accounts.first { $0.account.id == heard.account }?.account.name ?? heard.account
+                        exchange = (text, TaskFacts.relay(job, heard: heard, account: account))
+                    }
                 } else {
                     try await actions.message(text)
                     note = ""

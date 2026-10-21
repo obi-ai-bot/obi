@@ -723,20 +723,25 @@ pub(crate) fn follow_up_line(shared: &Shared, job: &Job, next: &Job) -> String {
     )
 }
 
-/// What Oby says once the owner's words for `job` (`POST /v1/jobs/{id}/messages`) reached
-/// `heard`: `job` itself, the follow-up they started, or the one already following it up.
+/// What Oby says once the owner's words for `job`, said on its page (`POST /v1/jobs/{id}/messages`),
+/// reached `heard`: `job` itself, the follow-up they started, or the one already following it up.
+/// Sangam's words (design/app `tasks.ts` `relay`); the apps say the same where no conversation
+/// keeps them (apps/shared/TaskFacts.swift `relay`).
 pub(crate) fn told_line(shared: &Shared, job: &Job, heard: &Job) -> String {
-    let name = job.short_title();
-    if heard.id == job.id {
-        format!("Told {name} what you said.")
-    } else if heard.heard.is_empty() {
-        follow_up_line(shared, job, heard)
-    } else {
-        format!(
-            "Already on it in {}, the follow-up of {name}: I told it what you said.",
-            heard.short_title()
-        )
+    let agent = tool_name(&heard.agent);
+    if heard.id != job.id && heard.heard.is_empty() {
+        return format!(
+            "This one’s finished, so I started a follow-up. {agent} has it in {} on {}.",
+            heard.repo_name(),
+            account_name(shared, &heard.account)
+        );
     }
+    let after = if heard.rounds.unwrap_or(1) > 1 {
+        "this round"
+    } else {
+        "its current step"
+    };
+    format!("Passed to {agent}. It’ll pick that up after {after}.")
 }
 
 /// Words for `job`, which ended, while `next` follows it up already: `next` hears them, never a

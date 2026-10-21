@@ -1426,6 +1426,12 @@ nonisolated struct Runner: Sendable {
         return try await call("POST", "v1/accounts", body: Body(agent: agent, name: name, payer: payer.isEmpty ? nil : payer))
     }
 
+    /// Lists the tool's own login again (`default`, `codex`) after it was removed here.
+    func restoreDefaultLogin(agent: String) async throws -> RunnerAccount {
+        struct Body: Encodable { var agent: String; var `default` = true }
+        return try await call("POST", "v1/accounts", body: Body(agent: agent))
+    }
+
     /// Takes the account out of Oby. The tool's own login, and the account with its provider, stay.
     func removeAccount(_ id: String) async throws {
         _ = try await send("DELETE", "v1/accounts/\(Self.segment(id))")

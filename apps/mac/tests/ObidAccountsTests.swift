@@ -129,5 +129,12 @@ struct AccountRowsTests {
     @Test func removingSaysWhatStays() {
         let note = AccountsSettingsView.removeNote(Account(id: "a1b2c3d4", agent: "codex", name: "Personal", payer: "", home: nil))
         #expect(note.contains("Codex's own login on this Mac, and your account with OpenAI, stay as they are"))
+        #expect(!note.contains("can't be added back"))
+        // The tool's own login comes back from Add an account; one in obid's configuration doesn't.
+        let own = AccountsSettingsView.removeNote(Account(id: "default", agent: "claude", name: "Default", payer: "", home: nil))
+        #expect(own.contains("Bring it back here any time with Use Claude Code's Own Login"))
+        let configured = AccountsSettingsView.removeNote(Account(id: "work", agent: "claude", name: "Work", payer: "", home: nil))
+        #expect(configured.contains("can't be added back here"))
+        #expect(configured.contains("Keychain item"))
     }
 }

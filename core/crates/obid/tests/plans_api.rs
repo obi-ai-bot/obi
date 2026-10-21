@@ -2124,12 +2124,50 @@ fn words_from_a_task_page_join_its_conversation() {
     assert_eq!(oby["who"], "oby");
     assert_eq!(
         oby["text"],
-        "Docs line is finished, so I started a follow-up: Follow-up: Docs line. Claude Code has it in fixture-app on Stub."
+        "This one’s finished, so I started a follow-up. Claude Code has it in fixture-app on Stub."
     );
     assert_eq!(oby["jobs"], json!([next]));
     // Try again picks its own session up: no new job, so no files.
     let again = post(json!({"text": obid::brain::actions::TRY_AGAIN, "attachments": [path]}));
     assert_eq!(again.status, 422, "{}", again.text);
+    // Without "conversation": true, nothing joins the conversation, whatever the words do.
+    post(json!({"text": "and one more", "conversation": false}));
+    let after = call(
+        &obid,
+        "GET",
+        &format!("/v1/conversation?id={conversation}"),
+        None,
+    )
+    .body;
+    assert_eq!(after.as_array().unwrap().len(), turns.len(), "{after}");
+
+    // A job at work takes words, never files.
+    let running = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "PAUSE: 60000", "title": "Slow"}}),
+        ),
+    );
+    assert_eq!(running.status, 201, "{}", running.text);
+    let slow = running.body["id"].as_str().unwrap().to_owned();
+    within(120, "its agent is at work", || {
+        let job = get_job(&obid, &slow);
+        (job["status"] == "running" && job["step"] == "Starting Claude Code").then_some(())
+    });
+    let busy = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{slow}/messages"),
+        Some(&json!({"text": "look at this", "attachments": [path]})),
+    );
+    assert_eq!(busy.status, 422, "{}", busy.text);
+    assert!(
+        busy.text.contains("Files go with a follow-up"),
+        "{}",
+        busy.text
+    );
 }
 
 /// A job the owner let go (Dismiss) is finished too: "tell it…" starts a follow-up, and the job

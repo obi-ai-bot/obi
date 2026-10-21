@@ -354,6 +354,10 @@ struct AccountsSettingsView: View {
     @State private var removing: Account?
     /// One of obid's accounts, asked about before it goes.
     @State private var removingRunner: Account?
+    /// The tools' own logins removed here (`default`, `codex`), comma-separated: Add an account
+    /// offers them back.
+    @AppStorage("ObyRemovedOwnLogins") private var removedOwnLogins = ""
+    private var removedOwn: Set<String> { Set(removedOwnLogins.split(separator: ",").map(String.init)) }
     /// The tool's own login for one of obid's accounts, under way in its sheet.
     @State private var signingIn: ShownAccountSignIn?
     @State private var problem: String?
@@ -397,8 +401,16 @@ struct AccountsSettingsView: View {
         }
     }
 
-    /// The add form (Sangam's "Add an account"): the tool, a name, who pays.
-    private func addForm(_ add: @escaping () async throws -> Void) -> some View {
+    /// The tool picked has an own login (Claude Code, Codex) removed here that obid doesn't list.
+    private var restorable: String? {
+        guard let id = Self.ownLogins[agent], removedOwn.contains(id),
+              !feed.accounts.contains(where: { $0.account.id == id }) else { return nil }
+        return Job.agentNames[agent] ?? agent
+    }
+
+    /// The add form (Sangam's "Add an account"): the tool, a name, who pays. `restore` names a tool
+    /// whose own login can come back, beside Add Account (obid on this Mac).
+    private func addForm(restore: String? = nil, _ add: @escaping () async throws -> Void) -> some View {
         SetGroup("Add an account", problem: problem) {
             SetRow("Tool", about: agent == "cursor" && !CursorFacts.separateLogins ? "\(CursorFacts.oneLogin): one Cursor account." : nil) {
                 SetSelect("Tool", selection: $agent, options: [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor")])
@@ -418,6 +430,19 @@ struct AccountsSettingsView: View {
                 }
                 .buttonStyle(.set)
                 .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                if let restore {
+                    Button("Use \(restore)'s Own Login") {
+                        Task {
+                            do {
+                                guard let runner = feed.runner else { throw RunnerError(message: "Oby isn't connected to its runner on this Mac yet.") }
+                                let back = try await runner.restoreDefaultLogin(agent: agent)
+                                removedOwnLogins = removedOwn.subtracting([back.account.id]).sorted().joined(separator: ",")
+                                problem = nil
+                            } catch { problem = error.localizedDescription }
+                        }
+                    }
+                    .buttonStyle(.set)
+                }
             }
         }
     }
@@ -444,8 +469,9 @@ struct AccountsSettingsView: View {
     }
 
     /// Adds to obid's accounts on this Mac: obid makes its folder, and its row then offers Sign In.
+    /// The tool's own login, once removed here, comes back with its own button.
     private var runnerAddAccount: some View {
-        addForm {
+        addForm(restore: restorable) {
             guard let runner = feed.runner else { throw RunnerError(message: "Oby isn't connected to its runner on this Mac yet.") }
             _ = try await runner.addAccount(agent: agent, name: name.trimmingCharacters(in: .whitespaces),
                                             payer: payer.trimmingCharacters(in: .whitespaces))
@@ -463,6 +489,9 @@ struct AccountsSettingsView: View {
         }
     }
 
+    /// The ids obid gives each tool's own login (core/crates/obid/src/accounts.rs `implicit`).
+    static let ownLogins = ["claude": "default", "codex": "codex"]
+
     /// What removing one of obid's accounts does, and what it leaves.
     static func removeNote(_ account: Account) -> String {
         let (tool, provider) = switch account.agent {
@@ -470,9 +499,15 @@ struct AccountsSettingsView: View {
         case "cursor": ("Cursor", "Cursor")
         default: ("Claude Code", "Anthropic")
         }
+        if ownLogins[account.agent] == account.id {
+            return "Oby stops using \(tool)'s own login on this Mac; nothing of it is deleted. Bring it back here any time with Use \(tool)'s Own Login, under Add an account."
+        }
         // Claude Code keeps an account's login in the Keychain on a Mac (docs/runner-api.md): obid leaves it.
         let kept = account.agent == "claude" ? " Its Keychain item for this account stays too; Keychain Access removes it." : ""
-        return "Oby stops using it, and deletes the folder it made for it, if any. \(tool)'s own login on this Mac, and your account with \(provider), stay as they are: sign out there to end them.\(kept)"
+        // One obid made has eight hex digits; any other is in obid's configuration.
+        let made = account.id.wholeMatch(of: /[0-9a-f]{8}/) != nil
+        let back = made ? "" : " It's in obid's configuration, so it can't be added back here."
+        return "Oby stops using it, and deletes the folder it made for it, if any. \(tool)'s own login on this Mac, and your account with \(provider), stay as they are: sign out there to end them.\(kept)\(back)"
     }
 
     private func remove(_ account: Account) {
@@ -480,6 +515,9 @@ struct AccountsSettingsView: View {
             do {
                 guard let runner = feed.runner else { throw RunnerError(message: "Oby isn't connected to its runner on this Mac yet.") }
                 try await runner.removeAccount(account.id)
+                if Self.ownLogins[account.agent] == account.id {
+                    removedOwnLogins = removedOwn.union([account.id]).sorted().joined(separator: ",")
+                }
                 problem = nil
             } catch { problem = error.localizedDescription }
         }

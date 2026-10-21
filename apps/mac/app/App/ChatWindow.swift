@@ -719,6 +719,8 @@ private struct JobPane: View {
     /// Full session: the job's session over its page; nil for this Mac's own jobs, which keep none.
     var onSession: (() -> Void)? = nil
     @State private var problem: String?
+    /// The page's own attachments: never what waits in Home's box.
+    @State private var tray = Tray()
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
@@ -727,19 +729,16 @@ private struct JobPane: View {
     var body: some View {
         Group {
             if let job {
-                TaskPage(job: job, actions: TaskActions.of(job, local: local, model: model), tray: model.tray,
+                TaskPage(job: job, actions: TaskActions.of(job, local: local, model: model), tray: tray,
                          publishNow: model.publishing == job.id, onPublishNow: { model.publishing = nil }, onBack: onBack,
                          followUps: ThreadTaskLine.followUps(of: job.id, in: local ? desk.jobs : feed.jobs), onOpenJob: onOpenJob,
                          onSession: onSession, usage: model.usageRows, voice: model.voice, talkKeyListening: model.listening,
-                         onTold: { heard in
-                             // Sangam's tellFromTask: its conversation opens on the words and Oby's answer;
-                             // without one, the follow-up they started.
-                             if model.hasConversation(of: job.id, local: local) {
-                                 model.showConversation(of: job.id, local: local)
-                                 onConversation()
-                             } else if heard.id != job.id {
-                                 onOpenJob(heard.id)
-                             }
+                         onTold: { _ in
+                             // Sangam's tellFromTask: its conversation opens on the words and Oby's answer.
+                             guard TaskPage.afterTold(hasConversation: model.hasConversation(of: job.id, local: local)) == .conversation else { return false }
+                             model.showConversation(of: job.id, local: local)
+                             onConversation()
+                             return true
                          })
             } else if let problem {
                 Text(problem).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.danger)
