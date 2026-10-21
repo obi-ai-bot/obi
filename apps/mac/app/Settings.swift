@@ -816,7 +816,7 @@ struct ConnectorsSettingsView: View {
         let runner = (feed.runner == nil && !staged) || feed.connection != .live ? nil : Connectors.RunnerState(
             name: feed.name, local: feed.local, accounts: feed.accounts, github: feed.github, checks: feed.checkRuns,
             gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: feed.tetrix,
-            slack: lists.slack, watch: lists.watch)
+            slack: feed.slack, watch: feed.watch)
         let accounts = Connectors.accounts(mac: store.accounts, runner: runner?.accounts, local: feed.local,
                                            hasRunner: feed.runner != nil || staged)
         return Connectors.list(accounts: accounts, runner: runner)
@@ -886,7 +886,12 @@ struct ConnectorsSettingsView: View {
         #if DEBUG
         if let staged = feed.stagedLists { lists = staged; return }
         #endif
-        defer { if let status = lists.tetrix { feed.tetrix = status } }
+        defer {
+            if let status = lists.tetrix { feed.tetrix = status }
+            // Read here, then kept by their events (obid signing out after a refused token).
+            feed.slack = lists.slack
+            feed.watch = lists.watch
+        }
         guard feed.connection == .live, let runner = feed.runner else {
             lists = Connectors.Lists()
             return
@@ -902,12 +907,12 @@ struct ConnectorsSettingsView: View {
             (userToken, botToken, appToken) = ("", "", "")
             askingSlack = true
         case .setWatchLive(let live):
-            guard let runner = feed.runner else { return }
+            guard feed.local, let runner = feed.runner else { return }
             Task {
                 busy = true
                 defer { busy = false }
                 do {
-                    lists.watch = try await runner.setWatchLive(live)
+                    feed.watch = try await runner.setWatchLive(live)
                     problems[connector.id] = nil
                 } catch {
                     problems[connector.id] = error.localizedDescription
@@ -950,7 +955,7 @@ struct ConnectorsSettingsView: View {
                 }
                 if let status = try? await runner.tetrix() { feed.tetrix = status }
             }
-        case .disconnectSlack: slackCall(row: connector.id) { try await $0.disconnectSlack() }
+        case .disconnectSlack: disconnectSlack(row: connector.id)
         case .disconnect(let name):
             guard let runner = feed.runner else { return }
             Task {
@@ -1093,28 +1098,29 @@ struct ConnectorsSettingsView: View {
             busy = true
             defer { busy = false }
             do {
-                lists.slack = try await runner.connectSlack(user: user, bot: bot, app: app.isEmpty ? nil : app)
+                feed.slack = try await runner.connectSlack(user: user, bot: bot, app: app.isEmpty ? nil : app)
                 problems[row] = nil
             } catch {
                 problems[row] = error.localizedDescription
             }
-            lists.watch = (try? await runner.watch()) ?? lists.watch
+            if let watch = try? await runner.watch() { feed.watch = watch }
         }
     }
 
-    /// A Slack call on the runner, then the row as obid says it is.
-    private func slackCall(row: String, _ call: @escaping (Runner) async throws -> Void) {
+    /// obid forgets the Slack tokens: the row says Not connected at its 204, then as obid says.
+    private func disconnectSlack(row: String) {
         guard feed.local, let runner = feed.runner else { return }
         Task {
             busy = true
             defer { busy = false }
             do {
-                try await call(runner)
+                try await runner.disconnectSlack()
+                feed.slack?.connected = false
                 problems[row] = nil
             } catch {
                 problems[row] = error.localizedDescription
             }
-            if let status = try? await runner.slack() { lists.slack = status }
+            if let status = try? await runner.slack() { feed.slack = status }
         }
     }
 

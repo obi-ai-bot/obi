@@ -36,7 +36,8 @@ nonisolated struct SlackStatus: Decodable, Equatable, Sendable {
     /// Whether `text` looks like a token of this kind (`xoxp-` or `xoxb-`), as obid takes it.
     static func isToken(_ text: String, _ prefix: String) -> Bool {
         let token = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return token.hasPrefix(prefix) && (20...512).contains(token.count) && token.allSatisfy { $0.isASCII && !$0.isWhitespace }
+        return token.hasPrefix(prefix) && (20...512).contains(token.count)
+            && token.unicodeScalars.allSatisfy { (0x21...0x7E).contains($0.value) }
     }
 }
 
@@ -59,15 +60,76 @@ nonisolated struct WatchStatus: Decodable, Equatable, Sendable {
     }
 }
 
-/// A `watch` inbox item (obid only: the watcher), as the Mac's notification shows it. Engine's inbox
-/// doesn't know the kind; obid's own words only (`title`, `text`), never what was written.
-nonisolated struct WatchNotice: Decodable, Equatable, Sendable {
+/// A `watch` or `listen` inbox item (obid only: the watcher and the channel listener), as the Mac's
+/// inbox card and notification show it. Engine's inbox doesn't know these kinds. Only obid's own
+/// words are shown (`title`, `text`), and the link when it's https on slack.com or github.com:
+/// never what was written (`watch.quoted`).
+nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
+    static let kinds: Set<String> = ["watch", "listen"]
+
     var kind: String
     var id: String
     var title: String
     var text: String
+    var options: [String]
     var created: Date
     var done: Date?
+    var later: Date?
+    /// The message's or the pull request's page: https on slack.com or github.com only.
+    var url: URL?
+
+    private enum Keys: String, CodingKey { case kind, id, title, text, options, created, done, later, watch }
+    private struct Place: Decodable { var url: String?; var pr: PR? }
+    private struct PR: Decodable { var url: String? }
+
+    init(kind: String = "watch", id: String, title: String, text: String, options: [String] = ["Dismiss"], created: Date,
+         done: Date? = nil, later: Date? = nil, url: URL? = nil) {
+        (self.kind, self.id, self.title, self.text, self.options) = (kind, id, title, text, options)
+        (self.created, self.done, self.later, self.url) = (created, done, later, url)
+    }
+
+    init(from decoder: any Decoder) throws {
+        let keys = try decoder.container(keyedBy: Keys.self)
+        kind = try keys.decode(String.self, forKey: .kind)
+        id = try keys.decode(String.self, forKey: .id)
+        title = try keys.decode(String.self, forKey: .title)
+        text = try keys.decode(String.self, forKey: .text)
+        options = (try? keys.decodeIfPresent([String].self, forKey: .options)) ?? []
+        created = try keys.decode(Date.self, forKey: .created)
+        done = try? keys.decodeIfPresent(Date.self, forKey: .done)
+        later = try? keys.decodeIfPresent(Date.self, forKey: .later)
+        let place = try? keys.decodeIfPresent(Place.self, forKey: .watch)
+        url = (place?.pr?.url ?? place?.url).flatMap(Self.link)
+    }
+
+    /// `text` as a link the card may open: https, no login, on slack.com or github.com (or a
+    /// subdomain), with nothing that could end it early.
+    static func link(_ text: String) -> URL? {
+        guard !text.contains(where: { $0.isWhitespace || $0.isNewline || "<>|\"".contains($0) }),
+              let url = URL(string: text), url.scheme == "https", url.user() == nil, url.password() == nil,
+              let host = url.host()?.lowercased() else { return nil }
+        let allowed = ["slack.com", "github.com"].contains { host == $0 || host.hasSuffix("." + $0) }
+        return allowed ? url : nil
+    }
+
+    /// Open, and not put off until later.
+    func waiting(at now: Date = .now) -> Bool { done == nil && (later.map { $0 <= now } ?? true) }
+
+    /// The ones of these kinds in a `GET /v1/inbox` answer.
+    static func list(_ data: Data) -> [WatchNotice] {
+        guard let items = (try? JSONSerialization.jsonObject(with: data)) as? [Any] else { return [] }
+        return items.compactMap { item in
+            (try? JSONSerialization.data(withJSONObject: item))
+                .flatMap { try? Runner.decoder.decode(WatchNotice.self, from: $0) }
+                .flatMap { kinds.contains($0.kind) ? $0 : nil }
+        }
+    }
+
+    /// Whether a notification shows for it: open, not put off, from the last hour (an older one is a
+    /// replay after a reconnect), and not shown already.
+    static func shows(_ notice: WatchNotice, told: Set<String>, now: Date = .now) -> Bool {
+        notice.waiting(at: now) && notice.created > now.addingTimeInterval(-3600) && !told.contains(notice.id)
+    }
 }
 
 #if os(macOS)
@@ -91,6 +153,14 @@ extension Runner {
     /// obid forgets the Slack tokens: the watcher reads only GitHub until they're pasted again.
     func disconnectSlack() async throws {
         try await send("DELETE", "v1/slack")
+    }
+
+    /// Settles a `watch` or `listen` item: Dismiss, Approve (a review's: obid posts it on GitHub),
+    /// done or later. Engine's inbox doesn't read these kinds, so the answer is read as one.
+    func settle(notice id: String, answer: String? = nil, later: Date? = nil) async throws -> WatchNotice {
+        struct Body: Encodable { var answer: String?; var later: Date? }
+        let data = try await send("POST", "v1/inbox/\(id)/answer", body: Body(answer: answer, later: later))
+        return try Runner.decoder.decode(WatchNotice.self, from: data)
     }
 
     /// The watcher, or nil from a runner that has none to say (404).

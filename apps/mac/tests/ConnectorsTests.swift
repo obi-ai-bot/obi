@@ -381,7 +381,9 @@ struct ConnectorsTests {
         #expect(lists.plugins == nil && lists.connections == nil)
         #expect(lists.problems == ["Couldn't read the plug-ins on tetrix-lab: The runner didn't let this device in.",
                                    "Couldn't read the connections on tetrix-lab: The runner couldn't read connections.json.",
-                                   "Couldn't read Tetrix on tetrix-lab: The runner didn't let this device in."])
+                                   "Couldn't read Tetrix on tetrix-lab: The runner didn't let this device in.",
+                                   "Couldn't read Slack on tetrix-lab: The runner didn't let this device in.",
+                                   "Couldn't read the watcher on tetrix-lab: The runner didn't let this device in."])
     }
 
     /// Disconnecting a runner's connection signs the runner's own sentence, under the connection

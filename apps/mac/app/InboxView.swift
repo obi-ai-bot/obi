@@ -16,6 +16,8 @@ struct IslandInbox: View {
     @State private var opened: String?
     /// Why the last answer didn't go through, until the next one does.
     @State private var problem: String?
+    /// Why a watcher's or the listener's item wasn't settled, by its id.
+    @State private var noticeProblems: [String: String] = [:]
     @State private var busy = false
 
     /// An item, and whether it's this Mac's own (else the runner's).
@@ -27,7 +29,7 @@ struct IslandInbox: View {
 
     /// Whether anything waits now, here or on the runner.
     static func waits(desk: Desk, feed: RunnerFeed, now: Date = .now) -> Bool {
-        !entries(desk: desk, feed: feed, now: now).isEmpty
+        !entries(desk: desk, feed: feed, now: now).isEmpty || feed.notices.contains { $0.waiting(at: now) }
     }
 
     static func entries(desk: Desk, feed: RunnerFeed, now: Date) -> [Entry] {
@@ -40,6 +42,7 @@ struct IslandInbox: View {
         // Every half minute: "waiting 3m" moves on, and what was put off comes back.
         TimelineView(.periodic(from: .now, by: 30)) { context in
             let entries = Self.entries(desk: desk, feed: feed, now: context.date)
+            let notices = feed.notices.filter { $0.waiting(at: context.date) }
             if !entries.isEmpty {
                 let current = entries.first { $0.id == opened } ?? entries[0]
                 VStack(alignment: .leading, spacing: 8) {
@@ -53,6 +56,15 @@ struct IslandInbox: View {
                 }
                 // Settled elsewhere, or another one opened: the problem was the one before's.
                 .onChange(of: current.id, initial: true) { problem = nil }
+            }
+            if !notices.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Slack and GitHub · \(notices.count)")
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.5))
+                        .padding(.leading, 4).padding(.top, 2)
+                        .accessibilityAddTraits(.isHeader)
+                    ForEach(notices) { noticeCard($0) }
+                }
             }
         }
     }
@@ -110,6 +122,49 @@ struct IslandInbox: View {
         .padding(14)
         .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .disabled(busy)
+    }
+
+    /// A watcher's or the channel listener's item: obid's words as plain text, never what was
+    /// written; its link opens only on a click, and only on slack.com or github.com over https.
+    private func noticeCard(_ notice: WatchNotice) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(verbatim: notice.title).font(.system(size: 13, weight: .semibold)).lineLimit(2)
+            Text(verbatim: notice.text).font(.system(size: 12)).foregroundStyle(.white.opacity(0.75)).lineLimit(3)
+            HStack(spacing: 14) {
+                ForEach(notice.options, id: \.self) { option in
+                    Button(option) { settle(notice, answer: option) }
+                        .help(option == "Approve" ? "Posts Oby's review on the pull request, as a comment from your GitHub login" : "Mark it read")
+                }
+                Button("Later") { settle(notice, later: .now.addingTimeInterval(3600)) }
+                    .help("Put it off for an hour")
+                if let url = notice.url {
+                    Button(url.host()?.hasSuffix("github.com") == true ? "Open on GitHub" : "Open in Slack") { openURL(url) }
+                        .help(url.absoluteString)
+                }
+                if let problem = noticeProblems[notice.id] {
+                    Text(problem).foregroundStyle(.red).lineLimit(2)
+                }
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.6))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .disabled(busy)
+    }
+
+    private func settle(_ notice: WatchNotice, answer: String? = nil, later: Date? = nil) {
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                try await feed.settle(notice: notice.id, answer: answer, later: later)
+                noticeProblems[notice.id] = nil
+            } catch {
+                noticeProblems[notice.id] = error.localizedDescription
+            }
+        }
     }
 
     /// Another item, waiting its turn: click to open it.

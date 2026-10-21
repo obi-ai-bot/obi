@@ -64,6 +64,12 @@ final class RunnerFeed {
     /// obid's Tetrix, held once for every agent: read on connecting, then kept by its `tetrix`
     /// event and by Settings › Connectors' own reads; nil from a runner that doesn't hold one.
     var tetrix: TetrixStatus?
+    /// obid's Slack and its watcher (Settings › Connectors), read there and kept by their events.
+    var slack: SlackStatus?
+    var watch: WatchStatus?
+    /// The watcher's and the channel listener's items waiting in the inbox (Engine's inbox doesn't
+    /// know their kinds), oldest first.
+    private(set) var notices: [WatchNotice] = []
     /// What each job carries that Engine's Job doesn't read yet (its mode, the permission it waits
     /// on, its question's recommended option and plan), by job id.
     /// Counts the `routine` events (#395): Settings › Routines reads the routines again on each.
@@ -306,8 +312,11 @@ final class RunnerFeed {
         inbox = []
         inboxHistory = []
         inboxWords = [:]
+        notices = []
         accounts = []
         tetrix = nil
+        slack = nil
+        watch = nil
         models = nil
         extras = [:]
         permissionHistory = []
@@ -359,6 +368,7 @@ final class RunnerFeed {
                         let (list, extras) = try Runner.jobsWithExtras(jobsData)
                         let inboxData = try await inboxAnswer
                         let (items, words) = try inboxData.map(Runner.inboxWithWords) ?? ([], [:])
+                        let fetchedNotices = inboxData.map(WatchNotice.list) ?? []
                         let conversationsData = try await conversationsAnswer
                         let history = await historyAnswer
                         let tetrix = await tetrixAnswer
@@ -385,6 +395,7 @@ final class RunnerFeed {
                         // Settings › Runner changed while the open jobs were fetched again.
                         try Task.checkCancellation()
                         inbox = items
+                        notices = fetchedNotices.filter { $0.done == nil }.sorted { $0.created < $1.created }
                         if let (past, pastWords) = history {
                             inboxHistory = past.filter { !$0.isOpen }
                             inboxWords = pastWords.merging(words, uniquingKeysWith: { _, fresh in fresh })
@@ -411,7 +422,9 @@ final class RunnerFeed {
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     case .tetrix(let status): tetrix = status
-                    case .watchNotice(let notice): tell(notice)
+                    case .watchNotice(let notice): take(notice)
+                    case .slack(let status): slack = status
+                    case .watch(let status): watch = status
                     case .cleanup(let measured): cleanup = measured
                     // obid names each turn's, step's and word's conversation: the window shows one (#493).
                     case .turn(let turn, let extras):
@@ -996,10 +1009,28 @@ final class RunnerFeed {
     /// The watcher's notices already shown, so a reconnect's replay doesn't show one again.
     @ObservationIgnored private var told: Set<String> = []
 
-    /// A `watch` item that just came: a notification with obid's own words (who, where), never what
-    /// was written. One that's done, or more than an hour old (a replay), shows nothing.
+    /// A `watch` or `listen` item as the runner last said it: its card while it waits, and a
+    /// notification when it's new. Settled, its card and notification go.
+    func take(_ notice: WatchNotice) {
+        notices.removeAll { $0.id == notice.id }
+        if notice.done == nil { notices.append(notice) }
+        if notice.done != nil || !notice.waiting() {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notice.id])
+        }
+        tell(notice)
+    }
+
+    /// Answers a `watch` or `listen` item (Dismiss, Approve) or puts it off.
+    func settle(notice id: String, answer: String? = nil, later: Date? = nil) async throws {
+        let runner = try acting("Set the runner's URL in Settings to answer it.")
+        take(try await runner.settle(notice: id, answer: answer, later: later))
+    }
+
+    /// A notification with obid's own words (who, where), never what was written, for a notice
+    /// that `WatchNotice.shows` (new, open, recent).
     private func tell(_ notice: WatchNotice) {
-        guard notice.done == nil, notice.created > .now.addingTimeInterval(-3600), told.insert(notice.id).inserted else { return }
+        guard WatchNotice.shows(notice, told: told) else { return }
+        told.insert(notice.id)
         let content = UNMutableNotificationContent()
         content.title = notice.title
         content.body = notice.text

@@ -107,7 +107,7 @@ nonisolated enum Connectors {
     /// The design's services Oby can't connect yet (Deskree Ops #502, Slack #26, Gmail #501, Google
     /// Meet #503, Zoom #504): id, name, line and mark.
     static let coming = [("deskree", "Deskree Ops", "Projects, deploys and incidents", "deskree"),
-                         ("slack", "Slack", "Read and send messages", "slack"),
+                         ("slack", "Slack", SlackStatus.about, "slack"),
                          ("gmail", "Gmail", "Read and manage your email", "gmail"),
                          ("meet", "Google Meet", "Join meetings and keep the notes", "meet"),
                          ("zoom", "Zoom", "Join meetings and keep the notes", "zoom")]
@@ -175,9 +175,17 @@ nonisolated enum Connectors {
         } catch {
             lists.problems.append("Couldn't read Tetrix on \(name): \(error.localizedDescription)")
         }
-        // Said on Slack's own row: without it, Slack stays "Coming soon".
-        lists.slack = try? await runner.slack()
-        lists.watch = try? await runner.watch()
+        // Only a 404 means obid has no Slack (the row stays "Coming soon"); anything else is said.
+        do {
+            lists.slack = try await runner.slack()
+        } catch {
+            lists.problems.append("Couldn't read Slack on \(name): \(error.localizedDescription)")
+        }
+        do {
+            lists.watch = try await runner.watch()
+        } catch {
+            lists.problems.append("Couldn't read the watcher on \(name): \(error.localizedDescription)")
+        }
         return lists
     }
 
