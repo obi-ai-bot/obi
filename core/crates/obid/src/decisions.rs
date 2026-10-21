@@ -1,8 +1,8 @@
 //! Decisions before publishing (docs/runner-api.md, "obid only: Tetrix"): Trail-Code's
 //! `trail check`, the idea only. Before a job publishes, obid reads the numbers its change sets
 //! (a line whose only change is a number: `retries = 4` to `retries = 6`) and looks for them in
-//! what earlier Tetrix sessions decided about the same files. A sentence of a digest that names
-//! the old number, not the new one, and shares a word with the line ("keep retries at 4") is a
+//! the decisions earlier Tetrix sessions made about the same files. A decision that names the old
+//! number, not the new one, and the name the number is assigned to ("Keep retries at 4") is a
 //! conflict: the author gets one round to put it back or say why in its summary, which goes into
 //! the pull request's description. It never blocks publishing.
 //!
@@ -15,23 +15,25 @@ use serde::{Deserialize, Serialize};
 pub const FILE: &str = "decisions.md";
 /// At most this many conflicts, each decision at most [`DECISION_MAX`] characters.
 const MOST: usize = 20;
-/// The most of the diff read, and of the changes kept from it: a generated file of a million
-/// changed numbers costs no more than this.
-pub const DIFF_MAX: usize = 8 * 1024 * 1024;
-const CHANGES_MAX: usize = 200;
-/// The files whose sessions Tetrix is asked for; changes elsewhere aren't checked.
-pub const FILES: usize = 10;
 const DECISION_MAX: usize = 300;
+/// The most of the diff read.
+pub const DIFF_MAX: usize = 8 * 1024 * 1024;
+/// The files checked, the first that have a change, and at most this many changes in them: a
+/// generated file of a million changed numbers costs no more than this.
+pub const FILES: usize = 10;
+const CHANGES_MAX: usize = 200;
 
 /// What a job's check found (its `tetrix.decisions`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Decisions {
-    /// The earlier sessions whose digests were read.
+    /// The earlier sessions whose decisions were read.
     pub sessions: Vec<String>,
     pub conflicts: Vec<Conflict>,
     /// The author got its round to answer them.
     pub asked: bool,
+    /// Why Tetrix's decisions couldn't be read (it didn't answer in time), or none.
+    pub error: Option<String>,
 }
 
 /// A number the change sets that an earlier session decided otherwise.
@@ -44,8 +46,15 @@ pub struct Conflict {
     pub was: String,
     pub now: String,
     pub session: String,
-    /// The digest's sentence, as Tetrix wrote it (scrubbed like every answer).
+    /// The decision, as Tetrix wrote it (scrubbed like every answer).
     pub decision: String,
+}
+
+/// An earlier session that changed one of the files, and the decisions it made.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Digest {
+    pub session: String,
+    pub decisions: Vec<String>,
 }
 
 /// A line of the diff whose only change is a number.
@@ -53,55 +62,66 @@ pub struct Conflict {
 pub struct Change {
     pub file: String,
     pub line: usize,
-    words: Vec<String>,
+    /// The words of the name the number is assigned to.
+    name: Vec<String>,
     was: String,
     now: String,
 }
 
-/// The numbers in `line`, where they are: digit runs (with a decimal part) that don't continue a
-/// name (`u32`, `x2`). Units may follow (`30s`).
-fn numbers(line: &str) -> Vec<(usize, usize)> {
+/// The numbers in `line` and where they start: digit runs (with a decimal part) that don't
+/// continue a name (`u32`), a reference (`#12`, `main.rs:40`) or a date or time (`2026-10-18`,
+/// `10/18`, `10:30`), nor a version's later parts (`1.2.3`). Units may follow (`30s`).
+fn numbers(line: &str) -> Vec<(usize, &str)> {
     let bytes = line.as_bytes();
+    let at = |i: usize| bytes.get(i).copied().unwrap_or(b' ');
     let mut found = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        let joined = i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
-        if !bytes[i].is_ascii_digit() || joined {
+        let before = if i == 0 { b' ' } else { bytes[i - 1] };
+        if !bytes[i].is_ascii_digit() || before.is_ascii_alphanumeric() || before == b'_' {
             i += 1;
             continue;
         }
         let start = i;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
+        while at(i).is_ascii_digit() {
             i += 1;
         }
-        if i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit() {
+        if at(i) == b'.' && at(i + 1).is_ascii_digit() {
             i += 1;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
+            while at(i).is_ascii_digit() {
                 i += 1;
             }
         }
-        found.push((start, i));
+        let end = i;
         // The rest of a run like `4px` or `1e3` is no number of its own.
-        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        while at(i).is_ascii_alphanumeric() || at(i) == b'_' {
             i += 1;
+        }
+        let joined =
+            |c: u8, next: u8| matches!(c, b'-' | b'/' | b':' | b'.') && next.is_ascii_digit();
+        let referenced = matches!(before, b'#' | b'/' | b'.')
+            || (before == b':' && start >= 2 && !at(start - 2).is_ascii_whitespace())
+            || (before == b'-' && start >= 2 && at(start - 2).is_ascii_digit())
+            || joined(at(end), at(end + 1));
+        if !referenced {
+            found.push((start, &line[start..end]));
         }
     }
     found
 }
 
-/// `line` with each number as `#`, and its numbers.
-fn template(line: &str) -> (String, Vec<&str>) {
+/// `line` with each number as `#`, and its numbers with where they start.
+fn template(line: &str) -> (String, Vec<(usize, &str)>) {
+    let found = numbers(line);
     let mut shape = String::new();
-    let mut values = Vec::new();
     let mut at = 0;
-    for (start, end) in numbers(line) {
-        shape.push_str(&line[at..start]);
+    for (start, value) in &found {
+        shape.push_str(&line[at..*start]);
         shape.push('#');
-        values.push(&line[start..end]);
-        at = end;
+        at = start + value.len();
     }
     shape.push_str(&line[at..]);
-    (shape.trim().to_owned(), values)
+    (shape.trim().to_owned(), found)
 }
 
 /// A word cut to its stem: `retries` and `retry` meet at `retry`.
@@ -116,8 +136,8 @@ fn stem(word: &str) -> String {
     }
 }
 
-/// The words of `text` worth matching: names split at `_`, `-` and camelCase, of 4 letters or
-/// more, and not one of the languages' own.
+/// The words of `text` worth matching, as stems: names split at `_`, `-` and camelCase, of 4
+/// letters or more, and not one of the languages' own.
 fn words(text: &str) -> Vec<String> {
     const COMMON: &[&str] = &[
         "const", "static", "final", "return", "self", "this", "true", "false", "none", "some",
@@ -146,13 +166,41 @@ fn words(text: &str) -> Vec<String> {
     out
 }
 
-/// Whether two stems are one word: the same, or one starts the other (`time`, `timeout`).
-fn same_word(a: &str, b: &str) -> bool {
-    a == b || a.starts_with(b) || b.starts_with(a)
+/// The name the number at `at` in `line` is assigned to: the last name left of the first `=` or
+/// `:` before it (`const MAX_RETRIES: u32 = 4`, `"retries": 4`), else the last name before it
+/// (`retry(4)`).
+fn assigned(line: &str, at: usize) -> &str {
+    let before = &line[..at];
+    let left = before.find(['=', ':']).map_or(before, |i| &before[..i]);
+    left.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .rfind(|t| t.starts_with(|c: char| c.is_alphabetic()))
+        .unwrap_or("")
 }
 
-/// The lines of `diff` (`git diff -U0`, names under `b/`) whose only change is a number: each
-/// removed line paired, in order, with the added line in the same place.
+/// Lock files and other generated files: their numbers are no one's decision.
+fn generated(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.ends_with(".lock")
+        || name.ends_with(".lockb")
+        || name.ends_with("-lock.json")
+        || name.ends_with("-lock.yaml")
+        || matches!(
+            name,
+            "go.sum" | "npm-shrinkwrap.json" | "Package.resolved" | "gradle.lockfile"
+        )
+        || name.contains(".min.")
+        || name.ends_with(".map")
+        || name.ends_with(".snap")
+        || name.ends_with(".pb.go")
+        || name.ends_with("_pb2.py")
+        || name.contains(".generated.")
+        || path
+            .split('/')
+            .any(|p| matches!(p, "vendor" | "node_modules" | "dist"))
+}
+
+/// The lines of `diff` (`git diff -U0`, names under `b/`) whose only change is a number, generated
+/// files left out: each removed line paired, in order, with the added line in the same place.
 pub fn changes(diff: &str) -> Vec<Change> {
     let mut out = Vec::new();
     let mut file = String::new();
@@ -162,19 +210,24 @@ pub fn changes(diff: &str) -> Vec<Change> {
     let mut added: Vec<(usize, &str)> = Vec::new();
     let mut flush = |file: &str, removed: &mut Vec<&str>, added: &mut Vec<(usize, &str)>| {
         // A name git quoted (`+++ "b/a\tb"`) isn't read: its lines are skipped.
-        let pairs = if file.is_empty() { 0 } else { removed.len() };
+        let pairs = if file.is_empty() || generated(file) {
+            0
+        } else {
+            removed.len()
+        };
         for (old, (line, new)) in removed.iter().zip(added.iter()).take(pairs) {
             let (old_shape, old_values) = template(old);
             let (new_shape, new_values) = template(new);
-            if old_shape != new_shape || !old_shape.contains('#') {
+            if old_shape != new_shape || old_values.is_empty() {
                 continue;
             }
-            for (was, now) in old_values.iter().zip(&new_values) {
-                if was != now && out.len() < CHANGES_MAX {
+            for ((_, was), (at, now)) in old_values.iter().zip(&new_values) {
+                let name = words(assigned(new, *at));
+                if was != now && !name.is_empty() {
                     out.push(Change {
                         file: file.to_owned(),
                         line: *line,
-                        words: words(new),
+                        name,
                         was: (*was).to_owned(),
                         now: (*now).to_owned(),
                     });
@@ -214,38 +267,45 @@ pub fn changes(diff: &str) -> Vec<Change> {
     out
 }
 
-/// The sentences of a digest's text: its lines, its JSON strings, its sentences.
-fn sentences(text: &str) -> impl Iterator<Item = &str> {
-    text.split(['\n', '"', ';'])
-        .flat_map(|s| s.split(". "))
-        .flat_map(|s| s.split("\\n"))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+/// The files to check, the first [`FILES`] with a change, and at most [`CHANGES_MAX`] changes
+/// in them.
+pub fn pick(changes: Vec<Change>) -> (Vec<String>, Vec<Change>) {
+    let mut files: Vec<String> = Vec::new();
+    for change in &changes {
+        if files.len() < FILES && !files.contains(&change.file) {
+            files.push(change.file.clone());
+        }
+    }
+    let changes = changes
+        .into_iter()
+        .filter(|c| files.contains(&c.file))
+        .take(CHANGES_MAX)
+        .collect();
+    (files, changes)
 }
 
-/// The changes an earlier decision named otherwise: `digests` are each session's id and its
-/// digest's text. One conflict per change, the first decision found.
-// ponytail: a word and a number in one sentence, no grammar; a reviewer that reads the digests
+/// The changes an earlier decision named otherwise: one conflict per change, the first decision
+/// found.
+// ponytail: a name and a number in one decision, no grammar; a reviewer that reads the digests
 // whole (Oby's review on obid, #525) catches the approaches ruled out and the reworded ones.
-pub fn conflicts(changes: &[Change], digests: &[(String, String)]) -> Vec<Conflict> {
-    // Each sentence read once: its numbers and its words.
+pub fn conflicts(changes: &[Change], digests: &[Digest]) -> Vec<Conflict> {
+    // Each decision read once: its numbers and its words.
     let read: Vec<(&str, &str, Vec<&str>, Vec<String>)> = digests
         .iter()
-        .flat_map(|(session, text)| {
-            sentences(text)
-                .map(|s| (session.as_str(), s, template(s).1, words(s)))
-                .filter(|(_, _, values, _)| !values.is_empty())
+        .flat_map(|d| {
+            d.decisions.iter().map(|text| {
+                let values: Vec<&str> = numbers(text).into_iter().map(|(_, v)| v).collect();
+                (d.session.as_str(), text.as_str(), values, words(text))
+            })
         })
+        .filter(|(_, _, values, _)| !values.is_empty())
         .collect();
     let mut out = Vec::new();
     'changes: for change in changes {
-        for (session, sentence, values, words) in &read {
-            let shared = words
-                .iter()
-                .any(|w| change.words.iter().any(|c| same_word(w, c)));
+        for (session, decision, values, words) in &read {
             if values.contains(&change.was.as_str())
                 && !values.contains(&change.now.as_str())
-                && shared
+                && words.iter().any(|w| change.name.contains(w))
             {
                 out.push(Conflict {
                     file: change.file.clone(),
@@ -253,7 +313,7 @@ pub fn conflicts(changes: &[Change], digests: &[(String, String)]) -> Vec<Confli
                     was: change.was.clone(),
                     now: change.now.clone(),
                     session: (*session).to_owned(),
-                    decision: sentence.chars().take(DECISION_MAX).collect(),
+                    decision: decision.chars().take(DECISION_MAX).collect(),
                 });
                 if out.len() >= MOST {
                     return out;
@@ -332,11 +392,19 @@ mod tests {
         @@ -12 +12 @@ fn connect()\n\
         -const MAX_RETRIES: u32 = 4;\n\
         +const MAX_RETRIES: u32 = 6;\n\
-        @@ -30,2 +30,2 @@\n\
+        @@ -30,3 +30,3 @@\n\
         -let timeout = Duration::from_secs(30);\n\
         --- a removed line that looks like a header\n\
+        -// Since 2026-10-18, see main.rs:40 and #12\n\
         +let timeout = Duration::from_secs(45);\n\
         +let name = \"other\";\n\
+        +// Since 2026-10-19, see main.rs:41 and #13\n\
+        diff --git a/Cargo.lock b/Cargo.lock\n\
+        --- a/Cargo.lock\n\
+        +++ b/Cargo.lock\n\
+        @@ -7 +7 @@\n\
+        -retries = 4\n\
+        +retries = 6\n\
         diff --git a/README.md b/README.md\n\
         --- a/README.md\n\
         +++ b/README.md\n\
@@ -344,28 +412,42 @@ mod tests {
         -Version 2 of the docs\n\
         +Version 2 of the guide\n";
 
+    fn digest(session: &str, decisions: &[&str]) -> Digest {
+        Digest {
+            session: session.into(),
+            decisions: decisions.iter().map(|d| (*d).to_owned()).collect(),
+        }
+    }
+
     #[test]
     fn a_number_an_earlier_decision_named_is_a_conflict() {
-        let changes = changes(DIFF);
-        let found: Vec<(&str, usize, &str, &str)> = changes
+        let (files, changes) = pick(changes(DIFF));
+        // Lock files are no one's decision; `u32`, dates, `#n` and `file:line` aren't numbers.
+        assert_eq!(files, vec!["src/net.rs".to_owned()]);
+        let found: Vec<(usize, &str, &str, &[String])> = changes
             .iter()
-            .map(|c| (c.file.as_str(), c.line, c.was.as_str(), c.now.as_str()))
+            .map(|c| (c.line, c.was.as_str(), c.now.as_str(), c.name.as_slice()))
             .collect();
-        // Only lines whose one change is a number; `u32` is a name, not a number.
         assert_eq!(
             found,
-            vec![("src/net.rs", 12, "4", "6"), ("src/net.rs", 30, "30", "45")]
+            vec![
+                (12, "4", "6", &["retry".to_owned()][..]),
+                (30, "30", "45", &["timeout".to_owned()][..])
+            ]
         );
         let digests = vec![
-            ("s-other".to_owned(), "Raised the cache to 4 entries.".to_owned()),
-            (
-                "s-1".to_owned(),
-                r#"{"decisions": ["Keep retries at 4: the gateway rate-limits a fifth.", "Timeout went from 30 to 45 seconds"]}"#
-                    .to_owned(),
+            digest("s-other", &["Raised the cache to 4 entries."]),
+            digest(
+                "s-1",
+                &[
+                    "Use 4 workers per runner.",
+                    "Keep retries at 4: the gateway rate-limits a fifth.",
+                    "Timeout went from 30 to 45 seconds.",
+                ],
             ),
         ];
         let conflicts = conflicts(&changes, &digests);
-        // "cache" shares no word with the line; the timeout's sentence names 45 too.
+        // "cache" and "workers" aren't the name assigned; the timeout's decision names 45 too.
         assert_eq!(conflicts.len(), 1, "{conflicts:?}");
         assert_eq!(conflicts[0].session, "s-1");
         assert_eq!(
@@ -380,5 +462,27 @@ mod tests {
         assert!(quoted.contains("<<<quoted-n0nce\nKeep retries at 4"));
         assert!(line(&conflicts).unwrap().contains("session s-1"));
         assert_eq!(line(&[]), None);
+    }
+
+    #[test]
+    fn dates_references_and_prefixes_are_no_match() {
+        let values = |text: &str| -> Vec<String> {
+            numbers(text)
+                .into_iter()
+                .map(|(_, v)| v.to_owned())
+                .collect()
+        };
+        assert_eq!(
+            values("On 2026-10-18 at 10:30, see #4, main.rs:4 and v1.2.3: keep 4 (or 2.5)"),
+            vec!["4", "2.5"]
+        );
+        // `time` isn't `timeout`: only the same stem matches.
+        let change =
+            changes("diff --git a/a b/a\n+++ b/a\n@@ -1 +1 @@\n-timeout = 4\n+timeout = 6\n");
+        assert!(conflicts(&change, &[digest("s", &["Keep the time at 4."])]).is_empty());
+        assert_eq!(
+            conflicts(&change, &[digest("s", &["Keep the timeout at 4."])]).len(),
+            1
+        );
     }
 }

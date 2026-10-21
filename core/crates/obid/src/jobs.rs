@@ -30,6 +30,8 @@ use crate::sandbox::{self, Sandbox, Spec};
 use crate::store::{self, Store};
 use crate::{acp, codex, git, policy, review};
 
+/// How long the decision check may wait on Tetrix before a job publishes (crate::decisions).
+const DECISIONS_WITHIN: Duration = Duration::from_secs(30);
 /// How often, at most, a working job's `activity` and `context` are saved and sent.
 const ACTIVITY_EVERY: Duration = Duration::from_secs(1);
 /// How long a review another Obi asked for may take. The owner's own jobs have no such clock: they
@@ -5127,8 +5129,12 @@ impl Jobs {
         }
         // What the secret scan found the last time it blocked publishing: the same again stops.
         let mut blocked_before: Option<Vec<crate::publish::Found>> = None;
-        // The decision check gave its one round (crate::decisions).
-        let mut decided_before = false;
+        // The decision check gave its one round (crate::decisions), in this run or before a restart.
+        let mut decided_before = self
+            .get(id)
+            .and_then(|j| j.tetrix)
+            .and_then(|t| t.decisions)
+            .is_some_and(|d| d.asked);
         // The turn only the owner's words started after the work's: its reply leaves the job's
         // summary to the work (#699).
         let mut noted = false;
@@ -5618,7 +5624,7 @@ impl Jobs {
             // Before it goes out: what it changes against earlier sessions' decisions. One round
             // to put it back or say why; what's left goes into the pull request, never a block.
             let conflicts = self
-                .decision_check(id, &head, &start_commit, decided_before)
+                .decision_check(id, &head, &start_commit, decided_before, signal)
                 .await;
             // Tetrix may take a while: stopped meanwhile, nothing more.
             if *signal.borrow() != Signal::Run {
@@ -5858,6 +5864,7 @@ impl Jobs {
         head: &str,
         start: &str,
         asked: bool,
+        signal: &watch::Receiver<Signal>,
     ) -> Vec<crate::decisions::Conflict> {
         let (Some(job), Some(tetrix), Some(connections)) =
             (self.get(id), self.tetrix.get(), self.connections.get())
@@ -5885,11 +5892,7 @@ impl Jobs {
             }
             diff.truncate(cut);
         }
-        let mut changes = crate::decisions::changes(&diff);
-        let mut files: Vec<String> = changes.iter().map(|c| c.file.clone()).collect();
-        files.dedup();
-        files.truncate(crate::decisions::FILES);
-        changes.retain(|c| files.contains(&c.file));
+        let (files, changes) = crate::decisions::pick(crate::decisions::changes(&diff));
         if changes.is_empty() {
             return Vec::new();
         }
@@ -5900,12 +5903,38 @@ impl Jobs {
             .chain(&seen.gaps.session)
             .cloned()
             .collect();
-        let digests = tetrix.digests(connections, &job, &files, &own).await;
+        // One deadline for all of it, and a stop ends it at once.
+        let mut stop = signal.clone();
+        let stopped = async move {
+            loop {
+                if *stop.borrow_and_update() != Signal::Run {
+                    break;
+                }
+                if stop.changed().await.is_err() {
+                    break;
+                }
+            }
+        };
+        let read = tokio::select! {
+            read = tokio::time::timeout(DECISIONS_WITHIN, tetrix.digests(connections, &job, &files, &own)) => read,
+            _ = stopped => return Vec::new(),
+        };
+        let (digests, error) = match read {
+            Ok(digests) => (digests, None),
+            Err(_) => (
+                Vec::new(),
+                Some(format!(
+                    "Tetrix didn't answer within {} seconds: nothing was checked.",
+                    DECISIONS_WITHIN.as_secs()
+                )),
+            ),
+        };
         let conflicts = crate::decisions::conflicts(&changes, &digests);
         let decisions = crate::decisions::Decisions {
-            sessions: digests.into_iter().map(|(session, _)| session).collect(),
+            sessions: digests.into_iter().map(|d| d.session).collect(),
             conflicts: conflicts.clone(),
             asked: asked || !conflicts.is_empty(),
+            error,
         };
         self.update(id, |job| {
             if let Some(tetrix) = job.tetrix.as_mut() {
