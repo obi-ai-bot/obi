@@ -4351,7 +4351,6 @@ impl Jobs {
                     branch: &job.branch,
                     title: job.title.as_deref().unwrap_or(&job.task),
                     size: "small",
-                    start_commit: job.start_commit.as_deref(),
                     config_dir: on_account.as_deref(),
                 };
                 return crate::sphere::guest::run_turn(
