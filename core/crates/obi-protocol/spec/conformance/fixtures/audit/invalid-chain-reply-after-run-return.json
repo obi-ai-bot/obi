@@ -115,17 +115,16 @@
               "wall_seconds": 1080,
               "cpu_seconds": 2400,
               "peak_memory_mb": 3100
-            },
-            "note": "Paused 10 minutes, then sent back."
+            }
           },
-          "signature": "0IlxDYDJsykucp6ctZ9TIHNjp2eiRNMhcTxRlBVkFvicBpk9kPJ7OJ-3ojltIcY7TqXoYyMxB4KZCDdVfwSIBA"
+          "signature": "wJt5MsmPwgCP7o9SiV36N0_Gu7jUeBn14_ncJ9KMF1z7ZySBiBy2m9a0IrepJMpytJ0Q6YiGrnceMAD-0i8LAQ"
         },
-        "hash": "6c42673ad6e058161b151cc27e245849ae58d3dd924be4415675c281f4d74d45"
+        "hash": "8cdb71b31a0f79c49f8c21f6d4bd787f338d32be912f5d622ae1013e0b5adb31"
       },
       {
         "sphere": "conf-sphere",
         "seq": 4,
-        "prev": "6c42673ad6e058161b151cc27e245849ae58d3dd924be4415675c281f4d74d45",
+        "prev": "8cdb71b31a0f79c49f8c21f6d4bd787f338d32be912f5d622ae1013e0b5adb31",
         "recorded_at": "2026-10-14T11:59:04Z",
         "envelope": {
           "protocol": "obi/0.1",
@@ -144,7 +143,7 @@
           },
           "signature": "-prAiNsu3gTXC133ucEq9qJYxQO4X-z5RhfHZxqVM0XJi3REAJpO06vq1S70m_CopO4__7VksQBGZoCg8UYcCg"
         },
-        "hash": "0daafee96fb81e941de7a8a3e84f976f7d2b06b7fc5cc8acdef998522e5b7f48"
+        "hash": "670b6f372ef7c58d8feae9cc8957ca2683046448714bace1cecc629cdd7644f6"
       }
     ]
   }

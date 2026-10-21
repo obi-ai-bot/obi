@@ -127,6 +127,8 @@ struct Running {
     agent: String,
     started: i64,
     state: String,
+    /// On a share of the owner's API account: its grant.
+    grant: Option<String>,
     stop: watch::Sender<Option<String>>,
 }
 
@@ -179,6 +181,16 @@ impl Hosting {
 
     /// Stops one job (`stopped`), or every job (`sharing_off` when sharing was turned off): each
     /// is asked to come back with what it did, and its VM is stopped within a minute.
+    /// Stops the jobs on share `grant` whose owner `keep` no longer allows (every one, when the
+    /// share was taken back): they come back to their owners.
+    pub fn stop_on_share(&self, grant: &str, keep: impl Fn(&str) -> bool) {
+        for r in self.running.lock().unwrap().values() {
+            if r.grant.as_deref() == Some(grant) && !keep(&r.from_owner) {
+                let _ = r.stop.send(Some("stopped".into()));
+            }
+        }
+    }
+
     pub fn stop(&self, cid: Option<&str>, reason: &str) -> usize {
         let running = self.running.lock().unwrap();
         let mut stopped = 0;
@@ -233,12 +245,13 @@ pub fn admit(link: &Arc<Link>, cid: String, asked: bool) {
     tokio::spawn(async move {
         let decided = decide(&link, &cid, asked).await;
         match decided {
+            // The reason only: no words go in the chain (spec protocol.md section 4, rule 9). Why,
+            // in this owner's words, goes to obid's own log.
             Decision::Decline(reason, note) => {
-                let mut body = json!({"reason": reason});
                 if let Some(note) = note {
-                    body["note"] = json!(note);
+                    tracing::info!("sphere: declined {cid} ({reason}): {note}");
                 }
-                link.host_reply(&cid, "decline", body, "declined");
+                link.host_reply(&cid, "decline", json!({"reason": reason}), "declined");
             }
             Decision::Ask => link.host_ask(&cid),
             Decision::Accept => {
@@ -454,6 +467,7 @@ async fn run_job(link: &Arc<Link>, cid: &str) -> Result<(), String> {
             agent: request["agent"].as_str().unwrap_or("").to_owned(),
             started: time::now(),
             state: "starting".into(),
+            grant: request["account"]["grant"].as_str().map(str::to_owned),
             stop: stop_tx,
         },
     );
@@ -568,7 +582,13 @@ async fn with_place(
         }
     };
     let (ended, host, started) = outcome;
-    if shared.grant.is_some() {
+    if let Some((grant, owner)) = &shared.grant {
+        // Each job's cost rounds up to a whole cent.
+        let micros = shared.cost.load(Ordering::Relaxed);
+        let up = super::shares::cents(micros) * 10_000 - micros;
+        if up > 0 {
+            link.count_use(grant, owner, up);
+        }
         link.sync_shares_soon(true);
     }
     if ended == "cancelled" {
@@ -989,8 +1009,11 @@ fn model_error(status: StatusCode, message: &str) -> Response {
 }
 
 /// A model call on a share (#809): sent from this Mac with the owner's own key, which never
-/// reaches the VM; metered at list price as its answer streams back. The call in flight finishes
-/// when the share runs out; the next is refused, and the job comes back (`share_used`).
+/// reaches the VM. Only the agent's model paths and allowlisted headers pass, as a guest's Obi
+/// does with its own login, and only a call obid can meter: a priced model, with no server tool
+/// but web search. Its worst case is counted before it goes, so no call takes the share past its
+/// limit; when the answer ends, the count becomes what its usage says (or stays the worst case
+/// when it said none). When the share has no room for a call, the job comes back (`share_used`).
 async fn metered_call(
     shared: &Shared,
     grant: &str,
@@ -1000,33 +1023,19 @@ async fn metered_call(
     request: Request,
 ) -> Response {
     let link = &shared.link;
-    let label = match link.grant_for(grant, owner, "claude") {
-        None => return model_error(StatusCode::FORBIDDEN, "The share was taken back."),
-        Some(g) if g.left_for(owner) == 0 => {
-            link.hosting.stop(Some(&shared.cid), "share_used");
-            return model_error(
-                StatusCode::PAYMENT_REQUIRED,
-                &format!("The share of {} is used for this month.", g.label),
-            );
-        }
-        Some(g) => g.label,
+    let Some(share) = link.grant_for(grant, owner, "claude") else {
+        return model_error(StatusCode::FORBIDDEN, "The share was taken back.");
     };
+    if path.starts_with("/v1/responses") {
+        return model_error(
+            StatusCode::FORBIDDEN,
+            "obid doesn't relay that path on a share",
+        );
+    }
     let headers: Vec<(String, String)> = request
         .headers()
         .iter()
-        .filter(|(name, _)| {
-            !matches!(
-                name.as_str(),
-                "host"
-                    | "authorization"
-                    | "x-api-key"
-                    | "connection"
-                    | "content-length"
-                    | "transfer-encoding"
-                    | "accept-encoding"
-                    | "cookie"
-            )
-        })
+        .filter(|(name, _)| super::guest::HEADERS.contains(&name.as_str()))
         .filter_map(|(n, v)| {
             v.to_str()
                 .ok()
@@ -1036,22 +1045,41 @@ async fn metered_call(
     let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_MODEL_BODY).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
-    // Only a model obid can price is called on a share; counting tokens and listing models cost
-    // nothing.
-    let model = serde_json::from_slice::<Value>(&body)
-        .ok()
-        .and_then(|v| v["model"].as_str().map(str::to_owned))
-        .unwrap_or_default();
+    // Counting tokens and listing models cost nothing; a message is metered.
     let costs = path.starts_with("/v1/messages") && !path.starts_with("/v1/messages/count_tokens");
-    if costs && super::shares::prices(&model).is_none() {
-        return model_error(
-            StatusCode::BAD_REQUEST,
-            &format!("obid can't meter {model} on the share of {label}: pick another model."),
-        );
+    let asked: Value = serde_json::from_slice(&body).unwrap_or_default();
+    let model = asked["model"].as_str().unwrap_or("").to_owned();
+    let mut reserved = 0;
+    if costs {
+        if let Some(why) = super::shares::unmeterable(&asked) {
+            return model_error(StatusCode::BAD_REQUEST, &format!("obid refused it: {why}."));
+        }
+        let Some(worst) = super::shares::worst(&model, &asked, body.len()) else {
+            return model_error(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "obid can't meter {model} on the share of {}: pick another model.",
+                    share.label
+                ),
+            );
+        };
+        if share.left_for(owner) < worst {
+            link.hosting.stop(Some(&shared.cid), "share_used");
+            return model_error(
+                StatusCode::PAYMENT_REQUIRED,
+                &format!(
+                    "The share of {} hasn't room for this call this month.",
+                    share.label
+                ),
+            );
+        }
+        link.count_use(grant, owner, worst);
+        reserved = worst;
     }
     let key = match crate::vault::value(super::guest::key_name("claude")) {
         Ok(Some(key)) => key,
         _ => {
+            link.refund(grant, owner, reserved);
             return model_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "The account's key isn't on this Mac now.",
@@ -1069,6 +1097,7 @@ async fn metered_call(
         upstream = upstream.header(name, value);
     }
     let Ok(mut response) = upstream.header("x-api-key", key).send().await else {
+        link.refund(grant, owner, reserved);
         return model_error(
             StatusCode::BAD_GATEWAY,
             "The model's API couldn't be reached.",
@@ -1111,12 +1140,19 @@ async fn metered_call(
                 }
             }
         }
-        if costs
-            && let Some(micros) = meter.finish().micros()
-            && micros > 0
-        {
-            cost.fetch_add(micros, Ordering::Relaxed);
-            if link.count_use(&grant, &owner, micros) == 0 {
+        if costs {
+            // What the usage says, or the worst case when it said none.
+            let spent = meter.finish().and_then(|u| u.micros()).unwrap_or(reserved);
+            if spent < reserved {
+                link.refund(&grant, &owner, reserved - spent);
+            } else if spent > reserved {
+                link.count_use(&grant, &owner, spent - reserved);
+            }
+            cost.fetch_add(spent, Ordering::Relaxed);
+            if link
+                .grant_for(&grant, &owner, "claude")
+                .is_none_or(|g| g.left_for(&owner) == 0)
+            {
                 link.hosting.stop(Some(&cid), "share_used");
             }
         }

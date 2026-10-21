@@ -83,9 +83,13 @@ pub fn hello(
     let public = secret
         .compute_public_key()
         .map_err(|_| "no X25519 public key".to_owned())?;
+    // A new X25519 key (above) and 32 new random bytes in every hello: both are in the salt, so a
+    // hello the Sphere replays can't bring back an earlier session's keys or nonces.
+    let mut nonce = [0u8; 32];
+    rand::SecureRandom::fill(&rng, &mut nonce).map_err(|_| "no random nonce".to_owned())?;
     let mut hello = json!({"protocol": "obi/0.1 channel", "sphere": sphere, "correlation_id": exchange,
                            "obi": obi, "role": role.name(), "x25519": b64url(public.as_ref()),
-                           "key_id": key.key_id()});
+                           "nonce": b64url(nonce), "key_id": key.key_id()});
     let signature = key.sign(&signing_input(&hello)?);
     hello["signature"] = json!(signature);
     Ok(Hello {
@@ -723,6 +727,32 @@ mod tests {
         let (gs, go) = keys(gh, Role::Guest, &g_peer, &hb).unwrap();
         let (hs, ho) = keys(hh, Role::Host, &h_peer, &gb).unwrap();
         (gs, go, hs, ho)
+    }
+
+    /// The Sphere injects a "joined" and replays the host's old hello: the guest's new hello has a
+    /// new key and nonce, so its keys are new, and nothing of the earlier session opens.
+    #[test]
+    fn a_replayed_hello_brings_back_no_earlier_key() {
+        let (g, h) = pair();
+        let (gkid, gpk, hkid, hpk) = (g.key_id(), g.public_key(), h.key_id(), h.public_key());
+        let host_expect = expect(&h, &hkid, &hpk, "obi-wellington", Role::Host);
+        let guest_expect = expect(&g, &gkid, &gpk, "obi-sangam", Role::Guest);
+        let first = hello(&g, "deskree", CID, "obi-sangam", Role::Guest).unwrap();
+        let host_hello = hello(&h, "deskree", CID, "obi-wellington", Role::Host).unwrap();
+        let replayed = host_hello.bytes.clone();
+        let h_peer = check_hello(&first.bytes, &guest_expect).unwrap();
+        let (mut host_seal, _) = keys(host_hello, Role::Host, &h_peer, &first.bytes).unwrap();
+        let earlier = host_seal.seal(b"a frame of the first session");
+        // The guest's side again, with the host's hello replayed.
+        let second = hello(&g, "deskree", CID, "obi-sangam", Role::Guest).unwrap();
+        assert_ne!(first.bytes, second.bytes);
+        let first_json: Value = serde_json::from_slice(&first.bytes).unwrap();
+        let second_json: Value = serde_json::from_slice(&second.bytes).unwrap();
+        assert_ne!(first_json["x25519"], second_json["x25519"]);
+        assert_ne!(first_json["nonce"], second_json["nonce"]);
+        let g_peer = check_hello(&replayed, &host_expect).unwrap();
+        let (_, mut guest_open) = keys(second, Role::Guest, &g_peer, &replayed).unwrap();
+        assert!(guest_open.open(&earlier).is_err());
     }
 
     #[test]

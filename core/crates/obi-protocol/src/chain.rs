@@ -110,6 +110,13 @@ pub fn exchange_problem(
     if kind == "answer" && asked != "question" {
         return Some(format!("an answer answers a question, not a {asked}"));
     }
+    // No words in a guest job's or a share's exchange: a decline there has no note (rule 9).
+    if kind == "decline"
+        && (asked == "run_request" || asked == "share_offer")
+        && reply["body"].get("note").is_some()
+    {
+        return Some(format!("a decline of a {asked} has no note"));
+    }
     None
 }
 

@@ -138,12 +138,11 @@
               "wall_seconds": 1080,
               "cpu_seconds": 2400,
               "peak_memory_mb": 3100
-            },
-            "note": "Paused 10 minutes, then sent back."
+            }
           },
-          "signature": "0IlxDYDJsykucp6ctZ9TIHNjp2eiRNMhcTxRlBVkFvicBpk9kPJ7OJ-3ojltIcY7TqXoYyMxB4KZCDdVfwSIBA"
+          "signature": "wJt5MsmPwgCP7o9SiV36N0_Gu7jUeBn14_ncJ9KMF1z7ZySBiBy2m9a0IrepJMpytJ0Q6YiGrnceMAD-0i8LAQ"
         },
-        "hash": "457527fcccdb9fb91ce1c11ed8a54e4600585f97668d6d8f6c6770f45becc3f9"
+        "hash": "63e1c5eccd3646dcf6af4278567ce39650364d38b2893ad160d8ab6db5483bd5"
       }
     ]
   }

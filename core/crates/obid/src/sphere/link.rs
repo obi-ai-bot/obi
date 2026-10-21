@@ -127,6 +127,75 @@ fn runner_signed(status: &Value, keys: &obi_protocol::Keys, obi: &str) -> bool {
 /// What a runner status's signature starts with.
 const RUNNER_PREFIX: &[u8] = b"obi/0.1 runner_status\n";
 
+/// The chain as this Obi knows it for itself (spec sphere-api.md 7.1, "No rollback, no fork"), in
+/// `home/sphere/chain.json` (0600): the last head it verified, and the seq and hash the Sphere
+/// answered for each of its own sends. A chain that is shorter than that head, has another hash at
+/// it, or lacks one of these sends at its seq is a rollback or a fork.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct ChainKept {
+    head: Option<(u64, String)>,
+    /// By envelope id: (seq, hash).
+    sends: std::collections::BTreeMap<String, (u64, String)>,
+}
+
+impl ChainKept {
+    fn path(home: &std::path::Path) -> std::path::PathBuf {
+        home.join("sphere").join("chain.json")
+    }
+
+    fn open(home: &std::path::Path) -> ChainKept {
+        std::fs::read(Self::path(home))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, home: &std::path::Path) {
+        let path = Self::path(home);
+        let saved = path
+            .parent()
+            .map_or(Ok(()), crate::store::make_private_dir)
+            .and_then(|()| {
+                crate::store::write_private(&path, &serde_json::to_vec(self).unwrap_or_default())
+            });
+        if let Err(e) = saved {
+            tracing::error!("can't keep what obid saw of the chain: {e}");
+        }
+    }
+
+    /// What's wrong with `entries` (the whole chain, from seq 1) against what this Obi saw: a
+    /// `rollback`, a `fork`, or nothing.
+    fn problem(&self, entries: &[Value]) -> Option<&'static str> {
+        let at = |seq: u64| entries.get((seq as usize).wrapping_sub(1));
+        if let Some((seq, hash)) = &self.head {
+            match at(*seq) {
+                None => return Some("rollback"),
+                Some(e) if e["hash"] != hash.as_str() => return Some("fork"),
+                _ => {}
+            }
+        }
+        for (id, (seq, hash)) in &self.sends {
+            let ok = at(*seq)
+                .is_some_and(|e| e["hash"] == hash.as_str() && e["envelope"]["id"] == id.as_str());
+            if !ok {
+                return Some("fork");
+            }
+        }
+        None
+    }
+}
+
+impl Link {
+    /// Keeps the seq and hash the Sphere answered for a send of this Obi's.
+    fn keep_receipt(&self, sent: &obi_protocol::client::Sent) {
+        let mut kept = self.chain.lock().unwrap();
+        kept.sends
+            .insert(sent.id.clone(), (sent.seq, sent.entry_hash.clone()));
+        kept.save(&self.config.home);
+    }
+}
+
 /// An audit entry as typed fields only: never a text the message carries.
 fn audit_entry(entry: &Value) -> Value {
     let e = &entry["envelope"];
@@ -203,6 +272,8 @@ pub struct Link {
     joining: tokio::sync::Mutex<()>,
     /// One pass over the shares of the owner's API accounts at a time (crate::sphere::shares).
     shares_sync: tokio::sync::Mutex<()>,
+    /// The chain as this Obi knows it for itself: no rollback, no fork (crate::sphere::link::ChainKept).
+    chain: Mutex<ChainKept>,
     following: AtomicBool,
     stopping: watch::Receiver<bool>,
     /// Teammates' jobs on this Mac (crate::sphere::hosting).
@@ -347,6 +418,7 @@ impl Link {
         let decisions = Decisions::open(&config.home);
         let sharing = sharing::Kept::open(&config.home);
         let pins = super::pins::Pins::open(&config.home);
+        let chain = ChainKept::open(&config.home);
         // Nothing of a guest job a crash left behind: obid starts with none running.
         super::hosting::clean_leftovers(&config.home);
         let sandbox = std::env::current_exe()
@@ -415,6 +487,7 @@ impl Link {
             tokening: tokio::sync::Mutex::new(()),
             joining: tokio::sync::Mutex::new(()),
             shares_sync: tokio::sync::Mutex::new(()),
+            chain: Mutex::new(chain),
             following: AtomicBool::new(false),
             stopping,
             hosting: super::hosting::Hosting::default(),
@@ -1267,6 +1340,11 @@ impl Link {
             if !self.pins.check(owner, owner_key, now) {
                 continue;
             }
+            // Never an older card than one trusted before (a key rotated away coming back).
+            let card_seq = params.and_then(|p| p["card_seq"].as_u64()).unwrap_or(0);
+            if !self.pins.check_card(obi, card_seq) {
+                continue;
+            }
             for key in member["keys"].as_array().into_iter().flatten() {
                 let (Some(id), Some(public_key)) =
                     (key["key_id"].as_str(), key["public_key"].as_str())
@@ -2055,6 +2133,7 @@ impl Link {
             match sent {
                 Ok(sent) => {
                     let id = next["id"].as_str().unwrap_or("").to_owned();
+                    self.keep_receipt(&sent);
                     self.lock().seen.insert(id);
                     self.update_exchange(cid, |e| {
                         e.outbox.remove(0);
@@ -2607,6 +2686,7 @@ impl Link {
         };
         match sent {
             Ok(sent) => {
+                self.keep_receipt(&sent);
                 self.lock().seen.insert(cid.clone());
                 let updated = self.update_exchange(&cid, |e| {
                     e.messages.insert(
@@ -4127,6 +4207,22 @@ impl Link {
         }
         let chain = json!({"sphere": membership.sphere, "entries": entries});
         let checked = obi_protocol::chain::verify(&chain, &self.lock().directory.keys);
+        // The chain checks out by itself; it must also be the one this Obi saw before.
+        let problem = match &checked {
+            Err(rejection) => Some(rejection.code.to_owned()),
+            Ok(()) => {
+                let mut kept = self.chain.lock().unwrap();
+                let found = kept.problem(&entries);
+                if found.is_none() {
+                    kept.head = Some((
+                        head["seq"].as_u64().unwrap_or(0),
+                        head["hash"].as_str().unwrap_or("").to_owned(),
+                    ));
+                    kept.save(&self.config.home);
+                }
+                found.map(str::to_owned)
+            }
+        };
         let me = membership.obi_id.as_str();
         let mine: Vec<Value> = entries
             .iter()
@@ -4134,7 +4230,7 @@ impl Link {
             .map(audit_entry)
             .collect();
         Ok(
-            json!({"verified": checked.is_ok(), "problem": checked.err().map(|r| r.code), "head": head, "entries": mine}),
+            json!({"verified": problem.is_none(), "problem": problem, "head": head, "entries": mine}),
         )
     }
 
@@ -4453,6 +4549,9 @@ impl Link {
             (grant, state.sharing.clone())
         };
         self.save_sharing(&sharing);
+        // A job running on it for someone it's no longer for comes back.
+        self.hosting
+            .stop_on_share(&grant.id, |owner| grant.offered_to(owner));
         self.sync_shares_soon(true);
         Ok(grant.to_json(now))
     }
@@ -4469,6 +4568,8 @@ impl Link {
             state.sharing.clone()
         };
         self.save_sharing(&sharing);
+        // Taken back: a job running on it comes back at once.
+        self.hosting.stop_on_share(id, |_| false);
         self.sync_shares_soon(true);
         Ok(())
     }
@@ -4611,6 +4712,24 @@ impl Link {
             self.share_used_item(&g, owner, now);
         }
         left
+    }
+
+    /// Gives back `micros` counted on `grant` for `owner` (a call's worst case, past what it cost).
+    pub(super) fn refund(&self, grant: &str, owner: &str, micros: u64) {
+        if micros == 0 {
+            return;
+        }
+        let sharing = {
+            let mut state = self.lock();
+            let Some(g) = state.sharing.grants.iter_mut().find(|g| g.id == grant) else {
+                return;
+            };
+            if let Some(used) = g.used.get_mut(owner) {
+                *used = used.saturating_sub(micros);
+            }
+            state.sharing.clone()
+        };
+        self.save_sharing(&sharing);
     }
 
     /// The owner's own job on `account` cost `usd` (Claude Code's `total_cost_usd`): it counts

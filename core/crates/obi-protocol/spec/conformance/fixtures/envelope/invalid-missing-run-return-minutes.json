@@ -22,7 +22,7 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "ef67c28b-341a-8429-865f-13c6235c95f9",
+    "id": "f4542c56-2f08-84fa-8f58-cecc0a9017f3",
     "type": "run_return",
     "from": "obi-a",
     "to": "obi-b",
@@ -43,9 +43,8 @@
         "wall_seconds": 1080,
         "cpu_seconds": 2400,
         "peak_memory_mb": 3100
-      },
-      "note": "Paused 10 minutes, then sent back."
+      }
     },
-    "signature": "PnKSGl99hgwPeklYGF5TpKr1Co1dTT5iWKjb7y2cZkfWTxoDnUpcJGSnVNzlokLbB7T0udDKW2MgYEzG5UsrDQ"
+    "signature": "d-sMbwFiCjs56KQQR__BM4fx-8zLV2uLt92oYMiymaFBxt_uALuhfharPye0QBz5dldnTFBiy5z0mZkWFqzbCg"
   }
 }

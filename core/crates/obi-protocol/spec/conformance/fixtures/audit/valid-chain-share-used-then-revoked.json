@@ -129,12 +129,11 @@
           "expires_at": "2026-10-14T13:00:00Z",
           "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
           "body": {
-            "grant": "g-0123456789ab",
-            "note": "The project ended."
+            "grant": "g-0123456789ab"
           },
-          "signature": "UP5w1a0X0lJnabz82-QwtYE5buNvXgC92XuB3LJzcGrLoJEaOjDKKpkds7sP_0RYp-BxyrOVA3ePq9WPJLPwCg"
+          "signature": "1WoAgMrh9F3UmMtk7p9aBtF2wX3Nbq3dnvaHZkFpaq4CmD1AjAPQxez3pSbUK9EwPjsxvpaaG-VCcTc11h7QAA"
         },
-        "hash": "97c0790043234fd5ef95231d49e2ae1c7db25be913401c4f3af0e321a51a3b1f"
+        "hash": "1b5aa6393a311779af0b29a2c8834ec35e802872bba200deb28a7943c4a92506"
       }
     ]
   }

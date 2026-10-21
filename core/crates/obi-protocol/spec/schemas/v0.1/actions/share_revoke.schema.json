@@ -11,12 +11,6 @@
   "properties": {
     "grant": {
       "$ref": "../common.schema.json#/$defs/grant_id"
-    },
-    "note": {
-      "$ref": "../common.schema.json#/$defs/line_text",
-      "x-obi-text": "data",
-      "minLength": 1,
-      "maxLength": 200
     }
   }
 }

@@ -1092,3 +1092,61 @@ async fn a_member_whose_owner_key_changes_isnt_trusted_until_the_owner_accepts_i
     assert_eq!(accepted.status, 200, "{}", accepted.text);
     assert_eq!(ask().status, 202);
 }
+
+/// A Sphere that rolls its chain back, or shows a chain without one of obid's sends, is caught
+/// (spec sphere-api.md 7.1, "No rollback, no fork"): obid keeps the last head it verified and the
+/// receipt of each of its sends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_chain_rolled_back_or_forked_doesnt_check_out() {
+    let folder = Folder::new("chain-kept");
+    let (sphere, obid, ernesto) = setup(&folder, &stub_agent(), None).await;
+    let body =
+        json!({"to": "obi-ernesto", "type": "review_request", "body": brief(), "expiresIn": 3600});
+    let sent = tokio::task::block_in_place(|| {
+        call(&obid, "POST", "/v1/obid/sphere/requests", Some(&body))
+    });
+    assert_eq!(sent.status, 202, "{}", sent.text);
+    let audit = tokio::task::block_in_place(|| get(&obid, "/v1/obid/sphere/audit"));
+    assert_eq!(audit["verified"], true, "{audit}");
+    let whole = sphere.lock().entries.clone();
+    // Rolled back: the last entry gone.
+    sphere.lock().entries.pop();
+    let rolled = tokio::task::block_in_place(|| get(&obid, "/v1/obid/sphere/audit"));
+    assert_eq!(
+        (rolled["verified"].clone(), rolled["problem"].clone()),
+        (json!(false), json!("rollback")),
+        "{rolled}"
+    );
+    // Forked: the same length, consistent in itself, but obid's send isn't in it.
+    sphere.lock().entries = whole.clone();
+    let other = ernesto.request(
+        "obi-wellington",
+        "question",
+        json!({"text": "Ready?"}),
+        3600,
+    );
+    ernesto.send(&other).await;
+    let mine = sent.body["correlationId"].as_str().unwrap().to_owned();
+    let mut forked: Vec<Value> = Vec::new();
+    for entry in sphere
+        .lock()
+        .entries
+        .iter()
+        .filter(|e| e["envelope"]["id"] != mine.as_str())
+    {
+        forked = obi_protocol::chain::append(
+            &forked,
+            SPHERE,
+            &entry["envelope"],
+            entry["recorded_at"].as_str().unwrap(),
+        )
+        .unwrap();
+    }
+    sphere.lock().entries = forked;
+    let fork = tokio::task::block_in_place(|| get(&obid, "/v1/obid/sphere/audit"));
+    assert_eq!(
+        (fork["verified"].clone(), fork["problem"].clone()),
+        (json!(false), json!("fork")),
+        "{fork}"
+    );
+}
