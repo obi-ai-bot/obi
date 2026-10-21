@@ -294,6 +294,8 @@ async function main() {
   pass("no entry holds the job's words; each obid checks the chain and finds its entries in it");
 
   step("7. Wellington shares half of his company API account's month with Sangam");
+  // Wellington is away again: his Mac is free for the next job.
+  writeFileSync(signals, JSON.stringify(away));
   const grant = expect(await obids.host.api("/obid/sharing/grants", { method: "PUT", body: { account: "stub", who: "sangam", share: 50, budgetCents: 1000, resetsDay: 1 } }), 200, "the share");
   const offered = await within(60, "the share on Sangam's Oby", async () => (expect(await obids.guest.api("/obid/sharing/shared"), 200, "")).shares.find((s) => s.grant === grant.id));
   pass(`Sangam sees ${offered.share}% of ${offered.account}'s month (${offered.limitCents} cents)`);
