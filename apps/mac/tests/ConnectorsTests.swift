@@ -109,6 +109,42 @@ struct ConnectorsTests {
         #expect(Connectors.tetrix(TetrixStatus(), place: "This Mac", local: true).way == .button("Connect…", .connectOtherTetrix))
     }
 
+    /// Slack, held by obid for its watcher with the owner's own app's tokens: a real row once obid
+    /// says it holds Slack, Connect… asking for the two tokens, and the watcher's Slack message
+    /// switched here.
+    @Test func slackOnceObidHoldsIt() throws {
+        var runner = Connectors.RunnerState(name: "This Mac", local: true, accounts: [])
+        #expect(try #require(Connectors.list(accounts: [], runner: runner).first { $0.id == "slack" }).soon, "coming until obid says")
+        runner.slack = SlackStatus()
+        let first = try #require(Connectors.list(accounts: [], runner: runner).first { $0.id == "slack" })
+        #expect(!first.soon && first.state == .available && first.brand == "slack")
+        #expect(first.way == .button("Connect…", .connectSlack) && first.also == nil)
+
+        let refused = Connectors.slack(SlackStatus(error: "Slack refused Oby's tokens: paste new ones in Settings › Connectors › Slack."),
+                                       watch: nil, place: "This Mac", local: true)
+        #expect(refused.state == .broken && refused.how.hasPrefix("Slack refused"))
+
+        let dry = WatchStatus(rules: .init(name: "Dmitry watcher", live: false, enabled: true))
+        let on = Connectors.slack(SlackStatus(connected: true, team: "Deskree"), watch: dry, place: "This Mac", local: true)
+        #expect(on.state == .connected && on.way == .button("Disconnect…", .disconnectSlack))
+        #expect(on.also == .button("Watcher: Send Slack Messages", .setWatchLive(true)))
+        #expect(on.how.hasSuffix("Dmitry watcher: a dry run, it tells you in Oby and only writes down the Slack message."))
+        let live = WatchStatus(rules: .init(name: "Dmitry watcher", live: true, enabled: true))
+        #expect(Connectors.slack(SlackStatus(connected: true), watch: live, place: "This Mac", local: true).also
+                == .button("Watcher: Dry Run Only", .setWatchLive(false)))
+
+        let remote = Connectors.slack(SlackStatus(), watch: nil, place: "tetrix-lab", local: false)
+        #expect(remote.also == nil && remote.way == .steps("Connect or disconnect it on tetrix-lab itself, with Oby there."))
+    }
+
+    /// Connect takes only what looks like each kind of token.
+    @Test func onlySlackTokensOfTheirKindAreTaken() {
+        let user = "xoxp-" + "1111-2222-3333-7c41e09b2fd8a365"
+        #expect(SlackStatus.isToken(user, "xoxp-") && SlackStatus.isToken(" \(user)\n", "xoxp-"))
+        #expect(!SlackStatus.isToken(user, "xoxb-") && !SlackStatus.isToken("xoxp-short", "xoxp-"))
+        #expect(!SlackStatus.isToken("xoxp-1111 2222-3333-7c41e09b2fd8", "xoxp-"))
+    }
+
     /// A remote runner's Tetrix has no button in any state: its sign-in comes back to 127.0.0.1 on
     /// that machine, so it's done there.
     @Test func aRemoteRunnersTetrixIsDoneThere() throws {
@@ -345,7 +381,9 @@ struct ConnectorsTests {
         #expect(lists.plugins == nil && lists.connections == nil)
         #expect(lists.problems == ["Couldn't read the plug-ins on tetrix-lab: The runner didn't let this device in.",
                                    "Couldn't read the connections on tetrix-lab: The runner couldn't read connections.json.",
-                                   "Couldn't read Tetrix on tetrix-lab: The runner didn't let this device in."])
+                                   "Couldn't read Tetrix on tetrix-lab: The runner didn't let this device in.",
+                                   "Couldn't read Slack on tetrix-lab: The runner didn't let this device in.",
+                                   "Couldn't read the watcher on tetrix-lab: The runner didn't let this device in."])
     }
 
     /// Disconnecting a runner's connection signs the runner's own sentence, under the connection

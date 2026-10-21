@@ -706,6 +706,13 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     case cleanup(RunnerStatus.Cleanup)
     /// obid's Tetrix changed: connected, signed out, a sign-in started or ended (obid only).
     case tetrix(TetrixStatus)
+    /// The watcher or the channel listener told the owner something (a `watch` or `listen` inbox
+    /// item, obid only): its card and a notification.
+    case watchNotice(WatchNotice)
+    /// obid's Slack changed: connected, signed out (obid only).
+    case slack(SlackStatus)
+    /// The watcher's rules or runs changed (obid only).
+    case watch(WatchStatus)
     #endif
     /// A turn of the conversation was added, from any app, or changed (a job dispatched from it):
     /// the Mac window's and the iPhone's thread replace it by id, or add it by time (#11).
@@ -1879,13 +1886,18 @@ nonisolated struct EventParser {
             case "accounts": return (try? Runner.decoder.decode([RunnerAccount].self, from: json)).map(RunnerEvent.accounts)
             case "clear": return (try? Runner.decoder.decode(ClearedAt.self, from: json)).map { .cleared($0.clearedAt) }
             #if os(macOS)
-            case "inbox": return InboxItem.runner(json).map { RunnerEvent.inbox($0, try? Runner.decoder.decode(InboxWords.self, from: json)) }
+            case "inbox":
+                // Engine's inbox doesn't know the watcher's kind: its item only notifies.
+                if let notice = try? Runner.decoder.decode(WatchNotice.self, from: json), WatchNotice.kinds.contains(notice.kind) { return .watchNotice(notice) }
+                return InboxItem.runner(json).map { RunnerEvent.inbox($0, try? Runner.decoder.decode(InboxWords.self, from: json)) }
             #else
             case "inbox": return (try? Runner.decoder.decode(InboxItem.self, from: json)).map(RunnerEvent.inbox)
             #endif
             #if os(macOS)
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
             case "tetrix": return (try? Runner.decoder.decode(TetrixStatus.self, from: json)).map(RunnerEvent.tetrix)
+            case "slack": return (try? Runner.decoder.decode(SlackStatus.self, from: json)).map(RunnerEvent.slack)
+            case "watch": return (try? Runner.decoder.decode(WatchStatus.self, from: json)).map(RunnerEvent.watch)
             case "cleanup": return (try? Runner.decoder.decode(RunnerStatus.Cleanup.self, from: json)).map(RunnerEvent.cleanup)
             #endif
             case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn, $0.extras) }
