@@ -127,4 +127,39 @@ struct WindowInputTests {
             #expect(state.trail.isHome, "a click on the page's empty space didn't go back: \(String(describing: state.trail.top)) size \(size)")
         }
     }
+
+    /// Under Completed, "Older ones are in Archived" spans its row (Sangam's `.group-archived`): a
+    /// click well left of the words opens Archived, not back Home.
+    @Test func archivedOpensFromBesideItsWords() async throws {
+        try await withPanel(open: false) {
+            let model = model()
+            for (id, ago) in [("t1", 6000.0), ("t2", 30000.0)] {
+                var job = Job(id: id, request: "task \(id)", agent: "claude", account: "deskree", repo: "deskree-inc/oby", branch: "b", base: "dev",
+                              pr: nil, kind: .build, task: "task \(id)", created: now - ago)
+                job.status = .done
+                job.finished = now - ago + 600
+                model.feed.apply(job)
+            }
+            let state = ChatState(defaults: .scratch)
+            state.trail.start(.group(.tasks))
+            let window = ChatWindow.make(ChatView(model: model, state: state, character: nil))
+            window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+            window.orderFrontRegardless()
+            window.makeKey()
+            defer { window.close() }
+            ChatWindow.measureLights(window, into: state)
+            try await Task.sleep(for: .milliseconds(800))
+            let size = try #require(window.contentView?.bounds.size)
+            // Two done cards, then the link's row 424 points down; its words are centred, this is 200 left of them.
+            let at = NSPoint(x: size.width / 2 - 200, y: size.height - 424)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = try #require(NSEvent.mouseEvent(with: type, location: at, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                            windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+                window.sendEvent(event)
+                try await Task.sleep(for: .milliseconds(80))
+            }
+            try await Task.sleep(for: .milliseconds(400))
+            #expect(state.trail.top == .archived, "a click beside the words didn't open Archived: \(String(describing: state.trail.top))")
+        }
+    }
 }

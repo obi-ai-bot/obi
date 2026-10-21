@@ -67,7 +67,7 @@ struct GroupPane: View {
                 // Completed ones leave Home after a while (Archive completed, in Home's ⋮).
                 if tab == .done {
                     // The row's full width, as the design's `.group-archived`: a click beside the words opens it too.
-                    Button(action: onOpenArchive) { Text(Self.archivedLink).frame(maxWidth: .infinity) }
+                    Button(action: onOpenArchive) { Text(Self.archivedLink).frame(maxWidth: .infinity).contentShape(Rectangle()) }
                         .buttonStyle(LinkTextStyle()).padding(.top, 8)
                 }
             }
