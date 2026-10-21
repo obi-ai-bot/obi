@@ -182,6 +182,21 @@ impl ClaudeBrain {
         schema: &str,
         calls: &mut Vec<Call>,
     ) -> Result<String, Failure> {
+        self.side_call(system, user, quoted, schema, BACKGROUND_TIMEOUT, calls)
+            .await
+    }
+
+    /// [`ClaudeBrain::background`] within `timeout`: a side call the owner started and waits on,
+    /// with more to read than a title (crate::memory, "Find what I keep repeating").
+    pub async fn side_call(
+        &self,
+        system: &str,
+        user: &str,
+        quoted: Option<&str>,
+        schema: &str,
+        timeout: Duration,
+        calls: &mut Vec<Call>,
+    ) -> Result<String, Failure> {
         let (system, user, schema, quoted) = for_brain(system, user, schema, quoted)
             .map_err(|why| Failure::Failed(format!("the vault can't be read: {why}")))?;
         let result = self
@@ -191,7 +206,7 @@ impl ClaudeBrain {
                 &user,
                 quoted.as_deref(),
                 &schema,
-                BACKGROUND_TIMEOUT,
+                timeout,
                 false,
                 &|| false,
                 calls,
