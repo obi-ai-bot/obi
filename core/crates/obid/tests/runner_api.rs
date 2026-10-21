@@ -1717,8 +1717,12 @@ fn an_android_phone_hands_over_its_fcm_token() {
     assert_eq!(answer.status, 200, "{}", answer.text);
     assert_eq!(answer.body, json!({"push": true}));
     assert_eq!(notify(iphone).body, json!({"push": false}));
-    let kept: Vec<String> = serde_json::from_slice(&std::fs::read(&tokens).unwrap()).unwrap();
-    assert_eq!(kept, vec!["fcm-token:APA91b_test-1".to_owned()]);
+    // On the loopback API, with the API token: no paired device.
+    let kept: Value = serde_json::from_slice(&std::fs::read(&tokens).unwrap()).unwrap();
+    assert_eq!(
+        kept,
+        json!([{"token": "fcm-token:APA91b_test-1", "device": null}])
+    );
     assert_eq!(
         std::fs::metadata(&tokens).unwrap().permissions().mode() & 0o777,
         0o600

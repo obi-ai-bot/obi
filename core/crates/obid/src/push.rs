@@ -4,7 +4,10 @@
 //! sender (#452).
 //!
 //! - **Tokens.** The phones' FCM registration tokens, in `home/push/fcm.json` (0600), at most
-//!   [`MOST`], oldest out. FCM's `UNREGISTERED`, or an `INVALID_ARGUMENT` about the token, drops one.
+//!   [`MOST`], oldest out, each with the paired device that handed it over through the gateway
+//!   (one token per device: a new one replaces it). Revoking the device drops its tokens, and a
+//!   device that is no longer paired is sent nothing. FCM's `UNREGISTERED`, or an
+//!   `INVALID_ARGUMENT` about the token, drops one.
 //! - **The service account.** The owner's vault secret [`SERVICE_ACCOUNT`] (`obid vault add`), so it
 //!   is in no file an agent could read, and every answer, log line and push has it taken out. Its
 //!   private key and the access tokens it gets are learned as obid's own secrets too.
@@ -15,7 +18,7 @@
 //! - **What goes out.** Every alert's title and body pass the secret scan first: a finding, or a
 //!   scan that can't run, sends nothing for that job. The send never holds up the API.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -184,9 +187,18 @@ pub fn registration(body: &[u8]) -> Result<Option<String>, &'static str> {
     }
 }
 
-/// `tokens` with `token` kept as the newest, at most [`MOST`].
-pub fn kept(mut tokens: Vec<String>, token: String) -> Vec<String> {
-    tokens.retain(|t| *t != token);
+/// One FCM token, and the paired device it came from; none when it came on the loopback API with
+/// the API token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Kept {
+    pub token: String,
+    pub device: Option<String>,
+}
+
+/// `tokens` with `token` kept as the newest, replacing its device's older one, at most [`MOST`].
+pub fn kept(mut tokens: Vec<Kept>, token: Kept) -> Vec<Kept> {
+    tokens
+        .retain(|t| t.token != token.token && (token.device.is_none() || t.device != token.device));
     tokens.push(token);
     let over = tokens.len().saturating_sub(MOST);
     tokens.drain(..over);
@@ -295,7 +307,7 @@ impl Account {
 /// The phones' FCM tokens, what was last said for each job, and the cached access token.
 pub struct Push {
     folder: PathBuf,
-    tokens: Mutex<Vec<String>>,
+    tokens: Mutex<Vec<Kept>>,
     /// None until the first look at the jobs when `notices.json` wasn't there.
     said: Mutex<Option<BTreeMap<String, Notice>>>,
     /// The access token, the service account it's for, and until when it's used.
@@ -330,7 +342,7 @@ impl Push {
         crate::store::write_private(&self.folder.join(name), &bytes)
     }
 
-    fn save_tokens(&self, tokens: &[String]) -> std::io::Result<()> {
+    fn save_tokens(&self, tokens: &[Kept]) -> std::io::Result<()> {
         self.write("fcm.json", &tokens)
     }
 
@@ -350,25 +362,38 @@ impl Push {
         }
     }
 
-    /// Keeps `token` as the newest.
-    pub fn keep(&self, token: String) -> std::io::Result<()> {
+    /// Keeps `token`, from the paired `device`, as the newest.
+    pub fn keep(&self, token: String, device: Option<String>) -> std::io::Result<()> {
         let mut tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
-        let next = kept(tokens.clone(), token);
+        let next = kept(tokens.clone(), Kept { token, device });
         self.save_tokens(&next)?;
         *tokens = next;
         Ok(())
     }
 
-    fn drop_token(&self, token: &str) {
+    fn drop_where(&self, gone: impl Fn(&Kept) -> bool) {
         let mut tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
-        tokens.retain(|t| t != token);
-        if let Err(e) = self.save_tokens(&tokens) {
+        let before = tokens.len();
+        tokens.retain(|t| !gone(t));
+        if tokens.len() != before
+            && let Err(e) = self.save_tokens(&tokens)
+        {
             tracing::error!("can't keep the FCM tokens: {e}");
         }
     }
 
-    /// Looks at the jobs: remembers what each needs, and tells the phones what changed.
-    pub async fn look(&self, jobs: &[Job], scratch: &Path) {
+    fn drop_token(&self, token: &str) {
+        self.drop_where(|t| t.token == token);
+    }
+
+    /// Drops the tokens the revoked device `id` handed over.
+    pub fn forget(&self, id: &str) {
+        self.drop_where(|t| t.device.as_deref() == Some(id));
+    }
+
+    /// Looks at the jobs: remembers what each needs, and tells the phones what changed: only the
+    /// tokens of devices still `paired`, and those that came with the API token.
+    pub async fn look(&self, jobs: &[Job], paired: &HashSet<String>, scratch: &Path) {
         let changed = {
             let mut said = self.said.lock().unwrap_or_else(|e| e.into_inner());
             let before = said.clone().unwrap_or_default();
@@ -386,11 +411,14 @@ impl Push {
             }
             changed
         };
-        let tokens = self
+        let tokens: Vec<String> = self
             .tokens
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
+            .iter()
+            .filter(|t| t.device.as_ref().is_none_or(|d| paired.contains(d)))
+            .map(|t| t.token.clone())
+            .collect();
         if changed.is_empty() || tokens.is_empty() {
             return;
         }
@@ -518,13 +546,15 @@ async fn scanned(title: &str, body: &str, scratch: &Path) -> Result<(), String> 
 /// `{"push": false}` for an APNs token, or without a service account (nothing kept).
 pub async fn register(
     State(shared): State<Arc<Shared>>,
+    device: Option<axum::Extension<crate::gateway::PairedDevice>>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let token =
         registration(&body).map_err(|why| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, why))?;
     let push = match token {
         Some(token) if shared.push.account().is_some() => {
-            shared.push.keep(token).map_err(|e| {
+            let device = device.map(|axum::Extension(d)| d.0);
+            shared.push.keep(token, device).map_err(|e| {
                 tracing::error!("can't keep an FCM token: {e}");
                 ApiError::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -546,9 +576,10 @@ pub fn spawn(shared: Arc<Shared>) {
     tokio::spawn(async move {
         let scratch = shared.config.home.join("tmp");
         loop {
+            let paired = shared.gateway.paired(std::time::SystemTime::now());
             shared
                 .push
-                .look(&shared.jobs.list(usize::MAX), &scratch)
+                .look(&shared.jobs.list(usize::MAX), &paired, &scratch)
                 .await;
             loop {
                 tokio::select! {
@@ -641,16 +672,26 @@ mod tests {
 
     #[test]
     fn tokens_are_capped_oldest_out_and_a_known_one_moves_up() {
+        let k = |token: &str, device: Option<&str>| Kept {
+            token: token.into(),
+            device: device.map(Into::into),
+        };
         let mut tokens = Vec::new();
         for n in 0..MOST + 3 {
-            tokens = kept(tokens, format!("t{n}"));
+            tokens = kept(tokens, k(&format!("t{n}"), None));
         }
         assert_eq!(tokens.len(), MOST);
-        assert_eq!(tokens[0], "t3");
-        tokens = kept(tokens, "t3".into());
+        assert_eq!(tokens[0].token, "t3");
+        tokens = kept(tokens, k("t3", None));
         assert_eq!(tokens.len(), MOST);
-        assert_eq!(tokens.last().unwrap(), "t3");
-        assert_eq!(tokens[0], "t4");
+        assert_eq!(tokens.last().unwrap().token, "t3");
+        assert_eq!(tokens[0].token, "t4");
+        // A device's new token replaces its old one; another device's stays.
+        let tokens = kept(
+            vec![k("a1", Some("A")), k("b1", Some("B"))],
+            k("a2", Some("A")),
+        );
+        assert_eq!(tokens, vec![k("b1", Some("B")), k("a2", Some("A"))]);
     }
 
     #[test]
@@ -863,12 +904,20 @@ mod tests {
     fn tokens_and_notices_are_kept_private() {
         let home = std::env::temp_dir().join(format!("obid-push-{}", std::process::id()));
         let push = Push::open(&home);
-        push.keep("tok-1".into()).unwrap();
-        push.keep("tok-2".into()).unwrap();
+        push.keep("tok-1".into(), None).unwrap();
+        push.keep("tok-2".into(), Some("phone".into())).unwrap();
+        push.keep("tok-3".into(), Some("lost".into())).unwrap();
         push.drop_token("tok-1");
+        push.forget("lost");
         let file = home.join("push/fcm.json");
-        let saved: Vec<String> = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-        assert_eq!(saved, vec!["tok-2".to_owned()]);
+        let saved: Vec<Kept> = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(
+            saved,
+            vec![Kept {
+                token: "tok-2".into(),
+                device: Some("phone".into())
+            }]
+        );
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
@@ -884,8 +933,12 @@ mod tests {
         let mut failed = job("f1");
         failed.status = Status::Failed;
         let push = Push::open(&home);
-        push.look(std::slice::from_ref(&failed), &home.join("tmp"))
-            .await;
+        push.look(
+            std::slice::from_ref(&failed),
+            &HashSet::new(),
+            &home.join("tmp"),
+        )
+        .await;
         let said: BTreeMap<String, Notice> =
             serde_json::from_slice(&std::fs::read(home.join("push/notices.json")).unwrap())
                 .unwrap();
