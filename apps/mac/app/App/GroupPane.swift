@@ -5,18 +5,17 @@ import SwiftUI
 /// and a card per task under the open tab. Under Completed, where older ones go.
 struct GroupPane: View {
     let model: IslandModel
+    let state: ChatState
     let kind: WorkType
     /// The kind's tasks, in Home's order (`WorkList.ranked`).
     let items: [WorkList.Item<SidebarSections.JobRow>]
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
+    let onOpenArchive: () -> Void
     /// Connect GitHub: Settings › Connectors, where GitHub's row signs obid's gh in with GitHub's
     /// own device sign-in (#690).
     let onConnectGitHub: () -> Void
     /// The tab picked, or nil for the one it opens on (`WorkList.firstTab`).
     @State private var picked: WorkList.Tab?
-
-    /// Archived (#280) isn't on the Mac yet: until it is, Clear done takes finished jobs off the list.
-    static let archivedLine = "Older ones will be in Archived, which isn't on the Mac yet. Until then, Clear done (in Home's ⋮) takes them off this list."
 
     private var tab: WorkList.Tab { picked ?? WorkList.firstTab(items, toDo: opensOnToDo) }
     private var ranked: [WorkList.Item<SidebarSections.JobRow>] { WorkList.ranked(items) }
@@ -30,6 +29,8 @@ struct GroupPane: View {
     /// GitHub's items, or Connect GitHub.
     private var opensOnToDo: Bool { gitHub && (!toDo.isEmpty || connect == .signedOut) }
     private var toDo: [GitHubWork.Column] { gitHub ? feed.gitHubWork?.toDo(kind, later: feed.gitHubLater) ?? [] : [] }
+
+    static let archivedLink = "Older ones are in Archived"
 
     static let connectLine = "See the pull requests waiting for your review and the issues assigned to you here, and hand any of them to Oby in one click. Signing in uses GitHub's own page; GitHub's CLI keeps the login."
 
@@ -52,15 +53,16 @@ struct GroupPane: View {
                 // A routine waiting for its next run says when (Sangam's tasks.ts).
                 if tab == .running { ForEach(upcoming) { UpcomingRoutineCard(routine: $0) } }
                 ForEach(cards) { item in
-                    TaskCardView(item: item, model: model) { onOpenJob(item.job.job.id, item.job.local) }
+                    TaskCardView(item: item, model: model, state: state) { onOpenJob(item.job.job.id, item.job.local) }
                 }
                 if tab != .todo && cards.isEmpty && (tab == .done || upcoming.isEmpty) {
                     Text(tab == .done ? "Nothing completed yet" : "Nothing running")
                         .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
                 }
+                // Completed ones leave Home after a while (Archive completed, in Home's ⋮).
                 if tab == .done {
-                    Text(Self.archivedLine).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
-                        .padding(.top, 8).padding(.horizontal, 4)
+                    Button(Self.archivedLink, action: onOpenArchive)
+                        .buttonStyle(LinkTextStyle()).padding(.top, 8).frame(maxWidth: .infinity)
                 }
             }
             .frame(maxWidth: Tokens.column, alignment: .leading)
@@ -74,5 +76,96 @@ struct GroupPane: View {
         .onChange(of: feed.gitHubWork == nil) { if picked == nil { picked = WorkList.firstTab(items, toDo: opensOnToDo) } }
         // Opening Review PR or Issues looks at GitHub again; the list arrives as an event.
         .task { if gitHub { await feed.refreshGitHubWork() } }
+    }
+}
+
+/// Archived (Sangam's ArchiveView): every done task that left Home, most recently done first, with
+/// a search over them at the top. A row opens its page.
+struct ArchivePane: View {
+    let items: [WorkList.Item<SidebarSections.JobRow>]
+    let onOpenJob: (_ job: String, _ local: Bool) -> Void
+    @State private var query = ""
+    @FocusState private var searching: Bool
+
+    /// The rows matching `query` in their name, kind of work or agent, any case.
+    nonisolated static func matching(_ items: [WorkList.Item<SidebarSections.JobRow>], _ query: String) -> [WorkList.Item<SidebarSections.JobRow>] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        return items.filter { q.isEmpty || "\($0.job.job.heading) \($0.type.label) \($0.job.job.agentName)".localizedCaseInsensitiveContains(q) }
+    }
+
+    var body: some View {
+        let shown = Self.matching(items, query)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Archived").font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink)
+                    .padding(.bottom, 16).accessibilityAddTraits(.isHeader)
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass").font(Tokens.font(14)).foregroundStyle(Tokens.muted)
+                    TextField("Search archived tasks", text: $query).textFieldStyle(.plain)
+                        .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.ink).focused($searching)
+                }
+                .padding(.horizontal, 14).frame(height: 40)
+                .overlay { RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(searching ? Tokens.lineFocus : Tokens.line) }
+                VStack(spacing: 2) {
+                    ForEach(shown) { item in ArchiveRow(item: item) { onOpenJob(item.job.job.id, item.job.local) } }
+                }
+                if shown.isEmpty {
+                    Text(items.isEmpty ? "Nothing archived yet" : "Nothing archived matches “\(query.trimmingCharacters(in: .whitespaces))”")
+                        .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
+                }
+            }
+            .frame(maxWidth: Tokens.column, alignment: .leading)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, Tokens.gutter).padding(.top, 16).padding(.bottom, 32)
+        }
+        .scrollIndicators(.never)
+    }
+}
+
+/// One archived task (Sangam's `.archive-row`): its agent's mark, its name, its kind and agent under
+/// it, and how long ago it was done.
+private struct ArchiveRow: View {
+    let item: WorkList.Item<SidebarSections.JobRow>
+    let action: () -> Void
+    @State private var hovering = false
+
+    private var job: Job { item.job.job }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                AgentMark(agent: job.agent).font(Tokens.font(13, .semibold)).frame(width: 16).foregroundStyle(Tokens.muted)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(job.heading).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.item).fadeOut()
+                    Text("\(item.type.label) · \(job.agentName)").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Text(ConversationOrder.ago(job.finished ?? job.created)).font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(Tokens.muted)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .background(hovering ? Tokens.hover : .clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(Tokens.fade, value: hovering)
+    }
+}
+
+/// Small muted words that light up hovered (Sangam's `.group-archived`).
+private struct LinkTextStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { Styled(configuration: configuration) }
+
+    private struct Styled: View {
+        let configuration: Configuration
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label.font(Tokens.font(Tokens.textSm))
+                .foregroundStyle(hovering ? Tokens.text : Tokens.muted)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+                .animation(Tokens.fade, value: hovering)
+        }
     }
 }

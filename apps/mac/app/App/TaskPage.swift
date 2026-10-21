@@ -20,6 +20,26 @@ struct TaskActions {
     var publishing: JobView.Publishing?
     var readReport: (() async throws -> ResearchDocument)?
     var fileProposal: ((Int, Bool) async throws -> FileProposalResult)?
+    /// The page's box (Sangam's TaskView): the words, and the files with them, for Oby to pass on;
+    /// answers the job that heard them, the follow-up they started on a finished one. Nil: `message`.
+    var tell: ((String, [String]) async throws -> Job)? = nil
+    /// The box's +: only obid on this Mac reads the tray's files, and only a follow-up takes them.
+    var attaches = false
+    /// Puts its decision off an hour (Later on its inbox item, as the conversation's cards do), and
+    /// says whether there was anything to put off; nil where nothing offers Later.
+    var later: (() async throws -> Bool)? = nil
+
+    /// The + is there where the files can go: obid on this Mac, and a finished job, whose words
+    /// start a follow-up (a job at work takes words only).
+    static func attaches(_ job: Job, runnerHere: Bool) -> Bool { runnerHere && !job.isActive }
+
+    /// What Later puts off: the job's open inbox item, else the permission it waits on.
+    enum LaterTarget: Equatable { case item(String), permission(String) }
+
+    static func laterTarget(_ job: String, inbox: [InboxItem], permissions: [RunnerFeed.PermissionRecord] = []) -> LaterTarget? {
+        if let item = inbox.first(where: { $0.job == job && $0.done == nil }) { return .item(item.id) }
+        return permissions.first { $0.job == job && $0.done == nil }.map { .permission($0.id) }
+    }
 
     @MainActor static func of(_ job: Job, local: Bool, model: IslandModel) -> TaskActions {
         let desk = model.desk, feed = model.feed
@@ -40,7 +60,21 @@ struct TaskActions {
                     return ResearchDocument(job: saved.job, commit: saved.commit, markdown: saved.markdown,
                                             proposals: saved.proposals.map { ResearchProposal(index: $0.index, repo: $0.repo, title: $0.title, body: $0.body, labels: $0.labels, filed: $0.filed, filedAt: $0.filedAt) })
                 },
-                fileProposal: { index, start in try await fileLocalProposal(job, index: index, start: start, desk: desk) })
+                fileProposal: { index, start in try await fileLocalProposal(job, index: index, start: start, desk: desk) },
+                tell: { text, _ in
+                    try desk.message(job.id, text)
+                    // The thread the window opens on it gets the words and Oby's answer, as obid's conversation does.
+                    if model.hasConversation(of: job.id, local: true) {
+                        let account = desk.accounts.accounts.first { $0.account.id == job.account }?.account.name ?? job.account
+                        desk.told(text, reply: TaskFacts.relay(job, heard: job, account: account), job: job.id)
+                    }
+                    return job
+                },
+                later: {
+                    guard case .item(let id) = laterTarget(job.id, inbox: desk.inbox) else { return false }
+                    _ = try await desk.answer(id, .later(.now.addingTimeInterval(3600)))
+                    return true
+                })
         }
         return TaskActions(
             place: feed.name, account: nil, extras: feed.extras[job.id], accounts: feed.accounts,
@@ -59,7 +93,21 @@ struct TaskActions {
                 ? JobView.Publishing(action: { try await feed.publishAction(job.id) }, publish: { try await feed.publish(job.id, action: $0) })
                 : nil,
             readReport: { try await feed.about(job.id) { try await $0.report(job.id) } },
-            fileProposal: { index, start in try await feed.about(job.id) { try await $0.fileProposal(job.id, index: index, start: start) } })
+            fileProposal: { index, start in try await feed.about(job.id) { try await $0.fileProposal(job.id, index: index, start: start) } },
+            tell: { text, files in
+                guard feed.runner != nil else { throw RunnerError(message: "The runner isn't set up.") }
+                let heard = try await feed.about(job.id) { try await $0.tell(job.id, text, conversation: true, attachments: files) }
+                feed.apply(heard)
+                return heard
+            },
+            attaches: attaches(job, runnerHere: feed.local),
+            later: {
+                switch laterTarget(job.id, inbox: feed.inbox, permissions: feed.permissionHistory) {
+                case .item(let id): try await feed.settle(id, later: .now.addingTimeInterval(3600)); return true
+                case .permission(let id): feed.laterPermission(id); return true
+                case nil: return false
+                }
+            })
     }
 
     /// Files one of this Mac's research report's proposed issues, after the secret scan, and starts
@@ -103,6 +151,8 @@ struct TaskDecision: View {
     @Binding var problem: String?
     /// On the task's page, where the box under it tells the agent (which answers it too).
     var box = false
+    /// Later: puts it off an hour, as the conversation's cards do; nil where it isn't offered.
+    var onLater: (() -> Void)? = nil
 
     private var question: Question? {
         actions.extras?.question ?? job.question.map { Question(text: $0.text, options: $0.options, recommended: $0.recommended, plan: $0.plan) }
@@ -115,16 +165,17 @@ struct TaskDecision: View {
                     onChoose: { option in
                         guard let decision = RunnerPermission.Decision(rawValue: option.answer) else { return }
                         run { try await actions.permission(decision, nil) }
-                    })
+                    }, onLater: onLater)
                 .id(permission.id)
         } else if job.waitsForAnswer, let question {
             AskCard(kind: AskKind.label("question", plan: question.plan != nil), title: question.text, plan: question.plan,
                     options: question.cardOptions, busy: busy, keyboardEnabled: box,
-                    hint: box ? "Or answer in your own words below" : nil, onChoose: { option in run { try await actions.message(option.answer) } })
+                    hint: box ? "Or answer in your own words below" : nil, onChoose: { option in run { try await actions.message(option.answer) } },
+                    onLater: onLater)
                 .id(question.text)
         } else if let next = job.nextStepOffered {
             AskCard(kind: job.needsYouKind, title: job.line, happened: job.resumesLine, options: CardOption.of([next], recommended: 0), busy: busy,
-                    onChoose: { _ in run { try await actions.message(Job.tryAgainWords) } })
+                    onChoose: { _ in run { try await actions.message(Job.tryAgainWords) } }, onLater: onLater)
                 .id("\(job.id)-\(job.finished?.timeIntervalSince1970 ?? 0)")
         }
     }
@@ -151,6 +202,7 @@ struct TaskDecision: View {
 struct TaskCardView: View {
     let item: WorkList.Item<SidebarSections.JobRow>
     let model: IslandModel
+    let state: ChatState
     let onOpen: () -> Void
     @State private var hovering = false
     @State private var busy = false
@@ -191,7 +243,12 @@ struct TaskCardView: View {
             if item.status == .needs {
                 VStack(alignment: .leading, spacing: 0) {
                     if TaskDecision.shows(job, extras: actions.extras) {
-                        TaskDecision(job: job, actions: actions, busy: $busy, problem: $problem)
+                        TaskDecision(job: job, actions: actions, busy: $busy, problem: $problem,
+                                     onLater: actions.later.map { later in {
+                                         Task {
+                                             do { _ = try await later(); problem = nil } catch { problem = error.localizedDescription }
+                                         }
+                                     } })
                     } else {
                         Text(job.badge.text).font(Tokens.font(Tokens.textSm, .medium))
                             .foregroundStyle(job.badge.tone == .red ? Tokens.danger : Tokens.needs)
@@ -227,9 +284,11 @@ struct TaskCardView: View {
         }
         .onHover { hovering = $0 }
         .animation(Tokens.fade, value: hovering)
+        // The task's menu, as on its side panel row; Rename opens its page, renaming in the title bar.
         .contextMenu {
-            Button("View details", action: onOpen)
-            if job.isActive { Button("Stop") { model.stopChatJob(job.id, local: item.job.local) } }
+            TaskMenu(row: item.job, model: model, state: state, onViewDetails: onOpen,
+                     onOpenChat: { state.trail.push(.talk) },
+                     onRename: { onOpen(); state.renaming = .init(id: item.id, inBar: true) })
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(job.heading), \(item.mark.rawValue)")
@@ -305,7 +364,17 @@ struct TaskPage: View {
     /// Full session: the job's live session, over this page with Session in the trail (#785); nil
     /// for this Mac's own jobs, which keep none.
     var onSession: (() -> Void)? = nil
+    /// The main composer's gauge and voice (Sangam's TaskView uses Home's Composer).
+    var usage: [UsageRow]? = nil
+    var voice: Voice? = nil
+    var talkKeyListening = false
+    /// The words went: the job that heard them (a follow-up a finished one started), for the
+    /// window to open its conversation, as Sangam's `tellFromTask` does. False when it has none
+    /// kept: then the words and Oby's answer show here.
+    var onTold: (Job) -> Bool = { _ in false }
     @State private var moving = false
+    /// The last words said here and Oby's answer, where no conversation keeps them (or Later's).
+    @State private var exchange: (said: String, reply: String)?
     @State private var busy = false
     @State private var problem: String?
     @State private var note = ""
@@ -324,6 +393,12 @@ struct TaskPage: View {
     private var needs: Bool { TaskDecision.shows(job, extras: actions.extras) && job.isActive }
     private var failure: Bool { TaskPage.failure(job) && !TaskDecision.shows(job, extras: actions.extras) }
 
+    /// Where words said on the page lead (Sangam's tellFromTask): the job's conversation when one
+    /// is kept, else they stay here with Oby's answer under them.
+    enum AfterTold: Equatable { case conversation, page }
+
+    static func afterTold(hasConversation: Bool) -> AfterTold { hasConversation ? .conversation : .page }
+
     /// It ended without finishing and you haven't let it go: the page leads with what failed.
     static func failure(_ job: Job) -> Bool {
         (job.status == .failed || job.status == .interrupted) && job.dismissed == nil
@@ -335,7 +410,13 @@ struct TaskPage: View {
                 VStack(alignment: .leading, spacing: 8) {
                     header
                     if TaskDecision.shows(job, extras: actions.extras) {
-                        TaskDecision(job: job, actions: actions, busy: $busy, problem: $problem, box: TaskFacts.box(job) != nil)
+                        TaskDecision(job: job, actions: actions, busy: $busy, problem: $problem, box: true,
+                                     onLater: actions.later.map { later in {
+                                         run {
+                                             // Oby says it'll wait only when something was put off.
+                                             if try await later() { exchange = ("Later", TaskFacts.laterReply) }
+                                         }
+                                     } })
                             .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 18)
                             .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
                     } else if failure {
@@ -379,18 +460,25 @@ struct TaskPage: View {
                 .padding(.horizontal, Tokens.gutter).padding(.top, 8).padding(.bottom, 32)
             }
             .scrollIndicators(.never)
-            if let placeholder = TaskFacts.box(job) {
-                if let noteProblem {
-                    Text(noteProblem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger)
-                        .frame(maxWidth: Tokens.column, alignment: .leading).padding(.horizontal, Tokens.gutter + 12).padding(.top, 8)
+            if let exchange {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("You: \(exchange.said)").foregroundStyle(Tokens.text)
+                    Text("Oby: \(exchange.reply)").foregroundStyle(Tokens.muted)
                 }
-                MessageBox(text: $note, focused: $typing, tray: tray, placeholder: placeholder, label: "Tell Oby about \(job.heading)",
-                           maximumHeight: height * 0.5, onSend: tell, onScreenshot: {}, onStop: { false }, onEscape: onBack, attachments: false,
-                           onStopTurn: job.isActive ? actions.stop : nil, working: job.isActive)
-                    .disabled(busy)
-                    .keepsDraft($note, as: Drafts.task(job.id))
-                    .frame(maxWidth: Tokens.column).padding(.horizontal, Tokens.gutter).padding(.top, 8).padding(.bottom, 20)
+                .font(Tokens.font(Tokens.textSm)).textSelection(.enabled)
+                .frame(maxWidth: Tokens.column, alignment: .leading).padding(.horizontal, Tokens.gutter + 12).padding(.top, 8)
             }
+            if let noteProblem {
+                Text(noteProblem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger)
+                    .frame(maxWidth: Tokens.column, alignment: .leading).padding(.horizontal, Tokens.gutter + 12).padding(.top, 8)
+            }
+            MessageBox(text: $note, focused: $typing, tray: tray, placeholder: TaskFacts.box, label: "Tell Oby about \(job.heading)",
+                       maximumHeight: height * 0.5, onSend: tell, onScreenshot: screenshot, onStop: { false }, onEscape: onBack,
+                       usage: usage, attachments: actions.attaches, voice: voice, talkKeyListening: talkKeyListening,
+                       onStopTurn: job.isActive ? actions.stop : nil, working: job.isActive)
+                .disabled(busy)
+                .keepsDraft($note, as: Drafts.task(job.id))
+                .frame(maxWidth: Tokens.column).padding(.horizontal, Tokens.gutter).padding(.top, 8).padding(.bottom, 20)
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         // Not a task tied to publishNow: starting clears it, which would cancel the publish.
@@ -588,11 +676,11 @@ struct TaskPage: View {
     /// What the job can still do: start now when it waits for its time, use an account past its
     /// weekly reserve, move it, stop it while the box can't (queued), or let it go.
     @ViewBuilder private var controls: some View {
+        // Stop is the box's end slot while it runs or waits its turn.
         let offers = TaskFacts.controls(job)
-        let stop = offers.stop && TaskFacts.box(job) == nil
         let reserved = job.waitsToStart && actions.useAnyway != nil
             ? Usage.liftable(job.waiting?.reserved, among: actions.accounts, id: \.account.id, usage: \.usage) : []
-        if offers.startNow || stop || offers.dismiss || !reserved.isEmpty || actions.move != nil {
+        if offers.startNow || offers.dismiss || !reserved.isEmpty || actions.move != nil {
             CenteredFlow(spacing: 8, centred: false) {
                 if offers.startNow, let startNow = actions.startNow {
                     PillButton(title: "Start now") { run(startNow) }.disabled(busy).help("Start it now instead of waiting")
@@ -604,7 +692,6 @@ struct TaskPage: View {
                     PillButton(title: "Move to…") { problem = nil; moving = true }.disabled(busy)
                         .help("Move this job to another tool, account or model")
                 }
-                if stop { PillButton(title: "Stop job", danger: true, action: actions.stop).disabled(busy) }
                 if offers.dismiss {
                     PillButton(title: "Dismiss", quiet: true) { run(actions.dismiss) }.disabled(busy)
                         .help("Let this job go: it stays in the list, and stops needing you")
@@ -641,14 +728,33 @@ struct TaskPage: View {
     private func tell() {
         let text = note.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (1...2000).contains(text.count), !busy else { return }
+        let files = actions.attaches ? tray.paths : []
         busy = true
         Task {
             defer { busy = false }
             do {
-                try await actions.message(text)
-                note = ""
-                noteProblem = nil
+                if let tell = actions.tell {
+                    let heard = try await tell(text, files)
+                    if !files.isEmpty { tray.clear() }
+                    note = ""
+                    noteProblem = nil
+                    if !onTold(heard) {
+                        let account = actions.accounts.first { $0.account.id == heard.account }?.account.name ?? heard.account
+                        exchange = (text, TaskFacts.relay(job, heard: heard, account: account))
+                    }
+                } else {
+                    try await actions.message(text)
+                    note = ""
+                    noteProblem = nil
+                }
             } catch { noteProblem = error.localizedDescription }
+        }
+    }
+
+    private func screenshot() {
+        Task {
+            await tray.screenshot()
+            typing = true
         }
     }
 
@@ -674,8 +780,10 @@ struct TaskPagePreview: View {
             let account = AccountState(account: Account(id: "personal", agent: "claude", name: "Personal", payer: "me"),
                                        label: "Max", fiveHour: fixture.windows.fiveHour, sevenDay: fixture.windows.sevenDay)
             TaskPage(job: job, actions: TaskActions(place: "Studio", account: "Personal", extras: extras, accounts: [account], stop: {},
-                                                    message: { _ in }, dismiss: {}, permission: { _, _ in }, mode: { _ in }),
-                     tray: Tray(), onSession: {})
+                                                    message: { _ in }, dismiss: {}, permission: { _, _ in }, mode: { _ in },
+                                                    attaches: true, later: { true }),
+                     tray: Tray(), onSession: {},
+                     usage: [UsageRow(id: "personal", agent: "claude", name: "Personal", week: fixture.windows.sevenDay)])
                 .frame(width: 700, height: 1480).background(Tokens.bg)
         }
     }

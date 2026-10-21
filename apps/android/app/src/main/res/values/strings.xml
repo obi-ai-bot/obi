@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name" translatable="false">Oby</string>
+    <string name="channel_jobs">Needs you</string>
+    <string name="channel_jobs_about">A job is ready to publish, failed, or waits for your answer.</string>
+    <string name="channel_work">Working now</string>
+    <string name="channel_work_about">The job an agent is on, while Oby is open.</string>
+    <string name="action_publish">Publish</string>
+    <string name="action_open">Open</string>
+    <string name="mic_rationale">Oby listens when you tap the mic to dictate, until you tap stop or for up to 60 seconds.</string>
+</resources>

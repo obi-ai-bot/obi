@@ -61,6 +61,10 @@ const KEPT: usize = 20;
 const LONGEST_GAP: usize = 200;
 /// At most this many paths and names from Tetrix's answers are kept for `unknownFiles`.
 const NAMED: usize = 5000;
+/// Decisions before publishing: the first this many sessions of the repository, and at most this
+/// many digests kept.
+const CANDIDATES: usize = 10;
+const DIGESTS: usize = 5;
 const INSTRUCTIONS: &str = "Tetrix, the code graph and memory for this work, through Oby: Oby holds the login and forwards your calls. Only the graph reads, earlier sessions' digests and save_session are offered. Candidate links are not confirmed facts.";
 
 /// What every agent with Tetrix is told, after its task.
@@ -1144,6 +1148,128 @@ impl Tetrix {
         (items, seen)
     }
 
+    /// The decisions earlier sessions made about `files`, before `job` publishes
+    /// (crate::decisions), asked with Oby's login, each question through the secret scan first:
+    /// the sessions Tetrix lists for the job's repository (`repo_sessions`), each one's natural
+    /// key (`session_context`), and its digest (`session_digest`, structured), kept when it
+    /// changed one of `files` there (its `projects[].paths_modified`). Never the job's own
+    /// sessions (`own`, the ids `save_session` answered). Empty when Tetrix has none or doesn't
+    /// answer.
+    // ponytail: the first [`CANDIDATES`] sessions of `repo_sessions`' first page, in Tetrix's
+    // order (edge type, then title, never date), since which ones changed `files` is only known
+    // from each one's digest; on a repository with more sessions, the rest aren't read. Ask
+    // `repo_sessions` by code unit once Tetrix names files that way.
+    pub async fn digests(
+        &self,
+        connections: &Connections,
+        job: &crate::job::Job,
+        files: &[String],
+        own: &[String],
+    ) -> Vec<crate::decisions::Digest> {
+        let Ok(listed) = self
+            .ask(
+                connections,
+                job,
+                "repo_sessions",
+                &json!({"name": job.repo}),
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let mut digests = Vec::new();
+        for graph_id in session_refs(&listed).into_iter().take(CANDIDATES) {
+            if digests.len() >= DIGESTS {
+                break;
+            }
+            let Ok(context) = self
+                .ask(
+                    connections,
+                    job,
+                    "session_context",
+                    &json!({"session": graph_id}),
+                )
+                .await
+            else {
+                continue;
+            };
+            let context = shaped(&context).unwrap_or_default();
+            // `session:<owner>/<uuid>`: the uuid is what save_session answered.
+            let Some(key) = context["natural_key"].as_str().filter(|k| is_ref(k)) else {
+                continue;
+            };
+            let id = key.rsplit('/').next().unwrap_or(key);
+            if !is_session_id(id) || own.iter().any(|o| o == id) {
+                continue;
+            }
+            if context["digest_summary"]["decisions"].as_u64() == Some(0) {
+                continue;
+            }
+            let arguments = json!({"session": key, "format": "structured"});
+            let Ok(answer) = self
+                .ask(connections, job, "session_digest", &arguments)
+                .await
+            else {
+                continue;
+            };
+            let digest = shaped(&answer).unwrap_or_default()["digest"].take();
+            let changed = digest["projects"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|p| {
+                    p["repo"]
+                        .as_str()
+                        .is_some_and(|r| r.eq_ignore_ascii_case(&job.repo))
+                        && p["paths_modified"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .any(|path| files.iter().any(|f| f == path))
+                });
+            let decisions: Vec<String> = digest["decisions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|d| d["status"] != "reverted")
+                .filter_map(|d| d["statement"].as_str().map(str::to_owned))
+                .collect();
+            if changed && !decisions.is_empty() {
+                digests.push(crate::decisions::Digest {
+                    session: id.to_owned(),
+                    decisions,
+                });
+            }
+        }
+        digests
+    }
+
+    /// One question of obid's own: through the secret scan, 10 seconds at most, and an answer
+    /// that isn't an error.
+    async fn ask(
+        &self,
+        connections: &Connections,
+        job: &crate::job::Job,
+        tool: &str,
+        arguments: &Value,
+    ) -> Result<Value, String> {
+        if let Err(why) = scanned(arguments, &self.scratch).await {
+            tracing::info!("job {}: Tetrix wasn't asked {tool}: {why}", job.id);
+            return Err(why);
+        }
+        let answer = tokio::time::timeout(
+            ASK_WITHIN,
+            self.call_tool(connections, &job.id, tool, arguments),
+        )
+        .await
+        .unwrap_or_else(|_| Err("Tetrix didn't answer within 10 seconds.".into()))?;
+        if answer["isError"] == true {
+            return Err(cut(&text_of(&answer)));
+        }
+        Ok(answer)
+    }
+
     /// When `job` ends: its commits' stamps, the files no answer named, and its gaps sent to
     /// Tetrix as a session of Oby's own (after the secret scan passes on exactly what goes).
     /// Gives the job's `tetrix` as it ends, and the outgoing action when something was sent.
@@ -1352,27 +1478,56 @@ fn found_nothing(answer: &Value) -> bool {
     }
 }
 
-fn session_id(answer: &Value) -> Option<String> {
+/// An answer's structured content, else its text read as JSON.
+fn shaped(answer: &Value) -> Option<Value> {
     let texts: String = answer["content"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|c| c["text"].as_str())
         .collect();
-    let shaped = answer
+    answer
         .get("structuredContent")
         .cloned()
-        .or_else(|| serde_json::from_str(&texts).ok())?;
-    shaped["session_id"]
+        .or_else(|| serde_json::from_str(&texts).ok())
+}
+
+/// A session id as obid keeps one: at most 64 letters, digits, `-` and `_`.
+fn is_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+fn session_id(answer: &Value) -> Option<String> {
+    shaped(answer)?["session_id"]
         .as_str()
-        .filter(|id| {
-            !id.is_empty()
-                && id.len() <= 64
-                && id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-        })
+        .filter(|id| is_session_id(id))
         .map(str::to_owned)
+}
+
+/// A reference to a session as Tetrix gives one (a graph id, `session:<owner>/<uuid>`): at most
+/// 200 letters, digits and `-_.:/@`.
+fn is_ref(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 200
+        && text.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'/' | b'@')
+        })
+}
+
+/// The sessions a `repo_sessions` answer lists: its `sessions[].session_id`, the graph's ids.
+fn session_refs(answer: &Value) -> Vec<String> {
+    shaped(answer).unwrap_or_default()["sessions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["session_id"].as_str())
+        .filter(|id| is_ref(id))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The commits' `Tetrix-Session:` trailers, from `git log --format=%B%x1e`.
@@ -1427,6 +1582,8 @@ pub struct Use {
     pub gaps: Gaps,
     /// The job ended: its gaps are final.
     pub ended: bool,
+    /// What the decision check found before publishing (crate::decisions), when it ran.
+    pub decisions: Option<crate::decisions::Decisions>,
     /// Paths and names Tetrix's answers held, for `unknownFiles`. Never in the API.
     pub named: BTreeSet<String>,
 }
@@ -1577,7 +1734,8 @@ impl Use {
             "stamps": self.stamps, "author": null, "context": self.context, "saved": self.saved,
             "gaps": if self.ended { json!({"noResults": gaps.no_results, "missing": gaps.missing,
                 "unknownFiles": gaps.unknown_files, "failed": gaps.failed, "sent": gaps.sent,
-                "session": gaps.session, "notSent": gaps.not_sent}) } else { Value::Null }})
+                "session": gaps.session, "notSent": gaps.not_sent}) } else { Value::Null },
+            "decisions": self.decisions})
     }
 
     /// Whether the agent called Tetrix at all.
@@ -1930,5 +2088,13 @@ mod tests {
             Some("ab-12".into())
         );
         assert_eq!(session_id(&text("{\"session_id\": \"a b\"}")), None);
+        // repo_sessions' list (mcp_service/app/tools/repo_sessions.py): sessions[].session_id.
+        assert_eq!(
+            session_refs(&text(
+                r#"{"target": {}, "sessions": [{"session_id": "agent_session:9f"}, {"session_id": "a b"}, {"title": "t"}]}"#
+            )),
+            vec!["agent_session:9f".to_owned()]
+        );
+        assert!(session_refs(&text("Earlier work on s-1")).is_empty());
     }
 }

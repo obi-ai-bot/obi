@@ -2065,6 +2065,111 @@ fn the_user_tells_a_running_job_something() {
     assert!(items_of(&obid, "confirm").is_empty());
 }
 
+/// Sangam's TaskView: words said in a task page's box (`POST /v1/jobs/{id}/messages` with
+/// `"conversation": true`) go on the end of the job's conversation, Oby's answer after them with
+/// the follow-up's card; files go with a follow-up only, and only from obid's attachments folder.
+#[test]
+fn words_from_a_task_page_join_its_conversation() {
+    let folder = Folder::new("brain-message-page");
+    let obid = started(&folder);
+    let dispatch = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "investigate",
+         "title": "Docs line", "task": "Look around", "rounds": 1}]});
+    queue(&obid, &[dispatch.to_string()]);
+    let answer = said(&obid, "look into the docs line");
+    let conversation = answer["conversation"].as_str().unwrap().to_owned();
+    let id = answer["jobs"][0]["id"].as_str().unwrap().to_owned();
+    within(120, "the job is done", || {
+        (get_job(&obid, &id)["status"] == "done").then_some(())
+    });
+    let post = |body: serde_json::Value| {
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/messages"),
+            Some(&body),
+        )
+    };
+
+    let outside = post(json!({"text": "and this", "attachments": ["/etc/hosts"]}));
+    assert_eq!(outside.status, 422, "{}", outside.text);
+    let attached = obid.home.join("attachments/shot.png");
+    std::fs::create_dir_all(attached.parent().unwrap()).unwrap();
+    std::fs::write(&attached, b"png").unwrap();
+    let path = attached.to_str().unwrap();
+    let followed =
+        post(json!({"text": "add one more line", "conversation": true, "attachments": [path]}));
+    assert_eq!(followed.status, 201, "{}", followed.text);
+    let next = followed.body["id"].as_str().unwrap().to_owned();
+    assert_eq!(followed.body["followUpOf"], json!(id));
+    let input = obid
+        .home
+        .join(format!("worktrees/{next}/.obi/inputs/shot.png"));
+    within(120, "the follow-up has the file", || {
+        input.is_file().then_some(())
+    });
+    let turns = call(
+        &obid,
+        "GET",
+        &format!("/v1/conversation?id={conversation}"),
+        None,
+    )
+    .body;
+    let turns = turns.as_array().unwrap();
+    let (you, oby) = (&turns[turns.len() - 2], &turns[turns.len() - 1]);
+    assert_eq!(
+        (you["who"].clone(), you["text"].clone()),
+        (json!("user"), json!("add one more line"))
+    );
+    assert_eq!(oby["who"], "oby");
+    assert_eq!(
+        oby["text"],
+        "This one’s finished, so I started a follow-up. Claude Code has it in fixture-app on Stub."
+    );
+    assert_eq!(oby["jobs"], json!([next]));
+    // Try again picks its own session up: no new job, so no files.
+    let again = post(json!({"text": obid::brain::actions::TRY_AGAIN, "attachments": [path]}));
+    assert_eq!(again.status, 422, "{}", again.text);
+    // Without "conversation": true, nothing joins the conversation, whatever the words do.
+    post(json!({"text": "and one more", "conversation": false}));
+    let after = call(
+        &obid,
+        "GET",
+        &format!("/v1/conversation?id={conversation}"),
+        None,
+    )
+    .body;
+    assert_eq!(after.as_array().unwrap().len(), turns.len(), "{after}");
+
+    // A job at work takes words, never files.
+    let running = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "PAUSE: 60000", "title": "Slow"}}),
+        ),
+    );
+    assert_eq!(running.status, 201, "{}", running.text);
+    let slow = running.body["id"].as_str().unwrap().to_owned();
+    within(120, "its agent is at work", || {
+        let job = get_job(&obid, &slow);
+        (job["status"] == "running" && job["step"] == "Starting Claude Code").then_some(())
+    });
+    let busy = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{slow}/messages"),
+        Some(&json!({"text": "look at this", "attachments": [path]})),
+    );
+    assert_eq!(busy.status, 422, "{}", busy.text);
+    assert!(
+        busy.text.contains("Files go with a follow-up"),
+        "{}",
+        busy.text
+    );
+}
+
 /// A job the owner let go (Dismiss) is finished too: "tell it…" starts a follow-up, and the job
 /// stays let go (a field test, 2026-10-17, kept being offered one more round of a dismissed job
 /// that had failed for good).

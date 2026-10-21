@@ -106,8 +106,11 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     var tetrix: TetrixJobReport?
     /// The job page's facts (#739), read from the same JSON; nil for this Mac's own jobs.
     var facts: JobFacts?
+    /// obid only: when it was archived by hand (Archive task, or a conversation's), or nil. It's
+    /// then under Archived, not on Home.
+    var archived: Date?
 
-    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, turn, artifacts, routine, tetrix }
+    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, turn, artifacts, routine, tetrix, archived }
 
     private enum TeammatesKey: String, CodingKey { case teammates }
 
@@ -133,6 +136,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
         artifacts = try? keys.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
         routine = try? keys.decodeIfPresent(RoutineMark.self, forKey: .routine)
         tetrix = try? keys.decodeIfPresent(TetrixJobReport.self, forKey: .tetrix)
+        archived = try? keys.decodeIfPresent(Date.self, forKey: .archived)
         facts = (try? JobFacts(from: decoder)).flatMap { $0 == JobFacts() ? nil : $0 }
     }
 

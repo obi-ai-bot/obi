@@ -703,21 +703,45 @@ pub(super) fn started_by(job: &Job, conversation: &str, turn: &str) -> Option<St
 pub(super) fn follow_up(shared: &Arc<Shared>, job: &Job, new: NewJob) -> Outcome {
     let name = job.short_title();
     match shared.jobs.create(new) {
-        Ok(next) => Outcome::Started(
-            format!(
-                "{name} is finished, so I started a follow-up: {}. {} has it in {} on {}.",
-                next.short_title(),
-                tool_name(&next.agent),
-                next.repo_name(),
-                account_name(shared, &next.account)
-            ),
-            next.to_json(),
-        ),
+        Ok(next) => Outcome::Started(follow_up_line(shared, job, &next), next.to_json()),
         Err(refused) => Outcome::Failed(format!(
             "Couldn't start a follow-up of {name}: {}",
             refused.0
         )),
     }
+}
+
+/// What Oby says once `next`, the follow-up of `job`, started.
+pub(crate) fn follow_up_line(shared: &Shared, job: &Job, next: &Job) -> String {
+    format!(
+        "{} is finished, so I started a follow-up: {}. {} has it in {} on {}.",
+        job.short_title(),
+        next.short_title(),
+        tool_name(&next.agent),
+        next.repo_name(),
+        account_name(shared, &next.account)
+    )
+}
+
+/// What Oby says once the owner's words for `job`, said on its page (`POST /v1/jobs/{id}/messages`),
+/// reached `heard`: `job` itself, the follow-up they started, or the one already following it up.
+/// Sangam's words (design/app `tasks.ts` `relay`); the apps say the same where no conversation
+/// keeps them (apps/shared/TaskFacts.swift `relay`).
+pub(crate) fn told_line(shared: &Shared, job: &Job, heard: &Job) -> String {
+    let agent = tool_name(&heard.agent);
+    if heard.id != job.id && heard.heard.is_empty() {
+        return format!(
+            "This one’s finished, so I started a follow-up. {agent} has it in {} on {}.",
+            heard.repo_name(),
+            account_name(shared, &heard.account)
+        );
+    }
+    let after = if heard.rounds.unwrap_or(1) > 1 {
+        "this round"
+    } else {
+        "its current step"
+    };
+    format!("Passed to {agent}. It’ll pick that up after {after}.")
 }
 
 /// Words for `job`, which ended, while `next` follows it up already: `next` hears them, never a

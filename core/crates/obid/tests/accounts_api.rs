@@ -597,6 +597,65 @@ fn the_default_login_is_never_signed_in_by_obid() {
     );
 }
 
+/// Removing a tool's own login isn't for good: `{"agent", "default": true}` lists it again, as it
+/// was. Only once removed, and never for Cursor, which has none outside an account.
+#[test]
+fn a_removed_default_login_comes_back() {
+    let folder = Folder::new("accounts-restore");
+    let obid = start(&folder.0, &accounts_config(&folder.0), None);
+    let lab = add(&obid, json!({"agent": "codex", "name": "Lab"}));
+    assert_eq!(lab.status, 201, "{}", lab.text);
+    assert!(account(&obid, "codex").is_some(), "{:?}", accounts(&obid));
+    let early = add(&obid, json!({"agent": "codex", "default": true}));
+    assert_eq!(early.status, 409, "{}", early.text);
+    assert_eq!(
+        call(&obid, "DELETE", "/v1/accounts/codex", None).status,
+        204
+    );
+    assert!(account(&obid, "codex").is_none());
+    for bad in [
+        json!({"agent": "codex", "default": false}),
+        json!({"agent": "codex", "default": true, "name": "X"}),
+    ] {
+        assert_eq!(add(&obid, bad).status, 422);
+    }
+    assert_eq!(
+        add(&obid, json!({"agent": "cursor", "default": true})).status,
+        422
+    );
+    let back = add(&obid, json!({"agent": "codex", "default": true}));
+    assert_eq!(back.status, 201, "{}", back.text);
+    assert_eq!(back.body["id"], "codex");
+    assert!(account(&obid, "codex").is_some(), "{:?}", accounts(&obid));
+    assert!(account(&obid, lab.body["id"].as_str().unwrap()).is_some());
+}
+
+/// A `default` the configuration gives a folder of its own isn't the tool's own login: removed,
+/// it stays removed.
+#[test]
+fn a_configured_default_with_a_folder_doesnt_come_back() {
+    let folder = Folder::new("accounts-restore-folder");
+    let mut config = accounts_config(&folder.0);
+    let dir = folder.0.join("claude-default");
+    std::fs::create_dir_all(&dir).unwrap();
+    let stub = config["agents"]["claude"]["accounts"][0].clone();
+    config["agents"]["claude"]["accounts"] =
+        json!([{"id": "default", "name": "Default", "configDir": dir}, stub]);
+    let obid = start(&folder.0, &config, None);
+    assert_eq!(
+        call(&obid, "DELETE", "/v1/accounts/default", None).status,
+        204
+    );
+    let refused = add(&obid, json!({"agent": "claude", "default": true}));
+    assert_eq!(refused.status, 409, "{}", refused.text);
+    assert!(
+        refused.text.contains("folder of its own"),
+        "{}",
+        refused.text
+    );
+    assert!(account(&obid, "default").is_none());
+}
+
 /// A fresh sign-in may be another kind of login: obid forgets how the account paid (`priced`, kept
 /// with its usage), so its next Codex job asks again; its windows stay.
 #[test]

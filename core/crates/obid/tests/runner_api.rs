@@ -1656,3 +1656,77 @@ fn modes_answer_what_they_allow_and_stopping_drops_the_permission() {
         "{planned}"
     );
 }
+
+/// `POST /v1/notifications` on obid (#452, FCM only): an APNs token is `{"push": false}` and not
+/// kept; an FCM token is `{"push": false}` until the owner puts a Firebase service account in the
+/// vault, then `{"push": true}` and kept in `home/push/fcm.json` (0600); what isn't a
+/// registration is `422`.
+#[test]
+fn an_android_phone_hands_over_its_fcm_token() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = Folder::new("fcm");
+    let (obid, _) = obid(&folder);
+    let notify = |body: Value| call(&obid, "POST", "/v1/notifications", Some(&body));
+    let fcm =
+        json!({"token": "fcm-token:APA91b_test-1", "platform": "fcm", "topic": "com.deskree.oby"});
+    let iphone =
+        json!({"token": "5b0e9c", "topic": "com.deskree.oby", "environment": "production"});
+    for body in [&iphone, &fcm] {
+        let answer = notify(body.clone());
+        assert_eq!(answer.status, 200, "{}", answer.text);
+        assert_eq!(answer.body, json!({"push": false}));
+    }
+    let tokens = obid.home.join("push/fcm.json");
+    assert!(!tokens.exists());
+    for bad in [
+        json!({"token": "", "platform": "fcm"}),
+        json!({"token": "a b", "platform": "fcm"}),
+        json!({"token": "abc", "platform": "web"}),
+        json!({"token": "abc", "platform": "fcm", "topic": "com.other.app"}),
+    ] {
+        assert_eq!(notify(bad.clone()).status, 422, "{bad}");
+    }
+
+    // A throwaway service account, its key made now.
+    use aws_lc_rs::encoding::AsDer;
+    use base64::Engine as _;
+    let key = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
+    let der = base64::engine::general_purpose::STANDARD.encode(key.as_der().unwrap().as_ref());
+    let account = json!({"type": "service_account", "project_id": "oby-test",
+        "private_key": format!("-----BEGIN PRIVATE KEY-----\n{der}\n-----END PRIVATE KEY-----\n"),
+        "client_email": "push@oby-test.iam.gserviceaccount.com",
+        "token_uri": "https://oauth2.googleapis.com/token"});
+    let mut child = std::process::Command::new(OBID)
+        .args(["vault", "--config"])
+        .arg(folder.0.join("config.json"))
+        .args(["add", "oby.fcm.serviceAccount"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(account.to_string().as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+
+    let answer = notify(fcm.clone());
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    assert_eq!(answer.body, json!({"push": true}));
+    assert_eq!(notify(iphone).body, json!({"push": false}));
+    // On the loopback API, with the API token: no paired device.
+    let kept: Value = serde_json::from_slice(&std::fs::read(&tokens).unwrap()).unwrap();
+    assert_eq!(
+        kept,
+        json!([{"token": "fcm-token:APA91b_test-1", "device": null}])
+    );
+    assert_eq!(
+        std::fs::metadata(&tokens).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!obid.log().contains(&der[..40]), "the key reached the log");
+}

@@ -626,7 +626,7 @@ fn validate_turns(input: Option<Vec<InputTurn>>) -> Result<Option<Vec<Turn>>, Ap
     }
     Ok(Some(out))
 }
-fn validate_attachments(home: &Path, paths: &[String]) -> Result<Vec<String>, ApiError> {
+pub(crate) fn validate_attachments(home: &Path, paths: &[String]) -> Result<Vec<String>, ApiError> {
     let path = home.join("attachments");
     let root = path.canonicalize().unwrap_or(path);
     let mut out = vec![];

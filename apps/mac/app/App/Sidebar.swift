@@ -61,10 +61,19 @@ nonisolated enum SidebarSections {
 }
 
 extension IslandModel {
-    /// Home's tasks (#496, `SidebarSections.work`), less what Clear done took (`lists`).
-    func work(since: Date, seen: Set<String>) -> [WorkList.Item<SidebarSections.JobRow>] {
-        SidebarSections.work(local: desk.jobs.filter(lists), runner: feed.jobs.filter(lists), since: since, seen: seen,
-                             routines: Set(feed.extras.compactMap { $0.value.routine == nil ? nil : $0.key }))
+    /// Home's tasks (#496, `SidebarSections.work`), less what's archived (`archived`).
+    func work(_ state: ChatState) -> [WorkList.Item<SidebarSections.JobRow>] { work(state, archived: false) }
+
+    /// Archived (Sangam's ArchiveView): the tasks that left Home, most recently done first. Only the
+    /// jobs the Mac holds: obid's latest 50, and older ones whose page was open.
+    func archive(_ state: ChatState) -> [WorkList.Item<SidebarSections.JobRow>] { work(state, archived: true) }
+
+    private func work(_ state: ChatState, archived: Bool) -> [WorkList.Item<SidebarSections.JobRow>] {
+        let after = state.archiveAfter, now = Date.now
+        return SidebarSections.work(local: desk.jobs.filter { self.archived($0, local: true, after: after, now: now) == archived },
+                                    runner: feed.jobs.filter { self.archived($0, local: false, after: after, now: now) == archived },
+                                    since: state.since, seen: state.seen,
+                                    routines: Set(feed.extras.compactMap { $0.value.routine == nil ? nil : $0.key }))
     }
 }
 
@@ -80,8 +89,6 @@ struct SidebarView: View {
     let onNewTask: () -> Void
     @AppStorage(GroupBy.key) private var groupBy = GroupBy.type
     @State private var search = ""
-    /// Why the last Clear done didn't go through, until the next one does.
-    @State private var clearProblem: String?
     @State private var searching = false
     @FocusState private var searchFocused: Bool
     /// Groups folded away (while searching, every group with a match opens), and those showing
@@ -96,7 +103,7 @@ struct SidebarView: View {
     /// The panel lists Settings' pages.
     private var listsSettings: Bool { state.section == .settings }
     private var title: String { listsSettings ? "Settings" : listsConversations ? "Conversations" : "Home" }
-    private var work: [WorkList.Item<SidebarSections.JobRow>] { model.work(since: state.since, seen: state.seen) }
+    private var work: [WorkList.Item<SidebarSections.JobRow>] { model.work(state) }
     private var groups: [WorkList.Group<SidebarSections.JobRow>] {
         let query = search.trimmingCharacters(in: .whitespaces)
         let items = work.filter {
@@ -104,20 +111,6 @@ struct SidebarView: View {
                 || $0.job.job.agentName.localizedCaseInsensitiveContains(query)
         }
         return WorkList.groups(items, by: groupBy)
-    }
-
-    /// Clear done can take something: a runner is set, a settled task is listed, and Oby isn't
-    /// waiting on an answer to its own question.
-    private var clearable: Bool {
-        if case .question = desk.talk { return false }
-        return feed.runner != nil && work.contains { model.clears($0.job.job) }
-    }
-
-    /// Clear done: the runner records the time, and the finished tasks go from here and from the iPhone's Home.
-    private func clear() {
-        Task {
-            do { try await feed.clear(); clearProblem = nil } catch { clearProblem = error.localizedDescription }
-        }
     }
 
     var body: some View {
@@ -144,17 +137,17 @@ struct SidebarView: View {
                         }
                         .pickerStyle(.inline)
                         Divider()
-                        // Through the runner (it keeps the time), so the iPhone's Home clears too.
-                        Button("Clear done", action: clear).disabled(!clearable)
+                        // When done tasks leave Home for Archived (Sangam's Archive completed).
+                        Picker("Archive completed", selection: Binding(get: { state.archiveAfter }, set: { state.archiveAfter = $0 })) {
+                            ForEach(ArchiveAfter.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.inline)
                     } label: { IconButton(symbol: "ellipsis", rotated: true) }
                         .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
                         .accessibilityLabel("Home options")
                 }
             }
-            .padding(.bottom, clearProblem == nil ? 12 : 4)
-            if let clearProblem {
-                Text(clearProblem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.horizontal, 10).padding(.bottom, 8)
-            }
+            .padding(.bottom, 12)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if searching && !listsSettings { searchField.transition(.opacity.combined(with: .move(edge: .top))) }
@@ -179,6 +172,13 @@ struct SidebarView: View {
                 .padding(.bottom, 8)
             }
             .scrollIndicators(.never)
+            // Home's foot, under a line, however it's grouped: the done tasks that left Home.
+            if !listsConversations && !listsSettings {
+                let archived = model.archive(state).count
+                if archived > 0 {
+                    ArchivedRow(count: archived, on: state.trail.top == .archived) { state.trail.start(.archived) }
+                }
+            }
         }
         .padding(.horizontal, 16).padding(.top, state.chrome.bar)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -286,25 +286,34 @@ private struct TaskRow: View {
     private var step: WindowStep { .job(id: job.id, local: local) }
     private var picked: Bool { state.trail.shows(job: job.id, local: local) }
     private var done: Bool { item.status == .done }
+    private var renaming: Bool { state.renaming == .init(id: item.id) }
 
     var body: some View {
         HStack(spacing: 0) {
-            Button(action: open) {
+            if renaming {
                 HStack(spacing: 8) {
-                    AgentMark(agent: job.agent).font(Tokens.font(12, .semibold)).frame(width: 14)
-                        .foregroundStyle(done ? Tokens.doneTitle : Tokens.muted)
-                    Text(job.heading).font(Tokens.font(Tokens.textBase))
-                        .foregroundStyle(hovering || picked ? .white : done ? Tokens.doneTitle : Tokens.openTitle)
-                        .fadeOut()
+                    AgentMark(agent: job.agent).font(Tokens.font(12, .semibold)).frame(width: 14).foregroundStyle(Tokens.muted)
+                    RenameField(label: "Task name", title: job.heading) { state.renamed(job, to: $0, feed: model.feed) }
                 }
                 .padding(.leading, 10).frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-                .contentShape(Rectangle())
+            } else {
+                Button(action: open) {
+                    HStack(spacing: 8) {
+                        AgentMark(agent: job.agent).font(Tokens.font(12, .semibold)).frame(width: 14)
+                            .foregroundStyle(done ? Tokens.doneTitle : Tokens.muted)
+                        Text(job.heading).font(Tokens.font(Tokens.textBase))
+                            .foregroundStyle(hovering || picked ? .white : done ? Tokens.doneTitle : Tokens.openTitle)
+                            .fadeOut()
+                    }
+                    .padding(.leading, 10).frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(job.heading), \(item.mark.rawValue)")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("\(job.heading), \(item.mark.rawValue)")
             ZStack {
                 WorkMarkView(mark: item.mark).opacity(hovering ? 0 : 1)
-                if hovering { menu }
+                if hovering && !renaming { menu }
             }
             .frame(width: 22).padding(.leading, 4).padding(.trailing, 5)
         }
@@ -330,15 +339,38 @@ private struct TaskRow: View {
         .accessibilityLabel("More for \(job.heading)")
     }
 
-    @ViewBuilder private var actions: some View {
-        Button("View details") { open() }
-        if model.hasConversation(of: job.id, local: local) {
-            Button("Go to conversation") {
-                model.showConversation(of: job.id, local: local)
-                state.trail.start(step, .talk)
+    private var actions: some View {
+        TaskMenu(row: item.job, model: model, state: state, onViewDetails: open,
+                 onOpenChat: { state.trail.start(step, .talk) }, onRename: { state.renaming = .init(id: item.id) })
+    }
+}
+
+/// Home's foot (Sangam's `.sidebar-archived`): Archived and its count, under a line, 44 tall; it
+/// opens Archived's page.
+private struct ArchivedRow: View {
+    let count: Int
+    let on: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                Text("Archived").font(Tokens.font(Tokens.textBase))
+                Spacer(minLength: 4)
+                Text("\(count)").font(Tokens.font(Tokens.textSm)).monospacedDigit()
             }
+            .foregroundStyle(hovering || on ? Tokens.text : Tokens.label)
+            .padding(.horizontal, 10).frame(height: 44)
+            .overlay(alignment: .top) { Tokens.line.frame(height: 1) }
+            .contentShape(Rectangle())
         }
-        if job.isActive { Button("Stop") { model.stopChatJob(job.id, local: local) } }
+        .buttonStyle(.plain)
+        .padding(.top, 4).padding(.bottom, 2)
+        .onHover { hovering = $0 }
+        .animation(Tokens.fade, value: hovering)
+        .accessibilityLabel("Archived, \(count) task\(count == 1 ? "" : "s")")
+        .accessibilityAddTraits(on ? .isSelected : [])
     }
 }
 

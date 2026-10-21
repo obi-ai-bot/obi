@@ -92,13 +92,17 @@ final class IslandModel {
         return working == 0 ? "idle" : "working"
     }
 
-    /// Whether the window lists a job: it isn't settled (`Job.settled`: still running, waiting,
-    /// needing you or with its pull request open), or it finished after the last Clear done on any
-    /// app. The runner keeps that time, and this Mac's own jobs go by it too.
-    func lists(_ job: Job) -> Bool { job.listed(after: feed.clearedAt, among: desk.jobs + feed.jobs) }
+    /// Whether a job is under Archived, not on Home (`ArchiveAfter.archives`): it's settled
+    /// (`Job.settled`), and it was archived by hand on obid, an older Clear done took it, or it
+    /// finished longer ago than Archive completed says. This Mac's own jobs go by time alone.
+    func archived(_ job: Job, local: Bool, after: ArchiveAfter, now: Date = .now) -> Bool {
+        after.archives(settled: job.settled(among: desk.jobs + feed.jobs), finished: job.finished,
+                       archived: local ? nil : feed.extras[job.id]?.archived, clearedAt: feed.clearedAt, now: now)
+    }
 
-    /// Clear done would take the job from the window (`Job.settled`).
-    func clears(_ job: Job) -> Bool { job.clearable(among: desk.jobs + feed.jobs) }
+    /// Rename, Archive task and Delete task are obid's (`PATCH`, `/archive`, `DELETE /v1/jobs/{id}`):
+    /// not for this Mac's own jobs, nor a runner that isn't obid.
+    func managesJobs(local: Bool) -> Bool { !local && feed.conversationsOn }
 
     /// The one line the iPhone's Home says too (apps/shared/JobList.swift): who's working, and what
     /// needs you among the jobs listed.
