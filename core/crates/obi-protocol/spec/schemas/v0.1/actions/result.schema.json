@@ -51,7 +51,7 @@
         "commits": { "$ref": "../common.schema.json#/$defs/bundle", "description": "The job's commits, a git bundle on the job channel. Absent when it made none." },
         "head_sha": { "$ref": "../common.schema.json#/$defs/sha" },
         "host": { "$ref": "../common.schema.json#/$defs/host_use" },
-        "cost_cents": { "$ref": "../common.schema.json#/$defs/cents", "description": "On a share of the receiver's owner's API account (protocol.md section 16): what the job's model calls cost at list price." }
+        "cost_cents": { "$ref": "../common.schema.json#/$defs/cents", "description": "On a share of the receiver's owner's API account (protocol.md section 15): what the job's model calls cost at list price." }
       }
     }
   ]

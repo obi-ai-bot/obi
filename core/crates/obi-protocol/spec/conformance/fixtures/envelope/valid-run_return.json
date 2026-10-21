@@ -1,7 +1,7 @@
 {
   "case": "envelope",
   "name": "valid-run_return",
-  "description": "The receiver's owner came back: the job comes back with its commits.",
+  "description": "The receiver's Mac stopped the job: it comes back with its commits, saying neither why nor when.",
   "expect": "accept",
   "context": {
     "now": "2026-10-14T12:00:00Z",
@@ -21,7 +21,7 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "0a6626a2-1ccb-886f-8e57-b9d718105ae8",
+    "id": "652a8f1c-6432-81bf-85df-f9b86e190c4c",
     "type": "run_return",
     "from": "obi-a",
     "to": "obi-b",
@@ -32,8 +32,7 @@
     "expires_at": "2026-10-14T13:00:00Z",
     "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
     "body": {
-      "reason": "owner_back",
-      "minutes": 18,
+      "reason": "host_unavailable",
       "commits": {
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "bytes": 2210
@@ -45,6 +44,6 @@
         "peak_memory_mb": 3100
       }
     },
-    "signature": "EfWKUf4zSvF5D4kJ9nmt8sQ-d8sKhdvVwUSV_689PrGHfu81N9HzRAGblUDElaUKwhc6tVdr4OEHlW9Za2bcAw"
+    "signature": "HxP37_uWQlU74Yt9WLTf_-nu71ur7XeoqUpWpfZnr3xFwuqSp74naDB8-glDrKf-l70inIU4jTU2OL0X23evDA"
   }
 }

@@ -110,7 +110,11 @@ pub fn exchange_problem(
     if kind == "answer" && asked != "question" {
         return Some(format!("an answer answers a question, not a {asked}"));
     }
-    // No words in a guest job's or a share's exchange: a decline there has no note (rule 9).
+    // No words in a guest job's or a share's exchange: a decline there has no note, and a guest
+    // job's takes no status, whose states and note would say when its host's owner is there (rule 9).
+    if kind == "status" && asked == "run_request" {
+        return Some("a run_request takes no status".into());
+    }
     if kind == "decline"
         && (asked == "run_request" || asked == "share_offer")
         && reply["body"].get("note").is_some()

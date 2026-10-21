@@ -1,7 +1,7 @@
 {
   "case": "audit",
   "name": "valid-chain-run-done",
-  "description": "A job run on another Obi's Mac: accepted, running, paused when its owner came back, resumed, done. (Six entries: obi-a's first key is valid up to seq 6.)",
+  "description": "A job run on another Obi's Mac: accepted, queued, starting, running, done. (Six entries: obi-a's first key is valid up to seq 6.)",
   "expect": "accept",
   "context": {
     "keys": {
@@ -92,6 +92,54 @@
         "recorded_at": "2026-10-14T11:59:03Z",
         "envelope": {
           "protocol": "obi/0.1",
+          "id": "3b1f08e5-2949-8e49-8ce2-e2bd38920857",
+          "type": "run_progress",
+          "from": "obi-a",
+          "to": "obi-b",
+          "sphere": "conf-sphere",
+          "correlation_id": "728f831b-6e11-87d7-8141-3ddc76a417fd",
+          "in_reply_to": "728f831b-6e11-87d7-8141-3ddc76a417fd",
+          "created_at": "2026-10-14T11:59:00Z",
+          "expires_at": "2026-10-14T13:00:00Z",
+          "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
+          "body": {
+            "state": "queued"
+          },
+          "signature": "HWRHy7gVmJeNzZn5pb3efr_gD3xHza0W87KFcbv3pIwOTCSA6gDBpyo2ALYiLm6VCfZ-i_CRTQNbhZGVIqZKAA"
+        },
+        "hash": "a8ffabeca73a72fa9a3341a922d5372fd34313c34fd1b8bd927e18525dcb7e76"
+      },
+      {
+        "sphere": "conf-sphere",
+        "seq": 4,
+        "prev": "a8ffabeca73a72fa9a3341a922d5372fd34313c34fd1b8bd927e18525dcb7e76",
+        "recorded_at": "2026-10-14T11:59:04Z",
+        "envelope": {
+          "protocol": "obi/0.1",
+          "id": "d7269b40-23eb-83fb-8feb-3f822cc11407",
+          "type": "run_progress",
+          "from": "obi-a",
+          "to": "obi-b",
+          "sphere": "conf-sphere",
+          "correlation_id": "728f831b-6e11-87d7-8141-3ddc76a417fd",
+          "in_reply_to": "728f831b-6e11-87d7-8141-3ddc76a417fd",
+          "created_at": "2026-10-14T11:59:00Z",
+          "expires_at": "2026-10-14T13:00:00Z",
+          "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
+          "body": {
+            "state": "starting"
+          },
+          "signature": "1132u6Uxb8Jvv3M3CL1W2QgKKIQf7cyByw06vRnGPVQtE70fjjusBb2FeC1dI-8wSIwv1KHoinlNNA6Q78ExDg"
+        },
+        "hash": "bb1fc62bb40c38e8865df4a448a05f98d82966617e1e0faa10dd67c5d014cff3"
+      },
+      {
+        "sphere": "conf-sphere",
+        "seq": 5,
+        "prev": "bb1fc62bb40c38e8865df4a448a05f98d82966617e1e0faa10dd67c5d014cff3",
+        "recorded_at": "2026-10-14T11:59:05Z",
+        "envelope": {
+          "protocol": "obi/0.1",
           "id": "7cb11d75-21fb-85d2-803f-3ba0bf94f0b7",
           "type": "run_progress",
           "from": "obi-a",
@@ -107,60 +155,12 @@
           },
           "signature": "exhO8y27Be4gxa-tkd4JKiGYXFYC245tVY2jRm-aycHSRNUygXnXckXcPC_uUE5WsENOEl1JHVS2O5qSW7sZAg"
         },
-        "hash": "00a555775de85a345284b359db35e7048719f6fb7157680b2c338570358bbbe0"
-      },
-      {
-        "sphere": "conf-sphere",
-        "seq": 4,
-        "prev": "00a555775de85a345284b359db35e7048719f6fb7157680b2c338570358bbbe0",
-        "recorded_at": "2026-10-14T11:59:04Z",
-        "envelope": {
-          "protocol": "obi/0.1",
-          "id": "2eb4e9ed-4ae1-8397-8e32-74c8fa765154",
-          "type": "run_progress",
-          "from": "obi-a",
-          "to": "obi-b",
-          "sphere": "conf-sphere",
-          "correlation_id": "728f831b-6e11-87d7-8141-3ddc76a417fd",
-          "in_reply_to": "728f831b-6e11-87d7-8141-3ddc76a417fd",
-          "created_at": "2026-10-14T11:59:00Z",
-          "expires_at": "2026-10-14T13:00:00Z",
-          "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
-          "body": {
-            "state": "paused"
-          },
-          "signature": "O4F5tyT1N_gzewDSStSosnclVQfZuL-ed_ZhKWoKD76-Efyr0rB69AkQK9utcr4JvWutMp9hBpnwERER7rBPBQ"
-        },
-        "hash": "857b3a48d53b0d3b5788289988c83384b884a0e3224454b78fffdf1447322e62"
-      },
-      {
-        "sphere": "conf-sphere",
-        "seq": 5,
-        "prev": "857b3a48d53b0d3b5788289988c83384b884a0e3224454b78fffdf1447322e62",
-        "recorded_at": "2026-10-14T11:59:05Z",
-        "envelope": {
-          "protocol": "obi/0.1",
-          "id": "56cb077d-e8cb-81db-8173-da55fb424660",
-          "type": "run_progress",
-          "from": "obi-a",
-          "to": "obi-b",
-          "sphere": "conf-sphere",
-          "correlation_id": "728f831b-6e11-87d7-8141-3ddc76a417fd",
-          "in_reply_to": "728f831b-6e11-87d7-8141-3ddc76a417fd",
-          "created_at": "2026-10-14T11:59:00Z",
-          "expires_at": "2026-10-14T13:00:00Z",
-          "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
-          "body": {
-            "state": "resumed"
-          },
-          "signature": "OHGwPL5VXLpSHF4AjJZMwuqI48Kok903vJt7yminNFizp7yjMrVEZnYe7tPcA2gd597tJReMFxbgEgfsaGBICw"
-        },
-        "hash": "941fb334f6f7bd6d2ccbbda3fed02109572e76981243c0e413f225e30ac39801"
+        "hash": "46fa0f5f50515b32125c2181aa60b6ece34eee86b4cfd1d069eb09f27849a9a6"
       },
       {
         "sphere": "conf-sphere",
         "seq": 6,
-        "prev": "941fb334f6f7bd6d2ccbbda3fed02109572e76981243c0e413f225e30ac39801",
+        "prev": "46fa0f5f50515b32125c2181aa60b6ece34eee86b4cfd1d069eb09f27849a9a6",
         "recorded_at": "2026-10-14T11:59:06Z",
         "envelope": {
           "protocol": "obi/0.1",
@@ -191,7 +191,7 @@
           },
           "signature": "-rOihGW35VeJVR4JaM0vJoJoP2Fw2Eb0_JCYWaKw4z5BZo18xwZC2L18nK_tx8GzzHIy5q2sVJ0e3fMLgo7UAA"
         },
-        "hash": "bb5314a8d59bf0478f482e0ecb4e9bf871744ac73cee516ed9141ad84e2ce99f"
+        "hash": "f4848cb5860f08109bc3dd093ece6314d7e242e48bff5b7759e1a1fcfe099b84"
       }
     ]
   }

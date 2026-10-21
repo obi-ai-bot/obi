@@ -22,7 +22,7 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "3af987ad-baa0-82a5-8b7b-5dcef2d59fe0",
+    "id": "99a46229-7ef2-8f6b-8bce-53c53c7f8ca1",
     "type": "run_return",
     "from": "obi-a",
     "to": "obi-b",
@@ -33,10 +33,9 @@
     "expires_at": "2026-10-14T13:00:00Z",
     "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
     "body": {
-      "reason": "owner_back",
-      "minutes": 3,
+      "reason": "host_unavailable",
       "note": "Wellington is back."
     },
-    "signature": "VsScVxgn3_oFrnBklOkCDR_sjFtoq20-cD3e7ttTunwh0C8E76Seg60JqbrnWEYLdK4aTYYaxMFercoH4wURDw"
+    "signature": "LeWuhq-_YsEL61fbJHjGCqDzE-r1mkMUDonG8Up88xtJzrBbog26cFFuNOU7I4eFhTmVd4Y9ULJBnlaLnwMACg"
   }
 }

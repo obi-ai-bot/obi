@@ -143,6 +143,41 @@ pub struct Hosting {
     published: Mutex<Option<(Value, i64)>>,
     /// The calls on each share under way, by grant: at most SHARE_CALLS_AT_ONCE.
     share_calls: Mutex<HashMap<String, Arc<Semaphore>>>,
+    /// The `free` the runner status says.
+    shown_free: Mutex<Blurred>,
+}
+
+/// How long the `free` a runner status says holds at least, and the most added to it at random.
+const BLUR_SECONDS: i64 = 900;
+const BLUR_JITTER: i64 = 300;
+
+/// The `free` a runner status says (the owner's decision of 2026-10-21): the Mac's own, read only
+/// at moments 15 to 20 minutes apart, picked at random. When it changes says nothing of when the
+/// owner came back or left: only that it was within the 20 minutes before.
+#[derive(Default)]
+struct Blurred {
+    shown: Option<bool>,
+    next_look: i64,
+}
+
+impl Blurred {
+    fn show(&mut self, actual: bool, now: i64, jitter: i64) -> bool {
+        match self.shown {
+            Some(shown) if now < self.next_look => shown,
+            _ => {
+                self.shown = Some(actual);
+                self.next_look = now + BLUR_SECONDS + jitter;
+                actual
+            }
+        }
+    }
+}
+
+/// A random 0 to BLUR_JITTER seconds.
+fn jitter() -> i64 {
+    let mut bytes = [0u8; 2];
+    getrandom::fill(&mut bytes).expect("the system's random source works");
+    i64::from(u16::from_le_bytes(bytes)) % (BLUR_JITTER + 1)
 }
 
 /// The most calls on one share at once, whichever jobs make them.
@@ -603,7 +638,7 @@ async fn with_place(
         // It stops: its disk's key goes with it.
         vm.stop().await;
         servers.abort();
-        Ok(Some((ended, host, started)))
+        Ok(Some((ended, host)))
     }
     .await;
     let outcome = match outcome {
@@ -619,7 +654,7 @@ async fn with_place(
             return Err(e);
         }
     };
-    let (ended, host, started) = outcome;
+    let (ended, host) = outcome;
     if let Some((grant, owner)) = &shared.grant {
         // Each job's cost rounds up to a whole cent.
         let micros = shared.cost.load(Ordering::Relaxed);
@@ -677,12 +712,17 @@ async fn with_place(
         .and_then(|c| head_of(&c.head, request["branch"].as_str().unwrap_or("")));
     let done = shared.done.lock().unwrap().clone();
     let repo = request["repo"].clone();
-    let minutes_ran = (time::now() - started) / 60;
     let mut body = if ended == "done" {
         let ok = done.as_ref().and_then(|d| d["exit"].as_i64()) == Some(0);
         json!({"for": "run_request", "outcome": if ok { "done" } else { "failed" }, "repo": repo, "host": host})
     } else {
-        json!({"reason": ended, "minutes": minutes_ran, "host": host})
+        // Never why this Mac stopped it, nor how long it ran: either would say when its owner came
+        // back (the owner's decision of 2026-10-21). Only its time being up or its share used.
+        let reason = match ended.as_str() {
+            "time_limit" | "share_used" => ended.as_str(),
+            _ => "host_unavailable",
+        };
+        json!({"reason": reason, "host": host})
     };
     if let Some(commits) = sent_commits {
         body["commits"] = commits;
@@ -1120,7 +1160,7 @@ async fn metered_call(
     let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_MODEL_BODY).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
-    // Counting tokens and listing models cost nothing; a message is metered.
+    // Counting tokens costs nothing; a message is metered.
     let costs = path.starts_with("/v1/messages") && !path.starts_with("/v1/messages/count_tokens");
     let asked: Value = serde_json::from_slice(&body).unwrap_or_default();
     let model = asked["model"].as_str().unwrap_or("").to_owned();
@@ -1128,6 +1168,13 @@ async fn metered_call(
     if costs {
         if let Some(why) = super::shares::unmeterable(&asked) {
             return model_error(StatusCode::BAD_REQUEST, &format!("obid refused it: {why}."));
+        }
+        // Its worst case needs a ceiling on its output.
+        if !asked["max_tokens"].is_u64() {
+            return model_error(
+                StatusCode::BAD_REQUEST,
+                "obid refused it: a call on a share needs max_tokens.",
+            );
         }
         let Some(worst) = super::shares::worst(&model, &asked, body.len()) else {
             return model_error(
@@ -1486,7 +1533,13 @@ pub async fn status_now(link: &Arc<Link>) -> Option<Value> {
     let setup = link.hosting_setup();
     let slots_free = link.hosting.count() < usize::from(mac.jobs_at_once);
     let signals = vm::signals(&setup.helper).await.ok();
-    let is_free = setup.ready() && slots_free && signals.is_some_and(|s| free(&mac, &s));
+    let actually_free = setup.ready() && slots_free && signals.is_some_and(|s| free(&mac, &s));
+    let is_free =
+        link.hosting
+            .shown_free
+            .lock()
+            .unwrap()
+            .show(actually_free, time::now(), jitter());
     let offered: Value = if mac.who == "people" {
         json!(mac.people)
     } else {
@@ -1596,6 +1649,22 @@ mod tests {
         assert!(theirs.exists());
         clean_leftovers(&other);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn the_free_a_status_says_changes_only_at_its_own_random_moments() {
+        let mut blurred = Blurred::default();
+        // The first look says what the Mac is.
+        assert!(blurred.show(true, 0, 120));
+        // The owner comes back at once: the status still says free until the next look, at 1,020 s.
+        assert!(blurred.show(false, 1, 0));
+        assert!(blurred.show(false, 1_019, 0));
+        assert!(!blurred.show(false, 1_020, 0));
+        // Free again a minute later: it says so only at the next look, 15 to 20 minutes on.
+        assert!(!blurred.show(true, 1_080, 0));
+        assert!(!blurred.show(true, 1_020 + 900 - 1, 0));
+        assert!(blurred.show(true, 1_020 + 900, 0));
+        assert!((0..=BLUR_JITTER).contains(&jitter()));
     }
 
     #[test]

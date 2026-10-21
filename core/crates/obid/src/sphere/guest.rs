@@ -588,17 +588,16 @@ async fn run_in(
     }
     let mut turn = session.turn;
     if reply["type"] == "run_return" {
-        let minutes = reply["body"]["minutes"].as_u64().unwrap_or(0);
+        // The other Mac says only that it couldn't keep it, never why or when (the owner's decision
+        // of 2026-10-21): how long it ran is this Mac's own count.
+        let minutes = accepted.elapsed().as_secs() / 60;
         let why = match reply["body"]["reason"].as_str() {
-            Some("owner_back") => format!("{} is back at that Mac", ask.host_owner),
             Some("time_limit") => "it reached its time limit there".to_owned(),
-            Some("sharing_off") => format!("{} turned sharing off", ask.host_owner),
-            Some("shutdown") => "that Mac shut down".to_owned(),
             Some("share_used") => format!(
                 "your share of {}'s account is used for this month",
                 ask.host_owner
             ),
-            _ => format!("{} stopped it", ask.host_owner),
+            _ => "that Mac couldn't keep running it".to_owned(),
         };
         let text = format!(
             "Came back from {}'s Mac: {why}. It ran {minutes} minute{} there and came back with its notes and {count} commit{}. Try again to send it back there, or run it here.",

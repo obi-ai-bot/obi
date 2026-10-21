@@ -21,7 +21,7 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "757517e4-52e3-8c0e-8774-42342bc64dec",
+    "id": "0379f303-5e72-8e31-8170-488795fdb6dd",
     "type": "run_return",
     "from": "obi-a",
     "to": "obi-b",
@@ -33,9 +33,8 @@
     "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
     "body": {
       "reason": "share_used",
-      "minutes": 7,
       "cost_cents": 121
     },
-    "signature": "fUqmkG3DOZMWbLmbYKzMk78keUBKD2a0jjo7lR-64b5JaPsaP2sOn06lyQMWe8_6M9LHmlYIicIw0pBGdm9jCg"
+    "signature": "koFi6AP0dfDSEr3d2fnAjAzPcKiXyDzNf1s0747N5_UVdVNQ6yDVLHgg9IryRkbjCO_9FmkY2lozGFS2lJ6vBg"
   }
 }

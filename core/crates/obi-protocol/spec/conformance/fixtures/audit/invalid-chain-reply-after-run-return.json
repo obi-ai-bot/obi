@@ -104,8 +104,7 @@
           "expires_at": "2026-10-14T13:00:00Z",
           "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
           "body": {
-            "reason": "owner_back",
-            "minutes": 18,
+            "reason": "host_unavailable",
             "commits": {
               "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
               "bytes": 2210
@@ -117,14 +116,14 @@
               "peak_memory_mb": 3100
             }
           },
-          "signature": "wJt5MsmPwgCP7o9SiV36N0_Gu7jUeBn14_ncJ9KMF1z7ZySBiBy2m9a0IrepJMpytJ0Q6YiGrnceMAD-0i8LAQ"
+          "signature": "Vttu7Cc-FnRvcGFNE29aDtUVDFrFeJNZukFREkh50Ov9E-ITsB2rqbLp8HOvEvvNmywozy15fp-MP40XtaOFDw"
         },
-        "hash": "8cdb71b31a0f79c49f8c21f6d4bd787f338d32be912f5d622ae1013e0b5adb31"
+        "hash": "4a385094b07209fa56d9c36be85ef4b4630c5091d2284f6070e950dd34576d2c"
       },
       {
         "sphere": "conf-sphere",
         "seq": 4,
-        "prev": "8cdb71b31a0f79c49f8c21f6d4bd787f338d32be912f5d622ae1013e0b5adb31",
+        "prev": "4a385094b07209fa56d9c36be85ef4b4630c5091d2284f6070e950dd34576d2c",
         "recorded_at": "2026-10-14T11:59:04Z",
         "envelope": {
           "protocol": "obi/0.1",
@@ -143,7 +142,7 @@
           },
           "signature": "-prAiNsu3gTXC133ucEq9qJYxQO4X-z5RhfHZxqVM0XJi3REAJpO06vq1S70m_CopO4__7VksQBGZoCg8UYcCg"
         },
-        "hash": "670b6f372ef7c58d8feae9cc8957ca2683046448714bace1cecc629cdd7644f6"
+        "hash": "ba795a145ed13bc9ff70d024ce68613193cb4687bceec279a26c89f50a558275"
       }
     ]
   }

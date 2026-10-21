@@ -441,18 +441,24 @@ async fn stop_sends_the_job_back_with_its_commit_and_it_needs_its_owner() {
         assert_eq!(job["status"], "interrupted", "{job}");
         let reason = job["reason"].as_str().unwrap_or("");
         assert!(
-            reason.starts_with("Came back from Wellington's Mac: Wellington stopped it."),
+            reason
+                .starts_with("Came back from Wellington's Mac: that Mac couldn't keep running it."),
             "{reason}"
         );
+        // The chain says only that the host was unavailable: not that Wellington stopped it, nor
+        // how long it ran.
+        let back: Vec<Value> = p
+            .sphere
+            .recorded()
+            .into_iter()
+            .filter(|e| e["type"] == "run_return")
+            .collect();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0]["body"]["reason"], "host_unavailable", "{}", back[0]);
+        assert!(back[0]["body"].get("minutes").is_none(), "{}", back[0]);
         assert!(reason.contains("1 commit"), "{reason}");
         let seen = std::fs::read_to_string(p.vm.join("guest.log")).unwrap();
         assert!(seen.contains("return stopped"), "{seen}");
-        let recorded = p.sphere.recorded();
-        assert!(
-            recorded
-                .iter()
-                .any(|e| e["type"] == "run_return" && e["body"]["reason"] == "stopped")
-        );
         // Run it here: the job that came back moves to this Mac, its commit kept.
         let id = job["id"].as_str().unwrap();
         let here = call(

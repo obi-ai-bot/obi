@@ -82,8 +82,7 @@
           "expires_at": "2026-10-14T13:00:00Z",
           "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
           "body": {
-            "reason": "owner_back",
-            "minutes": 18,
+            "reason": "host_unavailable",
             "commits": {
               "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
               "bytes": 2210
@@ -95,9 +94,9 @@
               "peak_memory_mb": 3100
             }
           },
-          "signature": "jM7CGFMur2JiSPpOLH74Yz7GtPgOYx-aR0QVIVAyWhNfrEYUQhCHXz7a6oGcmoh1Bhl1zBLG47fF4hsquoW8BQ"
+          "signature": "ETLIqRasclLsLeiJPhFe3h61b0TX8ty77xGGf2tVD9SlUTXgzYNEDX6tYDkjv6tEN-j-gR6SxvgeGQ4ug5-9CQ"
         },
-        "hash": "4c812a2ef5ab6e0bc4d1dbcbbc96ba7e4a83e3f2775695c447fe4f83cc70afb3"
+        "hash": "82a5c7d1f1b0d8644104f7e5ce9e596db3404f69f7fe9904290b8f7257178514"
       }
     ]
   }
