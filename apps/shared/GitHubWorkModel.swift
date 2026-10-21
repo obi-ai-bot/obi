@@ -301,25 +301,29 @@ extension GitHubWork {
 
 #if DEBUG
 extension GitHubWork {
-    /// Debug builds launched with `-ObySampleGitHub YES` (or `signedOut`, or `busy`: 9 reviews and
-    /// 51 issues on a board's columns, the owner's shape on 2026-10-21): made-up GitHub work in
-    /// place of obid's, for screenshots of Review PR and Issues. Nothing is sent.
+    /// The owner's shape of GitHub work on 2026-10-21, made up: 9 pull requests waiting for review
+    /// and 51 issues assigned, 47 of them on a board's columns (3 In progress, 14 Todo, 30 Backlog).
+    static func busy(now: Date = .now) -> GitHubWork {
+        let columns = ["In progress", "Todo", "Backlog"]
+        return GitHubWork(signedIn: true, login: "well-prado", items: (0..<9).map { n in
+            Item(id: "rv\(n)", list: .reviews, repo: "deskree-inc/tetrix-ee", number: 420 - n, title: "Review request \(n + 1)",
+                 url: "https://github.com/deskree-inc/tetrix-ee/pull/\(420 - n)", author: ["Ernesto", "Dima", "Daniel"][n % 3],
+                 updated: now.addingTimeInterval(Double(n + 1) * -1700))
+        } + (0..<51).map { n in
+            Item(id: "is\(n)", list: .assigned, repo: "deskree-inc/obi", number: 800 - n, title: "Roadmap issue \(n + 1)",
+                 url: "https://github.com/deskree-inc/obi/issues/\(800 - n)", author: "well-prado", updated: now.addingTimeInterval(Double(n + 1) * -2400),
+                 board: n < 47 ? .init(project: "Oby — Roadmap", column: columns[n < 3 ? 0 : n < 17 ? 1 : 2]) : nil)
+        })
+    }
+
+    /// Debug builds launched with `-ObySampleGitHub YES` (or `signedOut`, or `busy`): made-up GitHub
+    /// work in place of obid's, for screenshots of Review PR and Issues. Nothing is sent.
     /// ponytail: fixed items, enough for screenshots.
     static var sample: GitHubWork? {
         switch UserDefaults.standard.string(forKey: "ObySampleGitHub") {
         case "signedOut": return GitHubWork(signedIn: false)
         case nil, "NO": return nil
-        case "busy":
-            let now = Date.now, columns = ["In progress", "Todo", "Backlog"]
-            return GitHubWork(signedIn: true, login: "well-prado", items: (0..<9).map { n in
-                Item(id: "rv\(n)", list: .reviews, repo: "deskree-inc/tetrix-ee", number: 420 - n, title: "Review request \(n + 1)",
-                     url: "https://github.com/deskree-inc/tetrix-ee/pull/\(420 - n)", author: ["Ernesto", "Dima", "Daniel"][n % 3],
-                     updated: now.addingTimeInterval(Double(n + 1) * -1700))
-            } + (0..<51).map { n in
-                Item(id: "is\(n)", list: .assigned, repo: "deskree-inc/obi", number: 800 - n, title: "Roadmap issue \(n + 1)",
-                     url: "https://github.com/deskree-inc/obi/issues/\(800 - n)", author: "well-prado", updated: now.addingTimeInterval(Double(n + 1) * -2400),
-                     board: n < 47 ? .init(project: "Oby — Roadmap", column: columns[n < 3 ? 0 : n < 17 ? 1 : 2]) : nil)
-            })
+        case "busy": return busy()
         default:
             let now = Date.now
             return GitHubWork(signedIn: true, login: "well-prado", items: [

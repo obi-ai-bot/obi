@@ -7,6 +7,14 @@ import SwiftUI
 /// "Start it?" decision): GitHub's mark, who and what, the repository, then the headline and the
 /// one tap that starts Oby's job, Open on GitHub, and Later.
 struct GitHubCard: View {
+    /// Its start button (filled, first) and Open on GitHub; Later is the card's own.
+    static func options(_ item: GitHubWork.Item) -> [CardOption] {
+        (item.action.map { [CardOption(label: $0, answer: $0, recommended: true)] } ?? [])
+            + (item.page == nil ? [] : [CardOption(label: "Open on GitHub", answer: "open")])
+    }
+    /// No line under the choices saying what each does: Sangam's GitHub card has none.
+    static let explains = false
+
     let item: GitHubWork.Item
     let start: () async throws -> Void
     let later: () -> Void
@@ -39,10 +47,8 @@ struct GitHubCard: View {
             }
             .padding(.leading, 26).padding(.top, 4)
             VStack(alignment: .leading, spacing: 0) {
-                AskCard(kind: item.label, title: item.headline, happened: item.note,
-                        options: (item.action.map { [CardOption(label: $0, answer: $0, recommended: true)] } ?? [])
-                            + (item.page == nil ? [] : [CardOption(label: "Open on GitHub", answer: "open")]),
-                        busy: busy, explains: false,
+                AskCard(kind: item.label, title: item.headline, happened: item.note, options: Self.options(item),
+                        busy: busy, explains: Self.explains,
                         onChoose: { option in
                             if option.answer == "open" { item.page.map { openURL($0) }; return }
                             busy = true

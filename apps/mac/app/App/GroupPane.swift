@@ -66,8 +66,9 @@ struct GroupPane: View {
                 }
                 // Completed ones leave Home after a while (Archive completed, in Home's ⋮).
                 if tab == .done {
-                    Button(Self.archivedLink, action: onOpenArchive)
-                        .buttonStyle(LinkTextStyle()).padding(.top, 8).frame(maxWidth: .infinity)
+                    // The row's full width, as the design's `.group-archived`: a click beside the words opens it too.
+                    Button(action: onOpenArchive) { Text(Self.archivedLink).frame(maxWidth: .infinity) }
+                        .buttonStyle(LinkTextStyle()).padding(.top, 8)
                 }
             }
             .frame(maxWidth: Tokens.column, alignment: .leading)
@@ -75,7 +76,8 @@ struct GroupPane: View {
             .padding(.horizontal, Tokens.gutter).padding(.top, 16).padding(.bottom, 32)
             .frame(maxWidth: .infinity, minHeight: height, alignment: .top)
             // Under the page's content, so only a click that lands on nothing else closes it (Sangam's GroupView).
-            .background { Color.clear.contentShape(Rectangle()).onTapGesture(perform: onClose) }
+            // A button, not a tap gesture: a tap gesture there never fires inside the scroll view.
+            .background { Button(action: onClose) { Tokens.bg }.buttonStyle(.plain).accessibilityHidden(true) }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .scrollIndicators(.never)

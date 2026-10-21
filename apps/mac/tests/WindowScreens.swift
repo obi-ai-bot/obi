@@ -199,17 +199,7 @@ struct WindowScreens {
             }
         }
         for n in 0..<8 { model.feed.apply(job("d\(n)", "Done issue \(470 - n)", status: .done, issue: 470 - n, ago: 4000 + Double(n) * 3000)) }
-        let authors = ["Ernesto", "Dima", "Daniel", "Sangam"], columns = ["In progress", "Todo", "Backlog"]
-        let reviews = (0..<9).map { n in
-            GitHubWork.Item(id: "rv\(n)", list: .reviews, repo: "deskree-inc/tetrix-ee", number: 420 - n, title: "Review request \(n + 1)",
-                            url: "https://github.com/deskree-inc/tetrix-ee/pull/\(420 - n)", author: authors[n % 4], updated: now - Double(n + 1) * 1700)
-        }
-        let issues = (0..<51).map { n in
-            GitHubWork.Item(id: "is\(n)", list: .assigned, repo: "deskree-inc/obi", number: 800 - n, title: "Roadmap issue \(n + 1)",
-                            url: "https://github.com/deskree-inc/obi/issues/\(800 - n)", author: "well-prado", updated: now - Double(n + 1) * 2400,
-                            board: n < 47 ? .init(project: "Oby — Roadmap", column: columns[n < 3 ? 0 : n < 17 ? 1 : 2]) : nil)
-        }
-        model.feed.apply(GitHubWork(signedIn: true, login: "well-prado", items: reviews + issues))
+        model.feed.apply(GitHubWork.busy(now: now))
         return model
     }
 

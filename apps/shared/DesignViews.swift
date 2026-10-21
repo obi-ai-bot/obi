@@ -36,6 +36,11 @@ struct AskCard: View {
     var onOpen: (() -> Void)? = nil
     @State private var picked: String?
     @State private var showsDetails = false
+
+    /// The choices said under the pills (what each does, the recommended one marked), none when `explains` is off.
+    static func explained(_ options: [CardOption], explains: Bool) -> [CardOption] {
+        explains ? options.filter { $0.detail != nil || $0.recommended } : []
+    }
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -82,7 +87,7 @@ struct AskCard: View {
                 }
                 .padding(.top, 14)
                 // What each choice does, the recommended one marked, and the rule Always allow saves.
-                let explained = explains ? options.filter { $0.detail != nil || $0.recommended } : []
+                let explained = Self.explained(options, explains: explains)
                 if !explained.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(Array(explained.enumerated()), id: \.offset) { _, option in

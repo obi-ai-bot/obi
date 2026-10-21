@@ -90,4 +90,41 @@ struct WindowInputTests {
             }
         }
     }
+
+    /// The tasks page as Sangam's GroupView (#822): a click on a card stays on the page, and one on
+    /// the page's empty space goes back.
+    @Test func theTasksPageClosesOnAClickOnNothing() async throws {
+        try await withPanel(open: false) {
+            let model = model()
+            model.feed.apply(GitHubWork.busy(now: now))
+            let state = ChatState(defaults: .scratch)
+            state.trail.start(.group(.issues))
+            let window = ChatWindow.make(ChatView(model: model, state: state, character: nil))
+            window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+            window.orderFrontRegardless()
+            window.makeKey()
+            defer { window.close() }
+            ChatWindow.measureLights(window, into: state)
+            try await Task.sleep(for: .milliseconds(800))
+            let size = try #require(window.contentView?.bounds.size)
+            func click(_ at: NSPoint) async throws {
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    let event = try #require(NSEvent.mouseEvent(with: type, location: at, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+                    window.sendEvent(event)
+                    try await Task.sleep(for: .milliseconds(80))
+                }
+                try await Task.sleep(for: .milliseconds(400))
+            }
+            // The first card's Later: the clicks reach the page's buttons.
+            try await click(NSPoint(x: size.width / 2 - 21, y: size.height - 373))
+            #expect(model.feed.gitHubLater.contains("is0"), "Later didn't get the click")
+            // The first card's right half, between its column chip and its headline: still on the page.
+            try await click(NSPoint(x: size.width / 2 + 160, y: size.height - 300))
+            #expect(state.trail.top == .group(.issues), "a click on a card closed the page")
+            // Left of the column, halfway down: nothing there, so back Home.
+            try await click(NSPoint(x: 40, y: size.height / 2))
+            #expect(state.trail.isHome, "a click on the page's empty space didn't go back: \(String(describing: state.trail.top)) size \(size)")
+        }
+    }
 }
