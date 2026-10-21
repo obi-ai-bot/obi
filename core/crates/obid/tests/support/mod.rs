@@ -809,6 +809,8 @@ pub struct SphereState {
     pub relayed: Vec<u8>,
     /// Runner statuses, by Obi, as put.
     pub runners: HashMap<String, Value>,
+    /// A head the audit chain names in place of its last entry's.
+    pub head: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -1103,10 +1105,12 @@ async fn audit(
         .take(limit)
         .cloned()
         .collect();
-    let head = state.entries.last().map_or(
-        json!({"seq": 0, "hash": obi_protocol::ZERO_HASH}),
-        |e| json!({"seq": e["seq"], "hash": e["hash"]}),
-    );
+    let head = state.head.clone().unwrap_or_else(|| {
+        state.entries.last().map_or(
+            json!({"seq": 0, "hash": obi_protocol::ZERO_HASH}),
+            |e| json!({"seq": e["seq"], "hash": e["hash"]}),
+        )
+    });
     axum::Json(json!({"sphere": SPHERE, "entries": entries, "head": head})).into_response()
 }
 

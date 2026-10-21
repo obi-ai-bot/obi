@@ -1111,6 +1111,12 @@ async fn a_chain_rolled_back_or_forked_doesnt_check_out() {
     let audit = tokio::task::block_in_place(|| get(&obid, "/v1/obid/sphere/audit"));
     assert_eq!(audit["verified"], true, "{audit}");
     let whole = sphere.lock().entries.clone();
+    // A head that isn't the chain's last entry.
+    let last = whole.last().unwrap().clone();
+    sphere.lock().head = Some(json!({"seq": last["seq"], "hash": obi_protocol::ZERO_HASH}));
+    let named = tokio::task::block_in_place(|| get(&obid, "/v1/obid/sphere/audit"));
+    assert_eq!(named["problem"], "head_mismatch", "{named}");
+    sphere.lock().head = None;
     // Rolled back: the last entry gone.
     sphere.lock().entries.pop();
     let rolled = tokio::task::block_in_place(|| get(&obid, "/v1/obid/sphere/audit"));

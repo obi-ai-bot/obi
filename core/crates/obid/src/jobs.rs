@@ -4359,7 +4359,11 @@ impl Jobs {
                     repo: &job.repo,
                     base_branch: job.base.as_deref().unwrap_or("main"),
                     branch: &job.branch,
-                    title: job.title.as_deref().unwrap_or(&job.task),
+                    // The title goes in the run_request (and the chain): never the task's words.
+                    title: &job
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| format!("Job in {}", job.repo)),
                     size: "small",
                     start_commit: job.start_commit.as_deref(),
                     grant: on.grant.as_deref(),

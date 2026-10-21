@@ -4227,7 +4227,9 @@ impl Link {
         self.read_directory().await.map_err(|e| from_client(&e))?;
         let token = self.token().await.map_err(|e| from_client(&e))?;
         let client = self.client().map_err(|e| from_client(&e))?;
-        // ponytail: the whole chain each time; from a checked head once chains grow long.
+        // ponytail: the whole chain each time, at most MAX_AUDIT entries; from a checked head
+        // once chains grow long.
+        const MAX_AUDIT: usize = 100_000;
         let mut entries: Vec<Value> = Vec::new();
         let mut head = json!({"seq": 0, "hash": obi_protocol::ZERO_HASH});
         loop {
@@ -4240,12 +4242,37 @@ impl Link {
             let done = got.is_empty()
                 || entries.len() + got.len() >= head["seq"].as_u64().unwrap_or(0) as usize;
             entries.extend(got);
+            if entries.len() > MAX_AUDIT {
+                return Err(api(
+                    StatusCode::BAD_GATEWAY,
+                    "The Sphere's chain is longer than obid checks here (100,000 entries).",
+                ));
+            }
             if done {
                 break;
             }
         }
         let chain = json!({"sphere": membership.sphere, "entries": entries});
-        let checked = obi_protocol::chain::verify(&chain, &self.lock().directory.keys);
+        let checked =
+            obi_protocol::chain::verify(&chain, &self.lock().directory.keys).and_then(|()| {
+                // The head the Sphere names is the chain's last entry.
+                let last = entries
+                    .last()
+                    .map_or((0, obi_protocol::ZERO_HASH.to_owned()), |e| {
+                        (
+                            e["seq"].as_u64().unwrap_or(0),
+                            e["hash"].as_str().unwrap_or("").to_owned(),
+                        )
+                    });
+                if head["seq"].as_u64() == Some(last.0) && head["hash"].as_str() == Some(&last.1) {
+                    Ok(())
+                } else {
+                    Err(obi_protocol::Rejection::new(
+                        "head_mismatch",
+                        "the Sphere's head isn't the chain's last entry",
+                    ))
+                }
+            });
         // The chain checks out by itself; it must also be the one this Obi saw before.
         let problem = match &checked {
             Err(rejection) => Some(rejection.code.to_owned()),
