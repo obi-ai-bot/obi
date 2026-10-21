@@ -1132,6 +1132,28 @@ Two seconds after a job changes, the runner sends an alert push (`apns-push-type
 - When a job stops needing you (published, from the iPhone or the Mac, dismissed, or running again after a message), the runner sends a background push (`apns-push-type: background`, priority 5), `{"aps": {"content-available": 1}, "clear": "<job id>"}`, and the app removes that job's notification. The app also removes them whenever it opens and sees the job needs nothing.
 - The runner remembers what it last said for each job in `apns/notices.json`, so a restart doesn't say it again, and jobs a restart interrupted notify once it's back.
 
+**On obid** (#452, partly ported: Firebase Cloud Messaging for the Android app, no APNs). The above is the Swift runner's.
+
+```json
+{"token": "<FCM registration token>", "platform": "fcm", "topic": "com.deskree.oby"}
+```
+
+- `platform`: `"fcm"` for an Android phone's FCM registration token; absent or `"apns"` is the iPhone's device token as above, which `obid` answers `{"push": false}` and doesn't keep (it has no APNs sender). `token`: 1 to 4,095 printable ASCII characters, no spaces. `topic`: `"com.deskree.oby"` or left out, for FCM; an APNs registration's `topic` and `environment` aren't looked at.
+- It returns `{"push": true}` when the token is kept and `obid` can send (a Firebase service account is in the vault, below), `{"push": false}` when it can't (nothing kept), `422` for a token, platform or topic that isn't one of those, and `503` when the vault can't be read, as every answer.
+- Tokens are kept in `home/push/fcm.json` (0600, written to a new file renamed into place), at most 20, the oldest out; a token handed over again becomes the newest. FCM answering `404` `UNREGISTERED`, or `400` `INVALID_ARGUMENT` about the registration token, drops it.
+- **When.** As the Swift runner: two seconds after a job changes, each job whose need changed. obid's jobs never ask a question (`question` is null) and Oby's review isn't run (#525), so its alerts are `Couldn't publish: <title>` (`ready`, body `publishError`, else the summary's first line), `Failed: <title>` and `Interrupted: <title>` (`job`, body the job's `reason`, else the summary's first line), and `<permission title>?` (`permission`, body `<title>: <detail>`, 200 characters at most). What was last said for each job is kept in `home/push/notices.json`, so a restart doesn't say it again and jobs a restart interrupted notify once it's back; the first time, what the jobs already need isn't news.
+- **What's sent.** `POST https://fcm.googleapis.com/v1/projects/{project_id}/messages:send`, one data-only message per token (no `notification`, so the app draws it), every value a string, `android.collapse_key` the job's `id`, `android.ttl` `"86400s"`:
+
+```json
+{"message": {"token": "…", "data": {"job": "9f08fd10", "title": "Couldn't publish: Review oby #33", "body": "Couldn't push oby/review-33: the remote hung up.", "category": "ready"},
+             "android": {"priority": "HIGH", "collapse_key": "9f08fd10", "ttl": "86400s"}}}
+```
+
+- When a job stops needing you, `data` is `{"clear": "<job id>"}` with `android.priority` `"NORMAL"`, and the app removes that job's notification.
+- An alert's title and body pass the secret scan first (`crate::scan`, gitleaks too): a finding, or a scan that can't run, sends nothing for that job, and the log says so with the job's id only. Sending never holds up the API; a failure is logged with FCM's status and error code, never the token or the access token.
+- **The service account.** The owner's vault secret `oby.fcm.serviceAccount` ([obid only: the vault](#obid-only-the-vault)): the Google service account's JSON (`project_id`, `client_email`, `private_key` as PEM PKCS#8 RSA, `token_uri`, which must be `https://`). It lives where the vault lives, never reaches an agent, an answer, a log line or a push, and its private key and every access token it gets are taken out as `obid`'s own secrets too. `obid` signs a JWT with it (RS256; `iss` the `client_email`, `scope` `https://www.googleapis.com/auth/firebase.messaging`, `aud` the `token_uri`, an hour), trades it at `token_uri` for an access token (`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`) and uses that until 5 minutes before it ends. It's read again for each registration and each burst of alerts, so adding, replacing or removing it needs no restart.
+- **What the owner does.** In the Firebase console, open the project that has the Android app (`com.deskree.oby`) › Project settings › Service accounts › Generate new private key, which downloads a JSON file. On the machine `obid` runs on, as its user: `obid vault --config <path to config.json> add oby.fcm.serviceAccount < ~/Downloads/<the file>.json`, then delete the downloaded file. The phone's next `POST /v1/notifications` answers `{"push": true}`.
+
 ### `GET /v1/settings/permissions` and `PUT /v1/settings/permissions`
 
 Settings › Permissions: `{"mode": "ask"}`, the mode new jobs get (`bypass` until changed on the Swift runner, `sandbox` on obid), kept in the runner's `oby.sqlite`. `PUT` answers with the setting; `422` for a mode that isn't one. Jobs already dispatched keep theirs.

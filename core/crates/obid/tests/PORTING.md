@@ -169,7 +169,7 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 - #449 Research jobs: reads, reports and filed proposals
 - #450 Usage and reserves: POST /v1/accounts/{id}/reserve
 - #451 Publishing the owner's work (its endpoints and following are served now; no RunnerTests test is left on it)
-- #452 Pushes: POST /v1/activities and POST /v1/notifications
+- #452 Pushes: POST /v1/activities and POST /v1/notifications (partly ported: `POST /v1/notifications` takes FCM tokens and sends the job alerts through Firebase Cloud Messaging, src/push.rs, runner_api.rs `an_android_phone_hands_over_its_fcm_token`; no APNs, no Live Activity)
 - #453 Speech: POST /v1/speech
 - #454 The Watch API and /v1/watches
 - #455 startWhen: jobs that wait to start
