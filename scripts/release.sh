@@ -4,25 +4,28 @@
 #   scripts/release.sh <version> [--dry-run] [--full] [--notes <file>]
 #
 # Run on a Mac with Xcode 27. In order:
-#   0. runs the checks (swift test, the Mac app with MacTests), side by side: nothing is built unless
-#      they pass. A check that already passed on this Mac on the same files (scripts/tested.sh,
-#      recorded by the merge ritual) is skipped, saying so; --full runs them all;
+#   0. runs the checks (swift test, the Mac app with MacTests), side by side, through
+#      scripts/tested.sh: nothing is built unless they pass. A check that already passed on this
+#      Mac on the same files (run by the merge ritual with `scripts/tested.sh run`) is skipped,
+#      saying so; --full runs them all;
 #   1. bumps the version: CFBundleShortVersionString from <version>, the build number from the git
-#      commit count, committed on the current branch;
+#      commit count, committed on the current branch, once the checkout is checked unchanged;
 #   2. archives the Oby scheme (Release) and exports it with Developer ID
 #      (apps/ExportOptions-DeveloperID.plist, teamID from apps/config/Signing.xcconfig), with
 #      DerivedData and obid's cargo target kept per toolchain in ~/Library/Caches/Oby-release; checks
-#      both architectures (lipo) and every signature (codesign);
-#   3. builds Oby-<version>.dmg with an Applications link (and a background, with create-dmg), then
-#      signs it, notarizes it (xcrun notarytool, keychain profile "oby-notary": Apple tickets the app
-#      inside too) and staples it, and checks the app in it and a quarantined copy with spctl. While
-#      Apple works it scans the app and the commits since the last tag for secrets (gitleaks) and
-#      gathers the release notes;
-#   4. signs the DMG for Sparkle (sign_update, the EdDSA key in the keychain);
-#   5. writes the appcast entry, with the merged pull requests since the last tag as release notes,
+#      the checkout again, both architectures (lipo) and every signature (codesign), and scans the
+#      app for secrets (gitleaks) before anything leaves this Mac;
+#   3. notarizes the app (xcrun notarytool, keychain profile "oby-notary") and staples it; while
+#      Apple works it scans the commits since the last tag and gathers the release notes;
+#   4. builds Oby-<version>.dmg with an Applications link (and a background, with create-dmg), then
+#      signs, notarizes and staples the DMG, and checks it, the app in it and a quarantined copy
+#      (spctl, stapler validate, hdiutil verify);
+#   5. signs the DMG for Sparkle (sign_update, the EdDSA key in the keychain);
+#   6. writes the appcast entry, with the merged pull requests since the last tag as release notes,
 #      and scans it for secrets: a finding anywhere, or no scanner, and nothing is published;
-#   6. uploads the DMG and appcast.xml to R2 (wrangler, or aws against the R2 endpoint);
-#   7. tags v<version>.
+#   7. uploads the DMG, checks that its public URL serves the same bytes, then uploads appcast.xml
+#      to R2 (wrangler, or aws against the R2 endpoint);
+#   8. tags v<version>.
 #
 # --dry-run does everything up to the signatures with ad hoc identities, and leaves out the
 # notarization, the upload, the commit and the tag, so it runs on any Mac today. Everything lands in
@@ -41,15 +44,57 @@ bucket="${OBY_R2_BUCKET:-oby-downloads}"
 minimum_system="26.0"
 # What apps/config/Signing.xcconfig holds for OBY_SPARKLE_PUBLIC_KEY until the key is generated.
 placeholder_public_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-# Build caches kept between releases (docs/release.md, "Warm builds").
-cache_root="$HOME/Library/Caches/Oby-release"
+# What passed on this Mac, and the build caches kept between releases (docs/release.md).
 # shellcheck source=scripts/tested.sh
 source "$root/scripts/tested.sh"
+# What a stopped release would leave running or mounted: cleanup kills and detaches them on exit.
+bg_pids=()
+mnt=""
 
 # Each step says how long the release has run, so the slow ones show.
 say() { printf '\033[1m==> [%d:%02d] %s\033[0m\n' $((SECONDS / 60)) $((SECONDS % 60)) "$*"; }
 note() { printf '    %s\n' "$*"; }
 die() { printf 'release.sh: %s\n' "$*" >&2; exit 1; }
+
+kill_tree() {
+    local child
+    for child in $(pgrep -P "$1" || true); do kill_tree "$child"; done
+    kill "$1" 2>/dev/null || true
+}
+
+cleanup() {
+    local pid
+    for pid in ${bg_pids[@]+"${bg_pids[@]}"}; do kill_tree "$pid"; done
+    if [[ -n "$mnt" ]]; then hdiutil detach "$mnt" -force -quiet 2>/dev/null || true; fi
+}
+
+# Mounts a disk image (hdiutil attach's options, the image last) at $mnt; detach unmounts it.
+attach() {
+    mnt="$(hdiutil attach -nobrowse -noautoopen "$@" | awk -F'\t' '/\/Volumes\//{print $NF}')"
+    [[ -n "$mnt" ]] || die "couldn't attach ${*: -1}"
+}
+detach() {
+    hdiutil detach "$mnt" -quiet || hdiutil detach "$mnt" -force -quiet
+    mnt=""
+}
+
+# The checkout as the release found it: nothing changed, untracked files included, and HEAD at
+# `expected`. A real release checks it before its version commit and after the archive.
+still_clean() {
+    local expected="$1" when="$2"
+    [[ -z "$(git -C "$root" status --porcelain --untracked-files=all)" ]] || die "the checkout changed $when: nothing is published"
+    [[ "$(git -C "$root" rev-parse HEAD)" == "$expected" ]] || die "HEAD moved $when: nothing is published"
+}
+
+# Notarizes and staples one item (the app, as a zip, or the DMG); `log` names its log.
+notarize() {
+    local item="$1" submit="$2" log="$3"
+    xcrun notarytool submit "$submit" --keychain-profile "$notary_profile" --wait > "$out/$log" 2>&1 \
+        || { cat "$out/$log"; die "notarization failed: build/release/$log"; }
+    grep -E '^ *(id|status):' "$out/$log" | tail -n 2 | sed 's/^ */    /'
+    xcrun stapler staple "$item" > /dev/null || { cat "$out/$log"; die "no ticket to staple on ${item#"$out/"}: build/release/$log"; }
+    xcrun stapler validate "$item" || die "the ticket on ${item#"$out/"} doesn't validate"
+}
 
 # A build setting from apps/config/Signing.local.xcconfig, else apps/config/Signing.xcconfig: comments
 # stripped, the empty $() that keeps "//" out of a URL removed.
@@ -206,16 +251,6 @@ check_universal() {
     [[ "$archs" == *" arm64 "* && "$archs" == *" x86_64 "* ]] || die "${1#"$out/"} is${archs% } only, not arm64 and x86_64"
 }
 
-# One check of step 0 (suite, the cache folder), its output in build/release/<suite>.log. MacTests
-# builds obid in release too, into the cargo target the archive then reuses.
-run_check() {
-    case "$1" in
-        swift-test) swift test ;;
-        mac-tests) xcodebuild -project apps/Oby.xcodeproj -scheme Oby -destination 'platform=macOS' -derivedDataPath "$2/DerivedData" \
-            OBY_CARGO_TARGET_DIR="$2/cargo" test ;;
-    esac
-}
-
 upload_r2() {
     local file="$1" name="$2" type="$3"
     if command -v wrangler >/dev/null 2>&1; then
@@ -244,7 +279,7 @@ main() {
             --dry-run) dry_run=true ;;
             --full) full=true ;;
             --notes) shift; notes_file="${1:-}"; [[ -f "$notes_file" ]] || die "--notes needs a file" ;;
-            -h|--help) sed -n '2,33p' "${BASH_SOURCE[0]}"; exit 0 ;;
+            -h|--help) sed -n '2,36p' "${BASH_SOURCE[0]}"; exit 0 ;;
             -*) die "unknown option $1" ;;
             *) [[ -z "$version" ]] || die "one version only"; version="$1" ;;
         esac
@@ -270,10 +305,12 @@ main() {
     base="${feed%/*}"
 
     cd "$root"
-    local tag="v$version" last_tag
+    trap cleanup EXIT
+    local tag="v$version" last_tag start_head
     git rev-parse -q --verify "refs/tags/$tag" >/dev/null && die "$tag exists already"
     last_tag="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
-    if ! $dry_run && [[ -n "$(git status --porcelain)" ]]; then
+    start_head="$(git rev-parse HEAD)"
+    if ! $dry_run && [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
         die "the working tree isn't clean: commit or put aside what's changed first"
     fi
 
@@ -284,24 +321,29 @@ main() {
     # old set goes.
     local toolchain cache derived
     toolchain="$(tested_toolchain)"
-    cache="$cache_root/$toolchain"
+    cache="$tested_caches/$toolchain"
     derived="$cache/DerivedData"
     mkdir -p "$cache"
-    find "$cache_root" -mindepth 1 -maxdepth 1 ! -name "$toolchain" -exec rm -rf {} +
+    find "$tested_caches" -mindepth 1 -maxdepth 1 ! -name "$toolchain" -exec rm -rf {} +
 
     # 0. The checks Oby runs before a merge (docs/ci.md), without the iPhone app, which this release
     #    doesn't ship: nothing is built for release, let alone uploaded, unless they pass. One that
-    #    passed on these files on this Mac (scripts/tested.sh) doesn't run again.
+    #    passed on these files on this Mac (scripts/tested.sh) doesn't run again; the ones that run
+    #    run side by side, through tested.sh, which records them when they pass on a clean checkout.
     say "Checks"
-    local suite reason
-    local -a running=() pids=()
+    local suite reason recording=true
+    local -a running=()
+    if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+        recording=false
+        note "the checkout has changes: every check runs, and none is recorded (dry run)"
+    fi
     for suite in swift-test mac-tests; do
         if $full; then
             note "running $suite: --full"
         elif reason="$(tested_check "$suite")"; then
             note "skipped $suite: $reason"
             continue
-        else
+        elif $recording; then
             note "running $suite: $reason"
         fi
         running+=("$suite")
@@ -309,16 +351,21 @@ main() {
     if (( ${#running[@]} )); then
         local i failed=""
         for suite in "${running[@]}"; do
-            run_check "$suite" "$cache" > "$out/$suite.log" 2>&1 &
-            pids+=($!)
+            if $recording; then
+                tested_run "$suite" > "$out/$suite.log" 2>&1 &
+            else
+                tested_command "$suite" > "$out/$suite.log" 2>&1 &
+            fi
+            bg_pids+=($!)
         done
         for i in "${!running[@]}"; do
-            wait "${pids[$i]}" || failed+=" ${running[$i]}"
+            wait "${bg_pids[$i]}" || failed+=" ${running[$i]}"
         done
+        bg_pids=()
         for suite in $failed; do tail -n 40 "$out/$suite.log"; done
         [[ -z "$failed" ]] || die "failed:$failed (build/release/<name>.log)"
         note "passed: ${running[*]}"
-        tested_record "${running[@]}" | sed 's/^/    /' || note "not recorded: the checkout has changes"
+        for suite in "${running[@]}"; do grep -h '^recorded: ' "$out/$suite.log" | sed 's/^/    /' || true; done
     fi
 
     # 1. The version. For real, it's committed first, so the build number counts that commit and
@@ -328,6 +375,7 @@ main() {
         build="$(git rev-list --count HEAD)"
         say "Dry run: Oby $version ($build), ad hoc signed, nothing notarized, uploaded or tagged"
     else
+        still_clean "$start_head" "while the checks ran"
         say "Oby $version: bumping the version in apps/Oby.xcodeproj"
         build="$(( $(git rev-list --count HEAD) + 1 ))"
         sed -i '' -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = $version;/; s/CURRENT_PROJECT_VERSION = [^;]+;/CURRENT_PROJECT_VERSION = $build;/" apps/Oby.xcodeproj/project.pbxproj
@@ -335,6 +383,7 @@ main() {
         git commit -q -m "chore(release): Oby $version ($build)"
         [[ "$(git rev-list --count HEAD)" == "$build" ]] || die "the build number and the commit count disagree"
         note "committed $(git rev-parse --short HEAD): build $build"
+        start_head="$(git rev-parse HEAD)"
     fi
 
     # 2. Archive and export, warm: DerivedData and obid's cargo target are kept between releases.
@@ -376,6 +425,7 @@ main() {
         xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$out/ExportOptions.plist" \
             -exportPath "$out/export" > "$out/export.log" 2>&1 || { tail -n 40 "$out/export.log"; die "the export failed: build/release/export.log"; }
         app="$out/export/Oby.app"
+        still_clean "$start_head" "during the archive"
     fi
     [[ -d "$app" ]] || die "no Oby.app after the export"
     local built
@@ -386,7 +436,44 @@ main() {
     codesign --verify --deep --strict "$app" || die "Oby.app doesn't verify"
     note "Oby $built, arm64 and x86_64, feed $(plutil -extract SUFeedURL raw -o - "$app/Contents/Info.plist")"
 
-    # 3. The DMG: Oby.app and an Applications link; create-dmg lays it out with the background.
+    # The secret scan of the app before anything leaves this Mac, Apple's notary service included
+    # (AGENTS.md); the commits' and the appcast's follow. If the scanner can't run, nothing is
+    # published.
+    say "Secret scan (gitleaks)"
+    local scanner=true
+    if have_gitleaks "$dry_run"; then scan_paths "$app"; else scanner=false; fi
+
+    # 3. Notarize and staple the app, so a copy taken out of the DMG carries its own ticket, even
+    #    offline. Apple takes minutes: the commits' scan and the release notes happen meanwhile.
+    local notarizing=""
+    if $dry_run; then
+        say "Dry run: the app stays ad hoc signed, not notarized"
+    else
+        say "Notarizing the app (keychain profile $notary_profile)"
+        ditto -c -k --keepParent "$app" "$out/Oby.zip"
+        notarize "$app" "$out/Oby.zip" notarize-app.log > "$out/notarize-app.out" 2>&1 &
+        notarizing=$!
+        bg_pids+=("$notarizing")
+    fi
+    if $scanner; then scan_history "$last_tag"; fi
+    local notes previous=""
+    if [[ -n "$notes_file" ]]; then notes="$(notes_from_file "$notes_file")"; else notes="$(release_notes "$last_tag")"; fi
+    if curl -fsSL --max-time 20 "$feed" -o "$out/appcast-previous.xml" 2>/dev/null; then
+        previous="$out/appcast-previous.xml"
+        note "previous appcast: $(grep -c '<item>' "$previous" || true) entries"
+    else
+        note "no appcast at $feed yet: starting one"
+    fi
+    if [[ -n "$notarizing" ]]; then
+        local status=0
+        wait "$notarizing" || status=$?
+        bg_pids=()
+        sed 's/^/    /' "$out/notarize-app.out"
+        [[ "$status" == 0 ]] || die "the app's notarization failed: build/release/notarize-app.log"
+        spctl --assess --type execute -v "$app"
+    fi
+
+    # 4. The DMG: Oby.app and an Applications link; create-dmg lays it out with the background.
     # One local per line: a local's value can't read a name declared on the same line.
     local dmg_name="Oby-$version.dmg"
     local dmg="$out/$dmg_name"
@@ -405,29 +492,22 @@ main() {
         [[ -f "$background" ]] && note "create-dmg isn't installed (brew install create-dmg): a plain DMG, without the background"
         # `hdiutil create -srcfolder` fails "Resource busy" when a system scanner still holds its
         # scratch volume at unmount, so: a blank image, copy, a forced detach after sync, convert.
-        local rw="$out/dmg-rw.dmg" mnt
+        local rw="$out/dmg-rw.dmg"
         rm -f "$rw" "$dmg"
         hdiutil create -quiet -size "$(( $(du -sm "$staging" | cut -f1) + 50 ))m" -fs HFS+ -volname "Oby" "$rw"
-        mnt="$(hdiutil attach -nobrowse -noverify -noautoopen "$rw" | awk -F'\t' '/\/Volumes\//{print $NF}')"
-        [[ -n "$mnt" ]] || die "couldn't attach $rw"
+        attach -noverify "$rw"
         touch "$mnt/.metadata_never_index"
         ditto "$staging" "$mnt"
         sync
-        hdiutil detach "$mnt" -quiet || hdiutil detach "$mnt" -force -quiet
+        detach
         hdiutil convert -quiet "$rw" -format UDZO -o "$dmg"
         rm -f "$rw"
-        hdiutil verify -quiet "$dmg"
     fi
     # The checksum doesn't prove the copy is whole: the app inside must verify, every nested signature.
-    mnt="$(hdiutil attach -nobrowse -readonly -noautoopen "$dmg" | awk -F'\t' '/\/Volumes\//{print $NF}')"
-    [[ -n "$mnt" ]] || die "couldn't attach $dmg"
-    codesign --verify --deep --strict "$mnt/Oby.app" || { hdiutil detach "$mnt" -force -quiet; die "Oby.app in $dmg_name doesn't verify"; }
-    hdiutil detach "$mnt" -quiet || hdiutil detach "$mnt" -force -quiet
+    attach -readonly "$dmg"
+    codesign --verify --deep --strict "$mnt/Oby.app" || die "Oby.app in $dmg_name doesn't verify"
+    detach
 
-    # Notarized once, as the DMG: Apple tickets every signed item in a submission, the app inside
-    # too, and Gatekeeper finds the app's ticket online (docs/release.md, "One notarization").
-    # Apple takes minutes, so the work that doesn't need the stapled DMG happens meanwhile.
-    local notarizing=""
     if $dry_run; then
         codesign --force --sign - "$dmg"
         note "signed ad hoc, not notarized (dry run)"
@@ -436,51 +516,25 @@ main() {
         identity="$(developer_id_identity "$team")"
         [[ -n "$identity" ]] || die "no Developer ID Application certificate for team $team in the keychain: docs/release.md"
         codesign --force --sign "$identity" --timestamp "$dmg"
-        say "Notarizing the DMG (keychain profile $notary_profile), in the background"
-        xcrun notarytool submit "$dmg" --keychain-profile "$notary_profile" --wait > "$out/notarize.log" 2>&1 &
-        notarizing=$!
-    fi
-
-    # The secret scan of the app and of the commits since the last release (AGENTS.md); the
-    # appcast's comes once it's written. If the scanner can't run, nothing is published.
-    say "Secret scan (gitleaks)"
-    local scanner=true
-    if have_gitleaks "$dry_run"; then
-        scan_paths "$app"
-        scan_history "$last_tag"
-    else
-        scanner=false
-    fi
-    local notes previous=""
-    if [[ -n "$notes_file" ]]; then notes="$(notes_from_file "$notes_file")"; else notes="$(release_notes "$last_tag")"; fi
-    if curl -fsSL --max-time 20 "$feed" -o "$out/appcast-previous.xml" 2>/dev/null; then
-        previous="$out/appcast-previous.xml"
-        note "previous appcast: $(grep -c '<item>' "$previous" || true) entries"
-    else
-        note "no appcast at $feed yet: starting one"
-    fi
-
-    if [[ -n "$notarizing" ]]; then
-        say "Waiting for Apple's notarization"
-        wait "$notarizing" || { cat "$out/notarize.log"; die "notarization failed: build/release/notarize.log"; }
-        grep -E '^ *(id|status):' "$out/notarize.log" | tail -n 2 | sed 's/^ */    /'
-        xcrun stapler staple "$dmg" || { cat "$out/notarize.log"; die "no ticket to staple: build/release/notarize.log"; }
+        say "Notarizing the DMG"
+        notarize "$dmg" "$dmg" notarize-dmg.log
         spctl --assess --type open --context context:primary-signature -v "$dmg"
         # The app as a user gets it: in the mounted DMG, and copied out with a quarantine flag.
         local copy="$out/gatekeeper"
         rm -rf "$copy" && mkdir -p "$copy"
-        mnt="$(hdiutil attach -nobrowse -readonly -noautoopen "$dmg" | awk -F'\t' '/\/Volumes\//{print $NF}')"
-        [[ -n "$mnt" ]] || die "couldn't attach $dmg"
+        attach -readonly "$dmg"
         ditto "$mnt/Oby.app" "$copy/Oby.app"
-        spctl --assess --type execute -v "$mnt/Oby.app" || { hdiutil detach "$mnt" -force -quiet; die "Gatekeeper rejects Oby.app in $dmg_name"; }
-        hdiutil detach "$mnt" -quiet || hdiutil detach "$mnt" -force -quiet
+        spctl --assess --type execute -v "$mnt/Oby.app" || die "Gatekeeper rejects Oby.app in $dmg_name"
+        detach
         xattr -w com.apple.quarantine "0081;$(printf '%x' "$(date +%s)");Safari;" "$copy/Oby.app"
         spctl --assess --type execute -v "$copy/Oby.app" || die "Gatekeeper rejects Oby.app copied out of $dmg_name"
+        xcrun stapler validate "$copy/Oby.app" || die "Oby.app copied out of $dmg_name carries no ticket"
         rm -rf "$copy"
     fi
+    hdiutil verify -quiet "$dmg"
     codesign --verify "$dmg"
 
-    # 4. Sparkle's signature, of the stapled DMG.
+    # 5. Sparkle's signature, of the stapled DMG.
     local bin signature="" length
     length="$(stat -f %z "$dmg")"
     if bin="$(sparkle_bin "$derived")"; then
@@ -497,7 +551,7 @@ main() {
     fi
     say "Signed for Sparkle: $length bytes"
 
-    # 5. The appcast entry, on top of the appcast already published, and its secret scan.
+    # 6. The appcast entry, on top of the appcast already published, and its secret scan.
     local item pubdate
     pubdate="$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')"
     item="$(appcast_item "$version" "$build" "$pubdate" "$base/$dmg_name" "$length" "$signature" "$notes")"
@@ -507,7 +561,7 @@ main() {
     printf '%s\n' "$item"
     if $scanner; then scan_paths "$out/appcast.xml"; fi
 
-    # 6. Upload, 7. tag.
+    # 7. Upload, 8. tag.
     if $dry_run; then
         say "Dry run done: nothing uploaded or tagged"
         note "$dmg"
@@ -516,6 +570,12 @@ main() {
     fi
     say "Uploading to R2 ($bucket)"
     upload_r2 "$dmg" "$dmg_name" "application/octet-stream"
+    # The appcast points at the DMG only once the public URL serves this very file.
+    curl -fsSL --max-time 600 "$base/$dmg_name" -o "$out/published.dmg" || die "$base/$dmg_name doesn't download: the appcast isn't uploaded"
+    [[ "$(stat -f %z "$out/published.dmg")" == "$(stat -f %z "$dmg")" && \
+        "$(shasum -a 256 < "$out/published.dmg")" == "$(shasum -a 256 < "$dmg")" ]] \
+        || die "$base/$dmg_name isn't the DMG just built (size or sha256): the appcast isn't uploaded"
+    note "$base/$dmg_name serves this DMG (size and sha256)"
     upload_r2 "$out/appcast.xml" "appcast.xml" "application/xml"
     say "Tagging $tag"
     git tag -a "$tag" -m "Oby $version ($build)"
