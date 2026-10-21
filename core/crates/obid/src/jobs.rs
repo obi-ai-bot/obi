@@ -1082,10 +1082,8 @@ impl Jobs {
         if !job.artifact_problems.is_empty() {
             return Some("Some of its artifacts weren't published.".into());
         }
-        // The job's own object folder, which sandboxed git writes to, as a run makes it: an
-        // Obi-to-Obi review's worktree has none.
-        if let Ok((admin, _)) = git::worktree_dirs(&worktree).await {
-            let _ = std::fs::create_dir_all(admin.join("objects").join("info"));
+        if let Err(why) = self.own_git_dirs(&job.id).await {
+            return Some(why);
         }
         let status = ["status", "--porcelain", "--untracked-files=normal"];
         match self.sandboxed_git(&job.id, &status, None).await {
@@ -3459,9 +3457,7 @@ impl Jobs {
         if !worktree.join(".git").exists() {
             return Err("the job has no worktree".into());
         }
-        let (_, common) = git::worktree_dirs(&worktree)
-            .await
-            .map_err(|e| e.to_string())?;
+        let (_, common) = self.own_git_dirs(id).await?;
         let clone = common
             .parent()
             .ok_or("the clone's git directory has no folder")?
@@ -3510,6 +3506,27 @@ impl Jobs {
         Ok(head)
     }
 
+    /// The git directories of the job's worktree (its own and the common one), only when they're
+    /// obid's: the clone's `.git`, and a folder directly in its `worktrees/`. The worktree's `.git`
+    /// is the agent's to write, and could name any repository.
+    async fn own_git_dirs(&self, id: &str) -> Result<(PathBuf, PathBuf), String> {
+        let job = self.get(id).ok_or("the job is gone")?;
+        let (admin, common) = git::worktree_dirs(&self.worktree_path(id))
+            .await
+            .map_err(|e| e.to_string())?;
+        let ours = git::clone_path(&self.config.home, &job.repo)
+            .join(".git")
+            .canonicalize();
+        match (admin.canonicalize(), common.canonicalize(), ours) {
+            (Ok(admin), Ok(common), Ok(ours))
+                if common == ours && admin.parent() == Some(ours.join("worktrees").as_path()) =>
+            {
+                Ok((admin, common))
+            }
+            _ => Err(NOT_OUR_GIT.into()),
+        }
+    }
+
     /// Runs git in the job's worktree inside its sandbox, without the network, so git reads and
     /// runs nothing the job couldn't (no hooks, no fsmonitor): its output.
     async fn sandboxed_git(
@@ -3534,9 +3551,10 @@ impl Jobs {
     ) -> Result<Vec<u8>, String> {
         let sandbox = self.sandbox.as_ref().map_err(String::clone)?;
         let worktree = self.worktree_path(id);
-        let (admin, common) = git::worktree_dirs(&worktree)
-            .await
-            .map_err(|e| e.to_string())?;
+        let (admin, common) = self.own_git_dirs(id).await?;
+        // The job's own object folder, which git writes to here, as a run makes it: an Obi-to-Obi
+        // review's worktree has none.
+        own_objects(&admin)?;
         let temp = self.temp_path(id);
         prepare_folder(&temp).map_err(|e| e.to_string())?;
         let mut spec = self.spec(&worktree, &admin, &common, &temp, true, Tool::Claude);
@@ -4894,9 +4912,7 @@ impl Jobs {
             .map_err(|e| format!("obid can't write the diff: {e}"))?;
 
         // 4. The agent, with a fixed prompt, in the sandbox.
-        let (admin, common) = git::worktree_dirs(&worktree)
-            .await
-            .map_err(|e| e.to_string())?;
+        let (admin, common) = self.own_git_dirs(id).await?;
         let temp = self.temp_path(id);
         let (tool, account) = self.job_account(&job)?;
         let spec = self.spec(&worktree, &admin, &common, &temp, false, tool);
@@ -5211,9 +5227,7 @@ impl Jobs {
                 job.attachments = (!copied.is_empty()).then_some(copied)
             });
         }
-        let (admin, common) = git::worktree_dirs(&worktree)
-            .await
-            .map_err(|e| e.to_string())?;
+        let (admin, common) = self.own_git_dirs(id).await?;
         let temp = self.temp_path(id);
         let (tool, account) = self.job_account(&job)?;
         let spec = self.spec(&worktree, &admin, &common, &temp, true, tool);
@@ -5228,9 +5242,8 @@ impl Jobs {
                 .await
                 .map_err(|e| format!("obid couldn't detach the job's HEAD: {e}"))?;
         }
-        if let Some(own) = spec.own_objects() {
-            std::fs::create_dir_all(own.join("info"))
-                .map_err(|e| format!("obid can't make the job's object folder: {e}"))?;
+        if spec.own_objects().is_some() {
+            own_objects(&admin)?;
         }
         // The work an earlier run left uncommitted is the agent's to commit again, never counted
         // as the job's commits.
@@ -8221,6 +8234,25 @@ fn settled_in(state: &State, job: &Job, now: i64, cleared: Option<i64>) -> bool 
         && (put_away || now - finished >= SETTLE_AFTER)
 }
 
+/// Why obid won't run git for a worktree whose `.git` names another repository.
+const NOT_OUR_GIT: &str = "Its .git doesn't point into obid's clone.";
+
+/// Makes the job's own object folder, `admin/objects/info`, where it's missing; obid writes it
+/// outside the sandbox, so a link on the way (`objects` the agent made one) is refused.
+fn own_objects(admin: &Path) -> Result<(), String> {
+    let mut dir = admin.to_path_buf();
+    for part in ["objects", "info"] {
+        dir.push(part);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Err("The job's object folder isn't a folder of its own.".into()),
+            Err(_) => std::fs::create_dir(&dir)
+                .map_err(|e| format!("obid can't make the job's object folder: {e}"))?,
+        }
+    }
+    Ok(())
+}
+
 /// Takes a job's worktree away through obid's clone, and whatever git leaves of it.
 async fn remove_worktree(clone: &Path, worktree: &Path) {
     if !worktree.exists() {
@@ -10433,6 +10465,49 @@ mod tests {
         assert_eq!(jobs.clean_worktrees(now, None).await, 0);
         assert!(worktree.join(".git").exists());
         assert_eq!(jobs.cleaned().kept.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A worktree whose `.git` the agent pointed at a repository of its own stays, even one at the
+    /// job's start, and git never runs there; an object folder the agent made a link is refused,
+    /// and nothing is made where it leads.
+    #[tokio::test]
+    async fn a_worktree_obid_doesnt_own_stays() {
+        let (root, clone, base, jobs) = cleanup_home("foreign", true);
+        let now = obi_protocol::time::now();
+        let foreign = root.join("foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+        cleanup_git(&foreign, &["init", "-q"]);
+        cleanup_git(&foreign, &["commit", "-q", "--allow-empty", "-m", "theirs"]);
+        let theirs = cleanup_git(&foreign, &["rev-parse", "HEAD"]);
+        let (mut pointed, pointed_tree) = ended(&jobs, &clone, &base, "pointed", now);
+        pointed.start_commit = Some(theirs);
+        let gitdir = format!("gitdir: {}\n", foreign.join(".git").display());
+        std::fs::write(pointed_tree.join(".git"), gitdir).unwrap();
+        let (linked, linked_tree) = ended(&jobs, &clone, &base, "linked", now);
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let admin = clone.join(".git/worktrees/linked");
+        std::os::unix::fs::symlink(&elsewhere, admin.join("objects")).unwrap();
+        for job in [pointed, linked] {
+            jobs.lock().jobs.insert(job.id.clone(), job);
+        }
+
+        assert_eq!(jobs.clean_worktrees(now, None).await, 0);
+        assert!(pointed_tree.join(".git").exists() && linked_tree.join(".git").exists());
+        assert!(!elsewhere.join("info").exists());
+        let mut kept = jobs.cleaned().kept;
+        kept.sort_by(|a, b| a.job.cmp(&b.job));
+        assert_eq!(kept[0].job, "linked");
+        assert!(
+            kept[0]
+                .why
+                .ends_with("The job's object folder isn't a folder of its own."),
+            "{}",
+            kept[0].why
+        );
+        assert_eq!(kept[1].job, "pointed");
+        assert_eq!(kept[1].why, NOT_OUR_GIT);
         let _ = std::fs::remove_dir_all(&root);
     }
 
