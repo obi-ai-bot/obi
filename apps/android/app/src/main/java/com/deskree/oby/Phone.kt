@@ -47,6 +47,8 @@ class Phone(val context: Context) {
 
     /** The side panel, open on one of its sections, or null while it's closed. */
     var panel by mutableStateOf<PanelSection?>(null)
+    /** The panel's groups folded away with their chevron (Sangam's Sidebar.tsx), kept while Oby runs. */
+    var panelFolded by mutableStateOf(setOf<String>())
     /** What's open over Home: the app's one stack. */
     var homePath by mutableStateOf(listOf<Route>())
     /** The job whose notification's Publish was tapped; its page publishes once it's ready. */

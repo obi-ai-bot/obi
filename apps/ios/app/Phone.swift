@@ -90,6 +90,8 @@ final class Phone {
     let voice = PhoneVoice()
     /// The side panel, open on one of its sections, or nil while it's closed (PhoneRoot).
     var panel: PanelSection?
+    /// The panel's groups folded away with their chevron (Sangam's Sidebar.tsx), kept while Oby runs.
+    var panelFolded: Set<String> = []
     /// The runner's conversation, read in pages and followed over `turn` events, for the Chat
     /// tab's thread (apps/shared/ConversationModel.swift): one thread for every device (#11).
     let conversation = ConversationModel()

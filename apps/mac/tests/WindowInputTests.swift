@@ -162,4 +162,42 @@ struct WindowInputTests {
             #expect(state.trail.top == .archived, "a click beside the words didn't open Archived: \(String(describing: state.trail.top))")
         }
     }
+
+    /// A kind's name in the side panel opens its page, the one Home's chip opens (the owner's
+    /// addition to Sangam's design, 2026-10-21); its chevron only folds it, and a folded group stays
+    /// folded over the page.
+    @Test func aGroupsNameOpensItsPageAndItsChevronFolds() async throws {
+        try await withPanel(open: true) {
+            let state = ChatState(defaults: .scratch)
+            let window = ChatWindow.make(ChatView(model: model(), state: state, character: nil))
+            window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+            window.orderFrontRegardless()
+            window.makeKey()
+            defer { window.close() }
+            ChatWindow.measureLights(window, into: state)
+            try await Task.sleep(for: .milliseconds(800))
+            let height = try #require(window.contentView?.bounds.height)
+            // Review PR's row, 159 points down: its name from 74, its chevron at 142, its count at the right.
+            func click(_ x: CGFloat) async throws {
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    let event = try #require(NSEvent.mouseEvent(with: type, location: NSPoint(x: x, y: height - 159), modifierFlags: [],
+                                                                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                                context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+                    window.sendEvent(event)
+                    try await Task.sleep(for: .milliseconds(80))
+                }
+                try await Task.sleep(for: .milliseconds(500))
+            }
+            try await click(142)
+            #expect(state.folded == ["review"] && state.trail.isHome, "the chevron didn't only fold: \(state.folded) \(state.trail)")
+            try await click(142)
+            #expect(state.folded.isEmpty, "the chevron didn't unfold")
+            // The row past the chevron folds too, as the whole row does in Sangam's design.
+            try await click(220)
+            #expect(state.folded == ["review"] && state.trail.isHome, "the row past the chevron didn't fold: \(state.folded)")
+            try await click(95)
+            #expect(state.trail.top == .group(.review), "the name didn't open Review PR's page: \(state.trail)")
+            #expect(state.folded == ["review"], "opening the page unfolded the group")
+        }
+    }
 }
