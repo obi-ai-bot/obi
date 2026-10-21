@@ -101,6 +101,10 @@ struct SlackTests {
         // The mark is where obid says it came from, never the link's host: a listener's review links GitHub but came from Slack.
         let commented = WatchNotice(id: "w2", title: "t", text: "x", created: now, url: URL(string: "https://github.com/a/b/pull/1"), source: "github")
         #expect(InlineNotice.brand(slack) == "slack" && InlineNotice.brand(review) == "slack" && InlineNotice.brand(commented) == "github")
+        // The button says where its link goes: the review's opens its pull request on GitHub.
+        #expect(review.url.map(InlineNotice.linkLabel) == "Open on GitHub")
+        #expect(slack.url.map(InlineNotice.linkLabel) == "Open in Slack")
+        #expect(InlineNotice.linkLabel(URL(string: "https://GITHUB.com/a/b")!) == "Open on GitHub")
         // A review it can't show offers its job's page; one it shows doesn't.
         let flagged = WatchNotice(kind: "listen", id: "l2", job: "j2", title: "Review ready: obi #836", text: "x", created: now)
         #expect(InlineNotice.opensJob(flagged) && !InlineNotice.opensJob(review) && !InlineNotice.opensJob(slack))

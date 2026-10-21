@@ -1528,7 +1528,7 @@ pub async fn catch_up(shared: &Shared, now: i64) -> Result<usize, String> {
             Ok(n) => n,
             Err(why) => {
                 said.push(format!(
-                    "The messages weren't sorted, so the channels' cursors stay: {why}"
+                    "The messages weren't sorted, so the channels with unsorted messages keep their cursors: {why}"
                 ));
                 break;
             }
@@ -1538,9 +1538,20 @@ pub async fn catch_up(shared: &Shared, now: i64) -> Result<usize, String> {
             break;
         }
         if batch == 20 {
-            said.push(
-                "More than 1,000 new messages: the rest are sorted at the next catch-up.".into(),
-            );
+            // Said only when some are really left (exactly 1,000 is all of them).
+            let kept = shared.listen.lock();
+            let seen: BTreeSet<&String> = kept.seen.iter().collect();
+            let left = found.iter().any(|m| {
+                Some(m.user.as_str()) != owner.as_deref()
+                    && !seen.contains(&format!("slack:{}", m.key))
+            });
+            drop(kept);
+            if left {
+                said.push(
+                    "More than 1,000 new messages: the rest are sorted at the next catch-up."
+                        .into(),
+                );
+            }
         }
     }
     if !said.is_empty() {

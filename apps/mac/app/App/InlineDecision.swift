@@ -160,6 +160,13 @@ struct InlineNotice: View {
         notice.source == "github" ? "github" : "slack"
     }
 
+    /// What its link's button says, by where the link goes (a listener's review, from Slack, links
+    /// its pull request on GitHub).
+    static func linkLabel(_ url: URL) -> String {
+        let host = url.host()?.lowercased() ?? ""
+        return host == "github.com" || host.hasSuffix(".github.com") ? "Open on GitHub" : "Open in Slack"
+    }
+
     /// Whether it offers its job's page: a review it doesn't show (flagged, empty, unscanned).
     static func opensJob(_ notice: WatchNotice) -> Bool {
         !notice.job.isEmpty && notice.review == nil
@@ -179,7 +186,7 @@ struct InlineNotice: View {
             AskCard(kind: brand == "github" ? "GitHub" : "Slack", brand: brand,
                     shown: notice.review, title: notice.title, happened: notice.text,
                     options: Self.options(notice), busy: busy, keyboardEnabled: keyboardEnabled, focusRequest: focusRequest,
-                    hint: notice.url.map { _ in brand == "github" ? "Open on GitHub" : "Open in Slack" },
+                    hint: notice.url.map(Self.linkLabel),
                     onHint: notice.url.map { url in { openURL(url) } },
                     onChoose: { settle(answer: $0.answer) },
                     onLater: { settle(later: .now.addingTimeInterval(3600)) },
