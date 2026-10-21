@@ -1671,15 +1671,9 @@ No redirect URL, no PKCE and no client secret. Without the listener, no events a
 **`PUT /v1/slack`** with `{"user": "xoxp-…", "bot": "xoxb-…"}`, and `"app": "xapp-…"` for the channel listener (the owner pastes them in Settings › Connectors › Slack), checks them and keeps them, answering as `GET` does:
 
 - Each is its kind (`xoxp-` and `xoxb-`, 20 to 512 printable characters), else `422`.
-<<<<<<< HEAD
-- obid asks Slack's `auth.test` with each: the user token must be a person's (no `bot_id`), the bot token a bot's (`bot_id`), both of the same workspace (`team_id`). A token Slack refuses is `422` (`Slack refused the bot token.`); Slack out of reach is `502`. Nothing is kept until both pass.
-- They go into obid's vault as `oby.slack.user` and `oby.slack.bot`, so they're taken out of every answer, log line and push like every vault secret (obid only: the vault). Who they are is in `home/slack.json` (0600).
-- A token Slack refuses later (`invalid_auth`, `token_revoked`, …) signs Oby out, the tokens forgotten and `error` saying so, as long as the vault still holds the one Slack refused: a refusal that comes back after new tokens were pasted signs nothing out. A `PUT` that can't keep every token keeps none.
-=======
-- obid asks Slack's `auth.test` with each: the user token must be a person's (no `bot_id`), the bot token a bot's (`bot_id`), both of the same workspace (`team_id`). A token Slack refuses is `422` (`Slack refused the bot token.`); Slack out of reach is `502`. An app-level token is `xapp-` and has no `auth.test`: obid opens a Socket Mode connection with it (`apps.connections.open`, which must answer a `wss://` address on slack.com) and uses that address never. Nothing is kept until all pass; a `PUT` without `app` forgets the one obid held.
+- obid asks Slack's `auth.test` with each: the user token must be a person's (no `bot_id`), the bot token a bot's (`bot_id`), both of the same workspace (`team_id`). A token Slack refuses is `422` (`Slack refused the bot token.`); Slack out of reach is `502`. An app-level token is `xapp-` and has no `auth.test`: obid opens a Socket Mode connection with it (`apps.connections.open`, which must answer a `wss://` address on slack.com) and uses that address never. Nothing is kept until all pass. A `PUT` without `app` (or with an empty one) keeps the app-level token obid holds; `"app": null` forgets it.
 - They go into obid's vault as `oby.slack.user`, `oby.slack.bot` and `oby.slack.app`, so they're taken out of every answer, log line and push like every vault secret (obid only: the vault). Who they are is in `home/slack.json` (0600).
-- A token Slack refuses later (`invalid_auth`, `token_revoked`, …) signs Oby out: both are forgotten and `error` says so.
->>>>>>> d4497427 (feat(obid): the Slack channel listener (Socket Mode))
+- A token Slack refuses later (`invalid_auth`, `token_revoked`, …) signs Oby out, the tokens forgotten and `error` saying so, as long as the vault still holds the one Slack refused: a refusal that comes back after new tokens were pasted signs nothing out. A refused app-level token stops only the channel listener. A `PUT` that can't keep every token keeps none.
 
 **`DELETE /v1/slack`** forgets the tokens: `204`. The app stays installed in Slack; uninstalling it there revokes them.
 
