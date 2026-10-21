@@ -219,8 +219,6 @@ struct SidebarView: View {
         return VStack(alignment: .leading, spacing: 1) {
             GroupHead(group: group, open: open) {
                 withAnimation(Tokens.warm) { state.folded.formSymmetricDifference([group.id]) }
-            } onOpen: {
-                if let kind = group.type { state.trail.start(.group(kind)) }
             }
             if open {
                 ForEach(shown.rows) { TaskRow(item: $0, model: model, state: state) }
@@ -241,7 +239,6 @@ private struct GroupHead: View {
     let group: WorkList.Group<SidebarSections.JobRow>
     let open: Bool
     let onToggle: () -> Void
-    let onOpen: () -> Void
     @State private var hovering = false
 
     var body: some View {
@@ -269,7 +266,6 @@ private struct GroupHead: View {
         .animation(Tokens.fade, value: hovering)
         .accessibilityAddTraits(.isHeader)
         .accessibilityValue(open ? "Open" : "Folded")
-        .contextMenu { if group.type != nil { Button("Open \(group.label)", action: onOpen) } }
     }
 }
 
