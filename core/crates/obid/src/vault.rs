@@ -1116,7 +1116,13 @@ pub async fn answers(request: Request, next: Next) -> Response {
     if !request.uri().path().starts_with("/v1/") {
         return next.run(request).await;
     }
-    let Some(vault) = shared() else {
+    // A test's own vault, given as the request's extension; obid's otherwise (`install`).
+    let Some(vault) = request
+        .extensions()
+        .get::<Arc<Vault>>()
+        .cloned()
+        .or_else(shared)
+    else {
         return next.run(request).await;
     };
     let (request, stops) = stops_only(request).await;
@@ -1167,6 +1173,9 @@ pub async fn answers(request: Request, next: Next) -> Response {
     let frames = body
         .into_data_stream()
         .map(move |frame| match frame {
+            // obid's own keepalive carries nothing to scrub: no check, so an idle stream never
+            // reads the Keychain (it did 4 times every 15 seconds, at each `:ping`).
+            Ok(bytes) if keepalive(&bytes, events) => Some(Ok(bytes)),
             Ok(bytes) => {
                 vault.check().ok()?;
                 let clean = if events {
@@ -1181,6 +1190,13 @@ pub async fn answers(request: Request, next: Next) -> Response {
         .take_while(|frame| std::future::ready(frame.is_some()))
         .filter_map(std::future::ready);
     Response::from_parts(parts, Body::from_stream(frames))
+}
+
+/// A frame obid writes only to keep a stream open: the spaces `GET /v1/jobs/{id}/wait` sends
+/// while it waits, and on the event stream the `:ping` comment (routes.rs, `events`).
+fn keepalive(frame: &[u8], events: bool) -> bool {
+    let text = frame.trim_ascii();
+    text.is_empty() || (events && (text == b":ping" || text == b": ping"))
 }
 
 /// Whether `request` only stops work and sends nothing anywhere: `POST /v1/stop-all`,
@@ -1660,6 +1676,164 @@ mod tests {
             let full = serde_json::to_vec(&answer).unwrap();
             assert_eq!(fast.unwrap_or(bytes), full);
         }
+    }
+
+    /// Only obid's own keepalives go through a stream unchecked: whitespace, and on the event
+    /// stream the bare `:ping` comment. Anything with words in it is checked and scrubbed.
+    #[test]
+    fn only_keepalives_skip_the_check() {
+        for (frame, events) in [
+            (&b" "[..], false),
+            (b"\n", false),
+            (b":ping\n\n", true),
+            (b": ping\n\n", true),
+        ] {
+            assert!(
+                keepalive(frame, events),
+                "{:?}",
+                String::from_utf8_lossy(frame)
+            );
+        }
+        for (frame, events) in [
+            (&b":ping\n\n"[..], false),
+            (b":ping sk-test-value\n\n", true),
+            (b": other\n\n", true),
+            (b"event: job\ndata: {}\n\n", true),
+            (b"{\"id\": \"j\"}", false),
+        ] {
+            assert!(
+                !keepalive(frame, events),
+                "{:?}",
+                String::from_utf8_lossy(frame)
+            );
+        }
+    }
+
+    /// A store that counts every time it's asked, and like the Keychain isn't exact: what an idle
+    /// event stream would read.
+    #[derive(Clone, Default)]
+    struct Counted {
+        values: Arc<Mutex<BTreeMap<String, String>>>,
+        asked: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Counted {
+        fn ask(&self) -> BTreeMap<String, String> {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.values.lock().unwrap().clone()
+        }
+        fn asked(&self) -> usize {
+            self.asked.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Store for Counted {
+        fn stamp(&self) -> Result<String, String> {
+            Ok(self.ask().into_keys().collect::<Vec<_>>().join(" "))
+        }
+        fn read(&self) -> Result<BTreeMap<String, String>, String> {
+            Ok(self.ask())
+        }
+        fn save(&self, value: &str, name: &str) -> Result<(), String> {
+            self.values
+                .lock()
+                .unwrap()
+                .insert(name.into(), value.into());
+            Ok(())
+        }
+        fn remove(&self, name: &str) -> Result<bool, String> {
+            Ok(self.values.lock().unwrap().remove(name).is_some())
+        }
+        fn exact(&self) -> bool {
+            false
+        }
+    }
+
+    /// The event stream through the `answers` middleware, as obid serves it: its `:ping`s read
+    /// nothing from the store, and the next event is checked and scrubbed of a secret added to
+    /// the vault after the stream opened.
+    #[tokio::test]
+    async fn an_idle_stream_reads_nothing_and_its_next_event_is_scrubbed() {
+        use axum::response::sse::{Event, KeepAlive, Sse};
+        use tower::ServiceExt as _;
+
+        let store = Counted::default();
+        let first = format!("first-{}", uuid::Uuid::new_v4().simple());
+        let second = format!("second-{}", uuid::Uuid::new_v4().simple());
+        store.save(&first, "first").unwrap();
+        let vault = Arc::new(Vault::new(
+            Box::new(store.clone()),
+            Arc::new(Secrets::default()),
+        ));
+        vault.check().unwrap();
+
+        let (send, events) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let events = Arc::new(Mutex::new(Some(events)));
+        let app = axum::Router::new()
+            .route(
+                "/v1/events",
+                axum::routing::get(move || async move {
+                    let events = events.lock().unwrap().take().unwrap();
+                    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(events)
+                        .map(Ok::<_, std::convert::Infallible>);
+                    Sse::new(stream).keep_alive(
+                        KeepAlive::new()
+                            .interval(Duration::from_millis(50))
+                            .text("ping"),
+                    )
+                }),
+            )
+            .layer(axum::middleware::from_fn(answers))
+            // This test's vault, never obid's shared one, which other tests use meanwhile.
+            .layer(axum::Extension(vault.clone()));
+        let response = app
+            .oneshot(Request::get("/v1/events").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let mut frames = response.into_body().into_data_stream();
+        let mut next = async || -> String {
+            let frame = tokio::time::timeout(Duration::from_secs(10), frames.next())
+                .await
+                .expect("a frame within 10 seconds")
+                .unwrap()
+                .unwrap();
+            String::from_utf8(frame.to_vec()).unwrap()
+        };
+
+        // Pings, for longer than READ_EVERY: the store isn't asked once.
+        let ping = next().await;
+        assert!(keepalive(ping.as_bytes(), true), "{ping:?}");
+        let asked = store.asked();
+        let until = Instant::now() + READ_EVERY + Duration::from_millis(300);
+        while Instant::now() < until {
+            let ping = next().await;
+            assert!(keepalive(ping.as_bytes(), true), "{ping:?}");
+        }
+        assert_eq!(store.asked(), asked, "a ping read the store");
+
+        // A secret added since the stream opened, then an event that holds it and the first.
+        store.save(&second, "second").unwrap();
+        send.send(
+            Event::default()
+                .event("job")
+                .data(serde_json::json!({"step": format!("{second} and {first}")}).to_string()),
+        )
+        .unwrap();
+        let event = loop {
+            let frame = next().await;
+            if !keepalive(frame.as_bytes(), true) {
+                break frame;
+            }
+        };
+        assert!(store.asked() > asked, "the event wasn't checked");
+        assert!(
+            !event.contains(&second) && !event.contains(&first),
+            "{event}"
+        );
+        assert!(
+            event.contains("[vault: second]") && event.contains("[vault: first]"),
+            "{event}"
+        );
     }
 
     /// The Swift runner's Keychain items when obid runs in the Mac app's runner home; a file in
