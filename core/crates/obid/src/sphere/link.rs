@@ -4584,14 +4584,25 @@ impl Link {
     /// A call on `grant` by `owner`'s job cost `micros`: counted, and when it used the share up,
     /// the owner hears it (Sangam's "Sangam used the share of Deskree API"). What's left.
     pub(super) fn count_use(&self, grant: &str, owner: &str, micros: u64) -> u64 {
+        self.count(grant, owner, micros, false).unwrap_or(0)
+    }
+
+    /// Counts `micros` on `grant` for `owner` only when the share has that much left, checked
+    /// under the same lock; whether it did.
+    pub(super) fn reserve(&self, grant: &str, owner: &str, micros: u64) -> bool {
+        self.count(grant, owner, micros, true).is_some()
+    }
+
+    fn count(&self, grant: &str, owner: &str, micros: u64, only_if_room: bool) -> Option<u64> {
         let now = time::now();
         let (left, used_up, sharing) = {
             let mut state = self.lock();
-            let Some(g) = state.sharing.grants.iter_mut().find(|g| g.id == grant) else {
-                return 0;
-            };
+            let g = state.sharing.grants.iter_mut().find(|g| g.id == grant)?;
             g.roll(now);
             let had = g.left_for(owner);
+            if only_if_room && had < micros {
+                return None;
+            }
             *g.used.entry(owner.to_owned()).or_default() += micros;
             let left = g.left_for(owner);
             let used_up = (had > 0 && left == 0).then(|| g.clone());
@@ -4601,7 +4612,7 @@ impl Link {
         if let Some(g) = used_up {
             self.share_used_item(&g, owner, now);
         }
-        left
+        Some(left)
     }
 
     /// Gives back `micros` counted on `grant` for `owner` (a call's worst case, past what it cost).

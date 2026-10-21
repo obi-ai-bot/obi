@@ -286,13 +286,20 @@ const HAIKU_LONG: (f64, f64, f64) = (0.50, 2.50, 0.05);
 /// A web search through the API: $10 per 1,000.
 const SEARCH_MICROS: u64 = 10_000;
 
-/// The prices for `model` as Claude Code names it (an id, maybe with a suffix like `[1m]` or a
-/// date): the longest id it starts with.
+/// The prices for `model`: exactly one of the ids obid knows, or one of their dated snapshots
+/// (`-YYYYMMDD`), maybe with Claude Code's `[1m]`. Any other model, a newer one too, has none: a
+/// share refuses what obid can't price.
 pub fn prices(model: &str) -> Option<(f64, f64, f64)> {
+    let model = model.strip_suffix("[1m]").unwrap_or(model);
     PRICES
         .iter()
-        .filter(|(id, ..)| model.starts_with(id))
-        .max_by_key(|(id, ..)| id.len())
+        .find(|(id, ..)| {
+            model == *id
+                || model
+                    .strip_prefix(id)
+                    .and_then(|r| r.strip_prefix('-'))
+                    .is_some_and(|d| d.len() == 8 && d.bytes().all(|b| b.is_ascii_digit()))
+        })
         .map(|(_, i, o, r)| (*i, *o, *r))
 }
 
@@ -652,6 +659,11 @@ mod tests {
         assert_eq!(prices("claude-fable-5-1-20261001").unwrap().0, 10.0);
         assert_eq!(prices("claude-fable-5").unwrap().2, 1.0);
         assert!(prices("gpt-5").is_none());
+        // Only known ids: a newer model isn't priced as the one it starts with.
+        assert!(prices("claude-opus-5-6").is_none());
+        assert!(prices("claude-opus-5-5-fast").is_none());
+        assert_eq!(prices("claude-opus-5").unwrap().0, 5.0);
+        assert_eq!(prices("claude-haiku-4-5-20251001").unwrap().0, 1.0);
         let long = Usage {
             model: "claude-haiku-5-5".into(),
             input: 200_000,

@@ -1071,7 +1071,8 @@ async fn metered_call(
     let Some(share) = link.grant_for(grant, owner, "claude") else {
         return model_error(StatusCode::FORBIDDEN, "The share was taken back.");
     };
-    if path.starts_with("/v1/responses") {
+    // Only a message (metered) and counting tokens: nothing else is relayed on a share.
+    if !path.starts_with("/v1/messages") {
         return model_error(
             StatusCode::FORBIDDEN,
             "obid doesn't relay that path on a share",
@@ -1114,7 +1115,8 @@ async fn metered_call(
                 ),
             );
         };
-        if share.left_for(owner) < worst {
+        // Checked and counted at once: two calls can't both take the last of the share.
+        if !link.reserve(grant, owner, worst) {
             link.hosting.stop(Some(&shared.cid), "share_used");
             return model_error(
                 StatusCode::PAYMENT_REQUIRED,
@@ -1124,7 +1126,6 @@ async fn metered_call(
                 ),
             );
         }
-        link.count_use(grant, owner, worst);
         reserved = worst;
     }
     let key = match crate::vault::value(&share.key_name()) {
