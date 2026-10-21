@@ -278,7 +278,8 @@ final class RunnerFeed {
         guard again || url != self.url || local != self.local else { return }
         let first = self.url == nil
         let changed = url != self.url || local != self.local
-        if changed { forget() }
+        // At launch the last runner's answers are kept for `showKept`; after that a change drops them.
+        if changed { forget(droppingKept: !first) }
         self.url = url
         self.local = local
         token = nil
@@ -288,16 +289,19 @@ final class RunnerFeed {
         loop = nil
         guard local || Self.runner(url) != nil else { return }
         // At launch: the runner's last answers until it answers again.
-        if first { showKept(for: url) }
+        if first { _ = showKept(for: url) }
         loop = Task {
             if !first { try? await Task.sleep(for: .seconds(1)) }
             await run()
         }
     }
 
-    /// Another runner: nothing the last one said holds, and what's still on its way from it is dropped.
-    func forget() {
+    /// Another runner: nothing the last one said holds, and what's still on its way from it is dropped,
+    /// with what was kept of it for the next launch (`droppingKept`).
+    func forget(droppingKept: Bool = true) {
         runnerChanges += 1
+        showingKept = false
+        if droppingKept { try? FileManager.default.removeItem(at: keptFile) }
         jobs = []
         inbox = []
         inboxHistory = []
@@ -393,6 +397,7 @@ final class RunnerFeed {
                         try Task.checkCancellation()
                         if let liveSession { Task { await liveSession.catchUp() } }
                         connection = .live
+                        showingKept = false
                         wait = 1
                         keep(Kept(url: url ?? "", jobs: jobsData, inbox: inboxData, conversations: conversationsData))
                         Self.ask()
@@ -439,13 +444,13 @@ final class RunnerFeed {
     @ObservationIgnored var windowOpen: () -> Bool = { false }
     static let openWindowWait = 5.0
 
-    /// Waits `seconds` before the next try, in steps of at most `openWindowWait`, and stops after
-    /// a step once the window is open. With it closed that's a wake every 5 seconds while the
-    /// runner is down, nothing while it's up.
-    private func pause(_ seconds: Double) async {
+    /// Waits `seconds` before the next try, in steps of at most `most` (`openWindowWait`), and
+    /// stops after a step once the window is open. With it closed that's a wake every 5 seconds
+    /// while the runner is down, nothing while it's up.
+    func pause(_ seconds: Double, steps most: Double = openWindowWait) async {
         var left = seconds
         repeat {
-            let step = min(left, Self.openWindowWait)
+            let step = min(left, most)
             try? await Task.sleep(for: .seconds(step))
             left -= step
         } while left > 0 && !Task.isCancelled && !windowOpen()
@@ -455,34 +460,49 @@ final class RunnerFeed {
 
     /// The runner's last answers for its jobs, inbox and conversations, as they came. Oby shows them
     /// at launch while the runner starts or the connection comes up, and the first connection
-    /// replaces them. Only for the runner they came from (`url`). obid took secrets out of them
-    /// before they left it; the file is the user's alone (0600), in Oby's own folder.
-    struct Kept: Codable {
+    /// replaces them. Only for the runner they came from (`url`), and gone once another is
+    /// followed. obid took secrets out of them before they left it. The file is the user's alone
+    /// (0600, in a 0700 folder), in Caches, so it's never backed up.
+    struct Kept: Codable, Equatable {
         var url: String
         var jobs: Data
         var inbox: Data?
         var conversations: Data?
     }
 
-    static var keptFile: URL { LocalRunner.appRoot.appending(path: "runner-feed.json") }
+    /// `~/Library/Caches/Oby/runner-feed.json`.
+    static var keptURL: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appending(path: "Oby", directoryHint: .isDirectory).appending(path: "runner-feed.json")
+    }
 
-    private func keep(_ kept: Kept) {
-        Task.detached(priority: .utility) {
-            do {
-                try FileManager.default.createDirectory(at: LocalRunner.appRoot, withIntermediateDirectories: true)
-                try RunnerLoginItem.writePrivately(try JSONEncoder().encode(kept), to: Self.keptFile)
-            } catch {
-                Logger.feed.error("keeping the runner's answers for the next launch failed: \(error.localizedDescription, privacy: .public)")
-            }
+    /// Where `keep` writes (tests use a folder of their own).
+    @ObservationIgnored var keptFile = RunnerFeed.keptURL
+
+    /// The window shows what was kept, not what the runner says now: actions wait (`acting`).
+    private(set) var showingKept = false
+
+    static let reconnecting = "Still reconnecting to the runner: try again in a moment."
+
+    /// Writes `kept` for the next launch, on the main actor, so a later connection's answers always
+    /// land after an earlier one's.
+    func keep(_ kept: Kept) {
+        do {
+            let folder = keptFile.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+            try RunnerLoginItem.writePrivately(try JSONEncoder().encode(kept), to: keptFile)
+        } catch {
+            Logger.feed.error("keeping the runner's answers for the next launch failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    /// What `keep` saved for `url`, shown until the runner answers. Nothing from another runner,
-    /// and nothing the app can't read any more (an older or newer shape).
-    private func showKept(for url: String) {
-        guard let data = try? Data(contentsOf: Self.keptFile),
+    /// What `keep` saved for `url`, shown until the runner answers; whether it was. Nothing from
+    /// another runner, and nothing the app can't read any more (an older or newer shape).
+    func showKept(for url: String) -> Bool {
+        guard let data = try? Data(contentsOf: keptFile),
               let kept = try? JSONDecoder().decode(Kept.self, from: data), kept.url == url,
-              let (list, extras) = try? Runner.jobsWithExtras(kept.jobs) else { return }
+              let (list, extras) = try? Runner.jobsWithExtras(kept.jobs) else { return false }
         jobs = list
         self.extras = extras
         if let (items, words) = try? kept.inbox.map(Runner.inboxWithWords) {
@@ -490,6 +510,17 @@ final class RunnerFeed {
             inboxWords = words
         }
         if local, let list = try? kept.conversations.map(Runner.conversations) { conversations.take(list) }
+        showingKept = true
+        return true
+    }
+
+    /// The runner, for an action on a job or an inbox item the window shows; refused while those
+    /// are what was kept, which may be long out of date (a plan approved by voice could reach a job
+    /// that finished meanwhile, and start a follow-up).
+    func acting() throws -> Runner {
+        if showingKept { throw RunnerError(message: Self.reconnecting) }
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+        return runner
     }
 
     /// Registers this Mac's publishing key, as the iPhone does on each connection. A runner whose
@@ -639,14 +670,14 @@ final class RunnerFeed {
 
     /// Settles one of the runner's inbox items: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to answer it.") }
+        let runner = try acting()
         apply(try await runner.settle(id, answer: answer, done: done, later: later))
     }
 
     /// Changes a runner job's mode (its screen's Mode menu): a permission it waits on that the new
     /// mode allows is answered.
     func setMode(_ id: String, _ mode: RunnerMode) async throws {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to change it.") }
+        let runner = try acting()
         let job = try await runner.setMode(id, mode)
         extras[id, default: RunnerJobExtras(id: id)].mode = mode.rawValue
         apply(job)
@@ -655,7 +686,7 @@ final class RunnerFeed {
     /// Allow, Always allow or Deny on what a runner job's agent waits for; words go with a deny.
     /// `ask`: only that ask (an alert's), never a newer one the alert didn't show.
     func answer(_ id: String, _ decision: RunnerPermission.Decision, message: String? = nil, ask: String? = nil) async throws {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to answer it.") }
+        let runner = try acting()
         guard let permission = extras[id]?.permission else { return }
         guard ask == nil || ask == permission.id else { throw RunnerError(message: "It asks something else now.") }
         let job = try await runner.answer(id, permission: permission.id, decision, message: message)
@@ -689,7 +720,7 @@ final class RunnerFeed {
             if isConfirm(id: id) { throw RunnerError(message: "That waits for your own Confirm in the inbox: Oby doesn't answer it for you.") }
         case .tell, .dismiss, .liftReserve: break
         }
-        guard let runner else { throw RunnerError(message: "The runner isn't set up.") }
+        let runner = try acting()
         switch remote {
         case .settle(let item, let words): try await settle(item, answer: words)
         case .tell(let job, let words): apply(try await about(job) { try await $0.tell(job, words) })
@@ -752,7 +783,7 @@ final class RunnerFeed {
     /// Asks the runner something about its job `id` (stop, dismiss, a message, a move): when it
     /// answers 404, it has no such job, and the job leaves the lists here, its alert too (#223).
     func about<T>(_ id: String, _ call: (Runner) async throws -> T) async throws -> T {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+        let runner = try acting()
         do {
             return try await call(runner)
         } catch let error as RunnerError {
