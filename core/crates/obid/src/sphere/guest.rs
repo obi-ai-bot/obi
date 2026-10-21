@@ -210,11 +210,11 @@ pub async fn run_turn(
     .await
     .map_err(|e| e.to_string())?;
     let empty = String::from_utf8_lossy(&empty).trim().to_owned();
-    let tree = git(
-        worktree,
-        &["diff", "--no-color", "--no-ext-diff", &empty, "HEAD"],
-    )
-    .await?;
+    // As Publish reads what it pushes: binary files and `-diff` ones as text, no driver hiding any.
+    let mut args = vec!["diff"];
+    args.extend_from_slice(crate::publish::DIFF);
+    args.extend([empty.as_str(), "HEAD"]);
+    let tree = crate::publish::git_in(worktree, &args).await?;
     // The job's words go too, on the channel (never in the request, so never in the chain): the
     // spec's limit, and the scan.
     if prompt.chars().count() > MAX_WORDS {

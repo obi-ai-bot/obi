@@ -41,7 +41,18 @@ const HERE_WITHIN: u64 = 5;
 /// How long the owner must leave it alone again before a paused job resumes.
 const RESUME_AFTER: u64 = 120;
 /// How long a job stays paused before it comes back to its owner.
-const RETURN_AFTER: i64 = 600;
+// ponytail: chosen at random at each pause, so its return never says when the owner came back.
+const RETURN_AFTER: (i64, i64) = (600, 1500);
+/// The least time between two run_requests taken from one teammate's owner: more can't probe when
+/// this Mac's owner is at it (the owner's decision of 2026-10-21).
+const REQUEST_EVERY: i64 = 900;
+
+/// A random whole number of seconds from `low` to `high`.
+fn random_seconds(low: i64, high: i64) -> i64 {
+    let mut bytes = [0u8; 4];
+    getrandom::fill(&mut bytes).expect("the system's random source works");
+    low + i64::from(u32::from_le_bytes(bytes)) % (high - low + 1)
+}
 /// How long the guest has, once asked, to send back what it did before the VM is stopped.
 const GRACE: Duration = Duration::from_secs(60);
 /// How often the runner status is published while it holds, and its life.
@@ -86,6 +97,8 @@ pub fn person(owner: &str) -> String {
 pub struct Setup {
     pub helper: PathBuf,
     pub image: Image,
+    /// The least time between two run_requests taken from one teammate's owner.
+    pub request_every: i64,
 }
 
 impl Setup {
@@ -98,6 +111,7 @@ impl Setup {
             image: Image {
                 dir: config.vm_image.clone().unwrap_or(default.image.dir),
             },
+            request_every: config.guest_request_every.unwrap_or(REQUEST_EVERY),
         }
     }
 
@@ -114,6 +128,7 @@ impl Setup {
             image: Image {
                 dir: home.join("vm"),
             },
+            request_every: REQUEST_EVERY,
         }
     }
 
@@ -143,6 +158,8 @@ pub struct Hosting {
     published: Mutex<Option<(Value, i64)>>,
     /// The calls on each share under way, by grant: at most SHARE_CALLS_AT_ONCE.
     share_calls: Mutex<HashMap<String, Arc<Semaphore>>>,
+    /// When each teammate's owner last sent a run_request here.
+    asked_at: Mutex<HashMap<String, i64>>,
     /// The `free` the runner status says.
     shown_free: Mutex<Blurred>,
 }
@@ -175,9 +192,7 @@ impl Blurred {
 
 /// A random 0 to BLUR_JITTER seconds.
 fn jitter() -> i64 {
-    let mut bytes = [0u8; 2];
-    getrandom::fill(&mut bytes).expect("the system's random source works");
-    i64::from(u16::from_le_bytes(bytes)) % (BLUR_JITTER + 1)
+    random_seconds(0, BLUR_JITTER)
 }
 
 /// The most calls on one share at once, whichever jobs make them.
@@ -330,6 +345,20 @@ async fn decide(link: &Arc<Link>, cid: &str, asked: bool) -> Decision {
         return Decision::Decline("other", None);
     };
     let owner = exchange.peer_owner.clone().unwrap_or_default();
+    // One run_request per teammate's owner every 15 minutes (the owner's Allow of one asked isn't
+    // another): more could probe when this Mac's owner is at it.
+    if !asked {
+        let every = link.hosting_setup().request_every;
+        let now = time::now();
+        let mut asked_at = link.hosting.asked_at.lock().unwrap();
+        if asked_at.get(&owner).is_some_and(|at| now - at < every) {
+            return Decision::Decline(
+                "busy",
+                Some("one run_request per teammate every 15 minutes"),
+            );
+        }
+        asked_at.insert(owner.clone(), now);
+    }
     let mac = link.mac();
     // On a share of the owner's API account (#809): the share is the owner's yes to that person,
     // for as long as there's money left on it this month.
@@ -1334,6 +1363,7 @@ async fn watch_job(
 ) -> String {
     let deadline = started + (minutes * 60) as i64;
     let mut paused_at: Option<i64> = None;
+    let mut return_after = RETURN_AFTER.0;
     let mut background = false;
     // Twice a second: the job pauses within a second of the owner touching the Mac.
     let mut tick = tokio::time::interval(Duration::from_millis(500));
@@ -1422,6 +1452,7 @@ async fn watch_job(
                         if vm.command("pause").await {
                             tracing::info!("sphere: the guest job {cid} paused: the owner is at the Mac");
                             paused_at = Some(now);
+                            return_after = random_seconds(RETURN_AFTER.0, RETURN_AFTER.1);
                             // Shown here only: a `paused` in the chain would say when the owner
                             // came back to the Mac.
                             link.hosting.set_state(cid, "paused");
@@ -1434,7 +1465,7 @@ async fn watch_job(
                             vm.command("resume").await;
                             paused_at = None;
                             link.hosting.set_state(cid, "running");
-                        } else if now - at >= RETURN_AFTER {
+                        } else if now - at >= return_after {
                             vm.command("resume").await;
                             paused_at = None;
                             let _ = shared.back.send_replace(Some("owner_back".into()));
@@ -1579,6 +1610,13 @@ pub async fn publish_status(link: &Arc<Link>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_return_waits_a_random_10_to_25_minutes() {
+        for _ in 0..100 {
+            assert!((600..=1500).contains(&random_seconds(RETURN_AFTER.0, RETURN_AFTER.1)));
+        }
+    }
 
     #[test]
     fn only_the_agents_model_paths_are_relayed() {
