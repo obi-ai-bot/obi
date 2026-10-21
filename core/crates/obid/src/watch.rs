@@ -680,7 +680,12 @@ const LEFT_OUT: &str = "(Left out: the secret scan flagged it.)";
 /// run into the next text). Empty texts aren't scanned. An error when the scan can't run.
 // ponytail: one scan per text, a gitleaks run each; a run reads at most 100 of them.
 pub(crate) async fn scan_each(texts: &[String], scratch: &Path) -> Result<BTreeSet<usize>, String> {
-    crate::store::make_private_dir(scratch).map_err(|e| format!("its folder: {e}"))?;
+    // A folder of this call's own: two scans at once never remove each other's.
+    let folder = scratch.join(uuid::Uuid::new_v4().simple().to_string());
+    crate::store::make_private_dir(scratch)
+        .and_then(|()| crate::store::make_private_dir(&folder))
+        .map_err(|e| format!("its folder: {e}"))?;
+    let scratch = folder.as_path();
     let mut flagged = BTreeSet::new();
     let mut result = Ok(());
     for (n, text) in texts

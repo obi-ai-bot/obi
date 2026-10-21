@@ -3221,8 +3221,10 @@ impl Link {
                 Given::Later(_) => {}
             }
         }
-        // A listener's review (crate::listen): Approve posts it on GitHub, with no lock held, so
-        // the answer claims the item first; when nothing was posted it's open again.
+        // A listener's review (crate::listen): Approve posts it on GitHub, with no lock held. The
+        // answer claims it first, and the claim (`watch.posting`) is on disk before gh is asked, so
+        // a second Approve, or one after obid stopped mid-post, never posts it twice; when nothing
+        // was posted it's open again.
         let approving = {
             let mut state = self.lock();
             let item = state
@@ -3236,17 +3238,31 @@ impl Link {
                 .cloned();
             match (item, &given) {
                 (Some(item), Given::Answer(a)) if a == crate::listen::APPROVE => {
-                    if let Some(kept) = state.inbox.get_mut(id) {
-                        kept.done = Some(time::now());
+                    if item
+                        .watch
+                        .as_deref()
+                        .is_some_and(|w| !w["posting"].is_null())
+                    {
+                        return Err(api(
+                            StatusCode::CONFLICT,
+                            "Oby was posting this review when it stopped, or still is: check the pull request on GitHub, then Dismiss it.",
+                        ));
                     }
-                    Some(item)
+                    let mut claimed = item.clone();
+                    if let Some(watch) = claimed.watch.as_mut() {
+                        watch["posting"] = serde_json::json!(time::format(time::now()));
+                    }
+                    state.inbox.insert(claimed.id.clone(), claimed.clone());
+                    Some((item, claimed))
                 }
                 _ => None,
             }
         };
-        if let Some(mut item) = approving {
-            return match crate::listen::post_review_with_gh(&self.config.home, &item).await {
+        if let Some((open, claimed)) = approving {
+            self.save_item(&claimed);
+            return match crate::listen::post_review_with_gh(&self.config.home, &claimed).await {
                 Ok(()) => {
+                    let mut item = claimed;
                     item.done = Some(time::now());
                     item.answer = Some(crate::listen::APPROVE.into());
                     self.lock().inbox.insert(item.id.clone(), item.clone());
@@ -3254,7 +3270,8 @@ impl Link {
                     Ok(item.to_json())
                 }
                 Err(why) => {
-                    self.lock().inbox.insert(item.id.clone(), item.clone());
+                    self.lock().inbox.insert(open.id.clone(), open.clone());
+                    self.save_item(&open);
                     Err(api(
                         StatusCode::BAD_GATEWAY,
                         format!("Nothing was posted: {why}."),

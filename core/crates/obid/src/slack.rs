@@ -412,14 +412,19 @@ impl Slack {
             return Err(bad("The two tokens are from different workspaces.".into()));
         }
         let _held = self.changing.lock().await;
-        let held = self.saved().socket && matches!(self.vault.value(APP), Ok(Some(_)));
+        // The app-level token held is kept only for the same workspace: one of another would
+        // go on hearing the old one's channels.
+        let before = self.saved();
+        let held = before.socket
+            && before.team_id.as_deref() == Some(team_id.as_str())
+            && matches!(self.vault.value(APP), Ok(Some(_)));
         let socket_kept = match app_token {
             AppToken::Set(_) => true,
             AppToken::Keep => held,
             AppToken::Forget => false,
         };
         for (value, name) in [(Some(user), USER), (Some(bot), BOT), (socket, APP)] {
-            let kept = match (value, name == APP && app_token == AppToken::Keep) {
+            let kept = match (value, name == APP && socket_kept) {
                 (Some(value), _) => self.vault.add(value, name),
                 (None, true) => Ok(()),
                 (None, false) => self.vault.remove(name).map(|_| ()),
@@ -1000,6 +1005,38 @@ pub(crate) mod tests {
         assert_eq!(
             slack.socket_url().await.unwrap(),
             "wss://wss-primary.slack.com/link/?ticket=1"
+        );
+        // Another workspace's tokens without it: the old workspace's app-level token goes.
+        let other = stub(HashMap::from([
+            (
+                "auth.test",
+                json!({"ok": true, "team": "Other", "team_id": "T2", "user_id": "UOWNER"}),
+            ),
+            (
+                "auth.test.bot",
+                json!({"ok": true, "team_id": "T2", "user_id": "UBOT", "bot_id": "B1"}),
+            ),
+        ]))
+        .await;
+        let elsewhere = Slack::open_at(
+            &home,
+            slack.vault.clone(),
+            crate::events::Events::new(),
+            other.url,
+        );
+        assert!(
+            elsewhere
+                .connect(&user_token(), &bot_token(), AppToken::Keep)
+                .await
+                .is_ok()
+        );
+        assert!(!elsewhere.socket_ready());
+        assert_eq!(elsewhere.vault.value(APP).unwrap(), None);
+        assert!(
+            slack
+                .connect(&user_token(), &bot_token(), AppToken::Set(&app))
+                .await
+                .is_ok()
         );
         // Connected again without it: kept. With `"app": null`: forgotten.
         assert!(

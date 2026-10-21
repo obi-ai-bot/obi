@@ -484,6 +484,20 @@ async fn redeem(State(through): State<Through>, request: Request) -> Response {
 /// Every other request: an allowed route with a paired device's token goes to the API, as obid's
 /// own loopback call with the API token. Nothing else the phone sent goes with it but its body and
 /// its content type.
+/// What a phone may not do through the gateway, though the route is open to it: Approve on a
+/// channel listener's review (crate::listen), which posts on GitHub a review the phones don't show
+/// yet. Dismiss and later go through.
+fn phone_refuses(method: &Method, path: &str, body: &[u8]) -> Option<&'static str> {
+    let review = path
+        .strip_prefix("/v1/inbox/listen-review-")
+        .is_some_and(|rest| rest.ends_with("/answer"));
+    let approve =
+        serde_json::from_slice::<Value>(body).is_ok_and(|b| b["answer"] == crate::listen::APPROVE);
+    (method == Method::POST && review && approve).then_some(
+        "Approve it on your Mac, where the review is shown: the phone doesn't show it yet.",
+    )
+}
+
 async fn forward(State(through): State<Through>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
     if !allows(&parts.method, parts.uri.path()) {
@@ -511,6 +525,9 @@ async fn forward(State(through): State<Through>, request: Request) -> Response {
     let Ok(body) = axum::body::to_bytes(body, BODY).await else {
         return error(StatusCode::PAYLOAD_TOO_LARGE, "That request is too large.");
     };
+    if let Some(why) = phone_refuses(&parts.method, parts.uri.path(), &body) {
+        return error(StatusCode::FORBIDDEN, why);
+    }
     let target = parts
         .uri
         .path_and_query()
@@ -763,6 +780,27 @@ mod tests {
         assert!(allows(&Method::POST, "/v1/github/work/abc/start"));
         assert!(!allows(&Method::POST, "/v1/github/work"));
         assert!(!allows(&Method::GET, "/v1/github/work/abc"));
+        // A listener's review is approved on the Mac, where it's shown; Dismiss goes through.
+        let answer = |a: &str| format!(r#"{{"answer": "{a}"}}"#).into_bytes();
+        let review = "/v1/inbox/listen-review-0123456789abcdef/answer";
+        assert!(phone_refuses(&Method::POST, review, &answer("Approve")).is_some());
+        assert!(phone_refuses(&Method::POST, review, &answer("Dismiss")).is_none());
+        assert!(
+            phone_refuses(
+                &Method::POST,
+                review,
+                br#"{"later": "2099-01-01T00:00:00Z"}"#
+            )
+            .is_none()
+        );
+        assert!(
+            phone_refuses(
+                &Method::POST,
+                "/v1/inbox/github-1/answer",
+                &answer("Approve")
+            )
+            .is_none()
+        );
         // Slack's login and the watcher are the Mac's alone, their events too.
         let scrubber = Scrubber { homes: vec![] };
         let stream = "event: job\ndata: {\"id\":\"j1\"}\n\nevent: watch\ndata: {\"rules\":{}}\n\nevent: slack\ndata: {}\n\nevent: tetrix\ndata: {}\n\nevent: inbox\ndata: {\"id\":\"i1\"}\n\n";

@@ -600,6 +600,7 @@ fn notice_item(person: &str, notice: &Notice, why: Option<&str>, now: i64) -> It
 /// the secret scan, then the model; reviews start, what needs the owner is told now, the rest
 /// waits for the digest. Nothing is remembered when the sorting fails: the catch-up reads them
 /// again.
+#[cfg(test)]
 pub(crate) async fn handle(
     listen: &Listen,
     hands: &impl Hands,
@@ -607,6 +608,20 @@ pub(crate) async fn handle(
     owner: Option<&str>,
     known: &[String],
     now: i64,
+) -> Result<usize, String> {
+    handle_with(listen, hands, messages, owner, known, now, true).await
+}
+
+/// [`handle`], moving the channels' cursors (`advance`) or not (live messages, and a catch-up's
+/// batches until it has handled them all).
+async fn handle_with(
+    listen: &Listen,
+    hands: &impl Hands,
+    messages: Vec<Message>,
+    owner: Option<&str>,
+    known: &[String],
+    now: i64,
+    advance: bool,
 ) -> Result<usize, String> {
     let _one = listen.sorting.lock().await;
     let (settings, generation, new) = {
@@ -879,12 +894,14 @@ pub(crate) async fn handle(
         }
         for m in &done {
             kept.seen.push(format!("slack:{}", m.key));
+            // Only a catch-up, which reads every message after the cursor, moves it: a live
+            // message never takes it past one the socket dropped or the 50 left for later.
             let (channel, ts) = m.key.split_once(':').unwrap_or_default();
             let newer = kept
                 .cursors
                 .get(channel)
                 .is_none_or(|c| c.parse::<f64>().unwrap_or(0.0) < m.at);
-            if newer {
+            if advance && newer {
                 kept.cursors.insert(channel.to_owned(), ts.to_owned());
             }
         }
@@ -921,10 +938,10 @@ async fn send(hands: &impl Hands, settings: &Settings, text: String) {
 /// The inbox item for a review that ended done. Its title and text are obid's words (the
 /// repository is one of obid's own); the review is under `watch.review`, exactly what Approve
 /// posts. A review the secret scan flags shows nothing and can't be approved.
-fn review_item(review: &Review, body: Option<&str>, now: i64) -> Item {
+fn review_item(review: &Review, body: Result<&str, &str>, now: i64) -> Item {
     let name = review.repo.rsplit('/').next().unwrap_or(&review.repo);
     let (text, options, details) = match body {
-        Some(_) => (
+        Ok(_) => (
             format!(
                 "Oby reviewed pull request #{} in {}, as asked in Slack. Approve posts the review shown here on GitHub.",
                 review.number, review.repo
@@ -936,9 +953,9 @@ fn review_item(review: &Review, body: Option<&str>, now: i64) -> Item {
                 "Leaves it in Oby. Nothing is posted.".to_owned(),
             ],
         ),
-        None => (
+        Err(why) => (
             format!(
-                "Oby reviewed pull request #{} in {}, as asked in Slack, but the secret scan flagged the review, so it isn't shown or posted from here. Open the job to read it.",
+                "Oby reviewed pull request #{} in {}, as asked in Slack, but {why}, so it isn't shown or posted from here. Open the job to read it.",
                 review.number, review.repo
             ),
             vec![crate::sphere::inbox::DISMISS.to_owned()],
@@ -973,7 +990,7 @@ fn review_item(review: &Review, body: Option<&str>, now: i64) -> Item {
             "source": "slack", "place": review.place, "url": review.url, "at": review.at,
             "pr": {"repo": review.repo, "number": review.number, "sha": review.sha,
                    "url": format!("https://github.com/{}/pull/{}", review.repo, review.number)},
-            "review": body,
+            "review": body.ok(),
             "quoted": {"text": null, "title": null, "topic": null, "person": review.person},
         }))),
     }
@@ -1023,8 +1040,13 @@ pub(crate) async fn reviews_ended(
                 .iter()
                 .enumerate()
                 .map(|(n, (r, body))| {
-                    let clean = !body.is_empty() && flagged.as_ref().is_ok_and(|f| !f.contains(&n));
-                    review_item(r, clean.then_some(body.as_str()), now)
+                    let shown = match &flagged {
+                        _ if body.is_empty() => Err("the review was empty"),
+                        Err(_) => Err("the secret scan couldn't run"),
+                        Ok(f) if f.contains(&n) => Err("the secret scan flagged it"),
+                        Ok(_) => Ok(body.as_str()),
+                    };
+                    review_item(r, shown, now)
                 })
                 .collect(),
         );
@@ -1431,8 +1453,10 @@ fn catch_up_from(cursor: Option<&String>, now: i64) -> String {
     format!("{at:.6}")
 }
 
-/// Reads every listened channel since its cursor and sorts what's new. A channel that can't be
-/// read is said (`catchUpProblems`) and the others are read all the same.
+/// Reads every listened channel since its cursor and sorts what's new, in batches of 50 until
+/// none is left; only then does a channel's cursor move, to its newest message. A channel that
+/// can't be read is said (`catchUpProblems`) and the others are read all the same; when none can
+/// be, it's an error.
 pub async fn catch_up(shared: &Shared, now: i64) -> Result<usize, String> {
     let Some(settings) = shared.listen.settings().filter(|s| s.enabled) else {
         return Ok(0);
@@ -1442,12 +1466,14 @@ pub async fn catch_up(shared: &Shared, now: i64) -> Result<usize, String> {
     }
     let cursors = shared.listen.lock().cursors.clone();
     let mut found = vec![];
+    let mut read = vec![];
     let mut problems = vec![];
     for channel in &settings.channels {
         let from = catch_up_from(cursors.get(&channel.id), now);
         match shared.slack.history(channel, &from).await {
             Ok((messages, skipped)) => {
                 found.extend(messages);
+                read.push(channel.id.clone());
                 shared.listen.skipped(&skipped);
             }
             Err(why) => problems.push(format!("#{} wasn't read: {why}", channel.name)),
@@ -1456,20 +1482,67 @@ pub async fn catch_up(shared: &Shared, now: i64) -> Result<usize, String> {
     {
         let mut kept = shared.listen.lock();
         kept.caught_up = Some(now);
-        kept.catch_up_problems = problems;
+        kept.catch_up_problems = problems.clone();
+    }
+    shared.listen.save();
+    if read.is_empty() && !settings.channels.is_empty() {
+        return Err(format!("No channel could be read: {}", problems.join("; ")));
     }
     let owner = shared.slack.status_json()["user"]
         .as_str()
         .map(str::to_owned);
-    handle(
-        &shared.listen,
-        &real(shared),
-        found,
-        owner.as_deref(),
-        &known(shared),
-        now,
-    )
-    .await
+    let hands = real(shared);
+    let mut sorted = 0;
+    // ponytail: at most 20 batches (1,000 messages) a catch-up; the rest waits for the next.
+    for _ in 0..20 {
+        let n = handle_with(
+            &shared.listen,
+            &hands,
+            found.clone(),
+            owner.as_deref(),
+            &known(shared),
+            now,
+            false,
+        )
+        .await?;
+        sorted += n;
+        if n < SORTED {
+            break;
+        }
+    }
+    move_cursors(&shared.listen, &found, &read, owner.as_deref());
+    shared.listen.save();
+    Ok(sorted)
+}
+
+/// Each channel read whose every message found is handled now: its cursor goes to its newest.
+/// One with a message left (the batches ran out, a sorting failed) keeps its cursor.
+fn move_cursors(listen: &Listen, found: &[Message], read: &[String], owner: Option<&str>) {
+    let mut kept = listen.lock();
+    let seen: BTreeSet<&String> = kept.seen.iter().collect();
+    let mut newest: BTreeMap<String, (f64, String)> = BTreeMap::new();
+    let mut left: BTreeSet<String> = BTreeSet::new();
+    for m in found.iter().filter(|m| Some(m.user.as_str()) != owner) {
+        let (channel, ts) = m.key.split_once(':').unwrap_or_default();
+        if !seen.contains(&format!("slack:{}", m.key)) {
+            left.insert(channel.to_owned());
+        }
+        let entry = newest
+            .entry(channel.to_owned())
+            .or_insert((f64::MIN, String::new()));
+        if m.at > entry.0 {
+            *entry = (m.at, ts.to_owned());
+        }
+    }
+    for (channel, (at, ts)) in newest {
+        let later = kept
+            .cursors
+            .get(&channel)
+            .is_none_or(|c| c.parse::<f64>().unwrap_or(0.0) < at);
+        if read.contains(&channel) && !left.contains(&channel) && later {
+            kept.cursors.insert(channel, ts);
+        }
+    }
 }
 
 /// The listener: Socket Mode while Slack has the app-level token and channels are set, with
@@ -1555,6 +1628,9 @@ pub fn spawn(shared: Arc<Shared>) {
     }
     tokio::spawn(async move {
         let mut stopping = shared.stopping.clone();
+        // Made once: a busy channel's messages never put off the minute's work.
+        let mut minute = tokio::time::interval(Duration::from_secs(60));
+        minute.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 Some(first) = hearing.recv() => {
@@ -1565,11 +1641,11 @@ pub fn spawn(shared: Arc<Shared>) {
                         batch.push(more);
                     }
                     let owner = shared.slack.status_json()["user"].as_str().map(str::to_owned);
-                    if let Err(why) = handle(&shared.listen, &real(&shared), batch, owner.as_deref(), &known(&shared), time::now()).await {
+                    if let Err(why) = handle_with(&shared.listen, &real(&shared), batch, owner.as_deref(), &known(&shared), time::now(), false).await {
                         tracing::warn!("listen: the messages weren't sorted (the catch-up reads them again): {why}");
                     }
                 }
-                () = tokio::time::sleep(Duration::from_secs(60)) => {
+                _ = minute.tick() => {
                     let now = time::now();
                     let hands = real(&shared);
                     reviews_ended(&shared.listen, &hands, |id| shared.jobs.get(id).map(|j| (j.status, j.summary.clone())), now).await;
@@ -2374,7 +2450,7 @@ mod tests {
             job: "job1".into(),
             ..Review::default()
         };
-        review_item(&review, Some(body), 1_792_501_800)
+        review_item(&review, Ok(body), 1_792_501_800)
     }
 
     /// Approve posts exactly what the item shows, only while the head is the one reviewed, after
@@ -2449,7 +2525,27 @@ mod tests {
             .unwrap_err();
         assert_eq!(refused.status, StatusCode::BAD_GATEWAY);
         assert!(refused.message.starts_with("Nothing was posted"));
-        assert!(link.item(&item.id).unwrap().done.is_none(), "open again");
+        let open = link.item(&item.id).unwrap();
+        assert!(open.done.is_none(), "open again");
+        assert!(
+            open.watch.as_ref().unwrap()["posting"].is_null(),
+            "unclaimed"
+        );
+        // One claimed when obid stopped mid-post: Approve asks the owner to check, Dismiss settles.
+        let mut stuck = ready_item("Looks right.");
+        stuck.id = "listen-review-stuck".into();
+        stuck.watch.as_mut().unwrap()["posting"] = json!("2026-10-21T16:00:00Z");
+        link.add_items(vec![stuck.clone()]);
+        let refused = link
+            .answer(&stuck.id, br#"{"answer": "Approve"}"#)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert!(
+            link.answer(&stuck.id, br#"{"answer": "Dismiss"}"#)
+                .await
+                .is_ok()
+        );
         assert!(
             link.answer(&item.id, br#"{"answer": "Dismiss"}"#)
                 .await
@@ -2513,5 +2609,73 @@ mod tests {
         assert_eq!(listen.lock().cursors["C1"], "300.000000");
         listen.forget();
         assert!(listen.settings().is_none());
+    }
+
+    /// A live message, or a catch-up's batch, never moves a cursor; a catch-up moves a channel's
+    /// cursor only when every message it read there is handled.
+    #[tokio::test]
+    async fn a_cursor_never_passes_a_message_left_unhandled() {
+        let listen = listening("listen-cursor", json!({})).await;
+        let hands = Fake::default();
+        *hands.answer.lock().unwrap() = Some(Ok(answer(&["other"])));
+        let live = message("1792501900.000100", "U3", "later news");
+        handle_with(
+            &listen,
+            &hands,
+            vec![live.clone()],
+            None,
+            &known(),
+            1_792_502_000,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            listen.lock().cursors["C1"],
+            "1792501000.000000",
+            "a live message moves nothing"
+        );
+        // The catch-up read an older one too, not handled yet: the cursor stays.
+        let older = message("1792501500.000100", "U3", "the backlog");
+        let read = vec!["C1".to_owned()];
+        move_cursors(&listen, &[older.clone(), live.clone()], &read, None);
+        assert_eq!(listen.lock().cursors["C1"], "1792501000.000000");
+        handle_with(
+            &listen,
+            &hands,
+            vec![older.clone()],
+            None,
+            &known(),
+            1_792_502_000,
+            false,
+        )
+        .await
+        .unwrap();
+        move_cursors(&listen, &[older, live], &read, None);
+        assert_eq!(listen.lock().cursors["C1"], "1792501900.000100");
+    }
+
+    /// A finished review the scan couldn't check, or an empty one, says so, and isn't approvable.
+    #[test]
+    fn a_review_not_shown_says_why() {
+        let review = Review {
+            repo: "obi-ai-bot/obi".into(),
+            number: 835,
+            sha: SHA.into(),
+            ..Review::default()
+        };
+        for why in [
+            "the review was empty",
+            "the secret scan couldn't run",
+            "the secret scan flagged it",
+        ] {
+            let item = review_item(&review, Err(why), 0);
+            assert!(
+                item.text.contains(&format!("but {why}, so it isn't shown")),
+                "{}",
+                item.text
+            );
+            assert_eq!(item.options, ["Dismiss"]);
+        }
     }
 }
