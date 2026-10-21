@@ -721,6 +721,8 @@ struct ConnectorsSettingsView: View {
     @State private var askingSlack = false
     @State private var userToken = ""
     @State private var botToken = ""
+    /// The app-level token, for live channels (Socket Mode): optional.
+    @State private var appToken = ""
 
     var body: some View {
         let groups = Connectors.groups(list, query: query)
@@ -784,11 +786,13 @@ struct ConnectorsSettingsView: View {
         .alert("Connect Slack", isPresented: $askingSlack) {
             SecureField("User OAuth Token", text: $userToken, prompt: Text("xoxp-…"))
             SecureField("Bot User OAuth Token", text: $botToken, prompt: Text("xoxb-…"))
+            SecureField("App-Level Token (optional)", text: $appToken, prompt: Text("xapp-…"))
             Button("Connect") { connectSlack(row: "slack") }
-                .disabled(!SlackStatus.isToken(userToken, "xoxp-") || !SlackStatus.isToken(botToken, "xoxb-"))
-            Button("Cancel", role: .cancel) { userToken = ""; botToken = "" }
+                .disabled(!SlackStatus.isToken(userToken, "xoxp-") || !SlackStatus.isToken(botToken, "xoxb-")
+                          || (!appToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !SlackStatus.isToken(appToken, "xapp-")))
+            Button("Cancel", role: .cancel) { (userToken, botToken, appToken) = ("", "", "") }
         } message: {
-            Text("Your workspace's Oby app's two tokens, from api.slack.com/apps › OAuth & Permissions › OAuth Tokens. obid checks them with Slack and keeps them in its vault; this Mac doesn't keep them.")
+            Text("Your workspace's Oby app's tokens, from api.slack.com/apps › OAuth & Permissions › OAuth Tokens, and its app-level token (Basic Information) for live channels. obid checks them with Slack and keeps them in its vault; this Mac doesn't keep them.")
         }
         .alert("Connect Tetrix", isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } })) {
             TextField("MCP URL", text: $url, prompt: Text("https://"))
@@ -895,7 +899,7 @@ struct ConnectorsSettingsView: View {
         switch action {
         case .disablePlugin, .disconnect, .disconnectTetrix, .disconnectSlack: confirming = connector
         case .connectSlack:
-            (userToken, botToken) = ("", "")
+            (userToken, botToken, appToken) = ("", "", "")
             askingSlack = true
         case .setWatchLive(let live):
             guard let runner = feed.runner else { return }
@@ -1082,13 +1086,14 @@ struct ConnectorsSettingsView: View {
     /// why when it doesn't take them.
     private func connectSlack(row: String) {
         let (user, bot) = (userToken.trimmingCharacters(in: .whitespacesAndNewlines), botToken.trimmingCharacters(in: .whitespacesAndNewlines))
-        (userToken, botToken) = ("", "")
+        let app = appToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        (userToken, botToken, appToken) = ("", "", "")
         guard feed.local, let runner = feed.runner else { return }
         Task {
             busy = true
             defer { busy = false }
             do {
-                lists.slack = try await runner.connectSlack(user: user, bot: bot)
+                lists.slack = try await runner.connectSlack(user: user, bot: bot, app: app.isEmpty ? nil : app)
                 problems[row] = nil
             } catch {
                 problems[row] = error.localizedDescription

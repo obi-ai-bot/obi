@@ -81,10 +81,11 @@ extension Runner {
         }
     }
 
-    /// Gives obid the Slack app's two tokens: it checks them with Slack and keeps them in its vault.
-    func connectSlack(user: String, bot: String) async throws -> SlackStatus {
-        struct Body: Encodable { var user: String; var bot: String }
-        return try await call("PUT", "v1/slack", body: Body(user: user, bot: bot))
+    /// Gives obid the Slack app's tokens: it checks them with Slack and keeps them in its vault. The
+    /// app-level token (`app`) is for the channel listener's Socket Mode; nil leaves it out.
+    func connectSlack(user: String, bot: String, app: String?) async throws -> SlackStatus {
+        struct Body: Encodable { var user: String; var bot: String; var app: String? }
+        return try await call("PUT", "v1/slack", body: Body(user: user, bot: bot, app: app))
     }
 
     /// obid forgets the Slack tokens: the watcher reads only GitHub until they're pasted again.
