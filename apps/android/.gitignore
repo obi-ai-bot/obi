@@ -1,0 +1,12 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.kotlin/
+captures/
+# The owner's Firebase config and signing keys never go in git (README.md, "Owner's steps").
+app/google-services.json
+*.jks
+*.keystore
+keystore.properties
