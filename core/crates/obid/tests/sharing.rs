@@ -443,5 +443,71 @@ async fn with_sharing_off_or_the_mac_busy_a_job_is_declined_with_the_reason() {
             .map(|e| e["body"]["reason"].clone())
             .collect();
         assert_eq!(reasons, vec![json!("not_free"), json!("policy")]);
+
+        // A secret already in the repository, not one the job adds: the whole tree that would go
+        // is scanned, so nothing goes.
+        let token: String = format!("ghp_{}", uuid::Uuid::new_v4().simple())
+            .chars()
+            .take(40)
+            .collect();
+        let token = format!("{token}{}", "Q7".repeat(2));
+        let work = gf.0.join("secret-work");
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(&gf.0)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let remote = gf.0.join("fixture/remote.git");
+        git(&[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            work.to_str().unwrap(),
+        ]);
+        std::fs::write(work.join("deploy.env"), format!("GITHUB_TOKEN={token}\n")).unwrap();
+        let w = work.to_str().unwrap();
+        git(&["-C", w, "add", "-A"]);
+        git(&["-C", w, "commit", "-q", "-m", "Deploy settings"]);
+        git(&["-C", w, "push", "-q", "origin", "HEAD:main"]);
+        let sent_before = p
+            .sphere
+            .recorded()
+            .iter()
+            .filter(|e| e["type"] == "run_request")
+            .count();
+        let job = send_job(&p.guest);
+        let refused = within(60, "the job refused", || {
+            let j = get(&p.guest, &format!("/v1/jobs/{job}"));
+            (j["status"] == "failed" || j["status"] == "interrupted").then_some(j)
+        });
+        assert!(
+            refused
+                .to_string()
+                .contains("The secret scan found a possible secret"),
+            "{refused}"
+        );
+        assert!(!refused.to_string().contains(&token));
+        let sent_after = p
+            .sphere
+            .recorded()
+            .iter()
+            .filter(|e| e["type"] == "run_request")
+            .count();
+        assert_eq!(sent_before, sent_after, "nothing went to Wellington's Mac");
     });
 }
