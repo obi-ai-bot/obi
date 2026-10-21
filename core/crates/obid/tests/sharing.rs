@@ -1,0 +1,431 @@
+//! A job that runs on a teammate's Mac (#797; docs/runner-api.md, "obid only: sharing this Mac"),
+//! through two real obids and the fake Sphere (tests/support), with its job channel relayed there.
+//! Wellington's obid hosts; Sangam's sends one of Sangam's jobs to it. The VM is a stand-in
+//! (tests/agents/fake-obi-vm) that plays the guest over the same sockets the real image uses, and
+//! the model's API is a stand-in that records the key it was called with.
+
+mod support;
+
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use support::*;
+
+const HOST_SCOPES: &str =
+    "send:review_request send:question send:run_request reply receive directory:read audit:read";
+const API_KEY: &str = "test-company-api-key-for-obid-tests-only-7f3a9c";
+
+/// The model's API, as the guest's obid calls it: answers every `POST /v1/messages`, keeping each
+/// call's `x-api-key`.
+async fn model_api() -> (String, Arc<Mutex<Vec<String>>>) {
+    let keys = Arc::new(Mutex::new(Vec::new()));
+    let seen = keys.clone();
+    let app = axum::Router::new().route(
+        "/v1/messages",
+        axum::routing::post(move |headers: axum::http::HeaderMap| {
+            let seen = seen.clone();
+            async move {
+                let key = headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
+                seen.lock().unwrap().push(key);
+                axum::Json(json!({"id": "msg_1", "type": "message", "role": "assistant", "model": "fake",
+                                  "content": [{"type": "text", "text": "Hello from the model"}],
+                                  "stop_reason": "end_turn", "usage": {"input_tokens": 10, "output_tokens": 4}}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, keys)
+}
+
+struct Pair {
+    sphere: FakeSphere,
+    host: Obid,
+    guest: Obid,
+    keys: Arc<Mutex<Vec<String>>>,
+    vm: std::path::PathBuf,
+}
+
+/// Wellington's obid (sharing its Mac: `mac` over the defaults, turned on) and Sangam's, both
+/// joined, Sangam's with its company API key in its vault.
+async fn pair(host_folder: &Folder, guest_folder: &Folder, mac: Value, scenario: Value) -> Pair {
+    let sphere = FakeSphere::start().await;
+    let (api, keys) = model_api().await;
+    let fake_vm = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/fake-obi-vm");
+    let vm = host_folder.0.join("vm");
+    std::fs::create_dir_all(&vm).unwrap();
+    for f in ["vmlinuz", "initrd", "root.img"] {
+        std::fs::write(vm.join(f), b"stand-in").unwrap();
+    }
+    std::fs::write(vm.join("fake.json"), scenario.to_string()).unwrap();
+
+    let remote = fixture(&host_folder.0.join("fixture"));
+    let mut host_config = config(&host_folder.0, &remote, &stub_agent());
+    host_config["vmHelper"] = json!(fake_vm);
+    host_config["vmImage"] = json!(vm);
+    let host = start(&host_folder.0, &host_config, None);
+
+    let remote = fixture(&guest_folder.0.join("fixture"));
+    let mut guest_config = config(&guest_folder.0, &remote, &stub_agent());
+    guest_config["owner"] = json!("sangam");
+    guest_config["guestModelApi"] = json!(api);
+    let guest = start(&guest_folder.0, &guest_config, None);
+    let mut add = std::process::Command::new(OBID)
+        .args(["vault", "--config"])
+        .arg(guest_folder.0.join("config.json"))
+        .args(["add", "anthropic-api-key"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(add.stdin.as_mut().unwrap(), API_KEY.as_bytes()).unwrap();
+    drop(add.stdin.take());
+    assert!(add.wait().unwrap().success());
+
+    tokio::task::block_in_place(|| {
+        join_as(
+            &host,
+            &sphere,
+            &Owner::new("wellington"),
+            "obi-wellington",
+            &["review_request", "run_request"],
+            HOST_SCOPES,
+        );
+        join_as(
+            &guest,
+            &sphere,
+            &Owner::new("sangam"),
+            "obi-sangam",
+            &["review_request"],
+            HOST_SCOPES,
+        );
+        let mut settings =
+            call(&host, "GET", "/v1/obid/sharing/mac", None).body["settings"].clone();
+        assert_eq!(settings["on"], false, "off by default");
+        settings["on"] = json!(true);
+        for (k, v) in mac.as_object().unwrap() {
+            settings[k] = v.clone();
+        }
+        let set = call(&host, "PUT", "/v1/obid/sharing/mac", Some(&settings));
+        assert_eq!(set.status, 200, "{}", set.text);
+        assert_eq!(set.body["ready"], true);
+    });
+    Pair {
+        sphere,
+        host,
+        guest,
+        keys,
+        vm,
+    }
+}
+
+fn get(obid: &Obid, target: &str) -> Value {
+    let answer = call(obid, "GET", target, None);
+    assert_eq!(answer.status, 200, "GET {target}: {}", answer.text);
+    answer.body
+}
+
+/// Sangam's job, on Wellington's Mac.
+fn send_job(guest: &Obid) -> String {
+    let made = call(
+        guest,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "build", "task": "Say hello in guest.txt",
+                              "title": "Say hello", "runsOn": "obi-wellington"}}),
+        ),
+    );
+    assert_eq!(made.status, 201, "{}", made.text);
+    assert_eq!(
+        made.body["runsOn"],
+        json!({"obi": "obi-wellington", "owner": "wellington"})
+    );
+    made.body["id"].as_str().unwrap().to_owned()
+}
+
+/// Every file under `dir` that holds `needle`.
+fn holding(dir: &Path, needle: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in walk(dir) {
+        if std::fs::read(&entry)
+            .is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle.as_bytes()))
+        {
+            found.push(entry.display().to_string());
+        }
+    }
+    found
+}
+
+fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() && !path.is_symlink() {
+            out.extend(walk(&path));
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_runs_on_a_teammates_mac_with_the_owners_own_key_and_comes_back_with_its_commit() {
+    let (hf, gf) = (Folder::new("share-host"), Folder::new("share-guest"));
+    let p = pair(&hf, &gf, json!({"who": "everyone"}), json!({})).await;
+    let job = tokio::task::block_in_place(|| {
+        // Wellington's Mac shows as free to Sangam, never whether Wellington is at it.
+        let macs = within(40, "Wellington's Mac in the list", || {
+            let macs = get(&p.guest, "/v1/obid/sharing/macs");
+            macs.as_array().filter(|m| !m.is_empty()).cloned()
+        });
+        assert_eq!(macs[0]["obi"], "obi-wellington");
+        assert_eq!(macs[0]["free"], true);
+        send_job(&p.guest)
+    });
+    let done = tokio::task::block_in_place(|| {
+        within(90, "the job done", || {
+            let j = get(&p.guest, &format!("/v1/jobs/{job}"));
+            (j["status"] == "done" || j["status"] == "failed" || j["status"] == "interrupted")
+                .then_some(j)
+        })
+    });
+    assert_eq!(done["status"], "done", "{done}\n{}", p.guest.log());
+    assert_eq!(done["commits"], 1);
+    // The model was called from Sangam's Mac with Sangam's key, and only from there.
+    assert_eq!(*p.keys.lock().unwrap(), vec![API_KEY.to_owned()]);
+    let seen = std::fs::read_to_string(p.vm.join("guest.log")).unwrap();
+    assert!(seen.contains("cpus 4 memory 8192"), "{seen}");
+    assert!(seen.contains("key 200 64"), "{seen}");
+    assert!(seen.contains("key-again 410"), "{seen}");
+    assert!(seen.contains("refused 403"), "{seen}");
+    assert!(seen.contains("model 200 Hello from the model"), "{seen}");
+    assert!(seen.contains("job Say hello on"), "{seen}");
+    // The key is nowhere on Wellington's side, and the relay saw only sealed frames.
+    assert!(
+        holding(&hf.0, API_KEY).is_empty(),
+        "{:?}",
+        holding(&hf.0, API_KEY)
+    );
+    let relayed = p.sphere.lock().relayed.clone();
+    assert!(!relayed.is_empty());
+    for clear in [API_KEY.as_bytes(), b"Hello from the model", b"guest.txt"] {
+        assert!(
+            !relayed.windows(clear.len()).any(|w| w == clear),
+            "the relay saw {:?}",
+            String::from_utf8_lossy(clear)
+        );
+    }
+    // The exchange: request, accept, progress, result with what the job used of the Mac.
+    let recorded = p.sphere.recorded();
+    let types: Vec<&str> = recorded
+        .iter()
+        .map(|e| e["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(types.first(), Some(&"run_request"));
+    assert!(
+        types.contains(&"accept") && types.contains(&"run_progress"),
+        "{types:?}"
+    );
+    let result = recorded
+        .iter()
+        .find(|e| e["type"] == "result")
+        .expect("a result");
+    assert_eq!(result["body"]["for"], "run_request");
+    assert_eq!(result["body"]["host"]["cpu_seconds"], 3);
+    assert_eq!(result["body"]["host"]["peak_memory_mb"], 42);
+    // Wellington's obid keeps its own log of the host's use, and nothing of the job's.
+    let log = std::fs::read_to_string(hf.0.join("home/sharing-log.jsonl")).unwrap();
+    assert!(log.contains("\"fromOwner\":\"sangam\""), "{log}");
+    assert!(
+        !hf.0
+            .join("home/g")
+            .read_dir()
+            .is_ok_and(|mut d| d.next().is_some()),
+        "the job's folder is gone"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_teammates_first_job_waits_for_the_owners_allow_and_from_now_on_isnt_asked_again() {
+    let (hf, gf) = (
+        Folder::new("share-ask-host"),
+        Folder::new("share-ask-guest"),
+    );
+    let p = pair(&hf, &gf, json!({}), json!({})).await;
+    tokio::task::block_in_place(|| {
+        within(40, "Wellington's Mac in the list", || {
+            get(&p.guest, "/v1/obid/sharing/macs")
+                .as_array()
+                .filter(|m| !m.is_empty())
+                .cloned()
+        });
+        let first = send_job(&p.guest);
+        let item = within(30, "the ask in Wellington's inbox", || {
+            get(&p.host, "/v1/inbox")
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["obi"]["type"] == "run_request")
+                .cloned()
+        });
+        assert_eq!(
+            item["title"],
+            "sangam asks to use this Mac while you're away"
+        );
+        assert_eq!(
+            item["options"],
+            json!(["Allow", "Allow sangam from now on", "Decline"])
+        );
+        assert_eq!(item["obi"]["quoted"]["title"], "Say hello");
+        let answered = call(
+            &p.host,
+            "POST",
+            &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
+            Some(&json!({"answer": "Allow sangam from now on"})),
+        );
+        assert_eq!(answered.status, 200, "{}", answered.text);
+        let job = within(90, "the first job done", || {
+            let j = get(&p.guest, &format!("/v1/jobs/{first}"));
+            (j["status"] != "running" && j["status"] != "queued").then_some(j)
+        });
+        assert_eq!(job["status"], "done", "{job}");
+        assert_eq!(
+            get(&p.host, "/v1/obid/sharing/mac")["settings"]["allowed"],
+            json!(["sangam"])
+        );
+        // The second job runs without asking.
+        let second = send_job(&p.guest);
+        let job = within(90, "the second job done", || {
+            let j = get(&p.guest, &format!("/v1/jobs/{second}"));
+            (j["status"] != "running" && j["status"] != "queued").then_some(j)
+        });
+        assert_eq!(job["status"], "done", "{job}");
+        let asks = get(&p.host, "/v1/inbox?done=true")
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["obi"]["type"] == "run_request")
+            .count();
+        assert!(asks <= 1);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_sends_the_job_back_with_its_commit_and_it_needs_its_owner() {
+    let (hf, gf) = (
+        Folder::new("share-stop-host"),
+        Folder::new("share-stop-guest"),
+    );
+    let p = pair(
+        &hf,
+        &gf,
+        json!({"who": "everyone"}),
+        json!({"mode": "wait"}),
+    )
+    .await;
+    tokio::task::block_in_place(|| {
+        within(40, "Wellington's Mac in the list", || {
+            get(&p.guest, "/v1/obid/sharing/macs")
+                .as_array()
+                .filter(|m| !m.is_empty())
+                .cloned()
+        });
+        let job = send_job(&p.guest);
+        let running = within(60, "the job running on Wellington's Mac", || {
+            let mac = get(&p.host, "/v1/obid/sharing/mac");
+            mac["jobs"]
+                .as_array()
+                .filter(|j| j.iter().any(|j| j["state"] == "running"))
+                .cloned()
+        });
+        assert_eq!(running[0]["fromOwner"], "sangam");
+        assert_eq!(running[0]["title"], "Say hello");
+        let stopped = call(
+            &p.host,
+            "POST",
+            "/v1/obid/sharing/mac/stop",
+            Some(&json!({})),
+        );
+        assert_eq!(stopped.body["stopped"], 1);
+        let job = within(90, "the job back", || {
+            let j = get(&p.guest, &format!("/v1/jobs/{job}"));
+            (j["status"] == "interrupted" || j["status"] == "failed" || j["status"] == "done")
+                .then_some(j)
+        });
+        assert_eq!(job["status"], "interrupted", "{job}");
+        let reason = job["reason"].as_str().unwrap_or("");
+        assert!(
+            reason.starts_with("Came back from wellington's Mac: wellington stopped it."),
+            "{reason}"
+        );
+        assert!(reason.contains("1 commit"), "{reason}");
+        let seen = std::fs::read_to_string(p.vm.join("guest.log")).unwrap();
+        assert!(seen.contains("return stopped"), "{seen}");
+        let recorded = p.sphere.recorded();
+        assert!(
+            recorded
+                .iter()
+                .any(|e| e["type"] == "run_return" && e["body"]["reason"] == "stopped")
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_sharing_off_or_the_mac_busy_a_job_is_declined_with_the_reason() {
+    let (hf, gf) = (
+        Folder::new("share-off-host"),
+        Folder::new("share-off-guest"),
+    );
+    let p = pair(&hf, &gf, json!({"who": "everyone"}), json!({})).await;
+    tokio::task::block_in_place(|| {
+        within(40, "Wellington's Mac in the list", || {
+            get(&p.guest, "/v1/obid/sharing/macs")
+                .as_array()
+                .filter(|m| !m.is_empty())
+                .cloned()
+        });
+        // The owner is at the Mac: not free.
+        std::fs::write(
+            hf.0.join("env-home/fake-signals.json"),
+            json!({"idleSeconds": 3, "onAC": true, "lowPower": false, "thermal": "nominal"})
+                .to_string(),
+        )
+        .unwrap();
+        let job = send_job(&p.guest);
+        let declined = within(60, "the job declined", || {
+            let j = get(&p.guest, &format!("/v1/jobs/{job}"));
+            (j["status"] == "interrupted").then_some(j)
+        });
+        assert_eq!(
+            declined["reason"],
+            "wellington's Mac isn't free now. Try again later, or run it here."
+        );
+        // Sharing off: policy.
+        let mut settings = get(&p.host, "/v1/obid/sharing/mac")["settings"].clone();
+        settings["on"] = json!(false);
+        assert_eq!(
+            call(&p.host, "PUT", "/v1/obid/sharing/mac", Some(&settings)).status,
+            200
+        );
+        let job = send_job(&p.guest);
+        let declined = within(60, "the job declined", || {
+            let j = get(&p.guest, &format!("/v1/jobs/{job}"));
+            (j["status"] == "interrupted").then_some(j)
+        });
+        assert_eq!(
+            declined["reason"],
+            "wellington's Mac doesn't take your jobs. Run it here instead."
+        );
+        let reasons: Vec<Value> = p
+            .sphere
+            .recorded()
+            .iter()
+            .filter(|e| e["type"] == "decline")
+            .map(|e| e["body"]["reason"].clone())
+            .collect();
+        assert_eq!(reasons, vec![json!("not_free"), json!("policy")]);
+    });
+}

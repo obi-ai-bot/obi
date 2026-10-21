@@ -417,6 +417,9 @@ pub struct NewJob {
     pub earlier: Option<String>,
     #[serde(default)]
     pub start_from: Option<String>,
+    /// The teammate's Mac its agent runs on (crate::sphere::guest).
+    #[serde(default)]
+    pub runs_on: Option<crate::job::RunsOn>,
     /// The routine whose run it is (crate::routines).
     #[serde(default)]
     pub routine: Option<crate::job::RoutineMark>,
@@ -571,6 +574,8 @@ pub struct Jobs {
     review_hook: std::sync::OnceLock<ReviewHook>,
     /// Told when a permission waits for the owner, and when it stops waiting.
     permission_hook: std::sync::OnceLock<PermissionHook>,
+    /// The Sphere link, for jobs that run on a teammate's Mac (crate::sphere::guest).
+    link: std::sync::OnceLock<std::sync::Weak<crate::sphere::Link>>,
     confirm_hook: std::sync::OnceLock<ConfirmHook>,
     /// Settings › Permissions' default mode and the saved rules (`home/permissions.json`).
     permissions: Mutex<permissions::Kept>,
@@ -654,6 +659,7 @@ impl Jobs {
             preparing: Mutex::new(HashMap::new()),
             review_hook: std::sync::OnceLock::new(),
             permission_hook: std::sync::OnceLock::new(),
+            link: std::sync::OnceLock::new(),
             confirm_hook: std::sync::OnceLock::new(),
             permissions: Mutex::new(kept),
             plugins: std::sync::OnceLock::new(),
@@ -2003,6 +2009,7 @@ impl Jobs {
             .start_from
             .filter(|b| new.follow_up_of.is_some() && git::is_branch_name(b));
         job.follow_up_of = new.follow_up_of;
+        job.runs_on = new.runs_on;
         job.routine = new.routine;
         job.mode = Some(if job.read_only() {
             Mode::Plan.as_str().to_owned()
@@ -2483,6 +2490,11 @@ impl Jobs {
     }
 
     /// Who is told about permissions (once; a second call changes nothing).
+    /// The Sphere link a job that runs on a teammate's Mac goes through (once).
+    pub fn set_link(&self, link: std::sync::Weak<crate::sphere::Link>) {
+        let _ = self.link.set(link);
+    }
+
     pub fn on_permission(&self, hook: PermissionHook) {
         let _ = self.permission_hook.set(hook);
     }
@@ -3637,7 +3649,10 @@ impl Jobs {
                     // Needing the owner, with a session to pick up: the agent's own summary stays
                     // (`summaries` has every round's), and why it stopped is said apart. A dead end,
                     // or one with no session, failed, its summary why.
-                    let needs_you = matches!(end, End::NeedsYou { .. }) && job.session.is_some();
+                    // A job that ran on a teammate's Mac has no session here, but Try again sends it
+                    // back there (or Run it here, #808): it needs its owner too.
+                    let needs_you = matches!(end, End::NeedsYou { .. })
+                        && (job.session.is_some() || job.runs_on.is_some());
                     if needs_you {
                         job.status = Status::Interrupted;
                         if job.summary.trim().is_empty() {
@@ -4289,6 +4304,35 @@ impl Jobs {
         // The job's activity and context follow the transcript, saved and sent at most once a
         // second while the agent works (each call's start and end would be a `job` event).
         let run = async {
+            if let Some(on) = job.runs_on.clone() {
+                let link = self
+                    .link
+                    .get()
+                    .and_then(std::sync::Weak::upgrade)
+                    .ok_or_else(|| std::io::Error::other("obid isn't in a Sphere"))?;
+                let ask = crate::sphere::guest::Ask {
+                    host: &on.obi,
+                    host_owner: &on.owner,
+                    agent: tool.id(),
+                    model: job.model.as_deref(),
+                    repo: &job.repo,
+                    base_branch: job.base.as_deref().unwrap_or("main"),
+                    branch: &job.branch,
+                    title: job.title.as_deref().unwrap_or(&job.task),
+                    size: "small",
+                    start_commit: job.start_commit.as_deref(),
+                };
+                return crate::sphere::guest::run_turn(
+                    &link,
+                    ask,
+                    std::path::Path::new(&worktree),
+                    prompt,
+                    signal.clone(),
+                    on_event,
+                )
+                .await
+                .map_err(std::io::Error::other);
+            }
             match tool {
                 Tool::Claude => {
                     agent::run_turn(
@@ -5305,7 +5349,8 @@ impl Jobs {
                         flags.extend(mcp_rules.iter().map(OsString::from));
                     }
                 }
-                if tool == Tool::Claude {
+                // A job run on a teammate's Mac uses the company API key, not this account's login.
+                if tool == Tool::Claude && job.runs_on.is_none() {
                     self.claude_login_ready(Some(&account)).await?;
                 }
                 let left = self

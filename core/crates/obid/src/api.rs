@@ -273,6 +273,19 @@ pub fn router(shared: Arc<Shared>) -> Router {
             "/v1/obid/decisions/{id}",
             axum::routing::delete(crate::sphere::routes::forget),
         )
+        .route(
+            "/v1/obid/sharing/mac",
+            get(crate::sphere::routes::mac).put(crate::sphere::routes::set_mac),
+        )
+        .route(
+            "/v1/obid/sharing/mac/stop",
+            post(crate::sphere::routes::stop_guests),
+        )
+        .route("/v1/obid/sharing/macs", get(crate::sphere::routes::macs))
+        .route(
+            "/v1/obid/sphere/membership",
+            axum::routing::put(crate::sphere::routes::renew),
+        )
         .route("/v1/obid/sharing", get(crate::sphere::routes::sharing))
         .route(
             "/v1/obid/sharing/rules",

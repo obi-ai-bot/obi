@@ -250,6 +250,44 @@ impl Client {
         Ok(body["members"].as_array().cloned().unwrap_or_default())
     }
 
+    /// Publishes this Obi's signed runner status in the directory (sphere-api.md 6.4).
+    pub async fn put_runner(
+        &self,
+        token: &str,
+        obi: &str,
+        status: &Value,
+    ) -> Result<Value, ClientError> {
+        let url = self.sphere_path(&format!("/members/{obi}/runner"));
+        let (code, body) = self
+            .call(|| self.http.put(&url).bearer_auth(token).json(status))
+            .await?;
+        Client::expect(code, body, &[200], "wire/member")
+    }
+
+    /// Takes this Obi's runner status out of the directory.
+    pub async fn delete_runner(&self, token: &str, obi: &str) -> Result<Value, ClientError> {
+        let url = self.sphere_path(&format!("/members/{obi}/runner"));
+        let (code, body) = self
+            .call(|| self.http.delete(&url).bearer_auth(token))
+            .await?;
+        Client::expect(code, body, &[200], "wire/member")
+    }
+
+    /// Replaces this Obi's card with a new one its owner signed (identity.md section 3).
+    pub async fn update_card(
+        &self,
+        token: &str,
+        obi: &str,
+        card: &Value,
+    ) -> Result<Value, ClientError> {
+        let url = self.sphere_path(&format!("/members/{obi}/card"));
+        let body = json!({"card": card});
+        let (code, answer) = self
+            .call(|| self.http.put(&url).bearer_auth(token).json(&body))
+            .await?;
+        Client::expect(code, answer, &[200], "wire/member")
+    }
+
     /// Sends a signed envelope. A retry of one already recorded answers its original place (`200`).
     pub async fn send(&self, token: &str, envelope: &Value) -> Result<Sent, ClientError> {
         let url = self.sphere_path("/messages");

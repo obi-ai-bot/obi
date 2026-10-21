@@ -6,10 +6,13 @@ pub mod answering;
 pub mod channel;
 pub mod decisions;
 pub mod exchange;
+pub mod guest;
+pub mod hosting;
 pub mod inbox;
 pub mod link;
 pub mod membership;
 pub mod routes;
 pub mod sharing;
+pub mod vm;
 
 pub use link::Link;

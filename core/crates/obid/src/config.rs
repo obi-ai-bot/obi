@@ -94,6 +94,15 @@ struct File {
     /// left out, obid decides when it starts (crate::jobs::keychain_wanted).
     #[serde(default)]
     claude_keychain: Option<bool>,
+    /// Sharing this Mac (crate::sphere::hosting): where `obi-vm` and the guest image are.
+    #[serde(default)]
+    vm_helper: Option<PathBuf>,
+    #[serde(default)]
+    vm_image: Option<PathBuf>,
+    /// Where a job run on another Mac sends its model calls from here (crate::sphere::guest):
+    /// the providers' own APIs when it's left out. Tests point it at a stand-in.
+    #[serde(default)]
+    guest_model_api: Option<String>,
     /// How conversations run (crate::brain::harness): `{"agent", "model", "budget"}`.
     #[serde(default)]
     conversation: Option<ConversationSetting>,
@@ -249,6 +258,12 @@ pub struct Config {
     pub claude_keychain: Option<bool>,
     /// How conversations run.
     pub conversation: Conversation,
+    /// `vmHelper` and `vmImage`: `obi-vm` and the guest image's folder, when not the defaults
+    /// (crate::sphere::hosting::Setup).
+    pub vm_helper: Option<PathBuf>,
+    pub vm_image: Option<PathBuf>,
+    /// `guestModelApi`: the model API a guest job's calls go to from here, when not the providers'.
+    pub guest_model_api: Option<String>,
 }
 
 /// Where the plug-ins obid ships are when the configuration doesn't say: the `plugins/` folder
@@ -555,6 +570,9 @@ impl Config {
             job_token_budget,
             gateway,
             claude_keychain: file.claude_keychain,
+            vm_helper: file.vm_helper,
+            vm_image: file.vm_image,
+            guest_model_api: file.guest_model_api,
             conversation: Conversation {
                 harness,
                 agent,

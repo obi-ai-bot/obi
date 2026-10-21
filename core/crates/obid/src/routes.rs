@@ -343,7 +343,30 @@ pub async fn dispatch(
             "A job needs repo, kind and task.",
         ));
     }
-    let new = new_job(job).map_err(|why| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, why))?;
+    let mut new =
+        new_job(job).map_err(|why| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, why))?;
+    // On a teammate's Mac (#797): their Obi, which must take run_request.
+    match job.get("runsOn") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(obi)) => {
+            let owner = shared.link.run_host(obi).ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("{obi} isn't a teammate's Mac that takes jobs."),
+                )
+            })?;
+            new.runs_on = Some(crate::job::RunsOn {
+                obi: obi.clone(),
+                owner,
+            });
+        }
+        Some(_) => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "runsOn is a teammate's Obi id.",
+            ));
+        }
+    }
     let job = shared
         .jobs
         .create(new)
@@ -418,6 +441,7 @@ fn new_job(job: &Map<String, Value>) -> Result<NewJob, String> {
         follow_up_of: None,
         earlier: None,
         start_from: None,
+        runs_on: None,
         routine: None,
         split: false,
     })

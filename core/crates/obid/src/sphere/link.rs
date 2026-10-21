@@ -24,6 +24,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{Notify, watch};
 
 use super::answering;
+use super::channel;
 use super::decisions::{self, Decision, Decisions};
 use super::exchange::{Exchange, Exchanges, Message};
 use super::inbox::{self, Inbox, Item};
@@ -62,6 +63,9 @@ struct Member {
     owner: String,
     active: bool,
     accepts: Vec<String>,
+    /// Its runner status, when the directory shows it to this Obi's owner (protocol.md section
+    /// 14), signature checked.
+    runner: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -95,6 +99,33 @@ struct State {
     seen: HashSet<String>,
     dropped: Vec<String>,
 }
+
+/// Whether a runner status is `obi`'s, signed with its current key (protocol.md section 14).
+fn runner_signed(status: &Value, keys: &obi_protocol::Keys, obi: &str) -> bool {
+    let Some(key) = status["key_id"].as_str().and_then(|k| keys.get(k)) else {
+        return false;
+    };
+    if key.obi != obi || key.valid_until_seq.is_some() || status["obi"] != obi {
+        return false;
+    }
+    let mut unsigned = status.clone();
+    let signature = unsigned.as_object_mut().and_then(|m| m.remove("signature"));
+    let Some(signature) = signature.as_ref().and_then(Value::as_str) else {
+        return false;
+    };
+    let Ok(canonical) = obi_protocol::jcs::canonical_bytes(&unsigned) else {
+        return false;
+    };
+    obi_protocol::schema::is_valid("runner-status", status)
+        && obi_protocol::keys::verify_bytes(
+            &key.public_key,
+            &[RUNNER_PREFIX, &canonical].concat(),
+            signature,
+        )
+}
+
+/// What a runner status's signature starts with.
+const RUNNER_PREFIX: &[u8] = b"obi/0.1 runner_status\n";
 
 /// The names the Sphere's secrets are known by in `crate::secrets`.
 const OBI_KEY_SECRET: &str = "obi-key";
@@ -137,6 +168,9 @@ pub struct Link {
     joining: tokio::sync::Mutex<()>,
     following: AtomicBool,
     stopping: watch::Receiver<bool>,
+    /// Teammates' jobs on this Mac (crate::sphere::hosting).
+    pub(super) hosting: super::hosting::Hosting,
+    setup: super::hosting::Setup,
 }
 
 fn api(status: StatusCode, message: impl Into<String>) -> ApiError {
@@ -259,6 +293,7 @@ impl Link {
         stopping: watch::Receiver<bool>,
     ) -> std::io::Result<Arc<Link>> {
         let files = Files::new(&config.home);
+        let setup_config = config.clone();
         let key = files.load_key()?.map(Arc::new);
         let membership = files.load_membership();
         let delegation = files.load_delegation();
@@ -340,10 +375,13 @@ impl Link {
             joining: tokio::sync::Mutex::new(()),
             following: AtomicBool::new(false),
             stopping,
+            hosting: super::hosting::Hosting::default(),
+            setup: super::hosting::Setup::from(&setup_config),
         });
         // The inbox hears of the permissions jobs wait on. Jobs tells it with none of its own
         // locks held, and never while this Link's state is locked (only `start_obi_review` is
         // called under it, and an Obi-to-Obi review never asks the owner).
+        link.jobs.set_link(Arc::downgrade(&link));
         let hook = Arc::downgrade(&link);
         link.jobs.on_permission(Arc::new(move |note| {
             if let Some(link) = hook.upgrade() {
@@ -885,10 +923,10 @@ impl Link {
         }
         if let Some(other) = accepts
             .iter()
-            .find(|a| *a != "review_request" && *a != "question")
+            .find(|a| !matches!(a.as_str(), "review_request" | "question" | "run_request"))
         {
             return Err(invalid(format!(
-                "obid takes review_request and question in this version, not {other}."
+                "obid takes review_request, question and run_request in this version, not {other}."
             )));
         }
         if obi_protocol::keys::key_id_of(owner_key).is_none() {
@@ -1189,6 +1227,10 @@ impl Link {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    runner: member
+                        .get("runner")
+                        .filter(|r| runner_signed(r, &directory.keys, obi))
+                        .cloned(),
                 },
             );
         }
@@ -1219,6 +1261,7 @@ impl Link {
         if self.following.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.keep_runner_status();
         let link = self.clone();
         tokio::spawn(async move {
             tokio::select! {
@@ -1356,12 +1399,13 @@ impl Link {
         let id = envelope["id"].as_str().unwrap_or("").to_owned();
         let cid = envelope["in_reply_to"].as_str().unwrap_or("");
         let from = envelope["from"].as_str().unwrap_or("");
+        let kind = envelope["type"].as_str().unwrap_or("");
         let mut state = self.lock();
-        let Some(exchange) = state
-            .exchanges
-            .get_mut(cid)
-            .filter(|e| e.direction == "outgoing" && e.peer == from)
-        else {
+        let Some(exchange) = state.exchanges.get_mut(cid).filter(|e| {
+            e.peer == from
+                && (e.direction == "outgoing"
+                    || (kind == "run_cancel" && e.direction == "incoming"))
+        }) else {
             drop(state);
             self.drop_message(&id, "a reply to no request of this Obi's");
             return;
@@ -1402,6 +1446,13 @@ impl Link {
                 exchange.state = "done".into();
                 exchange.result = Some(envelope["body"].clone());
             }
+            // A job that came back from the other Mac with what it did.
+            "run_return" => {
+                exchange.state = "returned".into();
+                exchange.result = Some(envelope["body"].clone());
+            }
+            // The sender called its job off: it stops here at once.
+            "run_cancel" => exchange.state = "cancelled".into(),
             _ => {}
         }
         exchange.updated = time::now();
@@ -1409,6 +1460,12 @@ impl Link {
         state.seen.insert(id);
         drop(state);
         self.save_exchange(&exchange);
+        if kind == "run_cancel" {
+            self.hosting.cancelled(cid);
+            if let Some(item) = exchange.inbox_item.as_deref() {
+                self.settle(item);
+            }
+        }
     }
 
     /// A request (protocol.md section 11, steps 4 to 6): declined when the card doesn't accept its
@@ -1459,7 +1516,12 @@ impl Link {
         let mut item = None;
         let mut decisions_changed = false;
         let mut answer_by_itself = None;
-        if !accepts.contains(&kind) || !(kind == "review_request" || kind == "question") {
+        let mut admit = false;
+        if accepts.contains(&kind) && kind == "run_request" {
+            // Decided by the owner's sharing rules, which read the Mac: off this lock.
+            exchange.state = "admitting".into();
+            admit = true;
+        } else if !accepts.contains(&kind) || !(kind == "review_request" || kind == "question") {
             exchange.state = "declined".into();
             let decline = self.reply_locked(
                 &state,
@@ -1525,6 +1587,9 @@ impl Link {
         }
         self.save_exchange(&exchange);
         self.outbox.notify_one();
+        if admit {
+            super::hosting::admit(self, exchange.correlation_id.clone(), false);
+        }
         if let Some(rule) = answer_by_itself {
             let link = self.clone();
             let cid = exchange.correlation_id.clone();
@@ -2336,7 +2401,7 @@ impl Link {
         let kind = text_field(&map, "type")?.to_owned();
         if !obi_protocol::REQUEST_TYPES.contains(&kind.as_str()) {
             return Err(invalid(format!(
-                "type is review_request, question or handoff, not {kind}."
+                "type is review_request, question, handoff or run_request, not {kind}."
             )));
         }
         let action = map
@@ -3276,9 +3341,13 @@ impl Link {
                 self.save_item(&item);
                 return Ok(item.to_json());
             }
+            let run_request = item
+                .obi
+                .as_ref()
+                .is_some_and(|o| o["type"] == "run_request");
             let answer = match &given {
                 Given::Answer(a) => {
-                    if !inbox::OBI_OPTIONS.contains(&a.as_str()) {
+                    if !run_request && !inbox::OBI_OPTIONS.contains(&a.as_str()) {
                         return Err(api(
                             StatusCode::UNPROCESSABLE_ENTITY,
                             format!("The answer is one of: {}.", inbox::OBI_OPTIONS.join("; ")),
@@ -3309,6 +3378,10 @@ impl Link {
                     StatusCode::CONFLICT,
                     "That request expired before the answer.",
                 ));
+            }
+            if exchange.kind == "run_request" {
+                drop(state);
+                return self.answer_run_request(item, answer);
             }
             // Only a review request is accepted here: a question is answered in words (above).
             if exchange.kind != "review_request" {
@@ -3579,6 +3652,509 @@ impl Link {
         state.sharing.limits = limits;
         self.save_sharing(&state.sharing);
         Ok(limits.to_json())
+    }
+}
+
+impl channel::Party for Link {
+    fn token(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + '_>>
+    {
+        Box::pin(async move { Link::token(self).await.map_err(|e| e.to_string()) })
+    }
+
+    fn peer_key(&self, obi: &str) -> Option<(String, String)> {
+        let state = self.lock();
+        state
+            .directory
+            .keys
+            .iter()
+            .find(|(_, k)| k.obi == obi && k.valid_until_seq.is_none())
+            .map(|(id, k)| (id.clone(), k.public_key.clone()))
+    }
+}
+
+/// Running on another Obi's Mac, and sharing this one (#797; docs/runner-api.md, "obid only:
+/// sharing this Mac").
+impl Link {
+    pub(super) fn home(&self) -> &std::path::Path {
+        &self.config.home
+    }
+
+    pub(super) fn owner(&self) -> &str {
+        &self.config.owner
+    }
+
+    pub(super) fn model_api_base(&self) -> Option<String> {
+        self.config.guest_model_api.clone()
+    }
+
+    pub(super) fn hosting_setup(&self) -> super::hosting::Setup {
+        self.setup.clone()
+    }
+
+    pub(super) fn exchange(&self, cid: &str) -> Option<Exchange> {
+        self.lock().exchanges.get(cid).cloned()
+    }
+
+    pub(super) fn mac(&self) -> sharing::Mac {
+        self.lock().sharing.mac.clone()
+    }
+
+    /// Where one guest job's files are: short, since its sockets' paths must be.
+    pub(super) fn guest_dir(&self, cid: &str) -> std::path::PathBuf {
+        self.config.home.join("g").join(&cid[..cid.len().min(8)])
+    }
+
+    pub(super) fn channel_params(
+        &self,
+        cid: &str,
+        peer: &str,
+        role: channel::Role,
+    ) -> Option<channel::Params> {
+        let state = self.lock();
+        let membership = state.membership.as_ref()?;
+        Some(channel::Params {
+            base: membership.url.clone(),
+            sphere: membership.sphere.clone(),
+            exchange: cid.to_owned(),
+            me: membership.obi_id.clone(),
+            peer: peer.to_owned(),
+            role,
+            key: state.key.clone()?,
+        })
+    }
+
+    /// A reply in an exchange of this Obi's, built, kept and queued to send; `state` is the
+    /// exchange's state from now (unchanged when empty).
+    pub(super) fn host_reply(&self, cid: &str, kind: &str, body: Value, state_now: &str) {
+        let exchange = {
+            let mut state = self.lock();
+            let Some(mut exchange) = state.exchanges.get(cid).cloned() else {
+                return;
+            };
+            if exchange.ended() {
+                return;
+            }
+            let Some(reply) = self.reply_locked(&state, &exchange, kind, body.clone()) else {
+                return;
+            };
+            exchange.outbox.push(reply);
+            if !state_now.is_empty() {
+                exchange.state = state_now.into();
+            }
+            if matches!(kind, "result" | "run_return") {
+                exchange.result = Some(body);
+            }
+            exchange.updated = time::now();
+            state.exchanges.insert(cid.to_owned(), exchange.clone());
+            exchange
+        };
+        self.save_exchange(&exchange);
+        self.outbox.notify_one();
+    }
+
+    pub(super) fn host_progress(&self, cid: &str, progress: &str) {
+        self.host_reply(cid, "run_progress", json!({"state": progress}), "");
+    }
+
+    /// The owner's inbox gets the first-time ask, unless the sender's owner has too many there.
+    pub(super) fn host_ask(&self, cid: &str) {
+        let (item, exchange) = {
+            let mut state = self.lock();
+            let Some(mut exchange) = state.exchanges.get(cid).cloned() else {
+                return;
+            };
+            let owner = exchange.peer_owner.clone().unwrap_or_default();
+            if self.inbox_full(&state, &owner) {
+                drop(state);
+                self.host_reply(cid, "decline", json!({"reason": "busy"}), "declined");
+                return;
+            }
+            let item = super::hosting::ask_item(
+                cid,
+                &exchange.peer,
+                &owner,
+                &exchange.request["body"],
+                exchange.request["expires_at"].as_str().unwrap_or(""),
+                time::now(),
+            );
+            exchange.state = "inbox".into();
+            exchange.inbox_item = Some(item.id.clone());
+            state.inbox.insert(item.id.clone(), item.clone());
+            state.exchanges.insert(cid.to_owned(), exchange.clone());
+            (item, exchange)
+        };
+        self.save_item(&item);
+        self.save_exchange(&exchange);
+    }
+
+    /// The owner's answer to a teammate's ask: Allow (this time, or from now on) or Decline.
+    fn answer_run_request(
+        self: &Arc<Self>,
+        item: Item,
+        answer: Option<String>,
+    ) -> Result<Value, ApiError> {
+        let cid = item
+            .obi
+            .as_ref()
+            .and_then(|o| o["correlationId"].as_str())
+            .unwrap_or("")
+            .to_owned();
+        let from_owner = item
+            .obi
+            .as_ref()
+            .and_then(|o| o["fromOwner"].as_str())
+            .unwrap_or("")
+            .to_owned();
+        let from_now_on = format!("Allow {from_owner} from now on");
+        let chosen = answer.unwrap_or_else(|| super::hosting::DECLINE.into());
+        if chosen != super::hosting::ALLOW
+            && chosen != from_now_on
+            && chosen != super::hosting::DECLINE
+        {
+            return Err(api(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "The answer is one of: {}; {from_now_on}; {}.",
+                    super::hosting::ALLOW,
+                    super::hosting::DECLINE
+                ),
+            ));
+        }
+        let (item, sharing) = {
+            let mut state = self.lock();
+            if !state
+                .exchanges
+                .get(&cid)
+                .is_some_and(|e| e.state == "inbox")
+            {
+                return Err(api(
+                    StatusCode::CONFLICT,
+                    "That request was settled already.",
+                ));
+            }
+            let mut item = item;
+            item.done = Some(time::now());
+            item.answer = Some(chosen.clone());
+            state.inbox.insert(item.id.clone(), item.clone());
+            let mut sharing = None;
+            if chosen == from_now_on && !state.sharing.mac.allowed.contains(&from_owner) {
+                state.sharing.mac.allowed.push(from_owner.clone());
+                sharing = Some(state.sharing.clone());
+            }
+            if let Some(e) = state.exchanges.get_mut(&cid) {
+                e.decided_by = Some("inbox".into());
+                e.state = "admitting".into();
+            }
+            (item, sharing)
+        };
+        if let Some(sharing) = sharing {
+            self.save_sharing(&sharing);
+        }
+        self.save_item(&item);
+        if chosen == super::hosting::DECLINE {
+            self.host_reply(
+                &cid,
+                "decline",
+                json!({"reason": "owner_declined"}),
+                "declined",
+            );
+        } else {
+            super::hosting::admit(self, cid, true);
+        }
+        Ok(item.to_json())
+    }
+
+    /// The request's sender calls it off: a `run_cancel` in an outgoing run_request's exchange.
+    pub(super) fn send_cancel(&self, cid: &str) {
+        self.host_reply(cid, "run_cancel", json!({}), "cancelled");
+    }
+
+    /// Sends a request this obid makes itself (a job's run on another Mac): the same checks and
+    /// secret scan as `POST /v1/obid/sphere/requests`.
+    pub(super) async fn send_request(
+        &self,
+        to: &str,
+        kind: &str,
+        body: Value,
+        expires_in: i64,
+    ) -> Result<Exchange, ApiError> {
+        let request = json!({"to": to, "type": kind, "body": body, "expiresIn": expires_in});
+        let answer = self.request(request.to_string().as_bytes()).await?;
+        let cid = answer["correlationId"].as_str().unwrap_or("").to_owned();
+        self.exchange(&cid).ok_or_else(|| {
+            api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The request wasn't kept.",
+            )
+        })
+    }
+
+    /// Publishes the runner status soon, off this task.
+    pub(super) fn publish_runner_soon(self: &Arc<Self>) {
+        let link = self.clone();
+        tokio::spawn(async move { super::hosting::publish_status(&link).await });
+    }
+
+    /// Signs and publishes the runner status (protocol.md section 14).
+    pub(super) async fn put_runner(
+        &self,
+        fields: &Value,
+        now: i64,
+        expires: i64,
+    ) -> Result<(), String> {
+        let (key, membership) = {
+            let state = self.lock();
+            (
+                state.key.clone().ok_or("no key")?,
+                state.membership.clone().ok_or("not joined")?,
+            )
+        };
+        let mut status = fields.clone();
+        status["protocol"] = json!(obi_protocol::PROTOCOL);
+        status["sphere"] = json!(membership.sphere);
+        status["obi"] = json!(membership.obi_id);
+        status["created_at"] = json!(time::format(now));
+        status["expires_at"] = json!(time::format(expires));
+        status["key_id"] = json!(key.key_id());
+        let canonical = obi_protocol::jcs::canonical_bytes(&status).map_err(|e| e.to_string())?;
+        status["signature"] = json!(key.sign(&[RUNNER_PREFIX, &canonical].concat()));
+        let token = self.token().await.map_err(|e| e.to_string())?;
+        self.client()
+            .map_err(|e| e.to_string())?
+            .put_runner(&token, &membership.obi_id, &status)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub(super) async fn delete_runner(&self) -> Result<(), String> {
+        let membership = self.lock().membership.clone().ok_or("not joined")?;
+        let token = self.token().await.map_err(|e| e.to_string())?;
+        self.client()
+            .map_err(|e| e.to_string())?
+            .delete_runner(&token, &membership.obi_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Publishes the runner status every 30 seconds while obid is in a Sphere.
+    fn keep_runner_status(self: &Arc<Self>) {
+        let link = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        if link.lock().membership.as_ref().is_some_and(|m| m.state == "joined") {
+                            super::hosting::publish_status(&link).await;
+                        }
+                    }
+                    () = stopped(link.stopping.clone()) => return,
+                }
+            }
+        });
+    }
+
+    /// The owner of `obi`, when it is an active teammate whose card takes run_request.
+    pub fn run_host(&self, obi: &str) -> Option<String> {
+        let state = self.lock();
+        let me = state.membership.as_ref().map(|m| m.obi_id.as_str());
+        state
+            .directory
+            .members
+            .get(obi)
+            .filter(|m| m.active && m.accepts.iter().any(|a| a == "run_request") && Some(obi) != me)
+            .map(|m| m.owner.clone())
+    }
+
+    /// `GET /v1/obid/sharing/mac`: this Mac's sharing, whether it can run guests, and what runs
+    /// here now.
+    pub fn mac_json(&self) -> Value {
+        json!({"settings": self.mac().to_json(), "ready": self.setup.ready(), "jobs": self.hosting.jobs_json()})
+    }
+
+    /// `PUT /v1/obid/sharing/mac`. Turning it off stops every guest job here.
+    pub fn set_mac(self: &Arc<Self>, body: &[u8]) -> Result<Value, ApiError> {
+        let value: Value = serde_json::from_slice(body)
+            .map_err(|_| api(StatusCode::BAD_REQUEST, "The body isn't JSON."))?;
+        let mac =
+            sharing::mac_from(&value).map_err(|m| api(StatusCode::UNPROCESSABLE_ENTITY, m))?;
+        let sharing = {
+            let mut state = self.lock();
+            state.sharing.mac = mac.clone();
+            state.sharing.clone()
+        };
+        self.save_sharing(&sharing);
+        if !mac.on {
+            self.hosting.stop(None, "sharing_off");
+        }
+        self.publish_runner_soon();
+        Ok(self.mac_json())
+    }
+
+    /// `POST /v1/obid/sharing/mac/jobs/{cid}/stop`, and Stop All without one.
+    pub fn stop_guests(&self, cid: Option<&str>) -> usize {
+        self.hosting.stop(cid, "stopped")
+    }
+
+    /// The teammates' Macs this owner may send a job to, as their runner statuses say: free or
+    /// busy, never whether their owner is at them (`GET /v1/obid/sharing/macs`).
+    pub async fn macs_json(&self) -> Value {
+        // Fresh when the picker opens: a status published since the last read shows.
+        if time::now() - self.lock().directory_read > 15
+            && self.lock().membership.is_some()
+            && let Err(e) = self.read_directory().await
+        {
+            self.note_error(&e);
+        }
+        let state = self.lock();
+        let now = time::now();
+        let me = state
+            .membership
+            .as_ref()
+            .map(|m| m.obi_id.clone())
+            .unwrap_or_default();
+        let mut list: Vec<Value> = state
+            .directory
+            .members
+            .iter()
+            .filter(|(obi, m)| **obi != me && m.active && m.accepts.iter().any(|a| a == "run_request"))
+            .filter_map(|(obi, m)| {
+                let runner = m.runner.as_ref()?;
+                let live = runner["expires_at"].as_str().and_then(time::parse).is_some_and(|t| t > now);
+                Some(json!({"obi": obi, "owner": m.owner, "free": live && runner["free"] == true,
+                            "freeAt": runner.get("free_at"), "size": runner["size"], "agents": runner["agents"]}))
+            })
+            .collect();
+        list.sort_by(|a, b| a["owner"].as_str().cmp(&b["owner"].as_str()));
+        json!(list)
+    }
+
+    /// `PUT /v1/obid/sphere/membership`: a new card and/or delegation the owner signed (to take
+    /// `run_request`, or a delegation with `send:run_request`, or a fresh one), checked as at
+    /// joining. The card goes to the Sphere first; the delegation is kept and the token renewed.
+    pub async fn renew(self: &Arc<Self>, body: &[u8]) -> Result<Value, ApiError> {
+        let _one = self.joining.lock().await;
+        let map = object(body, &["card", "delegation"])?;
+        let invalid = |m: String| api(StatusCode::UNPROCESSABLE_ENTITY, m);
+        if map.is_empty() {
+            return Err(invalid(
+                "The body has a card, a delegation, or both.".into(),
+            ));
+        }
+        let (key, membership) = {
+            let state = self.lock();
+            let membership = state
+                .membership
+                .clone()
+                .filter(|m| m.state == "joined")
+                .ok_or_else(|| api(StatusCode::CONFLICT, "obid hasn't joined a Sphere."))?;
+            (
+                state
+                    .key
+                    .clone()
+                    .ok_or_else(|| api(StatusCode::CONFLICT, "There's no Obi key."))?,
+                membership,
+            )
+        };
+        let now = time::now();
+        let owner_key = obi_protocol::card::params(&membership.card)
+            .and_then(|p| {
+                p.get("owner_key")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default();
+        let mut card = None;
+        if let Some(new) = map.get("card") {
+            obi_protocol::card::verify(
+                new,
+                &obi_protocol::card::Context {
+                    now: Some(now),
+                    bound_owner_key: Some(owner_key.clone()),
+                },
+            )
+            .map_err(|r| invalid(format!("The card doesn't pass the spec's checks: {r}")))?;
+            let params = obi_protocol::card::params(new).expect("a verified card has its params");
+            let param = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or("");
+            if param("key_id") != key.key_id()
+                || param("obi_id") != membership.obi_id
+                || param("sphere") != membership.sphere
+                || param("owner") != self.config.owner
+            {
+                return Err(invalid(
+                    "The card isn't for this Obi, its key, Sphere and owner.".into(),
+                ));
+            }
+            if params.get("card_seq").and_then(Value::as_u64).unwrap_or(0) <= membership.card_seq()
+            {
+                return Err(invalid(format!(
+                    "The card's card_seq must be more than {}.",
+                    membership.card_seq()
+                )));
+            }
+            card = Some(new.clone());
+        }
+        let delegation = match map.get("delegation") {
+            None => None,
+            Some(Value::String(d)) => {
+                obi_protocol::identity::check_delegation(
+                    d,
+                    &obi_protocol::identity::DelegationCheck {
+                        owner_key: &owner_key,
+                        owner: &self.config.owner,
+                        sphere: &membership.sphere,
+                        obi_id: &membership.obi_id,
+                        now,
+                        needs: &NEEDED_SCOPES,
+                    },
+                )
+                .map_err(|why| invalid(format!("The delegation doesn't pass: {why}.")))?;
+                Some(d.clone())
+            }
+            Some(_) => {
+                return Err(invalid(
+                    "delegation is the owner's delegation, a JWT.".into(),
+                ));
+            }
+        };
+        if let Some(d) = &delegation {
+            crate::secrets::known().learn(DELEGATION_SECRET, d);
+            self.files.save_delegation(d).map_err(|e| {
+                api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("obid couldn't keep the delegation: {e}"),
+                )
+            })?;
+            let mut state = self.lock();
+            state.delegation = Some(d.clone());
+            state.token = None;
+        }
+        if let Some(card) = card {
+            let token = self.token().await.map_err(|e| from_client(&e))?;
+            self.client()
+                .map_err(|e| from_client(&e))?
+                .update_card(&token, &membership.obi_id, &card)
+                .await
+                .map_err(|e| from_client(&e))?;
+            let membership = {
+                let mut state = self.lock();
+                if let Some(m) = state.membership.as_mut() {
+                    m.card = card;
+                }
+                state.membership.clone()
+            };
+            if let Some(m) = membership {
+                let _ = self.files.save_membership(&m);
+            }
+        }
+        if let Err(e) = self.read_directory().await {
+            self.note_error(&e);
+        }
+        Ok(self.membership_json())
     }
 }
 

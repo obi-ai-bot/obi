@@ -152,6 +152,54 @@ pub async fn sharing(State(shared): State<Arc<Shared>>) -> Response {
     json(StatusCode::OK, shared.link.sharing_json())
 }
 
+/// `GET /v1/obid/sharing/mac`.
+pub async fn mac(State(shared): State<Arc<Shared>>) -> Response {
+    json(StatusCode::OK, shared.link.mac_json())
+}
+
+/// `PUT /v1/obid/sharing/mac`.
+pub async fn set_mac(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
+    Ok(json(StatusCode::OK, shared.link.set_mac(&body)?))
+}
+
+/// `POST /v1/obid/sharing/mac/stop` with `{"job": "<correlationId>"}` for one, `{}` for all.
+pub async fn stop_guests(
+    State(shared): State<Arc<Shared>>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let value: Value = if body.is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "The body isn't JSON."))?
+    };
+    let one = match value.get("job") {
+        None => None,
+        Some(Value::String(cid)) => Some(cid.clone()),
+        Some(_) => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "job is a guest job's correlationId.",
+            ));
+        }
+    };
+    let stopped = shared.link.stop_guests(one.as_deref());
+    Ok(json(
+        StatusCode::OK,
+        serde_json::json!({"stopped": stopped}),
+    ))
+}
+
+/// `GET /v1/obid/sharing/macs`.
+pub async fn macs(State(shared): State<Arc<Shared>>) -> Response {
+    json(StatusCode::OK, shared.link.macs_json().await)
+}
+
+/// `PUT /v1/obid/sphere/membership`.
+pub async fn renew(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
+    Ok(json(StatusCode::OK, shared.link.renew(&body).await?))
+}
+
 /// `POST /v1/obid/sharing/rules`.
 pub async fn add_rule(
     State(shared): State<Arc<Shared>>,

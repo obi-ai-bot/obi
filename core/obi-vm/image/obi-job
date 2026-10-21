@@ -16,8 +16,9 @@ title=$(jq -r .title job.json)
 git config --global user.name "$(jq -r .author.name job.json)"
 git config --global user.email "$(jq -r .author.email job.json)"
 git config --global init.defaultBranch main
-git clone -q -b obi-base in.bundle repo || done_ 1 "the code bundle didn't clone"
-cd repo && git checkout -q -b "$branch" || done_ 1 "no branch"
+base=$(jq -r .base_sha job.json)
+git init -q repo && cd repo && git fetch -q ../in.bundle '+refs/*:refs/obi-in/*' \
+  && git checkout -q -b "$branch" "$base" || done_ 1 "the code bundle didn't check out"
 
 # obid asks for the job back (the owner came back and stayed, the time limit, Stop): the agent
 # stops, and what it did so far is committed and sent back with a note.
@@ -52,8 +53,8 @@ note=""
 [ -s /work/return ] && note=$(head -c 200 /work/return) && title="$title (stopped: $note)"
 
 git add -A && git -c commit.gpgsign=false commit -qm "$title" 2>/dev/null
-if [ "$(git rev-list --count obi-base..HEAD)" -gt 0 ]; then
-  git bundle create -q ../out.bundle obi-base..HEAD "$branch" && curl -fsS -T ../out.bundle $C/commits >/dev/null \
+if [ "$(git rev-list --count "$base..HEAD")" -gt 0 ]; then
+  git bundle create -q ../out.bundle "$branch" "^$base" && curl -fsS -T ../out.bundle $C/commits >/dev/null \
     || done_ 1 "the commits didn't go back"
 fi
 done_ $status "$note"
