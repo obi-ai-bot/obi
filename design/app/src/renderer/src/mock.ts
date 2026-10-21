@@ -679,7 +679,7 @@ export type Place = { name: string; owner?: string; about: string; free: boolean
 export const PLACES: Place[] = [
   { name: 'This Mac', about: 'Room for 2 jobs', free: true },
   { name: 'Wellington’s Mac', owner: 'Wellington', about: 'Free now · room for 1 job', free: true },
-  { name: 'Ernesto’s Mac', owner: 'Ernesto', about: 'Busy · free tonight from 10 PM', free: false },
+  { name: 'Ernesto’s Mac', owner: 'Ernesto', about: 'Busy', free: false },
 ];
 // A part of someone's usage shared with you: an account their company pays by
 // use (a personal plan or a Team seat can't be shared), how much of its month

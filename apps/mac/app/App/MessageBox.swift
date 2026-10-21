@@ -205,13 +205,11 @@ struct MessageBox: View {
         }
     }
 
-    /// "Wellington’s Mac · Free", or "· Busy" (with when it's free, when the Mac says), and
-    /// "· unverified" until you've compared Wellington's key with him (Settings › Obysphere).
+    /// "Wellington’s Mac · Free" or "· Busy", and "· unverified" until you've compared
+    /// Wellington's key with him (Settings › Obysphere).
     static func placeLine(_ mac: RunnerMac) -> String {
         let unverified = mac.verified == false ? " · unverified" : ""
-        if mac.free { return "\(mac.name) · Free\(unverified)" }
-        guard let at = mac.freeAt else { return "\(mac.name) · Busy\(unverified)" }
-        return "\(mac.name) · Free at \(at.formatted(date: .omitted, time: .shortened))\(unverified)"
+        return "\(mac.name) · \(mac.free ? "Free" : "Busy")\(unverified)"
     }
 
     /// Always there where the box talks to Oby, even before an account reports usage (docs/mac-design.md B3).
