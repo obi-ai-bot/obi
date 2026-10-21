@@ -88,10 +88,21 @@ nonisolated enum TaskFacts {
         return facts
     }
 
-    /// The page's box (Sangam's TaskView): words for Oby about the task while it can take them (it
-    /// runs, or a finished one can pick its session up, which starts a follow-up); nil when there's
-    /// nothing to tell.
-    static func box(_ job: Job) -> String? {
-        job.status == .running || (!job.isActive && job.resumable) ? "Tell Oby about this task…" : nil
+    /// The page's box (Sangam's TaskView), always there: words for Oby about the task, which it
+    /// passes on to the agent, or which start a follow-up of a finished one.
+    static let box = "Tell Oby about this task…"
+
+    /// What Oby answers words said on a task's page, which reached `heard` (`job` itself, its
+    /// follow-up already at work, or the one they started): Sangam's `relay` (tasks.ts), as obid
+    /// says it in the job's conversation (core/crates/obid/src/brain/actions.rs `told_line`).
+    static func relay(_ job: Job, heard: Job, account: String) -> String {
+        if heard.id != job.id && heard.followUpOf == job.id && (heard.notes ?? []).isEmpty {
+            return "This one’s finished, so I started a follow-up. \(heard.agentName) has it in \(heard.repoName) on \(account)."
+        }
+        return "Passed to \(heard.agentName). It’ll pick that up after \((heard.rounds ?? 1) > 1 ? "this round" : "its current step")."
     }
+
+    /// Later on a task's decision (Sangam's `answer`, tasks.ts): it stays, and comes back in an hour.
+    static let laterReply = "Okay, it’ll wait. I’ll bring it back up in an hour."
+
 }

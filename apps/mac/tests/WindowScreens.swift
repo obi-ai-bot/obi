@@ -193,6 +193,28 @@ struct WindowScreens {
         try await shoot("mac-task", model: model(), state: state)
     }
 
+    /// Archived (Sangam's ArchiveView): done tasks older than Archive completed's 3 days, with the
+    /// side panel's Archived row at its foot.
+    @Test func archived() async throws {
+        let model = model()
+        let day: TimeInterval = 86_400
+        for old in [job("a1", "Webhook signature mismatch", status: .done, issue: 377, ago: 5 * day),
+                    job("a2", "Job progress screen", status: .done, ago: 7 * day, agent: "codex"),
+                    job("a3", "#388 Retry banner overlaps", kind: .review, status: .done, ago: 4 * day),
+                    job("a4", "Weekly repo health", status: .done, ago: 10 * day)] { model.feed.apply(old) }
+        let state = ChatState(defaults: .scratch)
+        state.trail.start(.archived)
+        try await shoot("mac-archived", model: model, state: state)
+    }
+
+    /// A task's page renaming it in place in the title bar (Sangam's `crumb-rename`).
+    @Test func taskRenaming() async throws {
+        let state = ChatState(defaults: .scratch)
+        state.trail.start(.job(id: "i3", local: false))
+        state.renaming = .init(id: SidebarSections.JobRow.id("i3", local: false), inBar: true)
+        try await shoot("mac-task-rename", model: model(), state: state)
+    }
+
     /// The talk key's pill with the window closed (#528), at each stage of a turn.
     @Test(arguments: [TalkStage.listening, .thinking, .speaking])
     func pill(_ stage: TalkStage) async throws {
@@ -367,6 +389,46 @@ struct WindowScreens {
         for _ in 0..<50 where !character.ready { try await Task.sleep(for: .milliseconds(100)) }
         try await Task.sleep(for: .milliseconds(1500))
         try await save("mac-tetrix-\(screen)", window: window)
+    }
+
+    /// Settings › Connectors as this Mac had it on 2026-10-20 (Sangam's SettingsView.tsx `Connectors`): obid
+    /// on this Mac with Claude Code's Personal and Deskree and Codex's default login, while the Mac's own
+    /// accounts.json names the same logins under other ids; Tetrix and GitHub connected. Made up, no runner asked.
+    @Test func connectors() async throws {
+        let suite = try #require(UserDefaults(suiteName: "oby-screens-\(UUID().uuidString)"))
+        suite.set(true, forKey: "ObySidebarOpen")
+        suite.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
+        let root = FileManager.default.temporaryDirectory.appending(path: "oby-screens-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let mac = [Account(id: "default", agent: "claude", name: "Personal", payer: "", home: nil),
+                   Account(id: "32203c5b", agent: "claude", name: "Deskree", payer: "", home: root.appending(path: "accounts/32203c5b").path),
+                   Account(id: "codex-default", agent: "codex", name: "Deskree", payer: "", home: nil)]
+        try JSONEncoder().encode(mac).write(to: root.appending(path: "accounts.json"))
+        func account(_ id: String, _ agent: String, _ name: String) -> AccountState {
+            AccountState(account: Account(id: id, agent: agent, name: name, payer: "", home: nil), label: nil, tetrix: true, runnerSignedIn: true)
+        }
+        let feed = RunnerFeed()
+        feed.stage(accounts: [account("default", "claude", "Personal"), account("deskree", "claude", "Deskree"), account("codex", "codex", "Codex")],
+                   models: ModelSettings(claude: ModelChoice(model: "claude-opus-5-5", effort: "xhigh"), codex: ModelChoice(model: "gpt-6.1-sol", effort: "high"),
+                                         cursor: CursorModelChoice(model: "auto")),
+                   options: ModelOptions(claude: .init(models: [], efforts: []), codex: .init(models: []), cursor: .init(models: [])))
+        let dogfood = TetrixStatus.Server(preset: "dogfood", name: "Tetrix Dogfood", url: URL(string: "https://mcp.tetrix.dev/mcp")!)
+        feed.stage(tetrix: TetrixStatus(connected: true, url: dogfood.url, preset: "dogfood", presets: [dogfood]),
+                   lists: Connectors.Lists(plugins: [], connections: nil, gitHub: GitHubLogin(gh: true, signedIn: true, user: "you", signIn: nil)))
+        let desk = Desk(accounts: AccountStore(root: root), store: JobStore(url: root.appending(path: "oby.sqlite")))
+        let model = IslandModel(desk: desk, feed: feed, availability: MacAvailability())
+        let state = ChatState(defaults: .scratch)
+        state.openSettings(.connectors)
+        let character = ObyCharacter(query: "embed&size=1.23")
+        let window = ChatWindow.make(ChatView(model: model, state: state, character: character).defaultAppStorage(suite),
+                                     size: NSSize(width: 994, height: 900))
+        window.setFrameOrigin(NSPoint(x: 40, y: 40))
+        window.orderFrontRegardless()
+        defer { window.close() }
+        ChatWindow.measureLights(window, into: state)
+        for _ in 0..<50 where !character.ready { try await Task.sleep(for: .milliseconds(100)) }
+        try await Task.sleep(for: .milliseconds(1500))
+        try await save("mac-connectors", window: window)
     }
 
     @Test func taskNeedingYou() async throws {

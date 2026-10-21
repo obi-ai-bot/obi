@@ -29,6 +29,15 @@ struct Seen {
     refresh: String,
     /// The `save_session` calls' arguments.
     saved: Vec<Value>,
+    /// How its earlier sessions answer: "" as they are, "leaky" listing one whose id holds a key,
+    /// "slow" listing four whose context takes 9 seconds each: each call within its own 10
+    /// seconds, all of them past the check's 30.
+    mode: &'static str,
+}
+
+/// A key the secret scan flags, put together here so this file holds none.
+fn made_up_key() -> String {
+    ["AK", "IA", "QWERTYUIOPASDFGH"].concat()
 }
 
 fn reply(stream: &mut std::net::TcpStream, status: &str, kind: &str, body: &str) {
@@ -201,7 +210,8 @@ fn fake_tetrix() -> (String, Arc<Mutex<Seen>>) {
                             "serverInfo": {"name": "tetrix", "version": "1"}}),
                         "tools/list" => {
                             let tools: Vec<Value> = ["search_entities", "get_entity", "repo_sessions",
-                                "save_session", "resume_session", "admin_wipe_graph"].iter()
+                                "session_context", "session_digest", "save_session", "resume_session",
+                                "admin_wipe_graph"].iter()
                                 .map(|name| json!({"name": name, "description": name, "inputSchema": {"type": "object"}}))
                                 .collect();
                             json!({"tools": tools})
@@ -216,7 +226,34 @@ fn fake_tetrix() -> (String, Arc<Mutex<Seen>>) {
                                         "entities": [{"name": "obi-e2e/fixture-app#src/index.js", "note": leak}]}).to_string()}]})
                                 }
                             }
-                            "repo_sessions" => json!({"content": [{"type": "text", "text": json!({"sessions": [{"title": "Earlier work"}]}).to_string()}]}),
+                            // The shapes of mcp_service/app/tools/{repo_sessions,session_context,
+                            // session_digest}.py.
+                            "repo_sessions" => {
+                                let ids = match seen.mode {
+                                    "leaky" => vec![made_up_key()],
+                                    "slow" => (1..=4).map(|n| format!("agent_session:g{n}")).collect(),
+                                    _ => vec!["agent_session:g1".to_owned()],
+                                };
+                                let sessions: Vec<Value> = ids.iter().map(|id| json!({"session_id": id, "title": "Earlier work", "edge_type": "worked_on"})).collect();
+                                json!({"content": [{"type": "text", "text": json!({"target": {"id": "r1", "name": "obi-e2e/fixture-app", "type": "repo"},
+                                    "count": sessions.len(), "sessions": sessions,
+                                    "truncated": false, "has_more": false, "next_cursor": null}).to_string()}]})
+                            }
+                            "session_context" => {
+                                if seen.mode == "slow" {
+                                    std::thread::sleep(std::time::Duration::from_secs(9));
+                                }
+                                json!({"content": [{"type": "text", "text": json!({"id": "agent_session:g1",
+                                "natural_key": "session:acme/5b0e7c1a-9d2f-4c3e-8a1b-2f3e4d5c6b7a", "title": "Earlier work",
+                                "digest_summary": {"decisions": 1}, "worked_on": [], "produced": [], "references": []}).to_string()}]})
+                            }
+                            "session_digest" => {
+                                json!({"content": [{"type": "text", "text": json!({"session_id": "5b0e7c1a-9d2f-4c3e-8a1b-2f3e4d5c6b7a",
+                                    "audience": "org", "has_digest": true, "digest": {"schema_version": 1,
+                                    "projects": [{"repo": "obi-e2e/fixture-app", "paths_modified": ["config.txt"]}],
+                                    "decisions": [{"statement": "Keep retries at 4: the gateway rate-limits a fifth.", "status": "decided"},
+                                        {"statement": "Retries were 3 before.", "status": "reverted"}]}}).to_string()}]})
+                            }
                             "get_entity" => json!({"content": [{"type": "text", "text": "Entity not found"}], "isError": true}),
                             "save_session" => {
                                 let arguments = message["params"]["arguments"].clone();
@@ -508,7 +545,9 @@ fn obid_signs_in_to_tetrix_once_and_agents_use_it_without_its_login() {
             "get_entity",
             "repo_sessions",
             "save_session",
-            "search_entities"
+            "search_entities",
+            "session_context",
+            "session_digest"
         ]
     );
     assert_eq!(report["toolCalls"]["resume"]["result"]["isError"], true);
@@ -657,4 +696,227 @@ fn obid_signs_in_to_tetrix_once_and_agents_use_it_without_its_login() {
             assert!(!text.contains(secret), "{secret} in {name}");
         }
     }
+}
+
+/// A stand-in `gh` in `folder/bin` that opens a pull request and keeps its description in
+/// `folder/gh/body`.
+fn body_keeping_gh(folder: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = folder.join("bin");
+    let state = folder.join("gh");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+dir='{state}'
+prev=
+case "$1 $2" in
+  "pr list") exit 0 ;;
+  "pr create")
+    for a in "$@"; do [ "$prev" = --body-file ] && cp "$a" "$dir/body"; prev="$a"; done
+    echo 'https://github.com/obi-e2e/fixture-app/pull/7'
+    exit 0 ;;
+  "pr view") exit 1 ;;
+  *) echo "gh: not in this test" >&2; exit 1 ;;
+esac
+"#,
+        state = state.display()
+    );
+    std::fs::write(bin.join("gh"), script).unwrap();
+    std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+/// Signs `obid` in to the fake Tetrix at `base`, as the browser would.
+fn sign_in(obid: &Obid, base: &str) {
+    let started = call(
+        obid,
+        "POST",
+        "/v1/tetrix/sign-in",
+        Some(&json!({"url": format!("{base}/mcp")})),
+    );
+    assert_eq!(started.status, 200, "{}", started.text);
+    let page = reqwest::Url::parse(started.body["url"].as_str().unwrap()).unwrap();
+    let query: std::collections::HashMap<String, String> = page
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    assert_eq!(browse(page.as_str()).0, 200);
+    let (status, said) = browse(&format!(
+        "{}?code=the-code&state={}",
+        query["redirect_uri"], query["state"]
+    ));
+    assert_eq!(status, 200, "{said}");
+    within(10, "signed in", || {
+        (call(obid, "GET", "/v1/tetrix", None).body["connected"] == true).then_some(())
+    });
+}
+
+/// Decisions before publishing (docs/runner-api.md, "obid only: Tetrix"): a job that changes a
+/// number an earlier session decided on gets one round, its decisions quoted as data, and
+/// publishes with the conflict in its pull request; a session reference the secret scan flags is
+/// never sent, and a Tetrix that doesn't answer in time still lets the job publish.
+#[test]
+fn a_change_against_an_earlier_decision_gets_one_round_and_never_blocks() {
+    let folder = Folder::new("tetrix-decisions");
+    let remote = fixture(&folder.0.join("fixture"));
+    // The base holds the value the earlier session decided on.
+    let work = folder.0.join("work");
+    let git = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&work)
+            .output()
+            .unwrap();
+        assert!(
+            done.status.success(),
+            "{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    };
+    std::fs::create_dir_all(&work).unwrap();
+    git(&["clone", "-q", "-b", "main", remote.to_str().unwrap(), "."]);
+    std::fs::write(work.join("config.txt"), "retries = 4\n").unwrap();
+    git(&["add", "config.txt"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        "Add config",
+    ]);
+    git(&["push", "-q", "origin", "main"]);
+    let (base, seen) = fake_tetrix();
+    let bin = body_keeping_gh(&folder.0);
+    let mut config = config(&folder.0, &remote, &fake_claude());
+    config["repos"][0]["check"] = Value::Null;
+    let obid = start(&folder.0, &config, Some(&bin));
+    sign_in(&obid, &base);
+    let run = |task: &str| {
+        let made = call(
+            &obid,
+            "POST",
+            "/v1/jobs",
+            Some(&json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "build", "task": task}})),
+        );
+        assert_eq!(made.status, 201, "{}", made.text);
+        let id = made.body["id"].as_str().unwrap().to_owned();
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None).body;
+        (id, job)
+    };
+    let body = || std::fs::read_to_string(folder.0.join("gh/body")).unwrap_or_default();
+
+    // One round, the decision quoted as data; the agent keeps its change and says why, and the
+    // job publishes with the conflict listed. No second round.
+    let (id, job) = run("BUMP: config.txt 4 6");
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    assert_eq!(
+        job["published"], "https://github.com/obi-e2e/fixture-app/pull/7",
+        "{job}"
+    );
+    assert_eq!(job["round"], 2, "{job}");
+    let decisions = &job["tetrix"]["decisions"];
+    assert_eq!(decisions["asked"], true, "{job}");
+    assert_eq!(
+        decisions["sessions"],
+        json!(["5b0e7c1a-9d2f-4c3e-8a1b-2f3e4d5c6b7a"])
+    );
+    assert_eq!(decisions["error"], Value::Null);
+    let conflict = &decisions["conflicts"][0];
+    assert_eq!(
+        (
+            &conflict["file"],
+            &conflict["line"],
+            &conflict["was"],
+            &conflict["now"]
+        ),
+        (&json!("config.txt"), &json!(1), &json!("4"), &json!("6"))
+    );
+    assert_eq!(
+        conflict["decision"],
+        "Keep retries at 4: the gateway rate-limits a fifth."
+    );
+    let seen_file = std::fs::read_to_string(
+        obid.home
+            .join("worktrees")
+            .join(&id)
+            .join(".obi/decisions-seen.md"),
+    )
+    .unwrap();
+    assert!(seen_file.contains("<<<quoted-"), "{seen_file}");
+    assert!(seen_file.contains("Keep retries at 4"), "{seen_file}");
+    let pr = body();
+    assert!(
+        pr.contains("- Earlier decisions: this changes 1 value(s) an earlier Tetrix session decided on: ` config.txt:1 ` (4 → 6), session 5b0e7c1a-9d2f-4c3e-8a1b-2f3e4d5c6b7a."),
+        "{pr}"
+    );
+    assert!(pr.contains("Kept it: the gateway allows six"), "{pr}");
+    // The decision's words aren't in the pull request; the reverted one isn't a decision.
+    assert!(!pr.contains("rate-limits"), "{pr}");
+    // Tetrix was asked about the repository and the session, never about a file.
+    let asked: Vec<Value> = seen
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter_map(|r| serde_json::from_str::<Value>(&r.3).ok())
+        .filter(|m| m["method"] == "tools/call")
+        .map(|m| m["params"].clone())
+        .collect();
+    assert!(
+        asked.contains(
+            &json!({"name": "repo_sessions", "arguments": {"name": "obi-e2e/fixture-app"}})
+        ),
+        "{asked:?}"
+    );
+    assert!(
+        asked.contains(
+            &json!({"name": "session_context", "arguments": {"session": "agent_session:g1"}})
+        ),
+        "{asked:?}"
+    );
+    assert!(
+        asked.contains(&json!({"name": "session_digest", "arguments":
+        {"session": "session:acme/5b0e7c1a-9d2f-4c3e-8a1b-2f3e4d5c6b7a", "format": "structured"}})),
+        "{asked:?}"
+    );
+
+    // A session reference the secret scan flags is never sent: the job publishes unchecked.
+    seen.lock().unwrap().mode = "leaky";
+    let (_, job) = run("BUMP: config.txt 4 7");
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["round"], 1, "{job}");
+    assert_eq!(job["tetrix"]["decisions"]["conflicts"], json!([]), "{job}");
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|r| r.3.contains("session_context") && r.3.contains(&made_up_key())),
+        "the key never reached Tetrix"
+    );
+    assert!(!body().contains("Earlier decisions"), "{}", body());
+
+    // A Tetrix whose every answer comes in time but whose answers together take longer than the
+    // check's 30 seconds: nothing is checked, it says so, and the job still publishes.
+    seen.lock().unwrap().mode = "slow";
+    let (_, job) = run("BUMP: config.txt 4 8");
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(
+        job["published"], "https://github.com/obi-e2e/fixture-app/pull/7",
+        "{job}"
+    );
+    assert_eq!(job["round"], 1, "{job}");
+    let decisions = &job["tetrix"]["decisions"];
+    assert_eq!(decisions["conflicts"], json!([]), "{job}");
+    assert_eq!(
+        decisions["error"], "Tetrix didn't answer within 30 seconds: nothing was checked.",
+        "{job}"
+    );
 }

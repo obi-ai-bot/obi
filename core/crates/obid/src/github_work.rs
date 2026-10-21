@@ -8,6 +8,7 @@
 //! its inputs, never in a prompt, a task, a title or the brain's briefing.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -124,7 +125,7 @@ pub fn id(repo: &str, number: u64) -> String {
 }
 
 /// A GitHub login: what may go into a search query.
-fn is_login(login: &str) -> bool {
+pub(crate) fn is_login(login: &str) -> bool {
     !login.is_empty()
         && login.len() <= 39
         && login
@@ -318,6 +319,20 @@ pub fn failure(said: String) -> Got {
     }
 }
 
+/// When GitHub's rate limit lets obid's `gh` read again, for the feed and every other read
+/// (crate::teammates): a rate limit one meets, the other waits out too.
+static LIMITED_UNTIL: AtomicI64 = AtomicI64::new(0);
+
+/// Whether GitHub's rate limit has obid waiting.
+pub fn limited() -> bool {
+    time::now() < LIMITED_UNTIL.load(Ordering::Relaxed)
+}
+
+/// No `gh` read before `at` (unless a later wait holds already).
+pub fn wait_out(at: i64) {
+    LIMITED_UNTIL.fetch_max(at, Ordering::Relaxed);
+}
+
 /// How long the `waits`-th rate limit in a row makes obid wait: 3 minutes, doubling, at most 30.
 pub fn backoff(waits: u32) -> i64 {
     let doublings = waits.saturating_sub(1).min(10);
@@ -491,7 +506,7 @@ impl Feed {
         let waiting = {
             let mut state = self.lock();
             state.read_at = now;
-            now < state.wait_until
+            now < state.wait_until || limited()
         };
         if waiting {
             return self.to_json();
@@ -520,6 +535,7 @@ impl Feed {
                     state.waits += 1;
                     state.wait_until = now + backoff(state.waits);
                     state.next_check = state.wait_until;
+                    wait_out(state.wait_until);
                     state.error = Some(format!(
                         "GitHub's rate limit: reading again at {}",
                         time::format(state.wait_until)
@@ -565,6 +581,7 @@ impl Feed {
                         && remaining < LOW_POINTS
                     {
                         state.wait_until = reset;
+                        wait_out(reset);
                         state.next_check = state.next_check.max(reset);
                     }
                     state.kept = Kept {

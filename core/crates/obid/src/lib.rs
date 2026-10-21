@@ -20,6 +20,7 @@ pub mod config;
 pub mod conn;
 pub mod connections;
 pub mod conversation;
+pub mod decisions;
 pub mod detail;
 pub mod devices;
 pub mod events;
@@ -34,12 +35,14 @@ pub mod job;
 pub mod jobs;
 pub mod limits;
 pub mod logs;
+pub mod memory;
 pub mod obi_dir;
 pub mod permissions;
 pub mod plugins;
 pub mod policy;
 pub mod process;
 pub mod publish;
+pub mod push;
 pub mod review;
 pub mod routes;
 pub mod routines;
@@ -49,6 +52,7 @@ pub mod secrets;
 pub mod settings;
 pub mod sphere;
 pub mod store;
+pub mod teammates;
 pub mod tetrix;
 pub mod token;
 pub mod transcript;
@@ -275,6 +279,7 @@ pub async fn serve(
     jobs.use_routines(routines.clone());
     let github =
         github_work::Feed::open(config.clone(), jobs.clone(), link.clone(), events.clone());
+    let pushes = push::Push::open(&config.home);
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -299,6 +304,7 @@ pub async fn serve(
         tetrix,
         pages: web::Sessions::default(),
         github_work: github.clone(),
+        push: pushes,
         stopping: stopping_rx.clone(),
     });
     let app = api::router(shared.clone());
@@ -335,6 +341,8 @@ pub async fn serve(
     jobs.resume();
     link.start();
     github.spawn(stopping_rx.clone());
+    // Job alerts to Android phones through FCM (crate::push).
+    push::spawn(shared.clone());
     // A tool reported an account's usage: every app hears the accounts as they are now.
     {
         let shared = shared.clone();

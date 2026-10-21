@@ -37,6 +37,12 @@ struct ObidAccountsTests {
         let accounts = try status(#"[{"id": "personal", "agent": "claude", "name": "Personal", "label": null, "signedIn": true, "running": 0}]"#).accounts
         #expect(accounts.filter(\.signedIn).map(\.account.id) == ["personal"])
     }
+
+    /// obid sends who pays for each account; Settings shows it.
+    @Test func obidsPayerReads() throws {
+        let accounts = try status(#"[{"id": "a1b2c3d4", "agent": "codex", "name": "Personal", "payer": "Wellington", "signedIn": false, "running": 0}]"#).accounts
+        #expect(accounts.first?.account.payer == "Wellington")
+    }
 }
 
 /// Sangam's usage rows on Settings › Accounts (docs/mac-design.md B2), and which accounts show (C1).
@@ -100,5 +106,35 @@ struct AccountRowsTests {
         #expect(AccountPlaces.of(local: true, runner: true) == [.runner])
         #expect(AccountPlaces.of(local: false, runner: true) == [.mac, .runner])
         #expect(AccountPlaces.of(local: false, runner: false) == [.mac])
+    }
+
+    /// The Mac opens a sign-in page obid answers only when it's https on the tool's own site, with
+    /// no login or port: a runner can't send the person to a look-alike to type their code.
+    @Test func onlyTheToolsOwnSignInPageOpens() throws {
+        func signIn(_ url: String) -> AccountSignIn {
+            AccountSignIn(account: "a1b2c3d4", url: URL(string: url)!, userCode: nil, pasteCode: true, expiresAt: nil)
+        }
+        #expect(signIn("https://claude.com/cai/oauth/authorize?code=true").opens(for: "claude"))
+        #expect(signIn("https://auth.openai.com/codex/device").opens(for: "codex"))
+        #expect(signIn("https://cursor.com/loginDeepControl?challenge=x").opens(for: "cursor"))
+        #expect(!signIn("https://auth.openai.com/codex/device").opens(for: "claude"))
+        #expect(!signIn("http://claude.com/cai/oauth").opens(for: "claude"))
+        #expect(!signIn("https://claude.com.evil.example/x").opens(for: "claude"))
+        #expect(!signIn("https://evilclaude.com/x").opens(for: "claude"))
+        #expect(!signIn("https://user@claude.com/x").opens(for: "claude"))
+        #expect(!signIn("https://claude.com:8443/x").opens(for: "claude"))
+    }
+
+    /// Removing one of obid's accounts says the tool's own login and the provider's account stay.
+    @Test func removingSaysWhatStays() {
+        let note = AccountsSettingsView.removeNote(Account(id: "a1b2c3d4", agent: "codex", name: "Personal", payer: "", home: nil))
+        #expect(note.contains("Codex's own login on this Mac, and your account with OpenAI, stay as they are"))
+        #expect(!note.contains("can't be added back"))
+        // The tool's own login comes back from Add an account; one in obid's configuration doesn't.
+        let own = AccountsSettingsView.removeNote(Account(id: "default", agent: "claude", name: "Default", payer: "", home: nil))
+        #expect(own.contains("Bring it back here any time with Use Claude Code's Own Login"))
+        let configured = AccountsSettingsView.removeNote(Account(id: "work", agent: "claude", name: "Work", payer: "", home: nil))
+        #expect(configured.contains("can't be added back here"))
+        #expect(configured.contains("Keychain item"))
     }
 }

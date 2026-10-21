@@ -1985,6 +1985,13 @@ final class Desk {
         return ids.count
     }
 
+    /// Words said on a task's page and Oby's answer, at the end of the thread the window then
+    /// opens (Sangam's tellFromTask), the job's card on the answer.
+    func told(_ said: String, reply: String, job: String) {
+        add(Turn(who: .user, text: said))
+        add(Turn(who: .oby, text: reply, jobs: [job]))
+    }
+
     /// The user talks to a job. A running one hears it now; a finished one picks its session up
     /// again in the same worktree, for one more round.
     func message(_ id: String, _ text: String) throws {

@@ -44,6 +44,20 @@ struct JobPageTests {
         #expect(facts.stages.isEmpty)
     }
 
+    /// Teammates' open pull requests on the job's files (obid only): one line under the head.
+    @Test func teammatesPullRequestsReadAsOneLine() throws {
+        let json = #"{"id": "j", "teammates": {"prs": [{"number": 812, "title": "Ignore this", "author": "alice", "branch": "feat/run","#
+            + #" "url": "https://github.com/acme/shop/pull/812", "files": ["src/jobs.rs"], "clash": null},"#
+            + #" {"number": 813, "title": "x", "author": "bob", "branch": "", "url": "", "files": ["src/jobs.rs", "src/lib.rs"], "clash": null}], "rechecked": false}}"#
+        var teammates = try #require(try Runner.decoder.decode(RunnerJobExtras.self, from: Data(json.utf8)).teammates)
+        #expect(teammates.line == "Also changed in @alice's #812 and @bob's #813 (src/jobs.rs, src/lib.rs)")
+        teammates.prs[0].clash = ["`fn run(&self)` in src/jobs.rs"]
+        #expect(teammates.line == "Same code changed in @alice's #812 and @bob's #813 (src/jobs.rs, src/lib.rs)")
+        teammates.prs = []
+        #expect(teammates.line == nil)
+        #expect(try Runner.decoder.decode(RunnerJobExtras.self, from: Data(#"{"id": "j", "teammates": null}"#.utf8)).teammates == nil)
+    }
+
     @Test func timesCountsAndMoneyReadAsTheCanvasSaysThem() {
         #expect(JobPageText.seconds(18) == "18s")
         #expect(JobPageText.seconds(199) == "3m 19s")

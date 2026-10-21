@@ -5,6 +5,8 @@ import Foundation
 /// conversation list (#493) shows only when the runner on this Mac is obid; there's no Obysphere yet.
 nonisolated enum WindowStep: Hashable, Sendable {
     case group(WorkType)
+    /// Archived (Sangam's ArchiveView): the done tasks that left Home.
+    case archived
     case job(id: String, local: Bool)
     case session(id: String)
     case talk
@@ -12,9 +14,9 @@ nonisolated enum WindowStep: Hashable, Sendable {
 }
 
 /// Settings' pages, in the side panel's Settings section in this order (Sangam's SettingsView.tsx
-/// `SETTINGS_PAGES`).
+/// `SETTINGS_PAGES`, with Memory, docs/onboarding.md section 5, which his design doesn't have yet).
 nonisolated enum SettingsPage: String, CaseIterable, Hashable, Sendable {
-    case general, runner, remote, accounts, models, connectors, sphere, vault, about
+    case general, runner, remote, accounts, models, connectors, memory, sphere, vault, about
 
     var label: String {
         switch self {
@@ -24,6 +26,7 @@ nonisolated enum SettingsPage: String, CaseIterable, Hashable, Sendable {
         case .accounts: "Accounts"
         case .models: "Models"
         case .connectors: "Connectors"
+        case .memory: "Memory"
         case .sphere: "Obysphere"
         case .vault: "Vault"
         case .about: "About"

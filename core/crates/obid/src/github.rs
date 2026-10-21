@@ -129,6 +129,64 @@ pub(crate) async fn run(gh: &Path, args: &[&str]) -> Result<String, String> {
 /// [`run`], keeping what `gh` printed on stdout when it fails too (trimmed; empty when it never
 /// ran): `gh api graphql` exits non-zero on an answer with `errors` even when it has `data`.
 pub(crate) async fn output(gh: &Path, args: &[&str]) -> Result<String, (String, String)> {
+    let child = command(gh, args)
+        .spawn()
+        .map_err(|e| (String::new(), format!("gh couldn't start: {e}")))?;
+    let output = tokio::time::timeout(GH_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| {
+            (
+                String::new(),
+                format!("gh took more than {} seconds", GH_TIMEOUT.as_secs()),
+            )
+        })?
+        .map_err(|e| (String::new(), format!("gh: {e}")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if output.status.success() {
+        return Ok(stdout);
+    }
+    Err((stdout, said(&String::from_utf8_lossy(&output.stderr))))
+}
+
+/// [`run`] for an answer that could be large: at most `most` bytes of stdout and `within` in all,
+/// else an error and `gh` is stopped. What it says on stderr isn't read.
+pub(crate) async fn run_bounded(
+    gh: &Path,
+    args: &[&str],
+    most: usize,
+    within: Duration,
+) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+    let mut command = command(gh, args);
+    command.stderr(std::process::Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("gh couldn't start: {e}"))?;
+    let mut stdout = child.stdout.take().ok_or("gh has no stdout")?;
+    let read = async {
+        let mut bytes = Vec::new();
+        (&mut stdout)
+            .take(most as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| format!("gh: {e}"))?;
+        if bytes.len() > most {
+            return Err(format!("gh printed more than {most} bytes"));
+        }
+        let status = child.wait().await.map_err(|e| format!("gh: {e}"))?;
+        if !status.success() {
+            return Err(format!("gh ended with {status}"));
+        }
+        Ok(String::from_utf8_lossy(&bytes).trim().to_owned())
+    };
+    // Dropped on either error, `gh` is killed (`kill_on_drop`).
+    tokio::time::timeout(within, read)
+        .await
+        .map_err(|_| format!("gh took more than {} seconds", within.as_secs()))?
+}
+
+/// `gh` with `args`, its environment cleaned, stdout and stderr piped.
+fn command(gh: &Path, args: &[&str]) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(gh);
     // gh signs in with its own login only: a token that found its way into obid's environment
     // (`GH_TOKEN`, `GITHUB_TOKEN`, the agents' variables) never reaches it.
@@ -149,23 +207,7 @@ pub(crate) async fn output(gh: &Path, args: &[&str]) -> Result<String, (String, 
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let child = command
-        .spawn()
-        .map_err(|e| (String::new(), format!("gh couldn't start: {e}")))?;
-    let output = tokio::time::timeout(GH_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| {
-            (
-                String::new(),
-                format!("gh took more than {} seconds", GH_TIMEOUT.as_secs()),
-            )
-        })?
-        .map_err(|e| (String::new(), format!("gh: {e}")))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if output.status.success() {
-        return Ok(stdout);
-    }
-    Err((stdout, said(&String::from_utf8_lossy(&output.stderr))))
+    command
 }
 
 /// The last thing a tool said on stderr, skipping git's hints, with the secrets obid holds taken

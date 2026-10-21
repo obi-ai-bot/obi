@@ -235,7 +235,6 @@ struct DesignTests {
         #expect(TaskFacts.facts(done).map(\.name) == ["Repository", "Branch", "Base", "Model"])
         let running = try job("r", "running", extra: #", "rounds": 4, "round": 2"#)
         #expect(running.maxRounds == 4 && running.currentRound == 2)
-        #expect(TaskFacts.box(running) == "Tell Oby about this task…")
     }
 
     /// The job page's facts (#739) read into the phone's Job from each of the canvas's states, the

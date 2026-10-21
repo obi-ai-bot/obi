@@ -142,6 +142,42 @@ nonisolated enum GroupBy: String, CaseIterable, Sendable {
     var label: String { self == .type ? "Type" : "Status" }
 }
 
+/// When done tasks leave Home for Archived (Sangam's Archive completed, in Home's ⋮, tasks.ts
+/// `ARCHIVE_AFTER`): how long after they finished. Remembered on each app under `key`; 3 days
+/// unless changed, so Friday's work is still on Home on Monday.
+nonisolated enum ArchiveAfter: String, CaseIterable, Sendable {
+    case day = "1d", threeDays = "3d", week = "1w", never
+    static let key = "ObyArchiveAfter"
+
+    var label: String {
+        switch self {
+        case .day: "After a day"
+        case .threeDays: "After 3 days"
+        case .week: "After a week"
+        case .never: "Never"
+        }
+    }
+
+    var interval: TimeInterval? {
+        switch self {
+        case .day: 86_400
+        case .threeDays: 3 * 86_400
+        case .week: 7 * 86_400
+        case .never: nil
+        }
+    }
+
+    /// Whether a job is under Archived rather than on Home (tasks.ts `isArchived`): it's settled
+    /// (`JobList.settled`), and it was archived by hand (obid's `archived`), a Clear done took it
+    /// (#280, `JobList.shows`), or it finished longer ago than this says.
+    func archives(settled: Bool, finished: Date?, archived: Date?, clearedAt: Date?, now: Date) -> Bool {
+        guard settled else { return false }
+        if archived != nil || !JobList.shows(finished: finished, clearedAt: clearedAt) { return true }
+        guard let finished, let interval else { return false }
+        return now.timeIntervalSince(finished) > interval
+    }
+}
+
 /// Where a task stands on Home (#496): running (queued too: it starts by itself, with nothing for
 /// you to do), needs you (whatever its agent is doing), or done.
 nonisolated enum WorkStatus: Sendable { case running, needs, done }

@@ -384,6 +384,7 @@ final class RunnerFeed {
                         checks.look(runner)
                         register(runner)
                     case .job(let job, let extras): apply(job, extras: extras)
+                    case .jobDeleted(let id): gone(id, 404)
                     case .cleared(let date): clearedAt = date
                     case .inbox(let item, let words):
                         apply(item, words: words)
@@ -557,13 +558,6 @@ final class RunnerFeed {
         return url
     }
 
-    /// Clear done: the runner records the time, and the window here and Home on the iPhone hide
-    /// the jobs that finished by then.
-    func clear() async throws {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to clear done jobs.") }
-        clearedAt = try await runner.clear()
-    }
-
     /// Saves the model and effort the runner's jobs use (Settings › Models).
     func setModels(_ models: ModelSettings) async throws {
         guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
@@ -692,6 +686,23 @@ final class RunnerFeed {
             gone(id, error.status)
             throw error
         }
+    }
+
+    /// Rename, Archive task and Delete task (Sangam's TaskMenu), on obid's jobs: each answers
+    /// at once here, and every other app hears it as the job's event.
+    func rename(_ id: String, to title: String) async throws {
+        apply(try await about(id) { try await $0.rename(id, to: title) })
+    }
+
+    func archive(_ id: String, _ archived: Bool = true) async throws {
+        let job = try await about(id) { try await $0.archive(id, archived) }
+        extras[id, default: RunnerJobExtras(id: id)].archived = archived ? .now : nil
+        apply(job)
+    }
+
+    func delete(_ id: String) async throws {
+        try await about(id) { try await $0.deleteJob(id) }
+        gone(id, 404)
     }
 
     /// The runner answered `status` about the job `id`: on a 404 the job goes from here.

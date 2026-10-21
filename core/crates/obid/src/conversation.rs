@@ -568,6 +568,27 @@ impl Conversations {
         self.append_as(id, "oby", text, jobs, false, vec![], Some(routine))
     }
 
+    /// The user's own words, the latest first, at most `limit` turns: (conversation id, its
+    /// title, the words). Only turns the user wrote, never Oby's or a routine's (crate::memory
+    /// finds what they keep repeating in them).
+    pub fn said_by_user(&self, limit: usize) -> Vec<(String, String, String)> {
+        let threads = self.lock();
+        let mut said: Vec<(&Thread, &Turn)> = threads
+            .iter()
+            .flat_map(|t| {
+                t.turns
+                    .iter()
+                    .filter(|turn| turn.who == "user")
+                    .map(move |turn| (t, turn))
+            })
+            .collect();
+        said.sort_by(|a, b| b.1.at.cmp(&a.1.at));
+        said.into_iter()
+            .take(limit)
+            .map(|(t, turn)| (t.id.clone(), t.title.clone(), turn.text.clone()))
+            .collect()
+    }
+
     /// Whether the conversation `id` is kept.
     pub fn has(&self, id: &str) -> bool {
         self.lock().iter().any(|t| t.id == id)
