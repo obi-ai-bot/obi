@@ -5929,9 +5929,17 @@ impl Jobs {
                 )),
             ),
         };
-        let conflicts = crate::decisions::conflicts(&changes, &digests);
+        // Out of time after the author's round: what the first check found still stands, and
+        // still goes into the pull request.
+        let (sessions, conflicts) = match seen.decisions.filter(|_| error.is_some()) {
+            Some(earlier) => (earlier.sessions, earlier.conflicts),
+            None => (
+                digests.iter().map(|d| d.session.clone()).collect(),
+                crate::decisions::conflicts(&changes, &digests),
+            ),
+        };
         let decisions = crate::decisions::Decisions {
-            sessions: digests.into_iter().map(|d| d.session).collect(),
+            sessions,
             conflicts: conflicts.clone(),
             asked: asked || !conflicts.is_empty(),
             error,

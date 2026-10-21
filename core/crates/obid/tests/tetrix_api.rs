@@ -30,7 +30,8 @@ struct Seen {
     /// The `save_session` calls' arguments.
     saved: Vec<Value>,
     /// How its earlier sessions answer: "" as they are, "leaky" listing one whose id holds a key,
-    /// "slow" with a digest that takes 12 seconds.
+    /// "slow" listing four whose context takes 9 seconds each: each call within its own 10
+    /// seconds, all of them past the check's 30.
     mode: &'static str,
 }
 
@@ -228,18 +229,25 @@ fn fake_tetrix() -> (String, Arc<Mutex<Seen>>) {
                             // The shapes of mcp_service/app/tools/{repo_sessions,session_context,
                             // session_digest}.py.
                             "repo_sessions" => {
-                                let id = if seen.mode == "leaky" { made_up_key() } else { "agent_session:g1".into() };
+                                let ids = match seen.mode {
+                                    "leaky" => vec![made_up_key()],
+                                    "slow" => (1..=4).map(|n| format!("agent_session:g{n}")).collect(),
+                                    _ => vec!["agent_session:g1".to_owned()],
+                                };
+                                let sessions: Vec<Value> = ids.iter().map(|id| json!({"session_id": id, "title": "Earlier work", "edge_type": "worked_on"})).collect();
                                 json!({"content": [{"type": "text", "text": json!({"target": {"id": "r1", "name": "obi-e2e/fixture-app", "type": "repo"},
-                                    "count": 1, "sessions": [{"session_id": id, "title": "Earlier work", "edge_type": "worked_on"}],
+                                    "count": sessions.len(), "sessions": sessions,
                                     "truncated": false, "has_more": false, "next_cursor": null}).to_string()}]})
                             }
-                            "session_context" => json!({"content": [{"type": "text", "text": json!({"id": "agent_session:g1",
-                                "natural_key": "session:acme/5b0e7c1a-9d2f-4c3e-8a1b-2f3e4d5c6b7a", "title": "Earlier work",
-                                "digest_summary": {"decisions": 1}, "worked_on": [], "produced": [], "references": []}).to_string()}]}),
-                            "session_digest" => {
+                            "session_context" => {
                                 if seen.mode == "slow" {
-                                    std::thread::sleep(std::time::Duration::from_secs(12));
+                                    std::thread::sleep(std::time::Duration::from_secs(9));
                                 }
+                                json!({"content": [{"type": "text", "text": json!({"id": "agent_session:g1",
+                                "natural_key": "session:acme/5b0e7c1a-9d2f-4c3e-8a1b-2f3e4d5c6b7a", "title": "Earlier work",
+                                "digest_summary": {"decisions": 1}, "worked_on": [], "produced": [], "references": []}).to_string()}]})
+                            }
+                            "session_digest" => {
                                 json!({"content": [{"type": "text", "text": json!({"session_id": "5b0e7c1a-9d2f-4c3e-8a1b-2f3e4d5c6b7a",
                                     "audience": "org", "has_digest": true, "digest": {"schema_version": 1,
                                     "projects": [{"repo": "obi-e2e/fixture-app", "paths_modified": ["config.txt"]}],
@@ -895,7 +903,8 @@ fn a_change_against_an_earlier_decision_gets_one_round_and_never_blocks() {
     );
     assert!(!body().contains("Earlier decisions"), "{}", body());
 
-    // A digest that doesn't come in time: nothing is checked, and the job still publishes.
+    // A Tetrix whose every answer comes in time but whose answers together take longer than the
+    // check's 30 seconds: nothing is checked, it says so, and the job still publishes.
     seen.lock().unwrap().mode = "slow";
     let (_, job) = run("BUMP: config.txt 4 8");
     assert_eq!(job["status"], "done", "{job}");
@@ -904,5 +913,10 @@ fn a_change_against_an_earlier_decision_gets_one_round_and_never_blocks() {
         "{job}"
     );
     assert_eq!(job["round"], 1, "{job}");
-    assert_eq!(job["tetrix"]["decisions"]["conflicts"], json!([]), "{job}");
+    let decisions = &job["tetrix"]["decisions"];
+    assert_eq!(decisions["conflicts"], json!([]), "{job}");
+    assert_eq!(
+        decisions["error"], "Tetrix didn't answer within 30 seconds: nothing was checked.",
+        "{job}"
+    );
 }

@@ -1144,7 +1144,11 @@ impl Tetrix {
     /// key (`session_context`), and its digest (`session_digest`, structured), kept when it
     /// changed one of `files` there (its `projects[].paths_modified`). Never the job's own
     /// sessions (`own`, the ids `save_session` answered). Empty when Tetrix has none or doesn't
-    /// answer. Sessions in Tetrix's order, the first [`CANDIDATES`] of them.
+    /// answer.
+    // ponytail: the first [`CANDIDATES`] sessions of `repo_sessions`' first page, in Tetrix's
+    // order (edge type, then title, never date), since which ones changed `files` is only known
+    // from each one's digest; on a repository with more sessions, the rest aren't read. Ask
+    // `repo_sessions` by code unit once Tetrix names files that way.
     pub async fn digests(
         &self,
         connections: &Connections,
