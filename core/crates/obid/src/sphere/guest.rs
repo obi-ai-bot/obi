@@ -4,9 +4,10 @@
 //!
 //! - the code goes as a git bundle on the job channel, after the secret scan of what the job adds;
 //! - every model call the agent makes comes back here, and obid sends it to the model's API from
-//!   this Mac with this owner's own company API key, from the vault (`anthropic-api-key` for Claude
-//!   Code, `openai-api-key` for Codex): the key never leaves this Mac, and only API-key accounts
-//!   run elsewhere until Anthropic and OpenAI say a subscription login may (#797, open question 1);
+//!   this Mac with this owner's own Claude Code login, the job's account's (the owner's decision of
+//!   2026-10-21): the VM has a placeholder, and the login never leaves this Mac. Only the agent's
+//!   model paths and an allowlist of headers pass; whatever credential the other Mac sends is
+//!   dropped; and nothing is relayed once the exchange ends or the job's minutes are up;
 //! - the transcript comes back as it goes, and the commits at the end, into the job's worktree.
 //!
 //! What comes back from the other Mac is data: the transcript is shown, the commits go through the
@@ -28,6 +29,55 @@ use crate::process::Signal;
 
 /// The most a job's words may be on the channel (spec protocol.md section 13).
 const MAX_WORDS: usize = 20_000;
+
+/// The most a job may run on the other Mac, as its `run_request` asks.
+const MAX_MINUTES: u64 = 120;
+
+/// The request headers a relayed model call keeps (spec protocol.md section 13): every other one,
+/// any credential among them, is dropped.
+const HEADERS: [&str; 6] = [
+    "content-type",
+    "accept",
+    "anthropic-version",
+    "anthropic-beta",
+    "openai-beta",
+    "user-agent",
+];
+
+/// The guest's own Claude Code login as a model call takes it: only the access token and when it
+/// ends (crate::jobs: never a refresh token), read where Claude Code keeps it (the Keychain, or the
+/// account's `.credentials.json`), its token already among the secrets obid takes out of logs.
+#[derive(Clone)]
+pub struct Login {
+    pub access_token: String,
+    /// Milliseconds since 1970, when it says.
+    pub expires_ms: Option<u64>,
+}
+
+impl Login {
+    /// The job's account's login, from its folder, or Claude Code's own default one.
+    pub fn read(config_dir: Option<&Path>) -> Option<Login> {
+        let bytes = match config_dir {
+            Some(dir) => crate::jobs::account_login(dir),
+            None => crate::jobs::keychain_login(None).or_else(|| {
+                crate::jobs::login_home()
+                    .and_then(|home| crate::jobs::folder_login(&home.join(".claude")))
+            }),
+        }?;
+        let login: Value = serde_json::from_slice(&bytes).ok()?;
+        let oauth = &login["claudeAiOauth"];
+        Some(Login {
+            access_token: oauth["accessToken"].as_str()?.to_owned(),
+            expires_ms: oauth["expiresAt"].as_u64(),
+        })
+    }
+
+    /// Whether it still works `seconds` from now.
+    pub fn lasts(&self, seconds: u64) -> bool {
+        self.expires_ms
+            .is_none_or(|t| t > (obi_protocol::time::now().max(0) as u64 + seconds) * 1000)
+    }
+}
 
 /// The vault secret each agent's company API key is kept under.
 pub fn key_name(agent: &str) -> &'static str {
@@ -64,6 +114,8 @@ pub struct Ask<'a> {
     /// On a share of the teammate's API account (#809): its grant. Its model calls are made on
     /// their Mac with their key, so none comes back here.
     pub grant: Option<&'a str>,
+    /// The job's account's folder (`CLAUDE_CONFIG_DIR`), or none for Claude Code's own login.
+    pub config_dir: Option<&'a Path>,
 }
 
 async fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -79,14 +131,19 @@ pub async fn run_turn(
     mut signal: watch::Receiver<Signal>,
     mut on_event: impl FnMut(AgentEvent),
 ) -> Result<Turn, String> {
-    let api_key = match ask.grant {
+    if ask.agent != "claude" {
+        return Err("Only Claude Code jobs run on another Mac so far: run this one here.".into());
+    }
+    // The job's model calls use this owner's own Claude Code login, from this Mac: it must be there,
+    // and good for a while (Claude Code refreshes it when it runs here). On a share of a teammate's
+    // API account (#809) the calls are made on their Mac with their key: no login is needed here.
+    let login = match ask.grant {
         Some(_) => None,
-        None => Some(crate::vault::value(key_name(ask.agent))?.ok_or_else(|| {
-            format!(
-                "Running on another Mac needs your company's API key in Oby's vault as {}: only an API-key account runs on someone else's Mac.",
-                key_name(ask.agent)
-            )
-        })?),
+        None => Some(
+            Login::read(ask.config_dir)
+                .filter(|l| l.lasts(600))
+                .ok_or("Your Claude Code login on this Mac has expired, or isn't there: run claude once to sign in, then try again. The job's model calls use it, from this Mac.")?,
+        ),
     };
     on_event(AgentEvent::Step(format!(
         "Packing the code for {}'s Mac",
@@ -159,7 +216,7 @@ pub async fn run_turn(
         &ask,
         worktree,
         prompt,
-        api_key.as_deref(),
+        login,
         &base_sha,
         &dir,
         &mut signal,
@@ -176,7 +233,7 @@ async fn run_in(
     ask: &Ask<'_>,
     worktree: &Path,
     prompt: &str,
-    api_key: Option<&str>,
+    mut login: Option<Login>,
     base_sha: &str,
     dir: &Path,
     signal: &mut watch::Receiver<Signal>,
@@ -249,6 +306,7 @@ async fn run_in(
             }
         }
     }
+    let accepted = tokio::time::Instant::now();
     on_event(AgentEvent::Step(format!(
         "Running on {}'s Mac",
         ask.host_owner
@@ -329,15 +387,26 @@ async fn run_in(
                             Kind::End => {
                                 if let Some((open, body)) = models.remove(&frame.stream) {
                                     // On a share, the other Mac makes the calls: none is relayed from here.
-                                    let Some(key) = api_key.map(str::to_owned) else {
+                                    let Some(current) = login.as_mut() else {
                                         channel.send(Frame::new(frame.stream, Kind::Reset, b"not relayed on a share".to_vec())).await;
                                         continue;
                                     };
+                                    // Not once the exchange is over or the job's minutes are up: the
+                                    // other Mac can't keep spending this owner's account.
+                                    let over = link.exchange(&cid).is_none_or(|e| e.ended())
+                                        || accepted.elapsed() > Duration::from_secs(MAX_MINUTES * 60);
+                                    if !current.lasts(300) {
+                                        *current = Login::read(ask.config_dir).unwrap_or_else(|| current.clone());
+                                    }
                                     let channel = channel.clone();
                                     let http = http.clone();
-                                    let (upstream, agent) = (upstream.clone(), ask.agent.to_owned());
+                                    let (upstream, token) = (upstream.clone(), current.access_token.clone());
                                     tokio::spawn(async move {
-                                        relay(&channel, &http, &upstream, &agent, &key, frame.stream, &open, body).await;
+                                        if over {
+                                            refuse(&channel, frame.stream, 403, "the job's time on that Mac is over").await;
+                                        } else {
+                                            relay(&channel, &http, &upstream, &token, frame.stream, &open, body).await;
+                                        }
                                     });
                                 } else if let Some((stream, data, want_sha, _)) = commits.take()
                                     && stream == frame.stream
@@ -547,15 +616,31 @@ async fn apply(worktree: &Path, bundle: &Path, branch: &str, base: &str) -> Resu
     Ok(count.parse().unwrap_or(0))
 }
 
-/// One model call: allowed paths only, sent from this Mac with this owner's key, its answer
-/// streamed back on the same stream.
-#[allow(clippy::too_many_arguments)]
+/// A model call answered here with an error, never sent on.
+async fn refuse(channel: &channel::Channel, stream: u32, status: u16, why: &str) {
+    channel
+        .send(Frame::json(
+            stream,
+            Kind::Open,
+            &json!({"type": "model_response", "status": status, "headers": [["content-type", "text/plain"]]}),
+        ))
+        .await;
+    channel.send_data(stream, why.as_bytes()).await;
+    channel
+        .send(Frame::new(stream, Kind::End, Vec::new()))
+        .await;
+}
+
+/// The `anthropic-beta` a call on a Claude Code login needs.
+const OAUTH_BETA: &str = "oauth-2025-04-20";
+
+/// One model call: allowed paths and headers only, sent from this Mac with this owner's own
+/// Claude Code login, its answer streamed back on the same stream.
 async fn relay(
     channel: &channel::Channel,
     http: &reqwest::Client,
     upstream: &str,
-    agent: &str,
-    key: &str,
+    token: &str,
     stream: u32,
     open: &Value,
     body: Vec<u8>,
@@ -581,28 +666,29 @@ async fn relay(
         "GET" => http.get(format!("{upstream}{path}")),
         _ => http.post(format!("{upstream}{path}")).body(body),
     };
+    let mut betas: Vec<String> = Vec::new();
     for pair in open["headers"].as_array().into_iter().flatten() {
-        if let (Some(name), Some(value)) = (pair[0].as_str(), pair[1].as_str())
-            && !matches!(
-                name.to_ascii_lowercase().as_str(),
-                "host"
-                    | "authorization"
-                    | "x-api-key"
-                    | "connection"
-                    | "content-length"
-                    | "transfer-encoding"
-                    | "accept-encoding"
-                    | "cookie"
-            )
-        {
+        let (Some(name), Some(value)) = (pair[0].as_str(), pair[1].as_str()) else {
+            continue;
+        };
+        let name = name.to_ascii_lowercase();
+        if name == "anthropic-beta" {
+            betas.extend(
+                value
+                    .split(',')
+                    .map(|b| b.trim().to_owned())
+                    .filter(|b| !b.is_empty()),
+            );
+        } else if HEADERS.contains(&name.as_str()) {
             request = request.header(name, value);
         }
     }
-    request = if agent == "codex" {
-        request.bearer_auth(key)
-    } else {
-        request.header("x-api-key", key)
-    };
+    if !betas.iter().any(|b| b == OAUTH_BETA) {
+        betas.push(OAUTH_BETA.into());
+    }
+    request = request
+        .header("anthropic-beta", betas.join(","))
+        .bearer_auth(token);
     let response = match request.send().await {
         Ok(response) => response,
         Err(_) => {

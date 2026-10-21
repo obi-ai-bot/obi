@@ -43,6 +43,23 @@ pub async fn membership(State(shared): State<Arc<Shared>>) -> Response {
     json(StatusCode::OK, shared.link.membership_json())
 }
 
+/// `GET /v1/obid/sphere/pins`.
+pub async fn pins(State(shared): State<Arc<Shared>>) -> Response {
+    json(StatusCode::OK, shared.link.pins_json())
+}
+
+/// `POST /v1/obid/sphere/pins/{owner}`.
+pub async fn accept_pin(
+    State(shared): State<Arc<Shared>>,
+    Path(owner): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    Ok(json(
+        StatusCode::OK,
+        shared.link.accept_pin(&owner, &body).await?,
+    ))
+}
+
 /// `POST /v1/obid/sphere/key`.
 pub async fn key(State(shared): State<Arc<Shared>>) -> Result<Response, ApiError> {
     Ok(json(StatusCode::OK, shared.link.make_key().await?))

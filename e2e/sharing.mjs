@@ -3,10 +3,11 @@
 // a Sphere (local, from OBI_SPHERE_DIR), Wellington's obid sharing this Mac and Sangam's obid sending
 // a job to it, each in a home of its own. The job runs in a real VM (core/obi-vm and its image), with
 // the real Claude Code inside; its model calls go back through the job channel to Sangam's obid,
-// which calls the model's API from there with Sangam's key. Then Wellington shares part of his
+// which calls the model's API from there with Sangam's own Claude Code login: the login never
+// leaves Sangam's side (the owner's decision of 2026-10-21). Then Wellington shares part of his
 // company API account with Sangam (#809): a job on it runs in the VM again, its model calls made
 // from Wellington's obid with Wellington's key and metered. The Sphere's audit chain keeps only what
-// the jobs are (#810).
+// the jobs are (#810). Logins, keys and the model's API are stand-ins: no real one is used.
 //
 //   node e2e/sharing.mjs --image <dir with vmlinuz, initrd, root.img>
 //
@@ -14,8 +15,8 @@
 //   OBI_SPHERE_DIR   the obi-sphere checkout with the job channel (default: ../obi-sphere)
 //   OBID_BIN         obid (default: core/target/debug/obid)
 //   OBI_VM_BIN       obi-vm (default: core/obi-vm/build/obi-vm)
-//   ANTHROPIC_KEY_FILE  a file holding a real company API key: the model's real API is used. Without
-//                    it, a stand-in model API on this Mac answers (one Bash call, then "Done").
+//   A stand-in model API on this Mac answers (one Bash call, then "Done"), and Sangam's Claude Code
+//   login is a stand-in one in Sangam's account folder.
 //   OBI_E2E_KEEP=1   keep the run folder.
 //
 // This Mac's own signals (idle time, power) decide whether a guest job may run, and the person
@@ -43,7 +44,6 @@ const IMAGE = resolve(arg("--image") ?? join(OBI, "core/obi-vm/image/out"));
 const SPHERE_DIR = resolve(process.env.OBI_SPHERE_DIR ?? join(OBI, "..", "obi-sphere"));
 const OBID = resolve(process.env.OBID_BIN ?? join(OBI, "core/target/debug/obid"));
 const OBI_VM = resolve(process.env.OBI_VM_BIN ?? join(OBI, "core/obi-vm/build/obi-vm"));
-const KEY_FILE = process.env.ANTHROPIC_KEY_FILE;
 const R = mkdtempSync(join(tmpdir(), "obi-sharing-"));
 const spec = await import(pathToFileURL(join(SPHERE_DIR, "spec/conformance/lib/obi.mjs")).href);
 
@@ -110,9 +110,11 @@ function fakeModel(port) {
     req.on("data", (c) => (raw += c));
     req.on("end", () => {
       const asked = JSON.parse(raw || "{}");
-      const sent = req.headers["x-api-key"];
-      const whose = sent === readFileSync(join(R, "key"), "utf8").trim() ? "the guest's" : sent === readFileSync(join(R, "host-key"), "utf8").trim() ? "the host's" : "other";
-      writeFileSync(join(R, "model-calls.log"), `${req.method} ${req.url} key=${whose}\n`, { flag: "a" });
+      const login = readFileSync(join(R, "login"), "utf8").trim();
+      const hostKey = readFileSync(join(R, "host-key"), "utf8").trim();
+      const whose = req.headers.authorization === `Bearer ${login}` && !req.headers["x-api-key"] && (req.headers["anthropic-beta"] ?? "").includes("oauth-2025-04-20")
+        ? "the guest's login" : req.headers["x-api-key"] === hostKey && !req.headers.authorization ? "the host's key" : "other";
+      writeFileSync(join(R, "model-calls.log"), `${req.method} ${req.url} with=${whose}\n`, { flag: "a" });
       const used = (asked.messages ?? []).some((m) => Array.isArray(m.content) && m.content.some((c) => c.type === "tool_result"));
       const ev = (t, o) => `event: ${t}\ndata: ${JSON.stringify(o)}\n\n`;
       const out = [ev("message_start", { type: "message_start", message: { id: "msg_e2e", type: "message", role: "assistant", model: asked.model ?? "fake", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 100, output_tokens: 1 } } })];
@@ -179,15 +181,17 @@ async function main() {
   expect(await call(`${sphereUrl}/v0.1/spheres/${SPHERE}/policy`, { method: "PUT", token: await admin(), body: { expected_version: 0, rules: [{ id: "team", from_owner: "*", to_owner: "*", actions: ["review_request", "run_request", "share_offer"], repos: ["*"] }] } }), 200, "the policy");
   pass(`Sphere ${SPHERE} at ${sphereUrl}, the policy allows run_request and share_offer`);
 
-  step("2. Two obids: Wellington's shares this Mac, Sangam's has a company API key");
+  step("2. Two obids: Wellington's shares this Mac, Sangam is signed in to Claude Code");
   const fixture = buildFixture(join(R, "fixture"));
   const modelPort = await freePort();
-  const key = KEY_FILE ? readFileSync(KEY_FILE, "utf8").trim() : `sk-ant-api03-e2e-${randomBytes(16).toString("hex")}`;
-  writeFileSync(join(R, "key"), key, { mode: 0o600 });
-  // Wellington's company key, which Sangam's jobs on his share run on (a stand-in unless the model is real).
-  const hostKey = KEY_FILE ? key : `sk-ant-api03-e2e-host-${randomBytes(16).toString("hex")}`;
+  // Sangam's Claude Code login: a stand-in, its access token and a refresh token that must never travel.
+  const login = `e2e-claude-login-${randomBytes(16).toString("hex")}`;
+  const refresh = `e2e-claude-refresh-${randomBytes(16).toString("hex")}`;
+  writeFileSync(join(R, "login"), login, { mode: 0o600 });
+  // Wellington's company key, which Sangam's jobs on his share run on (#809): a stand-in.
+  const hostKey = `sk-ant-api03-e2e-host-${randomBytes(16).toString("hex")}`;
   writeFileSync(join(R, "host-key"), hostKey, { mode: 0o600 });
-  if (!KEY_FILE) await fakeModel(modelPort);
+  await fakeModel(modelPort);
   // obi-vm, except `signals`, which this run decides.
   const signals = join(R, "signals.json");
   const away = { idleSeconds: 900, onAC: true, lowPower: false, thermal: "nominal" };
@@ -203,6 +207,10 @@ async function main() {
     mkdirSync(home, { recursive: true, mode: 0o700 });
     // Wellington's Claude Code account pays per token, as its tool said once.
     if (who === "host") writeFileSync(join(home, "usage.json"), JSON.stringify({ stub: { priced: "api" } }), { mode: 0o600 });
+    if (who === "guest") {
+      mkdirSync(join(home, "accounts/stub"), { recursive: true, mode: 0o700 });
+      writeFileSync(join(home, "accounts/stub/.credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: login, refreshToken: refresh, expiresAt: Date.now() + 86_400_000, scopes: ["user:inference"], subscriptionType: "max" } }), { mode: 0o600 });
+    }
     const port = await freePort();
     const token = randomBytes(32).toString("hex");
     writeFileSync(join(home, "api-token"), `${token}\n`, { mode: 0o600 });
@@ -212,7 +220,7 @@ async function main() {
       repos: [{ repo: "obi-e2e/fixture-app", remote: fixture.remoteUrl, defaultBranch: "main", check: "node --test" }],
       allowFileRemotes: true, telemetry: false,
       ...(who === "host" ? { vmHelper: wrapper, vmImage: IMAGE } : {}),
-      guestModelApi: KEY_FILE ? undefined : `http://127.0.0.1:${modelPort}`,
+      guestModelApi: `http://127.0.0.1:${modelPort}`,
     };
     writeFileSync(join(dir, "config.json"), JSON.stringify(config, null, 2));
     start(`obid-${who}`, OBID, ["serve", "--config", join(dir, "config.json")], { env: { HOME: join(dir, "env-home"), TMPDIR: join(dir, "tmp"), PATH: process.env.PATH } });
@@ -224,7 +232,6 @@ async function main() {
     if (joined.state !== "joined" || !made.keyId) fail(`${who} didn't join`);
     obids[who] = { api, dir, home, obi };
   }
-  execFileSync(OBID, ["vault", "--config", join(obids.guest.dir, "config.json"), "add", "anthropic-api-key"], { input: key });
   execFileSync(OBID, ["vault", "--config", join(obids.host.dir, "config.json"), "add", "anthropic-api-key"], { input: hostKey });
   const mac = expect(await obids.host.api("/obid/sharing/mac"), 200, "the host's sharing");
   if (mac.settings.on !== false) fail("sharing isn't off by default");
@@ -271,12 +278,14 @@ async function main() {
 
   step("6. What each side kept");
   const calls = existsSync(join(R, "model-calls.log")) ? readFileSync(join(R, "model-calls.log"), "utf8").trim().split("\n") : [];
-  if (!KEY_FILE && (!calls.length || calls.some((c) => !c.includes("key=the guest's")))) fail(`the model calls: ${calls.join("; ")}`);
-  pass(KEY_FILE ? "the model calls went to Anthropic's API from Sangam's obid" : `${calls.length} model calls, each from Sangam's obid with Sangam's key`);
+  if (!calls.length || calls.some((c) => !c.includes("with=the guest's login"))) fail(`the model calls: ${calls.join("; ")}`);
+  pass(`${calls.length} model calls, each from Sangam's obid with Sangam's own login (the VM's placeholder dropped)`);
   // grep exits 1 when it finds nothing: what this wants.
-  const search = spawnSync("grep", ["-rl", "--binary-files=text", key, obids.host.home, join(R, "sphere")], { encoding: "utf8" });
-  if (search.status !== 1) fail(`the key is on Wellington's side or the Sphere's: ${search.stdout}`);
-  pass("the key is nowhere in Wellington's obid's home or the Sphere's state");
+  for (const [what, secret] of [["login", login], ["refresh token", refresh]]) {
+    const search = spawnSync("grep", ["-rl", "--binary-files=text", secret, obids.host.home, join(R, "host"), join(R, "sphere")], { encoding: "utf8" });
+    if (search.status !== 1) fail(`Sangam's ${what} is on Wellington's side or the Sphere's: ${search.stdout}`);
+  }
+  pass("Sangam's login and refresh token are nowhere on Wellington's side or in the Sphere's state");
   const log = readFileSync(join(obids.host.home, "sharing-log.jsonl"), "utf8").trim();
   pass(`Wellington's sharing log: ${log}`);
   const audit = expect(await call(`${sphereUrl}/v0.1/spheres/${SPHERE}/audit`, { token: await admin() }), 200, "the audit chain");
@@ -306,11 +315,9 @@ async function main() {
     return ["done", "failed", "interrupted"].includes(j.status) && j;
   });
   if (ended.status !== "done") fail(`the job on the share ended ${ended.status}: ${ended.reason ?? ended.summary}`);
-  if (!KEY_FILE) {
-    const after = readFileSync(join(R, "model-calls.log"), "utf8").trim().split("\n").slice(before);
-    if (!after.length || after.some((c) => !c.includes("key=the host's"))) fail(`the share's model calls: ${after.join("; ")}`);
-    pass(`${after.length} model calls on the share, each from Wellington's obid with Wellington's key`);
-  }
+  const after = readFileSync(join(R, "model-calls.log"), "utf8").trim().split("\n").slice(before);
+  if (!after.length || after.some((c) => !c.includes("with=the host's key"))) fail(`the share's model calls: ${after.join("; ")}`);
+  pass(`${after.length} model calls on the share, each from Wellington's obid with Wellington's key`);
   const used = (expect(await obids.host.api("/obid/sharing/grants"), 200, "")).grants[0].usedCents.sangam;
   const seen = await within(60, "Sangam's meter", async () => {
     const s = (expect(await obids.guest.api("/obid/sharing/shared"), 200, "")).shares[0];
@@ -320,12 +327,9 @@ async function main() {
   const cost = chain.entries.map((e) => e.envelope).find((e) => e.type === "result" && e.body.cost_cents !== undefined)?.body.cost_cents;
   if (!used || cost !== used) fail(`the meters: Wellington's ${used}, the chain's ${cost}`);
   pass(`both meters and the chain say ${used} cents; Sangam has ${seen.limitCents - seen.usedCents} cents left`);
-  // With one real key standing in for both, Sangam's vault holds it too: only a stand-in can be looked for.
-  if (!KEY_FILE) {
-    const search2 = spawnSync("grep", ["-rl", "--binary-files=text", hostKey, obids.guest.home, join(R, "sphere")], { encoding: "utf8" });
-    if (search2.status !== 1) fail(`Wellington's key is on Sangam's side or the Sphere's: ${search2.stdout}`);
-    pass("Wellington's key is nowhere in Sangam's obid's home or the Sphere's state");
-  }
+  const search2 = spawnSync("grep", ["-rl", "--binary-files=text", hostKey, obids.guest.home, join(R, "guest"), join(R, "sphere")], { encoding: "utf8" });
+  if (search2.status !== 1) fail(`Wellington's key is on Sangam's side or the Sphere's: ${search2.stdout}`);
+  pass("Wellington's key is nowhere on Sangam's side or in the Sphere's state");
 }
 
 let ok = false;

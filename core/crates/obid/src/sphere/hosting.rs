@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -202,6 +202,31 @@ impl Hosting {
 // ---------------------------------------------------------------------------------------------
 // Admission
 
+/// The size a job gets: what it asks for, never more than the owner set.
+fn job_size<'a>(mac: &Mac, request: &'a Value) -> &'a str {
+    if mac.size == "large" {
+        request["size"].as_str().unwrap_or("small")
+    } else {
+        "small"
+    }
+}
+
+/// Whether `home`'s disk has room for a job's whole disk and 5 GB more.
+fn room_for(home: &Path, size: Size) -> bool {
+    nix::sys::statvfs::statvfs(home).is_ok_and(|s| {
+        (s.blocks_available() as u64).saturating_mul(s.fragment_size()) >= (size.disk_gib + 5) << 30
+    })
+}
+
+/// What a crash left (obid starts with no guest job running): every job folder, with its sparse
+/// disk and console, and every socket folder of this home's.
+pub fn clean_leftovers(home: &Path) {
+    let _ = std::fs::remove_dir_all(home.join("g"));
+    if let Ok(dir) = vm::sockets_base(home) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// Decides a `run_request` that arrived (`asked`: the owner just allowed it in the inbox).
 pub fn admit(link: &Arc<Link>, cid: String, asked: bool) {
     let link = link.clone();
@@ -267,6 +292,15 @@ async fn decide(link: &Arc<Link>, cid: &str, asked: bool) -> Decision {
     }
     if link.hosting.count() >= usize::from(mac.jobs_at_once) {
         return Decision::Decline("busy", None);
+    }
+    // The job's disk is sparse, but may fill: room for all of it, and 5 GB for the owner.
+    let size = Size::named(job_size(&mac, &exchange.request["body"]))
+        .unwrap_or(Size::named("small").unwrap());
+    if !room_for(link.home(), size) {
+        return Decision::Decline(
+            "not_free",
+            Some("This Mac hasn't the free disk space for a job now."),
+        );
     }
     let Ok(signals) = vm::signals(&setup.helper).await else {
         return Decision::Decline("not_free", None);
@@ -352,9 +386,8 @@ struct Shared {
     grant: Option<(String, String)>,
     channel: channel::Channel,
     request: Value,
-    /// The disk key, handed to the guest once.
+    /// The disk key, handed to the guest once, on its own socket.
     key: Vec<u8>,
-    key_given: AtomicBool,
     author: Mutex<Value>,
     /// The job's words, from the guest on the channel (never in the request).
     words: Mutex<Option<String>>,
@@ -406,13 +439,7 @@ async fn run_job(link: &Arc<Link>, cid: &str) -> Result<(), String> {
     let request = exchange.request["body"].clone();
     let mac = link.mac();
     let setup = link.hosting_setup();
-    // Never more than the owner set.
-    let size = if mac.size == "large" {
-        request["size"].as_str().unwrap_or("small")
-    } else {
-        "small"
-    };
-    let size = Size::named(size).ok_or("no such size")?;
+    let size = Size::named(job_size(&mac, &request)).ok_or("no such size")?;
     let minutes = request["max_minutes"]
         .as_u64()
         .unwrap_or(120)
@@ -433,7 +460,7 @@ async fn run_job(link: &Arc<Link>, cid: &str) -> Result<(), String> {
     link.publish_runner_soon();
     let place = Place {
         dir: link.guest_dir(cid),
-        sockets: vm::socket_dir(&cid[..cid.len().min(8)])?,
+        sockets: vm::socket_dir(link.home(), &cid[..cid.len().min(8)])?,
     };
     crate::store::make_private_dir(&place.dir)
         .map_err(|e| format!("no folder for the job: {e}"))?;
@@ -480,7 +507,6 @@ async fn with_place(
         channel: channel.clone(),
         request: request.clone(),
         key,
-        key_given: AtomicBool::new(false),
         author: Mutex::new(
             json!({"name": exchange.peer_owner.clone().unwrap_or_default(), "email": "oby@users.noreply.github.com"}),
         ),
@@ -512,7 +538,10 @@ async fn with_place(
             return Err("the job's words didn't come with its code".to_owned());
         }
         let servers = serve(shared.clone(), place)?;
-        let mut vm = Vm::start(&setup.helper, &setup.image, place, size).await?;
+        // obi-vm's own limit: obid's, and a minute for the job to come back, and a margin. Only a
+        // pause and a resume go in the chain as run_progress (#810).
+        let max_seconds = minutes * 60 + GRACE.as_secs() + 120;
+        let mut vm = Vm::start(&setup.helper, &setup.image, place, size, max_seconds).await?;
         let started = time::now();
         // Only a pause and a resume go in the chain as run_progress (#810).
         link.hosting.set_state(cid, "running");
@@ -755,17 +784,30 @@ async fn reopen_transcript(shared: &Shared, from: usize) {
     }
 }
 
-/// Serves the job's two sockets: the job's (7000) and the model API's (7001).
+/// Serves the job's three sockets: the disk key's (7002, answered once), the job's (7000) and the
+/// model API's (7001).
 fn serve(shared: Arc<Shared>, place: &Place) -> Result<tokio::task::JoinHandle<()>, String> {
     let _ = std::fs::remove_file(place.control());
     let _ = std::fs::remove_file(place.model());
+    let _ = std::fs::remove_file(place.key());
+    let key = tokio::net::UnixListener::bind(place.key())
+        .map_err(|e| format!("the key's socket: {e}"))?;
+    let (key_bytes, key_path) = (shared.key.clone(), place.key());
+    // The first connection gets the key, then the socket is gone: nobody asks twice.
+    tokio::spawn(async move {
+        if let Ok((mut conn, _)) = key.accept().await {
+            let _ = conn.write_all(&key_bytes).await;
+            let _ = conn.shutdown().await;
+        }
+        drop(key);
+        let _ = std::fs::remove_file(key_path);
+    });
     let control = tokio::net::UnixListener::bind(place.control())
         .map_err(|e| format!("the job's socket: {e}"))?;
     let model = tokio::net::UnixListener::bind(place.model())
         .map_err(|e| format!("the model's socket: {e}"))?;
     let control_app = axum::Router::new()
         .route("/hello", axum::routing::get(|| async { "ok" }))
-        .route("/key", axum::routing::get(give_key))
         .route("/job", axum::routing::get(job))
         .route("/bundle", axum::routing::get(bundle))
         .route(
@@ -782,13 +824,6 @@ fn serve(shared: Arc<Shared>, place: &Place) -> Result<tokio::task::JoinHandle<(
         let b = axum::serve(model, model_app);
         let _ = tokio::join!(a, b);
     }))
-}
-
-async fn give_key(State(shared): State<Arc<Shared>>) -> Response {
-    if shared.key_given.swap(true, Ordering::Relaxed) {
-        return StatusCode::GONE.into_response();
-    }
-    shared.key.clone().into_response()
 }
 
 async fn job(State(shared): State<Arc<Shared>>) -> Response {
@@ -1401,6 +1436,24 @@ mod tests {
             ),
             in_schedule()
         );
+    }
+
+    #[test]
+    fn what_a_crash_left_is_cleaned_at_the_start() {
+        let home = std::env::temp_dir().join(format!("obid-leftovers-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(home.join("g/abcd1234")).unwrap();
+        std::fs::write(home.join("g/abcd1234/disk.img"), b"sparse").unwrap();
+        let sockets = vm::socket_dir(&home, "abcd1234").unwrap();
+        std::fs::write(sockets.join("k.sock"), b"").unwrap();
+        clean_leftovers(&home);
+        assert!(!home.join("g").exists() && !sockets.exists());
+        // Another home's sockets stay.
+        let other = std::env::temp_dir().join(format!("obid-leftovers-{}", uuid::Uuid::new_v4()));
+        let theirs = vm::socket_dir(&other, "ef567890").unwrap();
+        clean_leftovers(&home);
+        assert!(theirs.exists());
+        clean_leftovers(&other);
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

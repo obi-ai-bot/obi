@@ -181,6 +181,8 @@ pub struct Link {
     inbox: Inbox,
     decisions: Decisions,
     sharing: sharing::Kept,
+    /// The owner keys this Obi trusts, pinned the first time it saw each (crate::sphere::pins).
+    pins: super::pins::Pins,
     /// What the model that answers a question by itself runs in: the job sandbox.
     sandbox: Result<Sandbox, String>,
     /// At most this many of those runs at once, whoever asked.
@@ -344,6 +346,9 @@ impl Link {
         let inbox = Inbox::open(&config.home)?;
         let decisions = Decisions::open(&config.home);
         let sharing = sharing::Kept::open(&config.home);
+        let pins = super::pins::Pins::open(&config.home);
+        // Nothing of a guest job a crash left behind: obid starts with none running.
+        super::hosting::clean_leftovers(&config.home);
         let sandbox = std::env::current_exe()
             .map_err(|e| format!("obid can't find its own executable: {e}"))
             .and_then(|obid| Sandbox::detect(&obid));
@@ -398,6 +403,7 @@ impl Link {
             inbox,
             decisions,
             sharing,
+            pins,
             sandbox,
             answering: tokio::sync::Semaphore::new(ANSWER_RUNS),
             jobs,
@@ -898,6 +904,29 @@ impl Link {
         Ok(json!({"keyId": key.key_id(), "publicKey": key.public_key()}))
     }
 
+    /// `GET /v1/obid/sphere/pins`: the owner keys this Obi trusts, each with the fingerprint owners
+    /// compare, and any changed key waiting for this owner's OK.
+    pub fn pins_json(&self) -> Value {
+        self.pins.to_json()
+    }
+
+    /// `POST /v1/obid/sphere/pins/{owner}` with `{"fingerprint"}`: the owner compared `owner`'s new
+    /// key with them and trusts it. The directory is read again.
+    pub async fn accept_pin(&self, owner: &str, body: &[u8]) -> Result<Value, ApiError> {
+        let map = object(body, &["fingerprint"])?;
+        let seen = text_field(&map, "fingerprint")?;
+        let pinned = self
+            .pins
+            .accept(owner, seen, time::now())
+            .map_err(|m| api(StatusCode::UNPROCESSABLE_ENTITY, m))?;
+        if self.lock().membership.is_some()
+            && let Err(e) = self.read_directory().await
+        {
+            self.note_error(&e);
+        }
+        Ok(pinned)
+    }
+
     /// `POST /v1/obid/sphere/card`: the card the owner is to sign, around obid's own key.
     pub async fn card(&self, body: &[u8]) -> Result<Value, ApiError> {
         let _one = self.joining.lock().await;
@@ -1231,6 +1260,11 @@ impl Link {
             }
             if !matches {
                 tracing::warn!("sphere: {obi}'s card names another Obi or owner: not trusted");
+                continue;
+            }
+            // Only a card signed with the owner key pinned here, whatever the Sphere bound.
+            let owner_key = params.and_then(|p| p["owner_key"].as_str()).unwrap_or("");
+            if !self.pins.check(owner, owner_key, now) {
                 continue;
             }
             for key in member["keys"].as_array().into_iter().flatten() {

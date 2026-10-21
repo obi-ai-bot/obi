@@ -4,7 +4,8 @@
 // over the same two Unix sockets obid serves, so everything obid does around a guest job is real.
 //
 //   signals   prints $HOME/fake-signals.json, or an idle Mac on power.
-//   run …     takes the disk key once (and checks a second ask is refused), the job, the code bundle;
+//   run …     takes the disk key once on its own socket (7002, and checks it's gone after), the job,
+//             the code bundle;
 //             makes one model call through the model socket with a placeholder key (and checks a
 //             path outside the allow-list is refused); streams a transcript; commits a file with
 //             the model's answer as the job's author; sends the commits back and says it's done.
@@ -17,6 +18,7 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -76,14 +78,26 @@ function call(socketPath, method, path, body, headers = {}) {
 }
 
 const control = vsock["7000"];
+const keySocket = vsock["7002"];
+log(`max-seconds ${flag("--max-seconds")}`);
+// The key, as PID 1 reads it: every byte the socket sends, then it closes.
+const readKey = () =>
+  new Promise((resolve) => {
+    const got = [];
+    const c = net.connect({ path: keySocket });
+    c.on("data", (d) => got.push(d));
+    c.on("end", () => resolve(Buffer.concat(got)));
+    c.on("error", () => resolve(null));
+  });
 const model = vsock["7001"];
 const git = (cwd, ...a) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...a], { cwd, encoding: "utf8" }).trim();
 
 async function main() {
+  const key = await readKey();
+  log(`key ${key ? key.length : "none"}`);
+  log(`key-again ${(await readKey()) === null ? "refused" : "given"}`);
   await call(control, "GET", "/hello");
-  const key = await call(control, "GET", "/key");
-  log(`key ${key.status} ${key.body.length}`);
-  log(`key-again ${(await call(control, "GET", "/key")).status}`);
+  log(`key-on-control ${(await call(control, "GET", "/key")).status}`);
   const job = JSON.parse((await call(control, "GET", "/job")).body.toString());
   log(`job ${job.title} on ${job.branch} by ${job.author.name}`);
   log(`words ${job.request ?? ""}`);
