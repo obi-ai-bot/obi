@@ -353,7 +353,9 @@ impl Transcripts {
     /// The turn is over: a call that never ended (the agent was stopped or died) failed.
     pub fn end_turn(&self, job: &str) -> Vec<Entry> {
         self.note(job, |live| {
-            // Words it was writing that never came whole: what came is what it said.
+            // Words it was writing that never came whole: what came is what it said, masked, held
+            // back lines and all. A message that stopped streaming (what it held passed the cap)
+            // dropped what it held then, on purpose: past the cap, it's not kept.
             let mut words: Vec<Entry> = match live.writing.take() {
                 Some(Writing {
                     n: Some(n),
@@ -694,25 +696,7 @@ fn held(lines: &[&str]) -> usize {
         .rposition(|l| crate::detail::key_begins(l))
         .filter(|&begin| !lines[begin..].iter().any(|l| l.contains("-----END")))
         .map_or(0, |begin| lines.len() - begin);
-    let encoded = lines
-        .iter()
-        .rev()
-        .take_while(|l| {
-            let text = l.trim_matches(|c: char| {
-                c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '\\' | '+' | '-' | '>')
-            });
-            !text.is_empty()
-                && text.bytes().all(|b| {
-                    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-')
-                })
-        })
-        .count();
-    let run = if encoded > 0 {
-        (encoded + 1).min(lines.len())
-    } else {
-        0
-    };
-    open_key.max(run)
+    open_key.max(crate::detail::encoded_tail(lines))
 }
 
 fn plan(live: &mut Live, todos: Vec<Todo>) -> Entry {
