@@ -41,12 +41,18 @@ struct RunnerKeptTests {
         #expect(next.showKept(for: Self.url))
         #expect(next.jobs.map(\.id) == ["4bbb145a"])
         #expect(next.showingKept)
-        do {
-            _ = try next.acting()
-            Issue.record("an action went through on kept answers")
-        } catch let error as RunnerError {
-            #expect(error.message == RunnerFeed.reconnecting)
+    }
+
+    /// While kept answers show, actions wait; with no runner each says what it always said.
+    @Test func actionsWaitForTheLiveRunner() throws {
+        let runner = Runner(base: URL(string: Self.url)!, token: "t")
+        func said(_ act: () throws -> Runner) -> String? {
+            do { _ = try act(); return nil } catch { return (error as? RunnerError)?.message }
         }
+        #expect(said { try RunnerFeed.acting(runner, showingKept: true, missing: "none") } == RunnerFeed.reconnecting)
+        #expect(said { try RunnerFeed.acting(runner, showingKept: false, missing: "none") } == nil)
+        #expect(said { try RunnerFeed.acting(nil, showingKept: true, missing: "The runner isn't set up.") } == "The runner isn't set up.")
+        #expect(said { try RunnerFeed().acting() } == "Set the runner's URL in Settings first.")
     }
 
     /// Another runner's answers (followed since, while Oby was closed), or a file that doesn't read

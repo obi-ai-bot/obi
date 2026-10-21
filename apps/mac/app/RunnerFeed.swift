@@ -484,7 +484,7 @@ final class RunnerFeed {
     /// The window shows what was kept, not what the runner says now: actions wait (`acting`).
     private(set) var showingKept = false
 
-    static let reconnecting = "Still reconnecting to the runner: try again in a moment."
+    nonisolated static let reconnecting = "Still reconnecting to the runner: try again in a moment."
 
     /// Writes `kept` for the next launch, on the main actor, so a later connection's answers always
     /// land after an earlier one's.
@@ -523,9 +523,15 @@ final class RunnerFeed {
     /// The runner, for an action on a job or an inbox item the window shows; refused while those
     /// are what was kept, which may be long out of date (a plan approved by voice could reach a job
     /// that finished meanwhile, and start a follow-up).
-    func acting() throws -> Runner {
-        if showingKept { throw RunnerError(message: Self.reconnecting) }
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+    /// `missing` is what the caller says when no runner is set, as it did before the gate.
+    func acting(_ missing: String = "Set the runner's URL in Settings first.") throws -> Runner {
+        try Self.acting(runner, showingKept: showingKept, missing: missing)
+    }
+
+    /// `acting`'s rule: no runner says `missing`, then kept answers say `reconnecting`.
+    nonisolated static func acting(_ runner: Runner?, showingKept: Bool, missing: String) throws -> Runner {
+        guard let runner else { throw RunnerError(message: missing) }
+        if showingKept { throw RunnerError(message: reconnecting) }
         return runner
     }
 
@@ -650,14 +656,14 @@ final class RunnerFeed {
 
     /// The runner's exact sentence for publishing a job: Publish shows it, and Touch ID approves it.
     func publishAction(_ id: String) async throws -> String {
-        let runner = try acting()
+        let runner = try acting("Set the runner's URL in Settings to publish it.")
         return try await runner.publishAction(id)
     }
 
     /// Publishes a runner's job with that sentence, after Touch ID; the runner pushes and opens the pull request.
     @discardableResult
     func publish(_ id: String, action: String) async throws -> URL {
-        let runner = try acting()
+        let runner = try acting("Set the runner's URL in Settings to publish it.")
         let url = try await device.publish(id, action: action, with: runner)
         // Its event brings the rest; until then it's published here too.
         if var job = jobs.first(where: { $0.id == id }) {
@@ -676,14 +682,14 @@ final class RunnerFeed {
 
     /// Settles one of the runner's inbox items: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
-        let runner = try acting()
+        let runner = try acting("Set the runner's URL in Settings to answer it.")
         apply(try await runner.settle(id, answer: answer, done: done, later: later))
     }
 
     /// Changes a runner job's mode (its screen's Mode menu): a permission it waits on that the new
     /// mode allows is answered.
     func setMode(_ id: String, _ mode: RunnerMode) async throws {
-        let runner = try acting()
+        let runner = try acting("Set the runner's URL in Settings to change it.")
         let job = try await runner.setMode(id, mode)
         extras[id, default: RunnerJobExtras(id: id)].mode = mode.rawValue
         apply(job)
@@ -692,7 +698,7 @@ final class RunnerFeed {
     /// Allow, Always allow or Deny on what a runner job's agent waits for; words go with a deny.
     /// `ask`: only that ask (an alert's), never a newer one the alert didn't show.
     func answer(_ id: String, _ decision: RunnerPermission.Decision, message: String? = nil, ask: String? = nil) async throws {
-        let runner = try acting()
+        let runner = try acting("Set the runner's URL in Settings to answer it.")
         guard let permission = extras[id]?.permission else { return }
         guard ask == nil || ask == permission.id else { throw RunnerError(message: "It asks something else now.") }
         let job = try await runner.answer(id, permission: permission.id, decision, message: message)
@@ -726,7 +732,7 @@ final class RunnerFeed {
             if isConfirm(id: id) { throw RunnerError(message: "That waits for your own Confirm in the inbox: Oby doesn't answer it for you.") }
         case .tell, .dismiss, .liftReserve: break
         }
-        let runner = try acting()
+        let runner = try acting("The runner isn't set up.")
         switch remote {
         case .settle(let item, let words): try await settle(item, answer: words)
         case .tell(let job, let words): apply(try await about(job) { try await $0.tell(job, words) })

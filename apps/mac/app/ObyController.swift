@@ -96,9 +96,8 @@ final class IslandController {
         // runner's jobs too (#134): a permission through its answer, a plan through the job's words,
         // as its card would send them.
         desk.answerElsewhere = { [weak self] job, decision, message in
-            guard let self else { return "The runner isn't set up." }
+            guard let self, let runner = feed.runner else { return "The runner isn't set up." }
             if feed.showingKept { return RunnerFeed.reconnecting }
-            guard let runner = feed.runner else { return "The runner isn't set up." }
             do {
                 if job.question?.plan != nil {
                     let words = decision == .deny ? (message ?? PermissionPolicy.changeIt) : "Approve: \(PermissionMode.acceptEdits.title)"
