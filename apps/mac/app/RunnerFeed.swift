@@ -64,6 +64,12 @@ final class RunnerFeed {
     /// obid's Tetrix, held once for every agent: read on connecting, then kept by its `tetrix`
     /// event and by Settings › Connectors' own reads; nil from a runner that doesn't hold one.
     var tetrix: TetrixStatus?
+    /// obid's Slack and its watcher (Settings › Connectors), read there and kept by their events.
+    var slack: SlackStatus?
+    var watch: WatchStatus?
+    /// The watcher's and the channel listener's items waiting in the inbox (Engine's inbox doesn't
+    /// know their kinds), oldest first.
+    private(set) var notices: [WatchNotice] = []
     /// What each job carries that Engine's Job doesn't read yet (its mode, the permission it waits
     /// on, its question's recommended option and plan), by job id.
     /// Counts the `routine` events (#395): Settings › Routines reads the routines again on each.
@@ -290,7 +296,8 @@ final class RunnerFeed {
         guard again || url != self.url || local != self.local else { return }
         let first = self.url == nil
         let changed = url != self.url || local != self.local
-        if changed { forget() }
+        // At launch the last runner's answers are kept for `showKept`; after that a change drops them.
+        if changed { forget(droppingKept: !first) }
         self.url = url
         self.local = local
         token = nil
@@ -299,21 +306,29 @@ final class RunnerFeed {
         loop?.cancel()
         loop = nil
         guard local || Self.runner(url) != nil else { return }
+        // At launch: the runner's last answers until it answers again.
+        if first { _ = showKept(for: url) }
         loop = Task {
             if !first { try? await Task.sleep(for: .seconds(1)) }
             await run()
         }
     }
 
-    /// Another runner: nothing the last one said holds, and what's still on its way from it is dropped.
-    func forget() {
+    /// Another runner: nothing the last one said holds, and what's still on its way from it is dropped,
+    /// with what was kept of it for the next launch (`droppingKept`).
+    func forget(droppingKept: Bool = true) {
         runnerChanges += 1
+        showingKept = false
+        if droppingKept { try? FileManager.default.removeItem(at: keptFile) }
         jobs = []
         inbox = []
         inboxHistory = []
         inboxWords = [:]
+        notices = []
         accounts = []
         tetrix = nil
+        slack = nil
+        watch = nil
         models = nil
         extras = [:]
         permissionHistory = []
@@ -349,14 +364,28 @@ final class RunnerFeed {
                 for try await event in runner.events() {
                     switch event {
                     case .connected:
+                        // Side by side, not one after another: none of these waits for another.
                         // Status every time: a Clear done while the connection was down is in it.
-                        let status = try await runner.status()
-                        let (list, extras) = try await runner.jobsWithExtras()
-                        let (items, words) = try await runner.inboxWithWords()
+                        async let statusAnswer = runner.status()
+                        async let jobsAnswer = runner.jobsAnswer()
+                        async let inboxAnswer = runner.inboxAnswer()
                         // History is an enhancement: an older runner or failed history request must not take chat offline.
-                        let history = try? await runner.inboxWithWords(state: "done")
-                        let tetrix = try? await runner.tetrix()
-                        let routines = try? await runner.routines()
+                        async let historyAnswer = try? runner.inboxWithWords(state: "done")
+                        async let tetrixAnswer = try? runner.tetrix()
+                        async let routinesAnswer = try? runner.routines()
+                        async let conversationsAnswer: Data? = local ? runner.conversationsAnswer(limit: 200) : nil
+                        async let gitHubRead: Void = readGitHub { try await runner.gitHubWork() }
+                        let status = try await statusAnswer
+                        let jobsData = try await jobsAnswer
+                        let (list, extras) = try Runner.jobsWithExtras(jobsData)
+                        let inboxData = try await inboxAnswer
+                        let (items, words) = try inboxData.map(Runner.inboxWithWords) ?? ([], [:])
+                        let fetchedNotices = inboxData.map(WatchNotice.list) ?? []
+                        let conversationsData = try await conversationsAnswer
+                        let history = await historyAnswer
+                        let tetrix = await tetrixAnswer
+                        let routines = await routinesAnswer
+                        await gitHubRead
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
                         host = status.runner.host
@@ -382,7 +411,6 @@ final class RunnerFeed {
                         cleanup = status.cleanup
                         github = status.github
                         checkRuns = status.checks
-                        await readGitHub { try await runner.gitHubWork() }
                         #if DEBUG
                         if let sample = GitHubWork.sample { gitHubWork = sample }
                         #endif
@@ -392,19 +420,26 @@ final class RunnerFeed {
                         // Settings › Runner changed while the open jobs were fetched again.
                         try Task.checkCancellation()
                         inbox = items
+                        let stillOpen = fetchedNotices.filter { $0.done == nil }.sorted { $0.created < $1.created }
+                        // Settled while the Mac was away: their notifications go too.
+                        let gone = Self.settledWhileAway(before: notices, after: stillOpen)
+                        if !gone.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: gone) }
+                        notices = stillOpen
                         if let (past, pastWords) = history {
                             inboxHistory = past.filter { !$0.isOpen }
                             inboxWords = pastWords.merging(words, uniquingKeysWith: { _, fresh in fresh })
                         } else { inboxWords.merge(words, uniquingKeysWith: { _, fresh in fresh }) }
                         // obid's conversations before the thread, which reads the one shown.
-                        try await conversations.load(from: runner, planning: local)
+                        conversations.take(try conversationsData.map(Runner.conversations))
                         // The thread's latest page every time too: what was said from the iPhone
                         // while the connection was down is in it.
                         await conversation.reload()
                         try Task.checkCancellation()
                         if let liveSession { Task { await liveSession.catchUp() } }
                         connection = .live
+                        showingKept = false
                         wait = 1
+                        keep(Kept(url: url ?? "", jobs: jobsData, inbox: inboxData, conversations: conversationsData))
                         Self.ask()
                         checks.look(runner)
                         register(runner)
@@ -416,6 +451,10 @@ final class RunnerFeed {
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     case .tetrix(let status): tetrix = status
+                    case .watchNotice(let notice): take(notice)
+                    case .slack(let status): slack = status
+                    case .watch(let status): watch = status
+                    case .cleanup(let measured): cleanup = measured
                     // obid names each turn's, step's and word's conversation: the window shows one (#493).
                     case .turn(let turn, let extras):
                         if conversations.shows(turn.conversation) { conversation.apply(turn, extras) }
@@ -439,9 +478,105 @@ final class RunnerFeed {
                 if !down { Logger.feed.error("following the runner failed: \(error.localizedDescription, privacy: .public)") }
                 connection = .offline(error.localizedDescription)
             }
-            try? await Task.sleep(for: .seconds(wait))
+            await pause(wait)
             wait = min(wait * 2, 30)
         }
+    }
+
+    /// Whether Oby's window is on screen (ObyApp): then a dropped runner is tried again within
+    /// `openWindowWait`, however long the wait has grown.
+    @ObservationIgnored var windowOpen: () -> Bool = { false }
+    static let openWindowWait = 5.0
+
+    /// Waits `seconds` before the next try, in steps of at most `most` (`openWindowWait`), and
+    /// stops after a step once the window is open. With it closed that's a wake every 5 seconds
+    /// while the runner is down, nothing while it's up.
+    func pause(_ seconds: Double, steps most: Double = openWindowWait) async {
+        var left = seconds
+        repeat {
+            let step = min(left, most)
+            try? await Task.sleep(for: .seconds(step))
+            left -= step
+        } while left > 0 && !Task.isCancelled && !windowOpen()
+    }
+
+    // MARK: Kept for the next launch
+
+    /// The runner's last answers for its jobs, inbox and conversations, as they came. Oby shows them
+    /// at launch while the runner starts or the connection comes up, and the first connection
+    /// replaces them. Only for the runner they came from (`url`), and gone once another is
+    /// followed. obid took secrets out of them before they left it. The file is the user's alone
+    /// (0600, in a 0700 folder), in Caches, so it's never backed up.
+    struct Kept: Codable, Equatable {
+        var url: String
+        var jobs: Data
+        var inbox: Data?
+        var conversations: Data?
+    }
+
+    /// `~/Library/Caches/Oby/runner-feed.json`.
+    static var keptURL: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appending(path: "Oby", directoryHint: .isDirectory).appending(path: "runner-feed.json")
+    }
+
+    /// Where `keep` writes: `keptURL`, or, while Oby hosts tests, a temporary file of this feed's
+    /// own, so no test ever reads or deletes the user's.
+    @ObservationIgnored var keptFile = NSClassFromString("XCTestCase") == nil ? RunnerFeed.keptURL
+        : FileManager.default.temporaryDirectory.appending(path: "RunnerFeed-\(UUID().uuidString)").appending(path: "runner-feed.json")
+
+    /// The window shows what was kept, not what the runner says now: actions wait (`acting`).
+    private(set) var showingKept = false
+
+    nonisolated static let reconnecting = "Still reconnecting to the runner: try again in a moment."
+
+    /// Writes `kept` for the next launch, on the main actor, so a later connection's answers always
+    /// land after an earlier one's.
+    func keep(_ kept: Kept) {
+        do {
+            let folder = keptFile.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+            try RunnerLoginItem.writePrivately(try JSONEncoder().encode(kept), to: keptFile)
+        } catch {
+            Logger.feed.error("keeping the runner's answers for the next launch failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// What `keep` saved for `url`, shown until the runner answers; whether it was. Nothing from
+    /// another runner (followed since, while Oby was closed), and nothing the app can't read any
+    /// more (an older or newer shape): that file goes.
+    func showKept(for url: String) -> Bool {
+        guard let data = try? Data(contentsOf: keptFile) else { return false }
+        guard let kept = try? JSONDecoder().decode(Kept.self, from: data), kept.url == url,
+              let (list, extras) = try? Runner.jobsWithExtras(kept.jobs) else {
+            try? FileManager.default.removeItem(at: keptFile)
+            return false
+        }
+        jobs = list
+        self.extras = extras
+        if let (items, words) = try? kept.inbox.map(Runner.inboxWithWords) {
+            inbox = items
+            inboxWords = words
+        }
+        if local, let list = try? kept.conversations.map(Runner.conversations) { conversations.take(list) }
+        showingKept = true
+        return true
+    }
+
+    /// The runner, for an action on a job or an inbox item the window shows; refused while those
+    /// are what was kept, which may be long out of date (a plan approved by voice could reach a job
+    /// that finished meanwhile, and start a follow-up).
+    /// `missing` is what the caller says when no runner is set, as it did before the gate.
+    func acting(_ missing: String = "Set the runner's URL in Settings first.") throws -> Runner {
+        try Self.acting(runner, showingKept: showingKept, missing: missing)
+    }
+
+    /// `acting`'s rule: no runner says `missing`, then kept answers say `reconnecting`.
+    nonisolated static func acting(_ runner: Runner?, showingKept: Bool, missing: String) throws -> Runner {
+        guard let runner else { throw RunnerError(message: missing) }
+        if showingKept { throw RunnerError(message: reconnecting) }
+        return runner
     }
 
     /// Registers this Mac's publishing key, as the iPhone does on each connection. A runner whose
@@ -567,14 +702,14 @@ final class RunnerFeed {
 
     /// The runner's exact sentence for publishing a job: Publish shows it, and Touch ID approves it.
     func publishAction(_ id: String) async throws -> String {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to publish it.") }
+        let runner = try acting("Set the runner's URL in Settings to publish it.")
         return try await runner.publishAction(id)
     }
 
     /// Publishes a runner's job with that sentence, after Touch ID; the runner pushes and opens the pull request.
     @discardableResult
     func publish(_ id: String, action: String) async throws -> URL {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to publish it.") }
+        let runner = try acting("Set the runner's URL in Settings to publish it.")
         let url = try await device.publish(id, action: action, with: runner)
         // Its event brings the rest; until then it's published here too.
         if var job = jobs.first(where: { $0.id == id }) {
@@ -593,14 +728,14 @@ final class RunnerFeed {
 
     /// Settles one of the runner's inbox items: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to answer it.") }
+        let runner = try acting("Set the runner's URL in Settings to answer it.")
         apply(try await runner.settle(id, answer: answer, done: done, later: later))
     }
 
     /// Changes a runner job's mode (its screen's Mode menu): a permission it waits on that the new
     /// mode allows is answered.
     func setMode(_ id: String, _ mode: RunnerMode) async throws {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to change it.") }
+        let runner = try acting("Set the runner's URL in Settings to change it.")
         let job = try await runner.setMode(id, mode)
         extras[id, default: RunnerJobExtras(id: id)].mode = mode.rawValue
         apply(job)
@@ -609,7 +744,7 @@ final class RunnerFeed {
     /// Allow, Always allow or Deny on what a runner job's agent waits for; words go with a deny.
     /// `ask`: only that ask (an alert's), never a newer one the alert didn't show.
     func answer(_ id: String, _ decision: RunnerPermission.Decision, message: String? = nil, ask: String? = nil) async throws {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to answer it.") }
+        let runner = try acting("Set the runner's URL in Settings to answer it.")
         guard let permission = extras[id]?.permission else { return }
         guard ask == nil || ask == permission.id else { throw RunnerError(message: "It asks something else now.") }
         let job = try await runner.answer(id, permission: permission.id, decision, message: message)
@@ -643,7 +778,7 @@ final class RunnerFeed {
             if isConfirm(id: id) { throw RunnerError(message: "That waits for your own Confirm in the inbox: Oby doesn't answer it for you.") }
         case .tell, .dismiss, .liftReserve: break
         }
-        guard let runner else { throw RunnerError(message: "The runner isn't set up.") }
+        let runner = try acting("The runner isn't set up.")
         switch remote {
         case .settle(let item, let words): try await settle(item, answer: words)
         case .tell(let job, let words): apply(try await about(job) { try await $0.tell(job, words) })
@@ -706,7 +841,7 @@ final class RunnerFeed {
     /// Asks the runner something about its job `id` (stop, dismiss, a message, a move): when it
     /// answers 404, it has no such job, and the job leaves the lists here, its alert too (#223).
     func about<T>(_ id: String, _ call: (Runner) async throws -> T) async throws -> T {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+        let runner = try acting()
         do {
             return try await call(runner)
         } catch let error as RunnerError {
@@ -898,6 +1033,50 @@ final class RunnerFeed {
                 _ = try await center.requestAuthorization(options: [.alert, .sound])
             } catch {
                 Logger.feed.error("asking to notify failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// The watcher's notices already shown, so a reconnect's replay doesn't show one again.
+    @ObservationIgnored private var told: Set<String> = []
+
+    /// A `watch` or `listen` item as the runner last said it: its card while it waits, and a
+    /// notification when it's new. Settled, its card and notification go.
+    func take(_ notice: WatchNotice) {
+        notices.removeAll { $0.id == notice.id }
+        if notice.done == nil { notices.append(notice) }
+        if notice.done != nil || !notice.waiting() {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notice.id])
+        }
+        tell(notice)
+    }
+
+    /// The notices that were open and aren't any more: settled elsewhere while the Mac was away.
+    nonisolated static func settledWhileAway(before: [WatchNotice], after: [WatchNotice]) -> [String] {
+        let open = Set(after.map(\.id))
+        return before.map(\.id).filter { !open.contains($0) }
+    }
+
+    /// Answers a `watch` or `listen` item (Dismiss, Approve) or puts it off.
+    func settle(notice id: String, answer: String? = nil, later: Date? = nil) async throws {
+        let runner = try acting("Set the runner's URL in Settings to answer it.")
+        take(try await runner.settle(notice: id, answer: answer, later: later))
+    }
+
+    /// A notification with obid's own words (who, where), never what was written, for a notice
+    /// that `WatchNotice.shows` (new, open, recent).
+    private func tell(_ notice: WatchNotice) {
+        guard WatchNotice.shows(notice, told: told) else { return }
+        told.insert(notice.id)
+        let content = UNMutableNotificationContent()
+        content.title = notice.title
+        content.body = notice.text
+        content.sound = .default
+        content.threadIdentifier = "watch"
+        let request = UNNotificationRequest(identifier: notice.id, content: content, trigger: nil)
+        Task {
+            do { try await UNUserNotificationCenter.current().add(request) } catch {
+                Logger.feed.error("posting a watcher notice failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
