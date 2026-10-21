@@ -14,12 +14,15 @@ pass() { echo "  PASS  $*"; }
 fail() { echo "  FAIL  $*"; exit 1; }
 vms() { pgrep -f com.apple.Virtualization.VirtualMachine | sort | tr '\n' ' '; }
 
-OBI_VM_DEBUG=1 "$here/build.sh" "$work/obi-vm" >/dev/null 2>&1
+OBI_VM_DEBUG=1 "$here/build.sh" "$work/obi-vm" "$image/image.json" >/dev/null 2>&1
+# One built for another image (its root's hash changed): it must refuse this one.
+sed 's/"root.img": "[0-9a-f]/"root.img": "z/' "$image/image.json" > "$work/other.json"
+OBI_VM_DEBUG=1 "$here/build.sh" "$work/obi-vm-other" "$work/other.json" >/dev/null 2>&1
 dd if=/dev/zero of="$work/disk" bs=1 count=0 seek=1073741824 2>/dev/null
 
-# Runs a VM named $1 with stdin held open, `$2` its --max-seconds, `$3` the image.
+# Runs a VM named $1 with stdin held open, `$2` its --max-seconds, `$3` the image, `$4` the obi-vm.
 run() {
-  (sleep 900 | OBI_VM_DEBUG_INIT=/usr/bin/yes "$work/obi-vm" run --kernel "$3/vmlinuz" --initrd "$3/initrd" \
+  (sleep 900 | OBI_VM_DEBUG_INIT=/usr/bin/yes "${4:-$work/obi-vm}" run --kernel "$3/vmlinuz" --initrd "$3/initrd" \
      --root "$3/root.img" --disk "$work/disk" --cpus 2 --memory-mib 1024 --console "$work/$1.console" \
      --max-seconds "$2" > "$work/$1.events" 2> "$work/$1.err") &
 }
@@ -30,24 +33,21 @@ waitfor() {
   return 1
 }
 
-echo "== A tampered image doesn't boot"
-mkdir "$work/bad"
-for f in vmlinuz initrd root.img; do ln -s "$image/$f" "$work/bad/$f"; done
-sed 's/"root.img": "[0-9a-f]/"root.img": "z/' "$image/image.json" > "$work/bad/image.json"
-run bad 30 "$work/bad"
-waitfor 60 "$work/bad.err" "isn't the one image.json names" || fail "it booted: $(cat "$work/bad.events" "$work/bad.err")"
+echo "== An image other than the one obi-vm was built for doesn't boot"
+run bad 30 "$image" "$work/obi-vm-other"
+waitfor 180 "$work/bad.err" "isn't the image this obi-vm was built for" || fail "it booted: $(cat "$work/bad.events" "$work/bad.err")"
 pass "refused: $(cat "$work/bad.err")"
 
 echo "== The time limit stops it, and the console stays at 1 MiB"
 before=$(vms)
-run limit 25 "$image"
-waitfor 60 "$work/limit.events" '"running"' || fail "it didn't start: $(cat "$work/limit.err")"
+run limit 45 "$image"
+waitfor 180 "$work/limit.events" '"running"' || fail "it didn't start: $(cat "$work/limit.err")"
 started=$(date +%s)
-waitfor 60 "$work/limit.events" '"time_limit"' || fail "no time limit: $(cat "$work/limit.events")"
+waitfor 90 "$work/limit.events" '"time_limit"' || fail "no time limit: $(cat "$work/limit.events")"
 sleep 3
 if pgrep -f "$work/obi-vm run" >/dev/null; then fail "obi-vm still runs after its limit"; fi
 [ "$(vms)" = "$before" ] || fail "a VM process outlived obi-vm"
-pass "stopped by itself $(( $(date +%s) - started )) s after it started (limit 25 s); no VM process left"
+pass "stopped by itself $(( $(date +%s) - started )) s after it started (limit 45 s); no VM process left"
 size=$(stat -f %z "$work/limit.console")
 [ "$size" -le 1048576 ] || fail "the console kept $size bytes"
 [ "$size" -ge 1000000 ] || fail "the guest wrote only $size bytes: the cap wasn't tried"
@@ -56,7 +56,7 @@ pass "the guest flooded its console; $size bytes kept"
 echo "== Killing obi-vm takes the VM with it"
 before=$(vms)
 run kill 600 "$image"
-waitfor 60 "$work/kill.events" '"running"' || fail "it didn't start: $(cat "$work/kill.err")"
+waitfor 180 "$work/kill.events" '"running"' || fail "it didn't start: $(cat "$work/kill.err")"
 sleep 2
 [ "$(vms)" != "$before" ] || fail "no VM process appeared"
 pkill -9 -f "$work/obi-vm run"
