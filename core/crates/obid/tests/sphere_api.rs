@@ -1092,3 +1092,29 @@ async fn a_member_whose_owner_key_changes_isnt_trusted_until_the_owner_accepts_i
     assert_eq!(accepted.status, 200, "{}", accepted.text);
     assert_eq!(ask().status, 202);
 }
+
+/// A Sphere that lists another Obi key for a member, with the member's card untouched: the key isn't
+/// the one the card signs, so obid doesn't trust that member (nor any message signed with it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_whose_listed_key_isnt_the_cards_isnt_trusted() {
+    let folder = Folder::new("listed-key");
+    let (sphere, obid, _ernesto) = setup(&folder, &stub_agent(), None).await;
+    let ask = || {
+        let body = json!({"to": "obi-ernesto", "type": "review_request", "body": brief(), "expiresIn": 3600});
+        tokio::task::block_in_place(|| call(&obid, "POST", "/v1/obid/sphere/requests", Some(&body)))
+    };
+    assert_eq!(ask().status, 202);
+    let mallory = obi_protocol::keys::Keypair::from_seed_string("a Sphere operator's own Obi key");
+    {
+        let mut state = sphere.lock();
+        let member = state
+            .members
+            .iter_mut()
+            .find(|m| m["obi"] == "obi-ernesto")
+            .unwrap();
+        member["keys"][0]["key_id"] = json!(mallory.key_id());
+        member["keys"][0]["public_key"] = json!(mallory.public_key());
+    }
+    let refused = ask();
+    assert_eq!(refused.status, 422, "{}", refused.text);
+}
