@@ -1,5 +1,9 @@
 package com.deskree.oby
 
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.ui.draw.rotate
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.outlined.Home
@@ -19,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -435,13 +440,28 @@ private fun TasksColumn(open: (Route) -> Unit) {
     LazyColumn(Modifier.fillMaxSize()) {
         if (groups.isEmpty()) item { T(if (phone.loaded) "Nothing yet. Ask Oby for something on Home." else "Reaching your Mac…", Tokens.textBase, c.muted, modifier = Modifier.padding(horizontal = 12.dp)) }
         for (group in groups) {
+            val folded = group.id in phone.panelFolded
             item(group.id) {
-                Row(Modifier.fillMaxWidth().padding(top = 8.dp).height(26.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    T(group.label, Tokens.textSm, c.label, modifier = Modifier.weight(1f).semantics { heading() })
-                    if (group.count > 0) T("${group.count}", Tokens.textSm, c.label)
+                // A kind's name opens its page, as Home's chip does (the owner's addition to Sangam's
+                // design, 2026-10-21); the chevron and the rest of the row fold it.
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).height(IntrinsicSize.Min), verticalAlignment = Alignment.CenterVertically) {
+                    group.type?.let { kind ->
+                        T(group.label, Tokens.textSm, c.label, modifier = Modifier.fillMaxHeight()
+                            .clickable(onClickLabel = "Open ${group.label}") { open(Route.Kind(kind)) }
+                            .semantics { contentDescription = "Open ${group.label}"; heading() }
+                            .padding(start = 12.dp, end = 6.dp).wrapContentHeight())
+                    }
+                    Row(Modifier.weight(1f).fillMaxHeight().clickable { phone.panelFolded = if (folded) phone.panelFolded - group.id else phone.panelFolded + group.id }
+                        .semantics { contentDescription = "${if (folded) "Show" else "Hide"} ${group.label}"; if (group.type == null) heading() }
+                        .padding(end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.ExpandMore, null, Modifier.size(12.dp).rotate(if (folded) 180f else 0f), tint = c.label)
+                        Spacer(Modifier.weight(1f))
+                        if (folded && group.needs > 0) Box(Modifier.padding(end = 4.dp).size(6.dp).background(c.needs, CircleShape))
+                        if (group.count > 0) T("${group.count}", Tokens.textSm, c.label)
+                    }
                 }
             }
-            items(WorkList.shown(group, false).first, key = { group.id + it.id }) { item ->
+            if (!folded) items(WorkList.shown(group, false).first, key = { group.id + it.id }) { item ->
                 Row(Modifier.fillMaxWidth().height(40.dp).clickable { open(Route.Task(item.id)) }.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Box(Modifier.width(16.dp), contentAlignment = Alignment.Center) { AgentMark(item.job.agent, 13.dp, c.ink.copy(alpha = 0.7f)) }
