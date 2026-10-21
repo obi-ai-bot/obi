@@ -55,7 +55,7 @@ export default function TaskCard({ task, alone = false, onOpen, onSession, style
         <span className="tc-ago">{when}</span>
       </header>
       <p className="tc-meta">
-        {AGENTS[j.agent].name} · {j.account}{repo && <> · {repo}</>}
+        {AGENTS[j.agent].name} · {j.account}{j.on && <> · on {j.on}</>}{repo && <> · {repo}</>}
         {/* on its page, how much the agent may do on its own; a click changes it */}
         {page?.mode && !done && <button className="tc-mode">{page.mode}<ChevronDown size={12} strokeWidth={1.8} /></button>}
       </p>

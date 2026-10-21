@@ -27,6 +27,9 @@ struct TaskActions {
     var attaches = false
     /// Puts its decision off an hour (Later on its inbox item, as the conversation's cards do), and
     /// says whether there was anything to put off; nil where nothing offers Later.
+    /// Run it here: a job that came back from a teammate's Mac moves to this one (#808); nil for
+    /// this Mac's own jobs.
+    var runHere: (() async throws -> Void)? = nil
     var later: (() async throws -> Bool)? = nil
 
     /// The + is there where the files can go: obid on this Mac, and a finished job, whose words
@@ -101,6 +104,7 @@ struct TaskActions {
                 return heard
             },
             attaches: attaches(job, runnerHere: feed.local),
+            runHere: { if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.place(job.id, on: nil) }) } },
             later: {
                 switch laterTarget(job.id, inbox: feed.inbox, permissions: feed.permissionHistory) {
                 case .item(let id): try await feed.settle(id, later: .now.addingTimeInterval(3600)); return true
@@ -173,12 +177,27 @@ struct TaskDecision: View {
                     hint: box ? "Or answer in your own words below" : nil, onChoose: { option in run { try await actions.message(option.answer) } },
                     onLater: onLater)
                 .id(question.text)
+        } else if job.nextStepOffered != nil, let on = actions.extras?.runsOn, let runHere = actions.runHere {
+            // It came back from a teammate's Mac (Sangam's "Came back" card, #808): run it here, or
+            // send it back there once that Mac is free.
+            let wait = "Wait for \(RunnerMac.person(on.owner))’s Mac"
+            AskCard(kind: "Came back", title: job.line, happened: job.resumesLine,
+                    options: CardOption.of([Self.runHereLabel, wait], recommended: 0), busy: busy,
+                    onChoose: { option in
+                        run {
+                            if option.answer == Self.runHereLabel { try await runHere() }
+                            try await actions.message(Job.tryAgainWords)
+                        }
+                    }, onLater: onLater)
+                .id("\(job.id)-\(job.finished?.timeIntervalSince1970 ?? 0)")
         } else if let next = job.nextStepOffered {
             AskCard(kind: job.needsYouKind, title: job.line, happened: job.resumesLine, options: CardOption.of([next], recommended: 0), busy: busy,
                     onChoose: { _ in run { try await actions.message(Job.tryAgainWords) } }, onLater: onLater)
                 .id("\(job.id)-\(job.finished?.timeIntervalSince1970 ?? 0)")
         }
     }
+
+    static let runHereLabel = "Run it here"
 
     private func run(_ work: @escaping () async throws -> Void) {
         busy = true
@@ -298,8 +317,10 @@ struct TaskCardView: View {
 
     private func meta(_ actions: TaskActions) -> String {
         let repo = job.repo.split(separator: "/").last.map(String.init)
+        // "Claude Code · Personal · on Wellington’s Mac · oby" (Sangam's design, #808).
+        let on = item.job.local ? nil : model.feed.extras[job.id]?.runsOn.map { "on \(RunnerMac.person($0.owner))’s Mac" }
         return ([job.agentName, actions.account ?? LiveView.account(of: job, local: item.job.local, desk: model.desk, feed: model.feed)]
-            + [repo].compactMap { $0 }).filter { !$0.isEmpty }.joined(separator: " · ")
+            + [on, repo].compactMap { $0 }).filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 

@@ -193,32 +193,71 @@ pub async fn archive(
 }
 
 /// `PATCH /v1/jobs/{id}`: `{"title": "…"}` renames the job, one line of 1 to 60 characters once
-/// trimmed (as a new job's `title`).
+/// trimmed (as a new job's `title`); `{"runsOn": "<Obi>" | null}` moves a job that isn't running to
+/// a teammate's Mac, or back to this one (Sangam's "Run it here", #808). Either, or both.
 pub async fn rename(
     State(shared): State<Arc<Shared>>,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Rename {
-        title: String,
+    let bad = || {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "The body is {\"title\": \"…\"} and/or {\"runsOn\": \"<Obi>\" | null}.",
+        )
+    };
+    let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&body) else {
+        return Err(bad());
+    };
+    if map.is_empty() || map.keys().any(|k| k != "title" && k != "runsOn") {
+        return Err(bad());
     }
-    let rename: Rename = serde_json::from_slice(&body)
-        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "The body is {\"title\": \"…\"}."))?;
-    let title = rename.title.trim().to_owned();
-    if title.is_empty()
-        || title.chars().count() > 60
-        || title
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    let title = match map.get("title") {
+        None => None,
+        Some(Value::String(t)) => Some(t.trim().to_owned()),
+        Some(_) => return Err(bad()),
+    };
+    if let Some(title) = &title
+        && (title.is_empty()
+            || title.chars().count() > 60
+            || title
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')))
     {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "title is one line of 1 to 60 characters.",
         ));
     }
-    match shared.jobs.rename(&id, title) {
+    let place = match map.get("runsOn") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(obi)) => {
+            let owner = shared.link.run_host(obi).ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("{obi} isn't a teammate's Mac that takes jobs."),
+                )
+            })?;
+            Some(Some(crate::job::RunsOn {
+                obi: obi.clone(),
+                owner,
+            }))
+        }
+        Some(_) => return Err(bad()),
+    };
+    if let Some(place) = place {
+        match shared.jobs.place(&id, place) {
+            None => return Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+            Some(Err(refused)) => return Err(ApiError::new(StatusCode::CONFLICT, refused.0)),
+            Some(Ok(_)) => {}
+        }
+    }
+    let job = match title {
+        Some(title) => shared.jobs.rename(&id, title),
+        None => shared.jobs.get(&id),
+    };
+    match job {
         None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
         Some(job) => Ok(json(StatusCode::OK, job.to_json())),
     }

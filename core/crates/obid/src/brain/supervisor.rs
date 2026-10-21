@@ -447,6 +447,7 @@ async fn supervise(shared: &Arc<Shared>, job: &Job) -> bool {
         conversation: &conversation,
         // No turn of the owner's: the jobs it starts are on Oby's answer.
         turn: "",
+        runs_on: None,
     };
     let ran = super::harness::supervise(shared, &account, &asked, &control, watch.clone()).await;
     shared.turns.end(&control);
@@ -581,6 +582,7 @@ mod tests {
             conversation: "c1".into(),
             said: String::new(),
             attachments: vec![],
+            runs_on: None,
             control: super::super::turn::Turns::default().begin("t1", "c1"),
             jobs: Mutex::new(vec![]),
             nonce: "n".into(),

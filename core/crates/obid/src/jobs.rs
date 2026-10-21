@@ -3051,6 +3051,31 @@ impl Jobs {
         })
     }
 
+    /// Moves a job that isn't running to a teammate's Mac, or back to this one (`None`): its next
+    /// turn runs there. The apps' "Run it here" and "Run on another Mac" on a job that came back.
+    pub fn place(
+        &self,
+        id: &str,
+        runs_on: Option<crate::job::RunsOn>,
+    ) -> Option<Result<Job, Refused>> {
+        let job = self.get(id)?;
+        if job.status.is_active() {
+            return Some(Err(Refused("The job is running: stop it first.".into())));
+        }
+        let said = match &runs_on {
+            Some(on) => format!(
+                "Moved to {}'s Mac by you",
+                crate::sphere::hosting::person(&on.owner)
+            ),
+            None => "Moved to this Mac by you".to_owned(),
+        };
+        self.update(id, |job| {
+            job.runs_on = runs_on;
+            job.changed(said);
+        })
+        .map(Ok)
+    }
+
     /// Why the job `id` can't be deleted now, when it can't (see [`undeletable_in`]).
     pub fn undeletable(&self, id: &str) -> Option<Refused> {
         let state = self.lock();
@@ -4312,7 +4337,7 @@ impl Jobs {
                     .ok_or_else(|| std::io::Error::other("obid isn't in a Sphere"))?;
                 let ask = crate::sphere::guest::Ask {
                     host: &on.obi,
-                    host_owner: &on.owner,
+                    host_owner: &crate::sphere::hosting::person(&on.owner),
                     agent: tool.id(),
                     model: job.model.as_deref(),
                     repo: &job.repo,

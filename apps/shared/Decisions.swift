@@ -109,8 +109,16 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     /// obid only: when it was archived by hand (Archive task, or a conversation's), or nil. It's
     /// then under Archived, not on Home.
     var archived: Date?
+    /// obid only (#808): the teammate's Mac it runs on, or nil (this one).
+    var runsOn: RunsOnMac?
 
-    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, turn, artifacts, routine, tetrix, archived }
+    /// Whose Mac a job runs on: their Obi, and its owner.
+    struct RunsOnMac: Decodable, Equatable, Sendable {
+        var obi: String
+        var owner: String
+    }
+
+    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, turn, artifacts, routine, tetrix, archived, runsOn }
 
     private enum TeammatesKey: String, CodingKey { case teammates }
 
@@ -137,6 +145,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
         routine = try? keys.decodeIfPresent(RoutineMark.self, forKey: .routine)
         tetrix = try? keys.decodeIfPresent(TetrixJobReport.self, forKey: .tetrix)
         archived = try? keys.decodeIfPresent(Date.self, forKey: .archived)
+        runsOn = try? keys.decodeIfPresent(RunsOnMac.self, forKey: .runsOn)
         facts = (try? JobFacts(from: decoder)).flatMap { $0 == JobFacts() ? nil : $0 }
     }
 

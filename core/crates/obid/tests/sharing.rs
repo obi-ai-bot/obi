@@ -239,13 +239,16 @@ async fn a_job_runs_on_a_teammates_mac_with_the_owners_own_key_and_comes_back_wi
     // Wellington's obid keeps its own log of the host's use, and nothing of the job's.
     let log = std::fs::read_to_string(hf.0.join("home/sharing-log.jsonl")).unwrap();
     assert!(log.contains("\"fromOwner\":\"sangam\""), "{log}");
-    assert!(
-        !hf.0
-            .join("home/g")
-            .read_dir()
-            .is_ok_and(|mut d| d.next().is_some()),
-        "the job's folder is gone"
-    );
+    // Its folder goes once the host has sent its reply and let the channel go.
+    tokio::task::block_in_place(|| {
+        within(20, "the job's folder gone", || {
+            (!hf.0
+                .join("home/g")
+                .read_dir()
+                .is_ok_and(|mut d| d.next().is_some()))
+            .then_some(())
+        })
+    });
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -273,18 +276,18 @@ async fn a_teammates_first_job_waits_for_the_owners_allow_and_from_now_on_isnt_a
         });
         assert_eq!(
             item["title"],
-            "sangam asks to use this Mac while you're away"
+            "Sangam asks to use this Mac while you're away"
         );
         assert_eq!(
             item["options"],
-            json!(["Allow", "Allow sangam from now on", "Decline"])
+            json!(["Allow", "Allow Sangam from now on", "Decline"])
         );
         assert_eq!(item["obi"]["quoted"]["title"], "Say hello");
         let answered = call(
             &p.host,
             "POST",
             &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
-            Some(&json!({"answer": "Allow sangam from now on"})),
+            Some(&json!({"answer": "Allow Sangam from now on"})),
         );
         assert_eq!(answered.status, 200, "{}", answered.text);
         let job = within(90, "the first job done", || {
@@ -358,7 +361,7 @@ async fn stop_sends_the_job_back_with_its_commit_and_it_needs_its_owner() {
         assert_eq!(job["status"], "interrupted", "{job}");
         let reason = job["reason"].as_str().unwrap_or("");
         assert!(
-            reason.starts_with("Came back from wellington's Mac: wellington stopped it."),
+            reason.starts_with("Came back from Wellington's Mac: Wellington stopped it."),
             "{reason}"
         );
         assert!(reason.contains("1 commit"), "{reason}");
@@ -370,6 +373,30 @@ async fn stop_sends_the_job_back_with_its_commit_and_it_needs_its_owner() {
                 .iter()
                 .any(|e| e["type"] == "run_return" && e["body"]["reason"] == "stopped")
         );
+        // Run it here: the job that came back moves to this Mac, its commit kept.
+        let id = job["id"].as_str().unwrap();
+        let here = call(
+            &p.guest,
+            "PATCH",
+            &format!("/v1/jobs/{id}"),
+            Some(&json!({"runsOn": null})),
+        );
+        assert_eq!(here.status, 200, "{}", here.text);
+        assert_eq!(here.body["runsOn"], Value::Null);
+        assert!(
+            here.body["changes"]
+                .to_string()
+                .contains("Moved to this Mac by you"),
+            "{}",
+            here.body["changes"]
+        );
+        let nowhere = call(
+            &p.guest,
+            "PATCH",
+            &format!("/v1/jobs/{id}"),
+            Some(&json!({"runsOn": "obi-nobody"})),
+        );
+        assert_eq!(nowhere.status, 422);
     });
 }
 
@@ -401,7 +428,7 @@ async fn with_sharing_off_or_the_mac_busy_a_job_is_declined_with_the_reason() {
         });
         assert_eq!(
             declined["reason"],
-            "wellington's Mac isn't free now. Try again later, or run it here."
+            "Wellington's Mac isn't free now. Try again later, or run it here."
         );
         // Sharing off: policy.
         let mut settings = get(&p.host, "/v1/obid/sharing/mac")["settings"].clone();
@@ -417,7 +444,7 @@ async fn with_sharing_off_or_the_mac_busy_a_job_is_declined_with_the_reason() {
         });
         assert_eq!(
             declined["reason"],
-            "wellington's Mac doesn't take your jobs. Run it here instead."
+            "Wellington's Mac doesn't take your jobs. Run it here instead."
         );
         let reasons: Vec<Value> = p
             .sphere

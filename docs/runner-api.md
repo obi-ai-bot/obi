@@ -522,6 +522,8 @@ One turn of the conversation with Oby: words become work that starts, a question
 
 `attachments`, when present, is a list of file paths in the runner's own attachments folder. The runner resolves `..` and symlinks before accepting them; a path outside that folder returns `422` naming the refused file. Accepted paths are checked again before they are copied into the job's input folder, including jobs restored after a restart: `.oby/inputs` on the Swift runner and `.obi/inputs` on `obid`.
 
+`runsOn` (obid only, #808), when present, is a teammate's Obi whose Mac the jobs these words start run on (the message box's "Run on another Mac"): an active member whose card takes `run_request`, else `422`. Each job it starts has that `runsOn` ([obid only: sharing this Mac](#obid-only-sharing-this-mac)).
+
 To answer the brain's question, send the original words with the answer:
 
 ```json
@@ -747,7 +749,7 @@ Archives a job that ended and needs nothing, or unarchives one: `{"archived": tr
 
 ### `PATCH /v1/jobs/{id}` (obid only)
 
-Renames a job, whatever it's doing: `{"title": "Vault tests"}`. The title is trimmed: one line of 1 to 60 characters, as a new job's `title`, with no line break (`\n`, `\r`, U+2028, U+2029) or other control character. Returns the job with its new `title`, adds `Renamed by you` to its `changes`, and sends its `job` event. The apps rename in place (Sangam's Rename, in the task's menu and the title bar's). `422` for a title that breaks those rules; `400` for a body that isn't that JSON (another key, a `title` that isn't a string); `404` for an unknown job. Through the gateway too. Nothing goes out.
+Renames a job, whatever it's doing: `{"title": "Vault tests"}`. With `{"runsOn": "<teammate's Obi>" | null}` (alone or with `title`) it moves a job that isn't running to a teammate's Mac, or back to this one (null: Sangam's "Run it here" on a job that came back): its next turn runs there, its `changes` say `Moved to Wellington's Mac by you` or `Moved to this Mac by you`; `409` while the job runs, `422` for an Obi that isn't a teammate's Mac that takes jobs. The title is trimmed: one line of 1 to 60 characters, as a new job's `title`, with no line break (`\n`, `\r`, U+2028, U+2029) or other control character. Returns the job with its new `title`, adds `Renamed by you` to its `changes`, and sends its `job` event. The apps rename in place (Sangam's Rename, in the task's menu and the title bar's). `422` for a title that breaks those rules; `400` for a body that isn't that JSON (another key, a `title` that isn't a string); `404` for an unknown job. Through the gateway too. Nothing goes out.
 
 ### `DELETE /v1/jobs/{id}` (obid only)
 

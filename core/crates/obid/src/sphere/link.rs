@@ -3807,7 +3807,7 @@ impl Link {
             .and_then(|o| o["fromOwner"].as_str())
             .unwrap_or("")
             .to_owned();
-        let from_now_on = format!("Allow {from_owner} from now on");
+        let from_now_on = format!("Allow {} from now on", super::hosting::person(&from_owner));
         let chosen = answer.unwrap_or_else(|| super::hosting::DECLINE.into());
         if chosen != super::hosting::ALLOW
             && chosen != from_now_on
@@ -3956,6 +3956,21 @@ impl Link {
                 }
             }
         });
+    }
+
+    /// Whether `obi`'s runner status says it's free now (None: it publishes none to this owner),
+    /// reading the directory again first.
+    pub(super) async fn runner_free(&self, obi: &str) -> Option<bool> {
+        if let Err(e) = self.read_directory().await {
+            self.note_error(&e);
+        }
+        let state = self.lock();
+        let runner = state.directory.members.get(obi)?.runner.clone()?;
+        let live = runner["expires_at"]
+            .as_str()
+            .and_then(time::parse)
+            .is_some_and(|t| t > time::now());
+        Some(live && runner["free"] == true)
     }
 
     /// The owner of `obi`, when it is an active teammate whose card takes run_request.

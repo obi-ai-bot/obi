@@ -52,7 +52,8 @@ export type Page = {
 
 // What the job needs from you (InboxItem + Question + Permission). Buttons
 // per kind follow Inbox.swift; every ask also has Later.
-export type AskKind = 'question' | 'permission' | 'review' | 'failed' | 'limit' | 'start' | 'merge';
+// back: a job that was on someone else's Mac came back to yours (Sharing, a preview)
+export type AskKind = 'question' | 'permission' | 'review' | 'failed' | 'limit' | 'start' | 'merge' | 'back';
 export type Ask = {
   kind: AskKind;
   headline: string;   // Oby's plain-words rewrite, e.g. "Pick one vault"
@@ -63,7 +64,7 @@ export type Ask = {
 };
 export const ASK_LABEL: Record<AskKind, string> = {
   question: 'Question', permission: 'Permission', review: 'Out of reviews', failed: 'Failed',
-  limit: 'Out of usage', start: 'Start it?', merge: 'Not merged',
+  limit: 'Out of usage', start: 'Start it?', merge: 'Not merged', back: 'Came back',
 };
 
 // One line of the agent's session: a file it read, a command it ran, what it said.
@@ -77,7 +78,8 @@ export type Job = {
   from?: Brand;        // where it came from (GitHub, Slack, Gmail…); none when you asked Oby
   request: string;     // your own words, or the message it came from
   agent: Agent;
-  account: 'Personal' | 'Deskree';
+  account: string;     // which of the accounts it runs on (Personal, Deskree, or someone's shared one)
+  on?: string;         // whose Mac it runs on, when not this one ("Wellington’s Mac")
   model: string;
   repo: string;
   branch: string;
@@ -151,6 +153,49 @@ export const GITHUB_WORK: GitHubItem[] = [
 ];
 
 export const JOBS: Job[] = [
+  // Sharing (a preview for Sangam, docs/research/sphere-sharing.md): what the
+  // Obysphere's sharing puts in front of you. Someone asking for this Mac, or
+  // for a part of your usage; and, as a member, your own jobs on another Mac.
+  {
+    id: 'x1', type: 'tasks', who: 'Sangam', title: 'Run a job on this Mac?', request: 'Sangam’s Oby asks to run “Fix the login retry” on this Mac.',
+    agent: 'claude', account: 'Sangam’s own', model: 'Opus 5.5', repo: 'deskree-inc/tetrix-ee', branch: 'oby/fix-login-retry', base: 'dev',
+    status: 'queued', step: 'Waiting for your OK', stages: stages('prepare', 'upcoming'), created: 3,
+    ask: {
+      kind: 'start', headline: 'Sangam asks to use this Mac while you’re away',
+      text: 'Sangam’s Oby wants to run “Fix the login retry” here, on Sangam’s own Claude Code. It runs sealed off from your files, logins and network, with at most 4 cores, 8 GB of memory and 30 GB of disk, and stops when you’re back.',
+      options: ['Allow', 'Allow Sangam from now on', 'Decline'], recommended: 0,
+    },
+  },
+  {
+    id: 'x2', type: 'tasks', title: 'Share sheet polish', request: 'polish the share sheet to Sangam’s design',
+    agent: 'claude', account: 'Personal', model: 'Opus 5.5', repo: 'deskree-inc/oby', branch: 'oby/share-sheet', base: 'dev',
+    status: 'queued', step: 'Waiting for usage', stages: stages('prepare', 'upcoming'), created: 6,
+    ask: {
+      kind: 'limit', headline: 'Your Claude is full until 4 PM',
+      text: 'Wellington shares 30% of Deskree API’s month with you, and 18% is left. It would run on Wellington’s Mac, on that account, and you get the pull request. About 2% of the share.',
+      options: ['Use Wellington’s share', 'Run it on Codex', 'Wait for the reset'], recommended: 0,
+    },
+  },
+  {
+    id: 'x4', type: 'tasks', who: 'Sangam', title: 'Share used up', request: 'Sangam has used the 30% of Deskree API you shared.',
+    agent: 'claude', account: 'Deskree API', model: 'Opus 5.5', repo: '—', branch: '—', base: '—',
+    status: 'done', step: 'Share used', stages: stages('prepare', 'upcoming'), created: 30,
+    ask: {
+      kind: 'limit', headline: 'Sangam used the share of Deskree API',
+      text: 'All 30% of this month’s share is used ($120 of $400). The job that was running finished; Oby takes no more of Sangam’s jobs on it until the 1st.',
+      options: ['Share 20% more this month', 'Leave it'], recommended: 1,
+    },
+  },
+  {
+    id: 'x3', type: 'tasks', title: 'Onboarding copy', request: 'update the onboarding copy to Sangam’s words',
+    agent: 'claude', account: 'Personal', on: 'Wellington’s Mac', model: 'Opus 5.5', repo: 'deskree-inc/oby', branch: 'oby/onboarding-copy', base: 'dev',
+    status: 'interrupted', step: 'Back from Wellington’s Mac', stages: stages('work', 'upcoming'), created: 52,
+    ask: {
+      kind: 'back', headline: 'Wellington is back at that Mac',
+      text: 'Your job paused there after 18 minutes and came back with its notes and its 2 commits. Run the rest on this Mac, or wait until that Mac is free again?',
+      options: ['Run it here', 'Wait for Wellington’s Mac'], recommended: 0,
+    },
+  },
   {
     id: 's5', type: 'tasks', title: 'Invite link expired', request: 'invite links die after an hour, should be 7 days',
     agent: 'claude', account: 'Personal', model: 'Haiku 5.5', repo: 'deskree-inc/tetrix-ee', branch: 'oby/fix-invite-ttl', base: 'dev', check: 'pnpm test invites',
@@ -509,7 +554,7 @@ export const TURNS: Turn[] = [
 // (a photo with a preview of itself); obys: the Obys it @mentions
 export type Message = { who: string; text: string; ago: number; jobs?: string[]; by?: string; steps?: string[]; looked?: number; asked?: string[]; streaming?: boolean } & Attachments;
 // What went with a message from the message box besides its words
-export type Attachments = { files?: { name: string; preview?: string }[]; obys?: string[]; jobs?: string[] };
+export type Attachments = { files?: { name: string; preview?: string }[]; obys?: string[]; jobs?: string[]; on?: string };
 export const hasAttachments = (a?: Attachments) => !!(a?.files?.length || a?.obys?.length || a?.jobs?.length);
 const SOURCE = new Map<Brand, string>([[github, 'GitHub'], [slack, 'Slack'], [gmail, 'Gmail'], [deskree, 'Deskree Ops']]);
 // What was said after it started, in minutes ago (between when it started and now)
@@ -620,9 +665,31 @@ export const OBYS: Peer[] = [
   { name: 'Daniel' },
   { name: 'Makar' },
   { name: 'Yury' },
+  { name: 'Sangam' },
   // no conversations with yet
   { name: 'Lucas' },
 ];
+// Where a job can run (the message box's Run on): this Mac, or the Mac of
+// someone in your Obysphere who shares theirs. free: it would take a job now;
+// about: why, or why not, in a few words (free or busy, never whether its
+// owner is at it). A job there still runs on your own
+// accounts: your login stays on this Mac, and their Mac reaches your AI
+// account only through your Oby, while the job runs.
+export type Place = { name: string; owner?: string; about: string; free: boolean };
+export const PLACES: Place[] = [
+  { name: 'This Mac', about: 'Room for 2 jobs', free: true },
+  { name: 'Wellington’s Mac', owner: 'Wellington', about: 'Free now · room for 1 job', free: true },
+  { name: 'Ernesto’s Mac', owner: 'Ernesto', about: 'Busy · free tonight from 10 PM', free: false },
+];
+// A part of someone's usage shared with you: an account their company pays by
+// use (a personal plan or a Team seat can't be shared), how much of its month
+// is yours (%), and how much of it you've used. Jobs on it run on their Mac:
+// its key never leaves it.
+export type Share = { owner: string; agent: Agent; account: string; share: number; used: number; resets: string };
+export const SHARED_WITH_ME: Share[] = [
+  { owner: 'Wellington', agent: 'claude', account: 'Deskree API', share: 30, used: 12, resets: 'Resets on the 1st' },
+];
+
 // who: 'you', 'oby' (your Oby, answering for you when another Oby asks it
 // something it can answer itself), or the person whose Oby said it
 export type PeerMessage = { who: string; text: string; ago: number; task?: string; streaming?: boolean } & Attachments;

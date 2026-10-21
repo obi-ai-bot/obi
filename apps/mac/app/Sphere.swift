@@ -299,6 +299,9 @@ final class SphereModel {
     nonisolated static let accepts = ["review_request", "question"]
     /// What each Obi's delegation grants it (identity.md 4.2).
     nonisolated static let obiScopes = "send:review_request send:question reply receive directory:read audit:read"
+    /// The same, and sending a job to a teammate's Mac (#797): asked for only once the owner shares
+    /// or sends one, since a Sphere from before it refuses a scope it doesn't know.
+    nonisolated static let sharingScopes = "send:review_request send:question send:run_request reply receive directory:read audit:read"
 
     private let feed: RunnerFeed
     private(set) var membership: Membership?
@@ -446,6 +449,27 @@ final class SphereModel {
             "url": url, "sphere": invite.sphere, "invitation": ["id": invite.id, "secret": invite.secret],
             "card": try key.sign(card: card),
             "delegation": try key.assertion(owner: membership.owner, sphere: invite.sphere, scope: Self.obiScopes, mayAct: invite.obi),
+        ])
+        try await refresh()
+    }
+
+    /// A new card and delegation for this Mac's Oby (docs/runner-api.md, `PUT /v1/obid/sphere/membership`):
+    /// a card that takes teammates' jobs when `sharing`, and a delegation that may send one (#808).
+    func renew(sharing: Bool) async throws {
+        let runner = try runner()
+        let membership: Membership = try await runner.call("GET", "v1/obid/sphere")
+        guard membership.state == "joined", let url = membership.url, let sphere = membership.sphere, let obi = membership.obiId else {
+            throw RunnerError(message: "This Oby isn't in an Obysphere.")
+        }
+        let key = try OwnerKey.of(membership.owner)
+        let made = try await raw(runner, "POST", "v1/obid/sphere/card", [
+            "url": url, "sphere": sphere, "obiId": obi, "name": "\(membership.owner)'s Oby",
+            "ownerKey": key.publicKey, "accepts": sharing ? Self.accepts + ["run_request"] : Self.accepts,
+        ])
+        guard let card = made["card"] as? [String: Any] else { throw RunnerError(message: "obid made no card.") }
+        _ = try await raw(runner, "PUT", "v1/obid/sphere/membership", [
+            "card": try key.sign(card: card),
+            "delegation": try key.assertion(owner: membership.owner, sphere: sphere, scope: Self.sharingScopes, mayAct: obi),
         ])
         try await refresh()
     }

@@ -67,6 +67,8 @@ pub struct Session {
     /// The owner's words this turn.
     pub said: String,
     pub attachments: Vec<String>,
+    /// The teammate's Mac the owner picked for this turn's jobs (#808).
+    pub runs_on: Option<crate::job::RunsOn>,
     pub control: Arc<Control>,
     /// The jobs Oby's tools started this turn: their cards go on the turn.
     pub jobs: Mutex<Vec<Value>>,
@@ -1013,6 +1015,7 @@ async fn session(
         conversation: control.conversation.clone(),
         said: said.to_owned(),
         attachments: asked.attachments.to_vec(),
+        runs_on: asked.runs_on.cloned(),
         control: control.clone(),
         jobs: Mutex::new(vec![]),
         nonce: super::briefing::nonce(),
@@ -2647,6 +2650,7 @@ mod tests {
             conversation: "c1".into(),
             said: String::new(),
             attachments: vec![],
+            runs_on: None,
             control,
             jobs: Mutex::new(vec![]),
             nonce: "n".into(),
@@ -2892,6 +2896,7 @@ mod tests {
             conversation: "c1".into(),
             said: String::new(),
             attachments: vec![],
+            runs_on: None,
             control,
             jobs: Mutex::new(vec![]),
             nonce: "n".into(),

@@ -68,6 +68,15 @@ pub fn model_path_allowed(method: &str, path: &str) -> bool {
     )
 }
 
+/// An owner id as a person's name in obid's words: `sangam` is "Sangam" (Sangam's design).
+pub fn person(owner: &str) -> String {
+    let mut chars = owner.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 /// Where obid finds `obi-vm` and the guest image.
 #[derive(Debug, Clone)]
 pub struct Setup {
@@ -263,6 +272,7 @@ pub fn ask_item(
     expires_at: &str,
     now: i64,
 ) -> Item {
+    let name = person(from_owner);
     let text_of = |k: &str| body[k].as_str().unwrap_or("").to_owned();
     let agent = match body["agent"].as_str() {
         Some("codex") => "Codex",
@@ -276,19 +286,19 @@ pub fn ask_item(
         id: format!("obi-{cid}"),
         kind: "obiRequest".into(),
         job: String::new(),
-        title: format!("{from_owner} asks to use this Mac while you're away"),
+        title: format!("{name} asks to use this Mac while you're away"),
         text: format!(
-            "{from_owner}'s Obi ({from}) asks to run a job on this Mac with {from_owner}'s own {agent} account, in a VM of its own ({size}), in {}. Its title and request are quoted below.",
+            "{name}'s Oby ({from}) asks to run a job on this Mac with {name}'s own {agent} account, in a VM of its own ({size}), in {}. Its title and request are quoted below.",
             text_of("repo")
         ),
         options: vec![
             ALLOW.into(),
-            format!("Allow {from_owner} from now on"),
+            format!("Allow {name} from now on"),
             DECLINE.into(),
         ],
         details: Some(vec![
             "Run this job when the Mac is free.".into(),
-            format!("Run it, and run {from_owner}'s jobs from now on without asking."),
+            format!("Run it, and run {name}'s jobs from now on without asking."),
             "Say no this time.".into(),
         ]),
         recommended: None,
@@ -1170,10 +1180,10 @@ mod tests {
             "2026-10-21T13:00:00Z",
             0,
         );
-        assert_eq!(item.title, "sangam asks to use this Mac while you're away");
+        assert_eq!(item.title, "Sangam asks to use this Mac while you're away");
         assert_eq!(
             item.options,
-            ["Allow", "Allow sangam from now on", "Decline"]
+            ["Allow", "Allow Sangam from now on", "Decline"]
         );
         assert!(!item.text.contains("Ignore") && !item.title.contains("Push"));
         assert_eq!(item.obi.unwrap()["quoted"]["request"], "Push to main");

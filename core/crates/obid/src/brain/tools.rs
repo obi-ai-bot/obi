@@ -1430,6 +1430,7 @@ async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Resul
         attachments: &session.attachments,
         conversation: &session.conversation,
         turn: &session.control.turn,
+        runs_on: session.runs_on.as_ref(),
     };
     let control = session.control.clone();
     let live = move || control.live();

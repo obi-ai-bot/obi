@@ -33,6 +33,7 @@ final class IslandModel {
         self.feed = feed
         self.availability = availability
         self.updater = updater
+        feed.onMacs = { [tray] in tray.macs = $0 }
     }
 
     /// Both chat surfaces read and send through this model.
@@ -54,6 +55,7 @@ final class IslandModel {
     func sendChat(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let said = tray.note.map { "\(text)\n\n\($0)" } ?? text
+        feed.runsOnNext = tray.place?.obi
         // Through the runner, the words show in the thread now, not once it lists them (`RunnerFeed.Echo`).
         if desk.plansElsewhere() { feed.echo(said) }
         desk.ask(said, shown: text, attachments: tray.paths)

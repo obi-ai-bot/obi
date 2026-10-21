@@ -68,6 +68,8 @@ pub struct Asked<'a> {
     /// The user's turn the words are, which the jobs started now name (`Job::turn`); empty for an
     /// event turn's, which no turn of the conversation holds.
     pub turn: &'a str,
+    /// The teammate's Mac the owner picked for this message's jobs ("Run on another Mac", #808).
+    pub runs_on: Option<&'a crate::job::RunsOn>,
 }
 
 /// A plan that answers rather than acts: a reply, a question, or jobs it starts (#269). `live` is
@@ -166,6 +168,7 @@ async fn dispatch(
             files,
             attachments: (!asked.attachments.is_empty()).then(|| asked.attachments.to_vec()),
             conversation: Some(asked.conversation.to_owned()),
+            runs_on: asked.runs_on.cloned(),
             base: d.base_branch.clone(),
             mode: d.mode.map(|m| m.as_str().to_owned()),
             brief: d.brief(),

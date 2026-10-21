@@ -180,6 +180,25 @@ async fn run_in(
     if let Some(model) = ask.model {
         body["model"] = json!(model);
     }
+    // A Mac that says it's busy isn't asked: the job waits until it's free (Sangam's "Wait for
+    // Wellington's Mac"), up to a day.
+    let waited = tokio::time::Instant::now();
+    while link.runner_free(ask.host).await == Some(false) {
+        on_event(AgentEvent::Step(format!(
+            "Waiting for {}'s Mac to be free",
+            ask.host_owner
+        )));
+        if waited.elapsed() > Duration::from_secs(86_400) {
+            return Ok(failed(&format!(
+                "{}'s Mac wasn't free for a day. Run it here instead.",
+                ask.host_owner
+            )));
+        }
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(30)) => {}
+            () = told_to_stop(signal) => return Ok(Turn { stopped: true, ..Turn::default() }),
+        }
+    }
     let exchange = link
         .send_request(ask.host, "run_request", body, 86_400)
         .await

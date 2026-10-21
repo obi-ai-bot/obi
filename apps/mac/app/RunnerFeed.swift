@@ -70,6 +70,14 @@ final class RunnerFeed {
     private(set) var routineChanges = 0
     /// obid's routines (#395), for the next runs on Home's Routines page; none from a runner without.
     private(set) var routines: [RunnerRoutine] = []
+    /// The teammates' Macs a job can run on (#808), as obid last listed them; each list goes to `onMacs`.
+    private(set) var macs: [RunnerMac] = [] { didSet { if macs != oldValue { onMacs?(macs) } } }
+    var onMacs: (([RunnerMac]) -> Void)?
+    /// The teammate's Obi whose Mac the next words' jobs run on, taken by the next `plan` (the
+    /// message box's "Run on another Mac"; Engine's Desk, frozen, doesn't carry it).
+    // ponytail: one message at a time from this Mac, so a slot is enough; a queue if sends overlap.
+    var runsOnNext: String?
+    private var macsTask: Task<Void, Never>?
     /// The session the window shows (#785): its job's `transcript` events go to it, and it reads
     /// what it missed when the connection comes back.
     @ObservationIgnored var liveSession: LiveSession?
@@ -350,6 +358,16 @@ final class RunnerFeed {
                         host = status.runner.host
                         version = status.runner.version
                         if let routines { self.routines = routines ?? [] }
+                        macs = (try? await runner.macs()) ?? []
+                        // A teammate's Mac goes free or busy without an event here: read again each minute.
+                        macsTask?.cancel()
+                        macsTask = Task { [weak self] in
+                            while !Task.isCancelled {
+                                try? await Task.sleep(for: .seconds(60))
+                                guard let self, let list = try? await runner.macs() else { continue }
+                                self.macs = list
+                            }
+                        }
                         clearedAt = status.clearedAt
                         accounts = status.accounts
                         self.tetrix = tetrix
@@ -510,7 +528,9 @@ final class RunnerFeed {
         // In the conversation shown, or a new one (obid keeps many, #493); neither for one thread.
         let planned: PlannedTurn
         do {
-            planned = try await runner.planned(said, answer: answer, attachments: attachments, in: conversations.target(said), id: echo)
+            let runsOn = runsOnNext
+            runsOnNext = nil
+            planned = try await runner.planned(said, answer: answer, attachments: attachments, in: conversations.target(said), id: echo, runsOn: runsOn)
         } catch {
             conversations.failed()
             // Given up (Stop, or other words in their place): they leave the thread. Else they stay, failed.

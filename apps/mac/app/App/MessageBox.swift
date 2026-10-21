@@ -86,7 +86,7 @@ struct MessageBox: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if attachments && !tray.items.isEmpty { tags.padding(.bottom, 6) }
+            if attachments && (!tray.items.isEmpty || tray.place != nil) { tags.padding(.bottom, 6) }
             if stacked {
                 editor.padding(BoxMetrics.stackedPadding)
                 HStack(spacing: 4) {
@@ -177,11 +177,39 @@ struct MessageBox: View {
             Button("Screenshot", action: onScreenshot).disabled(tray.capturing)
             Button("Clipboard", action: tray.pasteClipboard)
             Button("File…", action: tray.chooseFile)
+            // Where the box talks to Oby: run its jobs on a teammate's Mac that's free (Sangam's
+            // "Run on another Mac", #808), with your own accounts.
+            if usage != nil && !tray.macs.isEmpty { placeMenu }
         } label: {
             BoxIcon(symbol: "plus")
         }
         .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
         .accessibilityLabel("Add attachment")
+    }
+
+    /// This Mac, then the teammates' Macs: free or busy (and when it's free), never whether their
+    /// owner is at them. Picking one puts its tag over the words; one at a time.
+    private var placeMenu: some View {
+        Menu("Run on another Mac") {
+            Button { tray.place = nil } label: {
+                Label("This Mac", systemImage: tray.place == nil ? "checkmark" : "laptopcomputer")
+            }
+            ForEach(tray.macs) { mac in
+                Button { tray.place = mac } label: {
+                    Label(Self.placeLine(mac), systemImage: tray.place == mac ? "checkmark" : "laptopcomputer")
+                }
+                .disabled(!mac.free)
+            }
+            Divider()
+            Text("Your job runs there with your own accounts: your logins stay on this Mac.")
+        }
+    }
+
+    /// "Wellington’s Mac · Free", or "· Busy" (with when it's free, when the Mac says).
+    static func placeLine(_ mac: RunnerMac) -> String {
+        if mac.free { return "\(mac.name) · Free" }
+        guard let at = mac.freeAt else { return "\(mac.name) · Busy" }
+        return "\(mac.name) · Free at \(at.formatted(date: .omitted, time: .shortened))"
     }
 
     /// Always there where the box talks to Oby, even before an account reports usage (docs/mac-design.md B3).
@@ -251,6 +279,21 @@ struct MessageBox: View {
     /// What goes with the words, as tags over them.
     private var tags: some View {
         HStack(spacing: 6) {
+            if let mac = tray.place {
+                HStack(spacing: 6) {
+                    Image(systemName: "laptopcomputer").font(Tokens.font(11)).foregroundStyle(Tokens.muted)
+                    Text("On \(mac.name)").lineLimit(1)
+                    Button { tray.place = nil } label: {
+                        Image(systemName: "xmark").font(Tokens.font(9, .bold)).foregroundStyle(Tokens.muted)
+                            .frame(width: 18, height: 18).contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Run it on this Mac instead")
+                }
+                .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.item)
+                .padding(.leading, 6).padding(.trailing, 3).frame(height: 24)
+                .background(Tokens.chipHover, in: Capsule())
+            }
             ForEach(tray.items) { item in
                 HStack(spacing: 6) {
                     Image(systemName: item.icon).font(Tokens.font(11)).foregroundStyle(Tokens.muted)
