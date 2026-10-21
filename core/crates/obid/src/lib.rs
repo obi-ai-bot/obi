@@ -168,8 +168,9 @@ async fn keep_worktrees_clean(shared: Arc<api::Shared>, cancelled: Arc<AtomicBoo
         let now = obi_protocol::time::now();
         if shared.jobs.clean_worktrees(now, shared.cleared.at()).await > 0 {
             let (shared, cancelled) = (shared.clone(), cancelled.clone());
-            let _ = tokio::task::spawn_blocking(move || shared.cleanup.remeasure_unless(&cancelled))
-                .await;
+            let _ =
+                tokio::task::spawn_blocking(move || shared.cleanup.remeasure_unless(&cancelled))
+                    .await;
         }
         shared.jobs.wait_to_clean(CLEAN_EVERY).await;
     }
@@ -585,7 +586,7 @@ mod tests {
         assert_eq!(event.name, "cleanup");
         assert_eq!(
             event.data,
-            serde_json::json!({"path": "/nonexistent/obid/worktrees", "bytes": 0, "lastRun": null})
+            serde_json::json!({"path": "/nonexistent/obid/worktrees", "bytes": 0, "lastRun": null, "kept": []})
         );
 
         let silent = Arc::new(api::Cleanup::unmeasured(Path::new("/nonexistent/obid")));
