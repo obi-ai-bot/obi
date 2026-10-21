@@ -1558,11 +1558,17 @@ impl Link {
             self.drop_message(&id, "a request for an exchange obid has already");
             return;
         }
-        // The sender's owner comes from the directory, never from the message.
-        let owner = state.directory.members.get(&from).map(|m| m.owner.clone());
+        // The sender's owner comes from the directory, never from the message; a removed member
+        // is never admitted.
+        let owner = state
+            .directory
+            .members
+            .get(&from)
+            .filter(|m| m.active)
+            .map(|m| m.owner.clone());
         let Some(owner) = owner else {
             drop(state);
-            self.drop_message(&id, "its sender isn't in the directory");
+            self.drop_message(&id, "its sender isn't an active member in the directory");
             return;
         };
         let accepts = state
@@ -3819,6 +3825,15 @@ impl Link {
         };
         self.save_exchange(&exchange);
         self.outbox.notify_one();
+    }
+
+    /// Whether `obi` is an active member in the directory obid trusts.
+    pub(super) fn member_active(&self, obi: &str) -> bool {
+        self.lock()
+            .directory
+            .members
+            .get(obi)
+            .is_some_and(|m| m.active)
     }
 
     pub(super) fn host_progress(&self, cid: &str, progress: &str) {

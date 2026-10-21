@@ -106,6 +106,7 @@ async function main() {
   const repo = join(dir, "repo");
   git(repo, "fetch", "-q", "../in.bundle", "+refs/*:refs/obi-in/*");
   git(repo, "checkout", "-q", "-b", job.branch, job.base_sha);
+  log(`base "${git(repo, "log", "-1", "--format=%s", job.base_sha)}" parents "${git(repo, "log", "-1", "--format=%P", job.base_sha)}" commits ${git(repo, "rev-list", "--all", "--count")}`);
 
   const refused = await call(model, "POST", "/api/oauth/token", "{}", { "content-type": "application/json" });
   log(`refused ${refused.status}`);
