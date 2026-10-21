@@ -3245,7 +3245,7 @@ impl Link {
             }
         };
         if let Some(mut item) = approving {
-            return match crate::listen::post_review(&self.config.home, &self.jobs, &item).await {
+            return match crate::listen::post_review_with_gh(&self.config.home, &item).await {
                 Ok(()) => {
                     item.done = Some(time::now());
                     item.answer = Some(crate::listen::APPROVE.into());

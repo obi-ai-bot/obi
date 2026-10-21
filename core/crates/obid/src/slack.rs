@@ -29,6 +29,7 @@ pub const NOT_CONNECTED: &str = "Oby isn't connected to Slack.";
 const REFUSED: &str =
     "Slack refused Oby's tokens: paste new ones in Settings › Connectors › Slack.";
 const API: &str = "https://slack.com/api";
+const SOCKET_REFUSED: &str = "Slack refused the app-level token: paste a new one in Settings › Connectors › Slack to listen again.";
 /// The most a search reads: 3 pages of 100, newest first.
 const PAGES: u32 = 3;
 
@@ -84,11 +85,7 @@ fn socket_url_ok(url: &str) -> bool {
 /// `channel`, as obid keeps it: a person's own new message only (no subtype but a thread's
 /// broadcast, no bot), with a link to it on slack.com.
 pub fn event_message(event: &Value, channel: &Channel) -> Option<Message> {
-    if event["subtype"]
-        .as_str()
-        .is_some_and(|s| s != "thread_broadcast")
-        || event.get("bot_id").is_some_and(|b| !b.is_null())
-    {
+    if skip_reason(event).is_some() {
         return None;
     }
     let ts = event["ts"].as_str()?;
@@ -107,6 +104,23 @@ pub fn event_message(event: &Value, channel: &Channel) -> Option<Message> {
         ))
         .filter(|p| crate::watch::link_ok(p, "slack.com")),
     })
+}
+
+/// Why a message event isn't one obid reads, by its type only (never its words): a bot's post (one
+/// with a `bot_id`), an edit or another subtype, or one with no person. None for a person's own.
+pub fn skip_reason(event: &Value) -> Option<&'static str> {
+    if event.get("bot_id").is_some_and(|b| !b.is_null()) {
+        Some("a bot's post")
+    } else if event["subtype"]
+        .as_str()
+        .is_some_and(|s| s != "thread_broadcast")
+    {
+        Some("an edit, a join or another subtype")
+    } else if event["user"].as_str().is_none_or(str::is_empty) || event["ts"].as_str().is_none() {
+        Some("no person or no time")
+    } else {
+        None
+    }
 }
 
 /// A message search found, as obid keeps it: Slack's typed fields and the text, quoted data.
@@ -449,6 +463,15 @@ impl Slack {
                 if self.vault.value(name).ok().flatten().as_deref() != Some(token.as_str()) {
                     return Err("Slack refused a token that was replaced meanwhile.".into());
                 }
+                if name == APP {
+                    // The app-level token only stops the listener: the rest stays.
+                    let _ = self.vault.remove(APP);
+                    let mut saved = self.saved();
+                    saved.socket = false;
+                    saved.error = Some(SOCKET_REFUSED.into());
+                    let _ = self.save(saved);
+                    return Err(SOCKET_REFUSED.into());
+                }
                 self.forget(Some(REFUSED.into()));
                 Err(REFUSED.into())
             }
@@ -472,28 +495,43 @@ impl Slack {
             .ok_or_else(|| "Slack answered no Socket Mode address on slack.com.".into())
     }
 
-    /// The messages in `channel` newer than `oldest` (a Slack `ts`), oldest first, at most 200,
-    /// with the user token. Only people's own messages: no edits, joins or bots' posts.
-    pub async fn history(&self, channel: &Channel, oldest: &str) -> Result<Vec<Message>, String> {
-        let answer = self
-            .call(
-                USER,
-                "conversations.history",
-                &[
-                    ("channel", &channel.id),
-                    ("oldest", oldest),
-                    ("limit", "200"),
-                ],
-            )
-            .await?;
-        let mut found: Vec<Message> = answer["messages"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|m| event_message(m, channel))
-            .collect();
+    /// The messages in `channel` newer than `oldest` (a Slack `ts`), oldest first, at most 5
+    /// pages of 200, with the user token: people's own messages, and why each other one was left
+    /// out (`skip_reason`).
+    pub async fn history(
+        &self,
+        channel: &Channel,
+        oldest: &str,
+    ) -> Result<(Vec<Message>, Vec<&'static str>), String> {
+        let mut found = vec![];
+        let mut skipped = vec![];
+        let mut cursor = String::new();
+        for _ in 0..5 {
+            let mut form = vec![
+                ("channel", channel.id.as_str()),
+                ("oldest", oldest),
+                ("limit", "200"),
+            ];
+            if !cursor.is_empty() {
+                form.push(("cursor", cursor.as_str()));
+            }
+            let answer = self.call(USER, "conversations.history", &form).await?;
+            for m in answer["messages"].as_array().into_iter().flatten() {
+                match event_message(m, channel) {
+                    Some(message) => found.push(message),
+                    None => skipped.extend(skip_reason(m)),
+                }
+            }
+            cursor = answer["response_metadata"]["next_cursor"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            if answer["has_more"] != true || cursor.is_empty() {
+                break;
+            }
+        }
         found.sort_by(|a, b| a.at.total_cmp(&b.at));
-        Ok(found)
+        Ok((found, skipped))
     }
 
     /// A channel's name (`conversations.info`, the user token): also the check that the owner can
