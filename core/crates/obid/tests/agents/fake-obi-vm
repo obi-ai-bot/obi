@@ -86,6 +86,7 @@ async function main() {
   log(`key-again ${(await call(control, "GET", "/key")).status}`);
   const job = JSON.parse((await call(control, "GET", "/job")).body.toString());
   log(`job ${job.title} on ${job.branch} by ${job.author.name}`);
+  log(`words ${job.request ?? ""}`);
   const dir = mkdtempSync(join(tmpdir(), "fake-guest-"));
   writeFileSync(join(dir, "in.bundle"), (await call(control, "GET", "/bundle")).body);
   git(dir, "init", "-q", "repo");

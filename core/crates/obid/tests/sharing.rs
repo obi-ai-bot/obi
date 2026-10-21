@@ -221,6 +221,11 @@ async fn a_job_runs_on_a_teammates_mac_with_the_owners_own_key_and_comes_back_wi
     assert!(seen.contains("refused 403"), "{seen}");
     assert!(seen.contains("model 200 Hello from the model"), "{seen}");
     assert!(seen.contains("job Say hello on"), "{seen}");
+    // The job's words reached its agent on the channel, and never the chain (#810).
+    assert!(
+        seen.contains("words ") && seen.contains("Say hello in guest.txt"),
+        "{seen}"
+    );
     // The key is nowhere on Wellington's side, and the relay saw only sealed frames.
     assert!(
         holding(&hf.0, API_KEY).is_empty(),
@@ -243,9 +248,20 @@ async fn a_job_runs_on_a_teammates_mac_with_the_owners_own_key_and_comes_back_wi
         .map(|e| e["type"].as_str().unwrap())
         .collect();
     assert_eq!(types.first(), Some(&"run_request"));
+    assert!(types.contains(&"accept"), "{types:?}");
+    // Only a pause or a resume is a run_progress; the job's words are in no entry (#810).
     assert!(
-        types.contains(&"accept") && types.contains(&"run_progress"),
-        "{types:?}"
+        recorded
+            .iter()
+            .filter(|e| e["type"] == "run_progress")
+            .all(|e| e["body"]["state"] == "paused" || e["body"]["state"] == "resumed")
+    );
+    assert!(recorded[0]["body"].get("request").is_none());
+    assert!(
+        !serde_json::to_string(&recorded)
+            .unwrap()
+            .contains("in guest.txt"),
+        "the job's words are in the chain"
     );
     let result = recorded
         .iter()
@@ -257,6 +273,27 @@ async fn a_job_runs_on_a_teammates_mac_with_the_owners_own_key_and_comes_back_wi
     // Wellington's obid keeps its own log of the host's use, and nothing of the job's.
     let log = std::fs::read_to_string(hf.0.join("home/sharing-log.jsonl")).unwrap();
     assert!(log.contains("\"fromOwner\":\"sangam\""), "{log}");
+    tokio::task::block_in_place(|| {
+        assert_eq!(get(&p.host, "/v1/obid/sharing/mac")["week"]["jobs"], 1);
+        // Each side checks the chain and finds its own entries in it, as metadata only.
+        for (obid, me) in [(&p.guest, "obi-sangam"), (&p.host, "obi-wellington")] {
+            let audit = get(obid, "/v1/obid/sphere/audit");
+            assert_eq!(audit["verified"], true, "{audit}");
+            let entries = audit["entries"].as_array().unwrap();
+            assert!(entries.iter().all(|e| e["from"] == me || e["to"] == me));
+            let result = entries
+                .iter()
+                .find(|e| e["type"] == "result")
+                .expect("the result");
+            assert_eq!(result["host"]["cpu_seconds"], 3);
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e["type"] == "run_request" && e["repo"] == "obi-e2e/fixture-app")
+            );
+            assert!(!audit.to_string().contains("Say hello"), "{audit}");
+        }
+    });
     // Its folder goes once the host has sent its reply and let the channel go.
     tokio::task::block_in_place(|| {
         within(20, "the job's folder gone", || {
@@ -557,6 +594,11 @@ async fn a_share_of_an_api_account_runs_on_its_mac_with_its_key_metered_until_us
         assert_eq!(*p.keys.lock().unwrap(), vec![HOST_KEY.to_owned()]);
         let seen = std::fs::read_to_string(p.vm.join("guest.log")).unwrap();
         assert!(seen.contains("model 200 Hello from the model"), "{seen}");
+        // The job's cost is in the chain with its end (#810).
+        assert!(p.sphere.recorded().iter().any(|e| matches!(
+            e["type"].as_str(),
+            Some("result" | "run_return")
+        ) && e["body"]["cost_cents"] == 121));
         // Both meters say $1.21 ($1.20008, rounded up).
         let grants = get(&p.host, "/v1/obid/sharing/grants");
         assert_eq!(grants["grants"][0]["usedCents"]["sangam"], 121, "{grants}");

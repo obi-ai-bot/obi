@@ -55,6 +55,8 @@ struct SharingTests {
                                            started: Date(timeIntervalSince1970: 0), state: "paused")
         #expect(SharingSettingsView.about(guest, now: Date(timeIntervalSince1970: 12 * 60)) == "Claude Code on Sangam’s account · tetrix-ee · 12 min · Paused")
         #expect(SharingSettingsView.offFooter("Deskree").hasPrefix("Let people in Deskree run jobs on this Mac"))
+        #expect(SharingSettingsView.weekLine(.init(jobs: 3, wallSeconds: 7800, costCents: 0)) == "This week: 3 jobs, 2 h 10 min.")
+        #expect(SharingSettingsView.weekLine(.init(jobs: 1, wallSeconds: 600, costCents: 0)) == "This week: 1 job, 10 min.")
     }
 
     @Test func teammatesMacsAreFreeOrBusyAndAJobCanComeHere() async throws {

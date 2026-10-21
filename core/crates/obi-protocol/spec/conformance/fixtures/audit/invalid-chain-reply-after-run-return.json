@@ -47,7 +47,6 @@
           "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
           "body": {
             "title": "Write tests for average()",
-            "request": "Add tests for average() in src/average.test.js, including the empty list.\nCommit them.",
             "agent": "claude",
             "model": "sonnet",
             "repo": "obi-conf/fixture-app",
@@ -61,14 +60,14 @@
             "size": "small",
             "max_minutes": 120
           },
-          "signature": "mZfLR3GmKx5J4rzOKQawFiDxhHpF61VGJ66oQw1LVPY7ER08MYT1G-ipA9sV2MS7A1FUP0l7EjGfeacz-unFCg"
+          "signature": "zl-tYHIoHf0Wlyh0_p0ed9mq418u0tbRRfx6OmMOuv4KsV_qkPtqaAittZevv9MwJlyp337YLa8ZIEkcXDdHDg"
         },
-        "hash": "3a8ab8cc37246e96ceb114ed858daafbd65fa58d0492742c7d924dc1d1a81b25"
+        "hash": "4ec1b0cb502d367223615ce4106f340aff4c0b79d15c130f5308026695df5727"
       },
       {
         "sphere": "conf-sphere",
         "seq": 2,
-        "prev": "3a8ab8cc37246e96ceb114ed858daafbd65fa58d0492742c7d924dc1d1a81b25",
+        "prev": "4ec1b0cb502d367223615ce4106f340aff4c0b79d15c130f5308026695df5727",
         "recorded_at": "2026-10-14T11:59:02Z",
         "envelope": {
           "protocol": "obi/0.1",
@@ -85,12 +84,12 @@
           "body": {},
           "signature": "uH8lnfKvQ6R9A1Cn6NsArdyJHZFC9AWfNL7DUsDWl4E6UjRUHIoMJxCh2hNUVsuOUft1klGKgg2gupnYC7TaDQ"
         },
-        "hash": "7608b6f005be712e2318aa140aaad28dac95ed3ef5e7e28cf96c5b6217908404"
+        "hash": "076ed6132a86d025ddb504ec10cb8b58b34f5d04bc59c33d1994e1fe6c3ed53e"
       },
       {
         "sphere": "conf-sphere",
         "seq": 3,
-        "prev": "7608b6f005be712e2318aa140aaad28dac95ed3ef5e7e28cf96c5b6217908404",
+        "prev": "076ed6132a86d025ddb504ec10cb8b58b34f5d04bc59c33d1994e1fe6c3ed53e",
         "recorded_at": "2026-10-14T11:59:03Z",
         "envelope": {
           "protocol": "obi/0.1",
@@ -121,12 +120,12 @@
           },
           "signature": "0IlxDYDJsykucp6ctZ9TIHNjp2eiRNMhcTxRlBVkFvicBpk9kPJ7OJ-3ojltIcY7TqXoYyMxB4KZCDdVfwSIBA"
         },
-        "hash": "a1f135a4ac1fa159f7f386b47d85564d0bc32932a447618655ab3c3a1403f58f"
+        "hash": "6c42673ad6e058161b151cc27e245849ae58d3dd924be4415675c281f4d74d45"
       },
       {
         "sphere": "conf-sphere",
         "seq": 4,
-        "prev": "a1f135a4ac1fa159f7f386b47d85564d0bc32932a447618655ab3c3a1403f58f",
+        "prev": "6c42673ad6e058161b151cc27e245849ae58d3dd924be4415675c281f4d74d45",
         "recorded_at": "2026-10-14T11:59:04Z",
         "envelope": {
           "protocol": "obi/0.1",
@@ -145,7 +144,7 @@
           },
           "signature": "-prAiNsu3gTXC133ucEq9qJYxQO4X-z5RhfHZxqVM0XJi3REAJpO06vq1S70m_CopO4__7VksQBGZoCg8UYcCg"
         },
-        "hash": "60abf19919fc5c9a5c6093a82ce4dbd6fdc08dd11884b26e852f364ebc2b0275"
+        "hash": "0daafee96fb81e941de7a8a3e84f976f7d2b06b7fc5cc8acdef998522e5b7f48"
       }
     ]
   }

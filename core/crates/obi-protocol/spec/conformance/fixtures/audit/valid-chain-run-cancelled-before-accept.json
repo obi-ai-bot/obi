@@ -46,7 +46,6 @@
           "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
           "body": {
             "title": "Write tests for average()",
-            "request": "Add tests for average() in src/average.test.js, including the empty list.\nCommit them.",
             "agent": "claude",
             "model": "sonnet",
             "repo": "obi-conf/fixture-app",
@@ -60,14 +59,14 @@
             "size": "small",
             "max_minutes": 120
           },
-          "signature": "mZfLR3GmKx5J4rzOKQawFiDxhHpF61VGJ66oQw1LVPY7ER08MYT1G-ipA9sV2MS7A1FUP0l7EjGfeacz-unFCg"
+          "signature": "zl-tYHIoHf0Wlyh0_p0ed9mq418u0tbRRfx6OmMOuv4KsV_qkPtqaAittZevv9MwJlyp337YLa8ZIEkcXDdHDg"
         },
-        "hash": "3a8ab8cc37246e96ceb114ed858daafbd65fa58d0492742c7d924dc1d1a81b25"
+        "hash": "4ec1b0cb502d367223615ce4106f340aff4c0b79d15c130f5308026695df5727"
       },
       {
         "sphere": "conf-sphere",
         "seq": 2,
-        "prev": "3a8ab8cc37246e96ceb114ed858daafbd65fa58d0492742c7d924dc1d1a81b25",
+        "prev": "4ec1b0cb502d367223615ce4106f340aff4c0b79d15c130f5308026695df5727",
         "recorded_at": "2026-10-14T11:59:02Z",
         "envelope": {
           "protocol": "obi/0.1",
@@ -84,7 +83,7 @@
           "body": {},
           "signature": "h1Gza5jExhUQ2-fsCy0uen-ZcPAwylGB0cgKDxbXb29SWdJg9QEosib_9rtB8I6wKE1_B7wH51aItq9aVsRyDA"
         },
-        "hash": "1e3e48eb12fe5a14840868235a91c26044dba64963d6cf5027f5bbf8a298a920"
+        "hash": "2bd6fd984c9e37d3d402adcb67864cd87f5152cc5cea36f449e62b639386aabd"
       }
     ]
   }

@@ -2,12 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/obi-ai-bot/obi-sphere/raw/main/spec/schemas/v0.1/actions/run_request.schema.json",
   "title": "run_request body",
-  "description": "Ask another Obi to run one of this Obi's owner's jobs on its Mac, in a VM of its own, with this owner's own agent account (protocol.md 5.10). The code travels as a git bundle on the job channel; the model's calls go back to this Obi through it.",
+  "description": "Ask another Obi to run one of this Obi's owner's jobs on its Mac, in a VM of its own, with this owner's own agent account (protocol.md 5.10). The code and the job's words travel on the job channel, never in the request: the audit chain keeps only what the job is. The model's calls go back to this Obi through it.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "title",
-    "request",
     "agent",
     "repo",
     "base_branch",
@@ -23,12 +22,6 @@
       "x-obi-text": "data",
       "minLength": 1,
       "maxLength": 200
-    },
-    "request": {
-      "$ref": "../common.schema.json#/$defs/block_text",
-      "x-obi-text": "data",
-      "minLength": 1,
-      "maxLength": 20000
     },
     "agent": {
       "$ref": "../common.schema.json#/$defs/agent"

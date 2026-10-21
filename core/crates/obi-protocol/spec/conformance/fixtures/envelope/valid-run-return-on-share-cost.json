@@ -1,0 +1,41 @@
+{
+  "case": "envelope",
+  "name": "valid-run-return-on-share-cost",
+  "description": "A job on a share that came back: its cost so far.",
+  "expect": "accept",
+  "context": {
+    "now": "2026-10-14T12:00:00Z",
+    "sphere": "conf-sphere",
+    "receiver": "obi-b",
+    "keys": {
+      "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M": {
+        "obi": "obi-a",
+        "public_key": "ntsfB6eWkZc1OaiYP3IQWc8ULKnQgLnlTcEu78Ix1kM"
+      },
+      "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo": {
+        "obi": "obi-b",
+        "public_key": "h0N1imyuq1rRFqca2MG9WIbmY4HFUvtr0utDYJvrlsE"
+      }
+    },
+    "seen_ids": []
+  },
+  "input": {
+    "protocol": "obi/0.1",
+    "id": "757517e4-52e3-8c0e-8774-42342bc64dec",
+    "type": "run_return",
+    "from": "obi-a",
+    "to": "obi-b",
+    "sphere": "conf-sphere",
+    "correlation_id": "293ecc97-39be-89df-82d7-918d301f18fa",
+    "in_reply_to": "293ecc97-39be-89df-82d7-918d301f18fa",
+    "created_at": "2026-10-14T11:59:00Z",
+    "expires_at": "2026-10-14T13:00:00Z",
+    "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
+    "body": {
+      "reason": "share_used",
+      "minutes": 7,
+      "cost_cents": 121
+    },
+    "signature": "fUqmkG3DOZMWbLmbYKzMk78keUBKD2a0jjo7lR-64b5JaPsaP2sOn06lyQMWe8_6M9LHmlYIicIw0pBGdm9jCg"
+  }
+}

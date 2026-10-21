@@ -104,7 +104,7 @@ struct SharingSettingsView: View {
     // MARK: On this Mac now
 
     private func onThisMac(_ mac: RunnerSharingMac) -> some View {
-        SetGroup("On this Mac now", footer: Self.logFooter(team)) {
+        SetGroup("On this Mac now", footer: Self.logFooter(team) + (mac.week.map { " " + Self.weekLine($0) } ?? "")) {
             if mac.jobs.isEmpty {
                 SetRow("Nobody right now", quiet: true)
             }
@@ -121,6 +121,14 @@ struct SharingSettingsView: View {
                 SetRow("") { Button("Stop All", role: .destructive) { stop(nil) }.buttonStyle(.set) }
             }
         }
+    }
+
+    /// "This week: 3 jobs, 2 h 10 min." (#810), from obid's own log of what ran here.
+    static func weekLine(_ week: RunnerSharingMac.Week) -> String {
+        guard week.jobs > 0 else { return "None this week." }
+        let minutes = week.wallSeconds / 60
+        let time = minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) min" : "\(minutes) min"
+        return "This week: \(week.jobs) job\(week.jobs == 1 ? "" : "s"), \(time)."
     }
 
     /// "Claude Code on Sangam’s account · tetrix-ee · 12 min", and " · Paused" while its owner's back.

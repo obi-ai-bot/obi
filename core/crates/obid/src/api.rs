@@ -294,6 +294,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
             "/v1/obid/sharing/shared",
             get(crate::sphere::routes::shared_with_me),
         )
+        .route("/v1/obid/sphere/audit", get(crate::sphere::routes::audit))
         .route(
             "/v1/obid/sphere/membership",
             axum::routing::put(crate::sphere::routes::renew),

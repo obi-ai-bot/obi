@@ -21,7 +21,7 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "022a2768-1d80-8fe9-8085-c465b39ac62c",
+    "id": "6b8aff9e-a2f7-8300-843c-3e4c48d21d22",
     "type": "result",
     "from": "obi-a",
     "to": "obi-b",
@@ -44,9 +44,8 @@
         "wall_seconds": 840,
         "cpu_seconds": 1900,
         "peak_memory_mb": 2500
-      },
-      "summary": "Added four tests; all pass."
+      }
     },
-    "signature": "hfmRqgVTbwt3cHWp5-xAtAYwlS06ysbCuiM-Gvv80CtDtDIETjQ2qUvUp5XIdjMy1P2RamOsAh-reI2yezodAQ"
+    "signature": "pDCdgWyc2JMuyB8cs6PnzQ7GQ6RVeOGtBfWCHFZckEbHTcLx48CNiQbV4rWlJ-LMBjVkRPTlKybdY8WrWDiQBg"
   }
 }

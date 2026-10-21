@@ -845,6 +845,7 @@ impl FakeSphere {
             .route("/v0.1/spheres/{sphere}/deliveries", get(deliveries))
             .route("/v0.1/spheres/{sphere}/deliveries/ack", post(ack))
             .route("/v0.1/spheres/{sphere}/channels/{cid}", get(channel))
+            .route("/v0.1/spheres/{sphere}/audit", get(audit))
             .route(
                 "/v0.1/spheres/{sphere}/members/{obi}/runner",
                 axum::routing::put(put_runner).delete(delete_runner),
@@ -1074,6 +1075,39 @@ async fn members(State(state): State<Arc<Mutex<SphereState>>>, headers: HeaderMa
         })
         .collect();
     axum::Json(json!({"sphere": SPHERE, "members": members})).into_response()
+}
+
+/// `GET …/audit?from_seq=&limit=`: the chain as recorded (sphere-api.md section 7).
+async fn audit(
+    State(state): State<Arc<Mutex<SphereState>>>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    let state = state.lock().unwrap();
+    if bearer(&state, &headers).is_none() {
+        return sphere_error(StatusCode::UNAUTHORIZED, "unauthorized", "no token");
+    }
+    let from: usize = query
+        .get("from_seq")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    let limit: usize = query
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(500);
+    let entries: Vec<Value> = state
+        .entries
+        .iter()
+        .skip(from - 1)
+        .take(limit)
+        .cloned()
+        .collect();
+    let head = state.entries.last().map_or(
+        json!({"seq": 0, "hash": obi_protocol::ZERO_HASH}),
+        |e| json!({"seq": e["seq"], "hash": e["hash"]}),
+    );
+    axum::Json(json!({"sphere": SPHERE, "entries": entries, "head": head})).into_response()
 }
 
 /// `PUT …/members/{obi}/runner`: kept as put, shown to every member (the Sphere's own tests check

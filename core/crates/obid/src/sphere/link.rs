@@ -127,6 +127,39 @@ fn runner_signed(status: &Value, keys: &obi_protocol::Keys, obi: &str) -> bool {
 /// What a runner status's signature starts with.
 const RUNNER_PREFIX: &[u8] = b"obi/0.1 runner_status\n";
 
+/// An audit entry as typed fields only: never a text the message carries.
+fn audit_entry(entry: &Value) -> Value {
+    let e = &entry["envelope"];
+    let b = &e["body"];
+    let mut out = json!({"seq": entry["seq"], "recordedAt": entry["recorded_at"], "type": e["type"], "from": e["from"],
+                         "to": e["to"], "correlationId": e["correlation_id"]});
+    for (key, value) in [
+        ("repo", &b["repo"]),
+        ("reason", &b["reason"]),
+        ("state", &b["state"]),
+        ("outcome", &b["outcome"]),
+        ("host", &b["host"]),
+        ("minutes", &b["minutes"]),
+        ("costCents", &b["cost_cents"]),
+        (
+            "grant",
+            if b["grant"].is_null() {
+                &b["account"]["grant"]
+            } else {
+                &b["grant"]
+            },
+        ),
+        ("share", &b["share"]),
+        ("usedCents", &b["used_cents"]),
+        ("limitCents", &b["limit_cents"]),
+    ] {
+        if !value.is_null() {
+            out[key] = value.clone();
+        }
+    }
+    out
+}
+
 /// The names the Sphere's secrets are known by in `crate::secrets`.
 const OBI_KEY_SECRET: &str = "obi-key";
 const DELEGATION_SECRET: &str = "sphere-delegation";
@@ -4024,7 +4057,51 @@ impl Link {
     /// `GET /v1/obid/sharing/mac`: this Mac's sharing, whether it can run guests, and what runs
     /// here now.
     pub fn mac_json(&self) -> Value {
-        json!({"settings": self.mac().to_json(), "ready": self.setup.ready(), "jobs": self.hosting.jobs_json()})
+        json!({"settings": self.mac().to_json(), "ready": self.setup.ready(), "jobs": self.hosting.jobs_json(),
+               "week": super::hosting::week(self.home(), time::now())})
+    }
+
+    /// `GET /v1/obid/sphere/audit`: the Sphere's audit chain, checked here end to end against the
+    /// directory's keys, and the entries this Obi sent or got, as metadata only (#810): who, which
+    /// Obi, the repository, the kind, the times, the host's use and the cost; no message's text.
+    pub async fn audit_json(&self) -> Result<Value, ApiError> {
+        let membership = self
+            .lock()
+            .membership
+            .clone()
+            .filter(|m| m.state == "joined")
+            .ok_or_else(|| api(StatusCode::CONFLICT, "obid hasn't joined a Sphere."))?;
+        self.read_directory().await.map_err(|e| from_client(&e))?;
+        let token = self.token().await.map_err(|e| from_client(&e))?;
+        let client = self.client().map_err(|e| from_client(&e))?;
+        // ponytail: the whole chain each time; from a checked head once chains grow long.
+        let mut entries: Vec<Value> = Vec::new();
+        let mut head = json!({"seq": 0, "hash": obi_protocol::ZERO_HASH});
+        loop {
+            let page = client
+                .audit(&token, entries.len() as u64 + 1, 1000)
+                .await
+                .map_err(|e| from_client(&e))?;
+            head = page["head"].clone();
+            let got = page["entries"].as_array().cloned().unwrap_or_default();
+            let done = got.is_empty()
+                || entries.len() + got.len() >= head["seq"].as_u64().unwrap_or(0) as usize;
+            entries.extend(got);
+            if done {
+                break;
+            }
+        }
+        let chain = json!({"sphere": membership.sphere, "entries": entries});
+        let checked = obi_protocol::chain::verify(&chain, &self.lock().directory.keys);
+        let me = membership.obi_id.as_str();
+        let mine: Vec<Value> = entries
+            .iter()
+            .filter(|e| e["envelope"]["from"] == me || e["envelope"]["to"] == me)
+            .map(audit_entry)
+            .collect();
+        Ok(
+            json!({"verified": checked.is_ok(), "problem": checked.err().map(|r| r.code), "head": head, "entries": mine}),
+        )
     }
 
     /// `PUT /v1/obid/sharing/mac`. Turning it off stops every guest job here.

@@ -250,6 +250,18 @@ impl Client {
         Ok(body["members"].as_array().cloned().unwrap_or_default())
     }
 
+    /// A page of the audit chain from `from_seq` (sphere-api.md section 7): `{sphere, entries, head}`.
+    pub async fn audit(
+        &self,
+        token: &str,
+        from_seq: u64,
+        limit: u32,
+    ) -> Result<Value, ClientError> {
+        let url = self.sphere_path(&format!("/audit?from_seq={from_seq}&limit={limit}"));
+        let (status, body) = self.call(|| self.http.get(&url).bearer_auth(token)).await?;
+        Client::expect(status, body, &[200], "wire/audit.response")
+    }
+
     /// Publishes this Obi's signed runner status in the directory (sphere-api.md 6.4).
     pub async fn put_runner(
         &self,

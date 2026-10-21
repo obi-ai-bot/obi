@@ -22,18 +22,17 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "3d9d9441-ef1d-8835-8565-29d01d9e4867",
+    "id": "4c689064-0e7b-8ef7-8414-c09a0a4d454e",
     "type": "run_request",
     "from": "obi-b",
     "to": "obi-a",
     "sphere": "conf-sphere",
-    "correlation_id": "3d9d9441-ef1d-8835-8565-29d01d9e4867",
+    "correlation_id": "4c689064-0e7b-8ef7-8414-c09a0a4d454e",
     "created_at": "2026-10-14T11:59:00Z",
     "expires_at": "2026-10-14T13:00:00Z",
     "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
     "body": {
       "title": "Write tests for average()",
-      "request": "Add tests for average() in src/average.test.js, including the empty list.\nCommit them.",
       "agent": "claude",
       "model": "sonnet",
       "repo": "obi-conf/fixture-app",
@@ -46,6 +45,6 @@
       },
       "max_minutes": 120
     },
-    "signature": "_BYmrV-wCP8PHwQDXBSuaGoqb5GsMk-RshElnBHqxoC5khJczZPzk5qNjm-giCFe00LnJ59xV67t2R1v_fUOAA"
+    "signature": "OWpHr-9lUdOYC_vyVIT4P8sOh0OT4mKrtRxAu2Ig0kRjoUXoEWk0EUSGVfvEK45Cxt9ru7Wiw7iUbzlcchdGDg"
   }
 }

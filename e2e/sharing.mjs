@@ -3,7 +3,10 @@
 // a Sphere (local, from OBI_SPHERE_DIR), Wellington's obid sharing this Mac and Sangam's obid sending
 // a job to it, each in a home of its own. The job runs in a real VM (core/obi-vm and its image), with
 // the real Claude Code inside; its model calls go back through the job channel to Sangam's obid,
-// which calls the model's API from there with Sangam's key.
+// which calls the model's API from there with Sangam's key. Then Wellington shares part of his
+// company API account with Sangam (#809): a job on it runs in the VM again, its model calls made
+// from Wellington's obid with Wellington's key and metered. The Sphere's audit chain keeps only what
+// the jobs are (#810).
 //
 //   node e2e/sharing.mjs --image <dir with vmlinuz, initrd, root.img>
 //
@@ -107,7 +110,9 @@ function fakeModel(port) {
     req.on("data", (c) => (raw += c));
     req.on("end", () => {
       const asked = JSON.parse(raw || "{}");
-      writeFileSync(join(R, "model-calls.log"), `${req.method} ${req.url} key=${req.headers["x-api-key"] === readFileSync(join(R, "key"), "utf8").trim() ? "the guest's" : "other"}\n`, { flag: "a" });
+      const sent = req.headers["x-api-key"];
+      const whose = sent === readFileSync(join(R, "key"), "utf8").trim() ? "the guest's" : sent === readFileSync(join(R, "host-key"), "utf8").trim() ? "the host's" : "other";
+      writeFileSync(join(R, "model-calls.log"), `${req.method} ${req.url} key=${whose}\n`, { flag: "a" });
       const used = (asked.messages ?? []).some((m) => Array.isArray(m.content) && m.content.some((c) => c.type === "tool_result"));
       const ev = (t, o) => `event: ${t}\ndata: ${JSON.stringify(o)}\n\n`;
       const out = [ev("message_start", { type: "message_start", message: { id: "msg_e2e", type: "message", role: "assistant", model: asked.model ?? "fake", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 100, output_tokens: 1 } } })];
@@ -171,14 +176,17 @@ async function main() {
     const inv = expect(await call(`${sphereUrl}/v0.1/spheres/${SPHERE}/invitations`, { method: "POST", token: await admin(), body: { owner: o.id, obi, expires_in: 3600 } }), 201, `${obi}'s invitation`);
     return { id: inv.invitation_id, secret: inv.secret };
   };
-  expect(await call(`${sphereUrl}/v0.1/spheres/${SPHERE}/policy`, { method: "PUT", token: await admin(), body: { expected_version: 0, rules: [{ id: "team", from_owner: "*", to_owner: "*", actions: ["review_request", "run_request"], repos: ["*"] }] } }), 200, "the policy");
-  pass(`Sphere ${SPHERE} at ${sphereUrl}, the policy allows run_request`);
+  expect(await call(`${sphereUrl}/v0.1/spheres/${SPHERE}/policy`, { method: "PUT", token: await admin(), body: { expected_version: 0, rules: [{ id: "team", from_owner: "*", to_owner: "*", actions: ["review_request", "run_request", "share_offer"], repos: ["*"] }] } }), 200, "the policy");
+  pass(`Sphere ${SPHERE} at ${sphereUrl}, the policy allows run_request and share_offer`);
 
   step("2. Two obids: Wellington's shares this Mac, Sangam's has a company API key");
   const fixture = buildFixture(join(R, "fixture"));
   const modelPort = await freePort();
   const key = KEY_FILE ? readFileSync(KEY_FILE, "utf8").trim() : `sk-ant-api03-e2e-${randomBytes(16).toString("hex")}`;
   writeFileSync(join(R, "key"), key, { mode: 0o600 });
+  // Wellington's company key, which Sangam's jobs on his share run on (a stand-in unless the model is real).
+  const hostKey = KEY_FILE ? key : `sk-ant-api03-e2e-host-${randomBytes(16).toString("hex")}`;
+  writeFileSync(join(R, "host-key"), hostKey, { mode: 0o600 });
   if (!KEY_FILE) await fakeModel(modelPort);
   // obi-vm, except `signals`, which this run decides.
   const signals = join(R, "signals.json");
@@ -188,11 +196,13 @@ async function main() {
   writeFileSync(wrapper, `#!/bin/sh\nif [ "$1" = signals ]; then cat '${signals}'; exit 0; fi\nexec '${OBI_VM}' "$@"\n`);
   chmodSync(wrapper, 0o755);
   const obids = {};
-  for (const [who, o, obi, accepts] of [["host", W, "obi-wellington", ["review_request", "run_request"]], ["guest", S, "obi-sangam", ["review_request"]]]) {
+  for (const [who, o, obi, accepts] of [["host", W, "obi-wellington", ["review_request", "run_request"]], ["guest", S, "obi-sangam", ["review_request", "share_offer"]]]) {
     const dir = join(R, who);
     const home = join(dir, "home");
     for (const d of ["env-home", "tmp"]) mkdirSync(join(dir, d), { recursive: true });
     mkdirSync(home, { recursive: true, mode: 0o700 });
+    // Wellington's Claude Code account pays per token, as its tool said once.
+    if (who === "host") writeFileSync(join(home, "usage.json"), JSON.stringify({ stub: { priced: "api" } }), { mode: 0o600 });
     const port = await freePort();
     const token = randomBytes(32).toString("hex");
     writeFileSync(join(home, "api-token"), `${token}\n`, { mode: 0o600 });
@@ -201,7 +211,8 @@ async function main() {
       agents: { claude: { bin: join(OBI, "e2e/stub-agent/stub-agent"), accounts: [{ id: "stub", name: "Stub", configDir: join(home, "accounts/stub") }] } },
       repos: [{ repo: "obi-e2e/fixture-app", remote: fixture.remoteUrl, defaultBranch: "main", check: "node --test" }],
       allowFileRemotes: true, telemetry: false,
-      ...(who === "host" ? { vmHelper: wrapper, vmImage: IMAGE } : { guestModelApi: KEY_FILE ? undefined : `http://127.0.0.1:${modelPort}` }),
+      ...(who === "host" ? { vmHelper: wrapper, vmImage: IMAGE } : {}),
+      guestModelApi: KEY_FILE ? undefined : `http://127.0.0.1:${modelPort}`,
     };
     writeFileSync(join(dir, "config.json"), JSON.stringify(config, null, 2));
     start(`obid-${who}`, OBID, ["serve", "--config", join(dir, "config.json")], { env: { HOME: join(dir, "env-home"), TMPDIR: join(dir, "tmp"), PATH: process.env.PATH } });
@@ -209,11 +220,12 @@ async function main() {
     await within(30, `${who}'s obid answering`, async () => (await api("/status")).status === 200);
     const made = expect(await api("/obid/sphere/key", { method: "POST" }), 200, "the key");
     const card = expect(await api("/obid/sphere/card", { method: "POST", body: { url: sphereUrl, sphere: SPHERE, obiId: obi, name: `${o.id}'s Obi`, ownerKey: o.publicKey, accepts } }), 200, "the card").card;
-    const joined = expect(await api("/obid/sphere/join", { method: "POST", body: { url: sphereUrl, sphere: SPHERE, invitation: await invite(o, obi), card: spec.signCard(card, o.privateKey, o.keyId), delegation: jwt(o, "send:review_request send:question send:run_request reply receive directory:read audit:read", obi, 3600) } }), 200, "the join");
+    const joined = expect(await api("/obid/sphere/join", { method: "POST", body: { url: sphereUrl, sphere: SPHERE, invitation: await invite(o, obi), card: spec.signCard(card, o.privateKey, o.keyId), delegation: jwt(o, "send:review_request send:question send:run_request send:share_offer reply receive directory:read audit:read", obi, 3600) } }), 200, "the join");
     if (joined.state !== "joined" || !made.keyId) fail(`${who} didn't join`);
     obids[who] = { api, dir, home, obi };
   }
   execFileSync(OBID, ["vault", "--config", join(obids.guest.dir, "config.json"), "add", "anthropic-api-key"], { input: key });
+  execFileSync(OBID, ["vault", "--config", join(obids.host.dir, "config.json"), "add", "anthropic-api-key"], { input: hostKey });
   const mac = expect(await obids.host.api("/obid/sharing/mac"), 200, "the host's sharing");
   if (mac.settings.on !== false) fail("sharing isn't off by default");
   const on = expect(await obids.host.api("/obid/sharing/mac", { method: "PUT", body: { ...mac.settings, on: true } }), 200, "sharing on");
@@ -230,7 +242,7 @@ async function main() {
   if (job.runsOn?.owner !== "wellington") fail(`the job's runsOn is ${JSON.stringify(job.runsOn)}`);
   const ask = await within(60, "the ask in Wellington's inbox", async () => (expect(await obids.host.api("/inbox"), 200, "the inbox")).find((i) => i.obi?.type === "run_request"));
   pass(`Wellington's inbox: "${ask.title}" [${ask.options.join(" | ")}]`);
-  expect(await obids.host.api(`/inbox/${ask.id}/answer`, { method: "POST", body: { answer: "Allow sangam from now on" } }), 200, "Allow");
+  expect(await obids.host.api(`/inbox/${ask.id}/answer`, { method: "POST", body: { answer: "Allow Sangam from now on" } }), 200, "Allow");
 
   step("4. It runs in a VM on this Mac; the owner comes back, and leaves again");
   await within(120, "the job running in the VM", async () => (expect(await obids.host.api("/obid/sharing/mac"), 200, "")).jobs.find((j) => j.state === "running"));
@@ -271,6 +283,47 @@ async function main() {
   const verdict = spec.verifyChain({ sphere: SPHERE, entries: audit.entries }, { keys: Object.fromEntries((expect(await call(`${sphereUrl}/v0.1/spheres/${SPHERE}/members`, { token: await admin() }), 200, "members").members).flatMap((m) => m.keys.map((k) => [k.key_id, { obi: m.obi, public_key: k.public_key, valid_from_seq: k.valid_from_seq, valid_until_seq: k.valid_until_seq }]))) });
   if (!verdict.ok) fail(`the audit chain doesn't verify: ${verdict.message}`);
   pass(`the audit chain verifies: ${audit.entries.map((e) => e.envelope.type).join(", ")}`);
+  // Metadata only (#810): the job's words never reach the chain; a run_progress is a pause or a resume.
+  if (JSON.stringify(audit.entries).includes("saying hello")) fail("the job's words are in the audit chain");
+  const progress = audit.entries.filter((e) => e.envelope.type === "run_progress").map((e) => e.envelope.body.state);
+  if (progress.join() !== "paused,resumed") fail(`the chain's run_progress: ${progress.join()}`);
+  for (const who of ["guest", "host"]) {
+    const mine = expect(await obids[who].api("/obid/sphere/audit"), 200, `${who}'s audit`);
+    if (!mine.verified || !mine.entries.some((e) => e.type === "result" && e.host)) fail(`${who}'s obid's check of the chain: ${JSON.stringify(mine).slice(0, 300)}`);
+  }
+  pass("no entry holds the job's words; each obid checks the chain and finds its entries in it");
+
+  step("7. Wellington shares half of his company API account's month with Sangam");
+  const grant = expect(await obids.host.api("/obid/sharing/grants", { method: "PUT", body: { account: "stub", who: "sangam", share: 50, budgetCents: 1000, resetsDay: 1 } }), 200, "the share");
+  const offered = await within(60, "the share on Sangam's Oby", async () => (expect(await obids.guest.api("/obid/sharing/shared"), 200, "")).shares.find((s) => s.grant === grant.id));
+  pass(`Sangam sees ${offered.share}% of ${offered.account}'s month (${offered.limitCents} cents)`);
+  const before = existsSync(join(R, "model-calls.log")) ? readFileSync(join(R, "model-calls.log"), "utf8").trim().split("\n").length : 0;
+  const onShare = expect(await obids.guest.api("/jobs", { method: "POST", body: { job: { repo: "obi-e2e/fixture-app", kind: "build", title: "Hello on a share", task: "Write guest.txt saying hello.", runsOn: { obi: "obi-wellington", grant: grant.id } } } }), 201, "the job on the share");
+  const ended = await within(600, "the job on the share done", async () => {
+    const j = expect(await obids.guest.api(`/jobs/${onShare.id}`), 200, "the job");
+    return ["done", "failed", "interrupted"].includes(j.status) && j;
+  });
+  if (ended.status !== "done") fail(`the job on the share ended ${ended.status}: ${ended.reason ?? ended.summary}`);
+  if (!KEY_FILE) {
+    const after = readFileSync(join(R, "model-calls.log"), "utf8").trim().split("\n").slice(before);
+    if (!after.length || after.some((c) => !c.includes("key=the host's"))) fail(`the share's model calls: ${after.join("; ")}`);
+    pass(`${after.length} model calls on the share, each from Wellington's obid with Wellington's key`);
+  }
+  const used = (expect(await obids.host.api("/obid/sharing/grants"), 200, "")).grants[0].usedCents.sangam;
+  const seen = await within(60, "Sangam's meter", async () => {
+    const s = (expect(await obids.guest.api("/obid/sharing/shared"), 200, "")).shares[0];
+    return s.usedCents === used && s;
+  });
+  const chain = expect(await call(`${sphereUrl}/v0.1/spheres/${SPHERE}/audit`, { token: await admin() }), 200, "the audit chain");
+  const cost = chain.entries.map((e) => e.envelope).find((e) => e.type === "result" && e.body.cost_cents !== undefined)?.body.cost_cents;
+  if (!used || cost !== used) fail(`the meters: Wellington's ${used}, the chain's ${cost}`);
+  pass(`both meters and the chain say ${used} cents; Sangam has ${seen.limitCents - seen.usedCents} cents left`);
+  // With one real key standing in for both, Sangam's vault holds it too: only a stand-in can be looked for.
+  if (!KEY_FILE) {
+    const search2 = spawnSync("grep", ["-rl", "--binary-files=text", hostKey, obids.guest.home, join(R, "sphere")], { encoding: "utf8" });
+    if (search2.status !== 1) fail(`Wellington's key is on Sangam's side or the Sphere's: ${search2.stdout}`);
+    pass("Wellington's key is nowhere in Sangam's obid's home or the Sphere's state");
+  }
 }
 
 let ok = false;

@@ -2055,9 +2055,16 @@ nonisolated struct RunnerSharingMac: Codable, Equatable, Sendable {
         var state: String
         var id: String { correlationId }
     }
+    /// This Mac's last 7 days of teammates' jobs (#810); nil from an obid before it.
+    struct Week: Codable, Equatable, Sendable {
+        var jobs: Int
+        var wallSeconds: Int
+        var costCents: Int
+    }
     var settings: Settings
     var ready: Bool
     var jobs: [Guest]
+    var week: Week? = nil
 }
 
 /// A teammate's Mac a job can run on (`GET /v1/obid/sharing/macs`).

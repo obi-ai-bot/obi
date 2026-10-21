@@ -26,6 +26,9 @@ use super::channel::{self, Event, Frame, Kind, Role};
 use crate::agent::{self, Event as AgentEvent, Turn};
 use crate::process::Signal;
 
+/// The most a job's words may be on the channel (spec protocol.md section 13).
+const MAX_WORDS: usize = 20_000;
+
 /// The vault secret each agent's company API key is kept under.
 pub fn key_name(agent: &str) -> &'static str {
     if agent == "codex" {
@@ -118,9 +121,20 @@ pub async fn run_turn(
         ],
     )
     .await?;
+    // The job's words go too, on the channel (never in the request, so never in the chain): the
+    // spec's limit, and the scan.
+    if prompt.chars().count() > MAX_WORDS {
+        return Err(format!(
+            "The job's words are longer than {MAX_WORDS} characters: too long to send to another Mac."
+        ));
+    }
     let scratch = link.home().join("tmp");
     let _ = std::fs::create_dir_all(&scratch);
-    match crate::scan::scan(&[("the job's changes".into(), diff)], &scratch).await {
+    let outgoing = [
+        ("the job's changes".into(), diff),
+        ("the job's words".into(), prompt.to_owned()),
+    ];
+    match crate::scan::scan(&outgoing, &scratch).await {
         crate::scan::Verdict::Clean => {}
         crate::scan::Verdict::Found(found) => {
             return Err(format!(
@@ -180,7 +194,7 @@ async fn run_in(
     made?;
     let bytes = std::fs::read(&bundle).map_err(|e| e.to_string())?;
     let sha = hex::encode(digest::digest(&digest::SHA256, &bytes).as_ref());
-    let mut body = json!({"title": ask.title, "request": prompt, "agent": ask.agent, "repo": ask.repo,
+    let mut body = json!({"title": ask.title, "agent": ask.agent, "repo": ask.repo,
                           "base_branch": ask.base_branch, "base_sha": base_sha, "branch": ask.branch,
                           "bundle": {"sha256": sha, "bytes": bytes.len()}, "size": ask.size, "max_minutes": 120});
     if let Some(model) = ask.model {
@@ -260,7 +274,7 @@ async fn run_in(
                 let Some(event) = event else { break };
                 match event {
                     Event::Ready => {
-                        channel.send(Frame::json(0, Kind::Data, &json!({"author": author}))).await;
+                        channel.send(Frame::json(0, Kind::Data, &json!({"author": author, "request": prompt}))).await;
                         channel.send(Frame::json(0, Kind::Data, &json!({"transcript_from": session.lines}))).await;
                         if !bundle_sent {
                             let stream = 2;
