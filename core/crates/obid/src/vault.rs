@@ -1147,13 +1147,20 @@ pub async fn answers(request: Request, next: Next) -> Response {
             Ok(bytes) => bytes,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
-        return match vault.scrubbed(&bytes) {
-            Ok(None) => Response::from_parts(parts, Body::from(bytes)),
-            Ok(Some(clean)) => {
+        // Off the async threads: a big answer (a job list is hundreds of KB) is a lot of text.
+        let scrubbed = {
+            let (vault, bytes) = (vault.clone(), bytes.clone());
+            tokio::task::spawn_blocking(move || vault.scrubbed(&bytes)).await
+        };
+        return match scrubbed {
+            Ok(Ok(None)) => Response::from_parts(parts, Body::from(bytes)),
+            Ok(Ok(Some(clean))) => {
                 parts.headers.remove(header::CONTENT_LENGTH);
                 Response::from_parts(parts, Body::from(clean))
             }
-            Err(why) => unreadable(&why),
+            Ok(Err(why)) => unreadable(&why),
+            // The scrub panicked: nothing of the answer goes out.
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
     }
     parts.headers.remove(header::CONTENT_LENGTH);
@@ -1485,6 +1492,173 @@ mod tests {
         }
         for text in clean {
             assert!(!secrets.touches(text), "{text:?}");
+        }
+    }
+
+    /// The scrub as it was before the shortcut: the whole redaction on every string and key.
+    fn scrub_in_full(vault: &Vault, value: &mut Value) {
+        match value {
+            Value::String(text) => *text = vault.redact_checked(text),
+            Value::Array(items) => items.iter_mut().for_each(|item| scrub_in_full(vault, item)),
+            Value::Object(fields) => {
+                for (key, mut item) in std::mem::take(fields) {
+                    scrub_in_full(vault, &mut item);
+                    fields.insert(vault.redact_checked(&key), item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A small seeded generator (xorshift64*): the same strings on every run, no new dependency.
+    struct Dice(u64);
+
+    impl Dice {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+        fn pick<'a, T>(&mut self, list: &'a [T]) -> &'a T {
+            &list[self.below(list.len())]
+        }
+        fn bytes(&mut self, n: usize) -> Vec<u8> {
+            (0..n).map(|_| self.next() as u8).collect()
+        }
+    }
+
+    /// The shortcut against the whole redaction on generated text: pieces of every secret in
+    /// every form (plain, base64 at each offset, hex in either case, URL-encoded, a key's lines,
+    /// over `\n`, `\\n` and `\r\n`), cut anywhere, next to noise that looks like them (base64, hex
+    /// and `%XX` runs, paths, non-ASCII). Every string, and every JSON answer made of them, comes
+    /// out byte for byte the same both ways.
+    #[test]
+    fn the_scrubs_shortcut_matches_the_whole_redaction_on_generated_text() {
+        let scratch = Scratch::new();
+        let (vault, _) = scratch.vault();
+        let value = secret();
+        let hex_value = hex::encode(uuid::Uuid::new_v4().as_bytes());
+        // As short as a value can be (SHORTEST), with every kind of character so the vault takes it.
+        let short = "Q7-k9#Lz".to_owned();
+        let mut key = String::from("-----BEGIN TEST KEY-----\n");
+        let mut dice = Dice(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..12 {
+            key.push_str(&b64(&dice.bytes(48)));
+            key.push('\n');
+        }
+        key.push_str("-----END TEST KEY-----\n");
+        for (name, secret) in [
+            ("one", value.as_str()),
+            ("hex", hex_value.as_str()),
+            ("short", short.as_str()),
+            ("key", key.as_str()),
+        ] {
+            vault.add(secret, name).unwrap();
+        }
+        vault.check().unwrap();
+        let secrets = vault.secrets.snapshot();
+
+        let mut pieces: Vec<String> = Vec::new();
+        for secret in [&value, &hex_value, &short].into_iter().chain(
+            key.lines()
+                .filter(|l| !l.starts_with("-----"))
+                .take(3)
+                .map(|l| l.to_owned())
+                .collect::<Vec<_>>()
+                .iter(),
+        ) {
+            pieces.extend(copies(secret).into_iter().map(|(_, copy)| copy));
+        }
+        pieces.extend([
+            key.clone(),
+            key.replace('\n', "\\n"),
+            key.replace('\n', "\r\n"),
+        ]);
+        let noise = [
+            " ",
+            "\n",
+            "\\n",
+            "\r\n",
+            "\"",
+            "'",
+            "/",
+            "=",
+            "%",
+            "%2F",
+            "%zz",
+            "é",
+            "ü→",
+            "{",
+            "}",
+            ":",
+            ",",
+            "the ",
+            "token=",
+            "Bearer ",
+            "core/crates/obid/src/vault.rs",
+            "/Users/someone/Library/Application Support/Oby",
+        ];
+        let mut texts: Vec<String> = Vec::new();
+        for _ in 0..4000 {
+            let mut text = String::new();
+            for _ in 0..1 + dice.below(6) {
+                let piece = match dice.below(6) {
+                    0 | 1 => dice.pick(&pieces).clone(),
+                    2 => {
+                        let n = 4 + dice.below(40);
+                        b64(&dice.bytes(n))
+                    }
+                    3 => {
+                        let n = 4 + dice.below(24);
+                        hex::encode(dice.bytes(n))
+                    }
+                    _ => dice.pick(&noise).to_string(),
+                };
+                // Cut it anywhere (on a character's edge), at either end or both.
+                let chars: Vec<char> = piece.chars().collect();
+                let (mut from, mut to) = (0, chars.len());
+                if dice.below(3) == 0 {
+                    from = dice.below(chars.len().max(1));
+                }
+                if dice.below(3) == 0 {
+                    to = from + dice.below((chars.len() - from).max(1) + 1);
+                }
+                text.extend(&chars[from..to.min(chars.len())]);
+            }
+            texts.push(text);
+        }
+
+        let mut skipped = 0;
+        for text in &texts {
+            if !secrets.touches(text) {
+                skipped += 1;
+            }
+            assert_eq!(
+                vault.clean(&secrets, text),
+                vault.redact_checked(text),
+                "{text:?}"
+            );
+        }
+        // Both ways are taken: what holds a secret, and what's skipped.
+        assert!(
+            skipped > 200 && skipped < texts.len() - 200,
+            "skipped {skipped}"
+        );
+
+        for chunk in texts.chunks(40) {
+            let mut answer = serde_json::json!({
+                "jobs": chunk.iter().map(|t| serde_json::json!({"title": t, "steps": [t, "plain"]})).collect::<Vec<_>>(),
+                "keyed": chunk.iter().map(|t| (t.clone(), Value::from(1))).collect::<serde_json::Map<_, _>>(),
+            });
+            let bytes = serde_json::to_vec(&answer).unwrap();
+            let fast = vault.scrubbed_with(&secrets, &bytes);
+            scrub_in_full(&vault, &mut answer);
+            let full = serde_json::to_vec(&answer).unwrap();
+            assert_eq!(fast.unwrap_or(bytes), full);
         }
     }
 
