@@ -312,6 +312,8 @@ impl Link {
         let decisions = Decisions::open(&config.home);
         let sharing = sharing::Kept::open(&config.home);
         let pins = super::pins::Pins::open(&config.home);
+        // Nothing of a guest job a crash left behind: obid starts with none running.
+        super::hosting::clean_leftovers(&config.home);
         let sandbox = std::env::current_exe()
             .map_err(|e| format!("obid can't find its own executable: {e}"))
             .and_then(|obid| Sandbox::detect(&obid));
