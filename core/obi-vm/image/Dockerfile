@@ -2,6 +2,10 @@
 # network setup at all. core/obi-vm/image/build.sh turns it into a kernel, an initrd and a
 # read-only ext4 root. Every source is pinned: the base by digest, each tool by version and SHA-256.
 FROM debian:bookworm@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61
+# Debian's packages as they were on 2026-10-20, from its snapshot archive: the same every build.
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+ && echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261020T000000Z bookworm main" > /etc/apt/sources.list \
+ && echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20261020T000000Z bookworm-security main" >> /etc/apt/sources.list
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       linux-image-arm64 initramfs-tools ca-certificates curl git jq socat cryptsetup-bin e2fsprogs \
       iproute2 kmod procps util-linux ripgrep python3 less xz-utils \

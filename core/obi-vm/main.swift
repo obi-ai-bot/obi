@@ -6,8 +6,9 @@
 //              --max-seconds 7200 --vsock 7000=/path/control.sock --vsock 7001=/path/model.sock \
 //              --vsock 7002=/path/key.sock
 //     One Linux VM: the root image read-only, the job's disk read-write, no network device, no
-//     shared folder. The kernel, initrd and root are checked against `image.json` beside the
-//     kernel before it boots. A guest connection to a vsock port is joined to that Unix socket,
+//     shared folder. The kernel, initrd and root are checked against the SHA-256s baked into this
+//     obi-vm when it was built (build.sh, from the image's image.json) before it boots; one built
+//     without them boots nothing. A guest connection to a vsock port is joined to that Unix socket,
 //     which obid serves; that is the VM's only link out, at most 16 connections a port at once.
 //     The guest's console goes to LOG, at most 1 MiB, the rest dropped. stdin takes `pause`,
 //     `resume` and `stop`, one per line, and `background`, `foreground` and `usage`; stdout says
@@ -123,17 +124,17 @@ func parse(_ args: ArraySlice<String>) -> Options {
     return o
 }
 
-/// The image's files are the ones `image.json` beside the kernel names, by SHA-256, or nothing boots.
+/// The image's files are the ones baked into this obi-vm (`bakedImage`, image-hashes.swift, made by
+/// build.sh), by SHA-256, or nothing boots: never what a file beside them says.
 func verifyImage(_ o: Options) {
-    let dir = URL(fileURLWithPath: o.kernel).deletingLastPathComponent()
-    guard let data = try? Data(contentsOf: dir.appendingPathComponent("image.json")),
-          let want = (try? JSONSerialization.jsonObject(with: data)) as? [String: String] else { fail("no image.json beside the kernel") }
+    let want = bakedImage
+    if want.isEmpty { fail("this obi-vm was built without its image's hashes: build it with build.sh <out> <image.json>") }
     for (name, path) in [("vmlinuz", o.kernel), ("initrd", o.initrd), ("root.img", o.root)] {
         guard let file = FileHandle(forReadingAtPath: path) else { fail("can't read \(path)") }
         var hash = SHA256()
         while let chunk = try? file.read(upToCount: 8 << 20), !chunk.isEmpty { hash.update(data: chunk) }
         let got = hash.finalize().map { String(format: "%02x", $0) }.joined()
-        guard want[name] == got else { fail("\(name) isn't the one image.json names") }
+        guard want[name] == got else { fail("\(name) isn't the image this obi-vm was built for") }
     }
 }
 
@@ -327,12 +328,13 @@ switch args.count > 1 ? args[1] : "" {
 case "signals":
     say(signals())
 case "run":
-    // The owner always comes first: lowest CPU priority, throttled I/O.
-    setpriority(PRIO_DARWIN_PROCESS, 0, PRIO_DARWIN_BG)
-    // The VM process starts with the VZVirtualMachine, so the ones before it are looked at first.
-    let before = vmProcesses()
     let options = parse(args.dropFirst(2))
     verifyImage(options)
+    // The VM process starts with the VZVirtualMachine, so the ones before it are looked at first;
+    // one obi-vm starts a VM at a time (a lock), so the one that appears is this one's.
+    let lock = open("/private/tmp/obi-vm-\(getuid()).lock", O_CREAT | O_RDWR, 0o600)
+    if lock >= 0 { flock(lock, LOCK_EX) }
+    let before = vmProcesses()
     let runner: Runner
     do { runner = try Runner(options) } catch { fail("\(error)") }
     // Its own limit, whatever obid does: past it the VM stops hard, and obi-vm with it.
@@ -346,6 +348,10 @@ case "run":
         case .success:
             let new = vmProcesses().subtracting(before)
             runner.process = new.count == 1 ? new.first : nil
+            if lock >= 0 { flock(lock, LOCK_UN); close(lock) }
+            // The owner always comes first: lowest CPU priority, throttled I/O, once it runs (the
+            // image's check and the VM's start, at it, take minutes on a busy Mac).
+            setpriority(PRIO_DARWIN_PROCESS, 0, PRIO_DARWIN_BG)
             say(["event": "running"])
         case .failure(let error): say(["event": "stopped", "reason": "error", "error": error.localizedDescription]); exit(1)
         }
