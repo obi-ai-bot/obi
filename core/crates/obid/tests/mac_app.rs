@@ -169,6 +169,20 @@ fn the_mac_app_follows_obid_and_lists_its_jobs() {
     let done = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None).body;
     assert_eq!(done["status"], "done");
 
+    // obid has measured its worktrees (it may answer before), so the client's status has `cleanup`.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while call(&obid, "GET", "/v1/status", None)
+        .body
+        .get("cleanup")
+        .is_none()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "obid never measured its worktrees"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
     // The owner opens pairing on obid's machine, so the Mac's key registers (POST /v1/devices).
     std::fs::write(obid.home.join("pairing"), "").unwrap();
     let mut child = Command::new(&client)

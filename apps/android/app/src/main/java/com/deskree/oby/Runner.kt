@@ -332,11 +332,6 @@ data class GitHubWork(val signedIn: Boolean, val login: String? = null, val item
         }
         val action: String? get() = if (!known || draft == true) null else when (list) { "reviews" -> "Review it"; "assigned" -> "Fix it"; else -> null }
         val label get() = if (action == null) (if (list == "mine") "Your pull request" else "On GitHub") else "Start it?"
-        val actionDetail: String? get() = when (list) {
-            "reviews" -> "Starts Oby's review of it. Nothing is posted on GitHub."
-            "assigned" -> "Starts a fix job on it, which opens a pull request when its check passes."
-            else -> null
-        }
         val state: String? get() {
             val review = when (reviewDecision) { "APPROVED" -> "Approved"; "CHANGES_REQUESTED" -> "Changes requested"; "REVIEW_REQUIRED" -> "Waiting for review"; else -> null }
             val checksLine = when (checks) { "SUCCESS" -> "checks passed"; "FAILURE", "ERROR" -> "checks failed"; "PENDING", "EXPECTED" -> "checks running"; else -> null }

@@ -187,6 +187,35 @@ struct WindowScreens {
         ])
     }
 
+    /// A kind's page with the owner's shape of work (2026-10-21): 9 pull requests waiting for review,
+    /// 51 issues assigned on the roadmap's columns, jobs running and done. `open` false leaves only
+    /// the done jobs, so Issues and Review PR open on To do.
+    func busy(open: Bool) -> IslandModel {
+        let model = model()
+        if !open {
+            for (id, title, kind) in [("r1", "#251 settings layout", Plan.Kind.review), ("r2", "#412 retry jitter", .review), ("i1", "Search ignores accents", .build),
+                                      ("i2", "#251 Attention queue", .build), ("t1", "Dark mode flashes on launch", .build)] {
+                model.feed.apply(job(id, title, kind: kind, status: .done, issue: id.hasPrefix("i") ? 488 : nil, ago: 7200))
+            }
+        }
+        for n in 0..<8 { model.feed.apply(job("d\(n)", "Done issue \(470 - n)", status: .done, issue: 470 - n, ago: 4000 + Double(n) * 3000)) }
+        model.feed.apply(GitHubWork.busy(now: now))
+        return model
+    }
+
+    /// The page with the To do, Running and Completed tabs (#794, #814), on each tab.
+    @Test(arguments: ["issues-running", "issues-todo", "review-todo", "tasks-done"])
+    func tasksPage(_ screen: String) async throws {
+        let state = ChatState(defaults: .scratch)
+        state.trail.start(.group(screen.hasPrefix("issues") ? .issues : screen.hasPrefix("review") ? .review : .tasks))
+        try await shoot("mac-tasks-\(screen)", model: busy(open: screen.hasSuffix("running")), state: state)
+    }
+
+    /// Home with the owner's work, the side panel open: the ways to the page.
+    @Test func homeBusy() async throws {
+        try await shoot("mac-home-busy", model: busy(open: true), state: ChatState(defaults: .scratch))
+    }
+
     @Test func task() async throws {
         let state = ChatState(defaults: .scratch)
         state.trail.start(.group(.review), .job(id: "r2", local: false))

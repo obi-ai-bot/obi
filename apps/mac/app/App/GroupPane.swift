@@ -14,8 +14,12 @@ struct GroupPane: View {
     /// Connect GitHub: Settings › Connectors, where GitHub's row signs obid's gh in with GitHub's
     /// own device sign-in (#690).
     let onConnectGitHub: () -> Void
+    /// Back where it was opened from: a click on the page that isn't on its title, tabs, a card or a link.
+    let onClose: () -> Void
     /// The tab picked, or nil for the one it opens on (`WorkList.firstTab`).
     @State private var picked: WorkList.Tab?
+    /// The page's height, so the empty space under a short list closes it too.
+    @State private var height: CGFloat = 0
 
     private var tab: WorkList.Tab { picked ?? WorkList.firstTab(items, toDo: opensOnToDo) }
     private var ranked: [WorkList.Item<SidebarSections.JobRow>] { WorkList.ranked(items) }
@@ -43,6 +47,7 @@ struct GroupPane: View {
                 LineTabs(tab: tab, counts: WorkList.counts(items, toDo: gitHub ? columns.reduce(0) { $0 + $1.items.count } : nil, upcoming: upcoming.count)) {
                     picked = $0
                 }
+                .contentShape(Rectangle())
                 .padding(.bottom, 16)
                 let cards = WorkList.items(ranked, in: tab)
                 if tab == .todo {
@@ -61,14 +66,20 @@ struct GroupPane: View {
                 }
                 // Completed ones leave Home after a while (Archive completed, in Home's ⋮).
                 if tab == .done {
-                    Button(Self.archivedLink, action: onOpenArchive)
-                        .buttonStyle(LinkTextStyle()).padding(.top, 8).frame(maxWidth: .infinity)
+                    // The row's full width, as the design's `.group-archived`: a click beside the words opens it too.
+                    Button(action: onOpenArchive) { Text(Self.archivedLink).frame(maxWidth: .infinity).contentShape(Rectangle()) }
+                        .buttonStyle(LinkTextStyle()).padding(.top, 8)
                 }
             }
             .frame(maxWidth: Tokens.column, alignment: .leading)
             .frame(maxWidth: .infinity)
             .padding(.horizontal, Tokens.gutter).padding(.top, 16).padding(.bottom, 32)
+            .frame(maxWidth: .infinity, minHeight: height, alignment: .top)
+            // Under the page's content, so only a click that lands on nothing else closes it (Sangam's GroupView).
+            // A button, not a tap gesture: a tap gesture there never fires inside the scroll view.
+            .background { Button(action: onClose) { Tokens.bg }.buttonStyle(.plain).accessibilityHidden(true) }
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .scrollIndicators(.never)
         // The tab it opens on stays put while you're on it, so a task arriving doesn't switch it.
         // On Review PR and Issues it waits for GitHub's list, so it doesn't settle on an empty Running first.

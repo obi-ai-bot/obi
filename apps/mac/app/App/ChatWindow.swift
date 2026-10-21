@@ -438,7 +438,7 @@ private struct HomeView: View {
             GroupPane(model: model, state: state, kind: kind, items: work.filter { $0.type == kind },
                       onOpenJob: { state.trail.push(.job(id: $0, local: $1)) },
                       onOpenArchive: { state.trail.push(.archived) },
-                      onConnectGitHub: { state.openSettings(.connectors) })
+                      onConnectGitHub: { state.openSettings(.connectors) }, onClose: back)
                 .takesKeys()
         case .archived:
             ArchivePane(items: model.archive(state), onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })

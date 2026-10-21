@@ -411,6 +411,7 @@ final class RunnerFeed {
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     case .tetrix(let status): tetrix = status
+                    case .cleanup(let measured): cleanup = measured
                     // obid names each turn's, step's and word's conversation: the window shows one (#493).
                     case .turn(let turn, let extras):
                         if conversations.shows(turn.conversation) { conversation.apply(turn, extras) }
