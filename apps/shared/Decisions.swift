@@ -100,6 +100,8 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     var artifacts: [ArtifactRef]?
     /// obid only (#395): the routine whose run started it.
     var routine: RoutineMark?
+    /// Teammates' open pull requests on its files (obid only), or nil.
+    var teammates: TeammatePRs?
     /// What its agent asked Tetrix, the session it saved and where the graph fell short, or nil.
     var tetrix: TetrixJobReport?
     /// The job page's facts (#739), read from the same JSON; nil for this Mac's own jobs.
@@ -109,6 +111,8 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     var archived: Date?
 
     private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, turn, artifacts, routine, tetrix, archived }
+
+    private enum TeammatesKey: String, CodingKey { case teammates }
 
     init(id: String, mode: String? = nil, permission: RunnerPermission? = nil, question: Question? = nil, conversation: String? = nil,
          turn: String? = nil) {
@@ -128,6 +132,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
         question = try? keys.decodeIfPresent(Question.self, forKey: .question)
         conversation = try? keys.decodeIfPresent(String.self, forKey: .conversation)
         turn = try? keys.decodeIfPresent(String.self, forKey: .turn)
+        teammates = try? decoder.container(keyedBy: TeammatesKey.self).decodeIfPresent(TeammatePRs.self, forKey: .teammates)
         artifacts = try? keys.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
         routine = try? keys.decodeIfPresent(RoutineMark.self, forKey: .routine)
         tetrix = try? keys.decodeIfPresent(TetrixJobReport.self, forKey: .tetrix)

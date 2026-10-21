@@ -515,6 +515,9 @@ struct TaskPage: View {
             if let routine = actions.extras?.routine {
                 Text(routine.line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.leading, 30)
             }
+            if let line = actions.extras?.teammates?.line {
+                Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.leading, 30)
+            }
         }
         .padding(.bottom, 8)
     }

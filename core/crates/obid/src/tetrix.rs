@@ -53,6 +53,8 @@ const SIGNED_OUT: &str = "Tetrix signed Oby out: sign in again.";
 const SIGN_IN_LASTS: Duration = Duration::from_secs(10 * 60);
 /// How long obid's own questions to Tetrix (a job's context) may take.
 const ASK_WITHIN: Duration = Duration::from_secs(10);
+/// The most of a job's claimed files obid asks Tetrix about before it starts.
+const FILES_ASKED: usize = 3;
 const DEFAULT_SCOPES: &str = "graph:read sessions:write hitl:write";
 /// At most this many of each gap, each at most [`LONGEST_GAP`] characters.
 const KEPT: usize = 20;
@@ -1099,10 +1101,18 @@ impl Tetrix {
             Some(n) => format!("{}#{n}", job.repo),
             None => job.short_title(),
         };
-        let asks = [
+        let mut asks = vec![
             ("search_entities", json!({"query": query, "limit": 10})),
             ("repo_sessions", json!({"name": job.repo})),
         ];
+        // The files it claimed, as the graph names them (`owner/repo#path`): their pull requests
+        // and commits, teammates' too (crate::teammates reads which are open from GitHub).
+        for file in job.files.iter().flatten().take(FILES_ASKED) {
+            asks.push((
+                "search_entities",
+                json!({"query": format!("{}#{file}", job.repo), "limit": 5}),
+            ));
+        }
         let mut items = Vec::new();
         for (tool, arguments) in asks {
             // The query holds the job's title: through the secret scan, like every call.
