@@ -71,16 +71,35 @@ scripts/release.sh 0.2.0
 
 In order, it:
 
+0. **Runs the checks**, `swift test` and the Mac app's `MacTests`, side by side, skipping each one that already passed on this Mac on the same files (see "Tests a release skips"). `--full` runs both whatever the records say. Nothing is built unless they pass.
 1. **Bumps the version.** `MARKETING_VERSION` becomes `0.2.0` and `CURRENT_PROJECT_VERSION` the git commit count including the bump commit, so build numbers only grow; both in `apps/Oby.xcodeproj`, committed as `chore(release): Oby 0.2.0 (N)`.
-2. **Archives the `Oby` scheme** (Release) and exports it with Developer ID ([`apps/ExportOptions-DeveloperID.plist`](../apps/ExportOptions-DeveloperID.plist), `teamID` filled from `OBY_TEAM_ID`).
-3. **Notarizes the app** (`xcrun notarytool submit --keychain-profile oby-notary --wait`), staples the ticket, and checks it with `spctl`.
-4. **Builds `Oby-0.2.0.dmg`**, signs it with the Developer ID, notarizes and staples it too.
-5. **Signs it for Sparkle** with `sign_update` and the EdDSA key in the keychain.
-6. **Writes the appcast entry**: version, build, date, the DMG's URL, length and signature, and release notes from the merged pull requests since the last `v*` tag (`--notes <file>` gives your own, one line per item). It's put on top of the appcast published already, and checked with `xmllint`.
-7. **Uploads** the DMG and `appcast.xml` to R2.
-8. **Tags `v0.2.0`.**
+2. **Archives the `Oby` scheme** (Release) and exports it with Developer ID ([`apps/ExportOptions-DeveloperID.plist`](../apps/ExportOptions-DeveloperID.plist), `teamID` filled from `OBY_TEAM_ID`), on warm caches (see "Warm builds"), then checks the version, that the app and obid hold arm64 and x86_64 (`lipo`), and every signature (`codesign --deep --strict`).
+3. **Builds `Oby-0.2.0.dmg`**, checks the app in it with `codesign`, signs the DMG with the Developer ID, notarizes it (`xcrun notarytool submit --keychain-profile oby-notary --wait`) and staples it, then checks with `spctl` the DMG, the app in it, and a copy of the app with a quarantine flag (see "One notarization"). While Apple works, it scans the app and the commits since the last `v*` tag with gitleaks, and gathers the release notes and the published appcast.
+4. **Signs it for Sparkle** with `sign_update` and the EdDSA key in the keychain.
+5. **Writes the appcast entry**: version, build, date, the DMG's URL, length and signature, and release notes from the merged pull requests since the last `v*` tag (`--notes <file>` gives your own, one line per item). It's put on top of the appcast published already, checked with `xmllint` and scanned with gitleaks.
+6. **Uploads** the DMG and `appcast.xml` to R2.
+7. **Tags `v0.2.0`.**
 
-Everything lands in `build/release/` (gitignored), with `archive.log` and `export.log` when something fails. The script prints no credential and never runs with `set -x`.
+Each step prints how long the release has run (`==> [m:ss]`). Everything lands in `build/release/` (gitignored), with `swift-test.log`, `mac-tests.log`, `archive.log`, `export.log` and `notarize.log` when something fails. The script prints no credential and never runs with `set -x`.
+
+### Tests a release skips
+
+The coordinator's merge ritual already runs the full suites on the exact tree it merges, on this Mac. [`scripts/tested.sh`](../scripts/tested.sh) keeps a record of that, and `release.sh` doesn't run a suite again on files that passed it:
+
+- **The ritual records** what passed, from the checkout it tested, right after the suites pass and before the merge: `scripts/tested.sh record mac-tests` after `MacTests`, and `scripts/tested.sh record swift-test` after `swift test`. Squash-merging keeps the files, so the record holds for `dev` once it's merged. `release.sh` records what it ran itself too, so a release that fails after the checks doesn't run them again.
+- **A record** is `~/Library/Application Support/Oby-release/tested/<suite>/<fingerprint>`: the fingerprint of the files, the suite, the toolchain (Xcode, Swift, and the Rust that builds obid), the commit and the time, with an HMAC-SHA256 whose key is in the login keychain (service `oby-release-tested`, made on the first record). A record edited or written by hand, or by an agent boxed away from the keychain, doesn't verify.
+- **The fingerprint** is `git ls-tree -r HEAD` hashed, with the `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` lines of `project.pbxproj` normalized, so the release's version bump doesn't count as a change. `mac-tests` covers the whole tree; `swift-test` only the Swift package's inputs (`Package.swift`, `Package.resolved`, `Engine/`, `Runner/`, `RunnerTests/`, `mcp/`, `apps/shared/`), so a merge that didn't touch them keeps an earlier record valid. A checkout with any change, untracked files included, is never recorded or matched.
+- **A suite runs** when there's no record for these files, the record doesn't verify, the toolchain changed, the checkout has changes, or `--full` is given. The release prints which suites it skipped and why (`skipped mac-tests: tree 3f2a… passed it on this Mac at …`), or why each one runs.
+
+`scripts/tested.sh check <suite>` says whether the current checkout counts as tested, without running anything.
+
+### Warm builds
+
+The archive no longer starts cold. `~/Library/Caches/Oby-release/<toolchain>/` keeps the release's `DerivedData` (Xcode's build and its Swift packages) and `cargo/`, obid's cargo target directory (`OBY_CARGO_TARGET_DIR`, which the Bundle obid phase reads; it builds both architectures in one cargo run). `<toolchain>` is a hash of `xcodebuild -version`, `swift --version` and `rustc -vV`, so a new Xcode or Rust starts a fresh set and the old one is deleted. Before each archive the assembled `Oby.app` in DerivedData is removed, so nothing a previous build left in the bundle reaches this one. What stays warm is obid's Rust (cargo rebuilds only what changed: 0.6 s when nothing did, against about 4 minutes cold for both architectures), the Swift packages and the module caches; `xcodebuild archive` compiles Oby's own Swift again every time (whole-module, about 3 minutes for both architectures), which a release with new code needs anyway. After the export, `release.sh` checks the version, both architectures in the app and in obid (`lipo -archs`), and every nested signature. To start cold anyway, `rm -rf ~/Library/Caches/Oby-release`.
+
+### One notarization
+
+The release notarizes the DMG only. Apple's notary service "generates a ticket for the top-level file that you specify, as well as for each nested file" ([Customizing the notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)), so the app inside gets its own ticket, and Gatekeeper finds it online. The stapled DMG carries its ticket offline; the app copied out of it carries none (`stapler validate` says so), so Gatekeeper looks the app's ticket up online the first time it opens. A Mac offline at that moment is the one case the old second notarization covered and this one doesn't (not tested here); Sparkle's updates arrive online. Checked on 2026-10-21 with a probe app in a DMG notarized alone: `spctl` accepted the DMG, the app in it, and a copy with a quarantine flag, all `source=Notarized Developer ID`, and rejected a differently signed copy (`Unnotarized Developer ID`). `release.sh` makes the same three checks on every real release.
 
 Then push the commit and the tag: `git push origin HEAD v0.2.0`. Shipped Obys pick the update up within 6 hours; **Check for Updates…** gets it now.
 
