@@ -526,16 +526,18 @@ impl Slack {
     }
 
     /// The messages in `channel` newer than `oldest` (a Slack `ts`), oldest first, at most 5
-    /// pages of 200, with the user token: people's own messages, and why each other one was left
-    /// out (`skip_reason`).
+    /// pages of 200, with the user token: people's own messages, why each other one was left out
+    /// (`skip_reason`), and whether that was all of them (Slack gives the newest first: past
+    /// 1,000, the oldest aren't).
     pub async fn history(
         &self,
         channel: &Channel,
         oldest: &str,
-    ) -> Result<(Vec<Message>, Vec<&'static str>), String> {
+    ) -> Result<(Vec<Message>, Vec<&'static str>, bool), String> {
         let mut found = vec![];
         let mut skipped = vec![];
         let mut cursor = String::new();
+        let mut all = false;
         for _ in 0..5 {
             let mut form = vec![
                 ("channel", channel.id.as_str()),
@@ -557,11 +559,12 @@ impl Slack {
                 .unwrap_or_default()
                 .to_owned();
             if answer["has_more"] != true || cursor.is_empty() {
+                all = true;
                 break;
             }
         }
         found.sort_by(|a, b| a.at.total_cmp(&b.at));
-        Ok((found, skipped))
+        Ok((found, skipped, all))
     }
 
     /// A channel's name (`conversations.info`, the user token): also the check that the owner can

@@ -1136,6 +1136,16 @@ pub(crate) async fn digest(listen: &Listen, hands: &impl Hands, now: i64) {
 
 // Posting a review
 
+/// Why a phone may not give this answer to `item`, or none: Approve on a listener's review, which
+/// posts on GitHub a review the phones don't show yet. Dismiss and later go through.
+pub fn phone_refuses(item: Option<&Item>, body: &[u8]) -> Option<&'static str> {
+    let review = item.is_some_and(|i| i.kind == "listen" && i.options.iter().any(|o| o == APPROVE));
+    let approve = serde_json::from_slice::<Value>(body).is_ok_and(|b| b["answer"] == APPROVE);
+    (review && approve).then_some(
+        "Approve it on your Mac, where the review is shown: the phone doesn't show it yet.",
+    )
+}
+
 /// The owner's Approve on a review's item (only their own answer: the conversation's brain is
 /// refused): exactly the review the item shows (`watch.review`), after the secret scan, posted on
 /// the pull request (`post`) only while its head is still the commit Oby reviewed (`head`). Each
@@ -1471,10 +1481,18 @@ pub async fn catch_up(shared: &Shared, now: i64) -> Result<usize, String> {
     for channel in &settings.channels {
         let from = catch_up_from(cursors.get(&channel.id), now);
         match shared.slack.history(channel, &from).await {
-            Ok((messages, skipped)) => {
+            Ok((messages, skipped, all)) => {
                 found.extend(messages);
-                read.push(channel.id.clone());
                 shared.listen.skipped(&skipped);
+                // Cut short, the oldest weren't read: the cursor stays where it is.
+                if all {
+                    read.push(channel.id.clone());
+                } else {
+                    problems.push(format!(
+                        "#{} has more than 1,000 messages since the last catch-up: the oldest weren't read, and its cursor stays.",
+                        channel.name
+                    ));
+                }
             }
             Err(why) => problems.push(format!("#{} wasn't read: {why}", channel.name)),
         }
@@ -1485,7 +1503,7 @@ pub async fn catch_up(shared: &Shared, now: i64) -> Result<usize, String> {
         kept.catch_up_problems = problems.clone();
     }
     shared.listen.save();
-    if read.is_empty() && !settings.channels.is_empty() {
+    if read.is_empty() && found.is_empty() && !settings.channels.is_empty() {
         return Err(format!("No channel could be read: {}", problems.join("; ")));
     }
     let owner = shared.slack.status_json()["user"]
@@ -1494,8 +1512,9 @@ pub async fn catch_up(shared: &Shared, now: i64) -> Result<usize, String> {
     let hands = real(shared);
     let mut sorted = 0;
     // ponytail: at most 20 batches (1,000 messages) a catch-up; the rest waits for the next.
-    for _ in 0..20 {
-        let n = handle_with(
+    let mut said = vec![];
+    for batch in 1..=20 {
+        let n = match handle_with(
             &shared.listen,
             &hands,
             found.clone(),
@@ -1504,11 +1523,34 @@ pub async fn catch_up(shared: &Shared, now: i64) -> Result<usize, String> {
             now,
             false,
         )
-        .await?;
+        .await
+        {
+            Ok(n) => n,
+            Err(why) => {
+                said.push(format!(
+                    "The messages weren't sorted, so the channels' cursors stay: {why}"
+                ));
+                break;
+            }
+        };
         sorted += n;
         if n < SORTED {
             break;
         }
+        if batch == 20 {
+            said.push(
+                "More than 1,000 new messages: the rest are sorted at the next catch-up.".into(),
+            );
+        }
+    }
+    if !said.is_empty() {
+        shared
+            .listen
+            .lock()
+            .catch_up_problems
+            .extend(said.iter().cloned());
+        shared.listen.save();
+        tracing::warn!("listen: {}", said.join(" "));
     }
     move_cursors(&shared.listen, &found, &read, owner.as_deref());
     shared.listen.save();
@@ -2677,5 +2719,19 @@ mod tests {
             );
             assert_eq!(item.options, ["Dismiss"]);
         }
+    }
+
+    /// A phone's Approve on a listener's review is refused by the item itself; its Dismiss, or
+    /// Approve on anything else, isn't.
+    #[test]
+    fn a_phone_cant_approve_what_it_doesnt_show() {
+        let review = ready_item("Looks right.");
+        assert!(phone_refuses(Some(&review), br#"{"answer": "Approve"}"#).is_some());
+        assert!(phone_refuses(Some(&review), br#"{"answer": "Dismiss"}"#).is_none());
+        assert!(phone_refuses(Some(&review), br#"{"later": "2099-01-01T00:00:00Z"}"#).is_none());
+        let mut other = review.clone();
+        other.kind = "github".into();
+        assert!(phone_refuses(Some(&other), br#"{"answer": "Approve"}"#).is_none());
+        assert!(phone_refuses(None, br#"{"answer": "Approve"}"#).is_none());
     }
 }

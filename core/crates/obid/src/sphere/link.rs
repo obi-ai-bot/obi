@@ -790,13 +790,19 @@ impl Link {
 
     /// Keeps the item and tells the apps, as it is now (as `save_exchange`).
     fn save_item(&self, item: &Item) {
+        if let Err(e) = self.keep_item(item) {
+            tracing::error!("can't keep inbox item {}: {e}", item.id);
+        }
+    }
+
+    /// [`Link::save_item`], saying whether it was kept on disk.
+    fn keep_item(&self, item: &Item) -> Result<(), String> {
         let _saving = self.saving.lock().unwrap_or_else(|e| e.into_inner());
         let now = self.lock().inbox.get(&item.id).cloned();
         let item = now.as_ref().unwrap_or(item);
-        if let Err(e) = self.inbox.save(item) {
-            tracing::error!("can't keep inbox item {}: {e}", item.id);
-        }
+        let kept = self.inbox.save(item).map_err(|e| e.to_string());
         self.events.send("inbox", item.to_json());
+        kept
     }
 
     fn save_sharing(&self, sharing: &Sharing) {
@@ -3259,7 +3265,15 @@ impl Link {
             }
         };
         if let Some((open, claimed)) = approving {
-            self.save_item(&claimed);
+            // Not on disk: nothing is posted (a stop could then post it twice).
+            if let Err(why) = self.keep_item(&claimed) {
+                self.lock().inbox.insert(open.id.clone(), open.clone());
+                self.save_item(&open);
+                return Err(api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Nothing was posted: obid couldn't keep the claim ({why})."),
+                ));
+            }
             return match crate::listen::post_review_with_gh(&self.config.home, &claimed).await {
                 Ok(()) => {
                     let mut item = claimed;
@@ -3270,8 +3284,18 @@ impl Link {
                     Ok(item.to_json())
                 }
                 Err(why) => {
-                    self.lock().inbox.insert(open.id.clone(), open.clone());
-                    self.save_item(&open);
+                    // Open again, unless the owner dismissed it meanwhile.
+                    let dismissed = {
+                        let mut state = self.lock();
+                        let dismissed = state.inbox.get(&open.id).is_some_and(|i| i.done.is_some());
+                        if !dismissed {
+                            state.inbox.insert(open.id.clone(), open.clone());
+                        }
+                        dismissed
+                    };
+                    if !dismissed {
+                        self.save_item(&open);
+                    }
                     Err(api(
                         StatusCode::BAD_GATEWAY,
                         format!("Nothing was posted: {why}."),
