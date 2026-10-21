@@ -2193,17 +2193,18 @@ mod tests {
         )
         .await;
         assert!(!done.run.problems.iter().any(|p| p.contains("older ones")));
+        assert_eq!(done.since, Some(now as f64));
     }
 
-    /// A secret past the 500 characters a notice keeps is found all the same, and a title with one
-    /// is left out too.
+    /// A secret across the 500 characters a notice keeps (cut first, only its first letters would
+    /// be scanned) is found all the same, and a title with one is left out too.
     #[tokio::test]
     async fn githubs_texts_are_scanned_whole_and_titles_too() {
         let home = scratch("watch-whole");
         let mut answer = github_answer();
         answer["data"]["a0"]["nodes"][0]["comments"]["nodes"][0]["body"] = json!(format!(
             "{} token AKIA{}",
-            "x".repeat(495),
+            "x".repeat(490),
             "QWERTYUIOPASDFGH"
         ));
         answer["data"]["w0"]["nodes"][0]["title"] =
@@ -2224,6 +2225,13 @@ mod tests {
         .await;
         let shown = serde_json::to_string(&done.run.notices).unwrap();
         assert!(!shown.contains("AKIA"), "{shown}");
+        let comment = done
+            .run
+            .notices
+            .iter()
+            .find(|n| n.key == "github:IC1")
+            .unwrap();
+        assert_eq!(comment.quoted, LEFT_OUT);
         assert!(
             done.run
                 .notices
