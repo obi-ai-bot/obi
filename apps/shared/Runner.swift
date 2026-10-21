@@ -2117,7 +2117,6 @@ nonisolated struct RunnerMac: Codable, Equatable, Sendable, Identifiable {
     var obi: String
     var owner: String
     var free: Bool
-    var freeAt: Date?
     /// Whether you compared its owner's key with them and accepted it (false: trusted on first
     /// sight only; nil from an older obid).
     var verified: Bool?
