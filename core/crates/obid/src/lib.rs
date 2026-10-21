@@ -50,6 +50,7 @@ pub mod sandbox;
 pub mod scan;
 pub mod secrets;
 pub mod settings;
+pub mod slack;
 pub mod sphere;
 pub mod store;
 pub mod teammates;
@@ -58,6 +59,7 @@ pub mod token;
 pub mod transcript;
 pub mod usage;
 pub mod vault;
+pub mod watch;
 pub mod web;
 
 use std::future::Future;
@@ -328,6 +330,12 @@ pub async fn serve(
     let github =
         github_work::Feed::open(config.clone(), jobs.clone(), link.clone(), events.clone());
     let pushes = push::Push::open(&config.home);
+    let slack = slack::Slack::open(
+        &config.home,
+        vault::shared().expect("the vault is installed first"),
+        events.clone(),
+    );
+    let watch = watch::Watch::open(&config.home, events.clone());
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -352,6 +360,8 @@ pub async fn serve(
         tetrix,
         pages: web::Sessions::default(),
         github_work: github.clone(),
+        slack,
+        watch,
         push: pushes,
         stopping: stopping_rx.clone(),
     });
@@ -421,6 +431,8 @@ pub async fn serve(
     // Routines run on their schedules (#395).
     shared.routines.attach(&shared);
     routines::spawn(shared.clone());
+    // The watcher, every 15 minutes on weekdays (crate::watch).
+    watch::spawn(shared.clone());
     // Job, check and inbox events go to the brain first (#590).
     brain::orchestrator::spawn(shared.clone());
     // A job a conversation started that stalls goes back to that conversation, which decides.

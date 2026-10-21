@@ -639,6 +639,23 @@ async fn scrubbed(
     out
 }
 
+/// Events about logins and the watcher, which only the Mac's own Settings uses: Tetrix's and
+/// Slack's sign-ins, and the watcher's rules and runs (what people wrote, quoted).
+const MAC_ONLY_EVENTS: &[&str] = &["tetrix", "slack", "watch"];
+
+/// `text`, a piece of the event stream, without the frames of [`MAC_ONLY_EVENTS`]. The stream
+/// comes a frame at a time, each ending with a blank line.
+fn without_mac_only(text: &str) -> String {
+    text.split_inclusive("\n\n")
+        .filter(|frame| {
+            !frame.lines().any(|line| {
+                line.strip_prefix("event:")
+                    .is_some_and(|name| MAC_ONLY_EVENTS.contains(&name.trim()))
+            })
+        })
+        .collect()
+}
+
 /// What never leaves in a gateway answer besides the vault's secrets (already out): an agent's
 /// session id (a job's `session`, which resumes the agent's own conversation), as null, and the
 /// accounts' homes, as `[home]` (Runner/Gateway.swift, `GatewayScrubber`).
@@ -651,8 +668,10 @@ impl Scrubber {
         self.without_homes(&self.json(text))
     }
 
-    /// One event-stream frame: each `data:` line's JSON as a document.
+    /// One event-stream frame: each `data:` line's JSON as a document. The Mac's own events
+    /// ([`MAC_ONLY_EVENTS`]) never reach a phone.
     fn frame(&self, text: &str) -> String {
+        let text = &without_mac_only(text);
         let lines: Vec<String> = text
             .split('\n')
             .map(|line| match line.strip_prefix("data:") {
@@ -744,6 +763,17 @@ mod tests {
         assert!(allows(&Method::POST, "/v1/github/work/abc/start"));
         assert!(!allows(&Method::POST, "/v1/github/work"));
         assert!(!allows(&Method::GET, "/v1/github/work/abc"));
+        // Slack's login and the watcher are the Mac's alone, their events too.
+        let scrubber = Scrubber { homes: vec![] };
+        let stream = "event: job\ndata: {\"id\":\"j1\"}\n\nevent: watch\ndata: {\"rules\":{}}\n\nevent: slack\ndata: {}\n\nevent: tetrix\ndata: {}\n\nevent: inbox\ndata: {\"id\":\"i1\"}\n\n";
+        assert_eq!(
+            scrubber.frame(stream),
+            "event: job\ndata: {\"id\":\"j1\"}\n\nevent: inbox\ndata: {\"id\":\"i1\"}\n\n"
+        );
+        assert!(!allows(&Method::GET, "/v1/slack"));
+        assert!(!allows(&Method::POST, "/v1/slack/sign-in"));
+        assert!(!allows(&Method::PATCH, "/v1/watch"));
+        assert!(!allows(&Method::POST, "/v1/watch/run"));
         // Accounts are added, changed, removed and signed in on the machine itself: a paired
         // phone's token could otherwise sign obid into someone else's account (docs/runner-api.md,
         // "POST /v1/accounts").

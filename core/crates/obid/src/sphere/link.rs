@@ -571,6 +571,26 @@ impl Link {
         }
     }
 
+    /// What the watcher saw (crate::watch): a `watch` item for each notice that never had one,
+    /// open or done.
+    pub fn watch_notices(&self, person: &str, notices: &[crate::watch::Notice]) {
+        let now = time::now();
+        let mut changed = Vec::new();
+        {
+            let mut state = self.lock();
+            for notice in notices {
+                let item = inbox::watch_item(person, notice, now);
+                if !state.inbox.contains_key(&item.id) {
+                    state.inbox.insert(item.id.clone(), item.clone());
+                    changed.push(item);
+                }
+            }
+        }
+        for item in &changed {
+            self.save_item(item);
+        }
+    }
+
     /// Work on the feed item `work` started from the feed (`POST /v1/github/work/{id}/start`):
     /// its open `github` item is done, answered with its start option, `job` the job on it.
     pub fn github_started(&self, work: &str, job: &str) {
@@ -1471,7 +1491,7 @@ impl Link {
         } else if kind == "question" {
             match self.decide_question(&mut state, &mut exchange, &repos, &referenced, now) {
                 Decided::Settled { decisions } => decisions_changed = decisions,
-                Decided::Inbox(made) => item = Some(made),
+                Decided::Inbox(made) => item = Some(*made),
                 Decided::ByItself(rule) => answer_by_itself = Some(rule),
             }
         } else if let Some(decision) =
@@ -1633,7 +1653,7 @@ impl Link {
             }
         }
         match self.question_to_inbox(state, exchange, repos, referenced, now) {
-            Some(item) => Decided::Inbox(item),
+            Some(item) => Decided::Inbox(Box::new(item)),
             None => Decided::Settled { decisions: false },
         }
     }
@@ -3002,6 +3022,7 @@ impl Link {
             confirm: None,
             start: Some(Box::new(start)),
             github: None,
+            watch: None,
         };
         self.lock().inbox.insert(item.id.clone(), item.clone());
         self.save_item(&item);
@@ -3260,7 +3281,8 @@ impl Link {
                 self.save_item(&item);
                 return Ok(item.to_json());
             }
-            if item.kind == "pluginEvent" {
+            // A plug-in's event and the watcher's notice only say something: Dismiss settles them.
+            if matches!(item.kind.as_str(), "pluginEvent" | "watch") {
                 drop(state);
                 return match given {
                     Given::Answer(answer) => self.answer_plugin_event(item, Some(answer), None),
@@ -3586,8 +3608,8 @@ impl Link {
 enum Decided {
     /// Declined (`decisions`: a remembered decision was used).
     Settled { decisions: bool },
-    /// In the owner's inbox: its item.
-    Inbox(Item),
+    /// In the owner's inbox: its item, boxed (an item is far larger than the rest).
+    Inbox(Box<Item>),
     /// The Obi answers it by itself, under this sharing rule.
     ByItself(Rule),
 }
