@@ -98,15 +98,33 @@ struct SphereSettingsView: View {
         return String(words.joined(separator: "-").prefix(30))
     }
 
+    /// "ernesto · key ed25519:…", the fingerprint to compare with them; or, when the Obysphere shows
+    /// another key for them, what to do before your Oby trusts them again.
+    static func memberAbout(_ member: SphereModel.Member) -> String {
+        let who = member.active ? member.owner : "\(member.owner) · removed"
+        if let new = member.changedTo {
+            return "\(who) · their key changed to \(new). Your Oby doesn't trust them until you compare it with \(member.owner), in person or by phone, and accept it."
+        }
+        return member.fingerprint.map { "\(who) · key \($0)" } ?? who
+    }
+
     // MARK: In one
 
     @ViewBuilder private var joined: some View {
         let name = sphere.name ?? sphere.membership?.sphere ?? "Obysphere"
         SetGroup(name, footer: sphere.membership?.lastError.map { "Last problem with the Obysphere: \($0)" }, problem: sphere.problem) {
-            SetRow("You", about: sphere.admin ? "Admin" : "Member") { SetCode(sphere.owner ?? "") }
+            SetRow("You", about: [sphere.admin ? "Admin" : "Member", sphere.ownFingerprint.map { "your key \($0)" }].compactMap(\.self).joined(separator: " · ")) {
+                SetCode(sphere.owner ?? "")
+            }
             if sphere.members.isEmpty { SetRow("No one else has joined yet", quiet: true) }
             ForEach(sphere.members) { member in
-                SetRow(member.name, about: member.active ? member.owner : "\(member.owner) · removed") { SetCode(member.obi) }
+                SetRow(member.name, about: Self.memberAbout(member)) {
+                    if member.changedTo != nil {
+                        Button("Accept new key") { Task { try? await sphere.acceptKey(member) } }.buttonStyle(.set)
+                    } else {
+                        SetCode(member.obi)
+                    }
+                }
             }
         }
         if !sphere.requests.isEmpty {

@@ -277,7 +277,18 @@ final class SphereModel {
         var name: String
         var active: Bool
         var accepts: [String]
+        /// Their owner key's fingerprint as this Oby pinned it, and a different one the Obysphere
+        /// shows since, waiting for your OK (obid's `GET /v1/obid/sphere/pins`).
+        var fingerprint: String? = nil
+        var changedTo: String? = nil
         var id: String { obi }
+    }
+
+    /// An owner key obid pinned (docs/runner-api.md, "Pinned owner keys").
+    struct Pin: Decodable, Equatable {
+        var owner: String
+        var fingerprint: String
+        var changedTo: String?
     }
 
     /// An `obiRequest` inbox item (docs/runner-api.md, "Obi-to-Obi requests in the inbox"). Its
@@ -308,6 +319,8 @@ final class SphereModel {
     private(set) var name: String?
     private(set) var admin = false
     private(set) var members: [Member] = []
+    /// Your owner key's fingerprint, for the others to compare.
+    private(set) var ownFingerprint: String?
     private(set) var requests: [Request] = []
     var problem: String?
     var busy = false
@@ -364,6 +377,14 @@ final class SphereModel {
             return Member(obi: obi, owner: entry["owner"] as? String ?? "", name: (entry["card"] as? [String: Any])?["name"] as? String ?? obi,
                           active: entry["status"] as? String == "active", accepts: params?["accepts"] as? [String] ?? [])
         }
+        // The fingerprints to compare with each person, from the keys obid pinned.
+        let pins: [Pin] = (try? await runner.call("GET", "v1/obid/sphere/pins")) ?? []
+        for index in members.indices {
+            let pin = pins.first { $0.owner == members[index].owner }
+            members[index].fingerprint = pin?.fingerprint
+            members[index].changedTo = pin?.changedTo
+        }
+        ownFingerprint = try? OwnerKey.of(owner).keyId
         let inbox = (try JSONSerialization.jsonObject(with: try await runner.send("GET", "v1/inbox"))) as? [[String: Any]] ?? []
         requests = inbox.compactMap(Self.request)
     }
@@ -492,6 +513,13 @@ final class SphereModel {
     }
 
     /// Answers a request with one of its options (`POST /v1/inbox/{id}/answer`).
+    /// You compared `member`'s new key with them: obid trusts it from now on.
+    func acceptKey(_ member: Member) async throws {
+        guard let fingerprint = member.changedTo else { return }
+        _ = try await raw(try runner(), "POST", "v1/obid/sphere/pins/\(member.owner)", ["fingerprint": fingerprint])
+        try await refresh()
+    }
+
     func answer(_ request: Request, _ option: String) async throws {
         _ = try await raw(try runner(), "POST", "v1/inbox/\(request.id)/answer", ["answer": option])
         try await refresh()

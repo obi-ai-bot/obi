@@ -100,4 +100,12 @@ struct SharingTests {
         let review = Data(String(decoding: item, as: UTF8.self).replacingOccurrences(of: #""type": "run_request""#, with: #""type": "review_request""#).utf8)
         #expect(InboxItem.runner(review) == nil)
     }
+
+    @Test func eachMembersKeyFingerprintShowsAndAChangedKeyWaitsForYou() {
+        var member = SphereModel.Member(obi: "obi-ernesto", owner: "ernesto", name: "Ernesto's Oby", active: true, accepts: [],
+                                        fingerprint: "ed25519:abc")
+        #expect(SphereSettingsView.memberAbout(member) == "ernesto · key ed25519:abc")
+        member.changedTo = "ed25519:xyz"
+        #expect(SphereSettingsView.memberAbout(member).hasPrefix("ernesto · their key changed to ed25519:xyz. Your Oby doesn't trust them"))
+    }
 }

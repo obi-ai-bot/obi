@@ -238,7 +238,7 @@ async function main() {
   if (job.runsOn?.owner !== "wellington") fail(`the job's runsOn is ${JSON.stringify(job.runsOn)}`);
   const ask = await within(60, "the ask in Wellington's inbox", async () => (expect(await obids.host.api("/inbox"), 200, "the inbox")).find((i) => i.obi?.type === "run_request"));
   pass(`Wellington's inbox: "${ask.title}" [${ask.options.join(" | ")}]`);
-  expect(await obids.host.api(`/inbox/${ask.id}/answer`, { method: "POST", body: { answer: "Allow sangam from now on" } }), 200, "Allow");
+  expect(await obids.host.api(`/inbox/${ask.id}/answer`, { method: "POST", body: { answer: "Allow Sangam from now on" } }), 200, "Allow");
 
   step("4. It runs in a VM on this Mac; the owner comes back, and leaves again");
   await within(120, "the job running in the VM", async () => (expect(await obids.host.api("/obid/sharing/mac"), 200, "")).jobs.find((j) => j.state === "running"));
