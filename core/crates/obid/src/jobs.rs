@@ -5092,7 +5092,7 @@ impl Jobs {
                 if let Some(line) = crate::teammates::prompt_line(&prs) {
                     message = format!("{message}\n\n{line}");
                     more.push((
-                        obi_plugin_api::PluginId::new("github").expect("a plug-in id"),
+                        obi_plugin_api::PluginId::new("teammates").expect("a plug-in id"),
                         crate::teammates::context_items(&found),
                     ));
                 }
