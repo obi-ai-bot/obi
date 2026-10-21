@@ -1028,6 +1028,7 @@ async fn a_member_whose_owner_key_changes_isnt_trusted_until_the_owner_accepts_i
         .cloned()
         .unwrap();
     assert_eq!(ernesto_pin["fingerprint"], ernesto.owner.key.key_id());
+    assert_eq!(ernesto_pin["verified"], false);
     // The Sphere now serves a card for obi-ernesto signed with a key of its own.
     let mallory = obi_protocol::keys::Keypair::from_seed_string("a Sphere operator's own key");
     {
@@ -1090,6 +1091,7 @@ async fn a_member_whose_owner_key_changes_isnt_trusted_until_the_owner_accepts_i
         )
     });
     assert_eq!(accepted.status, 200, "{}", accepted.text);
+    assert_eq!(accepted.body["verified"], true);
     assert_eq!(ask().status, 202);
 }
 

@@ -2028,6 +2028,9 @@ nonisolated struct RunnerMac: Codable, Equatable, Sendable, Identifiable {
     var owner: String
     var free: Bool
     var freeAt: Date?
+    /// Whether you compared its owner's key with them and accepted it (false: trusted on first
+    /// sight only; nil from an older obid).
+    var verified: Bool?
     var id: String { obi }
     /// "Wellington’s Mac".
     var name: String { "\(RunnerMac.person(owner))’s Mac" }

@@ -4123,7 +4123,8 @@ impl Link {
                 let runner = m.runner.as_ref()?;
                 let live = runner["expires_at"].as_str().and_then(time::parse).is_some_and(|t| t > now);
                 Some(json!({"obi": obi, "owner": m.owner, "free": live && runner["free"] == true,
-                            "freeAt": runner.get("free_at"), "size": runner["size"], "agents": runner["agents"]}))
+                            "freeAt": runner.get("free_at"), "size": runner["size"], "agents": runner["agents"],
+                            "verified": self.pins.verified(&m.owner)}))
             })
             .collect();
         list.sort_by(|a, b| a["owner"].as_str().cmp(&b["owner"].as_str()));
