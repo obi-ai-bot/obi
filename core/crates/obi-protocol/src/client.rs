@@ -20,6 +20,8 @@ pub const JWT_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:jwt";
 
 /// How many times a `429` is retried before the client answers it.
 const RATE_LIMIT_TRIES: u32 = 5;
+/// The longest answer from a Sphere an Obi reads (an audit page of 1,000 entries is far less).
+const MAX_ANSWER: usize = 16 * 1024 * 1024;
 /// The longest the client waits on one `Retry-After`.
 const RETRY_AFTER_MAX: Duration = Duration::from_secs(30);
 
@@ -146,10 +148,21 @@ impl Client {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.trim().parse::<u64>().ok());
-            let bytes = response
-                .bytes()
+            // Read a piece at a time, never past MAX_ANSWER: a Sphere can't fill this Obi's memory.
+            let mut response = response;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
                 .await
-                .map_err(|e| ClientError::Unreachable(one_line(&e.to_string())))?;
+                .map_err(|e| ClientError::Unreachable(one_line(&e.to_string())))?
+            {
+                if bytes.len() + chunk.len() > MAX_ANSWER {
+                    return Err(ClientError::Unreachable(
+                        "the Sphere's answer is longer than an Obi reads".into(),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
             let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
             if status == 429 && tries < RATE_LIMIT_TRIES {
                 // Nothing was recorded: the same request again, once the Sphere says.
