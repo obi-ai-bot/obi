@@ -86,7 +86,7 @@ final class IslandController {
             return job
         }
         desk.liftElsewhereReserve = { [weak self] id, lift in
-            guard let self, let runner = feed.runner else { return false }
+            guard let self, let runner = try? feed.acting() else { return false }
             do {
                 _ = try await runner.liftReserve(id, lift)
                 return true
@@ -97,6 +97,7 @@ final class IslandController {
         // as its card would send them.
         desk.answerElsewhere = { [weak self] job, decision, message in
             guard let self, let runner = feed.runner else { return "The runner isn't set up." }
+            if feed.showingKept { return RunnerFeed.reconnecting }
             do {
                 if job.question?.plan != nil {
                     let words = decision == .deny ? (message ?? PermissionPolicy.changeIt) : "Approve: \(PermissionMode.acceptEdits.title)"

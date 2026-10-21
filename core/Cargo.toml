@@ -58,7 +58,8 @@ futures-util = { version = "0.3.34", default-features = false, features = ["std"
 tokio-stream = { version = "0.1.19", features = ["sync"] }
 # Routines' times in the owner's IANA zone, daylight saving included, from the system's tz database.
 jiff = "0.2.37"
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+# The job channel (native roots) and the Slack listener (#839) share one version.
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "__rustls-tls", "rustls-tls-native-roots"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

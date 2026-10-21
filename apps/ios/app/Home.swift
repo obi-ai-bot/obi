@@ -339,7 +339,7 @@ struct KindPage: View {
                 if tab == .done {
                     Button("Older ones are in Archived") { push(.archived) }
                         .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
-                        .padding(.top, 8).padding(.horizontal, 4)
+                        .padding(.top, 8).frame(maxWidth: .infinity)
                 }
             }
             .padding(.horizontal, Tokens.gutter).padding(.top, 8).padding(.bottom, 32)
