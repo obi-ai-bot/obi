@@ -63,7 +63,7 @@ struct SlackTests {
     @Test func slackStatusReadsTheSpecsBody() throws {
         let body = #"{"connected":true,"team":"Deskree","user":"U02MX5VJKQU","bot":"U0BOT1234","socket":true,"connectedAt":"2026-10-21T14:02:11Z","error":null}"#
         let status = try Runner.decoder.decode(SlackStatus.self, from: Data(body.utf8))
-        #expect(status == SlackStatus(connected: true, team: "Deskree"))
+        #expect(status == SlackStatus(connected: true, team: "Deskree", socket: true))
         #expect(events("slack", #"{"connected":false,"error":"Slack refused Oby's tokens: paste new ones in Settings › Connectors › Slack."}"#)
                 == .slack(SlackStatus(error: "Slack refused Oby's tokens: paste new ones in Settings › Connectors › Slack.")))
         #expect(events("watch", #"{"rules":{"name":"Dmitry watcher","live":false,"enabled":true,"zone":"UTC"},"nextRun":null,"runs":[]}"#)
@@ -81,5 +81,27 @@ struct SlackTests {
         let user = "xoxp-" + "1111-2222-3333-7c41e09b2fd8a365"
         #expect(SlackStatus.isToken(user, "xoxp-"))
         #expect(!SlackStatus.isToken(user + "é", "xoxp-") && !SlackStatus.isToken(user + "\u{7F}", "xoxp-"))
+    }
+
+    /// Settled while the Mac was away: their notifications go when it's back.
+    @Test func noticesSettledWhileAwayLoseTheirNotifications() {
+        let now = Date(timeIntervalSince1970: 1_792_501_200)
+        let a = WatchNotice(id: "w1", title: "t", text: "x", created: now)
+        let b = WatchNotice(id: "w2", title: "t", text: "x", created: now)
+        #expect(RunnerFeed.settledWhileAway(before: [a, b], after: [b]) == ["w1"])
+        #expect(RunnerFeed.settledWhileAway(before: [], after: [a]).isEmpty)
+    }
+
+    /// The card's mark, its choices (Approve says what it posts), and the listener's state on the row.
+    @Test func aNoticeCardIsTaggedWithItsSource() throws {
+        let now = Date(timeIntervalSince1970: 1_792_501_200)
+        let slack = WatchNotice(id: "w1", title: "t", text: "x", created: now, url: URL(string: "https://deskree.slack.com/archives/C1/p1"))
+        let review = WatchNotice(kind: "listen", id: "l1", job: "j1", title: "Review ready: obi #835", text: "x", options: ["Approve", "Dismiss"],
+                                 created: now, url: URL(string: "https://GitHub.com/obi-ai-bot/obi/pull/835"), review: "Looks right.")
+        #expect(InlineNotice.brand(slack) == "slack" && InlineNotice.brand(review) == "github")
+        let options = InlineNotice.options(review)
+        #expect(options.map(\.label) == ["Approve", "Dismiss"] && options[0].detail?.hasPrefix("Posts the review above") == true)
+        let status = try Runner.decoder.decode(SlackStatus.self, from: Data(#"{"connected":true,"team":"Deskree","socket":true}"#.utf8))
+        #expect(status.socket && status.how.hasSuffix("The channel listener's app-level token is set."))
     }
 }

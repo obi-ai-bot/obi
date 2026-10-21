@@ -884,13 +884,19 @@ struct ConnectorsSettingsView: View {
     /// A list it couldn't read says why; only a 404 means it has none.
     private func load() async {
         #if DEBUG
-        if let staged = feed.stagedLists { lists = staged; return }
+        if let staged = feed.stagedLists {
+            lists = staged
+            if let slack = staged.slack { feed.slack = slack }
+            if let watch = staged.watch { feed.watch = watch }
+            return
+        }
         #endif
         defer {
             if let status = lists.tetrix { feed.tetrix = status }
-            // Read here, then kept by their events (obid signing out after a refused token).
-            feed.slack = lists.slack
-            feed.watch = lists.watch
+            // Read here, then kept by their events (obid signing out after a refused token); a read
+            // that failed keeps what the events said.
+            if let slack = lists.slack { feed.slack = slack }
+            if let watch = lists.watch { feed.watch = watch }
         }
         guard feed.connection == .live, let runner = feed.runner else {
             lists = Connectors.Lists()

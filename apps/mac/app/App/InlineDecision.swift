@@ -139,3 +139,57 @@ struct Receipt: View {
         .accessibilityValue(expanded ? "Expanded" : "Collapsed")
     }
 }
+
+/// A watcher's or the channel listener's item (`watch`, `listen`) as a decision in the
+/// conversation, tagged with where it came from (Slack or GitHub's mark, as Sangam's sourced work):
+/// obid's own title and text, a finished review shown whole before Approve, the item's choices and
+/// Later, and its link opened only on a click.
+struct InlineNotice: View {
+    let notice: WatchNotice
+    let feed: RunnerFeed
+    var keyboardEnabled = false
+    var focusRequest = 0
+    @Environment(\.openURL) private var openURL
+    @State private var busy = false
+    @State private var problem: String?
+
+    /// Slack's or GitHub's, by the link's host (a GitHub notice of the watcher's links GitHub).
+    static func brand(_ notice: WatchNotice) -> String {
+        notice.url?.host()?.lowercased().hasSuffix("github.com") == true ? "github" : "slack"
+    }
+
+    /// Its choices: Approve says what it posts.
+    static func options(_ notice: WatchNotice) -> [CardOption] {
+        notice.options.map { option in
+            CardOption(label: option, answer: option,
+                       detail: option == "Approve" ? "Posts the review above on the pull request, as a comment from your GitHub login." : nil)
+        }
+    }
+
+    var body: some View {
+        let brand = Self.brand(notice)
+        VStack(alignment: .leading, spacing: 0) {
+            AskCard(kind: brand == "github" ? "GitHub" : "Slack", brand: brand,
+                    shown: notice.review, title: notice.title, happened: notice.text,
+                    options: Self.options(notice), busy: busy, keyboardEnabled: keyboardEnabled, focusRequest: focusRequest,
+                    hint: notice.url.map { _ in brand == "github" ? "Open on GitHub" : "Open in Slack" },
+                    onHint: notice.url.map { url in { openURL(url) } },
+                    onChoose: { settle(answer: $0.answer) },
+                    onLater: { settle(later: .now.addingTimeInterval(3600)) })
+            if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.top, 8) }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
+    }
+
+    private func settle(answer: String? = nil, later: Date? = nil) {
+        guard !busy else { return }
+        busy = true
+        problem = nil
+        Task {
+            defer { busy = false }
+            do { try await feed.settle(notice: notice.id, answer: answer, later: later) } catch { problem = error.localizedDescription }
+        }
+    }
+}

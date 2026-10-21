@@ -73,9 +73,12 @@ struct ConversationPage: View {
                 .filter { $0.local || own($0.item.job, turns, item: $0.item.id) }
                 .sorted { $0.item.created < $1.item.created }
             let waiting = entries.filter { $0.item.isOpen }
+            // The watcher's and the listener's items: no job, no conversation, so on top of the thread.
+            let notices = feed.notices.filter { $0.waiting(at: context.date) }
             let permissions = feed.chatPermissions.filter { ($0.done != nil || $0.waits(at: context.date)) && own($0.job, turns) }
             let permissionWaits = permissions.filter { $0.waits(at: context.date) }
-            let oldest = (waiting.map { ($0.id, $0.item.created) } + permissionWaits.map { ($0.id, $0.created) }).min { $0.1 < $1.1 }?.0
+            let oldest = (waiting.map { ($0.id, $0.item.created) } + permissionWaits.map { ($0.id, $0.created) }
+                + notices.map { ("notice/\($0.id)", $0.created) }).min { $0.1 < $1.1 }?.0
             let anchors = Dictionary(uniqueKeysWithValues: entries.map {
                 ($0.id, ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns))
             })
@@ -91,7 +94,7 @@ struct ConversationPage: View {
                 VStack(spacing: 0) {
                     if feed.down { RunnerOfflineNotice(name: feed.name) }
                     if let oldest {
-                        WaitingBar(count: waiting.count + permissionWaits.count) {
+                        WaitingBar(count: waiting.count + permissionWaits.count + notices.count) {
                             typing = false; decisionFocus += 1
                             withAnimation(Tokens.warm) { proxy.scrollTo(oldest, anchor: .center) }
                         }
@@ -110,6 +113,10 @@ struct ConversationPage: View {
                             if turns.isEmpty, !thinking {
                                 Text("Ask Oby anything. Hold fn to talk.").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
                                     .frame(maxWidth: .infinity).padding(.top, 40)
+                            }
+                            ForEach(notices) { notice in
+                                InlineNotice(notice: notice, feed: feed, keyboardEnabled: oldest == "notice/\(notice.id)", focusRequest: decisionFocus)
+                                    .id("notice/\(notice.id)").padding(.bottom, 12)
                             }
                             ForEach(entries.filter { anchors[$0.id] == .some(nil) }) { decision($0, active: oldest == $0.id).padding(.bottom, 12) }
                             ForEach(permissions.filter { ConversationModel.decisionAnchor(job: $0.job, created: $0.created, turns: turns) == nil }) { record in

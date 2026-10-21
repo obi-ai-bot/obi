@@ -15,6 +15,11 @@ struct AskCard: View {
     var failed = false
     /// The job it's from, after its kind.
     var source: String? = nil
+    /// Where it came from, as Sangam's `from?: Brand` (Slack, GitHub): its mark before the kind.
+    var brand: String? = nil
+    /// What a choice acts on, shown whole and as plain text before the choices (a review that
+    /// Approve posts): scrolls when long, never cut, never Markdown.
+    var shown: String? = nil
     let title: String
     var happened: String? = nil
     /// The asker's own words, behind Details, when the title is Oby's headline instead.
@@ -46,6 +51,9 @@ struct AskCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
+                #if os(macOS)
+                if let brand { Image("Brands/\(brand)").resizable().scaledToFit().frame(width: 14, height: 14).accessibilityHidden(true) }
+                #endif
                 Text(kind).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(failed ? Tokens.danger : Tokens.needsInk)
                 if let source, !source.isEmpty { Text(source).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fadeOut() }
             }
@@ -72,6 +80,16 @@ struct AskCard: View {
                 }
             }
             if let detail, !detail.isEmpty { code(detail) }
+            if let shown, !shown.isEmpty {
+                ScrollView {
+                    Text(verbatim: shown).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).lineSpacing(6)
+                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 280)
+                .padding(10)
+                .background(Tokens.chip, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .padding(.top, 10)
+            }
             if let plan, !plan.isEmpty { PlanText(plan: plan).padding(.top, 10) }
             if !answered {
                 CenteredFlow(spacing: 8, centred: false) {

@@ -395,7 +395,11 @@ final class RunnerFeed {
                         // Settings › Runner changed while the open jobs were fetched again.
                         try Task.checkCancellation()
                         inbox = items
-                        notices = fetchedNotices.filter { $0.done == nil }.sorted { $0.created < $1.created }
+                        let stillOpen = fetchedNotices.filter { $0.done == nil }.sorted { $0.created < $1.created }
+                        // Settled while the Mac was away: their notifications go too.
+                        let gone = Self.settledWhileAway(before: notices, after: stillOpen)
+                        if !gone.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: gone) }
+                        notices = stillOpen
                         if let (past, pastWords) = history {
                             inboxHistory = past.filter { !$0.isOpen }
                             inboxWords = pastWords.merging(words, uniquingKeysWith: { _, fresh in fresh })
@@ -1018,6 +1022,12 @@ final class RunnerFeed {
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notice.id])
         }
         tell(notice)
+    }
+
+    /// The notices that were open and aren't any more: settled elsewhere while the Mac was away.
+    nonisolated static func settledWhileAway(before: [WatchNotice], after: [WatchNotice]) -> [String] {
+        let open = Set(after.map(\.id))
+        return before.map(\.id).filter { !open.contains($0) }
     }
 
     /// Answers a `watch` or `listen` item (Dismiss, Approve) or puts it off.

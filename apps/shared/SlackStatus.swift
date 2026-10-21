@@ -11,25 +11,31 @@ nonisolated struct SlackStatus: Decodable, Equatable, Sendable {
     var connected = false
     /// The workspace's name.
     var team: String?
+    /// Whether obid holds the app-level token the channel listener's Socket Mode needs.
+    var socket = false
     /// Why obid was signed out, in its words, or nil.
     var error: String?
 
-    private enum Keys: String, CodingKey { case connected, team, error }
+    private enum Keys: String, CodingKey { case connected, team, socket, error }
 
-    init(connected: Bool = false, team: String? = nil, error: String? = nil) {
-        (self.connected, self.team, self.error) = (connected, team, error)
+    init(connected: Bool = false, team: String? = nil, socket: Bool = false, error: String? = nil) {
+        (self.connected, self.team, self.socket, self.error) = (connected, team, socket, error)
     }
 
     init(from decoder: any Decoder) throws {
         let keys = try decoder.container(keyedBy: Keys.self)
         connected = (try? keys.decodeIfPresent(Bool.self, forKey: .connected)) ?? false
         team = try? keys.decodeIfPresent(String.self, forKey: .team)
+        socket = (try? keys.decodeIfPresent(Bool.self, forKey: .socket)) ?? false
         error = try? keys.decodeIfPresent(String.self, forKey: .error)
     }
 
     /// The row's tooltip: how it's connected, or what connecting takes.
     var how: String {
-        if connected { return "Connected to \(team ?? "your workspace") with your Slack app's tokens. Oby reads messages for the watcher and writes only to you." }
+        if connected {
+            return "Connected to \(team ?? "your workspace") with your Slack app's tokens. Oby reads messages for the watcher and writes only to you."
+                + (socket ? " The channel listener's app-level token is set." : " No app-level token: the channel listener is off.")
+        }
         return error ?? "You paste your Slack app's two tokens once (OAuth & Permissions › OAuth Tokens). obid keeps them in its vault."
     }
 
@@ -69,6 +75,8 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
 
     var kind: String
     var id: String
+    /// A review ready to approve: its job's id; empty otherwise.
+    var job: String
     var title: String
     var text: String
     var options: [String]
@@ -81,13 +89,13 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
     /// review an agent wrote, after obid's secret scan. Shown as plain text, never as Markdown.
     var review: String?
 
-    private enum Keys: String, CodingKey { case kind, id, title, text, options, created, done, later, watch }
+    private enum Keys: String, CodingKey { case kind, id, job, title, text, options, created, done, later, watch }
     private struct Place: Decodable { var url: String?; var pr: PR?; var review: String? }
     private struct PR: Decodable { var url: String? }
 
-    init(kind: String = "watch", id: String, title: String, text: String, options: [String] = ["Dismiss"], created: Date,
+    init(kind: String = "watch", id: String, job: String = "", title: String, text: String, options: [String] = ["Dismiss"], created: Date,
          done: Date? = nil, later: Date? = nil, url: URL? = nil, review: String? = nil) {
-        (self.kind, self.id, self.title, self.text, self.options) = (kind, id, title, text, options)
+        (self.kind, self.id, self.job, self.title, self.text, self.options) = (kind, id, job, title, text, options)
         (self.created, self.done, self.later, self.url, self.review) = (created, done, later, url, review)
     }
 
@@ -95,6 +103,7 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
         let keys = try decoder.container(keyedBy: Keys.self)
         kind = try keys.decode(String.self, forKey: .kind)
         id = try keys.decode(String.self, forKey: .id)
+        job = (try? keys.decodeIfPresent(String.self, forKey: .job)) ?? ""
         title = try keys.decode(String.self, forKey: .title)
         text = try keys.decode(String.self, forKey: .text)
         options = (try? keys.decodeIfPresent([String].self, forKey: .options)) ?? []
