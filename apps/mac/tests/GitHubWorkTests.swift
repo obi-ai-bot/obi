@@ -165,4 +165,17 @@ struct GitHubWorkTests {
         _ = parser.feed(#"data: {"signedIn": false, "reviews": [], "assigned": [], "mine": []}"#)
         #expect(parser.feed("") == .github(GitHubWork(signedIn: false)))
     }
+
+    /// Sangam's GitHub card (#822): Fix it or Review it filled first, then Open on GitHub, and no line
+    /// under them saying what each does, where a decision with a recommended choice has one.
+    @Test func gitHubCardsSayNothingUnderTheirChoices() {
+        let work = GitHubWork.busy()
+        for item in [work.items[0], work.items[9]] {
+            let options = GitHubCard.options(item)
+            #expect(options.map(\.label) == [item.list == .reviews ? "Review it" : "Fix it", "Open on GitHub"])
+            #expect(options[0].recommended)
+            #expect(AskCard.explained(options, explains: GitHubCard.explains).isEmpty)
+        }
+        #expect(!AskCard.explained([CardOption(label: "Allow once", answer: "allow", recommended: true)], explains: true).isEmpty)
+    }
 }

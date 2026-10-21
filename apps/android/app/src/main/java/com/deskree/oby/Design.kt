@@ -316,7 +316,7 @@ fun PillButton(title: String, primary: Boolean = false, danger: Boolean = false,
 @Composable
 fun AskCard(kind: String, title: String, options: List<CardOption>, onChoose: (CardOption) -> Unit, failed: Boolean = false, source: String? = null,
             happened: String? = null, behindDetails: String? = null, detail: String? = null, plan: String? = null, busy: Boolean = false,
-            hint: String? = null, onLater: (() -> Unit)? = null) {
+            hint: String? = null, onLater: (() -> Unit)? = null, explains: Boolean = true) {
     val c = Tokens.c
     var picked by remember { mutableStateOf<String?>(null) }
     var showsDetails by remember { mutableStateOf(false) }
@@ -347,7 +347,8 @@ fun AskCard(kind: String, title: String, options: List<CardOption>, onChoose: (C
             }
             if (onLater != null) PillButton("Later", quiet = true, enabled = !busy, onClick = onLater)
         }
-        val explained = options.filter { it.detail != null || it.recommended }
+        // explains = false: no line under the choices, as Sangam's GitHub card
+        val explained = if (explains) options.filter { it.detail != null || it.recommended } else emptyList()
         if (explained.isNotEmpty()) Column(Modifier.padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             for (o in explained) Text(buildAnnotatedString {
                 withStyle(SpanStyle(color = c.text)) { append(o.label) }
