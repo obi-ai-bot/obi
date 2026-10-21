@@ -558,13 +558,6 @@ final class RunnerFeed {
         return url
     }
 
-    /// Clear done: the runner records the time, and the window here and Home on the iPhone hide
-    /// the jobs that finished by then.
-    func clear() async throws {
-        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to clear done jobs.") }
-        clearedAt = try await runner.clear()
-    }
-
     /// Saves the model and effort the runner's jobs use (Settings › Models).
     func setModels(_ models: ModelSettings) async throws {
         guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }

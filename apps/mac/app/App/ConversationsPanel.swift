@@ -79,7 +79,7 @@ private struct ConversationRow: View {
     var body: some View {
         HStack(spacing: 0) {
             if editing {
-                RenameField(label: "Conversation name", title: conversation.title) { title in
+                RenameField(label: "Conversation name", title: conversation.title, limit: 100) { title in
                     renaming = nil
                     if let title { Task { await list.rename(conversation.id, to: title) } }
                 }
@@ -134,22 +134,26 @@ private struct ConversationRow: View {
     }
 
     private var actions: some View {
-        ConversationMenu(conversation: conversation, list: list) { renaming = conversation.id }
+        ConversationMenu(conversation: conversation, list: list, onRename: { renaming = conversation.id },
+                         onDelete: { state.deletingConversation = conversation })
     }
 }
 
 /// A conversation's menu (Sangam's ConvoMenu.tsx), from its side panel row (⋮ or right-click) or
-/// its page's title bar: pin it to the top (or unpin), rename; last, set apart, delete it.
+/// its page's title bar: pin it to the top (or unpin), rename; last, set apart, delete it, which
+/// asks first (the window's dialog, `taskDialogs`): it can't be undone.
 struct ConversationMenu: View {
     let conversation: RunnerConversation
     let list: ConversationList
     let onRename: () -> Void
+    let onDelete: () -> Void
+
+    nonisolated static let deleteLine = "Its messages go for good. The tasks it started stay, each on its own page."
 
     var body: some View {
         Button(conversation.pinned ? "Unpin" : "Pin") { Task { await list.pin(conversation.id, !conversation.pinned) } }
         Button("Rename", action: onRename)
         Divider()
-        // Its tasks stay, and their cards open their own page.
-        Button("Delete conversation", role: .destructive) { Task { await list.delete(conversation.id) } }
+        Button("Delete conversation", role: .destructive, action: onDelete)
     }
 }

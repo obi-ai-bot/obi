@@ -35,12 +35,20 @@ struct ArchiveTests {
     @Test func deleteSaysWhatGoes() {
         var job = Job(id: "j", request: "r", agent: "claude", account: "default", repo: "deskree-inc/oby", branch: "oby/x",
                       base: "dev", pr: nil, kind: .build, task: "t", created: now)
-        #expect(TaskMenu.deleteLine(job) == "Its worktree and local branch go for good. What's on GitHub stays: its pushed branch and pull request.")
+        job.status = .done
+        #expect(TaskMenu.deleteLine(job) == "Its worktree and its local oby/ branch go for good, unless another task uses the branch. What's on GitHub stays: its pushed branch and pull request.")
+        #expect(TaskMenu.undeletable(job) == nil)
         job.commits = 3
         job.pushed = 2
         #expect(TaskMenu.deleteLine(job).hasSuffix(" 1 commit that isn't published is lost."))
         job.pushed = nil
         #expect(TaskMenu.deleteLine(job).hasSuffix(" 3 commits that aren't published are lost."))
+        // What obid refuses with 409, said before you confirm.
+        job.published = "https://github.com/deskree-inc/oby/pull/9"
+        #expect(TaskMenu.undeletable(job) == "Its pull request is open: merge or close it first, or archive the task.")
+        job.status = .running
+        #expect(TaskMenu.undeletable(job) == "It's still running: stop it first.")
+        #expect(ConversationMenu.deleteLine.contains("The tasks it started stay"))
     }
 
     /// Archived's search matches a task's name, kind of work or agent, in any case.

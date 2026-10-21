@@ -38,10 +38,21 @@ struct TaskMenu: View {
         }
     }
 
-    /// What Delete task's dialog says goes (obid's `DELETE /v1/jobs/{id}`): never anything pushed.
+    /// Why obid would refuse to delete it now (its `409`), or nil: then Delete task's dialog says so
+    /// instead of asking.
+    nonisolated static func undeletable(_ job: Job) -> String? {
+        if job.isActive { return "It's still running: stop it first." }
+        if job.published != nil, !["MERGED", "CLOSED"].contains(job.pullRequestState ?? "OPEN") {
+            return "Its pull request is open: merge or close it first, or archive the task."
+        }
+        return nil
+    }
+
+    /// What Delete task's dialog says goes (obid's `DELETE /v1/jobs/{id}`): never anything pushed,
+    /// nor a branch obid didn't make or another task uses.
     nonisolated static func deleteLine(_ job: Job) -> String {
         let lost = max(0, (job.commits ?? 0) - (job.pushed ?? 0))
-        var line = "Its worktree and local branch go for good. What's on GitHub stays: its pushed branch and pull request."
+        var line = "Its worktree and its local oby/ branch go for good, unless another task uses the branch. What's on GitHub stays: its pushed branch and pull request."
         if lost == 1 { line += " 1 commit that isn't published is lost." }
         if lost > 1 { line += " \(lost) commits that aren't published are lost." }
         return line
@@ -54,6 +65,8 @@ struct RenameField: View {
     let label: String
     let title: String
     var font = Tokens.font(Tokens.textBase)
+    /// The longest name the runner takes (a job's 60 characters, a conversation's 100).
+    var limit = 60
     /// The new name, or nil for Esc. Called once.
     let onDone: (String?) -> Void
     @State private var draft = ""
@@ -66,6 +79,7 @@ struct RenameField: View {
             .focused($focused)
             // No box, as Sangam's: the name stays where it was, selected.
             .padding(.horizontal, 6).frame(height: 22).padding(.leading, -6)
+            .onChange(of: draft) { _, typed in if typed.count > limit { draft = String(typed.prefix(limit)) } }
             .onSubmit { finish(draft) }
             .onExitCommand { finish(nil) }
             .onChange(of: focused) { _, now in if !now { finish(draft) } }
@@ -96,16 +110,28 @@ extension ChatState {
 }
 
 extension View {
-    /// The window's Delete task dialog (it asks first, as Sangam's Delete does) and the alert for a
-    /// Rename, Archive or Delete that didn't go through.
+    /// The window's Delete task and Delete conversation dialogs (both ask first: neither can be
+    /// undone) and the alert for a Rename, Archive or Delete that didn't go through.
     func taskDialogs(model: IslandModel, state: ChatState) -> some View {
-        confirmationDialog(state.deleting.map { "Delete “\($0.job.heading)”?" } ?? "",
+        confirmationDialog(state.deleting.map { TaskMenu.undeletable($0.job) == nil ? "Delete “\($0.job.heading)”?" : "“\($0.job.heading)” can't be deleted yet" } ?? "",
                            isPresented: Binding(get: { state.deleting != nil }, set: { if !$0 { state.deleting = nil } }),
                            presenting: state.deleting) { row in
-            Button("Delete task", role: .destructive) { state.act { try await model.feed.delete(row.job.id) } }
-            Button("Cancel", role: .cancel) {}
+            if TaskMenu.undeletable(row.job) == nil {
+                Button("Delete task", role: .destructive) { state.act { try await model.feed.delete(row.job.id) } }
+                Button("Cancel", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
+            }
         } message: { row in
-            Text(TaskMenu.deleteLine(row.job))
+            Text(TaskMenu.undeletable(row.job) ?? TaskMenu.deleteLine(row.job))
+        }
+        .confirmationDialog(state.deletingConversation.map { "Delete “\($0.title)”?" } ?? "",
+                            isPresented: Binding(get: { state.deletingConversation != nil }, set: { if !$0 { state.deletingConversation = nil } }),
+                            presenting: state.deletingConversation) { conversation in
+            Button("Delete conversation", role: .destructive) { Task { await model.feed.conversations.delete(conversation.id) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text(ConversationMenu.deleteLine)
         }
         .alert("That didn't go through", isPresented: Binding(get: { state.taskProblem != nil }, set: { if !$0 { state.taskProblem = nil } })) {
             Button("OK", role: .cancel) {}

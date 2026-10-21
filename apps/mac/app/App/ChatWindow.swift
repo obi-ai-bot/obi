@@ -191,8 +191,10 @@ final class ChatState {
     /// title bar's last crumb (`inBar`).
     var renaming: Renaming?
     struct Renaming: Equatable { var id: String; var inBar = false }
-    /// The task Delete task asks about, in the window's dialog.
+    /// The task Delete task asks about, and the conversation Delete conversation asks about, in
+    /// the window's dialogs.
     var deleting: SidebarSections.JobRow?
+    var deletingConversation: RunnerConversation?
     /// Why the last Rename, Archive task or Delete task didn't go through, until it's seen.
     var taskProblem: String?
     /// The side panel's folded groups and those showing all their done tasks.
@@ -516,7 +518,8 @@ private struct TitleBar: View {
                         }
                         let last = index == state.trail.steps.count - 1
                         if last, let renaming = renamingHere {
-                            RenameField(label: renaming.label, title: WindowLabels.label(step, model: model), font: Tokens.font(Tokens.textMd), onDone: renaming.done)
+                            RenameField(label: renaming.label, title: WindowLabels.label(step, model: model), font: Tokens.font(Tokens.textMd),
+                                        limit: renaming.limit, onDone: renaming.done)
                                 .frame(maxWidth: 280)
                         } else {
                             Crumb(title: WindowLabels.label(step, model: model), here: last) { state.trail.back(to: index) }
@@ -568,12 +571,12 @@ extension TitleBar {
     }
 
     /// The last crumb renamed in place (Sangam's `crumb-rename`): its field's label and what it does.
-    private var renamingHere: (label: String, done: (String?) -> Void)? {
+    private var renamingHere: (label: String, limit: Int, done: (String?) -> Void)? {
         if let task = shownTask, state.renaming == .init(id: task.id, inBar: true) {
-            return ("Task name", { state.renamed(task.job, to: $0, feed: model.feed) })
+            return ("Task name", 60, { state.renamed(task.job, to: $0, feed: model.feed) })
         }
         if let talk = shownTalk, state.renaming == .init(id: talk.id, inBar: true) {
-            return ("Conversation name", { title in
+            return ("Conversation name", 100, { title in
                 state.renaming = nil
                 if let title { Task { await model.feed.conversations.rename(talk.id, to: title) } }
             })
@@ -590,7 +593,9 @@ extension TitleBar {
             }
         } else if let talk = shownTalk {
             barMenu("Conversation options") {
-                ConversationMenu(conversation: talk, list: model.feed.conversations) { state.renaming = .init(id: talk.id, inBar: true) }
+                ConversationMenu(conversation: talk, list: model.feed.conversations,
+                                 onRename: { state.renaming = .init(id: talk.id, inBar: true) },
+                                 onDelete: { state.deletingConversation = talk })
             }
         }
     }
