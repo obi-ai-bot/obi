@@ -630,6 +630,32 @@ fn a_removed_default_login_comes_back() {
     assert!(account(&obid, lab.body["id"].as_str().unwrap()).is_some());
 }
 
+/// A `default` the configuration gives a folder of its own isn't the tool's own login: removed,
+/// it stays removed.
+#[test]
+fn a_configured_default_with_a_folder_doesnt_come_back() {
+    let folder = Folder::new("accounts-restore-folder");
+    let mut config = accounts_config(&folder.0);
+    let dir = folder.0.join("claude-default");
+    std::fs::create_dir_all(&dir).unwrap();
+    let stub = config["agents"]["claude"]["accounts"][0].clone();
+    config["agents"]["claude"]["accounts"] =
+        json!([{"id": "default", "name": "Default", "configDir": dir}, stub]);
+    let obid = start(&folder.0, &config, None);
+    assert_eq!(
+        call(&obid, "DELETE", "/v1/accounts/default", None).status,
+        204
+    );
+    let refused = add(&obid, json!({"agent": "claude", "default": true}));
+    assert_eq!(refused.status, 409, "{}", refused.text);
+    assert!(
+        refused.text.contains("folder of its own"),
+        "{}",
+        refused.text
+    );
+    assert!(account(&obid, "default").is_none());
+}
+
 /// A fresh sign-in may be another kind of login: obid forgets how the account paid (`priced`, kept
 /// with its usage), so its next Codex job asks again; its windows stay.
 #[test]

@@ -583,12 +583,30 @@ async fn restore_default(shared: Arc<Shared>, tool: Tool) -> Result<Response, Ap
             "Cursor has no login of its own outside an account: add one with a name.",
         ));
     };
+    // The configuration may name an account with that id and a folder of its own: that one isn't
+    // the tool's own login, and doesn't come back here.
+    let seeded = find(&shared.config.agents.read().seed, &own.id);
+    if seeded.is_some_and(|(_, a)| a.config_dir.is_some()) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "obid's configuration gives {} a folder of its own: it isn't {}'s own login, and can't be added back here.",
+                own.id,
+                tool.name()
+            ),
+        ));
+    }
     shared.config.agents.change(|agents, saved| {
         if find(agents, &own.id).is_some() {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
                 format!("{}'s own login is listed already.", tool.name()),
             ));
+        }
+        if all(agents).len() >= MOST_ACCOUNTS {
+            return Err(unprocessable(format!(
+                "obid keeps at most {MOST_ACCOUNTS} accounts: remove one first."
+            )));
         }
         if !saved.removed.contains(&own.id) {
             return Err(ApiError::new(

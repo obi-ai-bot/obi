@@ -1985,8 +1985,6 @@ final class Desk {
         return ids.count
     }
 
-    /// The user talks to a job. A running one hears it now; a finished one picks its session up
-    /// again in the same worktree, for one more round.
     /// Words said on a task's page and Oby's answer, at the end of the thread the window then
     /// opens (Sangam's tellFromTask), the job's card on the answer.
     func told(_ said: String, reply: String, job: String) {
@@ -1994,6 +1992,8 @@ final class Desk {
         add(Turn(who: .oby, text: reply, jobs: [job]))
     }
 
+    /// The user talks to a job. A running one hears it now; a finished one picks its session up
+    /// again in the same worktree, for one more round.
     func message(_ id: String, _ text: String) throws {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Tell the agent something of 1 to 2,000 characters.") }

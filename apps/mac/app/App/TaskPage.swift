@@ -25,9 +25,9 @@ struct TaskActions {
     var tell: ((String, [String]) async throws -> Job)? = nil
     /// The box's +: only obid on this Mac reads the tray's files, and only a follow-up takes them.
     var attaches = false
-    /// Puts its decision off an hour (Later on its inbox item, as the conversation's cards do); nil
-    /// where nothing offers Later.
-    var later: (() async throws -> Void)? = nil
+    /// Puts its decision off an hour (Later on its inbox item, as the conversation's cards do), and
+    /// says whether there was anything to put off; nil where nothing offers Later.
+    var later: (() async throws -> Bool)? = nil
 
     /// The + is there where the files can go: obid on this Mac, and a finished job, whose words
     /// start a follow-up (a job at work takes words only).
@@ -71,8 +71,9 @@ struct TaskActions {
                     return job
                 },
                 later: {
-                    guard case .item(let id) = laterTarget(job.id, inbox: desk.inbox) else { return }
+                    guard case .item(let id) = laterTarget(job.id, inbox: desk.inbox) else { return false }
                     _ = try await desk.answer(id, .later(.now.addingTimeInterval(3600)))
+                    return true
                 })
         }
         return TaskActions(
@@ -102,9 +103,9 @@ struct TaskActions {
             attaches: attaches(job, runnerHere: feed.local),
             later: {
                 switch laterTarget(job.id, inbox: feed.inbox, permissions: feed.permissionHistory) {
-                case .item(let id): try await feed.settle(id, later: .now.addingTimeInterval(3600))
-                case .permission(let id): feed.laterPermission(id)
-                case nil: break
+                case .item(let id): try await feed.settle(id, later: .now.addingTimeInterval(3600)); return true
+                case .permission(let id): feed.laterPermission(id); return true
+                case nil: return false
                 }
             })
     }
@@ -242,7 +243,11 @@ struct TaskCardView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if TaskDecision.shows(job, extras: actions.extras) {
                         TaskDecision(job: job, actions: actions, busy: $busy, problem: $problem,
-                                     onLater: actions.later.map { later in { Task { try? await later() } } })
+                                     onLater: actions.later.map { later in {
+                                         Task {
+                                             do { _ = try await later(); problem = nil } catch { problem = error.localizedDescription }
+                                         }
+                                     } })
                     } else {
                         Text(job.badge.text).font(Tokens.font(Tokens.textSm, .medium))
                             .foregroundStyle(job.badge.tone == .red ? Tokens.danger : Tokens.needs)
@@ -405,8 +410,8 @@ struct TaskPage: View {
                         TaskDecision(job: job, actions: actions, busy: $busy, problem: $problem, box: true,
                                      onLater: actions.later.map { later in {
                                          run {
-                                             try await later()
-                                             exchange = ("Later", TaskFacts.laterReply)
+                                             // Oby says it'll wait only when something was put off.
+                                             if try await later() { exchange = ("Later", TaskFacts.laterReply) }
                                          }
                                      } })
                             .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 18)
@@ -770,7 +775,7 @@ struct TaskPagePreview: View {
                                        label: "Max", fiveHour: fixture.windows.fiveHour, sevenDay: fixture.windows.sevenDay)
             TaskPage(job: job, actions: TaskActions(place: "Studio", account: "Personal", extras: extras, accounts: [account], stop: {},
                                                     message: { _ in }, dismiss: {}, permission: { _, _ in }, mode: { _ in },
-                                                    attaches: true, later: {}),
+                                                    attaches: true, later: { true }),
                      tray: Tray(), onSession: {},
                      usage: [UsageRow(id: "personal", agent: "claude", name: "Personal", week: fixture.windows.sevenDay)])
                 .frame(width: 700, height: 1480).background(Tokens.bg)
