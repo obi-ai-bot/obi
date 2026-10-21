@@ -83,6 +83,13 @@ pub const PLUGINS_GRACE: Duration = Duration::from_secs(8);
 /// How long obid waits for the worktrees' measurement before it answers anyway (`serve`).
 pub const MEASURE_FIRST: Duration = Duration::from_millis(200);
 
+/// How long after it starts obid runs its first cleanup pass, out of the way of the apps' first
+/// calls.
+pub const CLEAN_FIRST: Duration = Duration::from_secs(30);
+
+/// How often the cleanup pass runs when no job settles meanwhile.
+pub const CLEAN_EVERY: Duration = Duration::from_secs(3 * 60 * 60);
+
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
     #[error("can't make home {path}: {source}")]
@@ -149,6 +156,23 @@ fn keep_private(folder: &std::path::Path) -> std::io::Result<()> {
     #[cfg(not(unix))]
     let _ = folder;
     Ok(())
+}
+
+/// The cleanup pass (docs/runner-api.md, `cleanup`): [`CLEAN_FIRST`] after obid starts, then
+/// whenever a job may have settled, and every [`CLEAN_EVERY`] for the jobs that settle as time
+/// passes. A pass that removed a worktree measures the folder again, unless obid is stopping
+/// (`cancelled`).
+async fn keep_worktrees_clean(shared: Arc<api::Shared>, cancelled: Arc<AtomicBool>) {
+    tokio::time::sleep(CLEAN_FIRST).await;
+    loop {
+        let now = obi_protocol::time::now();
+        if shared.jobs.clean_worktrees(now, shared.cleared.at()).await > 0 {
+            let (shared, cancelled) = (shared.clone(), cancelled.clone());
+            let _ = tokio::task::spawn_blocking(move || shared.cleanup.remeasure_unless(&cancelled))
+                .await;
+        }
+        shared.jobs.wait_to_clean(CLEAN_EVERY).await;
+    }
 }
 
 /// Serves the API on `config.listen` until `stop` resolves, then lets requests under way finish
@@ -358,6 +382,8 @@ pub async fn serve(
     github.spawn(stopping_rx.clone());
     // Job alerts to Android phones through FCM (crate::push).
     push::spawn(shared.clone());
+    // The worktrees' cleanup pass, in the background: never before the first answer.
+    tokio::spawn(keep_worktrees_clean(shared.clone(), cancelled.clone()));
     // A tool reported an account's usage: every app hears the accounts as they are now.
     {
         let shared = shared.clone();
