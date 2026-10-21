@@ -92,8 +92,9 @@ final class RunnerLoginItem {
     /// older signature can outlive the app it came from while launchd refuses the new obid ("spawn
     /// failed", exit 78, seen 2026-10-20 after #790 moved the signing team; "Launch Constraint
     /// Violation", seen the same day when the Developer ID 0.2.0 replaced an Apple Development
-    /// build of the same team): it's registered again once when the app's team or kind of
-    /// certificate changed since the last launch, or when obid neither answers nor runs. Not from
+    /// build of the same team): it's registered again once when obid neither answers nor runs. A
+    /// change of the app's team or kind of certificate since the last launch is only noted in the
+    /// reason, never a re-register on its own (`atLaunch`). Not from
     /// a copy outside Applications (`mayRegister`): its registration would point at a folder that
     /// vanishes.
     func reconcile(onThisMac: Bool) {
