@@ -2073,9 +2073,25 @@ impl Link {
         state: &State,
         exchange: &Exchange,
         kind: &str,
-        body: Value,
+        mut body: Value,
     ) -> Option<Value> {
         let key = state.key.as_ref()?;
+        // A guest job's decline says only unavailable, whatever this Mac's reason (its owner at it,
+        // no slot, sharing off, not allowed, no VM now), and names no rule: why stays here, in the
+        // log (the owner's decision of 2026-10-21; spec protocol.md section 4, rule 9). Only the
+        // guest's own doing keeps its reason.
+        if kind == "decline" && exchange.kind == "run_request" {
+            let reason = body["reason"].as_str().unwrap_or("other").to_owned();
+            let said = match reason.as_str() {
+                "expired" | "out_of_scope" | "share_used" => reason.clone(),
+                _ => "unavailable".to_owned(),
+            };
+            tracing::info!(
+                "sphere: declined {} ({reason}); the guest is told {said}",
+                exchange.correlation_id
+            );
+            body = json!({"reason": said});
+        }
         let membership = state.membership.as_ref()?;
         let now = time::now();
         let request_expires = exchange.expires_at().unwrap_or(now);

@@ -442,7 +442,7 @@ async fn stop_sends_the_job_back_with_its_commit_and_it_needs_its_owner() {
         let reason = job["reason"].as_str().unwrap_or("");
         assert!(
             reason
-                .starts_with("Came back from Wellington's Mac: that Mac couldn't keep running it."),
+                .starts_with("Came back from Wellington's Mac. That Mac couldn't keep running it."),
             "{reason}"
         );
         // The chain says only that the host was unavailable: not that Wellington stopped it, nor
@@ -512,10 +512,7 @@ async fn with_sharing_off_or_the_mac_busy_a_job_is_declined_with_the_reason() {
             let j = get(&p.guest, &format!("/v1/jobs/{job}"));
             (j["status"] == "interrupted").then_some(j)
         });
-        assert_eq!(
-            declined["reason"],
-            "Wellington's Mac isn't free now. Try again later, or run it here."
-        );
+        let first = declined["reason"].clone();
         // Sharing off: policy.
         let mut settings = get(&p.host, "/v1/obid/sharing/mac")["settings"].clone();
         settings["on"] = json!(false);
@@ -528,18 +525,33 @@ async fn with_sharing_off_or_the_mac_busy_a_job_is_declined_with_the_reason() {
             let j = get(&p.guest, &format!("/v1/jobs/{job}"));
             (j["status"] == "interrupted").then_some(j)
         });
-        assert_eq!(
-            declined["reason"],
-            "Wellington's Mac doesn't take your jobs. Run it here instead."
-        );
-        let reasons: Vec<Value> = p
+        // The owner at the Mac, and sharing off, read the same to Sangam and in the chain: why
+        // stays in Wellington's own log (the owner's decision of 2026-10-21).
+        assert_eq!(first, "That Mac can't take it now.");
+        assert_eq!(declined["reason"], first);
+        let declines: Vec<Value> = p
             .sphere
             .recorded()
-            .iter()
+            .into_iter()
             .filter(|e| e["type"] == "decline")
-            .map(|e| e["body"]["reason"].clone())
+            .map(|e| e["body"].clone())
             .collect();
-        assert_eq!(reasons, vec![json!("not_free"), json!("policy")]);
+        assert_eq!(
+            declines,
+            vec![
+                json!({"reason": "unavailable"}),
+                json!({"reason": "unavailable"})
+            ]
+        );
+        let log = p.host.log();
+        assert!(
+            log.contains("(not_free); the guest is told unavailable"),
+            "{log}"
+        );
+        assert!(
+            log.contains("(policy); the guest is told unavailable"),
+            "{log}"
+        );
 
         // A secret already in the repository, not one the job adds: the whole tree that would go
         // is scanned, so nothing goes.
@@ -688,7 +700,7 @@ async fn a_share_of_an_api_account_runs_on_its_mac_with_its_key_metered_until_us
         let reason = first["reason"].as_str().unwrap_or("");
         assert!(
             first["status"] == "done"
-                || reason.contains("your share of Wellington's account is used"),
+                || reason.contains("Your share of Wellington's account is used"),
             "{first}\n{}",
             p.guest.log()
         );

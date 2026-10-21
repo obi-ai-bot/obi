@@ -82,12 +82,12 @@
           "expires_at": "2026-10-14T13:00:00Z",
           "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
           "body": {
-            "reason": "not_free",
+            "reason": "unavailable",
             "note": "Wellington is at the Mac."
           },
-          "signature": "UPAl1td1PTW5JgjoEBhWMWC1REMLlZhFAgSEGH9ZCl7YhN-V8cfycq5lCGIPpenNMQMR1kICISJTuF-GxhW4AQ"
+          "signature": "FCT8Wb3Y5cO4gwVl79bR5ZotnJle8t8XPk4xvBac16YjZqPLk70MkI72osNyxx3BLvIfCQJXSfxoCR0ZYsjBBg"
         },
-        "hash": "66231deb5cfd3452acb624e9b675a03117c58b581cc95d95feab79e9495e6443"
+        "hash": "53c174d7cedbaec47b9e8b45e9e4f7033a9ae522b2527589665fecfa0727925d"
       }
     ]
   }

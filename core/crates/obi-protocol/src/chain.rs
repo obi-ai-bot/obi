@@ -121,6 +121,19 @@ pub fn exchange_problem(
     {
         return Some(format!("a decline of a {asked} has no note"));
     }
+    // Nor why its host declined, which would say when its owner is at the Mac or what its rules
+    // are: only the guest's own doing keeps its reason.
+    if kind == "decline"
+        && asked == "run_request"
+        && (!matches!(
+            reply["body"]["reason"].as_str(),
+            Some("unavailable" | "expired" | "out_of_scope" | "share_used")
+        ) || reply["body"].get("by_rule").is_some())
+    {
+        return Some(
+            "a decline of a run_request says only unavailable, expired, out_of_scope or share_used, with no by_rule".into(),
+        );
+    }
     None
 }
 

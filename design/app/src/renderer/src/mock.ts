@@ -191,8 +191,8 @@ export const JOBS: Job[] = [
     agent: 'claude', account: 'Personal', on: 'Wellington’s Mac', model: 'Opus 5.5', repo: 'deskree-inc/oby', branch: 'oby/onboarding-copy', base: 'dev',
     status: 'interrupted', step: 'Back from Wellington’s Mac', stages: stages('work', 'upcoming'), created: 52,
     ask: {
-      kind: 'back', headline: 'Wellington is back at that Mac',
-      text: 'Your job paused there after 18 minutes and came back with its notes and its 2 commits. Run the rest on this Mac, or wait until that Mac is free again?',
+      kind: 'back', headline: 'That Mac couldn’t keep running it',
+      text: 'Your job ran there for 18 minutes and came back with its notes and its 2 commits. Run the rest on this Mac, or wait until that Mac is free again?',
       options: ['Run it here', 'Wait for Wellington’s Mac'], recommended: 0,
     },
   },

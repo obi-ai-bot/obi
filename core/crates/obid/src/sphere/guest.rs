@@ -592,15 +592,15 @@ async fn run_in(
         // of 2026-10-21): how long it ran is this Mac's own count.
         let minutes = accepted.elapsed().as_secs() / 60;
         let why = match reply["body"]["reason"].as_str() {
-            Some("time_limit") => "it reached its time limit there".to_owned(),
+            Some("time_limit") => "It reached its time limit there".to_owned(),
             Some("share_used") => format!(
-                "your share of {}'s account is used for this month",
+                "Your share of {}'s account is used for this month",
                 ask.host_owner
             ),
-            _ => "that Mac couldn't keep running it".to_owned(),
+            _ => "That Mac couldn't keep running it".to_owned(),
         };
         let text = format!(
-            "Came back from {}'s Mac: {why}. It ran {minutes} minute{} there and came back with its notes and {count} commit{}. Try again to send it back there, or run it here.",
+            "Came back from {}'s Mac. {why}. It ran {minutes} minute{} there and came back with its notes and {count} commit{}. Try again to send it back there, or run it here.",
             ask.host_owner,
             if minutes == 1 { "" } else { "s" },
             if count == 1 { "" } else { "s" }
@@ -648,24 +648,16 @@ fn declined(ex: &super::exchange::Exchange, host_owner: &str) -> Turn {
         .find(|m| m.envelope["type"] == "decline")
         .and_then(|m| m.envelope["body"]["reason"].as_str())
         .unwrap_or("expired");
+    // Why the other Mac said no stays there (the owner's decision of 2026-10-21): only what's this
+    // owner's own doing, its share used or its request expired, says more.
     let text = match reason {
-        "not_free" => {
-            format!("{host_owner}'s Mac isn't free now. Try again later, or run it here.")
-        }
-        "busy" => {
-            format!("{host_owner}'s Mac is busy with another job. Try again later, or run it here.")
-        }
-        "owner_declined" => {
-            format!("{host_owner} said no to running it on their Mac. Run it here instead.")
-        }
-        "policy" => format!("{host_owner}'s Mac doesn't take your jobs. Run it here instead."),
         "share_used" => format!(
             "Your share of {host_owner}'s account is used for this month. Run it on your own account instead."
         ),
         "expired" => {
             format!("{host_owner}'s Mac didn't answer in time. Try again, or run it here.")
         }
-        _ => format!("{host_owner}'s Mac couldn't take it. Run it here instead."),
+        _ => "That Mac can't take it now.".to_owned(),
     };
     failed(&text)
 }
