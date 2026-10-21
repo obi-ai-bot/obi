@@ -1646,43 +1646,38 @@ A decision that names the old number and not the new one, and a word of the assi
 
 ### obid only: Slack
 
-The owner connects Slack once, in Oby (F10, #14; the spike #26). obid is the client of a Slack app the owner makes in their own workspace: OAuth v2 with PKCE, no client secret, user scopes only. It keeps the owner's user token in its vault and uses it for two things: searching messages, and a direct message to the owner themselves. Agents never get it. None of these endpoints is on the gateway's allowlist, and no other Oby reaches them.
+The owner connects Slack once, in Oby (F10, #14; the spike #26), with their workspace's own Slack app. obid keeps the app's two tokens in its vault and uses them for two things: the user token to search messages, the bot token to send the owner a direct message as the app. Agents never get them. None of these endpoints is on the gateway's allowlist, and no other Oby reaches them.
 
-**Making the Slack app** (the owner's step; Oby never makes or approves it). At https://api.slack.com/apps: Create New App › From a manifest › the workspace › paste this JSON › Next › Create:
+**The Slack app** (the owner's step; Oby never makes, installs or approves it): an internal app in the workspace, installed with Slack's Install to Workspace, with these scopes and nothing else Oby needs:
 
-```json
-{"display_information": {"name": "Oby"},
- "oauth_config": {"redirect_urls": ["http://localhost:47823/callback"],
-                  "scopes": {"user": ["search:read", "chat:write"]},
-                  "pkce_enabled": true}}
-```
+- User token scopes: `search:read` (the watcher's reads, through `search.messages`). An app made for more (`channels:history`, `groups:history`, `im:history`, `mpim:history`, the `:read` scopes, `users:read`) works the same; obid doesn't use them.
+- Bot token scopes: `chat:write` and `im:write` (the direct message to the owner).
 
-Then Basic Information › App Credentials › Client ID is what Oby asks for. PKCE marks the app as a public client, which Slack can't undo without its support, and is what lets a `localhost` redirect work with no secret. Slack lets a workspace admin approve apps first: when the workspace asks for that, an admin approves Oby in Slack's own page. No bot, no events, no Socket Mode: Oby asks Slack, as it asks GitHub.
+No redirect URL, no PKCE, no client secret, no events and no Socket Mode: obid asks Slack, as it asks GitHub. OAuth & Permissions › OAuth Tokens has the two tokens, `xoxp-…` (User OAuth Token) and `xoxb-…` (Bot User OAuth Token).
 
 **`GET /v1/slack`** answers:
 
 ```json
-{"connected": true, "team": "Deskree", "user": "U02MX5VJKQU", "clientId": "1234567890.1234567890",
- "redirect": "http://localhost:47823/callback", "scopes": ["search:read", "chat:write"],
- "connectedAt": "2026-10-21T14:02:11Z", "signIn": null, "error": null}
+{"connected": true, "team": "Deskree", "user": "U02MX5VJKQU", "bot": "U0BOT1234",
+ "connectedAt": "2026-10-21T14:02:11Z", "error": null}
 ```
 
-- `connected`: obid holds a login it can use. `team`: the workspace's name. `user`: the owner's Slack user id, the one obid writes to. `clientId`: the Slack app's, kept so a second Connect doesn't ask again (it isn't a secret). `redirect`: what the app's Redirect URLs must list.
-- `signIn`: the sign-in under way (`{"url", "expiresAt"}`), or null. `error`: why the last sign-in or call failed (`Slack signed Oby out: connect it again.`), or null.
-- No token, code or verifier is ever in an answer, an event or a log line.
+- `connected`: obid holds both tokens and Slack took them. `team`: the workspace's name. `user`: the user token's Slack user id, the owner, the only person obid writes to. `bot`: the app's bot user id.
+- `error`: why Oby was signed out (`Slack refused Oby's tokens: paste new ones in Settings › Connectors › Slack.`), or null.
+- No token is ever in an answer, an event or a log line.
 
-**`POST /v1/slack/sign-in`** with `{"clientId": "…"}` (or nothing, to use the one kept) starts a sign-in and answers `{"url": "https://slack.com/oauth/v2/authorize?…", "expiresAt": "…"}`. The app opens `url`; once the person allows it there, Slack sends the browser to obid's page, which says `Oby is connected to Slack. You can close this tab.`
+**`PUT /v1/slack`** with `{"user": "xoxp-…", "bot": "xoxb-…"}` (the owner pastes them in Settings › Connectors › Slack) checks both and keeps them, answering as `GET` does:
 
-- The client id is digits, a dot and digits; anything else is `422`. With none given or kept, `422`.
-- The redirect is always `http://localhost:47823/callback`, on 127.0.0.1 only (Slack matches the port, so it's fixed): `409` when something else holds the port. It answers that one path, only with that `Host`, takes the first request whose `state` matches, and closes. A sign-in ends when the token exchange does, after 10 minutes, with `DELETE`, or when obid stops; a second `POST` ends the one under way first.
-- The request names `user_scope` `search:read,chat:write`, the `state` and the PKCE challenge (S256). The exchange (`oauth.v2.access`) sends the verifier, never a secret, and keeps only a user token (`authed_user`); a bot token is refused.
-- The login goes into obid's vault as `oby.slack.access` (and `oby.slack.refresh` when Slack rotates tokens), so it's taken out of every answer, log line and push like every vault secret. The rest is in `home/slack.json` (0600). A token with an end is refreshed when it has less than a minute left; one Slack refuses is refreshed once, and a refusal after that signs Oby out (`error` says so).
+- Each is its kind (`xoxp-` and `xoxb-`, 20 to 512 printable characters), else `422`.
+- obid asks Slack's `auth.test` with each: the user token must be a person's (no `bot_id`), the bot token a bot's (`bot_id`), both of the same workspace (`team_id`). A token Slack refuses is `422` (`Slack refused the bot token.`); Slack out of reach is `502`. Nothing is kept until both pass.
+- They go into obid's vault as `oby.slack.user` and `oby.slack.bot`, so they're taken out of every answer, log line and push like every vault secret (obid only: the vault). Who they are is in `home/slack.json` (0600).
+- A token Slack refuses later (`invalid_auth`, `token_revoked`, …) signs Oby out: both are forgotten and `error` says so.
 
-**`DELETE /v1/slack/sign-in`** ends the sign-in under way: `204`. **`DELETE /v1/slack`** asks Slack to revoke the token (`auth.revoke`, and goes on if that fails) and forgets it: `204`.
+**`DELETE /v1/slack`** forgets both tokens: `204`. The app stays installed in Slack; uninstalling it there revokes them.
 
 **The `slack` event** comes on `/v1/events` with the same body as `GET /v1/slack` whenever it changes.
 
-**What obid does with it.** Only the watcher (below) uses it: `search.messages` (at most 3 pages of 100, newest first), and `chat.postMessage` to the owner's own user id, a direct message from their own account (Slack shows it in their DM with themselves, so Slack itself doesn't ping a phone for it). Every message obid sends passes the secret scan first: a finding, or a scan that can't run, sends nothing. Nothing ever goes to anyone else.
+**What obid does with them.** Only the watcher (below) uses them: `search.messages` with the user token (at most 3 pages of 100, newest first), and, with the bot token, `conversations.open` with the owner's user id, then `chat.postMessage` in that direct message. Every message obid sends passes the secret scan first: a finding, or a scan that can't run, sends nothing. Nothing ever goes to anyone else.
 
 ### obid only: the watcher
 
@@ -1708,7 +1703,7 @@ The rules, as `GET /v1/watch` shows them and `PUT /v1/watch` sets them:
 - **GitHub**, with obid's own `gh` (obid only: GitHub work), one `gh api graphql` call whose search strings are variables, never part of the query: the owner's pull requests that the person is involved in or reviewed, and the `issues` searches that the person is involved in or reviewed, updated since the run's start; and, for the model, the titles of the open ones. What counts: the person's comments, reviews (approved, changes asked, reviewed), and their opening, closing or reopening of one, newer than the last run (less 10 minutes, for GitHub's index), each once. They're about what's watched by where they are, so the model doesn't sort them.
 - **Slack**, when connected: `from:<@person.slack> after:<the day before>`, the person's own messages newer than the last run (less 10 minutes), each once, at most the newest 100 (the run says how many older ones weren't sorted). Without Slack, the run says `Slack isn't connected, so only GitHub was read.`
 - **Sorting.** Each Slack message's text goes through the secret scan first: one it flags isn't shown to the model and isn't told. The rest go to the brain's quick model (Haiku, with the first Claude Code account, as the brain's side calls do), which reads them only in a quoted file, fenced as data with what's watched and the open titles, and answers, by the schema, which ones count and a topic of a few words for each. A run whose sorting fails (no Claude Code account, a timeout, an answer off the schema) is `failed` and reads the same time again next run; its GitHub notices are told all the same.
-- **Telling.** Each notice becomes one `watch` inbox item (below), and the Mac shows it as a notification. When there's any, one Slack message to the owner lists them, in obid's words: `Oby (Dmitry watcher): Dmitry said something you watch for.` then a line each, `• wrote in #tetrix-avenga-testing (Avenga snapshot cap): <permalink>` or `• commented on your pull request obi-ai-bot/obi#835: <url>`: never what the person wrote. In a dry run it's only written down (`dm` `dryRun`, `dmText`); live, it's sent after the secret scan (`sent`, or `notSent` with why in `problems`).
+- **Telling.** Each notice becomes one `watch` inbox item (below), and the Mac shows it as a notification. When there's any, one Slack message from the app's bot to the owner (obid only: Slack) lists them, in obid's words: `Oby (Dmitry watcher): Dmitry said something you watch for.` then a line each, `• wrote in #tetrix-avenga-testing (Avenga snapshot cap): <permalink>` or `• commented on your pull request obi-ai-bot/obi#835: <url>`: never what the person wrote. In a dry run it's only written down (`dm` `dryRun`, `dmText`); live, it's sent after the secret scan (`sent`, or `notSent` with why in `problems`).
 - **Remembering.** What was told (`slack:<channel>:<ts>`, `github:<node id>`) is kept, the latest 5,000, so nothing is told twice; the time the next run reads from is kept too. Both in `home/watch.json` (0600).
 
 **`GET /v1/watch`** answers `{"rules": …|null, "nextRun": "…"|null, "lastRun": Run|null, "runs": [Run, …]}`, the latest 20 runs newest first. A run:

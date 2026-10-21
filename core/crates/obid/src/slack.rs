@@ -1,58 +1,46 @@
 //! Slack, connected once in Oby (F10, #14; the spike #26; docs/runner-api.md, "obid only: Slack").
 //!
-//! obid is a Slack app's public client: OAuth v2 with PKCE and a redirect to `localhost` (Slack
-//! takes one as a desktop redirect once the app has PKCE on), asking only for user scopes. The
-//! owner's user token is kept in obid's vault, so every answer, log line and push has it taken
-//! out. Agents never get it, and nothing here is on the gateway. obid uses it for two things only:
-//! searching messages ([`Slack::search`]) and a direct message to the owner themselves
-//! ([`Slack::tell_owner`]), which passes the secret scan first.
+//! The owner installs their workspace's own Slack app ("Install to Workspace") and pastes its two
+//! tokens into Oby: the user token (`xoxp-`), which obid uses only to search messages, and the
+//! bot token (`xoxb-`), which it uses only to send the owner a direct message as the app. obid
+//! checks both with `auth.test` and keeps them in its vault, so every answer, log line and push has
+//! them taken out. Agents never get them, and nothing here is on the gateway. Every message obid
+//! sends passes the secret scan first, and goes to the owner and nobody else.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::extract::State;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::api::{ApiError, Shared};
 
-pub const ACCESS: &str = "oby.slack.access";
-pub const REFRESH: &str = "oby.slack.refresh";
-/// The port of the redirect the owner registers in the Slack app. Slack matches it, so it's fixed.
-pub const PORT: u16 = 47823;
-pub const REDIRECT: &str = "http://localhost:47823/callback";
-/// The user scopes obid asks for: reading messages through search, and writing to the owner.
-pub const USER_SCOPES: &str = "search:read,chat:write";
+pub const USER: &str = "oby.slack.user";
+pub const BOT: &str = "oby.slack.bot";
 pub const NOT_CONNECTED: &str = "Oby isn't connected to Slack.";
-const SIGNED_OUT: &str = "Slack signed Oby out: connect it again.";
-const SIGN_IN_LASTS: Duration = Duration::from_secs(10 * 60);
-const AUTHORIZE: &str = "https://slack.com/oauth/v2/authorize";
+const REFUSED: &str =
+    "Slack refused Oby's tokens: paste new ones in Settings › Connectors › Slack.";
 const API: &str = "https://slack.com/api";
 /// The most a search reads: 3 pages of 100, newest first.
 const PAGES: u32 = 3;
 
-/// `home/slack.json` (0600): everything about the login but the tokens, which are in the vault.
+/// `home/slack.json` (0600): who the tokens are, never the tokens, which are in the vault.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Saved {
-    /// The Slack app's client id: not a secret (a public client), the owner's app.
-    client_id: Option<String>,
     team: Option<String>,
     team_id: Option<String>,
-    /// The owner's own Slack user id: the only one obid ever writes to.
+    /// The owner's own Slack user id (the user token's): the only one obid ever writes to.
     user: Option<String>,
-    scopes: Option<Vec<String>>,
+    /// The app's bot user id (the bot token's).
+    bot: Option<String>,
     connected_at: Option<String>,
-    /// When the access token ends, in seconds since the epoch; none for a token that doesn't.
-    expires: Option<i64>,
     error: Option<String>,
 }
 
@@ -65,21 +53,8 @@ pub struct Slack {
     http: reqwest::Client,
     /// Slack's Web API (`https://slack.com/api`); a stub's in tests.
     api: String,
-    sign_in: Mutex<Option<Arc<SignIn>>>,
-    /// Held while the login changes, so one refresh runs at a time.
+    /// Held while the tokens change.
     changing: tokio::sync::Mutex<()>,
-}
-
-/// A sign-in under way: what its callback needs to finish it.
-struct SignIn {
-    url: String,
-    expires: i64,
-    state: String,
-    verifier: String,
-    client_id: String,
-    end: tokio::sync::Notify,
-    taken: AtomicBool,
-    closed: tokio::sync::watch::Sender<bool>,
 }
 
 /// A message search found, as obid keeps it: Slack's typed fields and the text, quoted data.
@@ -97,23 +72,9 @@ pub struct Message {
 }
 
 enum Failed {
-    /// Slack refused the login (`invalid_auth`, `token_revoked`, `invalid_grant`…).
+    /// Slack refused the token (`invalid_auth`, `token_revoked`…).
     Refused,
     Other(String),
-}
-
-/// A Slack app's client id: digits, a dot, digits (`1234567890.1234567890`).
-fn client_id_problem(id: &str) -> Option<String> {
-    let fine = id.len() <= 64
-        && id.split_once('.').is_some_and(|(a, b)| {
-            !a.is_empty()
-                && !b.is_empty()
-                && a.bytes().all(|c| c.is_ascii_digit())
-                && b.bytes().all(|c| c.is_ascii_digit())
-        });
-    (!fine).then(|| {
-        "That isn't a Slack app's Client ID: copy it from the app's Basic Information page (digits, a dot, digits).".into()
-    })
 }
 
 /// An error code from Slack, safe to show.
@@ -127,52 +88,17 @@ fn code_of(text: &str) -> String {
 fn refused(code: &str) -> bool {
     matches!(
         code,
-        "invalid_auth"
-            | "not_authed"
-            | "token_revoked"
-            | "token_expired"
-            | "account_inactive"
-            | "invalid_grant"
-            | "invalid_refresh_token"
-            | "invalid_code"
-            | "bad_redirect_uri"
+        "invalid_auth" | "not_authed" | "token_revoked" | "token_expired" | "account_inactive"
     )
 }
 
-fn random(bytes: usize) -> Vec<u8> {
-    let mut buffer = vec![0; bytes];
-    getrandom::fill(&mut buffer).expect("the system's random source works");
-    buffer
-}
-
-/// The login in an `oauth.v2.access` answer: a user token, from `authed_user` (a sign-in) or the
-/// top level (a refresh of a user token).
-struct Tokens {
-    access: String,
-    refresh: Option<String>,
-    expires_in: Option<i64>,
-    scope: Option<String>,
-    user: Option<String>,
-}
-
-fn tokens(answer: &Value) -> Option<Tokens> {
-    let text = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
-    let user = &answer["authed_user"];
-    let from = if text(&user["access_token"]).is_some() {
-        user
-    } else {
-        answer
-    };
-    // Never a bot's token: obid asks for none, and writes only as the owner.
-    if from["token_type"].as_str().is_some_and(|t| t != "user") {
-        return None;
-    }
-    Some(Tokens {
-        access: text(&from["access_token"])?,
-        refresh: text(&from["refresh_token"]),
-        expires_in: from["expires_in"].as_i64(),
-        scope: text(&from["scope"]),
-        user: text(&user["id"]).or_else(|| text(&answer["user_id"])),
+/// Why `token` isn't a Slack token of this kind (`xoxp-` or `xoxb-`), or none.
+fn token_problem(token: &str, prefix: &str, what: &str) -> Option<String> {
+    let fine = token.starts_with(prefix)
+        && (20..=512).contains(&token.len())
+        && token.bytes().all(|c| c.is_ascii_graphic());
+    (!fine).then(|| {
+        format!("The {what} token starts with {prefix} (OAuth & Permissions › OAuth Tokens).")
     })
 }
 
@@ -209,6 +135,10 @@ fn messages(answer: &Value) -> Vec<Message> {
         .collect()
 }
 
+fn text(v: &Value, key: &str) -> Option<String> {
+    v[key].as_str().filter(|s| !s.is_empty()).map(str::to_owned)
+}
+
 impl Slack {
     pub fn open(
         home: &std::path::Path,
@@ -242,7 +172,6 @@ impl Slack {
             events,
             http,
             api,
-            sign_in: Mutex::new(None),
             changing: tokio::sync::Mutex::new(()),
         })
     }
@@ -260,21 +189,8 @@ impl Slack {
         Ok(())
     }
 
-    fn running(&self) -> Option<Arc<SignIn>> {
-        self.sign_in
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
     pub fn connected(&self) -> bool {
         self.saved().connected_at.is_some()
-    }
-
-    /// The owner's own Slack user id, while connected.
-    pub fn owner(&self) -> Option<String> {
-        let saved = self.saved();
-        saved.connected_at.and(saved.user)
     }
 
     pub fn status_json(&self) -> Value {
@@ -284,146 +200,30 @@ impl Slack {
             "connected": connected,
             "team": saved.team.filter(|_| connected),
             "user": saved.user.filter(|_| connected),
-            "clientId": saved.client_id,
-            "redirect": REDIRECT,
-            "scopes": saved.scopes.filter(|_| connected),
+            "bot": saved.bot.filter(|_| connected),
             "connectedAt": saved.connected_at,
-            "signIn": self.running().map(|s| json!({"url": s.url,
-                "expiresAt": obi_protocol::time::format(s.expires)})),
             "error": saved.error,
         })
     }
 
-    /// Starts a sign-in with the Slack app `client_id` (none: the one obid kept), in place of the
-    /// one under way, and gives the page the person opens.
-    async fn start(self: &Arc<Self>, client_id: Option<String>) -> Result<Value, ApiError> {
-        let client_id = client_id.or(self.saved().client_id).ok_or_else(|| {
-            ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Say which Slack app: {\"clientId\": \"…\"}, its Client ID.",
-            )
-        })?;
-        if let Some(problem) = client_id_problem(&client_id) {
-            return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, problem));
-        }
-        let before = self
-            .sign_in
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(before) = before {
-            before.end.notify_one();
-            let mut closed = before.closed.subscribe();
-            let _ = tokio::time::timeout(Duration::from_secs(5), closed.wait_for(|c| *c)).await;
-        }
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, PORT))
-            .await
-            .map_err(|e| {
-                ApiError::new(
-                    StatusCode::CONFLICT,
-                    format!("obid can't open Slack's redirect, port {PORT} on this Mac: {e}"),
-                )
-            })?;
-        let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random(32));
-        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(obi_protocol::keys::sha256(&verifier));
-        let state = hex::encode(random(16));
-        let mut page = reqwest::Url::parse(AUTHORIZE).expect("Slack's page");
-        page.query_pairs_mut()
-            .append_pair("client_id", &client_id)
-            .append_pair("user_scope", USER_SCOPES)
-            .append_pair("redirect_uri", REDIRECT)
-            .append_pair("state", &state)
-            .append_pair("code_challenge", &challenge)
-            .append_pair("code_challenge_method", "S256");
-        let sign_in = Arc::new(SignIn {
-            url: page.to_string(),
-            expires: obi_protocol::time::now() + SIGN_IN_LASTS.as_secs() as i64,
-            state,
-            verifier,
-            client_id,
-            end: tokio::sync::Notify::new(),
-            taken: AtomicBool::new(false),
-            closed: tokio::sync::watch::channel(false).0,
-        });
-        if let Some(meanwhile) = self
-            .sign_in
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .replace(sign_in.clone())
-        {
-            meanwhile.end.notify_one();
-        }
-        let slack = self.clone();
-        let running = sign_in.clone();
-        tokio::spawn(async move {
-            let app = Router::new()
-                .route("/callback", get(callback))
-                .with_state((slack.clone(), running.clone()));
-            let ending = running.clone();
-            let ended = async move {
-                tokio::select! {
-                    _ = ending.end.notified() => {}
-                    _ = tokio::time::sleep(SIGN_IN_LASTS) => {}
-                }
-            };
-            if let Err(e) = axum::serve(listener, app)
-                .with_graceful_shutdown(ended)
-                .await
-            {
-                tracing::warn!("Slack's sign-in page stopped: {e}");
-            }
-            running.closed.send_replace(true);
-            let mut slot = slack.sign_in.lock().unwrap_or_else(|e| e.into_inner());
-            if slot.as_ref().is_some_and(|s| Arc::ptr_eq(s, &running)) {
-                *slot = None;
-                drop(slot);
-                slack.events.send("slack", slack.status_json());
-            }
-        });
-        self.events.send("slack", self.status_json());
-        Ok(json!({"url": sign_in.url,
-            "expiresAt": obi_protocol::time::format(sign_in.expires)}))
-    }
-
-    pub fn cancel(&self) {
-        if let Some(running) = self.running() {
-            running.end.notify_one();
-        }
-    }
-
-    fn set_error(&self, error: String) {
-        let mut saved = self.saved();
-        saved.error = Some(error);
-        if let Err(e) = self.save(saved) {
-            tracing::warn!("{e}");
-        }
-    }
-
-    /// `oauth.v2.access`, with no client secret (PKCE).
-    async fn token_request(&self, form: &[(&str, &str)]) -> Result<Tokens, Failed> {
-        let answer = self.post("oauth.v2.access", None, form).await?;
-        tokens(&answer).ok_or_else(|| Failed::Other("Slack sent no user token.".into()))
-    }
-
-    /// A Web API call, answered `ok`. A login Slack refuses is [`Failed::Refused`].
+    /// A Web API call, answered `ok`. A token Slack refuses is [`Failed::Refused`].
     async fn post(
         &self,
         method: &str,
-        token: Option<&str>,
+        token: &str,
         form: &[(&str, &str)],
     ) -> Result<Value, Failed> {
-        let mut request = self
+        let response = self
             .http
             .post(format!("{}/{method}", self.api))
             .header(header::ACCEPT, "application/json")
-            .form(form);
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
-        let response = request.send().await.map_err(|e| {
-            Failed::Other(format!("Slack couldn't be reached: {}", e.without_url()))
-        })?;
+            .bearer_auth(token)
+            .form(form)
+            .send()
+            .await
+            .map_err(|e| {
+                Failed::Other(format!("Slack couldn't be reached: {}", e.without_url()))
+            })?;
         let status = response.status();
         if status == StatusCode::TOO_MANY_REQUESTS {
             let wait = response
@@ -454,175 +254,117 @@ impl Slack {
         }))
     }
 
-    fn keep(&self, tokens: &Tokens, new_login: bool) -> Result<(), String> {
-        self.vault
-            .add(&tokens.access, ACCESS)
-            .map_err(|e| format!("obid couldn't keep Slack's login: {e}"))?;
-        match &tokens.refresh {
-            Some(refresh) => self
-                .vault
-                .add(refresh, REFRESH)
-                .map_err(|e| format!("obid couldn't keep Slack's login: {e}"))?,
-            None if new_login => {
-                let _ = self.vault.remove(REFRESH);
-            }
-            None => {}
-        }
-        Ok(())
-    }
-
-    async fn finish(&self, sign_in: &SignIn, code: &str) -> Result<(), String> {
-        let _held = self.changing.lock().await;
-        let tokens = self
-            .token_request(&[
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("client_id", &sign_in.client_id),
-                ("code_verifier", &sign_in.verifier),
-                ("redirect_uri", REDIRECT),
-            ])
+    /// `auth.test` for a pasted token: what Slack says it is, or why it can't be used.
+    async fn identify(&self, token: &str, what: &str) -> Result<Value, ApiError> {
+        self.post("auth.test", token, &[])
             .await
             .map_err(|e| match e {
-                Failed::Refused => "Slack refused the sign-in.".to_owned(),
-                Failed::Other(why) => why,
-            })?;
-        let user = tokens
-            .user
-            .clone()
-            .ok_or("Slack didn't say who signed in.")?;
-        self.keep(&tokens, true)?;
-        let now = obi_protocol::time::now();
-        let mut saved = self.saved();
-        saved.client_id = Some(sign_in.client_id.clone());
-        saved.user = Some(user);
-        saved.scopes = Some(
-            tokens
-                .scope
-                .as_deref()
-                .unwrap_or(USER_SCOPES)
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect(),
-        );
-        saved.connected_at = Some(obi_protocol::time::format(now));
-        saved.expires = tokens.expires_in.map(|s| now + s);
-        saved.error = None;
-        // Who the workspace is: `auth.test`, best effort.
-        if let Ok(who) = self.post("auth.test", Some(&tokens.access), &[]).await {
-            saved.team = who["team"].as_str().map(str::to_owned);
-            saved.team_id = who["team_id"].as_str().map(str::to_owned);
-        }
-        self.save(saved)
+                Failed::Refused => ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("Slack refused the {what} token."),
+                ),
+                Failed::Other(why) => ApiError::new(StatusCode::BAD_GATEWAY, why),
+            })
     }
 
-    /// The access token, refreshed first when it has less than a minute left, or when `stale` (the
-    /// token Slack just refused) is still the one held.
-    async fn access(&self, stale: Option<&str>) -> Result<String, String> {
-        let _held = self.changing.lock().await;
-        let mut saved = self.saved();
-        if saved.connected_at.is_none() {
-            return Err(NOT_CONNECTED.into());
-        }
-        let current = self
-            .vault
-            .value(ACCESS)
-            .map_err(|e| format!("the vault can't be read: {e}"))?
-            .ok_or(NOT_CONNECTED)?;
-        let now = obi_protocol::time::now();
-        match stale {
-            Some(stale) if stale != current => return Ok(current),
-            None if saved.expires.is_none_or(|e| e - now > 60) => return Ok(current),
-            _ => {}
-        }
-        let refresh = self
-            .vault
-            .value(REFRESH)
-            .map_err(|e| format!("the vault can't be read: {e}"))?;
-        let (Some(refresh), Some(client)) = (refresh, saved.client_id.clone()) else {
-            self.forget(Some(SIGNED_OUT.into()));
-            return Err(SIGNED_OUT.into());
-        };
-        match self
-            .token_request(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", &refresh),
-                ("client_id", &client),
-            ])
-            .await
+    /// Checks both tokens with `auth.test` (one workspace; the user token a person's, the bot
+    /// token the app's bot) and keeps them. Nothing is kept when either is refused.
+    async fn connect(&self, user: &str, bot: &str) -> Result<(), ApiError> {
+        let bad = |text: String| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, text);
+        let internal = |text: String| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, text);
+        if let Some(problem) =
+            token_problem(user, "xoxp-", "user").or_else(|| token_problem(bot, "xoxb-", "bot"))
         {
-            Ok(tokens) => {
-                self.keep(&tokens, false)?;
-                saved.expires = tokens.expires_in.map(|s| now + s);
-                saved.error = None;
-                self.save(saved)?;
-                Ok(tokens.access)
-            }
-            Err(Failed::Refused) => {
-                self.forget(Some(SIGNED_OUT.into()));
-                Err(SIGNED_OUT.into())
-            }
-            Err(Failed::Other(why)) => Err(why),
+            return Err(bad(problem));
         }
+        let person = self.identify(user, "user").await?;
+        let app = self.identify(bot, "bot").await?;
+        let (Some(owner), Some(team_id)) = (text(&person, "user_id"), text(&person, "team_id"))
+        else {
+            return Err(bad("Slack didn't say whose the user token is.".into()));
+        };
+        if text(&person, "bot_id").is_some() {
+            return Err(bad(
+                "That user token is a bot's: copy the User OAuth Token.".into(),
+            ));
+        }
+        if text(&app, "bot_id").is_none() {
+            return Err(bad(
+                "That bot token isn't a bot's: copy the Bot User OAuth Token.".into(),
+            ));
+        }
+        if text(&app, "team_id").as_deref() != Some(&team_id) {
+            return Err(bad("The two tokens are from different workspaces.".into()));
+        }
+        let _held = self.changing.lock().await;
+        for (value, name) in [(user, USER), (bot, BOT)] {
+            self.vault
+                .add(value, name)
+                .map_err(|e| internal(format!("obid couldn't keep Slack's tokens: {e}")))?;
+        }
+        self.save(Saved {
+            team: text(&person, "team"),
+            team_id: Some(team_id),
+            user: Some(owner),
+            bot: text(&app, "user_id"),
+            connected_at: Some(obi_protocol::time::format(obi_protocol::time::now())),
+            error: None,
+        })
+        .map_err(internal)
     }
 
-    /// Forgets the login (the caller holds `changing`).
+    /// Forgets both tokens (the app stays installed in Slack). `error` says why, when the owner
+    /// didn't ask.
     fn forget(&self, error: Option<String>) {
-        for name in [ACCESS, REFRESH] {
+        for name in [USER, BOT] {
             if let Err(e) = self.vault.remove(name) {
                 tracing::warn!("obid couldn't remove {name} from the vault: {e}");
             }
         }
-        let mut saved = self.saved();
-        saved.connected_at = None;
-        saved.scopes = None;
-        saved.expires = None;
-        saved.error = error;
+        let saved = Saved {
+            error,
+            ..Saved::default()
+        };
         if let Err(e) = self.save(saved) {
             tracing::warn!("{e}");
         }
     }
 
-    /// Signs Oby out: the token revoked at Slack (`auth.revoke`, best effort), then forgotten.
     pub async fn disconnect(&self) {
         let _held = self.changing.lock().await;
-        if let Ok(Some(token)) = self.vault.value(ACCESS)
-            && let Err(Failed::Other(why)) = self.post("auth.revoke", Some(&token), &[]).await
-        {
-            tracing::info!("Slack didn't take back the login: {why}");
-        }
         self.forget(None);
     }
 
-    /// A call with the owner's token: refreshed once when Slack refuses it, signed out when it
-    /// refuses again.
-    async fn call(&self, method: &str, form: &[(&str, &str)]) -> Result<Value, String> {
-        let token = self.access(None).await?;
-        match self.post(method, Some(&token), form).await {
+    /// A call with the token `name`; one Slack refuses signs Oby out (`error` says so).
+    async fn call(&self, name: &str, method: &str, form: &[(&str, &str)]) -> Result<Value, String> {
+        if !self.connected() {
+            return Err(NOT_CONNECTED.into());
+        }
+        let token = self
+            .vault
+            .value(name)
+            .map_err(|e| format!("the vault can't be read: {e}"))?
+            .ok_or(NOT_CONNECTED)?;
+        match self.post(method, &token, form).await {
             Ok(answer) => Ok(answer),
             Err(Failed::Other(why)) => Err(why),
             Err(Failed::Refused) => {
-                let token = self.access(Some(&token)).await?;
-                match self.post(method, Some(&token), form).await {
-                    Ok(answer) => Ok(answer),
-                    Err(Failed::Other(why)) => Err(why),
-                    Err(Failed::Refused) => {
-                        let _held = self.changing.lock().await;
-                        self.forget(Some(SIGNED_OUT.into()));
-                        Err(SIGNED_OUT.into())
-                    }
-                }
+                let _held = self.changing.lock().await;
+                self.forget(Some(REFUSED.into()));
+                Err(REFUSED.into())
             }
         }
     }
 
-    /// The messages `search.messages` finds for `query`, newest first, at most 300.
+    /// The messages `search.messages` finds for `query` with the user token, newest first, at
+    /// most 300.
     pub async fn search(&self, query: &str) -> Result<Vec<Message>, String> {
         let mut found = Vec::new();
         for page in 1..=PAGES {
             let page = page.to_string();
             let answer = self
                 .call(
+                    USER,
                     "search.messages",
                     &[
                         ("query", query),
@@ -642,11 +384,15 @@ impl Slack {
         Ok(found)
     }
 
-    /// Sends `text` to the owner themselves, as a direct message from their own account: never to
+    /// Sends `text` to the owner as the app's bot, in its direct message with them: never to
     /// anyone else. It passes the secret scan first: a finding, or a scan that can't run, sends
     /// nothing. Answers the message's `ts`.
     pub async fn tell_owner(&self, text: &str) -> Result<String, String> {
-        let owner = self.owner().ok_or(NOT_CONNECTED)?;
+        let owner = self
+            .saved()
+            .user
+            .filter(|_| self.connected())
+            .ok_or(NOT_CONNECTED)?;
         crate::store::make_private_dir(&self.scratch)
             .map_err(|e| format!("the secret scan couldn't run (its folder: {e})"))?;
         match crate::scan::scan(&[("slack.txt".into(), text.to_owned())], &self.scratch).await {
@@ -660,11 +406,20 @@ impl Slack {
                 ));
             }
         }
+        let opened = self
+            .call(BOT, "conversations.open", &[("users", &owner)])
+            .await?;
+        let channel = opened["channel"]["id"]
+            .as_str()
+            .filter(|c| c.starts_with('D'))
+            .ok_or("Slack opened no direct message with you.")?
+            .to_owned();
         let answer = self
             .call(
+                BOT,
                 "chat.postMessage",
                 &[
-                    ("channel", &owner),
+                    ("channel", &channel),
                     ("text", text),
                     ("unfurl_links", "false"),
                     ("unfurl_media", "false"),
@@ -675,75 +430,10 @@ impl Slack {
     }
 }
 
-/// The page the browser lands on: a sentence of obid's own and nothing that runs.
-fn page(status: StatusCode, text: &str) -> Response {
-    let escaped = text
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    (
-        status,
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-store"),
-            (header::CONTENT_SECURITY_POLICY, "default-src 'none'"),
-            (header::REFERRER_POLICY, "no-referrer"),
-        ],
-        format!("<!doctype html><meta charset=utf-8><title>Oby</title><p>{escaped}</p>"),
-    )
-        .into_response()
-}
-
-/// `GET /callback` on the redirect's port: the first request with its `state` finishes it.
-async fn callback(
-    State((slack, sign_in)): State<(Arc<Slack>, Arc<SignIn>)>,
-    headers: HeaderMap,
-    Query(query): Query<HashMap<String, String>>,
-) -> Response {
-    // Only the address it gave: a page that renamed itself to this machine (DNS rebinding) isn't.
-    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
-    if host != Some(&format!("localhost:{PORT}")) {
-        return page(StatusCode::BAD_REQUEST, "This isn't Oby's sign-in page.");
-    }
-    if query.get("state") != Some(&sign_in.state) {
-        return page(
-            StatusCode::BAD_REQUEST,
-            "This page isn't from Oby's sign-in to Slack.",
-        );
-    }
-    if sign_in.taken.swap(true, Ordering::SeqCst) {
-        return page(
-            StatusCode::BAD_REQUEST,
-            "This sign-in has already finished.",
-        );
-    }
-    let finished = match (query.get("code"), query.get("error")) {
-        (Some(code), _) => slack.finish(&sign_in, code).await,
-        (None, Some(error)) => Err(format!("Slack's page said {}.", code_of(error))),
-        _ => Err("Slack's page sent no code.".into()),
-    };
-    sign_in.end.notify_one();
-    match finished {
-        Ok(()) => page(
-            StatusCode::OK,
-            "Oby is connected to Slack. You can close this tab.",
-        ),
-        Err(why) => {
-            slack.set_error(why.clone());
-            page(
-                StatusCode::BAD_REQUEST,
-                &format!("Oby couldn't connect to Slack: {why}"),
-            )
-        }
-    }
-}
-
 // The API: loopback only, never on the gateway.
 
 pub fn router() -> Router<Arc<Shared>> {
-    Router::new()
-        .route("/v1/slack", get(status).delete(disconnect))
-        .route("/v1/slack/sign-in", post(sign_in).delete(cancel))
+    Router::new().route("/v1/slack", get(status).put(connect).delete(disconnect))
 }
 
 async fn status(State(shared): State<Arc<Shared>>) -> Json<Value> {
@@ -751,35 +441,28 @@ async fn status(State(shared): State<Arc<Shared>>) -> Json<Value> {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Start {
-    client_id: Option<String>,
+#[serde(deny_unknown_fields)]
+struct Tokens {
+    user: String,
+    bot: String,
 }
 
-async fn sign_in(State(shared): State<Arc<Shared>>, body: axum::body::Bytes) -> Response {
-    let start = if body.is_empty() {
-        Start { client_id: None }
-    } else {
-        match serde_json::from_slice::<Start>(&body) {
-            Ok(start) => start,
-            Err(_) => {
-                return ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "Send {\"clientId\": \"…\"}, the Slack app's Client ID, or nothing.",
-                )
-                .into_response();
-            }
-        }
+async fn connect(State(shared): State<Arc<Shared>>, body: axum::body::Bytes) -> Response {
+    let Ok(tokens) = serde_json::from_slice::<Tokens>(&body) else {
+        return ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Send {\"user\": \"xoxp-…\", \"bot\": \"xoxb-…\"}.",
+        )
+        .into_response();
     };
-    match shared.slack.start(start.client_id).await {
-        Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
+    match shared
+        .slack
+        .connect(tokens.user.trim(), tokens.bot.trim())
+        .await
+    {
+        Ok(()) => Json(shared.slack.status_json()).into_response(),
         Err(error) => error.into_response(),
     }
-}
-
-async fn cancel(State(shared): State<Arc<Shared>>) -> StatusCode {
-    shared.slack.cancel();
-    StatusCode::NO_CONTENT
 }
 
 async fn disconnect(State(shared): State<Arc<Shared>>) -> StatusCode {
@@ -789,12 +472,15 @@ async fn disconnect(State(shared): State<Arc<Shared>>) -> StatusCode {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     /// Each call a stub got: its method, its form and its `Authorization`.
     pub(crate) type Calls = Arc<Mutex<Vec<(String, String, Option<String>)>>>;
 
-    /// A stub of Slack's Web API on 127.0.0.1: what each method answers, and every form it got.
+    /// A stub of Slack's Web API on 127.0.0.1: what each method answers (a bot token's
+    /// `auth.test` answers `auth.test.bot` when there's one), and every call it got.
     pub(crate) struct Stub {
         pub url: String,
         pub got: Calls,
@@ -806,9 +492,9 @@ pub(crate) mod tests {
         let answers = Arc::new(answers);
         let app = Router::new().route(
             "/api/{method}",
-            post(
+            axum::routing::post(
                 move |axum::extract::Path(method): axum::extract::Path<String>,
-                      headers: HeaderMap,
+                      headers: axum::http::HeaderMap,
                       body: String| {
                     let kept = kept.clone();
                     let answers = answers.clone();
@@ -817,10 +503,14 @@ pub(crate) mod tests {
                             .get(header::AUTHORIZATION)
                             .and_then(|h| h.to_str().ok())
                             .map(str::to_owned);
+                        let bot = auth.as_deref().is_some_and(|a| a.contains("xoxb-"));
                         kept.lock().unwrap().push((method.clone(), body, auth));
+                        let answer = (method == "auth.test" && bot)
+                            .then(|| answers.get("auth.test.bot"))
+                            .flatten()
+                            .or_else(|| answers.get(method.as_str()));
                         Json(
-                            answers
-                                .get(method.as_str())
+                            answer
                                 .cloned()
                                 .unwrap_or(json!({"ok": false, "error": "unknown_method"})),
                         )
@@ -834,25 +524,6 @@ pub(crate) mod tests {
         Stub { url, got }
     }
 
-    /// A connected Slack whose API is `api`, with `token` in a vault of its own under `home`.
-    pub(crate) fn connected(home: &std::path::Path, api: String, token: &str) -> Arc<Slack> {
-        let vault = Arc::new(crate::vault::Vault::file(
-            home.join("vault"),
-            Arc::new(crate::secrets::Secrets::default()),
-        ));
-        vault.add(token, ACCESS).unwrap();
-        let slack = Slack::open_at(home, vault, crate::events::Events::new(), api);
-        slack
-            .save(Saved {
-                client_id: Some("1.2".into()),
-                user: Some("UOWNER".into()),
-                connected_at: Some("2026-10-21T12:00:00Z".into()),
-                ..Saved::default()
-            })
-            .unwrap();
-        slack
-    }
-
     /// A new empty folder of this test's own.
     pub(crate) fn scratch(name: &str) -> PathBuf {
         let home = std::env::temp_dir().join(format!("obid-slack-{name}-{}", std::process::id()));
@@ -861,29 +532,43 @@ pub(crate) mod tests {
         home
     }
 
-    #[test]
-    fn a_client_id_is_digits_a_dot_and_digits() {
-        assert!(client_id_problem("1234567890.1234567890").is_none());
-        for bad in ["", "1234", "a.1", "1.", ".1", "1.2&x=y", "1.2 "] {
-            assert!(client_id_problem(bad).is_some(), "{bad:?}");
-        }
+    fn unconnected(home: &std::path::Path, api: String) -> Arc<Slack> {
+        let vault = Arc::new(crate::vault::Vault::file(
+            home.join("vault"),
+            Arc::new(crate::secrets::Secrets::default()),
+        ));
+        Slack::open_at(home, vault, crate::events::Events::new(), api)
+    }
+
+    fn user_token() -> String {
+        format!("xoxp-{}", "1111-2222-3333-7c41e09b2fd8a365")
+    }
+
+    fn bot_token() -> String {
+        format!("xoxb-{}", "1111-4444-9d02b7f1e6c3a548")
+    }
+
+    /// A Slack connected as the owner `UOWNER` whose API is `api`.
+    pub(crate) fn connected(home: &std::path::Path, api: String) -> Arc<Slack> {
+        let slack = unconnected(home, api);
+        slack.vault.add(&user_token(), USER).unwrap();
+        slack.vault.add(&bot_token(), BOT).unwrap();
+        slack
+            .save(Saved {
+                user: Some("UOWNER".into()),
+                connected_at: Some("2026-10-21T12:00:00Z".into()),
+                ..Saved::default()
+            })
+            .unwrap();
+        slack
     }
 
     #[test]
-    fn a_sign_in_keeps_the_users_token_never_a_bots() {
-        let signed_in = json!({"ok": true, "access_token": "xoxb-bot", "token_type": "bot",
-            "authed_user": {"id": "U1", "scope": "search:read,chat:write", "access_token": "xoxp-1",
-                "token_type": "user", "refresh_token": "xoxe-1", "expires_in": 43200}});
-        let got = tokens(&signed_in).unwrap();
-        assert_eq!(got.access, "xoxp-1");
-        assert_eq!(got.refresh.as_deref(), Some("xoxe-1"));
-        assert_eq!(got.user.as_deref(), Some("U1"));
-        let refreshed = json!({"ok": true, "access_token": "xoxe.xoxp-2", "token_type": "user",
-            "refresh_token": "xoxe-2", "expires_in": 43200});
-        assert_eq!(tokens(&refreshed).unwrap().access, "xoxe.xoxp-2");
-        assert!(
-            tokens(&json!({"ok": true, "access_token": "xoxb", "token_type": "bot"})).is_none()
-        );
+    fn a_token_is_its_kind() {
+        assert!(token_problem(&user_token(), "xoxp-", "user").is_none());
+        assert!(token_problem(&bot_token(), "xoxp-", "user").is_some());
+        assert!(token_problem("xoxp-short", "xoxp-", "user").is_some());
+        assert!(token_problem("xoxp-1111-2222 3333-7c41e09b2fd8", "xoxp-", "user").is_some());
     }
 
     #[test]
@@ -903,31 +588,88 @@ pub(crate) mod tests {
         assert_eq!(found[1].permalink, None, "only https links are kept");
     }
 
+    /// The tokens are checked with Slack before they're kept: the user's a person's, the bot's a
+    /// bot's, both of one workspace. Disconnect forgets both.
     #[tokio::test]
-    async fn a_refused_token_is_refreshed_once_then_signs_out() {
+    async fn pasted_tokens_are_checked_then_kept() {
+        let person = json!({"ok": true, "team": "Deskree", "team_id": "T1", "user_id": "UOWNER"});
+        let home = scratch("connect");
+        // The bot token answers as a person: refused, nothing kept.
+        let stub_a = stub(HashMap::from([("auth.test", person.clone())])).await;
+        let slack = unconnected(&home, stub_a.url);
+        let refused = slack
+            .connect(&user_token(), &bot_token())
+            .await
+            .unwrap_err();
+        assert!(
+            refused.message.contains("isn't a bot's"),
+            "{}",
+            refused.message
+        );
+        assert!(!slack.connected());
+        assert_eq!(slack.vault.value(USER).unwrap(), None);
+
+        let other_team = json!({"ok": true, "team_id": "T2", "user_id": "UBOT", "bot_id": "B1"});
+        let stub_b = stub(HashMap::from([
+            ("auth.test", person.clone()),
+            ("auth.test.bot", other_team),
+        ]))
+        .await;
+        let slack = unconnected(&home, stub_b.url);
+        assert!(slack.connect(&user_token(), &bot_token()).await.is_err());
+        assert!(!slack.connected());
+
+        let bot = json!({"ok": true, "team": "Deskree", "team_id": "T1", "user_id": "UBOT", "bot_id": "B1"});
+        let stub_c = stub(HashMap::from([
+            ("auth.test", person),
+            ("auth.test.bot", bot),
+        ]))
+        .await;
+        let slack = unconnected(&home, stub_c.url);
+        assert!(slack.connect(&user_token(), &bot_token()).await.is_ok());
+        let status = slack.status_json();
+        assert_eq!(status["connected"], true);
+        assert_eq!(status["team"], "Deskree");
+        assert_eq!(status["user"], "UOWNER");
+        assert_eq!(status["bot"], "UBOT");
+        assert!(
+            !status.to_string().contains("xox"),
+            "no token in the answer"
+        );
+        assert_eq!(slack.vault.value(BOT).unwrap(), Some(bot_token()));
+        slack.disconnect().await;
+        assert!(!slack.connected());
+        assert_eq!(slack.vault.value(USER).unwrap(), None);
+        assert_eq!(slack.vault.value(BOT).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_refused_token_signs_out() {
         let home = scratch("refused");
         let stub = stub(HashMap::from([(
             "search.messages",
             json!({"ok": false, "error": "invalid_auth"}),
         )]))
         .await;
-        let slack = connected(&home, stub.url, "xoxp-7c41e09b2fd8a365");
-        let error = slack.search("from:<@U3>").await.unwrap_err();
-        assert_eq!(error, SIGNED_OUT);
+        let slack = connected(&home, stub.url);
+        assert_eq!(slack.search("from:<@U3>").await.unwrap_err(), REFUSED);
         assert!(!slack.connected());
-        assert_eq!(slack.vault.value(ACCESS).unwrap(), None);
-        assert_eq!(slack.status_json()["error"], SIGNED_OUT);
+        assert_eq!(slack.vault.value(USER).unwrap(), None);
+        assert_eq!(slack.status_json()["error"], REFUSED);
     }
 
     #[tokio::test]
-    async fn the_owner_is_told_only_as_themselves_and_only_what_scans_clean() {
+    async fn the_owner_is_told_by_the_bot_only_and_only_what_scans_clean() {
         let home = scratch("tell");
-        let stub = stub(HashMap::from([(
-            "chat.postMessage",
-            json!({"ok": true, "ts": "1.2"}),
-        )]))
+        let stub = stub(HashMap::from([
+            (
+                "conversations.open",
+                json!({"ok": true, "channel": {"id": "D0OWNER"}}),
+            ),
+            ("chat.postMessage", json!({"ok": true, "ts": "1.2"})),
+        ]))
         .await;
-        let slack = connected(&home, stub.url, "xoxp-owner");
+        let slack = connected(&home, stub.url);
         assert_eq!(
             slack
                 .tell_owner("Dmitry wrote about Avenga.")
@@ -936,16 +678,20 @@ pub(crate) mod tests {
             "1.2"
         );
         let got = stub.got.lock().unwrap().clone();
-        assert_eq!(got.len(), 1);
-        let (method, body, auth) = &got[0];
-        assert_eq!(method, "chat.postMessage");
-        assert!(body.contains("channel=UOWNER"), "{body}");
-        assert_eq!(auth.as_deref(), Some("Bearer xoxp-owner"));
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (got[0].0.as_str(), got[0].1.as_str()),
+            ("conversations.open", "users=UOWNER")
+        );
+        assert_eq!(got[1].0, "chat.postMessage");
+        assert!(got[1].1.starts_with("channel=D0OWNER&"), "{}", got[1].1);
+        let bearer = format!("Bearer {}", bot_token());
+        assert!(got.iter().all(|c| c.2.as_deref() == Some(bearer.as_str())));
         // A key in the text: nothing goes out.
         let leaked = slack
             .tell_owner(&format!("AKIA{}", "QWERTYUIOPASDFGH"))
             .await;
         assert!(leaked.is_err());
-        assert_eq!(stub.got.lock().unwrap().len(), 1);
+        assert_eq!(stub.got.lock().unwrap().len(), 2);
     }
 }

@@ -1243,7 +1243,7 @@ mod tests {
                  "channel": {"id": "C2", "name": "dev-general"}, "permalink": "https://deskree.slack.com/archives/C2/p2"}]}}),
         )]))
         .await;
-        let slack = crate::slack::tests::connected(&home, slack_api.url.clone(), "xoxp-owner");
+        let slack = crate::slack::tests::connected(&home, slack_api.url.clone());
         let now = at("2026-10-20T13:15:00Z");
         let done = read(
             &rules(),
