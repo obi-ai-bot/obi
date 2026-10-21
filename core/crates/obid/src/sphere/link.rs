@@ -1194,12 +1194,40 @@ impl Link {
             if !self.pins.check_card(obi, card_seq) {
                 continue;
             }
-            for key in member["keys"].as_array().into_iter().flatten() {
+            // The Obi key is the one the card signs: a current key the Sphere lists must be it.
+            // Older keys (with `valid_until_seq`) only check entries signed before they ended.
+            let (card_id, card_key) = (
+                params.and_then(|p| p["key_id"].as_str()).unwrap_or(""),
+                params.and_then(|p| p["public_key"].as_str()).unwrap_or(""),
+            );
+            let keys: Vec<&Value> = member["keys"].as_array().into_iter().flatten().collect();
+            let current: Vec<&&Value> = keys
+                .iter()
+                .filter(|k| k["valid_until_seq"].as_u64().is_none())
+                .collect();
+            if current.len() != 1
+                || current[0]["key_id"] != card_id
+                || current[0]["public_key"] != card_key
+            {
+                tracing::warn!(
+                    "sphere: the Sphere lists a key for {obi} that its card doesn't sign ({}): not trusted",
+                    current
+                        .iter()
+                        .filter_map(|k| k["key_id"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                continue;
+            }
+            for key in keys {
                 let (Some(id), Some(public_key)) =
                     (key["key_id"].as_str(), key["public_key"].as_str())
                 else {
                     continue;
                 };
+                if id == card_id && key["valid_until_seq"].as_u64().is_some() {
+                    continue;
+                }
                 directory.keys.insert(
                     id.to_owned(),
                     DirectoryKey {
