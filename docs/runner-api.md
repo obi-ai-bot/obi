@@ -1568,6 +1568,14 @@ The owner connects Tetrix once, in Oby, and every agent on every account (Claude
 
 **Context first.** Before a job's agent starts (its first turn, and the first after obid restarted it), obid asks Tetrix with its own login about the job: `search_entities` for the issue or pull request (`<repo>#<n>`, else the job's title) and `repo_sessions` for the repository, 10 seconds at most each, each through the secret scan first (one it doesn't pass isn't asked). What comes back is written to `.obi/context/tetrix.md` with the plug-ins' context (obid only: plug-ins), quoted as data, and the prompt says to start there, to ask Tetrix before reading many files, and to end with `save_session` and a `Tetrix-Session: <id>` trailer on every commit.
 
+**Decisions before publishing** (Trail-Code's `trail check`, the idea only). When a job's check has passed and before it publishes, obid reads what the change does in its own clone, as the secret scan reads it (`git diff -U0` with the scan's options and configuration, never the worktree's git), and keeps the lines whose only change is a number (`retries = 4` to `retries = 6`; a number inside a name, like `u32`, isn't one): the first 8 MB of the diff, at most 200 such changes, in the first 10 files that have one. With none, Tetrix isn't asked. Otherwise obid asks Tetrix with its own login, each question through the secret scan first and 10 seconds at most: `repo_sessions` with `{"name": "<file>"}` for at most 10 of the files those lines are in, then `session_digest` with `{"session_id": "<id>"}` for at most 5 of the sessions it lists (`sessions[].session_id`, else `id`), never the job's own (`saved`, and the graph gaps obid saved for it). A sentence of a digest that names the old number, not the new one, and shares a word with the line (`retries` and `MAX_RETRIES`) is a **conflict** (at most 20, one per line).
+
+- **The author's round.** The first time there's a conflict, the author gets one more round, as for a push the secret scan blocked (even with no rounds left). Each conflict and its decision are quoted in `.obi/inputs/decisions.md`, fenced as data from Tetrix; the round's message names only the file, the line and the two numbers of the agent's own diff and that file, and tells it to put the value back and commit, or keep it and say why in its summary, which goes into the pull request's description. The job's step reads `Round 2 of 2: a change goes against an earlier decision`. Its check runs again after it, and the decision check once more.
+- **Never a block.** What's still a conflict after that round publishes all the same, listed in the pull request's description: ``- Earlier decisions: this changes 1 value(s) an earlier Tetrix session decided on: ` src/net.rs:12 ` (4 → 6), session 8f2a…. The agent's summary says why.`` The decision's words aren't in it. No second round.
+- **On the job**, in its `tetrix`: `"decisions": {"sessions": ["8f2a…"], "conflicts": [{"file": "src/net.rs", "line": 12, "was": "4", "now": "6", "session": "8f2a…", "decision": "Keep retries at 4: …"}], "asked": true}`, the latest check's: `sessions` the digests read, `conflicts` what was found (`decision` at most 300 characters, scrubbed like every answer), `asked` whether the author got its round. Null when it didn't run.
+- **Without Tetrix** (Oby not signed in, or the job's agent didn't get it through Oby) nothing changes. Questions to Tetrix aren't outgoing actions; the pull request that lists the conflicts is.
+- What it doesn't catch yet: an approach an earlier session ruled out coming back, or a decision changed in other words. Those need a reviewer reading the digests whole, Oby's review, which obid doesn't run yet (#525).
+
 **Jobs' `tetrix`** (Job, above) on obid is filled for jobs whose agent had Tetrix through Oby, and stays null otherwise (a plug-in's server signed in by the tool's own login is the tool's business):
 
 ```json
@@ -1576,7 +1584,8 @@ The owner connects Tetrix once, in Oby, and every agent on every account (Claude
  "context": true, "saved": ["8f2a…"],
  "gaps": {"noResults": ["acme/shop#12"], "missing": ["repo:acme/legacy"], "unknownFiles": ["src/new.rs"],
           "failed": [{"tool": "code_impact", "error": "Tetrix said: …"}],
-          "sent": "2026-10-18T14:40:02Z", "session": "c41d…", "notSent": null}}
+          "sent": "2026-10-18T14:40:02Z", "session": "c41d…", "notSent": null},
+ "decisions": null}
 ```
 
 - `calls`: every call the agent made through obid, by tool, counted by obid itself (it is the server). `rounds` and `reminded` are null on obid. `stamps`: as above, read when the job's last round ends. `context`: whether `.obi/context/tetrix.md` was written. `saved`: the session ids Tetrix's `save_session` answered the agent.
