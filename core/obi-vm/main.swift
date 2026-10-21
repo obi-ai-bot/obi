@@ -3,19 +3,30 @@
 // the `com.apple.security.virtualization` entitlement.
 //
 //   obi-vm run --kernel K --initrd I --root R --disk D --cpus 4 --memory-mib 8192 --console LOG \
-//              --vsock 7000=/path/control.sock --vsock 7001=/path/model.sock
+//              --max-seconds 7200 --vsock 7000=/path/control.sock --vsock 7001=/path/model.sock \
+//              --vsock 7002=/path/key.sock
 //     One Linux VM: the root image read-only, the job's disk read-write, no network device, no
-//     shared folder. A guest connection to a vsock port is joined to that Unix socket, which obid
-//     serves; that is the VM's only link out. stdin takes `pause`, `resume` and `stop`, one per
-//     line; stdout says `{"event": "running" | "paused" | "resumed" | "stopped", ...}`.
+//     shared folder. The kernel, initrd and root are checked against `image.json` beside the
+//     kernel before it boots. A guest connection to a vsock port is joined to that Unix socket,
+//     which obid serves; that is the VM's only link out, at most 16 connections a port at once.
+//     The guest's console goes to LOG, at most 1 MiB, the rest dropped. stdin takes `pause`,
+//     `resume` and `stop`, one per line; stdout says `{"event": "running" | "paused" | "resumed" |
+//     "stopped", ...}`. Past --max-seconds, or when stdin ends, the VM is stopped hard.
 //   obi-vm signals
 //     `{"idleSeconds", "onAC", "lowPower", "thermal"}`: whether the owner is at the Mac.
 
+import CryptoKit
 import Foundation
 import IOKit.ps
 import Virtualization
 
 setvbuf(stdout, nil, _IOLBF, 0)
+// A guest that closes its end of a connection must not take obi-vm down with it.
+signal(SIGPIPE, SIG_IGN)
+
+/// The most of the guest's console kept on the host, and the most connections a port has at once.
+let consoleMax = 1 << 20
+let connectionsMax = 16
 
 func say(_ object: [String: Any]) {
     let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
@@ -71,9 +82,11 @@ func vmProcesses() -> Set<pid_t> {
 
 struct Options {
     var kernel = "", initrd = "", root = "", disk = "", console = ""
-    var cpus = 4, memoryMiB = 8192
+    var cpus = 4, memoryMiB = 8192, maxSeconds = 0
     var vsock: [(UInt32, String)] = []
-    var cmdline = "console=hvc0 root=/dev/vda ro rootfstype=ext4 init=/sbin/obi-guest quiet"
+    /// Fixed: the caller can't choose what the guest's PID 1 is. `panic=-1`: a guest that panics
+    /// powers off at once instead of waiting.
+    var cmdline = "console=hvc0 root=/dev/vda ro rootfstype=ext4 init=/sbin/obi-guest panic=-1 quiet"
 }
 
 func parse(_ args: ArraySlice<String>) -> Options {
@@ -87,7 +100,7 @@ func parse(_ args: ArraySlice<String>) -> Options {
         case "--root": o.root = value
         case "--disk": o.disk = value
         case "--console": o.console = value
-        case "--cmdline": o.cmdline = value
+        case "--max-seconds": o.maxSeconds = Int(value) ?? 0
         case "--cpus": o.cpus = Int(value) ?? 0
         case "--memory-mib": o.memoryMiB = Int(value) ?? 0
         case "--vsock":
@@ -99,7 +112,28 @@ func parse(_ args: ArraySlice<String>) -> Options {
     }
     for (name, value) in [("--kernel", o.kernel), ("--initrd", o.initrd), ("--root", o.root), ("--disk", o.disk), ("--console", o.console)]
     where value.isEmpty { fail("\(name) is needed") }
+    if o.maxSeconds <= 0 { fail("--max-seconds is needed: no VM runs without a limit") }
+    #if OBI_VM_DEBUG
+    // The smoke test's own guest (core/obi-vm/smoke.sh); never in a release build.
+    if let initPath = ProcessInfo.processInfo.environment["OBI_VM_DEBUG_INIT"] {
+        o.cmdline = o.cmdline.replacingOccurrences(of: "init=/sbin/obi-guest", with: "init=\(initPath)")
+    }
+    #endif
     return o
+}
+
+/// The image's files are the ones `image.json` beside the kernel names, by SHA-256, or nothing boots.
+func verifyImage(_ o: Options) {
+    let dir = URL(fileURLWithPath: o.kernel).deletingLastPathComponent()
+    guard let data = try? Data(contentsOf: dir.appendingPathComponent("image.json")),
+          let want = (try? JSONSerialization.jsonObject(with: data)) as? [String: String] else { fail("no image.json beside the kernel") }
+    for (name, path) in [("vmlinuz", o.kernel), ("initrd", o.initrd), ("root.img", o.root)] {
+        guard let file = FileHandle(forReadingAtPath: path) else { fail("can't read \(path)") }
+        var hash = SHA256()
+        while let chunk = try? file.read(upToCount: 8 << 20), !chunk.isEmpty { hash.update(data: chunk) }
+        let got = hash.finalize().map { String(format: "%02x", $0) }.joined()
+        guard want[name] == got else { fail("\(name) isn't the one image.json names") }
+    }
 }
 
 /// Copies bytes one way until either side ends, then shuts both down so the other way ends too.
@@ -138,16 +172,24 @@ func connectUnix(_ path: String) -> Int32? {
     return fd
 }
 
-/// Joins each guest connection on a port to a new connection to obid's Unix socket for it.
+/// Joins each guest connection on a port to a new connection to obid's Unix socket for it, at most
+/// `connectionsMax` at once.
 final class Bridge: NSObject, VZVirtioSocketListenerDelegate {
     let path: String
+    private let lock = NSLock()
+    private var open = 0
     init(path: String) { self.path = path }
 
     func listener(_ listener: VZVirtioSocketListener, shouldAcceptNewConnection connection: VZVirtioSocketConnection,
                   from socketDevice: VZVirtioSocketDevice) -> Bool {
-        guard let host = connectUnix(path) else { return false }
+        lock.lock()
+        guard open < connectionsMax else { lock.unlock(); return false }
+        open += 1
+        lock.unlock()
+        guard let host = connectUnix(path) else { release(); return false }
         let guest = connection.fileDescriptor
-        Thread.detachNewThread {
+        Thread.detachNewThread { [self] in
+            defer { release() }
             let other = Thread { pump(from: host, to: guest) }
             other.start()
             pump(from: guest, to: host)
@@ -157,6 +199,31 @@ final class Bridge: NSObject, VZVirtioSocketListenerDelegate {
             connection.close()
         }
         return true
+    }
+
+    private func release() {
+        lock.lock()
+        open -= 1
+        lock.unlock()
+    }
+}
+
+/// Copies the guest's console to `path` until `consoleMax` bytes, then drops the rest.
+func keepConsole(from pipe: Pipe, to path: String) {
+    FileManager.default.createFile(atPath: path, contents: nil, attributes: [.posixPermissions: 0o600])
+    guard let file = FileHandle(forWritingAtPath: path) else { return }
+    var kept = 0
+    Thread.detachNewThread {
+        while true {
+            let chunk = pipe.fileHandleForReading.availableData
+            if chunk.isEmpty { return }
+            let room = consoleMax - kept
+            if room > 0 {
+                let part = chunk.prefix(room)
+                file.write(part)
+                kept += part.count
+            }
+        }
     }
 }
 
@@ -181,12 +248,12 @@ final class Runner: NSObject, VZVirtualMachineDelegate {
             VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(
                 url: URL(fileURLWithPath: o.disk), readOnly: false)),
         ]
-        // The guest's console goes to a file obid keeps with the job; it is the guest's text, data.
-        FileManager.default.createFile(atPath: o.console, contents: nil)
+        // The guest's console goes to a file obid keeps with the job, and deletes with it; it is the
+        // guest's text, data, and at most 1 MiB of it. Nothing goes in.
+        let pipe = Pipe()
+        keepConsole(from: pipe, to: o.console)
         let console = VZVirtioConsoleDeviceSerialPortConfiguration()
-        console.attachment = VZFileHandleSerialPortAttachment(
-            fileHandleForReading: ProcessInfo.processInfo.environment["OBI_VM_DEBUG_CONSOLE_IN"].flatMap { FileHandle(forReadingAtPath: $0) },
-            fileHandleForWriting: FileHandle(forWritingAtPath: o.console))
+        console.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: nil, fileHandleForWriting: pipe.fileHandleForWriting)
         config.serialPorts = [console]
         config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         config.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
@@ -247,8 +314,16 @@ case "run":
     setpriority(PRIO_DARWIN_PROCESS, 0, PRIO_DARWIN_BG)
     // The VM process starts with the VZVirtualMachine, so the ones before it are looked at first.
     let before = vmProcesses()
+    let options = parse(args.dropFirst(2))
+    verifyImage(options)
     let runner: Runner
-    do { runner = try Runner(parse(args.dropFirst(2))) } catch { fail("\(error)") }
+    do { runner = try Runner(options) } catch { fail("\(error)") }
+    // Its own limit, whatever obid does: past it the VM stops hard, and obi-vm with it.
+    DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(options.maxSeconds)) {
+        say(["event": "stopped", "reason": "time_limit"])
+        runner.vm.stop { _ in exit(0) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(10)) { exit(0) }
+    }
     runner.vm.start { result in
         switch result {
         case .success:
