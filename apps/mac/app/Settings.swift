@@ -486,13 +486,14 @@ struct AccountUsageRow<Buttons: View>: View {
     }
 }
 
-/// Settings › Connectors (#498): everything Oby is connected to, on this Mac and on the runner,
-/// each with how it's signed in and how to disconnect it, then what needs attention, what isn't
-/// confirmed and what's set up but not connected, with a search over all of it
-/// (apps/mac/app/Connectors.swift).
+/// Settings › Connectors (#498), as Sangam's SettingsView.tsx `Connectors`: a search, then Connected and
+/// Available, one row per service with its brand's mark, its name and a line on it, and at the right
+/// "Connected" or its button (apps/mac/app/Connectors.swift). How it's signed in is the row's tooltip;
+/// Disconnect and the rest are in its context menu, so the row stays as clean as the design's.
 struct ConnectorsSettingsView: View {
     let store: AccountStore
     let feed: RunnerFeed
+    @Environment(\.openSettingsPage) private var openSettings
     @State private var query = ""
     /// What the runner lists besides its status, once it answers, and each list it couldn't read.
     @State private var lists = Connectors.Lists()
@@ -512,27 +513,27 @@ struct ConnectorsSettingsView: View {
 
     var body: some View {
         let groups = Connectors.groups(list, query: query)
-        VStack(alignment: .leading, spacing: 8) {
-            SearchField(text: $query, prompt: "Search connectors")
-            // The runner's rows are left out while it doesn't answer: they'd be out of date.
-            if feed.runner != nil, let note = Connectors.waiting(for: feed.name, feed.connection) {
-                SetAbout(note, color: Tokens.needs).padding(.horizontal, 16)
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                SearchField(text: $query, prompt: "Search connectors")
+                // What the runner holds (Tetrix, GitHub, its accounts) waits for it to answer: it'd be out of date.
+                if feed.runner != nil, let note = Connectors.waiting(for: feed.name, feed.connection) {
+                    SetAbout(note, color: Tokens.needs).padding(.horizontal, 16)
+                }
+                ForEach(lists.problems, id: \.self) { problem in
+                    SetAbout(problem, color: Tokens.danger).padding(.horizontal, 16)
+                }
             }
-            ForEach(lists.problems, id: \.self) { problem in
-                SetAbout(problem, color: Tokens.danger).padding(.horizontal, 16)
+            .padding(.bottom, 24)
+            ForEach(groups, id: \.title) { group in
+                SetGroup(group.title) { ForEach(group.items, content: row) }
+            }
+            if groups.isEmpty {
+                let typed = query.trimmingCharacters(in: .whitespaces)
+                Text("No connector matches “\(typed)”")
+                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.horizontal, 16).padding(.bottom, 24)
             }
         }
-        .padding(.bottom, 24)
-        ForEach(groups, id: \.title) { group in
-            SetGroup(group.title) { ForEach(group.items, content: row) }
-        }
-        if groups.isEmpty {
-            let typed = query.trimmingCharacters(in: .whitespaces)
-            Text(typed.isEmpty ? "Nothing is set up yet." : "No connector matches “\(typed)”")
-                .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.horizontal, 16).padding(.bottom, 24)
-        }
-        SetAbout("Each tool signs in through its own login, and Tetrix once for every agent: Oby never reads or shows a login, and Tetrix's stays with \(feed.local ? "obid on this Mac" : feed.name). Agents reach the runner's connections through Oby, never seeing their secrets.")
-            .padding(.horizontal, 16)
         .task { await store.refresh() }
         // Back from signing in or out, in Terminal.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -591,51 +592,66 @@ struct ConnectorsSettingsView: View {
         let runner = (feed.runner == nil && !staged) || feed.connection != .live ? nil : Connectors.RunnerState(
             name: feed.name, local: feed.local, accounts: feed.accounts, github: feed.github, checks: feed.checkRuns,
             gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: feed.tetrix)
-        return Connectors.list(mac: store.accounts, runner: runner)
+        let accounts = Connectors.accounts(mac: store.accounts, runner: runner?.accounts, local: feed.local,
+                                           hasRunner: feed.runner != nil || staged)
+        return Connectors.list(accounts: accounts, runner: runner)
     }
 
     private var typedURL: String { url.trimmingCharacters(in: .whitespaces) }
 
-    /// Sangam's connector row: its mark, its name with what it does and where, how it's signed in;
-    /// at the right whether it's connected and its button.
+    /// Sangam's connector row (`.set-connector`): its mark, its name over its line; under them only what
+    /// needs doing (what's wrong, or what to do where Oby has no button); at the right "Connected", its
+    /// button, or "Coming soon".
     private func row(_ connector: Connector) -> some View {
-        SetRow(controlOnTop: true) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: connector.symbol)
-                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
-                    .frame(width: 20)
-                    .padding(.top, 1)
-                    .accessibilityHidden(true)
+        let buttons = [connector.way, connector.also].compactMap { way -> (String, Connector.Action)? in
+            if case .button(let label, let action) = way { (label, action) } else { nil }
+        }
+        // Connected, every button is in the context menu; otherwise the first is on the row.
+        let onRow = connector.connected ? nil : buttons.first
+        return SetRow {
+            HStack(spacing: 12) {
+                mark(connector).frame(width: 24, height: 24).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(connector.name)
-                    SetAbout("\(connector.about) · \(connector.place)")
-                    SetAbout(connector.how, color: connector.state == .broken ? Tokens.needs : Tokens.muted)
-                    if case .steps(let steps) = connector.way {
-                        SetAbout(steps)
-                    }
-                    if let problem = problems[connector.id] {
-                        SetAbout(problem, color: Tokens.danger)
-                    }
+                    SetAbout(connector.about)
+                    if connector.state == .broken { SetAbout(connector.how, color: Tokens.needs) }
+                    if !connector.connected, case .steps(let steps) = connector.way { SetAbout(steps) }
+                    if let problem = problems[connector.id] { SetAbout(problem, color: Tokens.danger) }
                 }
             }
         } control: {
-            switch connector.state {
-            case .connected:
-                Label("Connected", systemImage: "checkmark").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text)
-            case .broken:
-                Label("Not working", systemImage: "exclamationmark.triangle").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.needs)
-            case .unconfirmed:
-                SetValue("Not confirmed")
-            case .available: EmptyView()
-            }
-            ForEach([connector.way, connector.also].compactMap { way -> (String, Connector.Action)? in
-                if case .button(let label, let action) = way { (label, action) } else { nil }
-            }, id: \.0) { label, action in
-                Button(label) { perform(action, connector) }
+            if connector.connected {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark").font(Tokens.font(12, .medium)).foregroundStyle(Tokens.muted)
+                    Text("Connected").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text)
+                }
+                .accessibilityElement(children: .combine)
+            } else if connector.soon {
+                SetValue("Coming soon")
+            } else if let button = onRow {
+                Button(button.0) { perform(button.1, connector) }
                     .buttonStyle(.set)
                     .disabled(busy)
-                    .accessibilityLabel("\(label.replacingOccurrences(of: "…", with: "")) \(connector.name), \(connector.place)")
+                    .accessibilityLabel("\(button.0.replacingOccurrences(of: "…", with: "")) \(connector.name)")
+            } else if connector.state == .unconfirmed {
+                SetValue("Not confirmed")
             }
+        }
+        .contentShape(Rectangle())
+        .help(connector.tip)
+        .contextMenu {
+            ForEach(buttons.filter { $0.0 != onRow?.0 }, id: \.0) { label, action in
+                Button(label) { perform(action, connector) }.disabled(busy)
+            }
+        }
+    }
+
+    /// The brand's own mark (Sangam's brands.tsx, in its colours), or a symbol for what has none.
+    @ViewBuilder private func mark(_ connector: Connector) -> some View {
+        if let brand = connector.brand {
+            Image("Brands/\(brand)").resizable().scaledToFit()
+        } else {
+            Image(systemName: connector.symbol).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
         }
     }
 
@@ -656,8 +672,8 @@ struct ConnectorsSettingsView: View {
     /// A button: what takes something away asks first; signing in or out opens Terminal.
     private func perform(_ action: Connector.Action, _ connector: Connector) {
         switch action {
-        case .removeAccount, .disablePlugin, .disconnect, .disconnectTetrix: confirming = connector
-        case .signIn(let account): attempt(connector.id) { try store.signIn(account) }
+        case .disablePlugin, .disconnect, .disconnectTetrix: confirming = connector
+        case .accounts: openSettings(.accounts)
         case .connectTetrix(let server): signInToTetrix(server, row: connector.id)
         case .connectOtherTetrix:
             url = ""
@@ -678,7 +694,6 @@ struct ConnectorsSettingsView: View {
     private func disconnect(_ connector: Connector) {
         guard case .button(_, let action) = connector.way else { return }
         switch action {
-        case .removeAccount(let account): attempt(connector.id) { try store.remove(account) }
         case .disablePlugin(let id): setPlugin(id, enabled: false, row: connector.id)
         case .disconnectTetrix:
             guard feed.local, let runner = feed.runner else { return }
@@ -716,9 +731,6 @@ struct ConnectorsSettingsView: View {
     private func warning(_ connector: Connector) -> String {
         guard case .button(_, let action) = connector.way else { return "" }
         switch action {
-        case .removeAccount(let account):
-            return account.home == nil ? "Oby stops using it. Its login stays in \(Usage.tool(account.agent))'s own settings."
-                                       : "Oby removes this account and deletes its settings folder, with its login."
         case .disablePlugin:
             return "\(feed.name) stops it and everything it started, and agents no longer get its tools."
         case .disconnect:
@@ -862,16 +874,6 @@ struct ConnectorsSettingsView: View {
                 if !login.signedIn { problems["github"] = "GitHub's sign-in ended without signing in." }
                 gitHubSignIn = nil
             }
-        }
-    }
-
-    /// Runs a row's button, keeping what went wrong under that row.
-    private func attempt(_ row: String, _ action: () throws -> Void) {
-        do {
-            try action()
-            problems[row] = nil
-        } catch {
-            problems[row] = error.localizedDescription
         }
     }
 }

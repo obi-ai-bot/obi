@@ -68,6 +68,8 @@ pub struct Shared {
     pub pages: crate::web::Sessions,
     /// What GitHub wants from the owner (crate::github_work).
     pub github_work: Arc<crate::github_work::Feed>,
+    /// The phones' FCM tokens and the job alerts sent to them (crate::push).
+    pub push: crate::push::Push,
     /// True once obid is stopping: streams end.
     pub stopping: tokio::sync::watch::Receiver<bool>,
 }
@@ -168,6 +170,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/stop-all", post(crate::routes::stop_all))
         .route("/v1/clear", post(crate::routes::clear))
         .route("/v1/devices", post(crate::routes::register_device))
+        .route("/v1/notifications", post(crate::push::register))
         .merge(crate::connections::router())
         .merge(crate::tetrix::router())
         .route("/v1/checks/next", get(crate::routes::next_check))
