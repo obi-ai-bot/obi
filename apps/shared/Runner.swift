@@ -683,6 +683,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     #if os(macOS)
     /// With what Engine's Job doesn't read yet (RunnerJobExtras), when it could be read.
     case job(Job, RunnerJobExtras?)
+    /// A job was deleted, here or on another app (obid only): it leaves every list.
+    case jobDeleted(String)
     #else
     case job(Job)
     #endif
@@ -1053,6 +1055,19 @@ nonisolated struct Runner: Sendable {
     func stopAll() async throws -> StoppedJobs { try await call("POST", "v1/stop-all") }
     /// Lets go of a job that needs the user: it then needs nothing. No signature: nothing goes out.
     func dismiss(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/dismiss") }
+    /// Renames a job (obid only, `PATCH /v1/jobs/{id}`): one line of 1 to 60 characters.
+    func rename(_ id: String, to title: String) async throws -> Job {
+        struct Body: Encodable { var title: String }
+        return try await call("PATCH", "v1/jobs/\(id)", body: Body(title: title))
+    }
+    /// Archives a job that ended and needs nothing, or unarchives it (obid only).
+    func archive(_ id: String, _ archived: Bool = true) async throws -> Job {
+        struct Body: Encodable { var archived: Bool }
+        return try await call("POST", "v1/jobs/\(id)/archive", body: Body(archived: archived))
+    }
+    /// Deletes a job that ended, for good (obid only): its record, worktree and local branch in
+    /// obid's clone. Nothing pushed is touched: its branch and pull request stay on GitHub.
+    func deleteJob(_ id: String) async throws { try await send("DELETE", "v1/jobs/\(id)") }
     /// Clear done: the runner records now, and every app hides the jobs that finished by then.
     func clear() async throws -> Date {
         let answer: ClearedAt = try await call("POST", "v1/clear")
@@ -1710,6 +1725,11 @@ nonisolated enum MoveChoice {
     }
 }
 
+#if os(macOS)
+/// obid's `job` event for a job that was deleted.
+private nonisolated struct DeletedJob: Decodable { var id: String; var deleted: Bool }
+#endif
+
 /// Turns Server-Sent Events lines into events. Unknown events and pings are skipped.
 nonisolated struct EventParser {
     private var name = ""
@@ -1722,7 +1742,10 @@ nonisolated struct EventParser {
             let json = Data(data.utf8)
             switch name {
             #if os(macOS)
-            case "job": return (try? Runner.decoder.decode(Job.self, from: json)).map { RunnerEvent.job($0, try? Runner.decoder.decode(RunnerJobExtras.self, from: json)) }
+            case "job":
+                // obid's `{"id", "deleted": true}`: the job was deleted, on any app.
+                if let gone = try? Runner.decoder.decode(DeletedJob.self, from: json), gone.deleted { return .jobDeleted(gone.id) }
+                return (try? Runner.decoder.decode(Job.self, from: json)).map { RunnerEvent.job($0, try? Runner.decoder.decode(RunnerJobExtras.self, from: json)) }
             #else
             case "job": return (try? Runner.decoder.decode(Job.self, from: json)).map(RunnerEvent.job)
             #endif

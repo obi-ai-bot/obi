@@ -181,7 +181,22 @@ final class ChatState {
             defaults.set(since, forKey: Self.sinceKey)
         }
         seen = Set(defaults.stringArray(forKey: Self.seenKey) ?? [])
+        archiveAfter = defaults.string(forKey: ArchiveAfter.key).flatMap(ArchiveAfter.init) ?? .threeDays
     }
+    /// When done tasks leave Home for Archived (Home's ⋮, Archive completed), remembered.
+    var archiveAfter: ArchiveAfter {
+        didSet { defaults.set(archiveAfter.rawValue, forKey: ArchiveAfter.key) }
+    }
+    /// The task or conversation being renamed in place: a side panel row's (`TaskRow`'s id), or the
+    /// title bar's last crumb (`inBar`).
+    var renaming: Renaming?
+    struct Renaming: Equatable { var id: String; var inBar = false }
+    /// The task Delete task asks about, and the conversation Delete conversation asks about, in
+    /// the window's dialogs.
+    var deleting: SidebarSections.JobRow?
+    var deletingConversation: RunnerConversation?
+    /// Why the last Rename, Archive task or Delete task didn't go through, until it's seen.
+    var taskProblem: String?
     /// The side panel's folded groups and those showing all their done tasks.
     var folded: Set<String> = []
     var more: Set<String> = []
@@ -259,6 +274,7 @@ struct ChatView: View {
         .preferredColorScheme(.dark)
         .ignoresSafeArea()
         .environment(\.openSettingsPage, OpenSettingsPage(state: state, animated: !reduceMotion))
+        .taskDialogs(model: model, state: state)
         // Esc goes back one page.
         .onExitCommand { if !state.trail.isHome { withAnimation(motion) { state.trail.back() } } }
         // Opened: its blue dot goes.
@@ -308,7 +324,7 @@ private struct HomeView: View {
     @State private var height: CGFloat = 600
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var work: [WorkList.Item<SidebarSections.JobRow>] { model.work(since: state.since, seen: state.seen) }
+    private var work: [WorkList.Item<SidebarSections.JobRow>] { model.work(state) }
     private var away: Bool { !state.trail.isHome }
 
     var body: some View {
@@ -418,9 +434,13 @@ private struct HomeView: View {
         case .session(let id):
             SessionPane(model: model, id: id, onBack: back).takesKeys()
         case .group(let kind):
-            GroupPane(model: model, kind: kind, items: work.filter { $0.type == kind },
+            GroupPane(model: model, state: state, kind: kind, items: work.filter { $0.type == kind },
                       onOpenJob: { state.trail.push(.job(id: $0, local: $1)) },
+                      onOpenArchive: { state.trail.push(.archived) },
                       onConnectGitHub: { state.openSettings(.connectors) })
+                .takesKeys()
+        case .archived:
+            ArchivePane(items: model.archive(state), onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })
                 .takesKeys()
         case .settings(let page):
             SettingsPane(model: model, page: page)
@@ -497,7 +517,14 @@ private struct TitleBar: View {
                                 .frame(width: 22).accessibilityHidden(true)
                         }
                         let last = index == state.trail.steps.count - 1
-                        Crumb(title: WindowLabels.label(step, model: model), here: last) { state.trail.back(to: index) }
+                        if last, let renaming = renamingHere {
+                            RenameField(label: renaming.label, title: WindowLabels.label(step, model: model), font: Tokens.font(Tokens.textMd),
+                                        limit: renaming.limit, onDone: renaming.done)
+                                .frame(maxWidth: 280)
+                        } else {
+                            Crumb(title: WindowLabels.label(step, model: model), here: last) { state.trail.back(to: index) }
+                            if last { more }
+                        }
                     }
                 }
                 .accessibilityElement(children: .contain)
@@ -525,6 +552,59 @@ private struct TitleBar: View {
         .padding(.leading, sidebarOpen ? Tokens.gutter : state.chrome.afterLights + 40)
         .frame(height: state.chrome.bar)
         .background { WindowDragArea() }
+    }
+}
+
+extension TitleBar {
+    /// The task on top, when a task's page is, as its side panel row has it.
+    private var shownTask: SidebarSections.JobRow? {
+        guard case .job(let id, let local) = state.trail.top,
+              let job = (local ? model.desk.jobs : model.feed.jobs).first(where: { $0.id == id }) else { return nil }
+        return SidebarSections.JobRow(job: job, local: local)
+    }
+
+    /// The conversation on top, when one of obid's is (#493), not a new one yet.
+    private var shownTalk: RunnerConversation? {
+        guard state.trail.top == .talk, model.feed.conversationsOn else { return nil }
+        let list = model.feed.conversations
+        return list.shown.flatMap { id in list.items.first { $0.id == id } }
+    }
+
+    /// The last crumb renamed in place (Sangam's `crumb-rename`): its field's label and what it does.
+    private var renamingHere: (label: String, limit: Int, done: (String?) -> Void)? {
+        if let task = shownTask, state.renaming == .init(id: task.id, inBar: true) {
+            return ("Task name", 60, { state.renamed(task.job, to: $0, feed: model.feed) })
+        }
+        if let talk = shownTalk, state.renaming == .init(id: talk.id, inBar: true) {
+            return ("Conversation name", 100, { title in
+                state.renaming = nil
+                if let title { Task { await model.feed.conversations.rename(talk.id, to: title) } }
+            })
+        }
+        return nil
+    }
+
+    /// The last crumb's ⋮ on a task's or a conversation's page: its menu, as on its side panel row.
+    @ViewBuilder private var more: some View {
+        if let task = shownTask {
+            barMenu("Task options") {
+                TaskMenu(row: task, model: model, state: state, onOpenChat: { state.trail.push(.talk) },
+                         onRename: { state.renaming = .init(id: task.id, inBar: true) })
+            }
+        } else if let talk = shownTalk {
+            barMenu("Conversation options") {
+                ConversationMenu(conversation: talk, list: model.feed.conversations,
+                                 onRename: { state.renaming = .init(id: talk.id, inBar: true) },
+                                 onDelete: { state.deletingConversation = talk })
+            }
+        }
+    }
+
+    private func barMenu(_ label: String, @ViewBuilder _ items: @escaping () -> some View) -> some View {
+        Menu(content: items) { IconButton(symbol: "ellipsis", rotated: true, size: 28) }
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+            .padding(.leading, 8)
+            .accessibilityLabel(label)
     }
 }
 
@@ -579,6 +659,7 @@ enum WindowLabels {
     static func label(_ step: WindowStep, model: IslandModel) -> String {
         switch step {
         case .group(let kind): kind.label
+        case .archived: "Archived"
         case .settings(let page): page.label
         case .talk: model.feed.conversationsOn ? model.feed.conversations.shownTitle : "Oby"
         case .job(let id, let local):

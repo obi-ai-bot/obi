@@ -3002,6 +3002,15 @@ impl Jobs {
         })?))
     }
 
+    /// Renames a job (`PATCH /v1/jobs/{id}`), whatever it's doing: the apps call it `title` from
+    /// now on. `title` is already one line of 1 to 60 characters.
+    pub fn rename(&self, id: &str, title: String) -> Option<Job> {
+        self.update(id, |job| {
+            job.title = Some(title);
+            job.changed("Renamed by you".into());
+        })
+    }
+
     /// Why the job `id` can't be deleted now, when it can't (see [`undeletable_in`]).
     pub fn undeletable(&self, id: &str) -> Option<Refused> {
         let state = self.lock();

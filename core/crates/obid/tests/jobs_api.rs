@@ -590,6 +590,86 @@ fn nothing_committed_is_done_and_needs_nothing() {
             .unwrap()
             .contains("doesn't need you")
     );
+
+    // Rename (`PATCH /v1/jobs/{id}`, Sangam's Rename): trimmed, kept, said in its changes, and
+    // sent to every app as one `job` event; a refused rename sends none.
+    let mut events = TcpStream::connect(("127.0.0.1", obid.port)).unwrap();
+    events
+        .write_all(format!("GET /v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").as_bytes())
+        .unwrap();
+    let mut events = BufReader::new(events);
+    let mut line = String::new();
+    events.read_line(&mut line).unwrap();
+    assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+    std::thread::sleep(Duration::from_millis(200));
+    let path = format!("/v1/jobs/{quiet}");
+    let renamed = request(
+        &obid,
+        "PATCH",
+        &path,
+        Some(r#"{"title": "  Look around the app  "}"#),
+    );
+    assert_eq!(renamed.status, 200, "{}", renamed.body);
+    assert_eq!(renamed.body["title"], "Look around the app");
+    assert_eq!(
+        request(&obid, "GET", &path, None).body["title"],
+        "Look around the app"
+    );
+    let changes = renamed.body["changes"].as_array().unwrap();
+    assert_eq!(changes.last().unwrap()["what"], "Renamed by you");
+    let long = format!(r#"{{"title": "{}"}}"#, "a".repeat(61));
+    for bad in [
+        r#"{"title": "  "}"#,
+        r#"{"title": "two\nlines"}"#,
+        long.as_str(),
+    ] {
+        assert_eq!(
+            request(&obid, "PATCH", &path, Some(bad)).status,
+            422,
+            "{bad}"
+        );
+    }
+    for bad in [r#"{"name": "x"}"#, r#"{"title": 3}"#, "not json"] {
+        assert_eq!(
+            request(&obid, "PATCH", &path, Some(bad)).status,
+            400,
+            "{bad}"
+        );
+    }
+    events
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let (mut event, mut renamed_events) = (String::new(), 0);
+    loop {
+        line.clear();
+        if !matches!(events.read_line(&mut line), Ok(n) if n > 0) {
+            break;
+        }
+        let text = line.trim();
+        if let Some(name) = text.strip_prefix("event: ") {
+            event = name.to_owned();
+        } else if let Some(data) = text.strip_prefix("data: ")
+            && event == "job"
+        {
+            let job: Value = serde_json::from_str(data).unwrap();
+            if job["id"] == quiet.as_str() {
+                assert_eq!(job["title"], "Look around the app", "{job}");
+                renamed_events += 1;
+            }
+        }
+    }
+    assert_eq!(renamed_events, 1);
+    assert_eq!(
+        request(
+            &obid,
+            "PATCH",
+            "/v1/jobs/nowhere",
+            Some(r#"{"title": "x"}"#)
+        )
+        .status,
+        404
+    );
 }
 
 /// A job that changes obid runs obid's own tests inside its job sandbox, and they start obid's
