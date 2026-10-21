@@ -672,9 +672,42 @@ pub fn sorted(answer: &str, count: usize) -> Result<HashMap<usize, String>, Stri
     Ok(about)
 }
 
+/// What a flagged text shows instead of itself.
+const LEFT_OUT: &str = "(Left out: the secret scan flagged it.)";
+
+/// Which of `texts` the secret scan flags, each scanned alone (a secret over several lines can't
+/// run into the next text). Empty texts aren't scanned. An error when the scan can't run.
+// ponytail: one scan per text, a gitleaks run each; a run reads at most 100 of them.
+pub(crate) async fn scan_each(texts: &[String], scratch: &Path) -> Result<BTreeSet<usize>, String> {
+    crate::store::make_private_dir(scratch).map_err(|e| format!("its folder: {e}"))?;
+    let mut flagged = BTreeSet::new();
+    let mut result = Ok(());
+    for (n, text) in texts
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| !t.trim().is_empty())
+    {
+        match crate::scan::scan(&[("text".into(), text.clone())], scratch).await {
+            crate::scan::Verdict::Clean => {}
+            crate::scan::Verdict::Found(_) => {
+                flagged.insert(n);
+            }
+            crate::scan::Verdict::CouldNotRun(why) => {
+                result = Err(why);
+                break;
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(scratch);
+    result.map(|()| flagged)
+}
+
 /// Which of `names` the scan's `verdict` flagged. An error when it couldn't run, or found
 /// something in no text it was given.
-fn flagged(verdict: crate::scan::Verdict, names: &[String]) -> Result<BTreeSet<String>, String> {
+fn flagged_names(
+    verdict: crate::scan::Verdict,
+    names: &[String],
+) -> Result<BTreeSet<String>, String> {
     let findings = match verdict {
         crate::scan::Verdict::Clean => return Ok(BTreeSet::new()),
         crate::scan::Verdict::Found(findings) => findings,
@@ -772,16 +805,36 @@ where
         Ok(text) => github_read(&text, rules, from, seen),
         Err(why) => Err(why),
     };
+    // Without the person's GitHub login, GitHub only gives the model titles: a failure costs
+    // those, never the cursor.
+    let watches_github = rules.person.github.is_some();
     match got {
-        Ok(got) => {
+        Ok(mut got) => {
             run.github = got.notices.len();
+            // What people wrote reaches the phone in the inbox item: the secret scan first.
+            let bodies: Vec<String> = got.notices.iter().map(|n| n.quoted.clone()).collect();
+            let flagged = scan_each(&bodies, scratch).await;
+            for (n, notice) in got.notices.iter_mut().enumerate() {
+                if notice.quoted.is_empty() {
+                    continue;
+                }
+                match &flagged {
+                    Ok(flagged) if !flagged.contains(&n) => {}
+                    _ => notice.quoted = LEFT_OUT.into(),
+                }
+            }
+            if let Err(why) = flagged {
+                run.problems.push(format!(
+                    "GitHub's texts were left out: the secret scan couldn't run ({why})."
+                ));
+            }
             run.notices.extend(got.notices);
             titles = got.titles;
-            complete &= got.problems.is_empty();
+            complete &= got.problems.is_empty() || !watches_github;
             run.problems.extend(got.problems);
         }
         Err(why) => {
-            complete = false;
+            complete &= !watches_github;
             run.problems.push(format!("GitHub wasn't read: {why}."));
         }
     }
@@ -804,7 +857,15 @@ where
                     complete = false;
                     run.problems.push(format!("Slack wasn't read: {why}"));
                 }
-                Ok(found) => {
+                Ok((found, all)) => {
+                    if !all {
+                        // The rest is read next time, from the same cursor.
+                        complete = false;
+                        run.problems.push(
+                            "Slack found more than 300 messages: the rest are read next time."
+                                .into(),
+                        );
+                    }
                     let mut new: Vec<crate::slack::Message> = found
                         .into_iter()
                         .filter(|m| m.user == *id && m.at >= from)
@@ -813,8 +874,10 @@ where
                     new.sort_by(|a, b| a.at.total_cmp(&b.at).then(a.key.cmp(&b.key)));
                     new.dedup_by(|a, b| a.key == b.key);
                     if new.len() > SORTED {
+                        // The cursor stays: the older ones are sorted next time.
+                        complete = false;
                         run.problems.push(format!(
-                            "{} older Slack messages weren't sorted: only the newest {SORTED} are.",
+                            "{} older Slack messages weren't sorted yet: only the newest {SORTED} are.",
                             new.len() - SORTED
                         ));
                         new.drain(..new.len() - SORTED);
@@ -876,28 +939,28 @@ where
     M: FnOnce(String, String, String) -> MF,
     MF: Future<Output = Result<String, Failure>>,
 {
+    // Each message alone, so a secret written over several lines can't run from one into the
+    // next; the titles (one line each) together, a line apart.
+    let texts: Vec<String> = messages.iter().map(|m| m.text.clone()).collect();
+    let flagged = scan_each(&texts, scratch)
+        .await
+        .map_err(|why| format!("the secret scan couldn't run ({why})"))?;
     crate::store::make_private_dir(scratch)
         .map_err(|e| format!("the secret scan couldn't run (its folder: {e})"))?;
-    let texts: Vec<(String, String)> = messages
+    let named: Vec<(String, String)> = titles
         .iter()
         .enumerate()
-        .map(|(n, m)| (format!("S{n}"), format!("{}{SEPARATOR}", m.text)))
-        .chain(
-            titles
-                .iter()
-                .enumerate()
-                .map(|(n, t)| (format!("T{n}"), format!("{t}{SEPARATOR}"))),
-        )
+        .map(|(n, t)| (format!("T{n}"), format!("{t}{SEPARATOR}")))
         .collect();
-    let names: Vec<String> = texts.iter().map(|(name, _)| name.clone()).collect();
-    let verdict = crate::scan::scan(&texts, scratch).await;
+    let names: Vec<String> = named.iter().map(|(name, _)| name.clone()).collect();
+    let verdict = crate::scan::scan(&named, scratch).await;
     let _ = std::fs::remove_dir_all(scratch);
-    let flagged =
-        flagged(verdict, &names).map_err(|why| format!("the secret scan couldn't run ({why})"))?;
+    let flagged_titles = flagged_names(verdict, &names)
+        .map_err(|why| format!("the secret scan couldn't run ({why})"))?;
     let titles: Vec<String> = titles
         .iter()
         .enumerate()
-        .filter(|(n, _)| !flagged.contains(&format!("T{n}")))
+        .filter(|(n, _)| !flagged_titles.contains(&format!("T{n}")))
         .map(|(_, t)| t.clone())
         .collect();
     let mut done = vec![];
@@ -905,7 +968,7 @@ where
     let mut shown = vec![];
     for (n, m) in messages.into_iter().enumerate() {
         done.push(format!("slack:{}", m.key));
-        if flagged.contains(&format!("S{n}")) {
+        if flagged.contains(&n) {
             count_flagged += 1;
         } else {
             shown.push(m);
@@ -962,8 +1025,8 @@ where
 
 /// Runs the watcher once for `slot` (none: the owner's Run now), unless a run is under way: reads
 /// as [`read`] does, hands what it found to `tell` (the inbox), sends the owner's Slack message
-/// when `live` (through `slack`), and keeps what it saw. Nothing is told or kept when the rules
-/// were forgotten meanwhile, and no cursor when they were set again.
+/// when `live` (through `slack`), and keeps what it saw. Nothing is told, sent or kept when the
+/// rules were forgotten, set again or resumed meanwhile.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with<G, GF, M, MF, T>(
     watch: &Watch,
@@ -1011,7 +1074,9 @@ where
     )
     .await;
     done.run.catch_up = slot.is_some_and(|s| now - s > LATE);
-    if watch.lock().rules.is_none() {
+    // Rules forgotten, set again or resumed meanwhile: this run tells, sends and keeps nothing.
+    let current = || watch.lock().generation == generation;
+    if !current() {
         return Some(done.run);
     }
     if !done.run.notices.is_empty() {
@@ -1020,6 +1085,8 @@ where
         done.run.dm = Some(if !rules.live {
             tracing::info!("watch: dry run, the Slack message to the owner isn't sent");
             "dryRun".into()
+        } else if !current() {
+            "notSent".into()
         } else {
             match slack.tell_owner(&text).await {
                 Ok(_) => "sent".into(),
@@ -1035,12 +1102,10 @@ where
     }
     {
         let mut kept = watch.lock();
-        if kept.rules.is_none() {
+        if kept.generation != generation {
             return Some(done.run);
         }
-        if let Some(since) = done.since
-            && kept.generation == generation
-        {
+        if let Some(since) = done.since {
             kept.since = Some(since);
         }
         kept.seen.extend(done.seen);
@@ -1138,7 +1203,9 @@ impl Watch {
         }
         {
             let mut kept = self.lock();
-            if kept.rules.as_ref().map(|r| &r.person) != Some(&rules.person) {
+            // A new person, the first rules, or paused rules turned on again: read from now.
+            let resumed = kept.rules.as_ref().is_some_and(|r| !r.enabled) && rules.enabled;
+            if resumed || kept.rules.as_ref().map(|r| &r.person) != Some(&rules.person) {
                 kept.since = Some(now as f64);
             }
             kept.slot = slot_at_or_before(&rules.zone(), now);
@@ -1648,8 +1715,11 @@ mod tests {
     async fn a_flagged_message_alone_is_left_out() {
         let home = scratch("watch-flagged");
         let mut answer = slack_answer();
-        answer["messages"]["matches"][0]["text"] =
-            json!(format!("the key is AKIA{}", "QWERTYUIOPASDFGH"));
+        // A secret on the message's second line, and the next message right after it.
+        answer["messages"]["matches"][0]["text"] = json!(format!(
+            "look at this\nthe key is AKIA{}",
+            "QWERTYUIOPASDFGH"
+        ));
         let api = stub(HashMap::from([("search.messages", answer)])).await;
         let slack = connected(&home, api.url.clone());
         let done = read(
@@ -1881,5 +1951,161 @@ mod tests {
         let reopened = Watch::open(&home, crate::events::Events::new());
         assert!(reopened.lock().rules.is_none());
         assert!(home.join("watch.json.unreadable").exists());
+    }
+
+    /// Rules set again while a run reads: the run tells, sends and keeps nothing.
+    #[tokio::test]
+    async fn rules_set_again_during_a_run_discard_it() {
+        let home = scratch("watch-regen");
+        let api = stub(api_with_dm()).await;
+        let slack = connected(&home, api.url.clone());
+        let watch = Watch::open(&home, crate::events::Events::new());
+        let now = at("2026-10-20T13:15:00Z");
+        watch.set(rules(), now - 300).unwrap();
+        watch.change(None, Some(true), now);
+        let told = Mutex::new(0);
+        let run = run_with(
+            &watch,
+            &slack,
+            None,
+            now,
+            |_, _| async {
+                let mut again = rules();
+                again.topics = "only Avenga".into();
+                again.live = true;
+                watch.set(again, now).unwrap();
+                ok_github().await
+            },
+            sorted_answer,
+            |_, _| *told.lock().unwrap() += 1,
+        )
+        .await
+        .unwrap();
+        assert!(!run.notices.is_empty());
+        assert_eq!(*told.lock().unwrap(), 0);
+        let kept = watch.lock();
+        assert!(kept.runs.is_empty() && kept.seen.is_empty());
+        assert_eq!(
+            kept.since,
+            Some((now - 300) as f64),
+            "the new rules' cursor, untouched"
+        );
+        assert!(
+            !api.got
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.0 == "chat.postMessage")
+        );
+    }
+
+    /// More than 100 new messages: the newest 100 are sorted and the cursor stays for the rest.
+    #[tokio::test]
+    async fn past_the_cap_the_cursor_stays() {
+        let home = scratch("watch-cap");
+        let matches: Vec<Value> = (0..101)
+            .map(|n| {
+                json!({"ts": format!("{}.000100", 1_792_501_300 + n), "user": "U3E9H62P2",
+                "text": format!("message {n}"), "channel": {"id": "C1", "name": "x"}})
+            })
+            .collect();
+        let api = stub(HashMap::from([(
+            "search.messages",
+            json!({"ok": true, "messages": {"paging": {"pages": 1}, "matches": matches}}),
+        )]))
+        .await;
+        let slack = connected(&home, api.url.clone());
+        let none: Vec<Value> = (1..=100)
+            .map(|n| json!({"n": n, "about": false, "topic": ""}))
+            .collect();
+        let answer = json!({"messages": none}).to_string();
+        let done = read(
+            &rules(),
+            at("2026-10-20T13:10:00Z") as f64,
+            at("2026-10-20T13:15:00Z"),
+            &BTreeSet::new(),
+            Some(&slack),
+            &home.join("scan"),
+            |_, _| ok_github(),
+            |_, _, quoted| async move {
+                assert!(!quoted.contains("message 0\n"), "the oldest waits");
+                Ok(answer)
+            },
+        )
+        .await;
+        assert_eq!((done.run.slack, done.since), (100, None));
+        assert!(!done.seen.contains(&"slack:C1:1792501300.000100".to_owned()));
+    }
+
+    /// A watcher with no GitHub login for the person: GitHub failing costs only the titles.
+    #[tokio::test]
+    async fn without_the_persons_github_a_missing_gh_holds_nothing() {
+        let home = scratch("watch-nogh");
+        let api = stub(HashMap::from([("search.messages", slack_answer())])).await;
+        let slack = connected(&home, api.url.clone());
+        let mut slack_only = rules();
+        slack_only.person.github = None;
+        let now = at("2026-10-20T13:15:00Z");
+        let done = read(
+            &slack_only,
+            at("2026-10-20T13:10:00Z") as f64,
+            now,
+            &BTreeSet::new(),
+            Some(&slack),
+            &home.join("scan"),
+            |_, _| async { Err("gh isn't installed".to_owned()) },
+            |_, _, _| async { Ok(SORTED_ANSWER.to_owned()) },
+        )
+        .await;
+        assert_eq!(
+            (done.run.outcome.as_str(), done.since),
+            ("ran", Some(now as f64))
+        );
+        assert!(
+            done.run
+                .problems
+                .iter()
+                .any(|p| p.starts_with("GitHub wasn't read"))
+        );
+    }
+
+    /// GitHub's texts reach the phone in the inbox item: a flagged one is left out.
+    #[tokio::test]
+    async fn a_flagged_github_text_is_left_out() {
+        let home = scratch("watch-ghscan");
+        let mut answer = github_answer();
+        answer["data"]["a0"]["nodes"][0]["comments"]["nodes"][0]["body"] =
+            json!(format!("token AKIA{}", "QWERTYUIOPASDFGH"));
+        let text = answer.to_string();
+        let mut github_only = rules();
+        github_only.person.slack = None;
+        let done = read(
+            &github_only,
+            at("2026-10-20T13:10:00Z") as f64,
+            at("2026-10-20T13:15:00Z"),
+            &BTreeSet::new(),
+            None,
+            &home.join("scan"),
+            |_, _| async { Ok(text) },
+            sorted_answer,
+        )
+        .await;
+        let quoted: Vec<&str> = done.run.notices.iter().map(|n| n.quoted.as_str()).collect();
+        assert!(
+            quoted.contains(&LEFT_OUT) && !quoted.iter().any(|q| q.contains("AKIA")),
+            "{quoted:?}"
+        );
+    }
+
+    #[test]
+    fn rules_turned_on_again_by_put_read_from_now() {
+        let home = scratch("watch-put-resume");
+        let watch = Watch::open(&home, crate::events::Events::new());
+        let mut paused = rules();
+        paused.enabled = false;
+        watch.set(paused, 100).unwrap();
+        watch.lock().since = Some(50.0);
+        watch.set(rules(), 900).unwrap();
+        assert_eq!(watch.lock().since, Some(900.0));
     }
 }

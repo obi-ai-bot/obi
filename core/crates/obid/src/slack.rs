@@ -307,9 +307,12 @@ impl Slack {
         }
         let _held = self.changing.lock().await;
         for (value, name) in [(user, USER), (bot, BOT)] {
-            self.vault
-                .add(value, name)
-                .map_err(|e| internal(format!("obid couldn't keep Slack's tokens: {e}")))?;
+            if let Err(e) = self.vault.add(value, name) {
+                // Never half a login: what was kept goes too.
+                let why = format!("obid couldn't keep Slack's tokens: {e}");
+                self.forget(Some(why.clone()));
+                return Err(internal(why));
+            }
         }
         self.save(Saved {
             team: text(&person, "team"),
@@ -359,6 +362,10 @@ impl Slack {
             Err(Failed::Other(why)) => Err(why),
             Err(Failed::Refused) => {
                 let _held = self.changing.lock().await;
+                // Only the token Slack refused signs Oby out: one pasted meanwhile stays.
+                if self.vault.value(name).ok().flatten().as_deref() != Some(token.as_str()) {
+                    return Err("Slack refused a token that was replaced meanwhile.".into());
+                }
                 self.forget(Some(REFUSED.into()));
                 Err(REFUSED.into())
             }
@@ -366,8 +373,8 @@ impl Slack {
     }
 
     /// The messages `search.messages` finds for `query` with the user token, newest first, at
-    /// most 300.
-    pub async fn search(&self, query: &str) -> Result<Vec<Message>, String> {
+    /// most 300, and whether that was all of them.
+    pub async fn search(&self, query: &str) -> Result<(Vec<Message>, bool), String> {
         let mut found = Vec::new();
         for page in 1..=PAGES {
             let page = page.to_string();
@@ -386,11 +393,12 @@ impl Slack {
                 .await?;
             found.extend(messages(&answer));
             let pages = answer["messages"]["paging"]["pages"].as_u64().unwrap_or(1);
-            if page.parse::<u64>().unwrap_or(1) >= pages {
-                break;
+            let page = page.parse::<u64>().unwrap_or(1);
+            if page >= pages {
+                return Ok((found, true));
             }
         }
-        Ok(found)
+        Ok((found, false))
     }
 
     /// Sends `text` to the owner as the app's bot, in its direct message with them: never to
@@ -650,6 +658,33 @@ pub(crate) mod tests {
         assert!(!slack.connected());
         assert_eq!(slack.vault.value(USER).unwrap(), None);
         assert_eq!(slack.vault.value(BOT).unwrap(), None);
+    }
+
+    /// A refusal that comes back after the owner pasted new tokens signs nothing out.
+    #[tokio::test]
+    async fn a_late_refusal_keeps_the_new_tokens() {
+        let home = scratch("late");
+        let app = Router::new().route(
+            "/api/search.messages",
+            axum::routing::post(|| async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                Json(json!({"ok": false, "error": "invalid_auth"}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let slack = connected(&home, url);
+        let newer = format!("xoxp-{}", "1111-2222-3333-9e8d7c6b5a4f3021");
+        let searching = {
+            let slack = slack.clone();
+            tokio::spawn(async move { slack.search("from:<@U3>").await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        slack.vault.add(&newer, USER).unwrap();
+        assert!(searching.await.unwrap().is_err());
+        assert!(slack.connected(), "the new token stays");
+        assert_eq!(slack.vault.value(USER).unwrap(), Some(newer));
     }
 
     #[tokio::test]
