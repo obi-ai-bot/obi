@@ -12,6 +12,7 @@
     "obi",
     "role",
     "x25519",
+    "nonce",
     "key_id",
     "signature"
   ],
@@ -35,6 +36,13 @@
       ]
     },
     "x25519": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 43,
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "nonce": {
+      "description": "32 random bytes, base64url, new for every hello: with the X25519 key, it makes every handshake's salt, and so its keys, new.",
       "type": "string",
       "minLength": 43,
       "maxLength": 43,
