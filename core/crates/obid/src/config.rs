@@ -99,6 +99,9 @@ struct File {
     vm_helper: Option<PathBuf>,
     #[serde(default)]
     vm_image: Option<PathBuf>,
+    /// The least time between two run_requests taken from one teammate, in seconds (tests only).
+    #[serde(default)]
+    guest_request_every: Option<i64>,
     /// Where a job run on another Mac sends its model calls from here (crate::sphere::guest):
     /// the providers' own APIs when it's left out. Tests point it at a stand-in.
     #[serde(default)]
@@ -262,6 +265,9 @@ pub struct Config {
     /// (crate::sphere::hosting::Setup).
     pub vm_helper: Option<PathBuf>,
     pub vm_image: Option<PathBuf>,
+    /// `guestRequestEvery`: the least time between two run_requests taken from one teammate, in
+    /// seconds; 900 when left out (crate::sphere::hosting). Tests set it lower.
+    pub guest_request_every: Option<i64>,
     /// `guestModelApi`: the model API a guest job's calls go to from here, when not the providers'.
     pub guest_model_api: Option<String>,
 }
@@ -572,6 +578,7 @@ impl Config {
             claude_keychain: file.claude_keychain,
             vm_helper: file.vm_helper,
             vm_image: file.vm_image,
+            guest_request_every: file.guest_request_every,
             guest_model_api: file.guest_model_api,
             conversation: Conversation {
                 harness,

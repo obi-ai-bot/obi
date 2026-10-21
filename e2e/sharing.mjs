@@ -210,7 +210,7 @@ async function main() {
       agents: { claude: { bin: join(OBI, "e2e/stub-agent/stub-agent"), accounts: [{ id: "stub", name: "Stub", configDir: join(home, "accounts/stub") }] } },
       repos: [{ repo: "obi-e2e/fixture-app", remote: fixture.remoteUrl, defaultBranch: "main", check: "node --test" }],
       allowFileRemotes: true, telemetry: false,
-      ...(who === "host" ? { vmHelper: wrapper, vmImage: IMAGE } : { guestModelApi: `http://127.0.0.1:${modelPort}` }),
+      ...(who === "host" ? { vmHelper: wrapper, vmImage: IMAGE, guestRequestEvery: 0 /* Sangam's two jobs come minutes apart */ } : { guestModelApi: `http://127.0.0.1:${modelPort}` }),
     };
     writeFileSync(join(dir, "config.json"), JSON.stringify(config, null, 2));
     start(`obid-${who}`, OBID, ["serve", "--config", join(dir, "config.json")], { env: { HOME: join(dir, "env-home"), TMPDIR: join(dir, "tmp"), PATH: process.env.PATH } });
