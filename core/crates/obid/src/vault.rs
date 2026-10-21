@@ -41,7 +41,7 @@ use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt as _;
 use serde_json::Value;
 
-use crate::secrets::Secrets;
+use crate::secrets::{Secrets, Snapshot};
 
 /// The shortest value the vault takes: a shorter one would match ordinary text everywhere.
 pub const SHORTEST: usize = crate::secrets::SHORTEST;
@@ -918,20 +918,39 @@ impl Vault {
         if self.secrets.is_empty() {
             return None;
         }
+        self.scrubbed_with(&self.secrets.snapshot(), bytes)
+    }
+
+    /// [`Vault::scrubbed_checked`] with the secrets read once, for every string of an answer.
+    fn scrubbed_with(&self, secrets: &Snapshot, bytes: &[u8]) -> Option<Vec<u8>> {
         if let Ok(mut value) = serde_json::from_slice::<Value>(bytes) {
             return self
-                .scrub(&mut value)
+                .scrub(secrets, &mut value)
                 .then(|| serde_json::to_vec(&value).unwrap_or_default());
         }
         let text = String::from_utf8_lossy(bytes);
-        let clean = self.redact_checked(&text);
+        let clean = self.clean(secrets, &text);
         (clean != text).then(|| clean.into_bytes())
     }
 
+    /// [`Vault::redact_checked`], told first, cheaply and exactly, whether it could change `text`
+    /// at all ([`Snapshot::touches`]): most strings of an answer hold no secret, and the whole
+    /// redaction of each one made a 380 KB job list take 2 to 12 seconds.
+    fn clean(&self, secrets: &Snapshot, text: &str) -> String {
+        if secrets.touches(text) {
+            self.redact_checked(text)
+        } else {
+            text.to_owned()
+        }
+    }
+
     /// Whether anything in `value` changed.
-    fn scrub(&self, value: &mut Value) -> bool {
+    fn scrub(&self, secrets: &Snapshot, value: &mut Value) -> bool {
         match value {
             Value::String(text) => {
+                if !secrets.touches(text) {
+                    return false;
+                }
                 let clean = self.redact_checked(text);
                 let changed = clean != *text;
                 *text = clean;
@@ -939,13 +958,13 @@ impl Vault {
             }
             Value::Array(items) => items
                 .iter_mut()
-                .fold(false, |changed, item| self.scrub(item) | changed),
+                .fold(false, |changed, item| self.scrub(secrets, item) | changed),
             Value::Object(fields) => {
                 let mut changed = false;
                 let taken = std::mem::take(fields);
                 for (key, mut item) in taken {
-                    changed |= self.scrub(&mut item);
-                    let clean = self.redact_checked(&key);
+                    changed |= self.scrub(secrets, &mut item);
+                    let clean = self.clean(secrets, &key);
                     changed |= clean != key;
                     fields.insert(clean, item);
                 }
@@ -961,19 +980,20 @@ impl Vault {
         if self.secrets.is_empty() {
             return None;
         }
+        let secrets = self.secrets.snapshot();
         let text = String::from_utf8_lossy(frame);
         let clean: Vec<String> = text
             .split('\n')
             .map(|line| match line.strip_prefix("data:") {
                 Some(data) => {
                     let (space, payload) = data.strip_prefix(' ').map_or(("", data), |p| (" ", p));
-                    let payload = match self.scrubbed_checked(payload.as_bytes()) {
+                    let payload = match self.scrubbed_with(&secrets, payload.as_bytes()) {
                         Some(clean) => String::from_utf8_lossy(&clean).into_owned(),
                         None => payload.to_owned(),
                     };
                     format!("data:{space}{payload}")
                 }
-                None => self.redact_checked(line),
+                None => self.clean(&secrets, line),
             })
             .collect();
         let clean = clean.join("\n");
@@ -1399,6 +1419,73 @@ mod tests {
             ("URL-encoded", percent.to_ascii_lowercase()),
             ("URL-encoded", unreserved(true)),
         ]
+    }
+
+    /// What an answer's scrub skips ([`Snapshot::touches`] false) is exactly what the whole
+    /// redaction leaves as it is: every copy of a value, alone, in text, wrapped over lines or cut
+    /// short, is redacted the same with the shortcut as without it, and clean text is skipped.
+    #[test]
+    fn the_scrubs_shortcut_changes_nothing() {
+        let scratch = Scratch::new();
+        let (vault, _) = scratch.vault();
+        let value = secret();
+        let key: String = (0..20)
+            .map(|i| {
+                format!(
+                    "{}\n",
+                    b64(format!("line {i} of the key {value}").as_bytes())
+                )
+            })
+            .collect();
+        let key = format!("-----BEGIN TEST KEY-----\n{key}-----END TEST KEY-----\n");
+        vault.add(&value, "one").unwrap();
+        vault.add(&key, "key").unwrap();
+        vault.check().unwrap();
+        let secrets = vault.secrets.snapshot();
+
+        let mut texts = vec![
+            key.clone(),
+            key.replace('\n', "\\n"),
+            key.replace('\n', "\r\n"),
+        ];
+        for (_, copy) in copies(&value)
+            .into_iter()
+            .chain(copies(key.lines().nth(3).unwrap()))
+        {
+            let wrapped: Vec<String> = copy
+                .as_bytes()
+                .chunks(16)
+                .map(|c| String::from_utf8_lossy(c).into_owned())
+                .collect();
+            texts.extend([
+                copy.clone(),
+                format!("the token is {copy}, see above"),
+                format!("{{\"value\": \"{copy}\"}}"),
+                wrapped.join("\n"),
+                wrapped.join("\\n"),
+                copy.chars().skip(1).collect(),
+                copy.chars().take(copy.chars().count() - 1).collect(),
+            ]);
+        }
+        let clean = [
+            "Ran cargo test -p obid --test status: 14 passed.",
+            "core/crates/obid/src/vault.rs:917 and apps/mac/app/RunnerFeed.swift",
+            "c19d4a9d0f6e4b7a9c2d1e0f3a4b5c6d7e8f9a0b",
+            "aGVsbG8gd29ybGQsIHRoaXMgaXMgbm90IGEgc2VjcmV0Lg==",
+            "https://github.com/obi-ai-bot/obi/pull/821?tab=files%20changed",
+            "Line one\nLine two with a path /Users/someone/Projects\n",
+        ];
+        texts.extend(clean.iter().map(|t| t.to_string()));
+        for text in &texts {
+            assert_eq!(
+                vault.clean(&secrets, text),
+                vault.redact_checked(text),
+                "{text:?}"
+            );
+        }
+        for text in clean {
+            assert!(!secrets.touches(text), "{text:?}");
+        }
     }
 
     /// The Swift runner's Keychain items when obid runs in the Mac app's runner home; a file in
