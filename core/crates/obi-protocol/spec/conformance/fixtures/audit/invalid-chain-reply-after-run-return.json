@@ -109,21 +109,16 @@
               "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
               "bytes": 2210
             },
-            "head_sha": "4f1c0e2a9b7d3c5e6f8a1b2c3d4e5f60718293a4",
-            "host": {
-              "wall_seconds": 1080,
-              "cpu_seconds": 2400,
-              "peak_memory_mb": 3100
-            }
+            "head_sha": "4f1c0e2a9b7d3c5e6f8a1b2c3d4e5f60718293a4"
           },
-          "signature": "Vttu7Cc-FnRvcGFNE29aDtUVDFrFeJNZukFREkh50Ov9E-ITsB2rqbLp8HOvEvvNmywozy15fp-MP40XtaOFDw"
+          "signature": "nZ7nQRoxxI5OFL4gfmb_D0rVvY9uvHN7EU5dE1dBHnwcw4Zfk3VkoF2UkOv5e3CMwWCPD8e-gNvdXwWpoWOvCQ"
         },
-        "hash": "4a385094b07209fa56d9c36be85ef4b4630c5091d2284f6070e950dd34576d2c"
+        "hash": "66bdea8494f4d3591c289f1a65356b429a52210c0d19c057b7623ba021988a90"
       },
       {
         "sphere": "conf-sphere",
         "seq": 4,
-        "prev": "4a385094b07209fa56d9c36be85ef4b4630c5091d2284f6070e950dd34576d2c",
+        "prev": "66bdea8494f4d3591c289f1a65356b429a52210c0d19c057b7623ba021988a90",
         "recorded_at": "2026-10-14T11:59:04Z",
         "envelope": {
           "protocol": "obi/0.1",
@@ -142,7 +137,7 @@
           },
           "signature": "-prAiNsu3gTXC133ucEq9qJYxQO4X-z5RhfHZxqVM0XJi3REAJpO06vq1S70m_CopO4__7VksQBGZoCg8UYcCg"
         },
-        "hash": "ba795a145ed13bc9ff70d024ce68613193cb4687bceec279a26c89f50a558275"
+        "hash": "f476c47a08d77006b0786cbad3f3d54f8441aebadfb7e678f3b02168f8960c72"
       }
     ]
   }

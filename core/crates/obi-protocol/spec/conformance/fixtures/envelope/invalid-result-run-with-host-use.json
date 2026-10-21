@@ -1,7 +1,7 @@
 {
   "case": "envelope",
-  "name": "invalid-result-run-without-host",
-  "description": "A run_request's result must say what it used of the Mac.",
+  "name": "invalid-result-run-with-host-use",
+  "description": "A run_request's result that says how long the job ran and how much CPU it took: with when it started, that says when the host's owner paused it.",
   "expect": "reject",
   "reason": "invalid_envelope",
   "context": {
@@ -22,7 +22,7 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "bdc1ebf2-588c-8f31-8967-b333905cba86",
+    "id": "6b8aff9e-a2f7-8300-843c-3e4c48d21d22",
     "type": "result",
     "from": "obi-a",
     "to": "obi-b",
@@ -40,8 +40,13 @@
         "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "bytes": 3077
       },
-      "head_sha": "4f1c0e2a9b7d3c5e6f8a1b2c3d4e5f60718293a4"
+      "head_sha": "4f1c0e2a9b7d3c5e6f8a1b2c3d4e5f60718293a4",
+      "host": {
+        "wall_seconds": 840,
+        "cpu_seconds": 1900,
+        "peak_memory_mb": 2500
+      }
     },
-    "signature": "JG8fB6AXLdvfCHGcS_L6079YjixjIiddanJ-YWGKX_7wJ7p4yp7_a2TqOVyFcpD4MVAtsoXwgKLvvTzUSi8UDQ"
+    "signature": "pDCdgWyc2JMuyB8cs6PnzQ7GQ6RVeOGtBfWCHFZckEbHTcLx48CNiQbV4rWlJ-LMBjVkRPTlKybdY8WrWDiQBg"
   }
 }

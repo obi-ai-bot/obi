@@ -207,8 +207,6 @@ fn audit_entry(entry: &Value) -> Value {
         ("reason", &b["reason"]),
         ("state", &b["state"]),
         ("outcome", &b["outcome"]),
-        ("host", &b["host"]),
-        ("minutes", &b["minutes"]),
         ("costCents", &b["cost_cents"]),
         (
             "grant",

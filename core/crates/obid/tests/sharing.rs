@@ -301,11 +301,19 @@ async fn a_job_runs_on_a_teammates_mac_with_the_owners_own_key_and_comes_back_wi
         .find(|e| e["type"] == "result")
         .expect("a result");
     assert_eq!(result["body"]["for"], "run_request");
-    assert_eq!(result["body"]["host"]["cpu_seconds"], 3);
-    assert_eq!(result["body"]["host"]["peak_memory_mb"], 42);
+    // No timing in the chain: wall and CPU time would say when Wellington paused it.
+    for timing in ["host", "minutes", "wall_seconds", "cpu_seconds"] {
+        assert!(
+            !serde_json::to_string(&recorded)
+                .unwrap()
+                .contains(&format!("\"{timing}\":")),
+            "{timing} in the chain"
+        );
+    }
     // Wellington's obid keeps its own log of the host's use, and nothing of the job's.
     let log = std::fs::read_to_string(hf.0.join("home/sharing-log.jsonl")).unwrap();
     assert!(log.contains("\"fromOwner\":\"sangam\""), "{log}");
+    assert!(log.contains("\"cpu_seconds\":3"), "{log}");
     tokio::task::block_in_place(|| {
         assert_eq!(get(&p.host, "/v1/obid/sharing/mac")["week"]["jobs"], 1);
         // Each side checks the chain and finds its own entries in it, as metadata only.
@@ -318,7 +326,7 @@ async fn a_job_runs_on_a_teammates_mac_with_the_owners_own_key_and_comes_back_wi
                 .iter()
                 .find(|e| e["type"] == "result")
                 .expect("the result");
-            assert_eq!(result["host"]["cpu_seconds"], 3);
+            assert!(result.get("host").is_none(), "{result}");
             assert!(
                 entries
                     .iter()
@@ -449,8 +457,7 @@ async fn stop_sends_the_job_back_with_its_commit_and_it_needs_its_owner() {
         assert_eq!(job["status"], "interrupted", "{job}");
         let reason = job["reason"].as_str().unwrap_or("");
         assert!(
-            reason
-                .starts_with("Came back from Wellington's Mac. That Mac couldn't keep running it."),
+            reason.starts_with("That Mac couldn’t keep running it. Your job ran there for "),
             "{reason}"
         );
         // The chain says only that the host was unavailable: not that Wellington stopped it, nor
@@ -464,6 +471,7 @@ async fn stop_sends_the_job_back_with_its_commit_and_it_needs_its_owner() {
         assert_eq!(back.len(), 1);
         assert_eq!(back[0]["body"]["reason"], "host_unavailable", "{}", back[0]);
         assert!(back[0]["body"].get("minutes").is_none(), "{}", back[0]);
+        assert!(back[0]["body"].get("host").is_none(), "{}", back[0]);
         assert!(reason.contains("1 commit"), "{reason}");
         let seen = std::fs::read_to_string(p.vm.join("guest.log")).unwrap();
         assert!(seen.contains("return stopped"), "{seen}");
@@ -710,7 +718,7 @@ async fn a_share_of_an_api_account_runs_on_its_mac_with_its_key_metered_until_us
         let reason = first["reason"].as_str().unwrap_or("");
         assert!(
             first["status"] == "done"
-                || reason.contains("Your share of Wellington's account is used"),
+                || reason.contains("Your share of Wellington’s account is used"),
             "{first}\n{}",
             p.guest.log()
         );
@@ -879,7 +887,9 @@ async fn a_second_request_within_15_minutes_is_declined() {
                 .to_string(),
         )
         .unwrap();
-        let _ = (first, declined(&send_job(&p.guest)));
+        let second = declined(&send_job(&p.guest));
+        assert_eq!(first["reason"], "That Mac can't take it now.");
+        assert_eq!(second["reason"], first["reason"]);
         let log = p.host.log();
         assert!(
             log.contains("one run_request per teammate every 15 minutes"),

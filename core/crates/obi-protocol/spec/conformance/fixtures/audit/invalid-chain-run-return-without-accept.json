@@ -87,16 +87,11 @@
               "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
               "bytes": 2210
             },
-            "head_sha": "4f1c0e2a9b7d3c5e6f8a1b2c3d4e5f60718293a4",
-            "host": {
-              "wall_seconds": 1080,
-              "cpu_seconds": 2400,
-              "peak_memory_mb": 3100
-            }
+            "head_sha": "4f1c0e2a9b7d3c5e6f8a1b2c3d4e5f60718293a4"
           },
-          "signature": "ETLIqRasclLsLeiJPhFe3h61b0TX8ty77xGGf2tVD9SlUTXgzYNEDX6tYDkjv6tEN-j-gR6SxvgeGQ4ug5-9CQ"
+          "signature": "Qya-E5fnkwLBK7W8a2-PaUilTr9kJIR1vyvtJQtOFT7rU_6AOQIa4tQPu0f7EgLeBD2Ssit3qEwnjuVoK5wjBQ"
         },
-        "hash": "82a5c7d1f1b0d8644104f7e5ce9e596db3404f69f7fe9904290b8f7257178514"
+        "hash": "eefb3f3186f3fa3074036160065fbe94916e0eba8732bc74c8449f8e6b98f42b"
       }
     ]
   }

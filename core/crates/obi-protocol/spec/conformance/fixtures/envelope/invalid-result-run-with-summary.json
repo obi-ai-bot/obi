@@ -22,7 +22,7 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "bf3a0fe7-29af-83c0-8e0d-0917fc5dced2",
+    "id": "e88c3dc1-23f0-89b2-8076-b99728d795be",
     "type": "result",
     "from": "obi-a",
     "to": "obi-b",
@@ -41,13 +41,8 @@
         "bytes": 3077
       },
       "head_sha": "4f1c0e2a9b7d3c5e6f8a1b2c3d4e5f60718293a4",
-      "host": {
-        "wall_seconds": 840,
-        "cpu_seconds": 1900,
-        "peak_memory_mb": 2500
-      },
       "summary": "Added four tests."
     },
-    "signature": "fCdBdNlx9F7RDDT3eL2bK4KPZuZpmb18anJWAwpUiRFU5u-I-FZ9ENkfYJAL73n1CWJ9tmDXR7fU6WOLHnNpBA"
+    "signature": "K6ICZkdmFW51QFiQrAVuGWidS3HZVdFfFwiB-5XwAno6gxLrw98mjeDHm26UbujEjgzv-UUXPbVS-UuGoYo7Bw"
   }
 }

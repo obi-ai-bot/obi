@@ -594,14 +594,15 @@ async fn run_in(
         let why = match reply["body"]["reason"].as_str() {
             Some("time_limit") => "It reached its time limit there".to_owned(),
             Some("share_used") => format!(
-                "Your share of {}'s account is used for this month",
+                "Your share of {}’s account is used for this month",
                 ask.host_owner
             ),
-            _ => "That Mac couldn't keep running it".to_owned(),
+            _ => "That Mac couldn’t keep running it".to_owned(),
         };
+        // Sangam's "Came back" card, word for word: its headline, then what happened (the Mac
+        // splits them at the first sentence).
         let text = format!(
-            "Came back from {}'s Mac. {why}. It ran {minutes} minute{} there and came back with its notes and {count} commit{}. Try again to send it back there, or run it here.",
-            ask.host_owner,
+            "{why}. Your job ran there for {minutes} minute{} and came back with its notes and its {count} commit{}. Run the rest on this Mac, or wait until that Mac is free again?",
             if minutes == 1 { "" } else { "s" },
             if count == 1 { "" } else { "s" }
         );

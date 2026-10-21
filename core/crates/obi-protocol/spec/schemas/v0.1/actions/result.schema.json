@@ -43,14 +43,13 @@
       "title": "result of a run_request",
       "type": "object",
       "additionalProperties": false,
-      "required": ["for", "outcome", "repo", "host"],
+      "required": ["for", "outcome", "repo"],
       "properties": {
         "for": { "const": "run_request" },
         "outcome": { "enum": ["done", "failed"] },
         "repo": { "$ref": "../common.schema.json#/$defs/repo" },
         "commits": { "$ref": "../common.schema.json#/$defs/bundle", "description": "The job's commits, a git bundle on the job channel. Absent when it made none." },
         "head_sha": { "$ref": "../common.schema.json#/$defs/sha" },
-        "host": { "$ref": "../common.schema.json#/$defs/host_use" },
         "cost_cents": { "$ref": "../common.schema.json#/$defs/cents", "description": "On a share of the receiver's owner's API account (protocol.md section 15): what the job's model calls cost at list price." }
       }
     }

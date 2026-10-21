@@ -78,6 +78,14 @@ struct SharingTests {
         #expect(String(data: obid.requests.last?.body ?? Data(), encoding: .utf8) == #"{"runsOn":null}"#)
     }
 
+    @Test func aJobThatCameBackShowsSangamsCardWordForWord() {
+        let line = "That Mac couldn’t keep running it. Your job ran there for 18 minutes and came back with its notes and its 2 commits. Run the rest on this Mac, or wait until that Mac is free again?"
+        let (title, happened) = TaskDecision.cameBack(line)
+        #expect(title == "That Mac couldn’t keep running it")
+        #expect(happened == "Your job ran there for 18 minutes and came back with its notes and its 2 commits. Run the rest on this Mac, or wait until that Mac is free again?")
+        #expect(TaskDecision.cameBack("Done").0 == "Done")
+    }
+
     @Test func aJobsPlaceIsInItsExtrasAndOnItsLine() throws {
         let json = Data(#"{"id": "j1", "runsOn": {"obi": "obi-wellington", "owner": "wellington"}}"#.utf8)
         let extras = try Runner.decoder.decode(RunnerJobExtras.self, from: json)

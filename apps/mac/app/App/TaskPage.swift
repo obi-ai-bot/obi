@@ -189,7 +189,8 @@ struct TaskDecision: View {
             // It came back from a teammate's Mac (Sangam's "Came back" card, #808): run it here, or
             // send it back there once that Mac is free.
             let wait = "Wait for \(RunnerMac.person(on.owner))’s Mac"
-            AskCard(kind: "Came back", title: job.line, happened: job.resumesLine,
+            let (title, happened) = Self.cameBack(job.line)
+            AskCard(kind: "Came back", title: title, happened: happened,
                     options: CardOption.of([Self.runHereLabel, wait], recommended: 0), busy: busy,
                     onChoose: { option in
                         run {
@@ -224,6 +225,13 @@ struct TaskDecision: View {
     }
 
     static let runHereLabel = "Run it here"
+
+    /// obid's words for a job that came back, as Sangam's card shows them: the headline ("That Mac
+    /// couldn’t keep running it"), then what happened, split at the first sentence.
+    static func cameBack(_ line: String) -> (String, String?) {
+        guard let end = line.range(of: ". ") else { return (line, nil) }
+        return (String(line[..<end.lowerBound]), String(line[end.upperBound...]))
+    }
     static let waitLabel = "Wait for the reset"
 
     /// "Use Wellington’s share".

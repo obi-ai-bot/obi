@@ -23,9 +23,6 @@
     "head_sha": {
       "$ref": "../common.schema.json#/$defs/sha"
     },
-    "host": {
-      "$ref": "../common.schema.json#/$defs/host_use"
-    },
     "cost_cents": {
       "$ref": "../common.schema.json#/$defs/cents",
       "description": "On a share of the receiver's owner's API account (protocol.md section 15): what the job's model calls cost at list price."

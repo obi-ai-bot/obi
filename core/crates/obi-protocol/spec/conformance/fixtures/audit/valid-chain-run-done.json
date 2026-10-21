@@ -182,16 +182,11 @@
               "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
               "bytes": 3077
             },
-            "head_sha": "4f1c0e2a9b7d3c5e6f8a1b2c3d4e5f60718293a4",
-            "host": {
-              "wall_seconds": 840,
-              "cpu_seconds": 1900,
-              "peak_memory_mb": 2500
-            }
+            "head_sha": "4f1c0e2a9b7d3c5e6f8a1b2c3d4e5f60718293a4"
           },
-          "signature": "-rOihGW35VeJVR4JaM0vJoJoP2Fw2Eb0_JCYWaKw4z5BZo18xwZC2L18nK_tx8GzzHIy5q2sVJ0e3fMLgo7UAA"
+          "signature": "3v_3-SoM8NSRi6t2ImhJlCDB8kds31hWRIYfP8xQlx3MGmfPFoPvMHc1II76Iv5jpOGrQ-aQtq9FnSy10KXgDw"
         },
-        "hash": "f4848cb5860f08109bc3dd093ece6314d7e242e48bff5b7759e1a1fcfe099b84"
+        "hash": "098db5811a261272960384c4409cbb2b84b5bf05cf50fd907f8bad5562f93b72"
       }
     ]
   }

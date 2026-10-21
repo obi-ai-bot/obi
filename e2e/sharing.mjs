@@ -299,7 +299,7 @@ async function main() {
   if (progress.length) fail(`the chain's run_progress: ${progress.join()}`);
   for (const who of ["guest", "host"]) {
     const mine = expect(await obids[who].api("/obid/sphere/audit"), 200, `${who}'s audit`);
-    if (!mine.verified || !mine.entries.some((e) => e.type === "result" && e.host)) fail(`${who}'s obid's check of the chain: ${JSON.stringify(mine).slice(0, 300)}`);
+    if (!mine.verified || !mine.entries.some((e) => e.type === "result" && !e.host)) fail(`${who}'s obid's check of the chain: ${JSON.stringify(mine).slice(0, 300)}`);
   }
   pass("no entry holds the job's words; each obid checks the chain and finds its entries in it");
 

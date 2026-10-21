@@ -533,8 +533,7 @@ fn run(link: Arc<Link>, cid: String) {
         if let Err(why) = outcome {
             tracing::warn!("sphere: the guest job {cid} failed here: {why}");
             if link.exchange(&cid).is_some_and(|e| !e.ended()) {
-                let body = json!({"for": "run_request", "outcome": "failed", "repo": link.exchange(&cid).map(|e| e.request["body"]["repo"].clone()).unwrap_or_default(),
-                                  "host": {"wall_seconds": 0, "cpu_seconds": 0, "peak_memory_mb": 0}});
+                let body = json!({"for": "run_request", "outcome": "failed", "repo": link.exchange(&cid).map(|e| e.request["body"]["repo"].clone()).unwrap_or_default()});
                 link.host_reply(&cid, "result", body, "failed");
             }
         }
@@ -743,7 +742,9 @@ async fn with_place(
     let repo = request["repo"].clone();
     let mut body = if ended == "done" {
         let ok = done.as_ref().and_then(|d| d["exit"].as_i64()) == Some(0);
-        json!({"for": "run_request", "outcome": if ok { "done" } else { "failed" }, "repo": repo, "host": host})
+        // Nothing of how long it ran or what it used of this Mac: with when it started, wall and
+        // CPU time say when its owner paused it. They stay in this Mac's own log.
+        json!({"for": "run_request", "outcome": if ok { "done" } else { "failed" }, "repo": repo})
     } else {
         // Never why this Mac stopped it, nor how long it ran: either would say when its owner came
         // back (the owner's decision of 2026-10-21). Only its time being up or its share used.
@@ -751,7 +752,7 @@ async fn with_place(
             "time_limit" | "share_used" => ended.as_str(),
             _ => "host_unavailable",
         };
-        json!({"reason": reason, "host": host})
+        json!({"reason": reason})
     };
     if let Some(commits) = sent_commits {
         body["commits"] = commits;
@@ -763,7 +764,7 @@ async fn with_place(
     if shared.grant.is_some() {
         body["cost_cents"] = json!(super::shares::cents(shared.cost.load(Ordering::Relaxed)));
     }
-    log_use(link, cid, &body);
+    log_use(link, cid, &body, &host, &ended);
     let (kind, state) = if ended == "done" {
         ("result", "done")
     } else {
@@ -1534,12 +1535,12 @@ pub fn week(home: &Path, now: i64) -> Value {
     json!({"jobs": jobs, "wallSeconds": seconds, "costCents": cents})
 }
 
-fn log_use(link: &Link, cid: &str, body: &Value) {
+fn log_use(link: &Link, cid: &str, body: &Value, host: &Value, ended: &str) {
     let Some(r) = link.hosting.running.lock().unwrap().get(cid).cloned() else {
         return;
     };
     let line = json!({"correlationId": cid, "fromOwner": r.from_owner, "repo": r.repo, "started": time::format(r.started),
-                      "ended": time::format(time::now()), "host": body["host"], "reason": body.get("reason"), "outcome": body.get("outcome"),
+                      "ended": time::format(time::now()), "host": host, "reason": (ended != "done").then_some(ended), "outcome": body.get("outcome"),
                       "costCents": body.get("cost_cents")});
     let path = link.home().join("sharing-log.jsonl");
     use std::io::Write;
