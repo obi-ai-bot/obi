@@ -84,7 +84,7 @@ struct TaskActions {
             permission: { try await feed.answer(job.id, $0, message: $1) },
             mode: { try await feed.setMode(job.id, $0) },
             startNow: { if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.startNow(job.id) }) } },
-            useAnyway: { account in if let runner = feed.runner { _ = try await runner.liftReserve(account, true) } },
+            useAnyway: { account in if feed.runner != nil { _ = try await feed.acting().liftReserve(account, true) } },
             move: job.reviewOf == nil ? { target in
                 guard feed.runner != nil else { throw RunnerError(message: "The runner isn't set up.") }
                 feed.apply(try await feed.about(job.id) { try await $0.move(job.id, agent: target.agent, account: target.account, model: target.model) })

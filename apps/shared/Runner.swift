@@ -1253,13 +1253,23 @@ nonisolated struct Runner: Sendable {
     /// obid's conversations, pinned first, then newest; with `query`, the ones that hold its words.
     /// Nil from a runner that keeps one thread (it doesn't know the path).
     func conversations(query: String? = nil, limit: Int = 100) async throws -> [RunnerConversation]? {
+        try await conversationsAnswer(query: query, limit: limit).map(Self.conversations)
+    }
+
+    /// `conversations`' answer as it came, or nil (404): what the Mac keeps for its next launch.
+    func conversationsAnswer(query: String? = nil, limit: Int = 100) async throws -> Data? {
         var path = "v1/conversations?limit=\(limit)"
         if let query, let q = query.addingPercentEncoding(withAllowedCharacters: .alphanumerics) { path += "&q=\(q)" }
         do {
-            return try await call("GET", path)
+            return try await send("GET", path)
         } catch let error as RunnerError where error.status == 404 {
             return nil
         }
+    }
+
+    /// The conversations in a conversations answer.
+    static func conversations(_ data: Data) throws -> [RunnerConversation] {
+        try decoder.decode([RunnerConversation].self, from: data)
     }
 
     /// Renames or pins a conversation (nil keeps either); obid answers with it.
@@ -1590,18 +1600,38 @@ nonisolated struct Runner: Sendable {
     #if os(macOS)
     /// What waits in the inbox, as `inbox()`, with Oby's plain words for each item, by item id.
     func inboxWithWords(state: String = "open") async throws -> ([InboxItem], [String: InboxWords]) {
+        guard let data = try await inboxAnswer(state: state) else { return ([], [:]) }
+        return try Self.inboxWithWords(data)
+    }
+
+    /// The inbox's answer as it came, or nil from a runner without an inbox (404): what the Mac
+    /// keeps to show at its next launch (RunnerFeed.Kept).
+    func inboxAnswer(state: String = "open") async throws -> Data? {
         do {
-            let data = try await send("GET", state == "done" ? "v1/inbox?state=done&limit=1000" : "v1/inbox")
-            return (try InboxItem.runnerList(data), InboxWords.of(data))
+            return try await send("GET", state == "done" ? "v1/inbox?state=done&limit=1000" : "v1/inbox")
         } catch let error as RunnerError where error.status == 404 {
-            return ([], [:])
+            return nil
         }
+    }
+
+    /// The items and Oby's words for them in an inbox answer.
+    static func inboxWithWords(_ data: Data) throws -> ([InboxItem], [String: InboxWords]) {
+        (try InboxItem.runnerList(data), InboxWords.of(data))
     }
 
     /// The latest jobs, with what Engine's Job doesn't read yet, by job id.
     func jobsWithExtras() async throws -> ([Job], [String: RunnerJobExtras]) {
-        let data = try await send("GET", "v1/jobs?limit=50")
-        return (try Self.decoder.decode([Job].self, from: data), RunnerJobExtras.of(data))
+        try Self.jobsWithExtras(try await jobsAnswer())
+    }
+
+    /// The latest jobs' answer as it came (RunnerFeed.Kept).
+    func jobsAnswer() async throws -> Data {
+        try await send("GET", "v1/jobs?limit=50")
+    }
+
+    /// The jobs, and their extras by job id, in a jobs answer.
+    static func jobsWithExtras(_ data: Data) throws -> ([Job], [String: RunnerJobExtras]) {
+        (try decoder.decode([Job].self, from: data), RunnerJobExtras.of(data))
     }
 
     /// One job, with what Engine's Job doesn't read yet.
