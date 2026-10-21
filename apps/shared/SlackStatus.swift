@@ -1,62 +1,42 @@
 import Foundation
 
-/// Slack, connected once on obid (docs/runner-api.md, "obid only: Slack"). obid is the public client
-/// of the owner's own Slack app and holds the login: the Mac only learns whether it's connected,
-/// opens Slack's own page, and turns the watcher's Slack message on or off. No token reaches it.
+/// Slack, connected once on obid (docs/runner-api.md, "obid only: Slack") with the owner's own
+/// Slack app: its user token (searching) and bot token (the DM to the owner), pasted once here and
+/// kept in obid's vault. The Mac only learns whether they work and for which workspace; it never
+/// keeps them.
 nonisolated struct SlackStatus: Decodable, Equatable, Sendable {
-    /// The sign-in under way: Slack's page, which hands the login back to obid's own page.
-    struct SignIn: Decodable, Equatable, Sendable {
-        var url: URL
-        var expiresAt: Date?
-
-        /// Only Slack's own page, over https, with no login in it, is ever opened.
-        var opens: Bool {
-            url.scheme?.lowercased() == "https" && url.host()?.lowercased() == "slack.com" && url.user() == nil && url.password() == nil
-        }
-    }
-
     /// What it does, as Sangam's Connectors says it.
     static let about = "Read and send messages"
 
     var connected = false
     /// The workspace's name.
     var team: String?
-    /// The Slack app's Client ID obid kept (not a secret), or nil before the first sign-in.
-    var clientId: String?
-    /// What the app's Redirect URLs must list.
-    var redirect: String?
-    var signIn: SignIn?
-    /// Why the last sign-in or call failed, in obid's words, or nil.
+    /// Why obid was signed out, in its words, or nil.
     var error: String?
 
-    private enum Keys: String, CodingKey { case connected, team, clientId, redirect, signIn, error }
+    private enum Keys: String, CodingKey { case connected, team, error }
 
-    init(connected: Bool = false, team: String? = nil, clientId: String? = nil, redirect: String? = nil,
-         signIn: SignIn? = nil, error: String? = nil) {
-        (self.connected, self.team, self.clientId, self.redirect, self.signIn, self.error) = (connected, team, clientId, redirect, signIn, error)
+    init(connected: Bool = false, team: String? = nil, error: String? = nil) {
+        (self.connected, self.team, self.error) = (connected, team, error)
     }
 
     init(from decoder: any Decoder) throws {
         let keys = try decoder.container(keyedBy: Keys.self)
         connected = (try? keys.decodeIfPresent(Bool.self, forKey: .connected)) ?? false
         team = try? keys.decodeIfPresent(String.self, forKey: .team)
-        clientId = try? keys.decodeIfPresent(String.self, forKey: .clientId)
-        redirect = try? keys.decodeIfPresent(String.self, forKey: .redirect)
-        signIn = try? keys.decodeIfPresent(SignIn.self, forKey: .signIn)
         error = try? keys.decodeIfPresent(String.self, forKey: .error)
     }
 
-    /// The row's tooltip: how it's connected, or what connecting does.
+    /// The row's tooltip: how it's connected, or what connecting takes.
     var how: String {
-        if connected { return "Connected to \(team ?? "your workspace") as you, through your workspace's Oby app. Oby reads messages for the watcher and writes only to you." }
-        if signIn != nil { return "Connecting in your browser…" }
-        return error ?? "You connect once, on Slack's own page, with your workspace's Oby app (its Client ID)."
+        if connected { return "Connected to \(team ?? "your workspace") with your Slack app's tokens. Oby reads messages for the watcher and writes only to you." }
+        return error ?? "You paste your Slack app's two tokens once (OAuth & Permissions › OAuth Tokens). obid keeps them in its vault."
     }
 
-    /// Whether `text` is a Slack app's Client ID, as obid takes it: digits, a dot, digits.
-    static func isClientID(_ text: String) -> Bool {
-        let parts = text.trimmingCharacters(in: .whitespaces).split(separator: ".", omittingEmptySubsequences: false)
-        return parts.count == 2 && parts.allSatisfy { !$0.isEmpty && $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) }
+    /// Whether `text` looks like a token of this kind (`xoxp-` or `xoxb-`), as obid takes it.
+    static func isToken(_ text: String, _ prefix: String) -> Bool {
+        let token = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return token.hasPrefix(prefix) && (20...512).contains(token.count) && token.allSatisfy { $0.isASCII && !$0.isWhitespace }
     }
 }
 
@@ -101,17 +81,13 @@ extension Runner {
         }
     }
 
-    /// Starts connecting obid to Slack with the app `clientID` (nil: the one obid kept).
-    func startSlackSignIn(clientID: String?) async throws -> SlackStatus.SignIn {
-        struct Body: Encodable { var clientId: String? }
-        return try await call("POST", "v1/slack/sign-in", body: Body(clientId: clientID))
+    /// Gives obid the Slack app's two tokens: it checks them with Slack and keeps them in its vault.
+    func connectSlack(user: String, bot: String) async throws -> SlackStatus {
+        struct Body: Encodable { var user: String; var bot: String }
+        return try await call("PUT", "v1/slack", body: Body(user: user, bot: bot))
     }
 
-    func cancelSlackSignIn() async throws {
-        try await send("DELETE", "v1/slack/sign-in")
-    }
-
-    /// obid forgets its Slack login: the watcher reads only GitHub until it's connected again.
+    /// obid forgets the Slack tokens: the watcher reads only GitHub until they're pasted again.
     func disconnectSlack() async throws {
         try await send("DELETE", "v1/slack")
     }

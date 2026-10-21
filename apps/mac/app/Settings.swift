@@ -717,9 +717,10 @@ struct ConnectorsSettingsView: View {
     @State private var problems: [String: String] = [:]
     /// gh's sign-in under way on the runner, shown in its sheet until it signs in or is cancelled.
     @State private var gitHubSignIn: GitHubSignIn?
-    /// Connect… on Slack asks for the Slack app's Client ID in this field.
+    /// Connect… on Slack asks for the Slack app's two tokens in these fields, cleared once sent.
     @State private var askingSlack = false
-    @State private var clientID = ""
+    @State private var userToken = ""
+    @State private var botToken = ""
 
     var body: some View {
         let groups = Connectors.groups(list, query: query)
@@ -781,12 +782,13 @@ struct ConnectorsSettingsView: View {
             Text("Its MCP server's address, starting with https://. You sign in on its own page, once, for every agent on \(feed.name).")
         }
         .alert("Connect Slack", isPresented: $askingSlack) {
-            TextField("Client ID", text: $clientID, prompt: Text("1234567890.1234567890"))
-            Button("Connect") { signInToSlack(clientID: clientID.trimmingCharacters(in: .whitespaces), row: "slack") }
-                .disabled(!SlackStatus.isClientID(clientID))
-            Button("Cancel", role: .cancel) {}
+            SecureField("User OAuth Token", text: $userToken, prompt: Text("xoxp-…"))
+            SecureField("Bot User OAuth Token", text: $botToken, prompt: Text("xoxb-…"))
+            Button("Connect") { connectSlack(row: "slack") }
+                .disabled(!SlackStatus.isToken(userToken, "xoxp-") || !SlackStatus.isToken(botToken, "xoxb-"))
+            Button("Cancel", role: .cancel) { userToken = ""; botToken = "" }
         } message: {
-            Text("Your workspace's Oby app's Client ID (api.slack.com/apps › Basic Information › App Credentials). Its Redirect URLs must list \(lists.slack?.redirect ?? "http://localhost:47823/callback"). You allow it once, on Slack's own page.")
+            Text("Your workspace's Oby app's two tokens, from api.slack.com/apps › OAuth & Permissions › OAuth Tokens. obid checks them with Slack and keeps them in its vault; this Mac doesn't keep them.")
         }
         .alert("Connect Tetrix", isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } })) {
             TextField("MCP URL", text: $url, prompt: Text("https://"))
@@ -892,17 +894,9 @@ struct ConnectorsSettingsView: View {
     private func perform(_ action: Connector.Action, _ connector: Connector) {
         switch action {
         case .disablePlugin, .disconnect, .disconnectTetrix, .disconnectSlack: confirming = connector
-        case .connectSlack(let asks):
-            if asks {
-                clientID = ""
-                askingSlack = true
-            } else {
-                signInToSlack(clientID: nil, row: connector.id)
-            }
-        case .reopenSlackSignIn:
-            if let signIn = lists.slack?.signIn, signIn.opens { NSWorkspace.shared.open(signIn.url) }
-        case .cancelSlackSignIn:
-            slackCall(row: connector.id) { try await $0.cancelSlackSignIn() }
+        case .connectSlack:
+            (userToken, botToken) = ("", "")
+            askingSlack = true
         case .setWatchLive(let live):
             guard let runner = feed.runner else { return }
             Task {
@@ -1084,37 +1078,20 @@ struct ConnectorsSettingsView: View {
         }
     }
 
-    /// obid's sign-in to Slack with the app `clientID` (nil: the one it kept): Slack's own page opens
-    /// in the browser, and the row follows obid every 2 seconds until the sign-in ends. Only a page on
-    /// slack.com, over https, is ever opened.
-    private func signInToSlack(clientID: String?, row: String) {
+    /// Gives obid the two tokens typed, then forgets them here: obid checks them with Slack and says
+    /// why when it doesn't take them.
+    private func connectSlack(row: String) {
+        let (user, bot) = (userToken.trimmingCharacters(in: .whitespacesAndNewlines), botToken.trimmingCharacters(in: .whitespacesAndNewlines))
+        (userToken, botToken) = ("", "")
         guard feed.local, let runner = feed.runner else { return }
         Task {
             busy = true
+            defer { busy = false }
             do {
-                let signIn = try await runner.startSlackSignIn(clientID: clientID)
-                guard signIn.opens else {
-                    busy = false
-                    problems[row] = "\(feed.name) answered with a page that isn't Slack's own, so Oby opened nothing."
-                    try? await runner.cancelSlackSignIn()
-                    return
-                }
+                lists.slack = try await runner.connectSlack(user: user, bot: bot)
                 problems[row] = nil
-                NSWorkspace.shared.open(signIn.url)
             } catch {
-                busy = false
                 problems[row] = error.localizedDescription
-                return
-            }
-            busy = false
-            for _ in 0..<300 {
-                guard let status = try? await runner.slack() else { break }
-                lists.slack = status
-                if status.signIn == nil {
-                    if !status.connected { problems[row] = status.error ?? "Slack's sign-in ended without connecting." }
-                    break
-                }
-                try? await Task.sleep(for: .seconds(2))
             }
             lists.watch = (try? await runner.watch()) ?? lists.watch
         }
