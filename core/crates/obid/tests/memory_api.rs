@@ -151,3 +151,41 @@ fn a_suggestion_is_saved_only_on_remember_and_never_a_secret_or_a_wider_rule() {
     assert_eq!(odd.status, 404, "{}", odd.text);
     assert!(memory.join("suggestions.json").exists());
 }
+
+#[test]
+fn a_scan_that_cant_run_saves_nothing() {
+    let folder = Folder::new("memory-api-broken-scan");
+    let remote = fixture(&folder.0.join("fixture"));
+    let config = config(&folder.0, &remote, &stub_agent());
+    let memory = folder.0.join("home/memory");
+    std::fs::create_dir_all(&memory).unwrap();
+    std::fs::write(
+        memory.join("suggestions.json"),
+        json!([suggestion(
+            "s0000000a",
+            "Tests with every fix",
+            "Write tests with every fix."
+        )])
+        .to_string(),
+    )
+    .unwrap();
+    let broken = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/bin-broken-gitleaks");
+    let obid = start(&folder.0, &config, Some(&broken));
+
+    let refused = call(
+        &obid,
+        "POST",
+        "/v1/memory/suggestions/s0000000a/remember",
+        None,
+    );
+    assert_eq!(refused.status, 503, "{}", refused.text);
+    assert!(
+        refused.text.contains("Nothing was saved"),
+        "{}",
+        refused.text
+    );
+    assert!(!memory.join("user").exists());
+    let listed = call(&obid, "GET", "/v1/memory", None);
+    assert_eq!(listed.body["memories"], json!([]));
+    assert_eq!(listed.body["suggestions"].as_array().unwrap().len(), 1);
+}

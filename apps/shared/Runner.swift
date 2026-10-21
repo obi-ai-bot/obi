@@ -1210,7 +1210,7 @@ nonisolated struct Runner: Sendable {
     /// Find what I keep repeating: obid reads the owner's conversations and the reviews on merged
     /// pull requests, and answers with what it could suggest. It takes a while.
     func findMemories() async throws -> RunnerMemoryFound {
-        try await call("POST", "v1/memory/find", timeout: 120)
+        try await call("POST", "v1/memory/find", timeout: 150)
     }
 
     /// Remember: the owner's yes to a suggestion; obid answers with the memory it saved.
