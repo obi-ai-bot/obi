@@ -984,6 +984,7 @@ async fn ask_owner(
         confirm: None,
         start: None,
         github: None,
+        watch: None,
     };
     let (tell, heard) = oneshot::channel();
     asks().insert(id.clone(), (session.conversation.clone(), tell));

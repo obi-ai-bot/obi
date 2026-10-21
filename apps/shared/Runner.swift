@@ -714,8 +714,17 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     #if os(macOS)
     /// A merge check was queued, taken or ended (Engine/Checks.swift): a Mac that runs them asks for one.
     case check(MacCheck)
+    /// obid measured the job worktrees after it started answering (Settings › Runner).
+    case cleanup(RunnerStatus.Cleanup)
     /// obid's Tetrix changed: connected, signed out, a sign-in started or ended (obid only).
     case tetrix(TetrixStatus)
+    /// The watcher or the channel listener told the owner something (a `watch` or `listen` inbox
+    /// item, obid only): its card and a notification.
+    case watchNotice(WatchNotice)
+    /// obid's Slack changed: connected, signed out (obid only).
+    case slack(SlackStatus)
+    /// The watcher's rules or runs changed (obid only).
+    case watch(WatchStatus)
     #endif
     /// A turn of the conversation was added, from any app, or changed (a job dispatched from it):
     /// the Mac window's and the iPhone's thread replace it by id, or add it by time (#11).
@@ -1340,13 +1349,23 @@ nonisolated struct Runner: Sendable {
     /// obid's conversations, pinned first, then newest; with `query`, the ones that hold its words.
     /// Nil from a runner that keeps one thread (it doesn't know the path).
     func conversations(query: String? = nil, limit: Int = 100) async throws -> [RunnerConversation]? {
+        try await conversationsAnswer(query: query, limit: limit).map(Self.conversations)
+    }
+
+    /// `conversations`' answer as it came, or nil (404): what the Mac keeps for its next launch.
+    func conversationsAnswer(query: String? = nil, limit: Int = 100) async throws -> Data? {
         var path = "v1/conversations?limit=\(limit)"
         if let query, let q = query.addingPercentEncoding(withAllowedCharacters: .alphanumerics) { path += "&q=\(q)" }
         do {
-            return try await call("GET", path)
+            return try await send("GET", path)
         } catch let error as RunnerError where error.status == 404 {
             return nil
         }
+    }
+
+    /// The conversations in a conversations answer.
+    static func conversations(_ data: Data) throws -> [RunnerConversation] {
+        try decoder.decode([RunnerConversation].self, from: data)
     }
 
     /// Renames or pins a conversation (nil keeps either); obid answers with it.
@@ -1677,18 +1696,38 @@ nonisolated struct Runner: Sendable {
     #if os(macOS)
     /// What waits in the inbox, as `inbox()`, with Oby's plain words for each item, by item id.
     func inboxWithWords(state: String = "open") async throws -> ([InboxItem], [String: InboxWords]) {
+        guard let data = try await inboxAnswer(state: state) else { return ([], [:]) }
+        return try Self.inboxWithWords(data)
+    }
+
+    /// The inbox's answer as it came, or nil from a runner without an inbox (404): what the Mac
+    /// keeps to show at its next launch (RunnerFeed.Kept).
+    func inboxAnswer(state: String = "open") async throws -> Data? {
         do {
-            let data = try await send("GET", state == "done" ? "v1/inbox?state=done&limit=1000" : "v1/inbox")
-            return (try InboxItem.runnerList(data), InboxWords.of(data))
+            return try await send("GET", state == "done" ? "v1/inbox?state=done&limit=1000" : "v1/inbox")
         } catch let error as RunnerError where error.status == 404 {
-            return ([], [:])
+            return nil
         }
+    }
+
+    /// The items and Oby's words for them in an inbox answer.
+    static func inboxWithWords(_ data: Data) throws -> ([InboxItem], [String: InboxWords]) {
+        (try InboxItem.runnerList(data), InboxWords.of(data))
     }
 
     /// The latest jobs, with what Engine's Job doesn't read yet, by job id.
     func jobsWithExtras() async throws -> ([Job], [String: RunnerJobExtras]) {
-        let data = try await send("GET", "v1/jobs?limit=50")
-        return (try Self.decoder.decode([Job].self, from: data), RunnerJobExtras.of(data))
+        try Self.jobsWithExtras(try await jobsAnswer())
+    }
+
+    /// The latest jobs' answer as it came (RunnerFeed.Kept).
+    func jobsAnswer() async throws -> Data {
+        try await send("GET", "v1/jobs?limit=50")
+    }
+
+    /// The jobs, and their extras by job id, in a jobs answer.
+    static func jobsWithExtras(_ data: Data) throws -> ([Job], [String: RunnerJobExtras]) {
+        (try decoder.decode([Job].self, from: data), RunnerJobExtras.of(data))
     }
 
     /// One job, with what Engine's Job doesn't read yet.
@@ -1936,13 +1975,19 @@ nonisolated struct EventParser {
             case "accounts": return (try? Runner.decoder.decode([RunnerAccount].self, from: json)).map(RunnerEvent.accounts)
             case "clear": return (try? Runner.decoder.decode(ClearedAt.self, from: json)).map { .cleared($0.clearedAt) }
             #if os(macOS)
-            case "inbox": return InboxItem.runner(json).map { RunnerEvent.inbox($0, try? Runner.decoder.decode(InboxWords.self, from: json)) }
+            case "inbox":
+                // Engine's inbox doesn't know the watcher's kind: its item only notifies.
+                if let notice = try? Runner.decoder.decode(WatchNotice.self, from: json), WatchNotice.kinds.contains(notice.kind) { return .watchNotice(notice) }
+                return InboxItem.runner(json).map { RunnerEvent.inbox($0, try? Runner.decoder.decode(InboxWords.self, from: json)) }
             #else
             case "inbox": return (try? Runner.decoder.decode(InboxItem.self, from: json)).map(RunnerEvent.inbox)
             #endif
             #if os(macOS)
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
             case "tetrix": return (try? Runner.decoder.decode(TetrixStatus.self, from: json)).map(RunnerEvent.tetrix)
+            case "slack": return (try? Runner.decoder.decode(SlackStatus.self, from: json)).map(RunnerEvent.slack)
+            case "watch": return (try? Runner.decoder.decode(WatchStatus.self, from: json)).map(RunnerEvent.watch)
+            case "cleanup": return (try? Runner.decoder.decode(RunnerStatus.Cleanup.self, from: json)).map(RunnerEvent.cleanup)
             #endif
             case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn, $0.extras) }
             case "step": return (try? Runner.decoder.decode(TurnStep.self, from: json)).map(RunnerEvent.step)

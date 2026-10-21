@@ -129,6 +129,7 @@ pub fn confirm_item(
         confirm: Some(Box::new(confirmed)),
         start: None,
         github: None,
+        watch: None,
     }
 }
 
@@ -172,6 +173,10 @@ pub struct Item {
     /// quoted (crate::github_work).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github: Option<Box<Value>>,
+    /// On a `watch` item: where the watcher saw it, typed fields, and what was written quoted
+    /// (crate::watch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<Box<Value>>,
 }
 
 /// Now in nanoseconds since the epoch, strictly later than any earlier answer in this process:
@@ -265,6 +270,9 @@ impl Item {
         }
         if let Some(github) = &self.github {
             shown["github"] = (**github).clone();
+        }
+        if let Some(watch) = &self.watch {
+            shown["watch"] = (**watch).clone();
         }
         if let Some(confirmed) = &self.confirm {
             shown["confirm"] = serde_json::to_value(confirmed).unwrap_or_default();
@@ -421,6 +429,7 @@ pub fn review_request_item(
         confirm: None,
         start: None,
         github: None,
+        watch: None,
     }
 }
 
@@ -516,6 +525,7 @@ pub fn question_item(
         confirm: None,
         start: None,
         github: None,
+        watch: None,
     }
 }
 
@@ -564,6 +574,7 @@ pub fn permission_item(
         confirm: None,
         start: None,
         github: None,
+        watch: None,
     }
 }
 
@@ -636,6 +647,7 @@ pub fn plugin_event_item(event: &obi_plugin_api::PluginEvent, now: i64) -> Item 
         confirm: None,
         start: None,
         github: None,
+        watch: None,
     }
 }
 
@@ -695,6 +707,49 @@ pub fn github_item(work: &crate::github_work::Item, now: i64) -> Item {
         github: Some(Box::new(json!({
             "id": work.id, "list": work.list, "repo": work.repo, "number": work.number,
             "url": work.url, "quoted": {"title": work.title},
+        }))),
+        watch: None,
+    }
+}
+
+/// A `watch` item's id: `watch-` and 16 hex characters of its notice's key.
+pub fn watch_item_id(key: &str) -> String {
+    format!(
+        "watch-{}",
+        &hex::encode(obi_protocol::keys::sha256(key.as_bytes()))[..16]
+    )
+}
+
+/// The `watch` item telling the owner what `person` said or did (crate::watch): obid's own words
+/// from the notice's typed fields; what they wrote, the title and the model's topic quoted under
+/// `watch.quoted`, for the card only.
+pub fn watch_item(kind: &str, person: &str, notice: &crate::watch::Notice, now: i64) -> Item {
+    let title = match notice.source.as_str() {
+        "slack" => format!("{person} on Slack, in {}", notice.place),
+        _ => format!("{person} on {}", notice.place),
+    };
+    Item {
+        id: format!("{kind}-{}", &watch_item_id(&notice.key)["watch-".len()..]),
+        kind: kind.into(),
+        job: String::new(),
+        title: title.chars().take(80).collect(),
+        text: format!("{person} {}.", notice.what),
+        options: vec![DISMISS.into()],
+        details: Some(vec!["Mark it read.".into()]),
+        recommended: None,
+        created: now,
+        done: None,
+        later: None,
+        answer: None,
+        obi: None,
+        plugin: None,
+        arrived: Some(arrival()),
+        confirm: None,
+        start: None,
+        github: None,
+        watch: Some(Box::new(json!({
+            "source": notice.source, "place": notice.place, "url": notice.url, "at": notice.at,
+            "quoted": {"text": notice.quoted, "title": notice.title, "topic": notice.topic},
         }))),
     }
 }

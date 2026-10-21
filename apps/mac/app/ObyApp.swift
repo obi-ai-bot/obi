@@ -108,6 +108,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         island.openWindow = { [weak self] job in self?.chat.show(job: job) }
         island.windowShowsTalk = { [weak self] in self.map { $0.chat.showsTalk || $0.firstLaunch.isOpen } ?? false }
         island.windowShowsConversation = { [weak self] in self?.chat.showsConversation ?? false }
+        // A dropped runner is tried again within seconds while the window shows.
+        island.feed.windowOpen = { [weak self] in self?.chat.isOpen ?? false }
         island.start()
         // obid as This Mac's engine: the Swift runner an older build registered goes, and the
         // engine is registered when nothing else serves this Mac (apps/mac/app/LoginItem.swift).

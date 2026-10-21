@@ -718,6 +718,12 @@ struct ConnectorsSettingsView: View {
     @State private var problems: [String: String] = [:]
     /// gh's sign-in under way on the runner, shown in its sheet until it signs in or is cancelled.
     @State private var gitHubSignIn: GitHubSignIn?
+    /// Connect… on Slack asks for the Slack app's two tokens in these fields, cleared once sent.
+    @State private var askingSlack = false
+    @State private var userToken = ""
+    @State private var botToken = ""
+    /// The app-level token, for live channels (Socket Mode): optional.
+    @State private var appToken = ""
 
     var body: some View {
         let groups = Connectors.groups(list, query: query)
@@ -778,6 +784,17 @@ struct ConnectorsSettingsView: View {
         } message: {
             Text("Its MCP server's address, starting with https://. You sign in on its own page, once, for every agent on \(feed.name).")
         }
+        .alert("Connect Slack", isPresented: $askingSlack) {
+            SecureField("User OAuth Token", text: $userToken, prompt: Text("xoxp-…"))
+            SecureField("Bot User OAuth Token", text: $botToken, prompt: Text("xoxb-…"))
+            SecureField("App-Level Token (optional)", text: $appToken, prompt: Text("xapp-…"))
+            Button("Connect") { connectSlack(row: "slack") }
+                .disabled(!SlackStatus.isToken(userToken, "xoxp-") || !SlackStatus.isToken(botToken, "xoxb-")
+                          || (!appToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !SlackStatus.isToken(appToken, "xapp-")))
+            Button("Cancel", role: .cancel) { (userToken, botToken, appToken) = ("", "", "") }
+        } message: {
+            Text("Your workspace's Oby app's tokens, from api.slack.com/apps › OAuth & Permissions › OAuth Tokens, and its app-level token (Basic Information) for live channels. obid checks them with Slack and keeps them in its vault; this Mac doesn't keep them.")
+        }
         .alert("Connect Tetrix", isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } })) {
             TextField("MCP URL", text: $url, prompt: Text("https://"))
             Button("Connect") {
@@ -799,7 +816,8 @@ struct ConnectorsSettingsView: View {
         #endif
         let runner = (feed.runner == nil && !staged) || feed.connection != .live ? nil : Connectors.RunnerState(
             name: feed.name, local: feed.local, accounts: feed.accounts, github: feed.github, checks: feed.checkRuns,
-            gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: feed.tetrix)
+            gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: feed.tetrix,
+            slack: feed.slack, watch: feed.watch)
         let accounts = Connectors.accounts(mac: store.accounts, runner: runner?.accounts, local: feed.local,
                                            hasRunner: feed.runner != nil || staged)
         return Connectors.list(accounts: accounts, runner: runner)
@@ -867,9 +885,20 @@ struct ConnectorsSettingsView: View {
     /// A list it couldn't read says why; only a 404 means it has none.
     private func load() async {
         #if DEBUG
-        if let staged = feed.stagedLists { lists = staged; return }
+        if let staged = feed.stagedLists {
+            lists = staged
+            if let slack = staged.slack { feed.slack = slack }
+            if let watch = staged.watch { feed.watch = watch }
+            return
+        }
         #endif
-        defer { if let status = lists.tetrix { feed.tetrix = status } }
+        defer {
+            if let status = lists.tetrix { feed.tetrix = status }
+            // Read here, then kept by their events (obid signing out after a refused token); a read
+            // that failed keeps what the events said.
+            if let slack = lists.slack { feed.slack = slack }
+            if let watch = lists.watch { feed.watch = watch }
+        }
         guard feed.connection == .live, let runner = feed.runner else {
             lists = Connectors.Lists()
             return
@@ -880,7 +909,22 @@ struct ConnectorsSettingsView: View {
     /// A button: what takes something away asks first; signing in or out opens Terminal.
     private func perform(_ action: Connector.Action, _ connector: Connector) {
         switch action {
-        case .disablePlugin, .disconnect, .disconnectTetrix: confirming = connector
+        case .disablePlugin, .disconnect, .disconnectTetrix, .disconnectSlack: confirming = connector
+        case .connectSlack:
+            (userToken, botToken, appToken) = ("", "", "")
+            askingSlack = true
+        case .setWatchLive(let live):
+            guard feed.local, let runner = feed.runner else { return }
+            Task {
+                busy = true
+                defer { busy = false }
+                do {
+                    feed.watch = try await runner.setWatchLive(live)
+                    problems[connector.id] = nil
+                } catch {
+                    problems[connector.id] = error.localizedDescription
+                }
+            }
         case .accounts: openSettings(.accounts)
         case .connectTetrix(let server): signInToTetrix(server, row: connector.id)
         case .connectOtherTetrix:
@@ -918,6 +962,7 @@ struct ConnectorsSettingsView: View {
                 }
                 if let status = try? await runner.tetrix() { feed.tetrix = status }
             }
+        case .disconnectSlack: disconnectSlack(row: connector.id)
         case .disconnect(let name):
             guard let runner = feed.runner else { return }
             Task {
@@ -945,6 +990,8 @@ struct ConnectorsSettingsView: View {
             return "After Touch ID, \(feed.name) forgets it and its agents can't reach it any more. Its secret stays in the runner's vault."
         case .disconnectTetrix:
             return "\(feed.local ? "obid" : feed.name) forgets its Tetrix login, and agents on every account stop getting Tetrix's tools."
+        case .disconnectSlack:
+            return "obid forgets its Slack login, and the watcher reads only GitHub until you connect Slack again."
         default:
             return ""
         }
@@ -1044,6 +1091,43 @@ struct ConnectorsSettingsView: View {
                 if !status.connected { problems["tetrix"] = status.error ?? "Tetrix's sign-in ended without signing in." }
                 tetrixSignIn = nil
             }
+        }
+    }
+
+    /// Gives obid the two tokens typed, then forgets them here: obid checks them with Slack and says
+    /// why when it doesn't take them.
+    private func connectSlack(row: String) {
+        let (user, bot) = (userToken.trimmingCharacters(in: .whitespacesAndNewlines), botToken.trimmingCharacters(in: .whitespacesAndNewlines))
+        let app = appToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        (userToken, botToken, appToken) = ("", "", "")
+        guard feed.local, let runner = feed.runner else { return }
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                feed.slack = try await runner.connectSlack(user: user, bot: bot, app: app.isEmpty ? nil : app)
+                problems[row] = nil
+            } catch {
+                problems[row] = error.localizedDescription
+            }
+            if let watch = try? await runner.watch() { feed.watch = watch }
+        }
+    }
+
+    /// obid forgets the Slack tokens: the row says Not connected at its 204, then as obid says.
+    private func disconnectSlack(row: String) {
+        guard feed.local, let runner = feed.runner else { return }
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                try await runner.disconnectSlack()
+                feed.slack?.connected = false
+                problems[row] = nil
+            } catch {
+                problems[row] = error.localizedDescription
+            }
+            if let status = try? await runner.slack() { feed.slack = status }
         }
     }
 
