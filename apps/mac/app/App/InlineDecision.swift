@@ -139,3 +139,72 @@ struct Receipt: View {
         .accessibilityValue(expanded ? "Expanded" : "Collapsed")
     }
 }
+
+/// A watcher's or the channel listener's item (`watch`, `listen`) as a decision in the
+/// conversation, tagged with where it came from (Slack or GitHub's mark, as Sangam's sourced work):
+/// obid's own title and text, a finished review shown whole before Approve, the item's choices and
+/// Later, and its link opened only on a click.
+struct InlineNotice: View {
+    let notice: WatchNotice
+    let feed: RunnerFeed
+    var keyboardEnabled = false
+    var focusRequest = 0
+    /// Opens a job's page: a review the item can't show offers its job ("Open the job to read it").
+    var onOpen: (_ job: String) -> Void = { _ in }
+    @Environment(\.openURL) private var openURL
+    @State private var busy = false
+    @State private var problem: String?
+
+    /// Slack's or GitHub's mark, by where obid says it came from (`watch.source`).
+    static func brand(_ notice: WatchNotice) -> String {
+        notice.source == "github" ? "github" : "slack"
+    }
+
+    /// What its link's button says, by where the link goes (a listener's review, from Slack, links
+    /// its pull request on GitHub).
+    static func linkLabel(_ url: URL) -> String {
+        let host = url.host()?.lowercased() ?? ""
+        return host == "github.com" || host.hasSuffix(".github.com") ? "Open on GitHub" : "Open in Slack"
+    }
+
+    /// Whether it offers its job's page: a review it doesn't show (flagged, empty, unscanned).
+    static func opensJob(_ notice: WatchNotice) -> Bool {
+        !notice.job.isEmpty && notice.review == nil
+    }
+
+    /// Its choices: Approve says what it posts.
+    static func options(_ notice: WatchNotice) -> [CardOption] {
+        notice.options.map { option in
+            CardOption(label: option, answer: option,
+                       detail: option == "Approve" ? "Posts the review above on the pull request, as a comment from your GitHub login." : nil)
+        }
+    }
+
+    var body: some View {
+        let brand = Self.brand(notice)
+        VStack(alignment: .leading, spacing: 0) {
+            AskCard(kind: brand == "github" ? "GitHub" : "Slack", brand: brand,
+                    shown: notice.review, title: notice.title, happened: notice.text,
+                    options: Self.options(notice), busy: busy, keyboardEnabled: keyboardEnabled, focusRequest: focusRequest,
+                    hint: notice.url.map(Self.linkLabel),
+                    onHint: notice.url.map { url in { openURL(url) } },
+                    onChoose: { settle(answer: $0.answer) },
+                    onLater: { settle(later: .now.addingTimeInterval(3600)) },
+                    onOpen: Self.opensJob(notice) ? { onOpen(notice.job) } : nil)
+            if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.top, 8) }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
+    }
+
+    private func settle(answer: String? = nil, later: Date? = nil) {
+        guard !busy else { return }
+        busy = true
+        problem = nil
+        Task {
+            defer { busy = false }
+            do { try await feed.settle(notice: notice.id, answer: answer, later: later) } catch { problem = error.localizedDescription }
+        }
+    }
+}

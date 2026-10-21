@@ -15,6 +15,11 @@ struct AskCard: View {
     var failed = false
     /// The job it's from, after its kind.
     var source: String? = nil
+    /// Where it came from, as Sangam's `from?: Brand` (Slack, GitHub): its mark before the kind.
+    var brand: String? = nil
+    /// What a choice acts on, shown whole and as plain text before the choices (a review that
+    /// Approve posts): scrolls when long, never cut, never Markdown.
+    var shown: String? = nil
     let title: String
     var happened: String? = nil
     /// The asker's own words, behind Details, when the title is Oby's headline instead.
@@ -29,16 +34,26 @@ struct AskCard: View {
     /// Under the choices: what your own words do, as a link to type them below.
     var hint: String? = nil
     var onHint: (() -> Void)? = nil
+    /// The line under the choices saying what each does; off where Sangam's card has none (GitHub's).
+    var explains = true
     let onChoose: (CardOption) -> Void
     var onLater: (() -> Void)? = nil
     var onOpen: (() -> Void)? = nil
     @State private var picked: String?
     @State private var showsDetails = false
+
+    /// The choices said under the pills (what each does, the recommended one marked), none when `explains` is off.
+    static func explained(_ options: [CardOption], explains: Bool) -> [CardOption] {
+        explains ? options.filter { $0.detail != nil || $0.recommended } : []
+    }
     @FocusState private var focused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
+                #if os(macOS)
+                if let brand { Image("Brands/\(brand)").resizable().scaledToFit().frame(width: 14, height: 14).accessibilityHidden(true) }
+                #endif
                 Text(kind).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(failed ? Tokens.danger : Tokens.needsInk)
                 if let source, !source.isEmpty { Text(source).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fadeOut() }
             }
@@ -65,6 +80,17 @@ struct AskCard: View {
                 }
             }
             if let detail, !detail.isEmpty { code(detail) }
+            if let shown, !shown.isEmpty {
+                ScrollView {
+                    Text(verbatim: shown).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).lineSpacing(6)
+                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 280)
+                .padding(10)
+                // Sangam's `tc-code`: a box apart, so a review cut at 280pt reads as one to scroll.
+                .background(Tokens.codeBg, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .padding(.top, 10)
+            }
             if let plan, !plan.isEmpty { PlanText(plan: plan).padding(.top, 10) }
             if !answered {
                 CenteredFlow(spacing: 8, centred: false) {
@@ -80,7 +106,7 @@ struct AskCard: View {
                 }
                 .padding(.top, 14)
                 // What each choice does, the recommended one marked, and the rule Always allow saves.
-                let explained = options.filter { $0.detail != nil || $0.recommended }
+                let explained = Self.explained(options, explains: explains)
                 if !explained.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(Array(explained.enumerated()), id: \.offset) { _, option in
@@ -530,6 +556,7 @@ struct LineTabs: View {
     let counts: [WorkList.Tab: Int]
     let onPick: (WorkList.Tab) -> Void
     @Namespace private var line
+    @State private var hovered: WorkList.Tab?
 
     var body: some View {
         HStack(spacing: 24) {
@@ -537,7 +564,7 @@ struct LineTabs: View {
                 Button { withAnimation(Tokens.warm) { onPick(each) } } label: {
                     HStack(spacing: 6) {
                         Text(each.rawValue).font(Tokens.font(Tokens.textBase))
-                            .foregroundStyle(tab == each ? Tokens.ink : Tokens.muted)
+                            .foregroundStyle(tab == each ? Tokens.ink : hovered == each ? Tokens.text : Tokens.muted)
                         Text("\(counts[each] ?? 0)").font(Tokens.font(Tokens.textSm)).monospacedDigit().foregroundStyle(Tokens.muted)
                     }
                     .frame(height: 36)
@@ -550,6 +577,8 @@ struct LineTabs: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .onHover { hovered = $0 ? each : hovered == each ? nil : hovered }
+                .animation(Tokens.fade, value: hovered)
                 .accessibilityAddTraits(tab == each ? .isSelected : [])
             }
         }

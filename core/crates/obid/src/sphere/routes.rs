@@ -156,9 +156,17 @@ pub async fn inbox(
 /// `POST /v1/inbox/{id}/answer`.
 pub async fn answer(
     State(shared): State<Arc<Shared>>,
+    device: Option<axum::Extension<crate::gateway::PairedDevice>>,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    // A phone (through the gateway) can't Approve a channel listener's review, which it doesn't
+    // show yet: by the item itself, found by its decoded id, so no spelling of the path gets by.
+    if device.is_some()
+        && let Some(why) = crate::listen::phone_refuses(shared.link.item(&id).as_ref(), &body)
+    {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, why));
+    }
     // A tap is the owner back (#594): after a while away, it gets a recap.
     crate::brain::recap::tapped(&shared);
     Ok(json(StatusCode::OK, shared.link.answer(&id, &body).await?))

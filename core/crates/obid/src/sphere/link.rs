@@ -615,6 +615,43 @@ impl Link {
         }
     }
 
+    /// What the watcher saw (crate::watch): a `watch` item for each notice that never had one,
+    /// open or done.
+    pub fn watch_notices(&self, person: &str, notices: &[crate::watch::Notice]) {
+        let now = time::now();
+        let mut changed = Vec::new();
+        {
+            let mut state = self.lock();
+            for notice in notices {
+                let item = inbox::watch_item("watch", person, notice, now);
+                if !state.inbox.contains_key(&item.id) {
+                    state.inbox.insert(item.id.clone(), item.clone());
+                    changed.push(item);
+                }
+            }
+        }
+        for item in &changed {
+            self.save_item(item);
+        }
+    }
+
+    /// Items obid made (crate::listen): each one that never was in the inbox, open or done.
+    pub fn add_items(&self, items: Vec<Item>) {
+        let mut changed = Vec::new();
+        {
+            let mut state = self.lock();
+            for item in items {
+                if !state.inbox.contains_key(&item.id) {
+                    state.inbox.insert(item.id.clone(), item.clone());
+                    changed.push(item);
+                }
+            }
+        }
+        for item in &changed {
+            self.save_item(item);
+        }
+    }
+
     /// Work on the feed item `work` started from the feed (`POST /v1/github/work/{id}/start`):
     /// its open `github` item is done, answered with its start option, `job` the job on it.
     pub fn github_started(&self, work: &str, job: &str) {
@@ -797,13 +834,19 @@ impl Link {
 
     /// Keeps the item and tells the apps, as it is now (as `save_exchange`).
     fn save_item(&self, item: &Item) {
+        if let Err(e) = self.keep_item(item) {
+            tracing::error!("can't keep inbox item {}: {e}", item.id);
+        }
+    }
+
+    /// [`Link::save_item`], saying whether it was kept on disk.
+    fn keep_item(&self, item: &Item) -> Result<(), String> {
         let _saving = self.saving.lock().unwrap_or_else(|e| e.into_inner());
         let now = self.lock().inbox.get(&item.id).cloned();
         let item = now.as_ref().unwrap_or(item);
-        if let Err(e) = self.inbox.save(item) {
-            tracing::error!("can't keep inbox item {}: {e}", item.id);
-        }
+        let kept = self.inbox.save(item).map_err(|e| e.to_string());
         self.events.send("inbox", item.to_json());
+        kept
     }
 
     fn save_sharing(&self, sharing: &Sharing) {
@@ -1620,7 +1663,7 @@ impl Link {
         } else if kind == "question" {
             match self.decide_question(&mut state, &mut exchange, &repos, &referenced, now) {
                 Decided::Settled { decisions } => decisions_changed = decisions,
-                Decided::Inbox(made) => item = Some(made),
+                Decided::Inbox(made) => item = Some(*made),
                 Decided::ByItself(rule) => answer_by_itself = Some(rule),
             }
         } else if let Some(decision) =
@@ -1785,7 +1828,7 @@ impl Link {
             }
         }
         match self.question_to_inbox(state, exchange, repos, referenced, now) {
-            Some(item) => Decided::Inbox(item),
+            Some(item) => Decided::Inbox(Box::new(item)),
             None => Decided::Settled { decisions: false },
         }
     }
@@ -3154,6 +3197,7 @@ impl Link {
             confirm: None,
             start: Some(Box::new(start)),
             github: None,
+            watch: None,
         };
         self.lock().inbox.insert(item.id.clone(), item.clone());
         self.save_item(&item);
@@ -3335,6 +3379,82 @@ impl Link {
                 Given::Later(_) => {}
             }
         }
+        // A listener's review (crate::listen): Approve posts it on GitHub, with no lock held. The
+        // answer claims it first, and the claim (`watch.posting`) is on disk before gh is asked, so
+        // a second Approve, or one after obid stopped mid-post, never posts it twice; when nothing
+        // was posted it's open again.
+        let approving = {
+            let mut state = self.lock();
+            let item = state
+                .inbox
+                .get(id)
+                .filter(|i| {
+                    i.done.is_none()
+                        && i.kind == "listen"
+                        && i.options.iter().any(|o| o == crate::listen::APPROVE)
+                })
+                .cloned();
+            match (item, &given) {
+                (Some(item), Given::Answer(a)) if a == crate::listen::APPROVE => {
+                    if item
+                        .watch
+                        .as_deref()
+                        .is_some_and(|w| !w["posting"].is_null())
+                    {
+                        return Err(api(
+                            StatusCode::CONFLICT,
+                            "Oby was posting this review when it stopped, or still is: check the pull request on GitHub, then Dismiss it.",
+                        ));
+                    }
+                    let mut claimed = item.clone();
+                    if let Some(watch) = claimed.watch.as_mut() {
+                        watch["posting"] = serde_json::json!(time::format(time::now()));
+                    }
+                    state.inbox.insert(claimed.id.clone(), claimed.clone());
+                    Some((item, claimed))
+                }
+                _ => None,
+            }
+        };
+        if let Some((open, claimed)) = approving {
+            // Not on disk: nothing is posted (a stop could then post it twice).
+            if let Err(why) = self.keep_item(&claimed) {
+                self.lock().inbox.insert(open.id.clone(), open.clone());
+                self.save_item(&open);
+                return Err(api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Nothing was posted: obid couldn't keep the claim ({why})."),
+                ));
+            }
+            return match crate::listen::post_review_with_gh(&self.config.home, &claimed).await {
+                Ok(()) => {
+                    let mut item = claimed;
+                    item.done = Some(time::now());
+                    item.answer = Some(crate::listen::APPROVE.into());
+                    self.lock().inbox.insert(item.id.clone(), item.clone());
+                    self.save_item(&item);
+                    Ok(item.to_json())
+                }
+                Err(why) => {
+                    // Open again, unless the owner dismissed it meanwhile.
+                    let dismissed = {
+                        let mut state = self.lock();
+                        let dismissed = state.inbox.get(&open.id).is_some_and(|i| i.done.is_some());
+                        if !dismissed {
+                            state.inbox.insert(open.id.clone(), open.clone());
+                        }
+                        dismissed
+                    };
+                    if !dismissed {
+                        self.save_item(&open);
+                    }
+                    Err(api(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Nothing was posted: {why}."),
+                    ))
+                }
+            };
+        }
         // An offer of GitHub work: its start reads GitHub first, with no lock held, so its start
         // answer claims the item under the lock (done), as Start does: nothing settles it
         // meanwhile, and a second answer finds it done.
@@ -3412,7 +3532,8 @@ impl Link {
                 self.save_item(&item);
                 return Ok(item.to_json());
             }
-            if item.kind == "pluginEvent" {
+            // A plug-in's event and the watcher's notice only say something: Dismiss settles them.
+            if matches!(item.kind.as_str(), "pluginEvent" | "watch" | "listen") {
                 drop(state);
                 return match given {
                     Given::Answer(answer) => self.answer_plugin_event(item, Some(answer), None),
@@ -4274,8 +4395,8 @@ impl Link {
 enum Decided {
     /// Declined (`decisions`: a remembered decision was used).
     Settled { decisions: bool },
-    /// In the owner's inbox: its item.
-    Inbox(Item),
+    /// In the owner's inbox: its item, boxed (an item is far larger than the rest).
+    Inbox(Box<Item>),
     /// The Obi answers it by itself, under this sharing rule.
     ByItself(Rule),
 }
