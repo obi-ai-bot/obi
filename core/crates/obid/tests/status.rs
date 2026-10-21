@@ -239,6 +239,19 @@ fn get_status(obid: &Obid, host: &str, token: &str) -> Answer {
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+/// `GET /v1/status` once obid has measured the worktrees: it answers before a slow walk ends and
+/// leaves `cleanup` out until then (lib.rs, `MEASURE_FIRST`). Asked again for at most 10 seconds.
+fn measured_status(obid: &Obid, host: &str) -> Answer {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let answer = get_status(obid, host, TOKEN);
+        if answer.body.get("cleanup").is_some() || Instant::now() > deadline {
+            return answer;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn status_answers_with_engine_obid() {
     let folder = Folder::new("status");
@@ -288,7 +301,7 @@ fn status_answers_with_engine_obid() {
     assert_eq!(status["claudeKeychain"], json!({"on": false, "auto": true}));
     let worktrees = folder.0.join("home").join("worktrees");
     assert_eq!(
-        status["cleanup"],
+        measured_status(&obid, &host).body["cleanup"],
         json!({"path": worktrees.to_string_lossy(), "bytes": 0, "lastRun": null})
     );
 
@@ -567,7 +580,7 @@ fn cleanup_bytes_are_measured_at_start_not_per_request() {
     std::fs::create_dir_all(worktrees.join("job-1")).unwrap();
     std::fs::write(worktrees.join("job-1").join("file"), vec![7u8; 256 * 1024]).unwrap();
     let obid = start(&folder.0, &config(&folder.0, 0), Some(TOKEN));
-    let first = get_status(&obid, "127.0.0.1", TOKEN);
+    let first = measured_status(&obid, "127.0.0.1");
     assert_eq!(first.status, 200);
     let bytes = first.body["cleanup"]["bytes"].as_u64().unwrap();
     assert!(bytes >= 256 * 1024, "measured at start: {bytes}");
