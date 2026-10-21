@@ -214,8 +214,7 @@ fn job_size<'a>(mac: &Mac, request: &'a Value) -> &'a str {
 /// Whether `home`'s disk has room for a job's whole disk and 5 GB more.
 fn room_for(home: &Path, size: Size) -> bool {
     nix::sys::statvfs::statvfs(home).is_ok_and(|s| {
-        (s.blocks_available() as u64).saturating_mul(s.fragment_size())
-            >= (size.disk_gib + 5) << 30
+        (s.blocks_available() as u64).saturating_mul(s.fragment_size()) >= (size.disk_gib + 5) << 30
     })
 }
 
@@ -234,12 +233,13 @@ pub fn admit(link: &Arc<Link>, cid: String, asked: bool) {
     tokio::spawn(async move {
         let decided = decide(&link, &cid, asked).await;
         match decided {
+            // The reason only: no words go in the chain (spec protocol.md section 4, rule 9). Why,
+            // in this owner's words, goes to obid's own log.
             Decision::Decline(reason, note) => {
-                let mut body = json!({"reason": reason});
                 if let Some(note) = note {
-                    body["note"] = json!(note);
+                    tracing::info!("sphere: declined {cid} ({reason}): {note}");
                 }
-                link.host_reply(&cid, "decline", body, "declined");
+                link.host_reply(&cid, "decline", json!({"reason": reason}), "declined");
             }
             Decision::Ask => link.host_ask(&cid),
             Decision::Accept => {
