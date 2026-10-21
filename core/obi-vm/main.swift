@@ -313,9 +313,6 @@ case "signals":
 case "run":
     let options = parse(args.dropFirst(2))
     verifyImage(options)
-    // The owner always comes first: lowest CPU priority, throttled I/O (after the image's check,
-    // which a busy Mac would otherwise starve).
-    setpriority(PRIO_DARWIN_PROCESS, 0, PRIO_DARWIN_BG)
     // The VM process starts with the VZVirtualMachine, so the ones before it are looked at first;
     // one obi-vm starts a VM at a time (a lock), so the one that appears is this one's.
     let lock = open("/private/tmp/obi-vm-\(getuid()).lock", O_CREAT | O_RDWR, 0o600)
@@ -335,6 +332,9 @@ case "run":
             let new = vmProcesses().subtracting(before)
             runner.process = new.count == 1 ? new.first : nil
             if lock >= 0 { flock(lock, LOCK_UN); close(lock) }
+            // The owner always comes first: lowest CPU priority, throttled I/O, once it runs (the
+            // image's check and the VM's start, at it, take minutes on a busy Mac).
+            setpriority(PRIO_DARWIN_PROCESS, 0, PRIO_DARWIN_BG)
             say(["event": "running"])
         case .failure(let error): say(["event": "stopped", "reason": "error", "error": error.localizedDescription]); exit(1)
         }
