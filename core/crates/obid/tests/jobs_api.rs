@@ -590,6 +590,52 @@ fn nothing_committed_is_done_and_needs_nothing() {
             .unwrap()
             .contains("doesn't need you")
     );
+
+    // Rename (`PATCH /v1/jobs/{id}`, Sangam's Rename): trimmed, kept, and said in its changes.
+    let path = format!("/v1/jobs/{quiet}");
+    let renamed = request(
+        &obid,
+        "PATCH",
+        &path,
+        Some(r#"{"title": "  Look around the app  "}"#),
+    );
+    assert_eq!(renamed.status, 200, "{}", renamed.body);
+    assert_eq!(renamed.body["title"], "Look around the app");
+    assert_eq!(
+        request(&obid, "GET", &path, None).body["title"],
+        "Look around the app"
+    );
+    let changes = renamed.body["changes"].as_array().unwrap();
+    assert_eq!(changes.last().unwrap()["what"], "Renamed by you");
+    let long = format!(r#"{{"title": "{}"}}"#, "a".repeat(61));
+    for bad in [
+        r#"{"title": "  "}"#,
+        r#"{"title": "two\nlines"}"#,
+        long.as_str(),
+    ] {
+        assert_eq!(
+            request(&obid, "PATCH", &path, Some(bad)).status,
+            422,
+            "{bad}"
+        );
+    }
+    for bad in [r#"{"name": "x"}"#, r#"{"title": 3}"#, "not json"] {
+        assert_eq!(
+            request(&obid, "PATCH", &path, Some(bad)).status,
+            400,
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        request(
+            &obid,
+            "PATCH",
+            "/v1/jobs/nowhere",
+            Some(r#"{"title": "x"}"#)
+        )
+        .status,
+        404
+    );
 }
 
 /// A job that changes obid runs obid's own tests inside its job sandbox, and they start obid's

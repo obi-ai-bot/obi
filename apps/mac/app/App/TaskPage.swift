@@ -151,6 +151,7 @@ struct TaskDecision: View {
 struct TaskCardView: View {
     let item: WorkList.Item<SidebarSections.JobRow>
     let model: IslandModel
+    let state: ChatState
     let onOpen: () -> Void
     @State private var hovering = false
     @State private var busy = false
@@ -227,9 +228,11 @@ struct TaskCardView: View {
         }
         .onHover { hovering = $0 }
         .animation(Tokens.fade, value: hovering)
+        // The task's menu, as on its side panel row; Rename opens its page, renaming in the title bar.
         .contextMenu {
-            Button("View details", action: onOpen)
-            if job.isActive { Button("Stop") { model.stopChatJob(job.id, local: item.job.local) } }
+            TaskMenu(row: item.job, model: model, state: state, onViewDetails: onOpen,
+                     onOpenChat: { state.trail.push(.talk) },
+                     onRename: { onOpen(); state.renaming = .init(id: item.id, inBar: true) })
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(job.heading), \(item.mark.rawValue)")

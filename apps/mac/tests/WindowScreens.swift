@@ -193,6 +193,28 @@ struct WindowScreens {
         try await shoot("mac-task", model: model(), state: state)
     }
 
+    /// Archived (Sangam's ArchiveView): done tasks older than Archive completed's 3 days, with the
+    /// side panel's Archived row at its foot.
+    @Test func archived() async throws {
+        let model = model()
+        let day: TimeInterval = 86_400
+        for old in [job("a1", "Webhook signature mismatch", status: .done, issue: 377, ago: 5 * day),
+                    job("a2", "Job progress screen", status: .done, ago: 7 * day, agent: "codex"),
+                    job("a3", "#388 Retry banner overlaps", kind: .review, status: .done, ago: 4 * day),
+                    job("a4", "Weekly repo health", status: .done, ago: 10 * day)] { model.feed.apply(old) }
+        let state = ChatState(defaults: .scratch)
+        state.trail.start(.archived)
+        try await shoot("mac-archived", model: model, state: state)
+    }
+
+    /// A task's page renaming it in place in the title bar (Sangam's `crumb-rename`).
+    @Test func taskRenaming() async throws {
+        let state = ChatState(defaults: .scratch)
+        state.trail.start(.job(id: "i3", local: false))
+        state.renaming = .init(id: SidebarSections.JobRow.id("i3", local: false), inBar: true)
+        try await shoot("mac-task-rename", model: model(), state: state)
+    }
+
     /// The talk key's pill with the window closed (#528), at each stage of a turn.
     @Test(arguments: [TalkStage.listening, .thinking, .speaking])
     func pill(_ stage: TalkStage) async throws {

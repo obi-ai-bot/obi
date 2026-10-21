@@ -70,8 +70,6 @@ private struct ConversationRow: View {
     let state: ChatState
     @Binding var renaming: String?
     @State private var hovering = false
-    @State private var draft = ""
-    @FocusState private var focused: Bool
 
     private var picked: Bool { list.shown == conversation.id && state.trail.top == .talk }
     private var editing: Bool { renaming == conversation.id }
@@ -80,7 +78,15 @@ private struct ConversationRow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            if editing { field } else { title }
+            if editing {
+                RenameField(label: "Conversation name", title: conversation.title) { title in
+                    renaming = nil
+                    if let title { Task { await list.rename(conversation.id, to: title) } }
+                }
+                .padding(.leading, 10)
+            } else {
+                self.title
+            }
             ZStack {
                 Text(moved).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
                     .opacity(hovering ? 0 : 1)
@@ -117,26 +123,6 @@ private struct ConversationRow: View {
         .accessibilityAddTraits(picked ? .isSelected : [])
     }
 
-    /// Renaming in place: Return keeps it, Esc leaves it as it was.
-    private var field: some View {
-        TextField("Conversation name", text: $draft)
-            .textFieldStyle(.plain).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.ink)
-            .focused($focused)
-            .padding(.horizontal, 8).frame(height: 26)
-            .overlay { RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Tokens.lineFocus) }
-            .padding(.leading, 6)
-            .onSubmit(commit)
-            .onExitCommand { renaming = nil }
-            .onChange(of: focused) { _, now in if !now && editing { commit() } }
-            .onAppear { draft = conversation.title; DispatchQueue.main.async { focused = true } }
-    }
-
-    private func commit() {
-        let title = draft
-        renaming = nil
-        Task { await list.rename(conversation.id, to: title) }
-    }
-
     private var menu: some View {
         Menu { actions } label: {
             Image(systemName: "ellipsis").rotationEffect(.degrees(90)).font(Tokens.font(12, .medium))
@@ -147,9 +133,21 @@ private struct ConversationRow: View {
         .accessibilityLabel("More for \(conversation.title)")
     }
 
-    @ViewBuilder private var actions: some View {
+    private var actions: some View {
+        ConversationMenu(conversation: conversation, list: list) { renaming = conversation.id }
+    }
+}
+
+/// A conversation's menu (Sangam's ConvoMenu.tsx), from its side panel row (⋮ or right-click) or
+/// its page's title bar: pin it to the top (or unpin), rename; last, set apart, delete it.
+struct ConversationMenu: View {
+    let conversation: RunnerConversation
+    let list: ConversationList
+    let onRename: () -> Void
+
+    var body: some View {
         Button(conversation.pinned ? "Unpin" : "Pin") { Task { await list.pin(conversation.id, !conversation.pinned) } }
-        Button("Rename") { renaming = conversation.id }
+        Button("Rename", action: onRename)
         Divider()
         // Its tasks stay, and their cards open their own page.
         Button("Delete conversation", role: .destructive) { Task { await list.delete(conversation.id) } }
