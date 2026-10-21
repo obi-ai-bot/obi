@@ -15,6 +15,8 @@ use tokio::sync::mpsc;
 /// The guest's vsock ports (core/obi-vm/image/obi-guest).
 pub const CONTROL_PORT: u32 = 7000;
 pub const MODEL_PORT: u32 = 7001;
+/// The job disk's key, which the guest's PID 1 reads once, as root, before anything else runs.
+pub const KEY_PORT: u32 = 7002;
 
 /// A box's size (protocol.md 5.10): vCPUs, memory and disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,22 +124,34 @@ pub struct Place {
     pub sockets: PathBuf,
 }
 
-/// A folder only this user may open, at a short path, for one job's sockets:
-/// `/private/tmp/obi-guests-<uid>/<name>`. A folder there that isn't this user's, or isn't 0700,
-/// or is a link, is refused.
-pub fn socket_dir(name: &str) -> Result<PathBuf, String> {
+/// This obid home's folder for its jobs' sockets, at a short path:
+/// `/private/tmp/obi-guests-<uid>/<8 hex of the home>`. A user folder there that isn't this
+/// user's, or isn't 0700, or is a link, is refused.
+pub fn sockets_base(home: &Path) -> Result<PathBuf, String> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     let uid = nix::unistd::getuid().as_raw();
-    let base = PathBuf::from(format!("/private/tmp/obi-guests-{uid}"));
-    let _ = std::fs::DirBuilder::new().mode(0o700).create(&base);
-    let meta = std::fs::symlink_metadata(&base)
+    let user = PathBuf::from(format!("/private/tmp/obi-guests-{uid}"));
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(&user);
+    let meta = std::fs::symlink_metadata(&user)
         .map_err(|e| format!("no folder for the job's sockets: {e}"))?;
     if !meta.is_dir() || meta.uid() != uid || meta.permissions().mode() & 0o077 != 0 {
         return Err(format!(
             "{} isn't a private folder of this user's, so no job runs",
-            base.display()
+            user.display()
         ));
     }
+    let digest = aws_lc_rs::digest::digest(
+        &aws_lc_rs::digest::SHA256,
+        home.as_os_str().as_encoded_bytes(),
+    );
+    Ok(user.join(hex::encode(&digest.as_ref()[..4])))
+}
+
+/// A folder only this user may open, for one job's sockets, under [`sockets_base`].
+pub fn socket_dir(home: &Path, name: &str) -> Result<PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    let base = sockets_base(home)?;
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(&base);
     let dir = base.join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::DirBuilder::new()
@@ -160,16 +174,20 @@ impl Place {
     pub fn model(&self) -> PathBuf {
         self.sockets.join("m.sock")
     }
+    pub fn key(&self) -> PathBuf {
+        self.sockets.join("k.sock")
+    }
 }
 
 impl Vm {
-    /// Makes the job's disk (sparse, `size.disk_gib`) and starts the VM. Its two sockets must be
-    /// served already.
+    /// Makes the job's disk (sparse, `size.disk_gib`) and starts the VM, which obi-vm itself stops
+    /// past `max_seconds` whatever obid does. Its three sockets must be served already.
     pub async fn start(
         helper: &Path,
         image: &Image,
         place: &Place,
         size: Size,
+        max_seconds: u64,
     ) -> Result<Vm, String> {
         let disk = place.disk();
         let file = std::fs::File::create(&disk)
@@ -197,6 +215,10 @@ impl Vm {
             .arg(format!("{CONTROL_PORT}={}", place.control().display()))
             .arg("--vsock")
             .arg(format!("{MODEL_PORT}={}", place.model().display()))
+            .arg("--vsock")
+            .arg(format!("{KEY_PORT}={}", place.key().display()))
+            .arg("--max-seconds")
+            .arg(max_seconds.to_string())
             // Nothing of obid's environment, but where programs are (a test's stand-in needs it).
             .env_clear()
             .envs(std::env::var_os("PATH").map(|p| ("PATH", p)))

@@ -11,6 +11,7 @@ pub mod hosting;
 pub mod inbox;
 pub mod link;
 pub mod membership;
+pub mod pins;
 pub mod routes;
 pub mod sharing;
 pub mod vm;

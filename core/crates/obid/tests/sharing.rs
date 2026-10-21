@@ -2,7 +2,8 @@
 //! through two real obids and the fake Sphere (tests/support), with its job channel relayed there.
 //! Wellington's obid hosts; Sangam's sends one of Sangam's jobs to it. The VM is a stand-in
 //! (tests/agents/fake-obi-vm) that plays the guest over the same sockets the real image uses, and
-//! the model's API is a stand-in that records the key it was called with.
+//! the model's API is a stand-in that records the credential it was called with: Sangam's own
+//! Claude Code login (a stand-in one), added by Sangam's obid, never seen on Wellington's side.
 
 mod support;
 
@@ -14,10 +15,11 @@ use support::*;
 
 const HOST_SCOPES: &str =
     "send:review_request send:question send:run_request reply receive directory:read audit:read";
-const API_KEY: &str = "test-company-api-key-for-obid-tests-only-7f3a9c";
+/// Sangam's Claude Code login's access token (a stand-in, in the account's `.credentials.json`).
+const LOGIN: &str = "test-claude-login-access-token-for-obid-tests-7f3a9c";
 
 /// The model's API, as the guest's obid calls it: answers every `POST /v1/messages`, keeping each
-/// call's `x-api-key`.
+/// call's credential and betas.
 async fn model_api() -> (String, Arc<Mutex<Vec<String>>>) {
     let keys = Arc::new(Mutex::new(Vec::new()));
     let seen = keys.clone();
@@ -26,8 +28,8 @@ async fn model_api() -> (String, Arc<Mutex<Vec<String>>>) {
         axum::routing::post(move |headers: axum::http::HeaderMap| {
             let seen = seen.clone();
             async move {
-                let key = headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
-                seen.lock().unwrap().push(key);
+                let header = |n: &str| headers.get(n).and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
+                seen.lock().unwrap().push(format!("{} {} [{}]", header("authorization"), header("x-api-key"), header("anthropic-beta")));
                 axum::Json(json!({"id": "msg_1", "type": "message", "role": "assistant", "model": "fake",
                                   "content": [{"type": "text", "text": "Hello from the model"}],
                                   "stop_reason": "end_turn", "usage": {"input_tokens": 10, "output_tokens": 4}}))
@@ -49,7 +51,7 @@ struct Pair {
 }
 
 /// Wellington's obid (sharing its Mac: `mac` over the defaults, turned on) and Sangam's, both
-/// joined, Sangam's with its company API key in its vault.
+/// joined, Sangam's signed in to Claude Code (a stand-in login).
 async fn pair(host_folder: &Folder, guest_folder: &Folder, mac: Value, scenario: Value) -> Pair {
     let sphere = FakeSphere::start().await;
     let (api, keys) = model_api().await;
@@ -71,17 +73,17 @@ async fn pair(host_folder: &Folder, guest_folder: &Folder, mac: Value, scenario:
     let mut guest_config = config(&guest_folder.0, &remote, &stub_agent());
     guest_config["owner"] = json!("sangam");
     guest_config["guestModelApi"] = json!(api);
+    let account = guest_folder.0.join("home/accounts/stub");
+    std::fs::create_dir_all(&account).unwrap();
+    let ends = (obi_protocol::time::now() + 86_400) * 1000;
+    std::fs::write(
+        account.join(".credentials.json"),
+        json!({"claudeAiOauth": {"accessToken": LOGIN, "refreshToken": "test-refresh-never-used", "expiresAt": ends,
+                                  "scopes": ["user:inference"], "subscriptionType": "max"}})
+        .to_string(),
+    )
+    .unwrap();
     let guest = start(&guest_folder.0, &guest_config, None);
-    let mut add = std::process::Command::new(OBID)
-        .args(["vault", "--config"])
-        .arg(guest_folder.0.join("config.json"))
-        .args(["add", "anthropic-api-key"])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::io::Write::write_all(add.stdin.as_mut().unwrap(), API_KEY.as_bytes()).unwrap();
-    drop(add.stdin.take());
-    assert!(add.wait().unwrap().success());
 
     tokio::task::block_in_place(|| {
         join_as(
@@ -195,23 +197,32 @@ async fn a_job_runs_on_a_teammates_mac_with_the_owners_own_key_and_comes_back_wi
     assert_eq!(done["status"], "done", "{done}\n{}", p.guest.log());
     assert_eq!(done["commits"], 1);
     // The model was called from Sangam's Mac with Sangam's key, and only from there.
-    assert_eq!(*p.keys.lock().unwrap(), vec![API_KEY.to_owned()]);
+    // From Sangam's Mac, with Sangam's own login and its beta; the VM's placeholder dropped.
+    assert_eq!(
+        *p.keys.lock().unwrap(),
+        vec![format!("Bearer {LOGIN}  [oauth-2025-04-20]")]
+    );
     let seen = std::fs::read_to_string(p.vm.join("guest.log")).unwrap();
     assert!(seen.contains("cpus 4 memory 8192"), "{seen}");
-    assert!(seen.contains("key 200 64"), "{seen}");
-    assert!(seen.contains("key-again 410"), "{seen}");
+    // The disk key came once, on its own socket, and isn't on the job's.
+    assert!(seen.contains("key 64"), "{seen}");
+    assert!(seen.contains("key-again refused"), "{seen}");
+    assert!(seen.contains("key-on-control 404"), "{seen}");
+    assert!(seen.contains("max-seconds 7380"), "{seen}");
     assert!(seen.contains("refused 403"), "{seen}");
     assert!(seen.contains("model 200 Hello from the model"), "{seen}");
     assert!(seen.contains("job Say hello on"), "{seen}");
     // The key is nowhere on Wellington's side, and the relay saw only sealed frames.
     assert!(
-        holding(&hf.0, API_KEY).is_empty(),
+        holding(&hf.0, LOGIN).is_empty(),
         "{:?}",
-        holding(&hf.0, API_KEY)
+        holding(&hf.0, LOGIN)
     );
+    // Only the access token is ever used, and only from Sangam's Mac: never the refresh token.
+    assert!(holding(&hf.0, "test-refresh-never-used").is_empty());
     let relayed = p.sphere.lock().relayed.clone();
     assert!(!relayed.is_empty());
-    for clear in [API_KEY.as_bytes(), b"Hello from the model", b"guest.txt"] {
+    for clear in [LOGIN.as_bytes(), b"Hello from the model", b"guest.txt"] {
         assert!(
             !relayed.windows(clear.len()).any(|w| w == clear),
             "the relay saw {:?}",
