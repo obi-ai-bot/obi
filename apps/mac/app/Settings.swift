@@ -44,6 +44,7 @@ struct SettingsPane: View {
         case .accounts: AccountsSettingsView(store: store, feed: feed)
         case .models: ModelsSettingsView(store: store, feed: feed)
         case .connectors: ConnectorsSettingsView(store: store, feed: feed)
+        case .sphere: SphereSettingsView(feed: feed)
         case .vault: VaultSettingsView(vault: model.vault ?? .shared)
         case .about: AboutSettingsView(updater: model.updater)
         }
@@ -242,95 +243,64 @@ struct RunnerSettingsView: View {
     }
 }
 
-/// Settings › Remote access: reach this Mac from anywhere (#285, apps/mac/app/RemoteAccess.swift). Sign in
-/// to Oby's control plane with a code by email, then turn it on: this Mac gets a hostname of its
-/// own and runs its tunnel. The iPhone connects to the hostname when it's away from home.
+/// Settings › Remote access: reach this Mac from anywhere (#285, apps/mac/app/RemoteAccess.swift).
+/// Turn it on: the first time, this Mac signs in with Apple or Google and registers with
+/// Oby's control plane by a key of its own, gets a hostname, and runs its tunnel. The iPhone connects to the hostname when it's
+/// away from home.
 struct RemoteAccessSettingsView: View {
     let remote: RemoteAccess
     @Environment(\.openSettingsPage) private var openSettings
-    @State private var email = ""
-    @State private var code = ""
     @State private var forgetting = false
 
-    private var signedIn: Bool { remote.step == .signedIn || remote.step == .on }
-    /// Pair a device sent you here: the next thing to do is ringed (the email, the code, then the switch).
+    /// Pair a device sent you here: the switch is ringed.
     private var pointed: Bool { openSettings.spotlight == .remoteAccess }
 
     var body: some View {
-        SetGroup("Oby account", footer: "Remote access goes through Oby’s control plane, which signs you in with a code by email and gives this Mac a hostname of its own.",
-                 problem: signedIn ? nil : remote.problem) {
-            switch remote.step {
-            case .signedOut:
-                SetRow("Email") { SetField("Email", text: $email, prompt: "you@example.com").onSubmit(sendCode) }
-                    .spotlit(pointed, id: .remoteAccess)
-                SetRow("") {
-                    Button("Send Code") { sendCode() }
-                        .buttonStyle(.set)
-                        .disabled(remote.busy || email.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-            case .codeSent(let to):
-                SetRow("Code", about: "A six-digit code went to \(to). It works for ten minutes.") {
-                    SetField("Code", text: $code, prompt: "123456").onSubmit(verify)
-                }
-                .spotlit(pointed, id: .remoteAccess)
-                SetRow("") {
-                    Button("Use Another Email") { remote.useAnotherEmail() }
-                        .buttonStyle(.set)
-                        .disabled(remote.busy)
-                    Button("Sign In") { verify() }
-                        .buttonStyle(.set)
-                        .disabled(remote.busy || code.trimmingCharacters(in: .whitespaces).count != 6)
-                }
-            case .signedIn, .on:
-                SetRow("Signed in as") { SetValue(remote.email ?? "") }
-            }
-        }
-        // On, and Pair a device sent you: straight back to it, its button ringed.
-        .onChange(of: remote.step) { _, step in
-            if step == .on, pointed { openSettings(.runner, spotlight: .pairDevice) }
-        }
-        .onDisappear { openSettings.clear(.remoteAccess) }
-        if signedIn {
-            SetGroup("Remote access", footer: "On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Off keeps the hostname for next time. Forget removes this Mac from your account, and the hostname stops answering.",
-                     problem: remote.problem) {
-                SetRow("Reach this Mac from anywhere") {
-                    Toggle("Reach this Mac from anywhere", isOn: Binding(get: { remote.step == .on }, set: { on in
+        SetGroup("Remote access", footer: "The first time, you sign in with Apple or Google: Oby asks Apple for no name or email, and keeps only your Google account’s domains, never the email. One account has up to 5 Macs: a sixth takes the place of the one used longest ago. On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Off keeps the hostname for a while: after 3 days off, asleep or offline, this Mac gets a new one when it’s back, and your iPhone pairs again. Forget removes this Mac from Oby’s control plane, and the hostname stops answering.",
+                 problem: remote.problem) {
+            SetRow("Reach this Mac from anywhere") {
+                if remote.signsInFirst {
+                    HStack(spacing: 8) {
+                        ForEach(RemoteAccess.signInButtons, id: \.provider) { button in
+                            Button(button.title) { Task { await remote.turnOn(with: button.provider) } }
+                                .buttonStyle(.set)
+                                .disabled(remote.busy)
+                        }
+                    }
+                } else {
+                    Toggle("Reach this Mac from anywhere", isOn: Binding(get: { remote.on }, set: { on in
                         if on { Task { await remote.turnOn() } } else { remote.turnOff() }
                     }))
                     .toggleStyle(.set)
                     .disabled(remote.busy)
                 }
-                .spotlit(pointed && remote.step != .on, id: .remoteAccess)
-                if let hostname = remote.hostname {
-                    SetRow("Hostname") { SetValue(hostname) }
-                }
-                SetRow("Status") {
-                    let status = remote.busy ? "Setting up…" : remote.status
-                    SetValue(status, connected: status == "Connected")
-                }
+            }
+            .spotlit(pointed && !remote.on, id: .remoteAccess)
+            if let hostname = remote.hostname {
+                SetRow("Hostname") { SetValue(hostname) }
+            }
+            SetRow("Status") {
+                let status = remote.busy ? "Setting up…" : remote.status
+                SetValue(status, connected: status == "Connected")
+            }
+            if remote.hostname != nil {
                 SetRow("") {
                     Button("Forget This Mac", role: .destructive) { forgetting = true }
                         .buttonStyle(.set)
                         .disabled(remote.busy)
                 }
             }
-            // Kept beyond Sangam's mock: the hostname can't be brought back, so macOS's confirmation first.
-            .confirmationDialog("Forget this Mac?", isPresented: $forgetting) {
-                Button("Forget", role: .destructive) { Task { await remote.forget() } }
-            } message: {
-                Text("Its tunnel and hostname are removed from your Oby account, and this Mac signs out. Turning remote access on again makes a new hostname.")
-            }
         }
-    }
-
-    private func sendCode() {
-        Task { await remote.requestCode(email) }
-    }
-
-    private func verify() {
-        Task {
-            await remote.verify(code)
-            if remote.step == .signedIn { code = "" }
+        // On, and Pair a device sent you: straight back to it, its button ringed.
+        .onChange(of: remote.on) { _, on in
+            if on, pointed { openSettings(.runner, spotlight: .pairDevice) }
+        }
+        .onDisappear { openSettings.clear(.remoteAccess) }
+        // Kept beyond Sangam's mock: the hostname can't be brought back, so macOS's confirmation first.
+        .confirmationDialog("Forget this Mac?", isPresented: $forgetting) {
+            Button("Forget", role: .destructive) { Task { await remote.forget() } }
+        } message: {
+            Text("Its tunnel and hostname are removed from Oby’s control plane. Turning remote access on again makes a new hostname.")
         }
     }
 }

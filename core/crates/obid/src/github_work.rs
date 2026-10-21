@@ -43,11 +43,22 @@ const QUERY: &str = "query($assigned: String!, $reviews: String!, $mine: String!
 assigned: search(query: $assigned, type: ISSUE, first: 100) { issueCount nodes { ...work } } \
 reviews: search(query: $reviews, type: ISSUE, first: 100) { issueCount nodes { ...work } } \
 mine: search(query: $mine, type: ISSUE, first: 100) { issueCount nodes { ...work } } \
-rateLimit { remaining resetAt } viewer { login } } \
+rateLimit { cost remaining resetAt } viewer { login } } \
 fragment work on SearchResultItem { \
-... on Issue { number title updatedAt state author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } } \
-... on PullRequest { number title updatedAt state isDraft reviewDecision author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } \
+... on Issue { number title updatedAt state author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } BOARD } \
+... on PullRequest { number title updatedAt state isDraft reviewDecision author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } BOARD \
 commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }";
+
+/// Each item's boards, but those it's archived from, and their Status column: needs gh's
+/// `read:project` scope.
+const BOARD: &str = "projectItems(first: 5, includeArchived: false) { nodes { project { title } \
+fieldValueByName(name: \"Status\") { ... on ProjectV2ItemFieldSingleSelectValue { name } } } }";
+
+/// What the feed says while gh's login can't read boards.
+const NO_BOARD_SCOPE: &str =
+    "Board columns need gh's read:project scope: run gh auth refresh -s read:project";
+/// How long obid reads without boards after GitHub said gh's login can't read them.
+const NO_BOARD_WAIT: i64 = 3600;
 
 /// One thing GitHub wants from the owner, as obid read it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,6 +78,15 @@ pub struct Item {
     pub draft: Option<bool>,
     pub review_decision: Option<String>,
     pub checks: Option<String>,
+    /// Its board column, or null: on no board, or on none with a Status.
+    pub board: Option<Board>,
+}
+
+/// The board an item is on and its Status column there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Board {
+    pub project: String,
+    pub column: String,
 }
 
 /// How many GitHub found for each list.
@@ -118,8 +138,9 @@ fn cut(text: &str, most: usize) -> String {
 
 /// The read, from what `gh api graphql` printed: whose work it is (`viewer`), the lists, GitHub's
 /// `rateLimit` (points left, when they reset) and the first of its `errors`, when it answered
-/// some (a SAML-protected organization's work, say) besides `data`. Nodes that aren't an issue or
-/// a pull request of a repository are left out.
+/// some (a SAML-protected organization's work, say) besides `data`, and whether one said gh's
+/// login can't read boards. Nodes that aren't an issue or a pull request of a repository are left
+/// out.
 pub fn parse(text: &str) -> Result<Got, String> {
     let value: Value =
         serde_json::from_str(text).map_err(|_| "GitHub's answer wasn't JSON".to_owned())?;
@@ -149,12 +170,24 @@ pub fn parse(text: &str) -> Result<Got, String> {
             .as_str()
             .and_then(time::parse_lenient),
     );
+    if let Some(cost) = data["rateLimit"]["cost"].as_i64() {
+        tracing::debug!(
+            "GitHub work: a read cost {cost} points, {:?} left",
+            rate.map(|r| r.0)
+        );
+    }
     let login = data["viewer"]["login"]
         .as_str()
         .filter(|l| is_login(l))
         .ok_or("GitHub didn't say whose work it is")?;
-    let partial = value["errors"][0]["message"]
-        .as_str()
+    let errors: Vec<&str> = value["errors"]
+        .as_array()
+        .map(|e| e.iter().filter_map(|e| e["message"].as_str()).collect())
+        .unwrap_or_default();
+    let no_board = errors.iter().any(|m| lacks_board_scope(m));
+    let partial = errors
+        .into_iter()
+        .find(|m| !lacks_board_scope(m))
         .map(|m| cut(m.lines().next().unwrap_or_default(), 300));
     Ok(Got::Read {
         login: login.into(),
@@ -170,7 +203,26 @@ pub fn parse(text: &str) -> Result<Got, String> {
         },
         rate,
         partial,
+        no_board,
     })
+}
+
+/// Whether what GitHub or gh said is that gh's login lacks the scope boards need.
+fn lacks_board_scope(said: &str) -> bool {
+    said.contains("read:project")
+}
+
+/// The first of a node's boards that has a Status column.
+fn board(node: &Value) -> Option<Board> {
+    node["projectItems"]["nodes"]
+        .as_array()?
+        .iter()
+        .find_map(|i| {
+            Some(Board {
+                project: cut(i["project"]["title"].as_str()?, 300),
+                column: cut(i["fieldValueByName"]["name"].as_str()?, 300),
+            })
+        })
 }
 
 fn item(list: &str, node: &Value) -> Option<Item> {
@@ -223,6 +275,7 @@ fn item(list: &str, node: &Value) -> Option<Item> {
         } else {
             None
         },
+        board: board(node),
     })
 }
 
@@ -241,6 +294,8 @@ pub enum Got {
         rate: Option<(i64, i64)>,
         /// What GitHub left out, when it answered errors besides the lists.
         partial: Option<String>,
+        /// gh's login can't read boards: every `board` is null.
+        no_board: bool,
     },
 }
 
@@ -284,17 +339,50 @@ pub fn offers<'a>(before: &Lists, now: &'a Lists, known: &[String]) -> Vec<&'a I
     new
 }
 
-/// Reads GitHub once with `gh`, as whoever it's signed in as now (`@me`).
-async fn fetch() -> Got {
+/// Reads GitHub once with `gh`, as whoever it's signed in as now (`@me`), with each item's board
+/// unless `board` is false. When gh's login can't read boards, it reads again without them.
+async fn fetch(board: bool) -> Got {
     let Some(gh) = crate::github::gh() else {
         return Got::SignedOut("gh isn't installed".into());
     };
+    let (mut text, mut said) = ask(&gh, board).await;
+    let mut board = board;
+    // GitHub fails the whole query when a field needs a scope the login lacks.
+    if board
+        && parse(&text).is_err()
+        && (lacks_board_scope(&text) || said.as_deref().is_some_and(lacks_board_scope))
+    {
+        (text, said) = ask(&gh, false).await;
+        board = false;
+    }
+    match parse(&text) {
+        Ok(Got::Read {
+            login,
+            lists,
+            rate,
+            partial,
+            no_board,
+        }) => Got::Read {
+            login,
+            lists,
+            rate,
+            no_board: no_board || !board || said.as_deref().is_some_and(lacks_board_scope),
+            partial: partial.or(said.filter(|s| !lacks_board_scope(s))),
+        },
+        Ok(other) => other,
+        Err(why) => said.map(failure).unwrap_or(Got::Failed(why)),
+    }
+}
+
+/// One `gh api graphql` call: what it printed, and what it said when it failed.
+async fn ask(gh: &std::path::Path, board: bool) -> (String, Option<String>) {
     let search = |what: &str| format!("is:open {what}:@me archived:false sort:updated-desc");
+    let query = QUERY.replace("BOARD", if board { BOARD } else { "" });
     let args = [
         "api".to_owned(),
         "graphql".into(),
         "-f".into(),
-        format!("query={QUERY}"),
+        format!("query={query}"),
         "-f".into(),
         format!("assigned=is:issue {}", search("assignee")),
         "-f".into(),
@@ -304,24 +392,9 @@ async fn fetch() -> Got {
     ];
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     // gh fails an answer that has `errors` even when it has `data`: the data still counts.
-    let (text, said) = match crate::github::output(&gh, &args).await {
+    match crate::github::output(gh, &args).await {
         Ok(text) => (text, None),
         Err((text, said)) => (text, Some(said)),
-    };
-    match parse(&text) {
-        Ok(Got::Read {
-            login,
-            lists,
-            rate,
-            partial,
-        }) => Got::Read {
-            login,
-            lists,
-            rate,
-            partial: partial.or(said),
-        },
-        Ok(other) => other,
-        Err(why) => said.map(failure).unwrap_or(Got::Failed(why)),
     }
 }
 
@@ -348,6 +421,9 @@ struct Seen {
     /// Whether obid read since it started: the first read sends no event (apps fetch the feed
     /// when they connect).
     read: bool,
+    /// gh's login couldn't read boards: no board read before then. 0 once boards read; a time
+    /// already past (a refresh, another login) reads them at once without warning again.
+    no_board_until: i64,
 }
 
 /// The feed: what obid last read, and the reads.
@@ -421,7 +497,8 @@ impl Feed {
             return self.to_json();
         }
         let before = self.shown();
-        let got = fetch().await;
+        let board = now >= self.lock().no_board_until;
+        let got = fetch(board).await;
         let known = self.known();
         let mut offered = Vec::new();
         let mut present = None;
@@ -435,6 +512,7 @@ impl Feed {
                     state.kept = Kept::default();
                     state.error = Some(why);
                     state.waits = 0;
+                    state.no_board_until = 0;
                     self.keep(&state.kept);
                 }
                 Got::Failed(why) => state.error = Some(why),
@@ -452,6 +530,7 @@ impl Feed {
                     lists,
                     rate,
                     partial,
+                    no_board,
                 } => {
                     // The first read on record, or the first as another login (`gh auth
                     // switch`), only notes what's there: no flood of offers.
@@ -468,8 +547,20 @@ impl Feed {
                         present = Some(lists.all().map(|i| i.id.clone()).collect::<HashSet<_>>());
                     }
                     state.waits = 0;
-                    state.error =
-                        partial.map(|e| format!("GitHub left some of your work out: {e}"));
+                    if no_board && board {
+                        if state.no_board_until == 0 {
+                            tracing::warn!("GitHub work: {NO_BOARD_SCOPE}");
+                        }
+                        state.no_board_until = now + NO_BOARD_WAIT;
+                    } else if !no_board {
+                        state.no_board_until = 0;
+                    } else if state.kept.login.as_deref() != Some(login.as_str()) {
+                        // Another login may read boards: the next read asks.
+                        state.no_board_until = state.no_board_until.min(now);
+                    }
+                    state.error = partial
+                        .map(|e| format!("GitHub left some of your work out: {e}"))
+                        .or(no_board.then(|| NO_BOARD_SCOPE.to_owned()));
                     if let Some((remaining, reset)) = rate
                         && remaining < LOW_POINTS
                     {
@@ -505,7 +596,14 @@ impl Feed {
     /// `POST /v1/github/work/refresh`: a read, unless one began within [`refresh_every`] (a
     /// paired phone can't spend GitHub's points by refreshing).
     pub async fn refresh(&self) -> Value {
-        if time::now() - self.lock().read_at < refresh_every() {
+        let now = time::now();
+        let soon = {
+            let mut state = self.lock();
+            // The owner may have just run `gh auth refresh -s read:project`: ask for boards.
+            state.no_board_until = state.no_board_until.min(now);
+            now - state.read_at < refresh_every()
+        };
+        if soon {
             return self.to_json();
         }
         self.read().await
@@ -934,6 +1032,72 @@ mod tests {
             .collect();
         assert_eq!(offered, [9, 8, 7, 6, 5]);
         assert!(offers(&now, &now, &known).is_empty(), "nothing twice");
+    }
+
+    #[test]
+    fn an_item_carries_the_first_of_its_boards_with_a_status() {
+        let on = |items: Value| {
+            let mut issue = node("obi-ai-bot/obi", 640, "2026-10-17T08:00:00Z");
+            issue["projectItems"] = json!({ "nodes": items });
+            let (lists, _) = read(&answer(vec![], vec![issue], 1));
+            lists.assigned[0].board.clone()
+        };
+        let board = |project: &str, column: &str| {
+            Some(Board {
+                project: project.into(),
+                column: column.into(),
+            })
+        };
+        assert_eq!(on(json!([])), None, "on no board");
+        assert_eq!(
+            on(json!([{"project": {"title": "Ideas"}, "fieldValueByName": null}])),
+            None,
+            "on a board without a Status"
+        );
+        assert_eq!(
+            on(
+                json!([{"project": {"title": "Oby — Roadmap"}, "fieldValueByName": {"name": "In progress"}}])
+            ),
+            board("Oby — Roadmap", "In progress")
+        );
+        assert_eq!(
+            on(json!([
+                {"project": {"title": "Ideas"}, "fieldValueByName": null},
+                {"project": {"title": "Oby — Roadmap"}, "fieldValueByName": {"name": "Todo"}},
+                {"project": {"title": "Later"}, "fieldValueByName": {"name": "Backlog"}}])),
+            board("Oby — Roadmap", "Todo"),
+            "on several boards, the first with a Status"
+        );
+        let long = on(json!([{"project": {"title": "p".repeat(400)}, "fieldValueByName": {"name": "c".repeat(400)}}]))
+            .unwrap();
+        assert_eq!((long.project.len(), long.column.len()), (300, 300));
+        // A board the item is archived from is GitHub's to leave out.
+        assert!(BOARD.contains("includeArchived: false"));
+        let (lists, _) = read(&answer(
+            vec![],
+            vec![node("obi-ai-bot/obi", 1, "2026-10-17T08:00:00Z")],
+            1,
+        ));
+        assert_eq!(lists.assigned[0].board, None, "read without boards");
+        // GitHub saying the login lacks read:project, with its data and `projectItems: null`,
+        // isn't work left out: the items stay, without boards.
+        let mut issue = node("obi-ai-bot/obi", 640, "2026-10-17T08:00:00Z");
+        issue["projectItems"] = Value::Null;
+        let mut text: Value = serde_json::from_str(&answer(vec![], vec![issue], 1)).unwrap();
+        text["errors"] = json!([{"type": "INSUFFICIENT_SCOPES", "message": "The 'projectItems' field requires one of the following scopes: ['read:project']"}]);
+        match parse(&text.to_string()).unwrap() {
+            Got::Read {
+                lists,
+                partial,
+                no_board,
+                ..
+            } => {
+                assert_eq!((partial, no_board), (None, true));
+                assert_eq!(lists.assigned.len(), 1);
+                assert_eq!(lists.assigned[0].board, None);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import OSLog
+import Security
 import ServiceManagement
 
 /// The runner on this Mac: obid, Oby's engine, as a login item (the owner's decision of 2026-10-18:
@@ -83,11 +84,96 @@ final class RunnerLoginItem {
     }
 
     /// At launch: the Swift runner an older build registered goes, and with "This Mac" on the
-    /// engine is registered when nothing else serves this Mac.
+    /// engine is registered when nothing else serves this Mac. A registration macOS kept from an
+    /// older signature still says `.enabled` while launchd refuses the new obid ("spawn failed",
+    /// exit 78, seen 2026-10-20 after #790 moved the signing team): it's registered again once
+    /// when the app's team changed since the last launch, or when obid neither answers nor runs.
     func reconcile(onThisMac: Bool) {
         retireSwiftRunner()
         refresh()
-        if onThisMac, !byScript, status == .notRegistered { register() }
+        let team = Self.signingTeam()
+        let last = UserDefaults.standard.string(forKey: Self.teamKey)
+        // No team on record yet (a build before this one): the health check alone decides.
+        let teamChanged = team != nil && last != nil && team != last
+        if let team { UserDefaults.standard.set(team, forKey: Self.teamKey) }
+        guard onThisMac, !byScript else { return }
+        let status = status
+        Task {
+            let runs = status == .enabled && !teamChanged ? await Self.obidRuns() : true
+            switch Self.atLaunch(onThisMac: onThisMac, byScript: byScript, status: status, teamChanged: teamChanged, runs: runs) {
+            case .nothing: break
+            case .register: register()
+            case .reregister(let why): reregister(because: why)
+            }
+        }
+    }
+
+    /// What launch does about obid's login item.
+    nonisolated enum AtLaunch: Equatable { case nothing, register, reregister(String) }
+
+    /// Registers when nothing is; registers again when it says `.enabled` but the app's signing team
+    /// changed or obid doesn't run (`runs`). Waiting for approval, or not in this build: nothing,
+    /// Settings › Runner shows why.
+    nonisolated static func atLaunch(onThisMac: Bool, byScript: Bool, status: SMAppService.Status, teamChanged: Bool, runs: Bool) -> AtLaunch {
+        guard onThisMac, !byScript else { return .nothing }
+        switch status {
+        case .notRegistered: return .register
+        case .enabled where teamChanged: return .reregister("Oby's signing team changed since the last launch")
+        case .enabled where !runs: return .reregister("obid doesn't answer on 127.0.0.1:\(LocalRunner.port) and launchd doesn't run it")
+        default: return .nothing
+        }
+    }
+
+    /// The app's signing team at the last launch (`signingTeam`).
+    static let teamKey = "obidSigningTeam"
+    /// At most one re-register per launch, so a registration that keeps failing never loops.
+    private static var reregistered = false
+
+    private func reregister(because why: String) {
+        guard !Self.reregistered else { return }
+        Self.reregistered = true
+        Logger.feed.notice("registering obid's login item again: \(why, privacy: .public)")
+        unregister()
+        register()
+    }
+
+    /// The team ID the running app is signed with, or nil (ad hoc, or unreadable).
+    nonisolated static func signingTeam() -> String? {
+        var code: SecCode?
+        var staticCode: SecStaticCode?
+        var info: CFDictionary?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess
+        else { return nil }
+        return (info as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String
+    }
+
+    /// Whether obid runs: it answers on 127.0.0.1 within about 5 seconds, or launchd says it's
+    /// running (still starting). A job launchd lacks, or one it couldn't spawn, doesn't run.
+    nonisolated static func obidRuns() async -> Bool {
+        for second in 0..<5 {
+            var request = URLRequest(url: LocalRunner.url)
+            request.timeoutInterval = 1
+            // Any answer, even 401 without the token, means obid listens.
+            if (try? await URLSession.shared.data(for: request)) != nil { return true }
+            if second < 4 { try? await Task.sleep(for: .seconds(1)) }
+        }
+        return launchd(label)?.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == "state = running" } == true
+    }
+
+    /// `launchctl print` for `label` in this user's GUI domain, or nil when launchd hasn't got it.
+    nonisolated static func launchd(_ label: String) -> String? {
+        let print = Process()
+        let out = Pipe()
+        print.executableURL = URL(filePath: "/bin/launchctl")
+        print.arguments = ["print", "gui/\(getuid())/\(label)"]
+        print.standardOutput = out
+        print.standardError = FileHandle.nullDevice
+        guard (try? print.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        print.waitUntilExit()
+        return print.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
     }
 
     /// Unregisters the Swift runner's login item when an older build left it registered.

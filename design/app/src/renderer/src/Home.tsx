@@ -4,6 +4,7 @@ import Oby from './Oby';
 import GroupView from './GroupView';
 import ChatView from './ChatView';
 import TaskView from './TaskView';
+import SessionView from './SessionView';
 import Sidebar from './Sidebar';
 import TaskMenu from './TaskMenu';
 import ConvoMenu from './ConvoMenu';
@@ -53,7 +54,7 @@ function rubberBand(w: number) {
 // adding it again, so a task and its conversation go back and forth.
 type Step =
   | { kind: 'group'; id: string; tab: Tab }
-  | { kind: 'task' | 'thread' | 'talk' | 'oby' | 'peer' | 'settings'; id: string }
+  | { kind: 'task' | 'thread' | 'talk' | 'oby' | 'peer' | 'settings' | 'session'; id: string }
   // an Obysphere's settings, or its knowledge: which one
   | { kind: 'sphere' | 'knowledge'; id: string }
   | { kind: 'archive'; id?: undefined };
@@ -217,6 +218,7 @@ export default function Home() {
     if (l.kind === 'thread') { const t = tasks.find((k) => k.id === l.id); return t ? convoTitle(t.job) : ''; }
     if (l.kind === 'talk') return chats.find((c) => c.id === l.id)?.title ?? '';
     if (l.kind === 'archive') return 'Archived';
+    if (l.kind === 'session') return 'Session';
     if (l.kind === 'settings') return settingsLabel(l.id);
     if (l.kind === 'sphere') return sphereSettingsLabel(l.id, spheres);
     if (l.kind === 'knowledge') return knowledgeLabel;
@@ -387,7 +389,8 @@ export default function Home() {
         // a page on its way out has nowhere to go back to (a second quick Esc)
         const back = () => { if (i < 0) return; if (i > 0) backTo(i - 1); else closeAll(); };
         if (l.kind === 'group') return <GroupView key={l.key} group={TYPES.find((t) => t.id === l.id)!} tab={l.tab} leaving={leaving} covered={covered} onClose={back} onGone={onGone} onOpenTask={openTask} onOpenArchive={() => push({ kind: 'archive' })} />;
-        if (l.kind === 'task') return <TaskView key={l.key} id={l.id} leaving={leaving} covered={covered} onBack={back} onHome={closeAll} onGone={onGone} onTell={tellFromTask} />;
+        if (l.kind === 'task') return <TaskView key={l.key} id={l.id} leaving={leaving} covered={covered} onBack={back} onHome={closeAll} onGone={onGone} onTell={tellFromTask} onSession={(id) => push({ kind: 'session', id })} />;
+        if (l.kind === 'session') return <SessionView key={l.key} id={l.id} leaving={leaving} covered={covered} onBack={back} onGone={onGone} onTell={tellFromTask} />;
         if (l.kind === 'archive') return <ArchiveView key={l.key} leaving={leaving} covered={covered} onClose={back} onGone={onGone} onOpenTask={openTask} />;
         if (l.kind === 'settings') return <SettingsView key={l.key} page={l.id} leaving={leaving} covered={covered} onClose={back} onGone={onGone} />;
         if (l.kind === 'sphere') return <SphereSettings key={l.key} id={l.id} leaving={leaving} covered={covered} onClose={back} onGone={onGone} />;

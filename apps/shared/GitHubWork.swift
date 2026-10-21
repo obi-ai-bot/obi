@@ -29,8 +29,15 @@ struct GitHubCard: View {
                     }
                 }
             }
-            Text(verbatim: item.repoName).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted)
-                .lineLimit(1).padding(.leading, 26).padding(.top, 4)
+            HStack(spacing: 8) {
+                Text(verbatim: item.repoName).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.muted).lineLimit(1)
+                // Its board column, "Todo" or "In progress", when it's on a project board.
+                if let column = item.column {
+                    Text(verbatim: column).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.text).lineLimit(1)
+                        .padding(.horizontal, 8).padding(.vertical, 2).background(Tokens.pill, in: Capsule())
+                }
+            }
+            .padding(.leading, 26).padding(.top, 4)
             VStack(alignment: .leading, spacing: 0) {
                 AskCard(kind: item.label, title: item.headline, happened: item.note,
                         options: (item.action.map { [CardOption(label: $0, answer: $0, detail: item.actionDetail, recommended: true)] } ?? [])
@@ -55,7 +62,44 @@ struct GitHubCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.cardRadius, style: .continuous))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(Text(verbatim: "\(item.who.map { $0 + ", " } ?? "")\(item.heading), \(item.label)"))
+        .accessibilityLabel(Text(verbatim: "\(item.who.map { $0 + ", " } ?? "")\(item.heading), \(item.column.map { $0 + ", " } ?? "")\(item.label)"))
+    }
+}
+
+/// A kind's To do tab (Review PR and Issues): Connect GitHub while gh is signed out, then the
+/// items no job works on yet by board column, each column's name over its cards once any item is
+/// on a board, then what obid cut and why its last read of GitHub failed.
+struct GitHubToDo: View {
+    let kind: WorkType
+    let work: GitHubWork?
+    let columns: [GitHubWork.Column]
+    let connect: ConnectGitHubCard?
+    let start: (GitHubWork.Item) async throws -> Void
+    let later: (GitHubWork.Item) -> Void
+
+    var body: some View {
+        if let connect { connect }
+        let named = columns.contains { $0.name != nil }
+        // Two projects' boards: each column says whose it is.
+        let projects = Set(columns.compactMap(\.project)).count > 1
+        ForEach(columns) { column in
+            if named {
+                Text(verbatim: column.name.map { name in projects ? column.project.map { "\(name) · \($0)" } ?? name : name } ?? "Not on a board").font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.muted)
+                    .padding(.horizontal, 4).padding(.top, 8).accessibilityAddTraits(.isHeader)
+            }
+            ForEach(column.items) { item in
+                GitHubCard(item: item, start: { try await start(item) }, later: { later(item) })
+            }
+        }
+        ForEach(work?.cut(kind) ?? [], id: \.self) { line in
+            Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.horizontal, 4)
+        }
+        if let problem = work?.error {
+            Text(verbatim: GitHubWork.plain(problem)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.horizontal, 4)
+        }
+        if columns.isEmpty && connect == nil {
+            Text("Nothing to do").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
+        }
     }
 }
 

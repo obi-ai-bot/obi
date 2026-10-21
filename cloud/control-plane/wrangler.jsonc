@@ -8,18 +8,38 @@
   "observability": { "enabled": true },
   // The Worker's own hostname, a first-level name under the zone so Universal SSL covers it.
   "routes": [{ "pattern": "oby-control.tetrix.pro", "custom_domain": true }],
-  // Plain settings. Secrets (the Cloudflare API token, the account and zone ids, the email
-  // sender's key) are never here: `wrangler secret put`, or .dev.vars for `wrangler dev`.
+  // Plain settings. Secrets (the Cloudflare API token, the account and zone ids) are never
+  // here: `wrangler secret put`, or .dev.vars for `wrangler dev`.
   "vars": {
-    // The zone the devices' hostnames live in, and their prefix: oby-<opaque>.tetrix.pro.
-    "DOMAIN": "tetrix.pro",
+    // The zone the devices' hostnames live in: a registrable domain of their own, never under
+    // PRODUCT_DOMAIN, since anyone running Oby gets a name there (docs/remote-access.md). Empty
+    // until the owner registers one; CF_ZONE_ID is that zone's id. No endpoint is made until then.
+    "DEVICE_DOMAIN": "",
+    "PRODUCT_DOMAIN": "tetrix.pro",
     "HOSTNAME_PREFIX": "oby-",
+    // Sign in with Apple on the web (docs/remote-access.md): the Services ID, and the return URL
+    // registered for it at Apple. Not secrets: no private key is used, only Apple's identity token.
+    "APPLE_CLIENT_ID": "com.deskree.oby.signin",
+    "APPLE_REDIRECT_URI": "https://oby-control.tetrix.pro/v1/auth/apple/callback",
+    // Sign in with Google (docs/remote-access.md): the OAuth client's id from Deskree's Google
+    // Cloud project, and the redirect URI authorized for it. Not secrets: the ID token flow uses no
+    // client secret. Empty until the owner makes the client: Sign in with Google answers 503.
+    "GOOGLE_CLIENT_ID": "",
+    "GOOGLE_REDIRECT_URI": "https://oby-control.tetrix.pro/v1/auth/google/callback",
+    // What one Google Workspace's accounts may have together (src/app.ts, PER_DOMAIN): live
+    // endpoints, and Macs set up a day. Raise them for a bigger company; other email domains get
+    // 25 and 20, fixed.
+    "WORKSPACE_DOMAIN_ENDPOINTS": "100",
+    "WORKSPACE_DOMAIN_REGISTRATIONS": "50",
+    // The most endpoints alive at once: under Cloudflare's tunnel limit for the account.
+    "MAX_ENDPOINTS": "500",
     // What every tunnel routes to on the Mac: the gateway (#284). Nothing else is reachable.
-    "GATEWAY": "http://127.0.0.1:8810",
-    "EMAIL_FROM": "Oby <oby@tetrix.pro>",
-    // "true" only in .dev.vars: then the sign-in code comes back in the response instead of an email.
-    "DEV_ECHO_OTP": "false"
+    "GATEWAY": "http://127.0.0.1:8810"
   },
+  // Every minute: spent nonces and old rate-limit windows go, installations with no endpoint
+  // after a day, installations idle for 30 days with their tunnels, and tunnels not kept
+  // connected (src/app.ts, `sweep`).
+  "triggers": { "crons": ["* * * * *"] },
   "d1_databases": [
     {
       "binding": "DB",

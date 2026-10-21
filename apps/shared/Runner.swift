@@ -720,6 +720,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     case routine
     /// Your work on GitHub changed, or obid's gh signed in or out (obid only): the whole list.
     case github(GitHubWork)
+    /// A job's session got an entry, one changed, or the agent wrote more words (obid only, #755, #784).
+    case transcript(TranscriptEvent)
 }
 
 #if os(iOS) || os(watchOS)
@@ -1089,6 +1091,11 @@ nonisolated struct Runner: Sendable {
         try await call("POST", "v1/github/work/\(id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id)/start")
     }
     func report(_ id: String) async throws -> ResearchDocument { try await call("GET", "v1/jobs/\(id)/report") }
+
+    /// One entry's detail (#784): what the call was given, what it printed and its diff.
+    func transcriptDetail(_ id: String, _ n: Int) async throws -> TranscriptDetail {
+        try TranscriptDetail.read(await send("GET", "v1/jobs/\(id)/transcript/\(n)"))
+    }
 
     /// The job's raw session after line `after` (#381), oldest first: a list, or `{entries: […]}`.
     func transcript(_ id: String, after: Int? = nil) async throws -> TranscriptPage {
@@ -1475,13 +1482,14 @@ nonisolated struct Runner: Sendable {
 
     /// The answer's body, unread: for a call whose answer says nothing the app needs.
     @discardableResult
-    func send(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Data {
+    /// `json`, when given, is the body as it is (an Obi-to-Obi object keeps its snake_case keys).
+    func send(_ method: String, _ path: String, body: (any Encodable)? = nil, json: Data? = nil, timeout: TimeInterval = 45) async throws -> Data {
         var request = URLRequest(url: URL(string: path, relativeTo: base.appending(path: "/"))!)
         request.httpMethod = method
         request.timeoutInterval = timeout
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        if let body {
-            request.httpBody = try Self.encoder.encode(body)
+        if let body = try json ?? body.map({ try Self.encoder.encode($0) }) {
+            request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         let (data, response) = try await URLSession.shared.data(for: signed(request))
@@ -1736,6 +1744,7 @@ nonisolated struct EventParser {
             case "artifact": return (try? Runner.decoder.decode(ArtifactEvent.self, from: json)).map(RunnerEvent.artifact)
             case "routine": return .routine
             case "github": return (try? Runner.decoder.decode(GitHubWork.self, from: json)).map(RunnerEvent.github)
+            case "transcript": return (try? Runner.decoder.decode(TranscriptEvent.self, from: json)).map(RunnerEvent.transcript)
             default: return nil
             }
         }

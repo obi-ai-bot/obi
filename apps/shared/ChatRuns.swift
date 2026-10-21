@@ -105,7 +105,9 @@ nonisolated enum AskKind {
         case "permission": "Permission"
         case "review": "Out of reviews"
         case "limit": "Out of usage"
-        case "start": "Start it?"
+        // obid's offer to start on GitHub work (a review requested, an issue assigned): Sangam's
+        // label for a task waiting to start.
+        case "start", "github": "Start it?"
         case "merge": "Not merged"
         case "audit": "Issue audit"
         case "failure": "Oby failure"
@@ -114,7 +116,7 @@ nonisolated enum AskKind {
         }
     }
 
-    static func failed(_ kind: String) -> Bool { !["question", "permission", "review", "limit", "start", "audit", RunnerConfirm.kind].contains(kind) }
+    static func failed(_ kind: String) -> Bool { !["question", "permission", "review", "limit", "start", "github", "audit", RunnerConfirm.kind].contains(kind) }
 }
 
 /// A task's card under the answer that started it (Sangam's ThreadTask): where it stands, then

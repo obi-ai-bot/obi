@@ -204,7 +204,7 @@ final class Watch: NSObject {
                             saveGlance()
                         case .accounts(let accounts): self.accounts = accounts
                         case .step(let step): take(step)
-                        case .cleared, .inbox, .turn, .conversation, .delta, .artifact, .routine, .github: break
+                        case .cleared, .inbox, .turn, .conversation, .delta, .artifact, .routine, .github, .transcript: break
                         }
                     }
                 } catch {

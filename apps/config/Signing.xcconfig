@@ -5,19 +5,18 @@
 // To override any of these on one Mac, write them in apps/config/Signing.local.xcconfig (gitignored).
 // CI's ad hoc flags (docs/ci.md) still win: command-line settings beat every xcconfig.
 
-OBY_TEAM_ID = PQKAL8E36D
+OBY_TEAM_ID = 3UV9W5SV7W
 
 OBY_MAC_BUNDLE_ID = com.deskree.oby
-OBY_IPHONE_BUNDLE_ID = dev.wellprado.oby
+OBY_IPHONE_BUNDLE_ID = com.deskree.oby
 
 // Where the Mac app looks for updates (apps/mac/app/Info.plist, SUFeedURL): the appcast scripts/release.sh
 // writes and uploads. "//" starts a comment in an xcconfig, so the empty $() keeps the URL whole.
 OBY_APPCAST_URL = https:/$()/downloads.oby.deskree.com/appcast.xml
 
-// Sparkle's EdDSA public key (apps/mac/app/Info.plist, SUPublicEDKey): the one `generate_keys` prints
-// (docs/release.md, Sparkle keys). Until it's generated, a placeholder of 32 zero bytes: Sparkle
-// starts (an empty or malformed key is a fatal error at launch) and accepts no update, since
-// nothing signs with it. scripts/release.sh refuses a real release while it's here.
-OBY_SPARKLE_PUBLIC_KEY = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+// Sparkle's EdDSA public key (apps/mac/app/Info.plist, SUPublicEDKey): the one `generate_keys` printed on
+// 2026-10-20 (docs/release.md, Sparkle keys). Its private half is in the release Mac's login keychain;
+// every update must be signed with it, so keep an exported copy somewhere safe.
+OBY_SPARKLE_PUBLIC_KEY = rcgwHqm6vDZowMPh9fV8r8PlvfKzNegd21UdrknYP34=
 
 #include? "Signing.local.xcconfig"
