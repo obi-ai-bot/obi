@@ -5082,8 +5082,30 @@ impl Jobs {
             } else {
                 obi_plugin_api::Purpose::Dispatch
             };
-            // What Tetrix knows about the job, asked with Oby's login (crate::tetrix).
             let mut more = Vec::new();
+            // Teammates' open pull requests on the files it claimed (crate::teammates).
+            if let Some(found) = self
+                .teammates_on(&job, job.files.as_deref().unwrap_or_default())
+                .await
+            {
+                let prs: Vec<_> = found.iter().map(|(pr, _)| pr.clone()).collect();
+                if let Some(line) = crate::teammates::prompt_line(&prs) {
+                    message = format!("{message}\n\n{line}");
+                    more.push((
+                        obi_plugin_api::PluginId::new("github").expect("a plug-in id"),
+                        crate::teammates::context_items(&found),
+                    ));
+                }
+                self.update(id, |job| {
+                    if !job.teammates.as_ref().is_some_and(|t| t.rechecked) {
+                        job.teammates = Some(crate::teammates::Teammates {
+                            prs,
+                            rechecked: false,
+                        });
+                    }
+                });
+            }
+            // What Tetrix knows about the job, asked with Oby's login (crate::tetrix).
             if let (Some(tetrix), Some(connections)) =
                 (self.tetrix_for(&job), self.connections.get())
             {
@@ -5564,6 +5586,7 @@ impl Jobs {
             self.publish_artifacts(id).await;
             stages.begin("keep commits");
             let head = self.keep_commits(id).await?;
+            self.teammates_ended(id, &worktree, &start_commit).await;
             self.tetrix_ended(id, &worktree, &start_commit).await;
             let job = self.get(id).ok_or("the job is gone")?;
             let commits = self.counted(&job, &worktree, &head).await;
@@ -5770,6 +5793,71 @@ impl Jobs {
                 job.artifact_problems = problems;
             });
         }
+    }
+
+    /// Teammates' open pull requests that change `files` of `job`, with their diffs of them: not
+    /// for another Oby's job or a review, and none on a branch of obid's own jobs (crate::teammates).
+    async fn teammates_on(
+        &self,
+        job: &Job,
+        files: &[String],
+    ) -> Option<Vec<(crate::teammates::Pr, String)>> {
+        if job.obi.is_some() || job.kind == "review" {
+            return None;
+        }
+        let skip: Vec<String> = self
+            .lock()
+            .jobs
+            .values()
+            .filter(|j| j.repo == job.repo)
+            .map(|j| j.branch.clone())
+            .chain(job.start_from.clone())
+            .collect();
+        crate::teammates::read(&job.repo, files, &skip).await
+    }
+
+    /// Once job `id` has commits since `start`: teammates' open pull requests on the files they
+    /// changed, whether one changes the same code, and its summary's line saying so.
+    async fn teammates_ended(&self, id: &str, worktree: &Path, start: &str) {
+        let Some(job) = self.get(id) else { return };
+        if start.is_empty() || job.teammates.as_ref().is_some_and(|t| t.rechecked) {
+            return;
+        }
+        let range = format!("{start}..HEAD");
+        let changed: Vec<String> = git::git(worktree, &["diff", "--name-only", &range])
+            .await
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .map(String::from)
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        let Some(found) = self.teammates_on(&job, &changed).await else {
+            return;
+        };
+        let ours = git::git(worktree, &["diff", "-U0", &range])
+            .await
+            .unwrap_or_default();
+        let teammates = crate::teammates::Teammates {
+            prs: found
+                .into_iter()
+                .map(|(mut pr, diff)| {
+                    pr.clash = Some(crate::teammates::clashes(&ours, &diff));
+                    pr
+                })
+                .collect(),
+            rechecked: true,
+        };
+        let line = crate::teammates::report_line(&teammates);
+        self.update(id, |job| {
+            if let Some(line) = line {
+                job.summary = format!("{}\n\n{line}", job.summary.trim_end());
+            }
+            job.teammates = Some(teammates);
+        });
     }
 
     /// Job `id`'s Tetrix as it ends (crate::tetrix): its commits' stamps, its graph gaps sent to

@@ -1765,6 +1765,32 @@ nonisolated struct RoutineMark: Codable, Equatable, Sendable {
     var line: String { "From routine: \(name)" }
 }
 
+/// Teammates' open pull requests that change a job's files (obid only: docs/runner-api.md,
+/// "obid only: teammates' pull requests"). Titles are what people wrote: never shown as obid's words.
+nonisolated struct TeammatePRs: Codable, Equatable, Sendable {
+    struct PR: Codable, Equatable, Sendable {
+        var number: Int
+        var author: String
+        var files: [String]
+        /// After the job's commits: the code both change, empty when only files are shared.
+        var clash: [String]?
+    }
+    var prs: [PR]
+
+    /// What a job's page says under its head: "Also changed in @alice's #812 (src/jobs.rs)", or
+    /// "Same code changed in …" once the check after its commits found some; nil when none.
+    var line: String? {
+        guard !prs.isEmpty else { return nil }
+        let same = prs.contains { !($0.clash ?? []).isEmpty }
+        let who = prs.map { "@\($0.author)'s #\($0.number)" }
+        var files: [String] = []
+        for file in prs.flatMap(\.files) where !files.contains(file) { files.append(file) }
+        let named = who.count < 3 ? who.joined(separator: " and ") : who.dropLast().joined(separator: ", ") + " and " + who.last!
+        let shown = files.prefix(3).joined(separator: ", ") + (files.count > 3 ? " and \(files.count - 3) more" : "")
+        return "\(same ? "Same code changed in" : "Also changed in") \(named) (\(shown))"
+    }
+}
+
 /// A routine as obid lists it: a saved request it runs on a schedule, a job each time.
 nonisolated struct RunnerRoutine: Codable, Identifiable, Equatable, Sendable {
     struct Run: Codable, Equatable, Sendable {

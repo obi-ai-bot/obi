@@ -102,10 +102,12 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
     var routine: RoutineMark?
     /// What its agent asked Tetrix, the session it saved and where the graph fell short, or nil.
     var tetrix: TetrixJobReport?
+    /// Teammates' open pull requests on its files (obid only), or nil.
+    var teammates: TeammatePRs?
     /// The job page's facts (#739), read from the same JSON; nil for this Mac's own jobs.
     var facts: JobFacts?
 
-    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, turn, artifacts, routine, tetrix }
+    private enum Keys: String, CodingKey { case id, mode, permission, question, conversation, turn, artifacts, routine, tetrix, teammates }
 
     init(id: String, mode: String? = nil, permission: RunnerPermission? = nil, question: Question? = nil, conversation: String? = nil,
          turn: String? = nil) {
@@ -128,6 +130,7 @@ nonisolated struct RunnerJobExtras: Decodable, Equatable, Sendable {
         artifacts = try? keys.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
         routine = try? keys.decodeIfPresent(RoutineMark.self, forKey: .routine)
         tetrix = try? keys.decodeIfPresent(TetrixJobReport.self, forKey: .tetrix)
+        teammates = try? keys.decodeIfPresent(TeammatePRs.self, forKey: .teammates)
         facts = (try? JobFacts(from: decoder)).flatMap { $0 == JobFacts() ? nil : $0 }
     }
 

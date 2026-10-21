@@ -49,6 +49,7 @@ pub mod secrets;
 pub mod settings;
 pub mod sphere;
 pub mod store;
+pub mod teammates;
 pub mod tetrix;
 pub mod token;
 pub mod transcript;

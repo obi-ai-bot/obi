@@ -245,6 +245,9 @@ pub struct Job {
     /// What obid saw of the agent and Tetrix, through obid's own Tetrix server (crate::tetrix).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tetrix: Option<crate::tetrix::Use>,
+    /// Teammates' open pull requests on the job's files (crate::teammates).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teammates: Option<crate::teammates::Teammates>,
     /// Calls an agent made through the user's connected apps; names only, never secret values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connection_uses: Vec<crate::connections::ConnectionUse>,
@@ -485,6 +488,7 @@ impl Job {
             answered_count: 0,
             connection_uses: Vec::new(),
             tetrix: None,
+            teammates: None,
             connections: None,
             heard: Vec::new(),
             offers: Vec::new(),
@@ -791,6 +795,7 @@ impl Job {
         if let Some(activity) = &self.activity {
             value["activity"] = activity.clone();
         }
+        value["teammates"] = json!(self.teammates);
         if let Some(context) = &self.context {
             value["context"] = json!(context);
             // The agent's own words, quoted: never obid's.
@@ -1249,11 +1254,12 @@ mod tests {
             "nextStep",
             "resumesAt",
             "routine",
+            "teammates",
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, obid's sixteen, and `supervised`.
-        assert_eq!(object.len(), 82);
+        // The Swift runner's 65 keys, obid's seventeen, and `supervised`.
+        assert_eq!(object.len(), 83);
         assert_eq!(value["supervised"], json!([]));
         assert_eq!(value["archived"], Value::Null);
         assert_eq!(value["changes"], json!([]));
