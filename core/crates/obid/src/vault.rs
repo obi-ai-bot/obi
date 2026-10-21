@@ -1116,7 +1116,13 @@ pub async fn answers(request: Request, next: Next) -> Response {
     if !request.uri().path().starts_with("/v1/") {
         return next.run(request).await;
     }
-    let Some(vault) = shared() else {
+    // A test's own vault, given as the request's extension; obid's otherwise (`install`).
+    let Some(vault) = request
+        .extensions()
+        .get::<Arc<Vault>>()
+        .cloned()
+        .or_else(shared)
+    else {
         return next.run(request).await;
     };
     let (request, stops) = stops_only(request).await;
@@ -1760,10 +1766,6 @@ mod tests {
             Arc::new(Secrets::default()),
         ));
         vault.check().unwrap();
-        let before = SHARED
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .replace(vault.clone());
 
         let (send, events) = tokio::sync::mpsc::unbounded_channel::<Event>();
         let events = Arc::new(Mutex::new(Some(events)));
@@ -1781,7 +1783,9 @@ mod tests {
                     )
                 }),
             )
-            .layer(axum::middleware::from_fn(answers));
+            .layer(axum::middleware::from_fn(answers))
+            // This test's vault, never obid's shared one, which other tests use meanwhile.
+            .layer(axum::Extension(vault.clone()));
         let response = app
             .oneshot(Request::get("/v1/events").body(Body::empty()).unwrap())
             .await
@@ -1830,8 +1834,6 @@ mod tests {
             event.contains("[vault: second]") && event.contains("[vault: first]"),
             "{event}"
         );
-
-        *SHARED.write().unwrap_or_else(|e| e.into_inner()) = before;
     }
 
     /// The Swift runner's Keychain items when obid runs in the Mac app's runner home; a file in
