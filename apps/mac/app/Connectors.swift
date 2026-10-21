@@ -39,6 +39,17 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
         case disconnect(String)
         /// gh's own sign-in on the runner (`POST /v1/github/sign-in`): GitHub's page and its code.
         case signInGitHub
+        /// obid connects to Slack (`POST /v1/slack/sign-in`): Slack's own page; `asksClientID` asks
+        /// for the Slack app's Client ID first.
+        case connectSlack(asksClientID: Bool)
+        /// The Slack sign-in under way: its page again.
+        case reopenSlackSignIn
+        /// `DELETE /v1/slack/sign-in`.
+        case cancelSlackSignIn
+        /// `DELETE /v1/slack`: obid forgets its Slack login.
+        case disconnectSlack
+        /// `PATCH /v1/watch`: the watcher's Slack message on, or back to a dry run.
+        case setWatchLive(Bool)
     }
 
     /// How to disconnect a connected one, or connect an available one.
@@ -122,6 +133,9 @@ nonisolated enum Connectors {
         var connections: [ConnectedApp]?
         /// obid's Tetrix, held once for every agent (`GET /v1/tetrix`); nil from a runner that doesn't hold one.
         var tetrix: TetrixStatus? = nil
+        /// obid's Slack (`GET /v1/slack`) and its watcher (`GET /v1/watch`); nil from a runner without them.
+        var slack: SlackStatus? = nil
+        var watch: WatchStatus? = nil
     }
 
     /// One of the page's groups, with its title.
@@ -138,6 +152,9 @@ nonisolated enum Connectors {
         var gitHub: GitHubLogin?
         /// obid's Tetrix (`GET /v1/tetrix`); nil from a runner that doesn't hold one.
         var tetrix: TetrixStatus?
+        /// obid's Slack and its watcher; nil from a runner without them.
+        var slack: SlackStatus?
+        var watch: WatchStatus?
         /// Why a list couldn't be read: a timeout, a 500, a 401. Only a 404 means the runner has
         /// none to list; anything else is said, never shown as an empty list.
         var problems: [String] = []
@@ -163,6 +180,9 @@ nonisolated enum Connectors {
         } catch {
             lists.problems.append("Couldn't read Tetrix on \(name): \(error.localizedDescription)")
         }
+        // Said on Slack's own row: without it, Slack stays "Coming soon".
+        lists.slack = try? await runner.slack()
+        lists.watch = try? await runner.watch()
         return lists
     }
 
@@ -195,7 +215,10 @@ nonisolated enum Connectors {
             accounts.map { tool(agent, name: name, about: about, brand: brand, accounts: $0) }
                 ?? untilRunner(id: agent, name: name, about: about, brand: brand, runner: nil)
         }
-        list += soon.dropFirst()
+        list += soon.dropFirst().map { coming in
+            guard coming.id == "slack", let runner, let status = runner.slack else { return coming }
+            return slack(status, watch: runner.watch, place: runner.name, local: runner.local)
+        }
         if let runner {
             list += (runner.plugins ?? []).filter { $0.id != "tetrix" }.map { plugin($0, place: runner.name) }
             list += (runner.connections ?? []).map { connection($0, place: runner.name) }
@@ -250,6 +273,32 @@ nonisolated enum Connectors {
                        there ?? first.map { .button("Connect", .connectTetrix($0)) } ?? .button("Connect…", .connectOtherTetrix),
                        local && first != nil ? .button("Another Tetrix…", .connectOtherTetrix) : nil)
         }
+    }
+
+    /// Slack, held by obid for its watcher: one sign-in, on Slack's own page, with the owner's own
+    /// Slack app. Only obid on this Mac gets buttons: Slack's page comes back to localhost on obid's
+    /// own machine. Connected, the watcher's Slack message is turned on or back to a dry run here.
+    static func slack(_ status: SlackStatus, watch: WatchStatus?, place: String, local: Bool) -> Connector {
+        let how = [status.how, watch?.line].compactMap { $0 }.joined(separator: "\n")
+        let row = { (state: Connector.State, way: Connector.Way?, also: Connector.Way?) in
+            Connector(id: "slack", name: "Slack", about: SlackStatus.about, place: place, how: how, state: state,
+                      way: way, also: also, brand: "slack")
+        }
+        guard local else {
+            return row(status.connected ? .connected : .available,
+                       .steps("Connect or disconnect it on \(place) itself, with Oby there: Slack's sign-in comes back to that machine."), nil)
+        }
+        if status.connected {
+            let live = watch?.rules.map { rules in
+                Connector.Way.button(rules.live ? "Watcher: Dry Run Only" : "Watcher: Send Slack Messages", .setWatchLive(!rules.live))
+            }
+            return row(.connected, .button("Disconnect…", .disconnectSlack), live)
+        }
+        if status.signIn != nil {
+            return row(.unconfirmed, .button("Open the Page Again", .reopenSlackSignIn), .button("Cancel", .cancelSlackSignIn))
+        }
+        return row(status.error == nil ? .available : .broken, .button("Connect…", .connectSlack(asksClientID: status.clientId == nil)),
+                   status.clientId == nil ? nil : .button("Another Slack App…", .connectSlack(asksClientID: true)))
     }
 
     /// A plug-in obid found (docs/ARCHITECTURE.md, "Plug-ins"). Ready is connected, failed needs

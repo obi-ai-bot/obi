@@ -109,6 +109,42 @@ struct ConnectorsTests {
         #expect(Connectors.tetrix(TetrixStatus(), place: "This Mac", local: true).way == .button("Connect…", .connectOtherTetrix))
     }
 
+    /// Slack, held by obid for its watcher: a real row once obid says it holds one, with Connect asking
+    /// for the Slack app's Client ID the first time, and the watcher's Slack message switched here.
+    @Test func slackOnceObidHoldsIt() throws {
+        var runner = Connectors.RunnerState(name: "This Mac", local: true, accounts: [])
+        #expect(try #require(Connectors.list(accounts: [], runner: runner).first { $0.id == "slack" }).soon, "coming until obid says")
+        runner.slack = SlackStatus(redirect: "http://localhost:47823/callback")
+        let first = try #require(Connectors.list(accounts: [], runner: runner).first { $0.id == "slack" })
+        #expect(!first.soon && first.state == .available && first.brand == "slack")
+        #expect(first.way == .button("Connect…", .connectSlack(asksClientID: true)) && first.also == nil)
+
+        let again = Connectors.slack(SlackStatus(clientId: "1.2"), watch: nil, place: "This Mac", local: true)
+        #expect(again.way == .button("Connect…", .connectSlack(asksClientID: false)) && again.also == .button("Another Slack App…", .connectSlack(asksClientID: true)))
+
+        let signing = Connectors.slack(SlackStatus(clientId: "1.2", signIn: .init(url: URL(string: "https://slack.com/oauth/v2/authorize?x=1")!)),
+                                       watch: nil, place: "This Mac", local: true)
+        #expect(signing.state == .unconfirmed && signing.way == .button("Open the Page Again", .reopenSlackSignIn))
+
+        let dry = WatchStatus(rules: .init(name: "Dmitry watcher", live: false, enabled: true))
+        let on = Connectors.slack(SlackStatus(connected: true, team: "Deskree", clientId: "1.2"), watch: dry, place: "This Mac", local: true)
+        #expect(on.state == .connected && on.way == .button("Disconnect…", .disconnectSlack))
+        #expect(on.also == .button("Watcher: Send Slack Messages", .setWatchLive(true)))
+        #expect(on.how.hasSuffix("Dmitry watcher: a dry run, it tells you in Oby and only writes down the Slack message."))
+
+        let remote = Connectors.slack(SlackStatus(), watch: nil, place: "tetrix-lab", local: false)
+        #expect(remote.also == nil && remote.way == .steps("Connect or disconnect it on tetrix-lab itself, with Oby there: Slack's sign-in comes back to that machine."))
+    }
+
+    /// Only Slack's own page is opened, and a Client ID is digits, a dot and digits.
+    @Test func onlySlacksPageAndAClientIDAreTaken() {
+        #expect(SlackStatus.SignIn(url: URL(string: "https://slack.com/oauth/v2/authorize?client_id=1.2")!).opens)
+        #expect(!SlackStatus.SignIn(url: URL(string: "https://slack.com.evil.example/oauth")!).opens)
+        #expect(!SlackStatus.SignIn(url: URL(string: "http://slack.com/oauth")!).opens)
+        #expect(SlackStatus.isClientID("1234567890.1234567890"))
+        #expect(!SlackStatus.isClientID("1234") && !SlackStatus.isClientID("a.1") && !SlackStatus.isClientID("1.") && !SlackStatus.isClientID("١.٢"))
+    }
+
     /// A remote runner's Tetrix has no button in any state: its sign-in comes back to 127.0.0.1 on
     /// that machine, so it's done there.
     @Test func aRemoteRunnersTetrixIsDoneThere() throws {

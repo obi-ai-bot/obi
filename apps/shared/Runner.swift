@@ -706,6 +706,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     case cleanup(RunnerStatus.Cleanup)
     /// obid's Tetrix changed: connected, signed out, a sign-in started or ended (obid only).
     case tetrix(TetrixStatus)
+    /// The watcher told the owner something (a `watch` inbox item, obid only): a notification.
+    case watchNotice(WatchNotice)
     #endif
     /// A turn of the conversation was added, from any app, or changed (a job dispatched from it):
     /// the Mac window's and the iPhone's thread replace it by id, or add it by time (#11).
@@ -1879,7 +1881,10 @@ nonisolated struct EventParser {
             case "accounts": return (try? Runner.decoder.decode([RunnerAccount].self, from: json)).map(RunnerEvent.accounts)
             case "clear": return (try? Runner.decoder.decode(ClearedAt.self, from: json)).map { .cleared($0.clearedAt) }
             #if os(macOS)
-            case "inbox": return InboxItem.runner(json).map { RunnerEvent.inbox($0, try? Runner.decoder.decode(InboxWords.self, from: json)) }
+            case "inbox":
+                // Engine's inbox doesn't know the watcher's kind: its item only notifies.
+                if let notice = try? Runner.decoder.decode(WatchNotice.self, from: json), notice.kind == "watch" { return .watchNotice(notice) }
+                return InboxItem.runner(json).map { RunnerEvent.inbox($0, try? Runner.decoder.decode(InboxWords.self, from: json)) }
             #else
             case "inbox": return (try? Runner.decoder.decode(InboxItem.self, from: json)).map(RunnerEvent.inbox)
             #endif

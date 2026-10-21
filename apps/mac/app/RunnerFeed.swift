@@ -411,6 +411,7 @@ final class RunnerFeed {
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     case .tetrix(let status): tetrix = status
+                    case .watchNotice(let notice): tell(notice)
                     case .cleanup(let measured): cleanup = measured
                     // obid names each turn's, step's and word's conversation: the window shows one (#493).
                     case .turn(let turn, let extras):
@@ -988,6 +989,26 @@ final class RunnerFeed {
                 _ = try await center.requestAuthorization(options: [.alert, .sound])
             } catch {
                 Logger.feed.error("asking to notify failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// The watcher's notices already shown, so a reconnect's replay doesn't show one again.
+    @ObservationIgnored private var told: Set<String> = []
+
+    /// A `watch` item that just came: a notification with obid's own words (who, where), never what
+    /// was written. One that's done, or more than an hour old (a replay), shows nothing.
+    private func tell(_ notice: WatchNotice) {
+        guard notice.done == nil, notice.created > .now.addingTimeInterval(-3600), told.insert(notice.id).inserted else { return }
+        let content = UNMutableNotificationContent()
+        content.title = notice.title
+        content.body = notice.text
+        content.sound = .default
+        content.threadIdentifier = "watch"
+        let request = UNNotificationRequest(identifier: notice.id, content: content, trigger: nil)
+        Task {
+            do { try await UNUserNotificationCenter.current().add(request) } catch {
+                Logger.feed.error("posting a watcher notice failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

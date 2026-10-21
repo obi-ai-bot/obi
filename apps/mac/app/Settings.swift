@@ -717,6 +717,9 @@ struct ConnectorsSettingsView: View {
     @State private var problems: [String: String] = [:]
     /// gh's sign-in under way on the runner, shown in its sheet until it signs in or is cancelled.
     @State private var gitHubSignIn: GitHubSignIn?
+    /// Connect… on Slack asks for the Slack app's Client ID in this field.
+    @State private var askingSlack = false
+    @State private var clientID = ""
 
     var body: some View {
         let groups = Connectors.groups(list, query: query)
@@ -777,6 +780,14 @@ struct ConnectorsSettingsView: View {
         } message: {
             Text("Its MCP server's address, starting with https://. You sign in on its own page, once, for every agent on \(feed.name).")
         }
+        .alert("Connect Slack", isPresented: $askingSlack) {
+            TextField("Client ID", text: $clientID, prompt: Text("1234567890.1234567890"))
+            Button("Connect") { signInToSlack(clientID: clientID.trimmingCharacters(in: .whitespaces), row: "slack") }
+                .disabled(!SlackStatus.isClientID(clientID))
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your workspace's Oby app's Client ID (api.slack.com/apps › Basic Information › App Credentials). Its Redirect URLs must list \(lists.slack?.redirect ?? "http://localhost:47823/callback"). You allow it once, on Slack's own page.")
+        }
         .alert("Connect Tetrix", isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } })) {
             TextField("MCP URL", text: $url, prompt: Text("https://"))
             Button("Connect") {
@@ -798,7 +809,8 @@ struct ConnectorsSettingsView: View {
         #endif
         let runner = (feed.runner == nil && !staged) || feed.connection != .live ? nil : Connectors.RunnerState(
             name: feed.name, local: feed.local, accounts: feed.accounts, github: feed.github, checks: feed.checkRuns,
-            gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: feed.tetrix)
+            gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: feed.tetrix,
+            slack: lists.slack, watch: lists.watch)
         let accounts = Connectors.accounts(mac: store.accounts, runner: runner?.accounts, local: feed.local,
                                            hasRunner: feed.runner != nil || staged)
         return Connectors.list(accounts: accounts, runner: runner)
@@ -879,7 +891,30 @@ struct ConnectorsSettingsView: View {
     /// A button: what takes something away asks first; signing in or out opens Terminal.
     private func perform(_ action: Connector.Action, _ connector: Connector) {
         switch action {
-        case .disablePlugin, .disconnect, .disconnectTetrix: confirming = connector
+        case .disablePlugin, .disconnect, .disconnectTetrix, .disconnectSlack: confirming = connector
+        case .connectSlack(let asks):
+            if asks {
+                clientID = ""
+                askingSlack = true
+            } else {
+                signInToSlack(clientID: nil, row: connector.id)
+            }
+        case .reopenSlackSignIn:
+            if let signIn = lists.slack?.signIn, signIn.opens { NSWorkspace.shared.open(signIn.url) }
+        case .cancelSlackSignIn:
+            slackCall(row: connector.id) { try await $0.cancelSlackSignIn() }
+        case .setWatchLive(let live):
+            guard let runner = feed.runner else { return }
+            Task {
+                busy = true
+                defer { busy = false }
+                do {
+                    lists.watch = try await runner.setWatchLive(live)
+                    problems[connector.id] = nil
+                } catch {
+                    problems[connector.id] = error.localizedDescription
+                }
+            }
         case .accounts: openSettings(.accounts)
         case .connectTetrix(let server): signInToTetrix(server, row: connector.id)
         case .connectOtherTetrix:
@@ -917,6 +952,7 @@ struct ConnectorsSettingsView: View {
                 }
                 if let status = try? await runner.tetrix() { feed.tetrix = status }
             }
+        case .disconnectSlack: slackCall(row: connector.id) { try await $0.disconnectSlack() }
         case .disconnect(let name):
             guard let runner = feed.runner else { return }
             Task {
@@ -944,6 +980,8 @@ struct ConnectorsSettingsView: View {
             return "After Touch ID, \(feed.name) forgets it and its agents can't reach it any more. Its secret stays in the runner's vault."
         case .disconnectTetrix:
             return "\(feed.local ? "obid" : feed.name) forgets its Tetrix login, and agents on every account stop getting Tetrix's tools."
+        case .disconnectSlack:
+            return "obid forgets its Slack login, and the watcher reads only GitHub until you connect Slack again."
         default:
             return ""
         }
@@ -1043,6 +1081,58 @@ struct ConnectorsSettingsView: View {
                 if !status.connected { problems["tetrix"] = status.error ?? "Tetrix's sign-in ended without signing in." }
                 tetrixSignIn = nil
             }
+        }
+    }
+
+    /// obid's sign-in to Slack with the app `clientID` (nil: the one it kept): Slack's own page opens
+    /// in the browser, and the row follows obid every 2 seconds until the sign-in ends. Only a page on
+    /// slack.com, over https, is ever opened.
+    private func signInToSlack(clientID: String?, row: String) {
+        guard feed.local, let runner = feed.runner else { return }
+        Task {
+            busy = true
+            do {
+                let signIn = try await runner.startSlackSignIn(clientID: clientID)
+                guard signIn.opens else {
+                    busy = false
+                    problems[row] = "\(feed.name) answered with a page that isn't Slack's own, so Oby opened nothing."
+                    try? await runner.cancelSlackSignIn()
+                    return
+                }
+                problems[row] = nil
+                NSWorkspace.shared.open(signIn.url)
+            } catch {
+                busy = false
+                problems[row] = error.localizedDescription
+                return
+            }
+            busy = false
+            for _ in 0..<300 {
+                guard let status = try? await runner.slack() else { break }
+                lists.slack = status
+                if status.signIn == nil {
+                    if !status.connected { problems[row] = status.error ?? "Slack's sign-in ended without connecting." }
+                    break
+                }
+                try? await Task.sleep(for: .seconds(2))
+            }
+            lists.watch = (try? await runner.watch()) ?? lists.watch
+        }
+    }
+
+    /// A Slack call on the runner, then the row as obid says it is.
+    private func slackCall(row: String, _ call: @escaping (Runner) async throws -> Void) {
+        guard feed.local, let runner = feed.runner else { return }
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                try await call(runner)
+                problems[row] = nil
+            } catch {
+                problems[row] = error.localizedDescription
+            }
+            if let status = try? await runner.slack() { lists.slack = status }
         }
     }
 
