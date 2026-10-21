@@ -97,8 +97,19 @@ struct SlackTests {
         let now = Date(timeIntervalSince1970: 1_792_501_200)
         let slack = WatchNotice(id: "w1", title: "t", text: "x", created: now, url: URL(string: "https://deskree.slack.com/archives/C1/p1"))
         let review = WatchNotice(kind: "listen", id: "l1", job: "j1", title: "Review ready: obi #835", text: "x", options: ["Approve", "Dismiss"],
-                                 created: now, url: URL(string: "https://GitHub.com/obi-ai-bot/obi/pull/835"), review: "Looks right.")
-        #expect(InlineNotice.brand(slack) == "slack" && InlineNotice.brand(review) == "github")
+                                 created: now, url: URL(string: "https://github.com/obi-ai-bot/obi/pull/835"), review: "Looks right.")
+        // The mark is where obid says it came from, never the link's host: a listener's review links GitHub but came from Slack.
+        let commented = WatchNotice(id: "w2", title: "t", text: "x", created: now, url: URL(string: "https://github.com/a/b/pull/1"), source: "github")
+        #expect(InlineNotice.brand(slack) == "slack" && InlineNotice.brand(review) == "slack" && InlineNotice.brand(commented) == "github")
+        // The button says where its link goes: the review's opens its pull request on GitHub.
+        #expect(review.url.map(InlineNotice.linkLabel) == "Open on GitHub")
+        #expect(slack.url.map(InlineNotice.linkLabel) == "Open in Slack")
+        #expect(InlineNotice.linkLabel(URL(string: "https://GITHUB.com/a/b")!) == "Open on GitHub")
+        // A review it can't show offers its job's page; one it shows doesn't.
+        let flagged = WatchNotice(kind: "listen", id: "l2", job: "j2", title: "Review ready: obi #836", text: "x", created: now)
+        #expect(InlineNotice.opensJob(flagged) && !InlineNotice.opensJob(review) && !InlineNotice.opensJob(slack))
+        let decoded = try Runner.decoder.decode(WatchNotice.self, from: Data(#"{"id":"w3","kind":"watch","title":"t","text":"x","created":"2026-10-21T15:00:00Z","watch":{"source":"github"}}"#.utf8))
+        #expect(decoded.source == "github")
         let options = InlineNotice.options(review)
         #expect(options.map(\.label) == ["Approve", "Dismiss"] && options[0].detail?.hasPrefix("Posts the review above") == true)
         let status = try Runner.decoder.decode(SlackStatus.self, from: Data(#"{"connected":true,"team":"Deskree","socket":true}"#.utf8))

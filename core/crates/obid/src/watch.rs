@@ -314,7 +314,7 @@ fn status_of(kept: &Kept) -> Value {
     })
 }
 
-fn cut(text: &str, most: usize) -> String {
+pub(crate) fn cut(text: &str, most: usize) -> String {
     let text = text.trim();
     if text.chars().count() <= most {
         return text.to_owned();
@@ -680,7 +680,12 @@ const LEFT_OUT: &str = "(Left out: the secret scan flagged it.)";
 /// run into the next text). Empty texts aren't scanned. An error when the scan can't run.
 // ponytail: one scan per text, a gitleaks run each; a run reads at most 100 of them.
 pub(crate) async fn scan_each(texts: &[String], scratch: &Path) -> Result<BTreeSet<usize>, String> {
-    crate::store::make_private_dir(scratch).map_err(|e| format!("its folder: {e}"))?;
+    // A folder of this call's own: two scans at once never remove each other's.
+    let folder = scratch.join(uuid::Uuid::new_v4().simple().to_string());
+    crate::store::make_private_dir(scratch)
+        .and_then(|()| crate::store::make_private_dir(&folder))
+        .map_err(|e| format!("its folder: {e}"))?;
+    let scratch = folder.as_path();
     let mut flagged = BTreeSet::new();
     let mut result = Ok(());
     for (n, text) in texts
@@ -727,7 +732,7 @@ fn flagged_names(
 
 // The message to the owner
 
-fn slack_escaped(text: &str) -> String {
+pub(crate) fn slack_escaped(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -741,23 +746,30 @@ pub fn dm_text(rules: &Rules, notices: &[Notice]) -> String {
         slack_escaped(&rules.name),
         slack_escaped(&rules.person.name)
     )];
-    for n in notices {
-        let about = n
-            .topic
-            .as_deref()
-            .map(plain_topic)
-            .filter(|t| !t.is_empty())
-            .map(|t| format!(" ({t})"))
-            .unwrap_or_default();
-        let link = n
-            .url
-            .as_deref()
-            .filter(|u| link_ok(u, "slack.com") || link_ok(u, "github.com"))
-            .map(|u| format!(": {u}"))
-            .unwrap_or_default();
-        lines.push(format!("• {}{about}{link}", slack_escaped(&n.what)));
-    }
+    lines.extend(notices.iter().map(|n| notice_line(None, n)));
     lines.join("\n")
+}
+
+/// One notice in a Slack message to the owner: `• <person> <what> (<topic made plain>): <link>`,
+/// obid's words and a link on slack.com or github.com only.
+pub(crate) fn notice_line(person: Option<&str>, n: &Notice) -> String {
+    let about = n
+        .topic
+        .as_deref()
+        .map(plain_topic)
+        .filter(|t| !t.is_empty())
+        .map(|t| format!(" ({t})"))
+        .unwrap_or_default();
+    let link = n
+        .url
+        .as_deref()
+        .filter(|u| link_ok(u, "slack.com") || link_ok(u, "github.com"))
+        .map(|u| format!(": {u}"))
+        .unwrap_or_default();
+    let who = person
+        .map(|p| format!("{} ", slack_escaped(p)))
+        .unwrap_or_default();
+    format!("• {who}{}{about}{link}", slack_escaped(&n.what))
 }
 
 // A run

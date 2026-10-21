@@ -87,7 +87,8 @@ struct AskCard: View {
                 }
                 .frame(maxHeight: 280)
                 .padding(10)
-                .background(Tokens.chip, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                // Sangam's `tc-code`: a box apart, so a review cut at 280pt reads as one to scroll.
+                .background(Tokens.codeBg, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .padding(.top, 10)
             }
             if let plan, !plan.isEmpty { PlanText(plan: plan).padding(.top, 10) }

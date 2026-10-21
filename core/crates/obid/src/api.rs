@@ -72,6 +72,8 @@ pub struct Shared {
     pub slack: Arc<crate::slack::Slack>,
     /// The watcher: one person's words about what the owner watches, told to them (crate::watch).
     pub watch: Arc<crate::watch::Watch>,
+    /// The Slack channels the owner picked, heard through Socket Mode (crate::listen).
+    pub listen: Arc<crate::listen::Listen>,
     /// The phones' FCM tokens and the job alerts sent to them (crate::push).
     pub push: crate::push::Push,
     /// True once obid is stopping: streams end.
@@ -195,6 +197,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .merge(crate::tetrix::router())
         .merge(crate::slack::router())
         .merge(crate::watch::router())
+        .merge(crate::listen::router())
         .route("/v1/checks/next", get(crate::routes::next_check))
         .route("/v1/checks/{id}/bundle", get(crate::routes::check_bundle))
         .route("/v1/checks/{id}/result", post(crate::routes::check_result))

@@ -23,10 +23,13 @@ use crate::api::{ApiError, Shared};
 
 pub const USER: &str = "oby.slack.user";
 pub const BOT: &str = "oby.slack.bot";
+/// The app-level token (`xapp-`, `connections:write`): Socket Mode only (crate::listen).
+pub const APP: &str = "oby.slack.app";
 pub const NOT_CONNECTED: &str = "Oby isn't connected to Slack.";
 const REFUSED: &str =
     "Slack refused Oby's tokens: paste new ones in Settings › Connectors › Slack.";
 const API: &str = "https://slack.com/api";
+const SOCKET_REFUSED: &str = "Slack refused the app-level token: paste a new one in Settings › Connectors › Slack to listen again.";
 /// The most a search reads: 3 pages of 100, newest first.
 const PAGES: u32 = 3;
 
@@ -40,6 +43,8 @@ struct Saved {
     user: Option<String>,
     /// The app's bot user id (the bot token's).
     bot: Option<String>,
+    /// Whether obid holds the app-level token, for Socket Mode.
+    socket: bool,
     connected_at: Option<String>,
     error: Option<String>,
 }
@@ -55,6 +60,76 @@ pub struct Slack {
     api: String,
     /// Held while the tokens change.
     changing: tokio::sync::Mutex<()>,
+    /// People's names by Slack id, as `users.info` said them.
+    names: Mutex<std::collections::HashMap<String, String>>,
+}
+
+/// What a `PUT /v1/slack` says of the app-level token: left out (or empty), keep the one held;
+/// `null`, forget it; a token, check it and keep it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AppToken<'a> {
+    Keep,
+    Forget,
+    Set(&'a str),
+}
+
+/// A channel obid listens to: its id and, as Slack named it, its name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Channel {
+    pub id: String,
+    pub name: String,
+}
+
+/// Whether `url` is a Socket Mode address obid connects to: `wss://` on slack.com.
+fn socket_url_ok(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| {
+        u.scheme() == "wss"
+            && u.username().is_empty()
+            && u.host_str()
+                .is_some_and(|h| h == "slack.com" || h.ends_with(".slack.com"))
+    })
+}
+
+/// A message event (Socket Mode's `event`, or one of `conversations.history`'s messages) in
+/// `channel`, as obid keeps it: a person's own new message only (no subtype but a thread's
+/// broadcast, no bot), with a link to it on slack.com.
+pub fn event_message(event: &Value, channel: &Channel) -> Option<Message> {
+    if skip_reason(event).is_some() {
+        return None;
+    }
+    let ts = event["ts"].as_str()?;
+    let user = event["user"].as_str().filter(|u| !u.is_empty())?;
+    let at: f64 = ts.parse().ok()?;
+    let digits: String = ts.chars().filter(char::is_ascii_digit).collect();
+    Some(Message {
+        key: format!("{}:{ts}", channel.id),
+        at,
+        user: user.to_owned(),
+        place: format!("#{}", channel.name),
+        text: event["text"].as_str().unwrap_or_default().to_owned(),
+        permalink: Some(format!(
+            "https://slack.com/archives/{}/p{digits}",
+            channel.id
+        ))
+        .filter(|p| crate::watch::link_ok(p, "slack.com")),
+    })
+}
+
+/// Why a message event isn't one obid reads, by its type only (never its words): a bot's post (one
+/// with a `bot_id`), an edit or another subtype, or one with no person. None for a person's own.
+pub fn skip_reason(event: &Value) -> Option<&'static str> {
+    if event.get("bot_id").is_some_and(|b| !b.is_null()) {
+        Some("a bot's post")
+    } else if event["subtype"]
+        .as_str()
+        .is_some_and(|s| s != "thread_broadcast")
+    {
+        Some("an edit, a join or another subtype")
+    } else if event["user"].as_str().is_none_or(str::is_empty) || event["ts"].as_str().is_none() {
+        Some("no person or no time")
+    } else {
+        None
+    }
 }
 
 /// A message search found, as obid keeps it: Slack's typed fields and the text, quoted data.
@@ -173,6 +248,7 @@ impl Slack {
             http,
             api,
             changing: tokio::sync::Mutex::new(()),
+            names: Mutex::default(),
         })
     }
 
@@ -201,6 +277,7 @@ impl Slack {
             "team": saved.team.filter(|_| connected),
             "user": saved.user.filter(|_| connected),
             "bot": saved.bot.filter(|_| connected),
+            "socket": connected && saved.socket,
             "connectedAt": saved.connected_at,
             "error": saved.error,
         })
@@ -278,7 +355,17 @@ impl Slack {
 
     /// Checks both tokens with `auth.test` (one workspace; the user token a person's, the bot
     /// token the app's bot) and keeps them. Nothing is kept when either is refused.
-    async fn connect(&self, user: &str, bot: &str) -> Result<(), ApiError> {
+    async fn connect(
+        &self,
+        user: &str,
+        bot: &str,
+        app_token: AppToken<'_>,
+    ) -> Result<(), ApiError> {
+        // Left out: the app-level token obid holds stays as it is, untested.
+        let socket = match app_token {
+            AppToken::Set(token) => Some(token),
+            AppToken::Keep | AppToken::Forget => None,
+        };
         let bad = |text: String| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, text);
         let internal = |text: String| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, text);
         if let Some(problem) =
@@ -286,8 +373,27 @@ impl Slack {
         {
             return Err(bad(problem));
         }
+        if let Some(problem) = socket.and_then(|t| token_problem(t, "xapp-", "app-level")) {
+            return Err(bad(problem));
+        }
         let person = self.identify(user, "user").await?;
         let app = self.identify(bot, "bot").await?;
+        // An app-level token has no `auth.test`: opening a Socket Mode connection is its test
+        // (the URL it answers is used once, or never).
+        if let Some(token) = socket {
+            match self.post("apps.connections.open", token, &[]).await {
+                Ok(answer) if socket_url_ok(answer["url"].as_str().unwrap_or("")) => {}
+                Ok(_) => {
+                    return Err(bad(
+                        "Slack opened no Socket Mode connection for the app-level token.".into(),
+                    ));
+                }
+                Err(Failed::Refused) => {
+                    return Err(bad("Slack refused the app-level token.".into()));
+                }
+                Err(Failed::Other(why)) => return Err(ApiError::new(StatusCode::BAD_GATEWAY, why)),
+            }
+        }
         let (Some(owner), Some(team_id)) = (text(&person, "user_id"), text(&person, "team_id"))
         else {
             return Err(bad("Slack didn't say whose the user token is.".into()));
@@ -306,8 +412,24 @@ impl Slack {
             return Err(bad("The two tokens are from different workspaces.".into()));
         }
         let _held = self.changing.lock().await;
-        for (value, name) in [(user, USER), (bot, BOT)] {
-            if let Err(e) = self.vault.add(value, name) {
+        // The app-level token held is kept only for the same workspace: one of another would
+        // go on hearing the old one's channels.
+        let before = self.saved();
+        let held = before.socket
+            && before.team_id.as_deref() == Some(team_id.as_str())
+            && matches!(self.vault.value(APP), Ok(Some(_)));
+        let socket_kept = match app_token {
+            AppToken::Set(_) => true,
+            AppToken::Keep => held,
+            AppToken::Forget => false,
+        };
+        for (value, name) in [(Some(user), USER), (Some(bot), BOT), (socket, APP)] {
+            let kept = match (value, name == APP && socket_kept) {
+                (Some(value), _) => self.vault.add(value, name),
+                (None, true) => Ok(()),
+                (None, false) => self.vault.remove(name).map(|_| ()),
+            };
+            if let Err(e) = kept {
                 // Never half a login: what was kept goes too.
                 let why = format!("obid couldn't keep Slack's tokens: {e}");
                 self.forget(Some(why.clone()));
@@ -319,6 +441,7 @@ impl Slack {
             team_id: Some(team_id),
             user: Some(owner),
             bot: text(&app, "user_id"),
+            socket: socket_kept,
             connected_at: Some(obi_protocol::time::format(obi_protocol::time::now())),
             error: None,
         })
@@ -332,7 +455,7 @@ impl Slack {
     /// Forgets both tokens (the app stays installed in Slack). `error` says why, when the owner
     /// didn't ask.
     fn forget(&self, error: Option<String>) {
-        for name in [USER, BOT] {
+        for name in [USER, BOT, APP] {
             if let Err(e) = self.vault.remove(name) {
                 tracing::warn!("obid couldn't remove {name} from the vault: {e}");
             }
@@ -370,9 +493,118 @@ impl Slack {
                 if self.vault.value(name).ok().flatten().as_deref() != Some(token.as_str()) {
                     return Err("Slack refused a token that was replaced meanwhile.".into());
                 }
+                if name == APP {
+                    // The app-level token only stops the listener: the rest stays.
+                    let _ = self.vault.remove(APP);
+                    let mut saved = self.saved();
+                    saved.socket = false;
+                    saved.error = Some(SOCKET_REFUSED.into());
+                    let _ = self.save(saved);
+                    return Err(SOCKET_REFUSED.into());
+                }
                 self.forget(Some(REFUSED.into()));
                 Err(REFUSED.into())
             }
+        }
+    }
+
+    /// Whether obid holds the app-level token Socket Mode needs.
+    pub fn socket_ready(&self) -> bool {
+        let saved = self.saved();
+        saved.connected_at.is_some() && saved.socket
+    }
+
+    /// A Socket Mode connection's address (`apps.connections.open`, the app-level token): a
+    /// `wss://` URL on slack.com, used once.
+    pub async fn socket_url(&self) -> Result<String, String> {
+        let answer = self.call(APP, "apps.connections.open", &[]).await?;
+        answer["url"]
+            .as_str()
+            .filter(|u| socket_url_ok(u))
+            .map(str::to_owned)
+            .ok_or_else(|| "Slack answered no Socket Mode address on slack.com.".into())
+    }
+
+    /// The messages in `channel` newer than `oldest` (a Slack `ts`), oldest first, at most 5
+    /// pages of 200, with the user token: people's own messages, why each other one was left out
+    /// (`skip_reason`), and whether that was all of them (Slack gives the newest first: past
+    /// 1,000, the oldest aren't).
+    pub async fn history(
+        &self,
+        channel: &Channel,
+        oldest: &str,
+    ) -> Result<(Vec<Message>, Vec<&'static str>, bool), String> {
+        let mut found = vec![];
+        let mut skipped = vec![];
+        let mut cursor = String::new();
+        let mut all = false;
+        for _ in 0..5 {
+            let mut form = vec![
+                ("channel", channel.id.as_str()),
+                ("oldest", oldest),
+                ("limit", "200"),
+            ];
+            if !cursor.is_empty() {
+                form.push(("cursor", cursor.as_str()));
+            }
+            let answer = self.call(USER, "conversations.history", &form).await?;
+            for m in answer["messages"].as_array().into_iter().flatten() {
+                match event_message(m, channel) {
+                    Some(message) => found.push(message),
+                    None => skipped.extend(skip_reason(m)),
+                }
+            }
+            cursor = answer["response_metadata"]["next_cursor"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            if answer["has_more"] != true || cursor.is_empty() {
+                all = true;
+                break;
+            }
+        }
+        found.sort_by(|a, b| a.at.total_cmp(&b.at));
+        Ok((found, skipped, all))
+    }
+
+    /// A channel's name (`conversations.info`, the user token): also the check that the owner can
+    /// read it.
+    pub async fn channel_name(&self, id: &str) -> Result<String, String> {
+        let answer = self
+            .call(USER, "conversations.info", &[("channel", id)])
+            .await?;
+        text(&answer["channel"], "name").ok_or_else(|| format!("Slack has no channel {id}."))
+    }
+
+    /// A person's display name (`users.info`, the user token), or their id when Slack doesn't say.
+    pub async fn user_name(&self, id: &str) -> String {
+        if let Some(name) = self.names.lock().unwrap_or_else(|e| e.into_inner()).get(id) {
+            return name.clone();
+        }
+        let answer = self.call(USER, "users.info", &[("user", id)]).await;
+        let user = answer.as_ref().map(|a| &a["user"]);
+        let name = user
+            .ok()
+            .and_then(|u| {
+                text(&u["profile"], "display_name")
+                    .or_else(|| text(u, "real_name"))
+                    .or_else(|| text(u, "name"))
+            })
+            .map(|n| {
+                n.chars()
+                    .filter(|c| !c.is_control())
+                    .take(60)
+                    .collect::<String>()
+            });
+        match name {
+            Some(name) => {
+                self.names
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(id.to_owned(), name.clone());
+                name
+            }
+            None => id.to_owned(),
         }
     }
 
@@ -466,19 +698,40 @@ async fn status(State(shared): State<Arc<Shared>>) -> Json<Value> {
 struct Tokens {
     user: String,
     bot: String,
+    /// The app-level token, for Socket Mode (crate::listen): left out, kept; `null`, forgotten.
+    #[serde(default, deserialize_with = "present")]
+    app: Option<Value>,
+}
+
+/// A key that's there, `null` too, as `Some`: only a key left out is `None`.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(d).map(Some)
 }
 
 async fn connect(State(shared): State<Arc<Shared>>, body: axum::body::Bytes) -> Response {
     let Ok(tokens) = serde_json::from_slice::<Tokens>(&body) else {
         return ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "Send {\"user\": \"xoxp-…\", \"bot\": \"xoxb-…\"}.",
+            "Send {\"user\": \"xoxp-…\", \"bot\": \"xoxb-…\"}, and \"app\": \"xapp-…\" for Socket Mode.",
         )
         .into_response();
     };
+    let app = match &tokens.app {
+        None => AppToken::Keep,
+        Some(Value::Null) => AppToken::Forget,
+        Some(Value::String(t)) if t.trim().is_empty() => AppToken::Keep,
+        Some(Value::String(t)) => AppToken::Set(t.trim()),
+        Some(_) => {
+            return ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "\"app\" is the app-level token (xapp-…), or null to forget it.",
+            )
+            .into_response();
+        }
+    };
     match shared
         .slack
-        .connect(tokens.user.trim(), tokens.bot.trim())
+        .connect(tokens.user.trim(), tokens.bot.trim(), app)
         .await
     {
         Ok(()) => Json(shared.slack.status_json()).into_response(),
@@ -619,7 +872,7 @@ pub(crate) mod tests {
         let stub_a = stub(HashMap::from([("auth.test", person.clone())])).await;
         let slack = unconnected(&home, stub_a.url);
         let refused = slack
-            .connect(&user_token(), &bot_token())
+            .connect(&user_token(), &bot_token(), AppToken::Keep)
             .await
             .unwrap_err();
         assert!(
@@ -637,7 +890,12 @@ pub(crate) mod tests {
         ]))
         .await;
         let slack = unconnected(&home, stub_b.url);
-        assert!(slack.connect(&user_token(), &bot_token()).await.is_err());
+        assert!(
+            slack
+                .connect(&user_token(), &bot_token(), AppToken::Keep)
+                .await
+                .is_err()
+        );
         assert!(!slack.connected());
 
         let bot = json!({"ok": true, "team": "Deskree", "team_id": "T1", "user_id": "UBOT", "bot_id": "B1"});
@@ -647,7 +905,12 @@ pub(crate) mod tests {
         ]))
         .await;
         let slack = unconnected(&home, stub_c.url);
-        assert!(slack.connect(&user_token(), &bot_token()).await.is_ok());
+        assert!(
+            slack
+                .connect(&user_token(), &bot_token(), AppToken::Keep)
+                .await
+                .is_ok()
+        );
         let status = slack.status_json();
         assert_eq!(status["connected"], true);
         assert_eq!(status["team"], "Deskree");
@@ -689,6 +952,137 @@ pub(crate) mod tests {
         assert!(searching.await.unwrap().is_err());
         assert!(slack.connected(), "the new token stays");
         assert_eq!(slack.vault.value(USER).unwrap(), Some(newer));
+    }
+
+    /// The app-level token, for Socket Mode: its shape, then a Socket Mode connection opened as
+    /// its test, on slack.com only.
+    #[tokio::test]
+    async fn the_app_level_token_is_tested_by_opening_a_connection() {
+        let home = scratch("socket");
+        let person = json!({"ok": true, "team": "Deskree", "team_id": "T1", "user_id": "UOWNER"});
+        let bot = json!({"ok": true, "team_id": "T1", "user_id": "UBOT", "bot_id": "B1"});
+        let app = format!("xapp-{}", "1-A0CAWE3AH99-1111-5f0e2a9c7b31d846");
+        let elsewhere = stub(HashMap::from([
+            ("auth.test", person.clone()),
+            ("auth.test.bot", bot.clone()),
+            (
+                "apps.connections.open",
+                json!({"ok": true, "url": "wss://evil.example/link"}),
+            ),
+        ]))
+        .await;
+        let slack = unconnected(&home, elsewhere.url);
+        assert!(
+            slack
+                .connect(&user_token(), &bot_token(), AppToken::Set(&app))
+                .await
+                .is_err()
+        );
+        assert!(
+            slack
+                .connect(&user_token(), &bot_token(), AppToken::Set(&bot_token()))
+                .await
+                .is_err(),
+            "an xapp- token only"
+        );
+        assert!(!slack.socket_ready());
+        let fine = stub(HashMap::from([
+            ("auth.test", person),
+            ("auth.test.bot", bot),
+            (
+                "apps.connections.open",
+                json!({"ok": true, "url": "wss://wss-primary.slack.com/link/?ticket=1"}),
+            ),
+        ]))
+        .await;
+        let slack = unconnected(&home, fine.url);
+        assert!(
+            slack
+                .connect(&user_token(), &bot_token(), AppToken::Set(&app))
+                .await
+                .is_ok()
+        );
+        assert!(slack.socket_ready());
+        assert_eq!(slack.status_json()["socket"], true);
+        assert_eq!(slack.vault.value(APP).unwrap(), Some(app.clone()));
+        assert_eq!(
+            slack.socket_url().await.unwrap(),
+            "wss://wss-primary.slack.com/link/?ticket=1"
+        );
+        // Another workspace's tokens without it: the old workspace's app-level token goes.
+        let other = stub(HashMap::from([
+            (
+                "auth.test",
+                json!({"ok": true, "team": "Other", "team_id": "T2", "user_id": "UOWNER"}),
+            ),
+            (
+                "auth.test.bot",
+                json!({"ok": true, "team_id": "T2", "user_id": "UBOT", "bot_id": "B1"}),
+            ),
+        ]))
+        .await;
+        let elsewhere = Slack::open_at(
+            &home,
+            slack.vault.clone(),
+            crate::events::Events::new(),
+            other.url,
+        );
+        assert!(
+            elsewhere
+                .connect(&user_token(), &bot_token(), AppToken::Keep)
+                .await
+                .is_ok()
+        );
+        assert!(!elsewhere.socket_ready());
+        assert_eq!(elsewhere.vault.value(APP).unwrap(), None);
+        assert!(
+            slack
+                .connect(&user_token(), &bot_token(), AppToken::Set(&app))
+                .await
+                .is_ok()
+        );
+        // Connected again without it: kept. With `"app": null`: forgotten.
+        assert!(
+            slack
+                .connect(&user_token(), &bot_token(), AppToken::Keep)
+                .await
+                .is_ok()
+        );
+        assert!(slack.socket_ready());
+        assert_eq!(slack.vault.value(APP).unwrap(), Some(app.clone()));
+        assert!(
+            slack
+                .connect(&user_token(), &bot_token(), AppToken::Forget)
+                .await
+                .is_ok()
+        );
+        assert!(!slack.socket_ready());
+        assert_eq!(slack.vault.value(APP).unwrap(), None);
+    }
+
+    #[test]
+    fn a_message_event_is_a_persons_new_message_only() {
+        let channel = Channel {
+            id: "C1".into(),
+            name: "reviews".into(),
+        };
+        let event = json!({"type": "message", "channel": "C1", "user": "U3", "text": "hi", "ts": "1792501500.000100"});
+        let m = event_message(&event, &channel).unwrap();
+        assert_eq!(
+            (m.key.as_str(), m.place.as_str()),
+            ("C1:1792501500.000100", "#reviews")
+        );
+        assert_eq!(
+            m.permalink.as_deref(),
+            Some("https://slack.com/archives/C1/p1792501500000100")
+        );
+        for skipped in [
+            json!({"subtype": "message_changed", "user": "U3", "ts": "1.0"}),
+            json!({"bot_id": "B1", "user": "U3", "ts": "1.0"}),
+            json!({"ts": "1.0", "text": "no user"}),
+        ] {
+            assert!(event_message(&skipped, &channel).is_none(), "{skipped}");
+        }
     }
 
     #[tokio::test]

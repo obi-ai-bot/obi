@@ -723,14 +723,14 @@ pub fn watch_item_id(key: &str) -> String {
 /// The `watch` item telling the owner what `person` said or did (crate::watch): obid's own words
 /// from the notice's typed fields; what they wrote, the title and the model's topic quoted under
 /// `watch.quoted`, for the card only.
-pub fn watch_item(person: &str, notice: &crate::watch::Notice, now: i64) -> Item {
+pub fn watch_item(kind: &str, person: &str, notice: &crate::watch::Notice, now: i64) -> Item {
     let title = match notice.source.as_str() {
         "slack" => format!("{person} on Slack, in {}", notice.place),
         _ => format!("{person} on {}", notice.place),
     };
     Item {
-        id: watch_item_id(&notice.key),
-        kind: "watch".into(),
+        id: format!("{kind}-{}", &watch_item_id(&notice.key)["watch-".len()..]),
+        kind: kind.into(),
         job: String::new(),
         title: title.chars().take(80).collect(),
         text: format!("{person} {}.", notice.what),

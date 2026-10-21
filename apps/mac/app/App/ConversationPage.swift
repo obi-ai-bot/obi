@@ -115,7 +115,8 @@ struct ConversationPage: View {
                                     .frame(maxWidth: .infinity).padding(.top, 40)
                             }
                             ForEach(notices) { notice in
-                                InlineNotice(notice: notice, feed: feed, keyboardEnabled: oldest == "notice/\(notice.id)", focusRequest: decisionFocus)
+                                InlineNotice(notice: notice, feed: feed, keyboardEnabled: oldest == "notice/\(notice.id)", focusRequest: decisionFocus,
+                                             onOpen: { onOpenJob($0, false) })
                                     .id("notice/\(notice.id)").padding(.bottom, 12)
                             }
                             ForEach(entries.filter { anchors[$0.id] == .some(nil) }) { decision($0, active: oldest == $0.id).padding(.bottom, 12) }

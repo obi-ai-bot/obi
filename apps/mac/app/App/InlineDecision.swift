@@ -149,13 +149,27 @@ struct InlineNotice: View {
     let feed: RunnerFeed
     var keyboardEnabled = false
     var focusRequest = 0
+    /// Opens a job's page: a review the item can't show offers its job ("Open the job to read it").
+    var onOpen: (_ job: String) -> Void = { _ in }
     @Environment(\.openURL) private var openURL
     @State private var busy = false
     @State private var problem: String?
 
-    /// Slack's or GitHub's, by the link's host (a GitHub notice of the watcher's links GitHub).
+    /// Slack's or GitHub's mark, by where obid says it came from (`watch.source`).
     static func brand(_ notice: WatchNotice) -> String {
-        notice.url?.host()?.lowercased().hasSuffix("github.com") == true ? "github" : "slack"
+        notice.source == "github" ? "github" : "slack"
+    }
+
+    /// What its link's button says, by where the link goes (a listener's review, from Slack, links
+    /// its pull request on GitHub).
+    static func linkLabel(_ url: URL) -> String {
+        let host = url.host()?.lowercased() ?? ""
+        return host == "github.com" || host.hasSuffix(".github.com") ? "Open on GitHub" : "Open in Slack"
+    }
+
+    /// Whether it offers its job's page: a review it doesn't show (flagged, empty, unscanned).
+    static func opensJob(_ notice: WatchNotice) -> Bool {
+        !notice.job.isEmpty && notice.review == nil
     }
 
     /// Its choices: Approve says what it posts.
@@ -172,10 +186,11 @@ struct InlineNotice: View {
             AskCard(kind: brand == "github" ? "GitHub" : "Slack", brand: brand,
                     shown: notice.review, title: notice.title, happened: notice.text,
                     options: Self.options(notice), busy: busy, keyboardEnabled: keyboardEnabled, focusRequest: focusRequest,
-                    hint: notice.url.map { _ in brand == "github" ? "Open on GitHub" : "Open in Slack" },
+                    hint: notice.url.map(Self.linkLabel),
                     onHint: notice.url.map { url in { openURL(url) } },
                     onChoose: { settle(answer: $0.answer) },
-                    onLater: { settle(later: .now.addingTimeInterval(3600)) })
+                    onLater: { settle(later: .now.addingTimeInterval(3600)) },
+                    onOpen: Self.opensJob(notice) ? { onOpen(notice.job) } : nil)
             if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.top, 8) }
         }
         .padding(16)
