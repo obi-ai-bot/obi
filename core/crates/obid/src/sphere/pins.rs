@@ -41,6 +41,9 @@ struct Kept {
     owners: BTreeMap<String, Pin>,
     /// The highest `card_seq` trusted, by Obi.
     cards: BTreeMap<String, u64>,
+    /// Every Obi key a trusted card signed, by Obi and key id: the only older keys obid takes from
+    /// the directory (to check old chain entries), whatever the Sphere lists.
+    keys: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 pub struct Pins {
@@ -132,6 +135,30 @@ impl Pins {
         true
     }
 
+    /// Keeps `obi`'s key `id`, which a card obid trusted signed.
+    pub fn keep_key(&self, obi: &str, id: &str, public_key: &str) {
+        let mut kept = self.pins.lock().unwrap();
+        let keys = kept.keys.entry(obi.to_owned()).or_default();
+        if keys.contains_key(id) {
+            return;
+        }
+        keys.insert(id.to_owned(), public_key.to_owned());
+        let copy = kept.clone();
+        drop(kept);
+        self.save(&copy);
+    }
+
+    /// Whether a card obid trusted once signed `obi`'s key `id`, `public_key`.
+    pub fn knows_key(&self, obi: &str, id: &str, public_key: &str) -> bool {
+        self.pins
+            .lock()
+            .unwrap()
+            .keys
+            .get(obi)
+            .and_then(|k| k.get(id))
+            .is_some_and(|k| k == public_key)
+    }
+
     /// The owner accepts `owner`'s changed key, named by its fingerprint (what they compared).
     pub fn accept(&self, owner: &str, fingerprint_seen: &str, now: i64) -> Result<Value, String> {
         let mut kept = self.pins.lock().unwrap();
@@ -203,6 +230,11 @@ mod tests {
         assert!(pins.check_card("obi-sangam", 2) && pins.check_card("obi-sangam", 2));
         assert!(!Pins::open(&home).check_card("obi-sangam", 1));
         assert!(pins.check_card("obi-sangam", 3));
+        // The Obi keys trusted cards signed, kept across restarts; no other.
+        pins.keep_key("obi-sangam", "ed25519:k1", "K1");
+        assert!(Pins::open(&home).knows_key("obi-sangam", "ed25519:k1", "K1"));
+        assert!(!pins.knows_key("obi-sangam", "ed25519:k1", "K2"));
+        assert!(!pins.knows_key("obi-sangam", "ed25519:k2", "K2"));
         let _ = std::fs::remove_dir_all(home);
     }
 }
