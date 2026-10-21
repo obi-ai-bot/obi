@@ -2080,6 +2080,12 @@ impl Link {
         // no slot, sharing off, not allowed, no VM now), and names no rule: why stays here, in the
         // log (the owner's decision of 2026-10-21; spec protocol.md section 4, rule 9). Only the
         // guest's own doing keeps its reason.
+        // Nor whether a rule or this owner in person said yes or no.
+        if exchange.kind == "run_request"
+            && let Some(map) = body.as_object_mut()
+        {
+            map.remove("by_rule");
+        }
         if kind == "decline" && exchange.kind == "run_request" {
             let reason = body["reason"].as_str().unwrap_or("other").to_owned();
             let said = match reason.as_str() {
@@ -4375,13 +4381,20 @@ impl Link {
             .directory
             .members
             .iter()
-            .filter(|(obi, m)| **obi != me && m.active && m.accepts.iter().any(|a| a == "run_request"))
+            .filter(|(obi, m)| {
+                **obi != me && m.active && m.accepts.iter().any(|a| a == "run_request")
+            })
             .filter_map(|(obi, m)| {
                 let runner = m.runner.as_ref()?;
-                let live = runner["expires_at"].as_str().and_then(time::parse).is_some_and(|t| t > now);
-                Some(json!({"obi": obi, "owner": m.owner, "free": live && runner["free"] == true,
-                            "freeAt": runner.get("free_at"), "size": runner["size"], "agents": runner["agents"],
-                            "verified": self.pins.verified(&m.owner)}))
+                let live = runner["expires_at"]
+                    .as_str()
+                    .and_then(time::parse)
+                    .is_some_and(|t| t > now);
+                Some(
+                    json!({"obi": obi, "owner": m.owner, "free": live && runner["free"] == true,
+                            "size": runner["size"], "agents": runner["agents"],
+                            "verified": self.pins.verified(&m.owner)}),
+                )
             })
             .collect();
         list.sort_by(|a, b| a["owner"].as_str().cmp(&b["owner"].as_str()));

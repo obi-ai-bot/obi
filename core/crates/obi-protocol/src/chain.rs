@@ -128,11 +128,16 @@ pub fn exchange_problem(
         && (!matches!(
             reply["body"]["reason"].as_str(),
             Some("unavailable" | "expired" | "out_of_scope" | "share_used")
-        ) || reply["body"].get("by_rule").is_some())
+        ))
     {
         return Some(
-            "a decline of a run_request says only unavailable, expired, out_of_scope or share_used, with no by_rule".into(),
+            "a decline of a run_request says only unavailable, expired, out_of_scope or share_used"
+                .into(),
         );
+    }
+    // Nor whether a rule or its owner in person answered.
+    if asked == "run_request" && reply["body"].get("by_rule").is_some() {
+        return Some("no reply to a run_request names a rule (by_rule)".into());
     }
     None
 }

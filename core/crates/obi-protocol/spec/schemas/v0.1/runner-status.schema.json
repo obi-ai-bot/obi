@@ -32,7 +32,7 @@
     },
     "free": {
       "type": "boolean",
-      "description": "Whether a job sent now would likely be accepted. It changes at most once every 15 minutes, with jitter, so it never says when the owner is at the Mac (protocol.md section 14)."
+      "description": "Whether a job sent now would likely be accepted, as the Obi found at its last look: it looks only at moments a random 15 to 20 minutes apart, so it never says when the owner is at the Mac (protocol.md section 14)."
     },
     "slots": {
       "type": "integer",
@@ -81,10 +81,6 @@
         }
       ],
       "description": "The owners it is offered to, or every member (`*`)."
-    },
-    "free_at": {
-      "$ref": "common.schema.json#/$defs/timestamp",
-      "description": "When it expects to be free, when it isn't."
     },
     "created_at": {
       "$ref": "common.schema.json#/$defs/timestamp"
