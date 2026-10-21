@@ -80,6 +80,9 @@ pub const JOBS_GRACE: Duration = Duration::from_secs(2);
 /// once, side by side with the jobs, from the moment obid is told to stop).
 pub const PLUGINS_GRACE: Duration = Duration::from_secs(8);
 
+/// How long obid waits for the worktrees' measurement before it answers anyway (`serve`).
+pub const MEASURE_FIRST: Duration = Duration::from_millis(200);
+
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
     #[error("can't make home {path}: {source}")]
@@ -151,9 +154,10 @@ fn keep_private(folder: &std::path::Path) -> std::io::Result<()> {
 /// Serves the API on `config.listen` until `stop` resolves, then lets requests under way finish
 /// for at most [`SHUTDOWN_GRACE`]. `ready` is told the address once obid is listening.
 ///
-/// Before it answers, obid measures `home/worktrees` (`status.cleanup.bytes`), which walks every
-/// worktree and can take a while. A `stop` that resolves meanwhile ends that walk and returns at
-/// once, without `ready` being told anything: a stop while starting is a stop, not a wait.
+/// It measures `home/worktrees` (`status.cleanup.bytes`), a walk of every worktree, while it
+/// starts: it waits for it at most [`MEASURE_FIRST`], then answers and lets the walk finish in
+/// the background. A `stop` that resolves while it waits ends the walk and returns at once,
+/// without `ready` being told anything: a stop while starting is a stop, not a wait.
 pub async fn serve(
     config: Config,
     token: String,
@@ -177,14 +181,14 @@ pub async fn serve(
         None => None,
     };
     let host = gethostname::gethostname().to_string_lossy().into_owned();
-    let home = config.home.clone();
+    let cleanup = Arc::new(api::Cleanup::unmeasured(&config.home));
     let cancelled = Arc::new(AtomicBool::new(false));
-    let measuring = {
-        let cancelled = cancelled.clone();
-        tokio::task::spawn_blocking(move || api::Cleanup::measure_unless(&home, &cancelled))
+    let mut measuring = {
+        let (cleanup, cancelled) = (cleanup.clone(), cancelled.clone());
+        tokio::task::spawn_blocking(move || cleanup.remeasure_unless(&cancelled))
     };
     let mut stop = Box::pin(stop);
-    let cleanup = tokio::select! {
+    tokio::select! {
         // A stop that is there already wins over a measurement that is done too.
         biased;
         () = &mut stop => {
@@ -192,8 +196,10 @@ pub async fn serve(
             tracing::info!("stopped while starting");
             return Ok(());
         }
-        measured = measuring => measured.map_err(|e| StartError::Serve(std::io::Error::other(e)))?,
-    };
+        // A few worktrees are measured before the first answer; the owner's 20 GB took 4 to 28
+        // seconds, so obid doesn't wait for those.
+        _ = tokio::time::timeout(MEASURE_FIRST, &mut measuring) => {}
+    }
     // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
     secrets::known().learn("api-token", &token);
     // claudeKeychain as the owner set it; left out, on by itself on macOS when Claude Code's default
@@ -399,6 +405,7 @@ pub async fn serve(
                 }
             }
             let _ = stopped_at.set(tokio::time::Instant::now());
+            cancelled.store(true, Ordering::Relaxed);
             shared.sign_ins.kill_all();
             shared.github.kill();
             shared.harness.end_all_warm();

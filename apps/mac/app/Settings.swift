@@ -227,6 +227,8 @@ struct RunnerSettingsView: View {
                 guard feed.connection == .live, let runner = feed.runner else { return }
                 // A runner older than the Watch API has no list: then there's nothing to show.
                 watches = (try? await runner.watches()) ?? []
+                // obid answers before it has measured a big worktrees folder: the size as it is now.
+                await feed.refreshCleanup()
             }
     }
 

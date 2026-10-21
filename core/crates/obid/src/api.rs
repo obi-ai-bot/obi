@@ -30,7 +30,7 @@ pub struct Shared {
     pub config: Config,
     pub token: String,
     pub host: String,
-    pub cleanup: Cleanup,
+    pub cleanup: Arc<Cleanup>,
     /// When Clear done was last pressed (`POST /v1/clear`).
     pub cleared: crate::clear::Cleared,
     /// The devices that may approve publishing (`POST /v1/devices`).
@@ -77,34 +77,50 @@ pub struct Shared {
 /// What `status.cleanup` says: the job worktrees' folder and the disk space it took when last
 /// measured. As Engine/Cleanup.swift, it's measured when obid starts and again after each cleanup
 /// pass, never per request: a walk of every worktree, `node_modules` and all, on each status poll
-/// from each app would cost far more than the number is worth.
+/// from each app would cost far more than the number is worth. obid answers before a big folder
+/// is measured (20 GB took 4 to 28 seconds), so until then there's no number and status leaves
+/// `cleanup` out.
 pub struct Cleanup {
     pub path: PathBuf,
+    /// [`NOT_MEASURED`] until the first walk ends.
     bytes: AtomicU64,
 }
 
+const NOT_MEASURED: u64 = u64::MAX;
+
 impl Cleanup {
+    /// `home/worktrees`, not measured yet.
+    pub fn unmeasured(home: &Path) -> Cleanup {
+        Cleanup {
+            path: worktrees(home),
+            bytes: AtomicU64::new(NOT_MEASURED),
+        }
+    }
+
     /// Measures `home/worktrees` now. It walks the whole tree, so call it off the async threads.
     pub fn measure(home: &Path) -> Cleanup {
-        Cleanup::measure_unless(home, &AtomicBool::new(false))
+        let cleanup = Cleanup::unmeasured(home);
+        cleanup.remeasure();
+        cleanup
     }
 
-    /// [`Cleanup::measure`], that gives up as soon as `cancelled` is set (obid was told to stop
-    /// while it measured); the bytes are then what it had counted, and nobody should use them.
-    pub fn measure_unless(home: &Path, cancelled: &AtomicBool) -> Cleanup {
-        let path = worktrees(home);
-        let bytes = AtomicU64::new(disk_usage_unless(&path, cancelled));
-        Cleanup { path, bytes }
-    }
-
-    /// The disk space as last measured.
-    pub fn bytes(&self) -> u64 {
-        self.bytes.load(Ordering::Relaxed)
+    /// The disk space as last measured, or None before the first measurement ends.
+    pub fn bytes(&self) -> Option<u64> {
+        Some(self.bytes.load(Ordering::Relaxed)).filter(|&bytes| bytes != NOT_MEASURED)
     }
 
     /// Measures again, as a cleanup pass does when it ends. Walks the whole tree, like `measure`.
     pub fn remeasure(&self) {
-        self.bytes.store(disk_usage(&self.path), Ordering::Relaxed);
+        self.remeasure_unless(&AtomicBool::new(false));
+    }
+
+    /// [`Cleanup::remeasure`], that gives up as soon as `cancelled` is set (obid was told to stop
+    /// while it measured) and then keeps the number it had.
+    pub fn remeasure_unless(&self, cancelled: &AtomicBool) {
+        let bytes = disk_usage_unless(&self.path, cancelled);
+        if !cancelled.load(Ordering::Relaxed) {
+            self.bytes.store(bytes, Ordering::Relaxed);
+        }
     }
 }
 
@@ -529,7 +545,9 @@ pub struct Status {
     pub github: &'static str,
     pub checks: &'static str,
     pub permissions: ModeJson,
-    pub cleanup: CleanupJson,
+    /// Left out until obid has measured the worktrees once, as from older runners.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<CleanupJson>,
     /// Whether obid copies Claude Code's Keychain login, and whether it chose that itself.
     pub claude_keychain: KeychainJson,
 }
@@ -709,12 +727,12 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         permissions: ModeJson {
             mode: shared.jobs.default_mode().as_str(),
         },
-        cleanup: CleanupJson {
+        cleanup: shared.cleanup.bytes().map(|bytes| CleanupJson {
             path: shared.cleanup.path.to_string_lossy().into_owned(),
-            bytes: shared.cleanup.bytes(),
+            bytes,
             // obid has no cleanup pass yet; when it does, it sets this and calls `remeasure`.
             last_run: None,
-        },
+        }),
         claude_keychain: KeychainJson {
             on: crate::jobs::keychain_on(),
             auto: crate::jobs::keychain_auto(),
@@ -855,5 +873,18 @@ mod tests {
     #[test]
     fn disk_usage_of_nothing_is_zero() {
         assert_eq!(disk_usage(Path::new("/nonexistent/obid/worktrees")), 0);
+    }
+
+    /// No number before the first walk ends, nor after one cut short by a stop.
+    #[test]
+    fn cleanup_says_nothing_until_measured() {
+        let home = Path::new("/nonexistent/obid");
+        let cleanup = Cleanup::unmeasured(home);
+        assert_eq!(cleanup.bytes(), None);
+        cleanup.remeasure_unless(&AtomicBool::new(true));
+        assert_eq!(cleanup.bytes(), None);
+        cleanup.remeasure();
+        assert_eq!(cleanup.bytes(), Some(0));
+        assert_eq!(Cleanup::measure(home).bytes(), Some(0));
     }
 }
