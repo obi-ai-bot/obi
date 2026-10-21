@@ -279,15 +279,19 @@ fn sharing_accounts(shared: &Shared) -> Vec<Value> {
 }
 
 /// `GET /v1/obid/sharing/grants`: the owner's shares, their accounts as Sharing sorts them, and
-/// whether the key the shares run on is in Oby's vault.
+/// whether each share's key is in Oby's vault (`key`: every one's is).
 pub async fn grants(State(shared): State<Arc<Shared>>) -> Response {
-    let key = matches!(
-        crate::vault::value(super::guest::key_name("claude")),
-        Ok(Some(_))
-    );
+    let mut grants = shared.link.grants_json();
+    let mut key = true;
+    for grant in grants.as_array_mut().into_iter().flatten() {
+        let name = grant["keyName"].as_str().unwrap_or("").to_owned();
+        let there = matches!(crate::vault::value(&name), Ok(Some(_)));
+        key &= there;
+        grant["keyInVault"] = serde_json::json!(there);
+    }
     json(
         StatusCode::OK,
-        serde_json::json!({"grants": shared.link.grants_json(), "accounts": sharing_accounts(&shared), "key": key}),
+        serde_json::json!({"grants": grants, "accounts": sharing_accounts(&shared), "key": key}),
     )
 }
 

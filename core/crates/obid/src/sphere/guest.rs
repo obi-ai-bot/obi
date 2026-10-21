@@ -90,15 +90,6 @@ impl Login {
     }
 }
 
-/// The vault secret each agent's company API key is kept under.
-pub fn key_name(agent: &str) -> &'static str {
-    if agent == "codex" {
-        "openai-api-key"
-    } else {
-        "anthropic-api-key"
-    }
-}
-
 /// Where each agent's model API is.
 pub(super) fn upstream(link: &Link, agent: &str) -> String {
     link.model_api_base().unwrap_or_else(|| {
@@ -1169,11 +1160,5 @@ mod tests {
         assert_eq!(body.total(0), 10);
         // An answer that never says: what it asked, and a long answer.
         assert_eq!(Tokens::default().total(3_000), 1_000 + 32_000);
-    }
-
-    #[test]
-    fn each_agent_has_its_own_key_in_the_vault() {
-        assert_eq!(key_name("claude"), "anthropic-api-key");
-        assert_eq!(key_name("codex"), "openai-api-key");
     }
 }

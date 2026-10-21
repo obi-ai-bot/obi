@@ -2310,20 +2310,21 @@ The runner status (`free`, `slots`, `size`, `agents`, `kinds`, `for`: `*`, or `p
 
 ### obid only: sharing your usage
 
-A share of a company-paid API account the owner holds the key to, for a teammate (#798, #809; spec `protocol.md` sections 5.14 to 5.16 and 16). Only an account that pays per token can be shared: a personal plan or a seat never is (its terms are for one person). obid meters Anthropic API keys only, so far: OpenAI's prices aren't in obid yet, and Cursor's team balance has no meter obid can read. The teammate's jobs on it run on this Mac, in a VM, as a teammate's job does ([obid only: sharing this Mac](#obid-only-sharing-this-mac)), and obid adds the account's key to their model calls here, outside the VM: the key, `anthropic-api-key` in Oby's vault, never leaves this Mac.
+A share of a company-paid API account the owner holds the key to, for a teammate (#798, #809; spec `protocol.md` sections 5.14 to 5.16 and 16). Only an account that pays per token can be shared: a personal plan or a seat never is (its terms are for one person). obid meters Anthropic API keys only, so far: OpenAI's prices aren't in obid yet, and Cursor's team balance has no meter obid can read. The teammate's jobs on it run on this Mac, in a VM, as a teammate's job does ([obid only: sharing this Mac](#obid-only-sharing-this-mac)), and obid adds the account's key to their model calls here, outside the VM: the key, in Oby's vault as `anthropic-api-key.<account id>` (each account its own; `anthropic-api-key` for a share with no account), never leaves this Mac. At most 2 calls on one share go at once (`429`), no redirect is followed, and `anthropic-organization-id` doesn't go back to the VM.
 
 **`GET /v1/obid/sharing/grants`**: the owner's shares, their accounts as Settings › Sharing sorts them, and whether the key is in the vault:
 
 ```json
 {"grants": [{"id": "g-0123456789ab", "agent": "claude", "label": "Deskree API", "account": "deskree", "who": "sangam",
              "share": 30, "extra": 0, "budgetCents": 40000, "resetsDay": 1, "resets": "2026-11-01T00:00:00Z",
-             "limitCents": 12000, "usedCents": {"sangam": 2310, "wellington": 9000}, "created": "…"}],
+             "limitCents": 12000, "usedCents": {"sangam": 2310, "wellington": 9000}, "created": "…",
+             "keyName": "anthropic-api-key.deskree", "keyInVault": true}],
  "accounts": [{"id": "deskree", "agent": "claude", "name": "Deskree API", "plan": "api", "why": null},
               {"id": "personal", "agent": "claude", "name": "Personal", "plan": "personal", "why": "A personal plan is for you alone: its terms don’t let anyone else’s work run on it."}],
  "key": true}
 ```
 
-An account's `plan` is what its tool said about how it pays (`api`, `personal`; `seat` for Cursor; `unknown` until its first job): obid never reads a login to find out. `why` is null for an account that can be shared (Sangam's "Share your usage"), else why it's kept (his "Kept for you"). `usedCents` is this period's use by owner, the owner's own jobs on that account included (their `total_cost_usd`): a share is a ceiling for that person, never money set aside, and nobody's jobs pass the month's budget.
+`keyName` is the vault secret the share's key is kept under, `keyInVault` whether it's there, and `key` whether every share's is. An account's `plan` is what its tool said about how it pays (`api`, `personal`; `seat` for Cursor; `unknown` until its first job): obid never reads a login to find out. `why` is null for an account that can be shared (Sangam's "Share your usage"), else why it's kept (his "Kept for you"). `usedCents` is this period's use by owner, the owner's own jobs on that account included (their `total_cost_usd`): a share is a ceiling for that person, never money set aside, and nobody's jobs pass the month's budget.
 
 **`PUT /v1/obid/sharing/grants`** with exactly `account` (one whose `why` is null), `who` (`nobody`, `everyone`, or one owner), `share` (10 to 100, percent of the month), `budgetCents` (the account's month, $1 to $1,000,000) and `resetsDay` (1 to 28, the day it starts again, UTC): one share per account, new or changed (its meter kept). Answers the share. Only the owner changes shares, here; nothing another Obi sends can. Kept in `home/sharing.json`. `422` with why.
 

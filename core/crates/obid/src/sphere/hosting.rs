@@ -141,7 +141,12 @@ struct Running {
 pub struct Hosting {
     running: Mutex<HashMap<String, Running>>,
     published: Mutex<Option<(Value, i64)>>,
+    /// The calls on each share under way, by grant: at most SHARE_CALLS_AT_ONCE.
+    share_calls: Mutex<HashMap<String, Arc<Semaphore>>>,
 }
+
+/// The most calls on one share at once, whichever jobs make them.
+const SHARE_CALLS_AT_ONCE: usize = 2;
 
 /// Whether now is inside "Nights and weekends": 19:00 to 7:00 on weekdays, and all weekend.
 fn in_schedule() -> bool {
@@ -161,6 +166,19 @@ fn free(mac: &Mac, signals: &vm::Signals) -> bool {
 }
 
 impl Hosting {
+    /// A place for one call on `grant`, held until its answer is counted; none when the share
+    /// has as many under way as it may.
+    fn share_call(&self, grant: &str) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let calls = self
+            .share_calls
+            .lock()
+            .unwrap()
+            .entry(grant.to_owned())
+            .or_insert_with(|| Arc::new(Semaphore::new(SHARE_CALLS_AT_ONCE)))
+            .clone();
+        calls.try_acquire_owned().ok()
+    }
+
     /// The jobs running here, for `GET /v1/obid/sharing/mac`.
     pub fn jobs_json(&self) -> Value {
         let running = self.running.lock().unwrap();
@@ -290,10 +308,7 @@ async fn decide(link: &Arc<Link>, cid: &str, asked: bool) -> Decision {
         if share.left_for(&owner) < super::shares::START_AT_LEAST_MICROS {
             return Decision::Decline("share_used", None);
         }
-        if !matches!(
-            crate::vault::value(super::guest::key_name("claude")),
-            Ok(Some(_))
-        ) {
+        if !matches!(crate::vault::value(&share.key_name()), Ok(Some(_))) {
             return Decision::Decline("not_free", Some("The account's key isn't on this Mac now."));
         }
     }
@@ -1062,6 +1077,12 @@ async fn metered_call(
             "obid doesn't relay that path on a share",
         );
     }
+    let Some(place) = link.hosting.share_call(grant) else {
+        return model_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many calls on the share at once.",
+        );
+    };
     let headers: Vec<(String, String)> = request
         .headers()
         .iter()
@@ -1106,7 +1127,7 @@ async fn metered_call(
         link.count_use(grant, owner, worst);
         reserved = worst;
     }
-    let key = match crate::vault::value(super::guest::key_name("claude")) {
+    let key = match crate::vault::value(&share.key_name()) {
         Ok(Some(key)) => key,
         _ => {
             link.refund(grant, owner, reserved);
@@ -1117,7 +1138,17 @@ async fn metered_call(
         }
     };
     let url = format!("{}{path}", super::guest::upstream(link, "claude"));
-    let http = reqwest::Client::new();
+    // A redirect would take the key somewhere else.
+    let Ok(http) = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
+        link.refund(grant, owner, reserved);
+        return model_error(
+            StatusCode::BAD_GATEWAY,
+            "obid couldn't call the model's API.",
+        );
+    };
     let mut upstream = if method == "GET" {
         http.get(url)
     } else {
@@ -1137,9 +1168,14 @@ async fn metered_call(
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut answer = Response::builder().status(status);
     for (name, value) in response.headers() {
+        // The key holder's organization stays here too.
         if !matches!(
             name.as_str(),
-            "content-length" | "transfer-encoding" | "connection" | "set-cookie"
+            "content-length"
+                | "transfer-encoding"
+                | "connection"
+                | "set-cookie"
+                | "anthropic-organization-id"
         ) {
             answer = answer.header(name.as_str(), value.as_bytes());
         }
@@ -1154,6 +1190,8 @@ async fn metered_call(
     );
     let cost = shared.cost.clone();
     tokio::spawn(async move {
+        // The share's place is held until the answer is counted.
+        let _place = place;
         let mut meter = super::shares::Meter::new(&model);
         loop {
             match response.chunk().await {
@@ -1511,6 +1549,17 @@ mod tests {
         assert!(theirs.exists());
         clean_leftovers(&other);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_share_takes_two_calls_at_once() {
+        let hosting = Hosting::default();
+        let (a, b) = (hosting.share_call("g-1"), hosting.share_call("g-1"));
+        assert!(a.is_some() && b.is_some());
+        assert!(hosting.share_call("g-1").is_none());
+        assert!(hosting.share_call("g-2").is_some());
+        drop(a);
+        assert!(hosting.share_call("g-1").is_some());
     }
 
     #[test]

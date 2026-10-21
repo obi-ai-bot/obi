@@ -2092,6 +2092,9 @@ nonisolated struct RunnerGrants: Codable, Equatable, Sendable {
         var limitCents: Int
         /// This month's use by owner, the owner's own jobs on the account included.
         var usedCents: [String: Int]
+        /// The vault secret its key is kept under, and whether it's there (nil from an older obid).
+        var keyName: String?
+        var keyInVault: Bool?
     }
     /// One of the owner's accounts: `why` is nil for one that can be shared, else why it's kept.
     struct Account: Codable, Equatable, Sendable, Identifiable {

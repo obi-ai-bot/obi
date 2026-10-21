@@ -132,6 +132,10 @@ struct SharingTests {
         #expect(SharingSettingsView.usageAbout(nil, key: true, macOn: true) == "Not shared")
         #expect(SharingSettingsView.whoOptions(members: [], who: "sangam").map(\.1) == ["Nobody", "Everyone", "Sangam"])
         #expect(SharingSettingsView.usageAbout(grant, key: false, macOn: false).hasSuffix("share this Mac too"))
+        // Each share names its own key in the vault.
+        var missing = grant
+        (missing.keyName, missing.keyInVault) = ("anthropic-api-key.deskree", false)
+        #expect(SharingSettingsView.usageAbout(missing, key: true, macOn: true).contains("Put its key in Oby’s vault as anthropic-api-key.deskree"))
         _ = try await obid.runner.setGrant(account: "deskree", who: "everyone", share: 50, budgetCents: 40000)
         #expect(obid.requests.last?.json?.keys.sorted() == ["account", "budgetCents", "resetsDay", "share", "who"])
         let shared = try #require(try await obid.runner.sharedWithMe())
