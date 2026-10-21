@@ -70,10 +70,18 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
 
     var connected: Bool { state == .connected }
 
-    /// Whether every word of `query` is in its name, what it does or where it is, whatever the
-    /// case or accents. An empty query matches every one.
+    /// The row's tooltip: how it's signed in and, once connected, how to disconnect it where Oby has
+    /// no button (the row shows those steps only while it isn't connected).
+    var tip: String {
+        if soon { return "Oby can't connect \(name) yet." }
+        if connected, case .steps(let steps) = way { return "\(how)\n\(steps)" }
+        return how
+    }
+
+    /// Whether every word of `query` is in its name or what it does, as the design searches, whatever
+    /// the case or accents. An empty query matches every one.
     func matches(_ query: String) -> Bool {
-        let text = "\(name) \(about) \(place)"
+        let text = "\(name) \(about)"
         return query.split(whereSeparator: \.isWhitespace).allSatisfy {
             text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil
         }
@@ -161,15 +169,18 @@ nonisolated enum Connectors {
     /// The accounts jobs run on, from where Settings › Accounts lists them (`AccountPlaces`): with obid
     /// on this Mac only obid's, never this Mac's own `accounts.json` beside it, which names the same
     /// logins under other ids; with a remote runner this Mac's and the runner's; with none, this Mac's.
-    static func accounts(mac: [AccountState], runner: [AccountState], local: Bool, hasRunner: Bool) -> [AccountState] {
-        AccountPlaces.of(local: local, runner: hasRunner).flatMap { $0 == .mac ? mac : runner }
+    /// `runner` is nil while the runner doesn't answer: with obid on this Mac that's nil too, as nothing is known yet.
+    static func accounts(mac: [AccountState], runner: [AccountState]?, local: Bool, hasRunner: Bool) -> [AccountState]? {
+        let places = AccountPlaces.of(local: local, runner: hasRunner)
+        if places == [.runner], runner == nil { return nil }
+        return places.flatMap { $0 == .mac ? mac : runner ?? [] }
     }
 
     /// Every service, in the design's order: Deskree Ops, Tetrix, GitHub, the coding tools, then the
     /// rest the design shows, and after them what the runner adds (obid's plug-ins, its connections).
-    /// `accounts` are the ones jobs run on (`accounts(mac:runner:local:hasRunner:)`); `runner` is nil
-    /// while it doesn't answer, and then Tetrix and GitHub say they wait for it.
-    static func list(accounts: [AccountState], runner: RunnerState?) -> [Connector] {
+    /// `accounts` are the ones jobs run on (`accounts(mac:runner:local:hasRunner:)`), nil while the runner
+    /// that holds them doesn't answer; `runner` is nil while it doesn't answer. Then what it holds says it waits for it.
+    static func list(accounts: [AccountState]?, runner: RunnerState?) -> [Connector] {
         let soon = coming.map { id, name, about, brand in
             Connector(id: id, name: name, about: about, place: thisMac, how: "Coming soon", state: .available, way: nil, brand: brand, soon: true)
         }
@@ -180,7 +191,10 @@ nonisolated enum Connectors {
         if let runner, let login = runner.gitHubLogin { list.append(gitHub(login, place: runner.name)) }
         else if let runner, let github = runner.github { list.append(gitHub(github, checks: runner.checks, place: runner.name)) }
         else { list.append(untilRunner(id: "github", name: "GitHub", about: gitHubAbout, brand: "github", runner: runner?.name)) }
-        list += tools.map { agent, name, about, brand in tool(agent, name: name, about: about, brand: brand, accounts: accounts) }
+        list += tools.map { agent, name, about, brand in
+            accounts.map { tool(agent, name: name, about: about, brand: brand, accounts: $0) }
+                ?? untilRunner(id: agent, name: name, about: about, brand: brand, runner: nil)
+        }
         list += soon.dropFirst()
         if let runner {
             list += (runner.plugins ?? []).filter { $0.id != "tetrix" }.map { plugin($0, place: runner.name) }
@@ -208,7 +222,7 @@ nonisolated enum Connectors {
                          way: .button(signedIn.isEmpty ? "Connect" : "Manage Accounts…", .accounts), brand: brand)
     }
 
-    /// Tetrix or GitHub while the runner that holds it doesn't answer (`runner` nil), or one that doesn't say.
+    /// What the runner holds (Tetrix, GitHub, obid's accounts) while it doesn't answer (`runner` nil), or one that doesn't say.
     static func untilRunner(id: String, name: String, about: String, brand: String, runner: String?) -> Connector {
         Connector(id: id, name: name, about: about, place: runner ?? thisMac, how: "Oby's runner holds it", state: .available,
                   way: .steps(runner.map { "\($0) doesn't say: it needs a newer runner." } ?? "Shows here once Oby's runner answers (Settings › Runner)."),

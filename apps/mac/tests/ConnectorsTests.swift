@@ -67,9 +67,12 @@ struct ConnectorsTests {
         }
         let mac = [claude("default", "Personal"), claude("32203c5b", "Deskree")]
         let obid = [claude("default", "Personal"), claude("deskree", "Deskree")]
-        #expect(Connectors.accounts(mac: mac, runner: obid, local: true, hasRunner: true).map(\.account.id) == ["default", "deskree"])
-        #expect(Connectors.accounts(mac: mac, runner: obid, local: false, hasRunner: true).count == 4)
-        #expect(Connectors.accounts(mac: mac, runner: [], local: false, hasRunner: false).map(\.account.id) == ["default", "32203c5b"])
+        #expect(Connectors.accounts(mac: mac, runner: obid, local: true, hasRunner: true)?.map(\.account.id) == ["default", "deskree"])
+        #expect(Connectors.accounts(mac: mac, runner: obid, local: false, hasRunner: true)?.count == 4)
+        #expect(Connectors.accounts(mac: mac, runner: nil, local: false, hasRunner: false)?.map(\.account.id) == ["default", "32203c5b"])
+        // A remote runner that doesn't answer leaves this Mac's own; obid on this Mac that doesn't, nothing known yet.
+        #expect(Connectors.accounts(mac: mac, runner: nil, local: false, hasRunner: true)?.count == 2)
+        #expect(Connectors.accounts(mac: mac, runner: nil, local: true, hasRunner: true) == nil)
         let row = Connectors.list(accounts: Connectors.accounts(mac: mac, runner: obid, local: true, hasRunner: true), runner: nil).first { $0.id == "claude" }
         #expect(row?.how == "Signed in with Claude Code's own login: Personal, Deskree")
     }
@@ -215,12 +218,18 @@ struct ConnectorsTests {
     }
 
     /// While the runner doesn't answer (or there's none), Tetrix and GitHub, which it holds, say they
-    /// wait for it, never connected; the runner's plug-ins and connections aren't listed.
+    /// wait for it, never connected; so do the coding tools while obid on this Mac, which holds their
+    /// accounts, doesn't answer (no "No account yet" and Connect). The runner's plug-ins and connections aren't listed.
     @Test func whatTheRunnerHoldsWaitsForIt() throws {
         let list = Connectors.list(accounts: [personal], runner: nil)
         for id in ["tetrix", "github"] {
             let row = try #require(list.first { $0.id == id })
             #expect(row.state == .available && row.way == .steps("Shows here once Oby's runner answers (Settings › Runner)."))
+        }
+        let silent = Connectors.list(accounts: Connectors.accounts(mac: [personal], runner: nil, local: true, hasRunner: true), runner: nil)
+        for id in ["claude", "codex", "cursor"] {
+            let row = try #require(silent.first { $0.id == id })
+            #expect(!row.connected && row.way == .steps("Shows here once Oby's runner answers (Settings › Runner)."))
         }
         #expect(list.count == 10)
         #expect(Connectors.list(accounts: [], runner: lab(github: nil)).first { $0.id == "github" }?.way
@@ -252,6 +261,25 @@ struct ConnectorsTests {
         #expect(ids(all, "Connected") == ["github", "claude", "codex"])
         #expect(ids(all, "Available") == ["deskree", "tetrix", "cursor", "slack", "gmail", "meet", "zoom"])
         #expect(Connectors.groups(list, query: "nothing like it").isEmpty)
+        // Where a row is isn't shown, so it isn't searched: "mac" isn't in every row.
+        #expect(Connectors.groups(list, query: "this mac").isEmpty && Connectors.groups(list, query: "tetrix-lab").isEmpty)
+    }
+
+    /// Once connected, the steps to disconnect where Oby has no button (gh auth logout, a remote
+    /// runner's Tetrix) are in the row's tooltip, since the row no longer shows them.
+    @Test func disconnectStepsStayFindable() throws {
+        let gh = Connectors.gitHub(GitHubLogin(gh: true, signedIn: true, user: "octo-cat", signIn: nil), place: "This Mac")
+        #expect(gh.connected && gh.tip == gh.how + "\nTo disconnect it, run gh auth logout on this Mac.")
+        let app = try #require(Connectors.list(accounts: [], runner: lab()).first { $0.id == "github" })
+        #expect(app.connected && app.tip.contains("OBY_GITHUB_APP_ID"))
+        var runner = lab()
+        runner.tetrix = TetrixStatus(connected: true, url: dogfood.url, preset: "dogfood")
+        let tetrix = try #require(Connectors.list(accounts: [], runner: runner).first { $0.id == "tetrix" })
+        #expect(tetrix.connected && tetrix.tip.hasSuffix("Connect or disconnect it on tetrix-lab itself, with Oby there: Tetrix's sign-in comes back to that machine."))
+        // A row with a button keeps it in the context menu, so the tooltip is only how it's signed in.
+        let local = Connectors.tetrix(TetrixStatus(connected: true, url: dogfood.url, preset: "dogfood"), place: "This Mac", local: true)
+        #expect(local.tip == local.how)
+        #expect(Connectors.list(accounts: [], runner: nil).first { $0.id == "zoom" }?.tip == "Oby can't connect Zoom yet.")
     }
 
     /// While the runner doesn't answer its rows are left out, and the page says why; the Tetrix

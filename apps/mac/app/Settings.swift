@@ -592,7 +592,7 @@ struct ConnectorsSettingsView: View {
         let runner = (feed.runner == nil && !staged) || feed.connection != .live ? nil : Connectors.RunnerState(
             name: feed.name, local: feed.local, accounts: feed.accounts, github: feed.github, checks: feed.checkRuns,
             gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: feed.tetrix)
-        let accounts = Connectors.accounts(mac: store.accounts, runner: runner?.accounts ?? [], local: feed.local,
+        let accounts = Connectors.accounts(mac: store.accounts, runner: runner?.accounts, local: feed.local,
                                            hasRunner: feed.runner != nil || staged)
         return Connectors.list(accounts: accounts, runner: runner)
     }
@@ -638,7 +638,7 @@ struct ConnectorsSettingsView: View {
             }
         }
         .contentShape(Rectangle())
-        .help(connector.soon ? "Oby can't connect \(connector.name) yet." : connector.how)
+        .help(connector.tip)
         .contextMenu {
             ForEach(buttons.filter { $0.0 != onRow?.0 }, id: \.0) { label, action in
                 Button(label) { perform(action, connector) }.disabled(busy)
