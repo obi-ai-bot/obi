@@ -204,30 +204,46 @@ pub fn keys(
         Role::Guest => (own.bytes.as_slice(), peer_hello),
         Role::Host => (peer_hello, own.bytes.as_slice()),
     };
-    let salt = sha256([guest, host].concat());
     let peer = agreement::UnparsedPublicKey::new(&agreement::X25519, peer_x25519);
-    let derive = |shared: &[u8], info: &[u8]| -> Result<aead::LessSafeKey, ()> {
+    agreement::agree_ephemeral(
+        own.secret,
+        peer,
+        "the X25519 agreement failed".to_owned(),
+        |shared| derive(shared, role, guest, host),
+    )
+}
+
+/// Each direction's key: HKDF-SHA256 of the shared secret, salted with SHA-256 of the guest's
+/// hello bytes then the host's.
+fn derive(
+    shared: &[u8],
+    role: Role,
+    guest: &[u8],
+    host: &[u8],
+) -> Result<(Sealer, Opener), String> {
+    let salt = sha256([guest, host].concat());
+    let key = |info: &[u8]| -> Result<aead::LessSafeKey, String> {
         let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &salt).extract(shared);
         let info = [info];
         let okm = prk
             .expand(&info, &aead::CHACHA20_POLY1305)
-            .map_err(|_| ())?;
+            .map_err(|_| "no key".to_owned())?;
         Ok(aead::LessSafeKey::new(aead::UnboundKey::from(okm)))
     };
     let (send_info, recv_info): (&[u8], &[u8]) = match role {
         Role::Guest => (b"obi/0.1 channel guest>host", b"obi/0.1 channel host>guest"),
         Role::Host => (b"obi/0.1 channel host>guest", b"obi/0.1 channel guest>host"),
     };
-    agreement::agree_ephemeral(
-        own.secret,
-        peer,
-        "the X25519 agreement failed".to_owned(),
-        |shared| {
-            let send = derive(shared, send_info).map_err(|_| "no key".to_owned())?;
-            let recv = derive(shared, recv_info).map_err(|_| "no key".to_owned())?;
-            Ok((Sealer { key: send, next: 0 }, Opener { key: recv, next: 0 }))
+    Ok((
+        Sealer {
+            key: key(send_info)?,
+            next: 0,
         },
-    )
+        Opener {
+            key: key(recv_info)?,
+            next: 0,
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -591,6 +607,75 @@ async fn send_sealed(ws: &mut Ws, session: &mut Option<(Sealer, Opener)>, frame:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The spec's known answers (obi-sphere conformance/channel-vectors.json, synced into
+    /// obi-protocol): obid's hello check, keys, nonces and frames give each one.
+    #[test]
+    fn the_channel_gives_the_specs_known_answers() {
+        let v: Value = serde_json::from_str(include_str!(
+            "../../../obi-protocol/spec/conformance/channel-vectors.json"
+        ))
+        .unwrap();
+        let bytes = |k: &Value| from_b64url(k.as_str().unwrap()).unwrap();
+        let (g, h) = (&v["guest"], &v["host"]);
+        let cid = g["hello"]["correlation_id"].as_str().unwrap();
+        for (side, role) in [(g, Role::Guest), (h, Role::Host)] {
+            let x = check_hello(
+                &bytes(&side["hello_bytes"]),
+                &Expect {
+                    sphere: "conf-sphere",
+                    exchange: cid,
+                    obi: side["obi"].as_str().unwrap(),
+                    role,
+                    key_id: side["key_id"].as_str().unwrap(),
+                    public_key: side["public_key"].as_str().unwrap(),
+                },
+            )
+            .unwrap();
+            assert_eq!(x, bytes(&side["hello"]["x25519"]));
+            // X25519 from the fixed private key: the shared secret both sides get.
+            let own = agreement::PrivateKey::from_private_key(
+                &agreement::X25519,
+                &bytes(&side["x25519_private"]),
+            )
+            .unwrap();
+            let other = if role == Role::Guest { h } else { g };
+            let peer = agreement::UnparsedPublicKey::new(
+                &agreement::X25519,
+                bytes(&other["hello"]["x25519"]),
+            );
+            let shared = agreement::agree(&own, peer, (), |s| Ok(s.to_vec())).unwrap();
+            assert_eq!(shared, bytes(&v["shared"]));
+        }
+        assert_eq!(
+            sha256([bytes(&g["hello_bytes"]), bytes(&h["hello_bytes"])].concat()).as_slice(),
+            bytes(&v["salt"])
+        );
+        let shared = bytes(&v["shared"]);
+        let (gh, hh) = (bytes(&g["hello_bytes"]), bytes(&h["hello_bytes"]));
+        let (mut guest_seal, mut guest_open) = derive(&shared, Role::Guest, &gh, &hh).unwrap();
+        let (mut host_seal, mut host_open) = derive(&shared, Role::Host, &gh, &hh).unwrap();
+        assert_eq!(nonce(258).as_ref(), bytes(&v["nonce_258"]).as_slice());
+        for f in v["frames"].as_array().unwrap() {
+            let counter = f["counter"].as_u64().unwrap();
+            let frame = Frame::new(
+                f["stream"].as_u64().unwrap() as u32,
+                [Kind::Open, Kind::Data, Kind::End, Kind::Reset]
+                    [f["kind"].as_u64().unwrap() as usize],
+                bytes(&f["payload"]),
+            );
+            let (seal, open) = if f["direction"] == "guest>host" {
+                (&mut guest_seal, &mut host_open)
+            } else {
+                (&mut host_seal, &mut guest_open)
+            };
+            seal.next = counter;
+            open.next = counter;
+            let wire = seal.seal(&frame.encode());
+            assert_eq!(wire, bytes(&f["wire"]), "{}", f["direction"]);
+            assert_eq!(Frame::decode(&open.open(&wire).unwrap()), Some(frame));
+        }
+    }
 
     fn pair() -> (Keypair, Keypair) {
         (

@@ -4345,6 +4345,12 @@ impl Jobs {
                     .get()
                     .and_then(std::sync::Weak::upgrade)
                     .ok_or_else(|| std::io::Error::other("obid isn't in a Sphere"))?;
+                // The job's own account: its model calls use that login, from this Mac.
+                let on_account = self
+                    .accounts(tool)
+                    .into_iter()
+                    .find(|a| a.id == job.account)
+                    .and_then(|a| a.config_dir);
                 let ask = crate::sphere::guest::Ask {
                     host: &on.obi,
                     host_owner: &crate::sphere::hosting::person(&on.owner),
@@ -4357,6 +4363,7 @@ impl Jobs {
                     size: "small",
                     start_commit: job.start_commit.as_deref(),
                     grant: on.grant.as_deref(),
+                    config_dir: on_account.as_deref(),
                 };
                 return crate::sphere::guest::run_turn(
                     &link,
