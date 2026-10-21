@@ -352,6 +352,14 @@ struct AccountsSettingsView: View {
     @State private var name = ""
     @State private var payer = ""
     @State private var removing: Account?
+    /// One of obid's accounts, asked about before it goes.
+    @State private var removingRunner: Account?
+    /// The tools' own logins removed here (`default`, `codex`), comma-separated: Add an account
+    /// offers them back.
+    @AppStorage("ObyRemovedOwnLogins") private var removedOwnLogins = ""
+    private var removedOwn: Set<String> { Set(removedOwnLogins.split(separator: ",").map(String.init)) }
+    /// The tool's own login for one of obid's accounts, under way in its sheet.
+    @State private var signingIn: ShownAccountSignIn?
     @State private var problem: String?
 
     private var places: [AccountPlaces] { AccountPlaces.of(local: feed.local, runner: feed.runner != nil) }
@@ -371,22 +379,38 @@ struct AccountsSettingsView: View {
             addAccount
         }
         if places.contains(.runner) {
-            // obid's own accounts, signed in on it through each tool's own login. Adding, signing in and
-            // removing them come with obid's accounts API (docs/mac-design.md A2, A3): their buttons go
-            // in this row's `buttons`, and the add form after this list.
+            // obid's own accounts, signed in on it through each tool's own login. Its accounts API is
+            // loopback only (docs/runner-api.md, "obid only: accounts"): a runner elsewhere lists them here,
+            // and they're added, signed in and removed on that machine.
             AccountSections(feed.local ? "Accounts on this Mac" : "Accounts on \(feed.name)", items: feed.accounts, id: \.account.id,
                             usage: \.usage, place: both ? "on \(feed.name)" : nil) { state in
-                AccountUsageRow(state: state) { lift in
+                AccountUsageRow(state: state, payer: state.account.payer) { lift in
                     // The runner's "accounts" event brings the change back.
                     guard let runner = feed.runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
                     _ = try await runner.liftReserve(state.account.id, lift)
-                } buttons: {}
+                } buttons: {
+                    if feed.local {
+                        if !state.signedIn {
+                            Button("Sign In") { signIn(state.account) }.buttonStyle(.set)
+                        }
+                        Button("Remove", role: .destructive) { removingRunner = state.account }.buttonStyle(.set)
+                    }
+                }
             }
+            if feed.local { runnerAddAccount }
         }
     }
 
-    /// Adds to this Mac's own accounts, which only Oby on this Mac uses.
-    private var addAccount: some View {
+    /// The tool picked has an own login (Claude Code, Codex) removed here that obid doesn't list.
+    private var restorable: String? {
+        guard let id = Self.ownLogins[agent], removedOwn.contains(id),
+              !feed.accounts.contains(where: { $0.account.id == id }) else { return nil }
+        return Job.agentNames[agent] ?? agent
+    }
+
+    /// The add form (Sangam's "Add an account"): the tool, a name, who pays. `restore` names a tool
+    /// whose own login can come back, beside Add Account (obid on this Mac).
+    private func addForm(restore: String? = nil, _ add: @escaping () async throws -> Void) -> some View {
         SetGroup("Add an account", problem: problem) {
             SetRow("Tool", about: agent == "cursor" && !CursorFacts.separateLogins ? "\(CursorFacts.oneLogin): one Cursor account." : nil) {
                 SetSelect("Tool", selection: $agent, options: [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor")])
@@ -395,15 +419,38 @@ struct AccountsSettingsView: View {
             SetRow("Paid by") { SetField("Paid by", text: $payer, prompt: "Wellington") }
             SetRow("") {
                 Button("Add Account") {
-                    attempt {
-                        try store.add(agent: agent, name: name.trimmingCharacters(in: .whitespaces), payer: payer.trimmingCharacters(in: .whitespaces))
-                        name = ""
-                        payer = ""
+                    Task {
+                        do {
+                            try await add()
+                            name = ""
+                            payer = ""
+                            problem = nil
+                        } catch { problem = error.localizedDescription }
                     }
                 }
                 .buttonStyle(.set)
                 .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                if let restore {
+                    Button("Use \(restore)'s Own Login") {
+                        Task {
+                            do {
+                                guard let runner = feed.runner else { throw RunnerError(message: "Oby isn't connected to its runner on this Mac yet.") }
+                                let back = try await runner.restoreDefaultLogin(agent: agent)
+                                removedOwnLogins = removedOwn.subtracting([back.account.id]).sorted().joined(separator: ",")
+                                problem = nil
+                            } catch { problem = error.localizedDescription }
+                        }
+                    }
+                    .buttonStyle(.set)
+                }
             }
+        }
+    }
+
+    /// Adds to this Mac's own accounts, which only Oby on this Mac uses.
+    private var addAccount: some View {
+        addForm {
+            try store.add(agent: agent, name: name.trimmingCharacters(in: .whitespaces), payer: payer.trimmingCharacters(in: .whitespaces))
         }
         .task { await store.refresh() }
         // Kept beyond Sangam's mock: removing deletes the account's settings folder and its login, so
@@ -421,6 +468,82 @@ struct AccountsSettingsView: View {
         }
     }
 
+    /// Adds to obid's accounts on this Mac: obid makes its folder, and its row then offers Sign In.
+    /// The tool's own login, once removed here, comes back with its own button.
+    private var runnerAddAccount: some View {
+        addForm(restore: restorable) {
+            guard let runner = feed.runner else { throw RunnerError(message: "Oby isn't connected to its runner on this Mac yet.") }
+            _ = try await runner.addAccount(agent: agent, name: name.trimmingCharacters(in: .whitespaces),
+                                            payer: payer.trimmingCharacters(in: .whitespaces))
+        }
+        // Kept beyond Sangam's mock, which removes at once: what goes and what stays, first.
+        .confirmationDialog("Remove \(removingRunner?.name ?? "this account") from Oby?",
+                            isPresented: Binding(get: { removingRunner != nil }, set: { if !$0 { removingRunner = nil } }),
+                            presenting: removingRunner) { account in
+            Button("Remove", role: .destructive) { remove(account) }
+        } message: { account in
+            Text(Self.removeNote(account))
+        }
+        .sheet(item: $signingIn) { shown in
+            AccountSignInSheet(shown: shown, feed: feed) { signingIn = nil }
+        }
+    }
+
+    /// The ids obid gives each tool's own login (core/crates/obid/src/accounts.rs `implicit`).
+    static let ownLogins = ["claude": "default", "codex": "codex"]
+
+    /// What removing one of obid's accounts does, and what it leaves.
+    static func removeNote(_ account: Account) -> String {
+        let (tool, provider) = switch account.agent {
+        case "codex": ("Codex", "OpenAI")
+        case "cursor": ("Cursor", "Cursor")
+        default: ("Claude Code", "Anthropic")
+        }
+        if ownLogins[account.agent] == account.id {
+            return "Oby stops using \(tool)'s own login on this Mac; nothing of it is deleted. Bring it back here any time with Use \(tool)'s Own Login, under Add an account."
+        }
+        // Claude Code keeps an account's login in the Keychain on a Mac (docs/runner-api.md): obid leaves it.
+        let kept = account.agent == "claude" ? " Its Keychain item for this account stays too; Keychain Access removes it." : ""
+        // One obid made has eight hex digits; any other is in obid's configuration.
+        let made = account.id.wholeMatch(of: /[0-9a-f]{8}/) != nil
+        let back = made ? "" : " It's in obid's configuration, so it can't be added back here."
+        return "Oby stops using it, and deletes the folder it made for it, if any. \(tool)'s own login on this Mac, and your account with \(provider), stay as they are: sign out there to end them.\(kept)\(back)"
+    }
+
+    private func remove(_ account: Account) {
+        Task {
+            do {
+                guard let runner = feed.runner else { throw RunnerError(message: "Oby isn't connected to its runner on this Mac yet.") }
+                try await runner.removeAccount(account.id)
+                if Self.ownLogins[account.agent] == account.id {
+                    removedOwnLogins = removedOwn.union([account.id]).sorted().joined(separator: ",")
+                }
+                problem = nil
+            } catch { problem = error.localizedDescription }
+        }
+    }
+
+    /// The tool's own login on obid: its page opens in the browser, and the sheet waits for it.
+    private func signIn(_ account: Account) {
+        Task {
+            do {
+                guard let runner = feed.runner else { throw RunnerError(message: "Oby isn't connected to its runner on this Mac yet.") }
+                let signIn = try await runner.startAccountSignIn(account.id)
+                guard signIn.opens(for: account.agent) else {
+                    try? await runner.endAccountSignIn(account.id)
+                    throw RunnerError(message: "\(feed.name) answered with a page that isn't \((Job.agentNames[account.agent] ?? account.agent))'s own sign-in, so Oby opened nothing.")
+                }
+                if let code = signIn.userCode {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(code, forType: .string)
+                }
+                NSWorkspace.shared.open(signIn.url)
+                signingIn = ShownAccountSignIn(account: account, signIn: signIn)
+                problem = nil
+            } catch { problem = error.localizedDescription }
+        }
+    }
+
     private func attempt(_ action: () throws -> Void) {
         do {
             try action()
@@ -428,6 +551,89 @@ struct AccountsSettingsView: View {
         } catch {
             problem = error.localizedDescription
         }
+    }
+}
+
+/// One of obid's accounts with its sign-in under way, as a sheet's item.
+struct ShownAccountSignIn: Identifiable {
+    let account: Account
+    let signIn: AccountSignIn
+    var id: String { account.id }
+}
+
+/// The tool's own login for one of obid's accounts, waiting for the person on the tool's page: the
+/// code to type there (Codex, already on the clipboard), or a field for the code the page ends with
+/// (Claude Code); the page again; Cancel. Oby only hands the code to the tool's login, once.
+private struct AccountSignInSheet: View {
+    let shown: ShownAccountSignIn
+    let feed: RunnerFeed
+    let close: () -> Void
+    @State private var code = ""
+    @State private var sending = false
+    @State private var problem: String?
+
+    private var tool: String { Job.agentNames[shown.account.agent] ?? shown.account.agent }
+    private var signedIn: Bool { feed.accounts.first { $0.account.id == shown.account.id }?.signedIn == true }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Sign in to \(tool)").font(Tokens.font(17, .semibold)).foregroundStyle(Tokens.ink)
+            if let userCode = shown.signIn.userCode {
+                Text("\(tool)'s page opened in your browser. Type this code there; it's on your clipboard.")
+                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).multilineTextAlignment(.center)
+                Text(userCode).font(Tokens.mono(30)).foregroundStyle(Tokens.ink).textSelection(.enabled)
+                    .accessibilityLabel("Code \(userCode.map(String.init).joined(separator: " "))")
+            } else if shown.signIn.pasteCode {
+                Text("\(tool)'s page opened in your browser. Sign in as \(shown.account.name), then paste the code it shows.")
+                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).multilineTextAlignment(.center)
+                SetField("Code", text: $code, prompt: "Paste the code").onSubmit(send).disabled(sending)
+            } else {
+                Text("\(tool)'s page opened in your browser. Sign in there as \(shown.account.name).")
+                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).multilineTextAlignment(.center)
+            }
+            if !shown.signIn.pasteCode || sending {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Waiting for \(tool)").font(Tokens.font(13)).foregroundStyle(Tokens.muted)
+                }
+            }
+            if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).multilineTextAlignment(.center) }
+            HStack(spacing: 8) {
+                Button("Cancel", action: cancel).buttonStyle(.set).keyboardShortcut(.cancelAction)
+                Button("Open the Page Again") { NSWorkspace.shared.open(shown.signIn.url) }.buttonStyle(.set)
+                if shown.signIn.pasteCode {
+                    Button("Sign In", action: send).buttonStyle(.set).keyboardShortcut(.defaultAction)
+                        .disabled(sending || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .padding(.top, 6)
+            Text("\(tool) keeps the login, in Oby's folder for \(shown.account.name). Oby never reads it; it only learns that it worked.")
+                .font(Tokens.font(12)).foregroundStyle(Tokens.muted).multilineTextAlignment(.center)
+        }
+        .padding(26)
+        .frame(width: 420)
+        .background(Tokens.surface)
+        // Codex and Cursor end by themselves: obid's `accounts` event says it's signed in.
+        .onChange(of: signedIn) { if signedIn { close() } }
+    }
+
+    private func send() {
+        let code = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty, !sending, let runner = feed.runner else { return }
+        sending = true
+        Task {
+            defer { sending = false }
+            do {
+                _ = try await runner.sendAccountCode(shown.account.id, code)
+                close()
+            } catch { problem = error.localizedDescription }
+        }
+    }
+
+    private func cancel() {
+        close()
+        let id = shown.account.id
+        Task { try? await feed.runner?.endAccountSignIn(id) }
     }
 }
 

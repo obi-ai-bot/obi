@@ -215,8 +215,8 @@ struct MessageBox: View {
     /// Voice while the box is empty: the talk key does it, so it says how. Send once there's text.
     @ViewBuilder private var sendOrVoice: some View {
         ZStack {
-            // The talk key speaks to Oby: where the box tells an agent, no voice.
-            if attachments { voiceIcon }
+            // The talk key speaks to Oby: where the box tells an agent (no voice given), none.
+            if attachments || voice != nil { voiceIcon }
             Button(action: onSend) { BoxIcon(symbol: "arrow.up", color: Tokens.ink) }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Send")

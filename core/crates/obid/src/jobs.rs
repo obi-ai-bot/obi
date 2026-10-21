@@ -2248,6 +2248,18 @@ impl Jobs {
         text: &str,
         source: Source,
     ) -> Option<Result<Job, Refused>> {
+        self.message_attaching(id, text, source, &[])
+    }
+
+    /// [`Self::message`] with files the owner attached (already checked to be in obid's
+    /// attachments folder): they go with the follow-up the words start, and only with one.
+    pub fn message_attaching(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+        source: Source,
+        attachments: &[String],
+    ) -> Option<Result<Job, Refused>> {
         let job = self.get(id)?;
         let text = text.trim();
         if text.is_empty() || text.chars().count() > 2000 {
@@ -2261,7 +2273,17 @@ impl Jobs {
             )));
         }
         // Try again's words, and more after them (oby_continue_job's), pick its session up.
-        if !job.status.is_active() && !text.starts_with(crate::brain::actions::TRY_AGAIN) {
+        let follows =
+            !job.status.is_active() && !text.starts_with(crate::brain::actions::TRY_AGAIN);
+        // ponytail: files reach only a new job's inputs; a running agent's would need a copy mid-run.
+        if !attachments.is_empty()
+            && (!follows || (source != Source::Event && self.following(id).is_some()))
+        {
+            return Some(Err(Refused(
+                "Files go with a follow-up of a finished task or a new task: tell this one in words.".into(),
+            )));
+        }
+        if follows {
             // Its follow-up is working already: the words go to that one, never a second.
             if source != Source::Event
                 && let Some(next) = self.following(id)
@@ -2272,8 +2294,14 @@ impl Jobs {
             }
             return Some(match source {
                 // Past its safety limit, a follow-up would start its counters again.
+                Source::Owner if past_safety(&job) && !attachments.is_empty() => Err(Refused(
+                    "It stopped at its safety limit: carrying it on waits for your Confirm, which takes words only. Send them without the files.".into(),
+                )),
                 Source::Owner if past_safety(&job) => Err(self.confirm_past_safety(&job, text)),
-                Source::Owner | Source::Confirmed => self.create(follow_up(&job, text)),
+                Source::Owner | Source::Confirmed => self.create(NewJob {
+                    attachments: (!attachments.is_empty()).then(|| attachments.to_vec()),
+                    ..follow_up(&job, text)
+                }),
                 Source::Untrusted | Source::Event => Err(Refused(
                     "It ended, so these words would start a follow-up: only the owner's own words start one, where Oby read nothing untrusted.".into(),
                 )),

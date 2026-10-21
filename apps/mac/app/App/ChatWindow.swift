@@ -430,6 +430,7 @@ private struct HomeView: View {
         case .job(let id, let local):
             JobPane(model: model, id: id, local: local, onBack: back,
                     onOpenJob: { state.trail.push(.job(id: $0, local: local)) },
+                    onConversation: { state.trail.push(.talk) },
                     onSession: local ? nil : { state.trail.push(.session(id: id)) }).takesKeys()
         case .session(let id):
             SessionPane(model: model, id: id, onBack: back).takesKeys()
@@ -794,9 +795,13 @@ private struct JobPane: View {
     let local: Bool
     var onBack: (() -> Void)? = nil
     var onOpenJob: (String) -> Void = { _ in }
+    /// Its conversation, made the one shown, over the page.
+    var onConversation: () -> Void = {}
     /// Full session: the job's session over its page; nil for this Mac's own jobs, which keep none.
     var onSession: (() -> Void)? = nil
     @State private var problem: String?
+    /// The page's own attachments: never what waits in Home's box.
+    @State private var tray = Tray()
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
@@ -805,10 +810,17 @@ private struct JobPane: View {
     var body: some View {
         Group {
             if let job {
-                TaskPage(job: job, actions: TaskActions.of(job, local: local, model: model), tray: model.tray,
+                TaskPage(job: job, actions: TaskActions.of(job, local: local, model: model), tray: tray,
                          publishNow: model.publishing == job.id, onPublishNow: { model.publishing = nil }, onBack: onBack,
                          followUps: ThreadTaskLine.followUps(of: job.id, in: local ? desk.jobs : feed.jobs), onOpenJob: onOpenJob,
-                         onSession: onSession)
+                         onSession: onSession, usage: model.usageRows, voice: model.voice, talkKeyListening: model.listening,
+                         onTold: { _ in
+                             // Sangam's tellFromTask: its conversation opens on the words and Oby's answer.
+                             guard TaskPage.afterTold(hasConversation: model.hasConversation(of: job.id, local: local)) == .conversation else { return false }
+                             model.showConversation(of: job.id, local: local)
+                             onConversation()
+                             return true
+                         })
             } else if let problem {
                 Text(problem).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.danger)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
