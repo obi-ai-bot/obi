@@ -702,6 +702,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     #if os(macOS)
     /// A merge check was queued, taken or ended (Engine/Checks.swift): a Mac that runs them asks for one.
     case check(MacCheck)
+    /// obid measured the job worktrees after it started answering (Settings › Runner).
+    case cleanup(RunnerStatus.Cleanup)
     /// obid's Tetrix changed: connected, signed out, a sign-in started or ended (obid only).
     case tetrix(TetrixStatus)
     #endif
@@ -1854,6 +1856,7 @@ nonisolated struct EventParser {
             #if os(macOS)
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
             case "tetrix": return (try? Runner.decoder.decode(TetrixStatus.self, from: json)).map(RunnerEvent.tetrix)
+            case "cleanup": return (try? Runner.decoder.decode(RunnerStatus.Cleanup.self, from: json)).map(RunnerEvent.cleanup)
             #endif
             case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn, $0.extras) }
             case "step": return (try? Runner.decoder.decode(TurnStep.self, from: json)).map(RunnerEvent.step)
