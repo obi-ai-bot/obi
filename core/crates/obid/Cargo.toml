@@ -13,6 +13,8 @@ obi-protocol = { path = "../obi-protocol" }
 obi-plugin-api.workspace = true
 obi-plugin-host.workspace = true
 axum.workspace = true
+# The FCM service account's RS256 JWT (crate::push): the RSA that rustls already builds.
+aws-lc-rs = { version = "1.18.2", default-features = false, features = ["aws-lc-sys"] }
 base64.workspace = true
 futures-util.workspace = true
 jsonschema.workspace = true

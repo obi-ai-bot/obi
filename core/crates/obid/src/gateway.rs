@@ -13,7 +13,7 @@
 //! ponytail: the gateway binds 127.0.0.1 and `tailscale serve` puts it on the owner's tailnet.
 //! The Swift gateway's LAN listener and Bonjour come back when pairing on the home network needs them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -181,6 +181,11 @@ pub struct Redeemed {
     pub link: Value,
 }
 
+/// The paired device a forwarded request came from, as a request extension: only the gateway's
+/// in-process call sets it, so nothing that reaches the API over a socket can claim a device.
+#[derive(Debug, Clone)]
+pub struct PairedDevice(pub String);
+
 pub struct Gateway {
     file: PathBuf,
     devices: Mutex<HashMap<String, Device>>,
@@ -301,10 +306,26 @@ impl Gateway {
 
     /// Whether `token` is a paired device's, and still works.
     pub fn accepts(&self, token: &str, now: SystemTime) -> bool {
+        self.device(token, now).is_some()
+    }
+
+    /// The id of the paired device `token` is, while it still works.
+    pub fn device(&self, token: &str, now: SystemTime) -> Option<String> {
         let devices = self.devices.lock().unwrap_or_else(|e| e.into_inner());
         devices
             .get(&digest(token))
-            .is_some_and(|d| d.expires_at > seconds(now))
+            .filter(|d| d.expires_at > seconds(now))
+            .map(|d| d.id.clone())
+    }
+
+    /// The ids of the devices still paired at `now`.
+    pub fn paired(&self, now: SystemTime) -> HashSet<String> {
+        let devices = self.devices.lock().unwrap_or_else(|e| e.into_inner());
+        devices
+            .values()
+            .filter(|d| d.expires_at > seconds(now))
+            .map(|d| d.id.clone())
+            .collect()
     }
 
     /// The paired devices, oldest first: never a token or its digest.
@@ -385,7 +406,11 @@ pub async fn revoke(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
     match shared.gateway.revoke(&id) {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            // A lost phone gets no more alerts: its push tokens go with it.
+            shared.push.forget(&id);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => error(StatusCode::NOT_FOUND, "That paired device was not found."),
         Err(_) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -475,12 +500,13 @@ async fn forward(State(through): State<Through>, request: Request) -> Response {
             .map(str::trim),
         _ => None,
     };
-    if !token.is_some_and(|t| through.shared.gateway.accepts(t, SystemTime::now())) {
+    let Some(device) = token.and_then(|t| through.shared.gateway.device(t, SystemTime::now()))
+    else {
         return error(
             StatusCode::UNAUTHORIZED,
             "Every gateway request needs a device token.",
         );
-    }
+    };
     let Ok(body) = axum::body::to_bytes(body, BODY).await else {
         return error(StatusCode::PAYLOAD_TOO_LARGE, "That request is too large.");
     };
@@ -496,7 +522,8 @@ async fn forward(State(through): State<Through>, request: Request) -> Response {
         .header(
             header::AUTHORIZATION,
             format!("Bearer {}", through.shared.token),
-        );
+        )
+        .extension(PairedDevice(device));
     if let Some(kind) = parts.headers.get(header::CONTENT_TYPE) {
         upstream = upstream.header(header::CONTENT_TYPE, kind);
     }

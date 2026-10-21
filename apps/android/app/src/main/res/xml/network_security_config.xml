@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Plain HTTP only reaches the gateway on the home network, as the iPhone's NSAllowsLocalNetworking:
+     Runner.kt refuses it for any host that isn't this phone or a private address. Everything else is HTTPS. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

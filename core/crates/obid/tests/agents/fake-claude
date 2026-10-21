@@ -67,6 +67,10 @@
 //   AGAIN: <words>   keeps the words (maybe none) in .obi/again, then goes on with the rest of the
 //                    prompt; a later "Try again, …" that finds them writes .obi/tried and ends the
 //                    turn with them
+//   BUMP: <file> <a> <b>  changes `= <a>` to `= <b>` in the file and commits it
+//   obid's decision round  (it compared the change with earlier decisions) keeps the change and
+//                    ends the turn with "Kept it: …", having copied .obi/inputs/decisions.md to
+//                    .obi/decisions-seen.md
 //   anything else    ends the turn with "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
 
@@ -172,6 +176,17 @@ rl.on("line", (line) => {
   const spend = prompt.match(/SPEND: (\d+)/);
   if (spend) {
     return emit({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: "Spent.", session_id: session, total_cost_usd: 0, usage: { input_tokens: Number(spend[1]), output_tokens: 0 } });
+  }
+  if (prompt.startsWith("Before publishing, obid compared")) {
+    writeFileSync(".obi/decisions-seen.md", readFileSync(".obi/inputs/decisions.md"));
+    return result("Kept it: the gateway allows six retries since its upgrade.");
+  }
+  const bump = prompt.match(/BUMP: (\S+) (\S+) (\S+)/);
+  if (bump) {
+    writeFileSync(bump[1], readFileSync(bump[1], "utf8").replace(`= ${bump[2]}`, `= ${bump[3]}`));
+    execFileSync("git", ["add", bump[1]]);
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Bump ${bump[1]}`]);
+    return result(`Bumped ${bump[1]}.`);
   }
   const commit = prompt.match(/COMMIT: (\S+)/);
   const ask = prompt.match(/ASK: (\{.*\})/);
