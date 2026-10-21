@@ -438,6 +438,8 @@ pub async fn clear(State(shared): State<Arc<Shared>>) -> Result<Response, ApiErr
         })?;
     let body = json!({"clearedAt": obi_protocol::time::format(time)});
     shared.events.send("clear", body.clone());
+    // What it cleared may be settled now: its worktrees go (docs/runner-api.md, `cleanup`).
+    shared.jobs.clean_soon();
     Ok(json(StatusCode::OK, body))
 }
 

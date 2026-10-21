@@ -73,6 +73,8 @@ const RESET_NOTE: &str = "Oby tried again after the usage reset.";
 const RESET_TICK: Duration = Duration::from_secs(15);
 /// How often obid lets git tidy a clone.
 const TIDY_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long a job that ended keeps its worktree unless it's put away (docs/runner-api.md, `cleanup`).
+const SETTLE_AFTER: i64 = 24 * 60 * 60;
 /// The agent's MCP configuration (`--mcp-config`), in the job's own folder (its `HOME`), written
 /// before each turn: the `agent-mcp` plug-ins' servers.
 pub const MCP_CONFIG_FILE: &str = "obi-mcp.json";
@@ -550,6 +552,22 @@ impl Drop for Changing {
     }
 }
 
+/// What the last cleanup pass did ([`Jobs::clean_worktrees`]).
+#[derive(Debug, Clone, Default)]
+pub struct Cleaned {
+    /// When it ended, in seconds since the epoch; none before the first.
+    pub last_run: Option<i64>,
+    /// The settled jobs whose worktree it kept, and why.
+    pub kept: Vec<KeptWorktree>,
+}
+
+/// A settled job's worktree the cleanup pass kept: what's in it exists nowhere else.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct KeptWorktree {
+    pub job: String,
+    pub why: String,
+}
+
 /// Every job obid has, and the workers running them.
 pub struct Jobs {
     config: Config,
@@ -590,6 +608,10 @@ pub struct Jobs {
     approvals: crate::approval::Approvals,
     /// Wakes the pull request follower: a job just published.
     follow: Notify,
+    /// Wakes the cleanup pass: a job may have settled ([`Jobs::clean_worktrees`]).
+    cleaning: Notify,
+    /// What the last cleanup pass did: `status.cleanup`'s `lastRun` and `kept`.
+    cleaned: Mutex<Cleaned>,
     /// Each account's usage and weekly reserve (crate::usage).
     pub usage: crate::usage::Usages,
     /// Told when an account's usage changed: the `accounts` event goes out (crate::lib).
@@ -664,6 +686,8 @@ impl Jobs {
             api_url: Mutex::new(api_url),
             approvals,
             follow: Notify::new(),
+            cleaning: Notify::new(),
+            cleaned: Mutex::new(Cleaned::default()),
             usage,
             usage_changed: Notify::new(),
         }))
@@ -983,6 +1007,144 @@ impl Jobs {
         .await
         .map_err(|e| e.to_string())?;
         Ok(true)
+    }
+
+    /// The cleanup pass (docs/runner-api.md, `cleanup`): removes the worktree of every settled job
+    /// ([`settled_in`]) whose worktree holds nothing that exists nowhere else
+    /// ([`Jobs::worktree_holds_work`]), through obid's clone, and keeps the rest in `status.cleanup.kept`.
+    /// `cleared` is when Clear done was last pressed. Answers how many it removed.
+    pub async fn clean_worktrees(&self, now: i64, cleared: Option<i64>) -> usize {
+        let settled: Vec<Job> = {
+            let state = self.lock();
+            state
+                .jobs
+                .values()
+                .filter(|job| settled_in(&state, job, now, cleared))
+                .filter(|job| self.worktree_path(&job.id).exists())
+                .cloned()
+                .collect()
+        };
+        let (mut removed, mut kept) = (0, Vec::new());
+        let still_settled = |id: &str| {
+            let state = self.lock();
+            state
+                .jobs
+                .get(id)
+                .filter(|j| settled_in(&state, j, now, cleared))
+                .cloned()
+        };
+        for job in settled {
+            if self.shutting_down.load(Ordering::Relaxed) {
+                break;
+            }
+            // Under the lock a job's worktree is made with, checked again: one that runs again
+            // meanwhile waits, then makes it afresh from its branch.
+            let preparing = self.preparing(&job.repo);
+            let _preparing = preparing.lock().await;
+            let Some(job) = still_settled(&job.id) else {
+                continue;
+            };
+            if let Some(why) = self.worktree_holds_work(&job).await {
+                kept.push(KeptWorktree { job: job.id, why });
+                continue;
+            }
+            if still_settled(&job.id).is_none() {
+                continue;
+            }
+            let clone = git::clone_path(&self.config.home, &job.repo);
+            remove_worktree(&clone, &self.worktree_path(&job.id)).await;
+            tracing::info!("job {}: its worktree was cleaned up", job.id);
+            self.update(&job.id, |j| j.worktree = None);
+            removed += 1;
+        }
+        *self.cleaned.lock().unwrap_or_else(|e| e.into_inner()) = Cleaned {
+            last_run: Some(now),
+            kept,
+        };
+        removed
+    }
+
+    /// Why the worktree of `job`, settled, must stay, or none: what's in it may exist nowhere
+    /// else. A folder that isn't a git worktree (an agent can delete its `.git`) unless it's empty,
+    /// artifacts that weren't all published (`.obi/artifacts` is never a change git sees),
+    /// uncommitted changes (untracked files too, ignored ones not), or a HEAD that is neither where
+    /// the job started, nor what it pushed, nor on any of the clone's remote branches. git runs in
+    /// the job's sandbox, as for `keep_wip`: the agent could write the worktree's `.git` and point
+    /// it at a repository whose filters would run. Whatever can't be answered keeps it too. A
+    /// settled job's branch in the clone holds its commits, and obid makes the worktree again from
+    /// there when the job runs again.
+    async fn worktree_holds_work(&self, job: &Job) -> Option<String> {
+        let worktree = self.worktree_path(&job.id);
+        if std::fs::symlink_metadata(worktree.join(".git")).is_err() {
+            let empty = std::fs::read_dir(&worktree).is_ok_and(|mut d| d.next().is_none());
+            return (!empty).then(|| "It isn't a git worktree.".into());
+        }
+        if !job.artifact_problems.is_empty() {
+            return Some("Some of its artifacts weren't published.".into());
+        }
+        if let Err(why) = self.own_git_dirs(&job.id).await {
+            return Some(why);
+        }
+        let status = ["status", "--porcelain", "--untracked-files=normal"];
+        match self.sandboxed_git(&job.id, &status, None).await {
+            Ok(changes) if changes.is_empty() => {}
+            Ok(_) => return Some("It has uncommitted changes.".into()),
+            Err(e) => {
+                return Some(format!(
+                    "obid can't tell whether it has uncommitted changes: {e}"
+                ));
+            }
+        }
+        let head = match self
+            .sandboxed_git(&job.id, &["rev-parse", "--verify", "--quiet", "HEAD"], None)
+            .await
+        {
+            Ok(head) => String::from_utf8_lossy(&head).trim().to_owned(),
+            Err(e) => return Some(format!("obid can't read its HEAD: {e}")),
+        };
+        if !git::is_sha(&head) {
+            return Some("Its HEAD isn't a commit.".into());
+        }
+        if job.start_commit.as_deref() == Some(head.as_str())
+            || job.pushed_head() == Some(head.as_str())
+        {
+            return None;
+        }
+        let clone = git::clone_path(&self.config.home, &job.repo);
+        match git::git(
+            &clone,
+            &[
+                "for-each-ref",
+                "--count=1",
+                "--contains",
+                &head,
+                "refs/remotes",
+            ],
+        )
+        .await
+        {
+            Ok(refs) if !refs.is_empty() => None,
+            _ => Some("It has commits that aren't on the remote.".into()),
+        }
+    }
+
+    /// Waits until a job may have settled (it ended, was dismissed or archived, or Clear done was
+    /// pressed), or `most` passed.
+    pub async fn wait_to_clean(&self, most: Duration) {
+        let _ = tokio::time::timeout(most, self.cleaning.notified()).await;
+    }
+
+    /// Wakes the cleanup pass: Clear done may have settled jobs.
+    pub fn clean_soon(&self) {
+        self.cleaning.notify_one();
+    }
+
+    /// What the last cleanup pass did.
+    pub fn cleaned(&self) -> Cleaned {
+        self.cleaned
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// One job.
@@ -2186,6 +2348,7 @@ impl Jobs {
                     state.wrapping.remove(&id);
                 }
                 jobs.changed.notify_waiters();
+                jobs.cleaning.notify_one();
                 jobs.schedule();
             });
         }
@@ -2971,6 +3134,7 @@ impl Jobs {
         }
         self.events.send("job", dismissed.to_json());
         self.changed.notify_waiters();
+        self.cleaning.notify_one();
         Some(Ok(dismissed))
     }
 
@@ -3024,10 +3188,12 @@ impl Jobs {
         } else {
             ("Unarchived", None)
         };
-        Some(Ok(self.update(id, |job| {
+        let job = self.update(id, |job| {
             job.archived = at;
             job.changed(format!("{what} {by}"));
-        })?))
+        })?;
+        self.cleaning.notify_one();
+        Some(Ok(job))
     }
 
     /// Renames a job (`PATCH /v1/jobs/{id}`), whatever it's doing: the apps call it `title` from
@@ -3076,22 +3242,7 @@ impl Jobs {
             tracing::error!("can't forget job {id}: {e}");
         }
         let clone = git::clone_path(&self.config.home, &job.repo);
-        let worktree = self.worktree_path(id);
-        if worktree.exists() {
-            let _ = git::run(
-                &clone,
-                &[
-                    "worktree".as_ref(),
-                    "remove".as_ref(),
-                    "--force".as_ref(),
-                    worktree.as_os_str(),
-                ],
-                &[],
-            )
-            .await;
-            let _ = std::fs::remove_dir_all(&worktree);
-            let _ = git::git(&clone, &["worktree", "prune"]).await;
-        }
+        remove_worktree(&clone, &self.worktree_path(id)).await;
         let _ = std::fs::remove_dir_all(self.temp_path(id));
         let _ = std::fs::remove_dir_all(self.login_path(id));
         self.transcripts.remove(id);
@@ -3306,9 +3457,7 @@ impl Jobs {
         if !worktree.join(".git").exists() {
             return Err("the job has no worktree".into());
         }
-        let (_, common) = git::worktree_dirs(&worktree)
-            .await
-            .map_err(|e| e.to_string())?;
+        let (_, common) = self.own_git_dirs(id).await?;
         let clone = common
             .parent()
             .ok_or("the clone's git directory has no folder")?
@@ -3357,6 +3506,36 @@ impl Jobs {
         Ok(head)
     }
 
+    /// The git directories of the job's worktree (its own and the common one), only when they're
+    /// obid's: the clone's `.git`, and a folder directly in its `worktrees/` whose `gitdir` names
+    /// this worktree (never another job's). The worktree's `.git` is the agent's to write, and
+    /// could name any repository.
+    async fn own_git_dirs(&self, id: &str) -> Result<(PathBuf, PathBuf), String> {
+        let job = self.get(id).ok_or("the job is gone")?;
+        let worktree = self.worktree_path(id);
+        let (admin, common) = git::worktree_dirs(&worktree)
+            .await
+            .map_err(|e| e.to_string())?;
+        let ours = git::clone_path(&self.config.home, &job.repo)
+            .join(".git")
+            .canonicalize();
+        let this = worktree.join(".git").canonicalize();
+        match (admin.canonicalize(), common.canonicalize(), ours, this) {
+            (Ok(admin), Ok(common), Ok(ours), Ok(this))
+                if common == ours
+                    && admin.parent() == Some(ours.join("worktrees").as_path())
+                    && std::fs::read_to_string(admin.join("gitdir"))
+                        .ok()
+                        .and_then(|named| Path::new(named.trim()).canonicalize().ok())
+                        .as_ref()
+                        == Some(&this) =>
+            {
+                Ok((admin, common))
+            }
+            _ => Err(NOT_OUR_GIT.into()),
+        }
+    }
+
     /// Runs git in the job's worktree inside its sandbox, without the network, so git reads and
     /// runs nothing the job couldn't (no hooks, no fsmonitor): its output.
     async fn sandboxed_git(
@@ -3381,9 +3560,10 @@ impl Jobs {
     ) -> Result<Vec<u8>, String> {
         let sandbox = self.sandbox.as_ref().map_err(String::clone)?;
         let worktree = self.worktree_path(id);
-        let (admin, common) = git::worktree_dirs(&worktree)
-            .await
-            .map_err(|e| e.to_string())?;
+        let (admin, common) = self.own_git_dirs(id).await?;
+        // The job's own object folder, which git writes to here, as a run makes it: an Obi-to-Obi
+        // review's worktree has none.
+        own_objects(&admin)?;
         let temp = self.temp_path(id);
         prepare_folder(&temp).map_err(|e| e.to_string())?;
         let mut spec = self.spec(&worktree, &admin, &common, &temp, true, Tool::Claude);
@@ -3482,6 +3662,7 @@ impl Jobs {
     /// Takes obid's own `wip:` commit back out as the job runs again: what it held is uncommitted,
     /// as the agent left it. One the job started from (a follow-up's) stays.
     async fn unkeep_wip(&self, id: &str, start_commit: &str) -> Result<(), String> {
+        self.own_git_dirs(id).await?;
         let worktree = self.worktree_path(id);
         let head = git::git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
             .await
@@ -3562,9 +3743,12 @@ impl Jobs {
                 // What it committed itself ends here, before obid's `wip:` commit, which never
                 // counts: counted once keep_commits has its objects in the clone.
                 let worktree = self.worktree_path(id);
-                let own_head = git::git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
-                    .await
-                    .unwrap_or_default();
+                let own_head = match self.own_git_dirs(id).await {
+                    Ok(_) => git::git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
+                        .await
+                        .unwrap_or_default(),
+                    Err(_) => String::new(),
+                };
                 if *signal.borrow() != Signal::Shutdown
                     && !keeps_none
                     && let Err(e) = self.keep_wip(id).await
@@ -4668,22 +4852,8 @@ impl Jobs {
             ));
         }
         let worktree = self.worktree_path(id);
-        if worktree.exists() {
-            // A restart: start again from a fresh one.
-            let _ = git::run(
-                &clone,
-                &[
-                    "worktree".as_ref(),
-                    "remove".as_ref(),
-                    "--force".as_ref(),
-                    worktree.as_os_str(),
-                ],
-                &[],
-            )
-            .await;
-            let _ = std::fs::remove_dir_all(&worktree);
-            let _ = git::git(&clone, &["worktree", "prune"]).await;
-        }
+        // A restart: start again from a fresh one.
+        remove_worktree(&clone, &worktree).await;
         std::fs::create_dir_all(worktree.parent().expect("worktrees have a folder"))
             .map_err(|e| format!("obid can't make its worktrees folder: {e}"))?;
         git::run(
@@ -4755,9 +4925,7 @@ impl Jobs {
             .map_err(|e| format!("obid can't write the diff: {e}"))?;
 
         // 4. The agent, with a fixed prompt, in the sandbox.
-        let (admin, common) = git::worktree_dirs(&worktree)
-            .await
-            .map_err(|e| e.to_string())?;
+        let (admin, common) = self.own_git_dirs(id).await?;
         let temp = self.temp_path(id);
         let (tool, account) = self.job_account(&job)?;
         let spec = self.spec(&worktree, &admin, &common, &temp, false, tool);
@@ -5072,9 +5240,7 @@ impl Jobs {
                 job.attachments = (!copied.is_empty()).then_some(copied)
             });
         }
-        let (admin, common) = git::worktree_dirs(&worktree)
-            .await
-            .map_err(|e| e.to_string())?;
+        let (admin, common) = self.own_git_dirs(id).await?;
         let temp = self.temp_path(id);
         let (tool, account) = self.job_account(&job)?;
         let spec = self.spec(&worktree, &admin, &common, &temp, true, tool);
@@ -5089,9 +5255,8 @@ impl Jobs {
                 .await
                 .map_err(|e| format!("obid couldn't detach the job's HEAD: {e}"))?;
         }
-        if let Some(own) = spec.own_objects() {
-            std::fs::create_dir_all(own.join("info"))
-                .map_err(|e| format!("obid can't make the job's object folder: {e}"))?;
+        if spec.own_objects().is_some() {
+            own_objects(&admin)?;
         }
         // The work an earlier run left uncommitted is the agent's to commit again, never counted
         // as the job's commits.
@@ -8035,12 +8200,7 @@ fn undeletable_in(jobs: &HashMap<String, Job>, publishing: bool, id: &str) -> Op
         Some("It's still running: stop it first.")
     } else if publishing {
         Some("obid is publishing it: delete it once that's done.")
-    } else if job.published.is_some()
-        && job
-            .pull_request
-            .as_ref()
-            .is_none_or(|pr| pr.state != "MERGED" && pr.state != "CLOSED")
-    {
+    } else if pull_request_open(job) {
         Some("Its pull request is open: merge or close it first, or archive the job.")
     } else if jobs
         .values()
@@ -8050,6 +8210,80 @@ fn undeletable_in(jobs: &HashMap<String, Job>, publishing: bool, id: &str) -> Op
     } else {
         None
     }
+}
+
+/// Published, and its pull request open as obid last read it (or never read).
+fn pull_request_open(job: &Job) -> bool {
+    job.published.is_some()
+        && job
+            .pull_request
+            .as_ref()
+            .is_none_or(|pr| pr.state != "MERGED" && pr.state != "CLOSED")
+}
+
+/// Whether `job` is settled, as far as obid's records tell (docs/runner-api.md, `cleanup`): it
+/// ended and needs nothing, no worker or publish holds it, its pull request isn't open, no
+/// follow-up still at work carries its branch on, and it was put away (dismissed, archived, or
+/// cleared by Clear done) or ended [`SETTLE_AFTER`] ago; an Oby review as soon as it ends. Its
+/// worktree itself is looked at next ([`Jobs::worktree_holds_work`]).
+fn settled_in(state: &State, job: &Job, now: i64, cleared: Option<i64>) -> bool {
+    let Some(finished) = job.finished else {
+        return false;
+    };
+    let put_away = job.dismissed.is_some()
+        || job.archived.is_some()
+        || cleared.is_some_and(|at| finished <= at)
+        || job.kind == "review" && job.obi.is_none();
+    !job.status.is_active()
+        && !job.needs_you()
+        && !state.workers.contains_key(&job.id)
+        && !state.publishing.contains(&job.id)
+        && !pull_request_open(job)
+        && !state.jobs.values().any(|j| {
+            j.follow_up_of.as_deref() == Some(job.id.as_str())
+                && j.branch == job.branch
+                && (j.status.is_active() || j.needs_you() || pull_request_open(j))
+        })
+        && (put_away || now - finished >= SETTLE_AFTER)
+}
+
+/// Why obid won't run git for a worktree whose `.git` names another repository.
+const NOT_OUR_GIT: &str = "Its .git doesn't point into obid's clone.";
+
+/// Makes the job's own object folder, `admin/objects/info`, where it's missing; obid writes it
+/// outside the sandbox, so a link on the way (`objects` the agent made one) is refused.
+fn own_objects(admin: &Path) -> Result<(), String> {
+    let mut dir = admin.to_path_buf();
+    for part in ["objects", "info"] {
+        dir.push(part);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Err("The job's object folder isn't a folder of its own.".into()),
+            Err(_) => std::fs::create_dir(&dir)
+                .map_err(|e| format!("obid can't make the job's object folder: {e}"))?,
+        }
+    }
+    Ok(())
+}
+
+/// Takes a job's worktree away through obid's clone, and whatever git leaves of it.
+async fn remove_worktree(clone: &Path, worktree: &Path) {
+    if !worktree.exists() {
+        return;
+    }
+    let _ = git::run(
+        clone,
+        &[
+            "worktree".as_ref(),
+            "remove".as_ref(),
+            "--force".as_ref(),
+            worktree.as_os_str(),
+        ],
+        &[],
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(worktree);
+    let _ = git::git(clone, &["worktree", "prune"]).await;
 }
 
 /// Whether `job`'s branch must stay when it's deleted: obid didn't make it (only `oby/…` are
@@ -10013,6 +10247,292 @@ mod tests {
             );
         }
         assert_eq!(jobs.list(10).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A cleanup test's home: obid's clone of `o/r` with one commit, `base`, on `origin/main`,
+    /// and jobs whose sandbox starts processes through a stand-in for `obid __session`.
+    fn cleanup_home(name: &str, sandboxed: bool) -> (PathBuf, PathBuf, String, Arc<Jobs>) {
+        let root = std::env::temp_dir().join(format!("obid-cleanup-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // Seatbelt matches real paths: /private/var, not /var.
+        let root = root.canonicalize().unwrap();
+        let home = root.join("home");
+        let clone = git::clone_path(&home, "o/r");
+        std::fs::create_dir_all(&clone).unwrap();
+        cleanup_git(&clone, &["init", "-q"]);
+        cleanup_git(&clone, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let base = cleanup_git(&clone, &["rev-parse", "HEAD"]);
+        cleanup_git(&clone, &["update-ref", "refs/remotes/origin/main", &base]);
+        let sandbox = if sandboxed {
+            use std::os::unix::fs::PermissionsExt;
+            let session = root.join("session");
+            std::fs::write(&session, "#!/bin/sh\nshift 2\nexec \"$@\"\n").unwrap();
+            std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Ok(Sandbox::detect(&session).unwrap())
+        } else {
+            Err("no sandbox".into())
+        };
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": home, "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(config, crate::events::Events::new(), sandbox).unwrap();
+        (root, clone, base, jobs)
+    }
+
+    fn cleanup_git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// A job `id` that ended done two days ago, with a worktree of its own at `base`.
+    fn ended(jobs: &Jobs, clone: &Path, base: &str, id: &str, now: i64) -> (Job, PathBuf) {
+        let worktree = jobs.worktree_path(id);
+        let path = worktree.to_str().unwrap();
+        cleanup_git(clone, &["worktree", "add", "-q", "--detach", path, base]);
+        let mut job = Job::new(
+            id.into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        job.branch = format!("oby/{id}");
+        job.base = Some("main".into());
+        job.status = Status::Done;
+        job.start_commit = Some(base.into());
+        job.finished = Some(now - 2 * SETTLE_AFTER);
+        job.worktree = Some(path.into());
+        (job, worktree)
+    }
+
+    /// The cleanup pass (docs/runner-api.md, `cleanup`), in a home of its own, git in the job
+    /// sandbox. A settled job's worktree goes, and so do a pushed one's, an empty folder, and the
+    /// worktrees of jobs put away (dismissed, archived) or of a review, however young. A dirty one,
+    /// one with commits on no remote, one with artifacts that weren't published and a folder that
+    /// isn't a worktree stay, said in `kept`; a running job's, one with an open pull request, a
+    /// failed one that needs the owner, one whose follow-up carries its branch on and one that
+    /// ended an hour ago stay too, until Clear done puts the last away.
+    #[tokio::test]
+    async fn the_cleanup_pass_removes_only_settled_worktrees() {
+        let (root, clone, base, jobs) = cleanup_home("pass", true);
+        let now = obi_protocol::time::now();
+        let mut add = Vec::new();
+        let mut job = |id: &str, change: &dyn Fn(&mut Job, &Path)| {
+            let (mut job, worktree) = ended(&jobs, &clone, &base, id, now);
+            change(&mut job, &worktree);
+            add.push(job);
+            worktree
+        };
+        let settled = job("settled", &|_, _| {});
+        let pushed = job("pushed", &|_, tree| {
+            cleanup_git(tree, &["commit", "-q", "--allow-empty", "-m", "sent"]);
+            let sent = cleanup_git(tree, &["rev-parse", "HEAD"]);
+            cleanup_git(
+                &clone,
+                &["update-ref", "refs/remotes/origin/oby/pushed", &sent],
+            );
+        });
+        let empty = job("empty", &|_, tree| {
+            std::fs::remove_dir_all(tree).unwrap();
+            std::fs::create_dir(tree).unwrap();
+        });
+        let dismissed = job("dismissed", &|job, _| {
+            job.status = Status::Failed;
+            job.finished = Some(now - 60);
+            job.dismissed = Some(now);
+        });
+        let archived = job("archived", &|job, _| {
+            job.finished = Some(now - 60);
+            job.archived = Some(now);
+        });
+        let review = job("review", &|job, _| {
+            job.kind = "review".into();
+            job.finished = Some(now - 60);
+        });
+        let dirty = job("dirty", &|_, tree| {
+            std::fs::write(tree.join("notes.md"), "not committed").unwrap();
+        });
+        let unpushed = job("unpushed", &|_, tree| {
+            cleanup_git(tree, &["commit", "-q", "--allow-empty", "-m", "mine"]);
+        });
+        let artifacts = job("artifacts", &|job, _| {
+            job.artifact_problems = vec!["page: too big".into()];
+        });
+        let no_git = job("no-git", &|_, tree| {
+            std::fs::write(tree.join("notes.md"), "the agent's").unwrap();
+            std::fs::remove_file(tree.join(".git")).unwrap();
+        });
+        let running = job("running", &|job, _| {
+            job.status = Status::Running;
+            job.finished = None;
+        });
+        let open = job("open", &|job, _| {
+            job.published = Some("https://github.com/o/r/pull/1".into());
+        });
+        let failed = job("failed", &|job, _| job.status = Status::Failed);
+        let parent = job("parent", &|_, _| {});
+        let follow = job("follow", &|job, _| {
+            job.branch = "oby/parent".into();
+            job.follow_up_of = Some("parent".into());
+            job.status = Status::Running;
+            job.finished = None;
+        });
+        let young = job("young", &|job, _| job.finished = Some(now - 60 * 60));
+        for job in add {
+            jobs.lock().jobs.insert(job.id.clone(), job);
+        }
+
+        assert_eq!(jobs.clean_worktrees(now, None).await, 6);
+        for gone in [&settled, &pushed, &empty, &dismissed, &archived, &review] {
+            assert!(!gone.exists(), "{} stayed", gone.display());
+        }
+        assert_eq!(jobs.get("settled").unwrap().worktree, None);
+        for stays in [
+            &dirty, &unpushed, &artifacts, &running, &open, &failed, &parent, &follow,
+        ] {
+            assert!(
+                stays.join(".git").exists(),
+                "{} was removed",
+                stays.display()
+            );
+        }
+        assert!(no_git.join("notes.md").exists());
+        let cleaned = jobs.cleaned();
+        assert_eq!(cleaned.last_run, Some(now));
+        let mut kept: Vec<(String, String)> =
+            cleaned.kept.into_iter().map(|k| (k.job, k.why)).collect();
+        kept.sort();
+        let said = |job: &str, why: &str| (job.to_owned(), why.to_owned());
+        assert_eq!(
+            kept,
+            vec![
+                said("artifacts", "Some of its artifacts weren't published."),
+                said("dirty", "It has uncommitted changes."),
+                said("no-git", "It isn't a git worktree."),
+                said("unpushed", "It has commits that aren't on the remote."),
+            ]
+        );
+        // git forgets the worktrees it removed: the clone lists only the ones left.
+        let listed = cleanup_git(&clone, &["worktree", "list", "--porcelain"]);
+        assert!(
+            !listed.contains("settled") && listed.contains("dirty"),
+            "{listed}"
+        );
+
+        // Clear done puts the young job away; nothing else changes.
+        assert_eq!(jobs.clean_worktrees(now, Some(now)).await, 1);
+        assert!(!young.exists());
+        for stays in [
+            &dirty, &unpushed, &running, &open, &failed, &parent, &no_git,
+        ] {
+            assert!(stays.exists(), "{} was removed", stays.display());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// When git can't run in the job's sandbox, or can't answer, the worktree stays, said in
+    /// `kept`.
+    #[tokio::test]
+    async fn a_worktree_git_cant_answer_for_stays() {
+        let (root, clone, base, jobs) = cleanup_home("errors", false);
+        let now = obi_protocol::time::now();
+        let (job, worktree) = ended(&jobs, &clone, &base, "boxless", now);
+        jobs.lock().jobs.insert(job.id.clone(), job);
+        assert_eq!(jobs.clean_worktrees(now, None).await, 0);
+        assert!(worktree.join(".git").exists());
+        let kept = jobs.cleaned().kept;
+        assert_eq!(kept.len(), 1);
+        assert!(
+            kept[0]
+                .why
+                .starts_with("obid can't tell whether it has uncommitted changes"),
+            "{}",
+            kept[0].why
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        let (root, clone, base, jobs) = cleanup_home("broken", true);
+        let (job, worktree) = ended(&jobs, &clone, &base, "broken", now);
+        // Its `.git` names a git directory that isn't there.
+        std::fs::write(worktree.join(".git"), "gitdir: /nonexistent/obid/git\n").unwrap();
+        jobs.lock().jobs.insert(job.id.clone(), job);
+        assert_eq!(jobs.clean_worktrees(now, None).await, 0);
+        assert!(worktree.join(".git").exists());
+        assert_eq!(jobs.cleaned().kept.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A worktree whose `.git` the agent pointed at a repository of its own, or at another job's
+    /// folder in obid's clone, stays, even one at the job's start, and git never runs there; an
+    /// object folder the agent made a link is refused, and nothing is made where it leads.
+    #[tokio::test]
+    async fn a_worktree_obid_doesnt_own_stays() {
+        let (root, clone, base, jobs) = cleanup_home("foreign", true);
+        let now = obi_protocol::time::now();
+        let foreign = root.join("foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+        cleanup_git(&foreign, &["init", "-q"]);
+        cleanup_git(&foreign, &["commit", "-q", "--allow-empty", "-m", "theirs"]);
+        let theirs = cleanup_git(&foreign, &["rev-parse", "HEAD"]);
+        let (mut pointed, pointed_tree) = ended(&jobs, &clone, &base, "pointed", now);
+        pointed.start_commit = Some(theirs);
+        let gitdir = format!("gitdir: {}\n", foreign.join(".git").display());
+        std::fs::write(pointed_tree.join(".git"), gitdir).unwrap();
+        let (linked, linked_tree) = ended(&jobs, &clone, &base, "linked", now);
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let admin = clone.join(".git/worktrees/linked");
+        std::os::unix::fs::symlink(&elsewhere, admin.join("objects")).unwrap();
+        // A job's `.git` naming another job's folder in the clone: that one is the other's.
+        let (sibling, sibling_tree) = ended(&jobs, &clone, &base, "sibling", now);
+        let (other, _) = ended(&jobs, &clone, &base, "other", now);
+        let gitdir = format!("gitdir: {}\n", clone.join(".git/worktrees/other").display());
+        std::fs::write(sibling_tree.join(".git"), gitdir).unwrap();
+        // The other job holds work, so only its own worktree's state could let it go.
+        let mut other = other;
+        other.published = Some("https://github.com/o/r/pull/2".into());
+        for job in [pointed, linked, sibling, other] {
+            jobs.lock().jobs.insert(job.id.clone(), job);
+        }
+
+        assert_eq!(jobs.clean_worktrees(now, None).await, 0);
+        assert!(pointed_tree.join(".git").exists() && linked_tree.join(".git").exists());
+        assert!(sibling_tree.join(".git").exists());
+        assert!(!elsewhere.join("info").exists());
+        let mut kept = jobs.cleaned().kept;
+        kept.sort_by(|a, b| a.job.cmp(&b.job));
+        assert_eq!(kept[0].job, "linked");
+        assert!(
+            kept[0]
+                .why
+                .ends_with("The job's object folder isn't a folder of its own."),
+            "{}",
+            kept[0].why
+        );
+        assert_eq!(kept[1].job, "pointed");
+        assert_eq!(kept[1].why, NOT_OUR_GIT);
+        assert_eq!(kept[2].job, "sibling");
+        assert_eq!(kept[2].why, NOT_OUR_GIT);
+        assert_eq!(kept.len(), 3);
         let _ = std::fs::remove_dir_all(&root);
     }
 

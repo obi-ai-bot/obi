@@ -302,7 +302,7 @@ fn status_answers_with_engine_obid() {
     let worktrees = folder.0.join("home").join("worktrees");
     assert_eq!(
         measured_status(&obid, &host).body["cleanup"],
-        json!({"path": worktrees.to_string_lossy(), "bytes": 0, "lastRun": null})
+        json!({"path": worktrees.to_string_lossy(), "bytes": 0, "lastRun": null, "kept": []})
     );
 
     // The token put in home/api-token is taken as it is, never rewritten, nor said anywhere.
@@ -570,7 +570,7 @@ fn oauth_discovery_needs_the_token() {
     assert_eq!(answer.status, 403);
 }
 
-/// status.cleanup.bytes is measured when obid starts (and, once obid cleans up, after each pass),
+/// status.cleanup.bytes is measured when obid starts (and after each cleanup pass that removed a worktree),
 /// as Engine/Cleanup.swift does, never on each request: what lands in the worktrees afterwards
 /// doesn't change it until then.
 #[test]

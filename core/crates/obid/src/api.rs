@@ -642,6 +642,8 @@ pub struct CleanupJson {
     pub path: String,
     pub bytes: u64,
     pub last_run: Option<String>,
+    /// Settled jobs' worktrees the last pass kept, and why (crate::jobs, `clean_worktrees`).
+    pub kept: Vec<crate::jobs::KeptWorktree>,
 }
 
 /// `status.cleanup`, and the `cleanup` event: nothing until the worktrees are measured.
@@ -649,8 +651,9 @@ pub fn cleanup_json(cleanup: &Cleanup) -> Option<CleanupJson> {
     cleanup.bytes().map(|bytes| CleanupJson {
         path: cleanup.path.to_string_lossy().into_owned(),
         bytes,
-        // obid has no cleanup pass yet; when it does, it sets this and calls `remeasure`.
+        // The cleanup pass's, which status adds (crate::jobs, `cleaned`).
         last_run: None,
+        kept: Vec::new(),
     })
 }
 
@@ -719,6 +722,7 @@ pub fn account_json(
 
 async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>, ApiError> {
     let accounts = crate::accounts::list_now(&shared).await;
+    let cleaned = shared.jobs.cleaned();
     Ok(axum::Json(Status {
         runner: RunnerJson {
             version: API_VERSION,
@@ -737,7 +741,11 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         permissions: ModeJson {
             mode: shared.jobs.default_mode().as_str(),
         },
-        cleanup: cleanup_json(&shared.cleanup),
+        cleanup: cleanup_json(&shared.cleanup).map(|json| CleanupJson {
+            last_run: cleaned.last_run.map(obi_protocol::time::format),
+            kept: cleaned.kept,
+            ..json
+        }),
         claude_keychain: KeychainJson {
             on: crate::jobs::keychain_on(),
             auto: crate::jobs::keychain_auto(),
