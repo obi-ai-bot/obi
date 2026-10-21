@@ -247,7 +247,11 @@ impl Vm {
             events,
             disk,
         };
-        match vm.next().await {
+        // A VM that hasn't started in 5 minutes won't (obi-vm is killed as `vm` drops).
+        let first = tokio::time::timeout(std::time::Duration::from_secs(300), vm.next())
+            .await
+            .map_err(|_| "the VM didn't start within 5 minutes".to_owned())?;
+        match first {
             Some(e) if e["event"] == "running" => Ok(vm),
             Some(e) => Err(format!(
                 "the VM didn't start: {}",

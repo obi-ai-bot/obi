@@ -239,6 +239,11 @@ async fn a_job_runs_on_a_teammates_mac_with_the_owners_own_key_and_comes_back_wi
     assert!(seen.contains("refused 403"), "{seen}");
     assert!(seen.contains("model 200 Hello from the model"), "{seen}");
     assert!(seen.contains("job Say hello on"), "{seen}");
+    // Only the job's code went, as one commit with no parent: none of the repository's history.
+    assert!(
+        seen.contains(r#"base "The job's code" parents "" commits 1"#),
+        "{seen}"
+    );
     // The key is nowhere on Wellington's side, and the relay saw only sealed frames.
     assert!(
         holding(&hf.0, LOGIN).is_empty(),
