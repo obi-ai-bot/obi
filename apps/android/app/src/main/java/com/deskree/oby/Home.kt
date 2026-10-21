@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -443,15 +444,15 @@ private fun TasksColumn(open: (Route) -> Unit) {
             item(group.id) {
                 // A kind's name opens its page, as Home's chip does (the owner's addition to Sangam's
                 // design, 2026-10-21); the chevron and the rest of the row fold it.
-                Row(Modifier.fillMaxWidth().padding(top = 4.dp).height(36.dp).semantics { heading() }, verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).height(IntrinsicSize.Min), verticalAlignment = Alignment.CenterVertically) {
                     group.type?.let { kind ->
                         T(group.label, Tokens.textSm, c.label, modifier = Modifier.fillMaxHeight()
                             .clickable(onClickLabel = "Open ${group.label}") { open(Route.Kind(kind)) }
-                            .semantics { contentDescription = "Open ${group.label}" }
+                            .semantics { contentDescription = "Open ${group.label}"; heading() }
                             .padding(start = 12.dp, end = 6.dp).wrapContentHeight())
                     }
                     Row(Modifier.weight(1f).fillMaxHeight().clickable { phone.panelFolded = if (folded) phone.panelFolded - group.id else phone.panelFolded + group.id }
-                        .semantics { contentDescription = "${if (folded) "Show" else "Hide"} ${group.label}" }
+                        .semantics { contentDescription = "${if (folded) "Show" else "Hide"} ${group.label}"; if (group.type == null) heading() }
                         .padding(end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.ExpandMore, null, Modifier.size(12.dp).rotate(if (folded) 180f else 0f), tint = c.label)
                         Spacer(Modifier.weight(1f))

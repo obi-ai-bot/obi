@@ -261,6 +261,7 @@ private struct GroupHead: View {
                 .pointerStyle(.link)
                 .help("Open \(group.label)")
                 .accessibilityLabel("Open \(group.label)")
+                .accessibilityAddTraits(.isHeader)
                 .layoutPriority(1)
             }
             Button(action: onToggle) {
@@ -278,14 +279,14 @@ private struct GroupHead: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(open ? "Hide" : "Show") \(group.label)")
+            // The group's header to VoiceOver: its name, or this chevron where it has no page.
+            .accessibilityAddTraits(group.type == nil ? .isHeader : [])
             .accessibilityValue([group.count > 0 ? "\(group.count) \(group.countLabel)" : nil,
                                  group.needs > 0 ? "\(group.needs) need\(group.needs == 1 ? "s" : "") you" : nil].compactMap { $0 }.joined(separator: ", "))
         }
         .onHover { hovering = $0 }
         .animation(Tokens.fade, value: hovering)
         .animation(Tokens.fade, value: hoveringName)
-        .accessibilityElement(children: .contain)
-        .accessibilityAddTraits(.isHeader)
     }
 }
 

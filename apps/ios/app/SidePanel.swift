@@ -174,10 +174,11 @@ private struct TasksColumn: View {
                     HStack(spacing: 0) {
                         if let kind = group.type {
                             Button { open(.kind(kind)) } label: {
-                                Text(group.label).padding(.leading, 12).padding(.trailing, 6).frame(height: 36).contentShape(Rectangle())
+                                Text(group.label).padding(.leading, 12).padding(.trailing, 6).frame(minHeight: 44).contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Open \(group.label)")
+                            .accessibilityAddTraits(.isHeader)
                         }
                         Button { withAnimation(Tokens.warm) { phone.panelFolded.formSymmetricDifference([group.id]) } } label: {
                             HStack(spacing: 4) {
@@ -187,16 +188,15 @@ private struct TasksColumn: View {
                                 // A kind's open tasks, as his panel counts them.
                                 if group.count > 0 { Text("\(group.count)").monospacedDigit() }
                             }
-                            .padding(.trailing, 12).frame(height: 36).contentShape(Rectangle())
+                            .padding(.trailing, 12).frame(minHeight: 44).contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("\(folded ? "Show" : "Hide") \(group.label)")
                         .accessibilityValue(group.count > 0 ? "\(group.count) \(group.countLabel)" : "")
+                        // The group's header to VoiceOver: its name, or this chevron where it has no page.
+                        .accessibilityAddTraits(group.type == nil ? .isHeader : [])
                     }
                     .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.label)
-                    .padding(.top, 4)
-                    .accessibilityElement(children: .contain)
-                    .accessibilityAddTraits(.isHeader)
                     if !folded {
                         ForEach(WorkList.shown(group, more: false).rows) { item in
                             Button { open(.task(item.id)) } label: { PanelTaskRow(item: item) }.buttonStyle(.plain)
