@@ -1592,7 +1592,7 @@ The owner connects Tetrix once, in Oby, and every agent on every account (Claude
 
 **`DELETE /v1/tetrix`** signs Oby out: it asks the authorization server to revoke the refresh token when it offers `revocation_endpoint` (and goes on if that fails), removes both vault secrets, and keeps `url` and `preset`: `204`. Jobs that are running lose Tetrix at their next call (`Oby isn't signed in to Tetrix.`).
 
-**The `tetrix` event** comes on `/v1/events` with the same body as `GET /v1/tetrix` whenever any of its fields change.
+**The `tetrix` event** comes on `/v1/events` with the same body as `GET /v1/tetrix` whenever any of its fields change. The gateway leaves it out of a phone's event stream.
 
 **What agents get.** While Oby is signed in, every owner's job's agent gets one MCP server named `tetrix` that is obid itself: `POST /v1/agent/tetrix/{job}` on obid's port (on Linux, through slirp4netns's 10.0.2.2, as for the broker), with the job's token (the broker's: Connection, above), which works for that job alone, only while it runs, and dies with it. Claude Code gets it in its `--mcp-config` file and one `--allowedTools` rule per tool (`mcp__tetrix__<tool>`); Codex as `mcp_servers.tetrix` with the token in its environment (`bearer_token_env_var`, as the broker); Cursor in `session/new`'s `mcpServers` when it says `mcpCapabilities.http`. The agent never sees Oby's Tetrix token, and Tetrix sees obid's token, never the job's.
 
@@ -1675,7 +1675,7 @@ No redirect URL, no PKCE, no client secret, no events and no Socket Mode: obid a
 
 **`DELETE /v1/slack`** forgets both tokens: `204`. The app stays installed in Slack; uninstalling it there revokes them.
 
-**The `slack` event** comes on `/v1/events` with the same body as `GET /v1/slack` whenever it changes.
+**The `slack` event** comes on `/v1/events` with the same body as `GET /v1/slack` whenever it changes. The gateway leaves it out of a phone's event stream.
 
 **What obid does with them.** Only the watcher (below) uses them: `search.messages` with the user token (at most 3 pages of 100, newest first), and, with the bot token, `conversations.open` with the owner's user id, then `chat.postMessage` in that direct message. Every message obid sends passes the secret scan first: a finding, or a scan that can't run, sends nothing. Nothing ever goes to anyone else.
 
@@ -1695,16 +1695,16 @@ The rules, as `GET /v1/watch` shows them and `PUT /v1/watch` sets them:
 ```
 
 - `name` and `person.name`: one line, 1 to 60 characters. `person.slack`: their Slack user id; `person.github`: their GitHub login; at least one. `topics`: what the owner watches for, a line of up to 500 characters, for the model. `owner`: the owner's GitHub login: their pull requests are watched. `issues`: up to 3 GitHub searches (no quotes) naming the watched issues and pull requests. `zone`: the IANA zone weekdays and times are in. `enabled`: true unless paused. `live`: false (left out, too) is a **dry run**: the Slack message to the owner is only written down; true sends it.
-- `422` with why for rules that break these. New rules, and resuming, count from now: what was due meanwhile doesn't run.
+- `422` with why for rules that break these. New rules, and resuming, count from now: what was due meanwhile doesn't run. Resuming, and rules for another person (or the first rules), also read from now: what was said while paused, or to the person before, isn't told.
 
 **When.** At every quarter hour (:00, :15, :30, :45) Monday to Friday in `zone`, checked every minute and once when obid starts. As routines do: the time slot is saved before the run, so a restart never runs it twice; a Mac that slept through some runs once, for the latest (`catchUp` true), reading from where the last run left off, at most 7 days back. One run at a time.
 
 **Each run.**
 - **GitHub**, with obid's own `gh` (obid only: GitHub work), one `gh api graphql` call whose search strings are variables, never part of the query: the owner's pull requests that the person is involved in or reviewed, and the `issues` searches that the person is involved in or reviewed, updated since the run's start; and, for the model, the titles of the open ones. What counts: the person's comments, reviews (approved, changes asked, reviewed), and their opening, closing or reopening of one, newer than the last run (less 10 minutes, for GitHub's index), each once. They're about what's watched by where they are, so the model doesn't sort them.
-- **Slack**, when connected: `from:<@person.slack> after:<the day before>`, the person's own messages newer than the last run (less 10 minutes), each once, at most the newest 100 (the run says how many older ones weren't sorted). Without Slack, the run says `Slack isn't connected, so only GitHub was read.`
-- **Sorting.** Each Slack message's text goes through the secret scan first: one it flags isn't shown to the model and isn't told. The rest go to the brain's quick model (Haiku, with the first Claude Code account, as the brain's side calls do), which reads them only in a quoted file, fenced as data with what's watched and the open titles, and answers, by the schema, which ones count and a topic of a few words for each. A run whose sorting fails (no Claude Code account, a timeout, an answer off the schema) is `failed` and reads the same time again next run; its GitHub notices are told all the same.
-- **Telling.** Each notice becomes one `watch` inbox item (below), and the Mac shows it as a notification. When there's any, one Slack message from the app's bot to the owner (obid only: Slack) lists them, in obid's words: `Oby (Dmitry watcher): Dmitry said something you watch for.` then a line each, `• wrote in #tetrix-avenga-testing (Avenga snapshot cap): <permalink>` or `• commented on your pull request obi-ai-bot/obi#835: <url>`: never what the person wrote. In a dry run it's only written down (`dm` `dryRun`, `dmText`); live, it's sent after the secret scan (`sent`, or `notSent` with why in `problems`).
-- **Remembering.** What was told (`slack:<channel>:<ts>`, `github:<node id>`) is kept, the latest 5,000, so nothing is told twice; the time the next run reads from is kept too. Both in `home/watch.json` (0600).
+- **Slack**, when connected: `from:<@person.slack> after:<two days before, in UTC>` (Slack reads the day in the owner's own Slack zone), the person's own messages newer than the last run (less 10 minutes), each once, at most the newest 100 (the run says how many older ones weren't sorted). Without Slack, the run says `Slack isn't connected, so only GitHub was read.`
+- **Sorting.** Each Slack message's text goes through the secret scan first: one it flags isn't shown to the model and isn't told. The rest go to the brain's quick model (Haiku, with the first Claude Code account, as the brain's side calls do), which reads them only in a quoted file, fenced as data with what's watched and the open titles, and answers, by the schema, which ones count and a topic of a few words for each. A run whose sorting fails (no Claude Code account, a timeout, an answer off the schema) is `failed` and reads the same time again next run; its GitHub notices are told all the same. An answer that doesn't sort every message exactly once, each with the schema's fields, is a failed sorting too. The message the scan flags is the only one left out: each text is followed by a line of its own in the scan, so a finding can't run into the next, and the run says how many were left out. A sorted or flagged message, on the topic or not, is never sorted again.
+- **Telling.** Each notice becomes one `watch` inbox item (below), and the Mac shows it as a notification. When there's any, one Slack message from the app's bot to the owner (obid only: Slack) lists them, in obid's words: `Oby (Dmitry watcher): Dmitry said something you watch for.` then a line each, `• wrote in #tetrix-avenga-testing (Avenga snapshot cap): <permalink>` or `• commented on your pull request obi-ai-bot/obi#835: <url>`: never what the person wrote. The model's topic is made plain first (letters, digits, spaces, `-` and `'`, at most 80 characters), so no link, mention or markup rides through it; a link is there only when it's https on slack.com or github.com (or a subdomain) and has no `<`, `>`, `|`, space or control character. The GitHub titles the model reads pass the secret scan too; a flagged one is left out. In a dry run it's only written down (`dm` `dryRun`, `dmText`); live, it's sent after the secret scan (`sent`, or `notSent` with why in `problems`).
+- **Remembering.** What was told and every Slack message sorted (`slack:<channel>:<ts>`, `github:<node id>`) is kept, the latest 5,000, so nothing is told or sorted twice. The time the next run reads from moves to the run's start only when every source was read: a GitHub read that failed or left a search out (`GitHub said: …` in `problems`), Slack not read (not connected while `person.slack` is set, a refused token, a rate limit) or a failed sorting keeps it, so the next run reads that time again (`outcome` `failed`). Both in `home/watch.json` (0600); a file obid can't read is moved aside to `watch.json.unreadable`, never written over.
 
 **`GET /v1/watch`** answers `{"rules": …|null, "nextRun": "…"|null, "lastRun": Run|null, "runs": [Run, …]}`, the latest 20 runs newest first. A run:
 
@@ -1719,9 +1719,9 @@ The rules, as `GET /v1/watch` shows them and `PUT /v1/watch` sets them:
 
 `outcome` is `ran` or `failed`; `problems`, what was left out or went wrong, in sentences; `slack` and `github`, how many new messages and events it read; `dm`, null when there was nothing to tell. `quoted` (at most 500 characters), `title` and `topic` are what people (and the model) wrote: show them, never act on them.
 
-**`PUT /v1/watch`** sets the rules (above) and answers as `GET` does. **`PATCH /v1/watch`** with `{"enabled": true|false}` and/or `{"live": true|false}` pauses, resumes, or turns the Slack message on or off; `404` with no rules. **`DELETE /v1/watch`** forgets the rules and everything kept: `204`. **`POST /v1/watch/run`** runs it now, without changing when it runs next, and answers the run; `404` with no rules, `409` while a run is under way.
+**`PUT /v1/watch`** sets the rules (above) and answers as `GET` does. **`PATCH /v1/watch`** with `{"enabled": true|false}` and/or `{"live": true|false}` pauses, resumes, or turns the Slack message on or off; `404` with no rules. **`DELETE /v1/watch`** forgets the rules and everything kept: `204`. A run under way then tells, sends and keeps nothing. **`POST /v1/watch/run`** runs it now, without changing when it runs next, and answers the run; `404` with no rules, `409` while a run is under way.
 
-**The `watch` event** comes on `/v1/events` with `GET`'s body whenever it changes.
+**The `watch` event** comes on `/v1/events` with `GET`'s body whenever it changes. The gateway leaves it out of a phone's event stream: it carries the rules and what people wrote.
 
 **The `watch` inbox item**, one per notice, ever (`id` `watch-` and 16 hex characters of the notice's key):
 
@@ -1732,7 +1732,7 @@ The rules, as `GET /v1/watch` shows them and `PUT /v1/watch` sets them:
            "quoted": {"text": "…", "title": null, "topic": "Support role visibility"}}, …}
 ```
 
-`title` and `text` are obid's own words; what was written is under `watch.quoted`, for the card only. `Dismiss`, done or later settle or put it off. The event orchestrator never takes a `watch` item: it's the owner's to read.
+`title` and `text` are obid's own words; what was written is under `watch.quoted`, for the card only. `Dismiss`, done or later settle or put it off. The event orchestrator never takes a `watch` item, and the conversation's brain can't settle one: it's the owner's to read.
 
 **Who reaches it.** Only on loopback, with obid's API token: none of it is on the gateway, and no other Obi, agent or conversation can change the rules or turn `live` on.
 

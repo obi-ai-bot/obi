@@ -128,7 +128,7 @@ fn messages(answer: &Value) -> Vec<Message> {
                 text: m["text"].as_str().unwrap_or_default().to_owned(),
                 permalink: m["permalink"]
                     .as_str()
-                    .filter(|p| p.starts_with("https://"))
+                    .filter(|p| crate::watch::link_ok(p, "slack.com"))
                     .map(str::to_owned),
             })
         })
@@ -230,14 +230,23 @@ impl Slack {
                 .headers()
                 .get(header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
-                .unwrap_or("a while");
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map_or("a while".to_owned(), |s| format!("{s} seconds"));
             return Err(Failed::Other(format!(
-                "Slack's rate limit: try again in {wait} seconds."
+                "Slack's rate limit: try again in {wait}."
             )));
         }
-        let bytes = response.bytes().await.unwrap_or_default();
-        if bytes.len() > 4 * 1024 * 1024 {
-            return Err(Failed::Other("Slack's answer was too long.".into()));
+        let mut response = response;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| Failed::Other(format!("Slack's answer broke off: {}", e.without_url())))?
+        {
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() > 4 * 1024 * 1024 {
+                return Err(Failed::Other("Slack's answer was too long.".into()));
+            }
         }
         let answer: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         if answer["ok"] == true {

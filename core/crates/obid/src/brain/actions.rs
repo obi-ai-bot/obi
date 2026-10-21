@@ -905,6 +905,8 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
     match item.kind.as_str() {
         // A confirm item is the owner's own decision: never answered by the brain.
         "confirm" => Owners::Refuse("only you can confirm it, in your inbox.".into()),
+        // What someone said, told to the owner: theirs to read, not the brain's to settle.
+        "watch" => Owners::Refuse("it's for you to read, in your inbox.".into()),
         // A job's plan is the owner's to approve or send back, either way (#609).
         "plan" => Owners::Refuse(
             "it's a job's plan: only you can approve it or send it back, in your inbox.".into(),
@@ -1388,6 +1390,15 @@ mod tests {
         assert_eq!(
             owners_call(&confirm, "Confirm", None),
             Owners::Refuse("only you can confirm it, in your inbox.".into())
+        );
+    }
+
+    #[test]
+    fn owners_call_refuses_a_watchers_notice() {
+        let notice = item("watch", "watch-1", "Dmitry on Slack, in #x", &["Dismiss"]);
+        assert_eq!(
+            owners_call(&notice, "Dismiss", None),
+            Owners::Refuse("it's for you to read, in your inbox.".into())
         );
     }
 
