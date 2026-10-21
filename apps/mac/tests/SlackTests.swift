@@ -25,6 +25,14 @@ struct SlackTests {
         #expect(item.id == "j1-question-0")
     }
 
+    /// A listener's finished review: the pull request's page, and the review Approve posts.
+    @Test func aReviewReadyShowsWhatApprovePosts() throws {
+        let json = #"{"id":"listen-review-1","kind":"listen","job":"j1","title":"Review ready: obi #835","text":"Oby reviewed pull request #835.","options":["Approve","Dismiss"],"created":"2026-10-21T15:00:00Z","done":null,"later":null,"watch":{"source":"slack","url":"https://slack.com/archives/C1/p1","pr":{"repo":"obi-ai-bot/obi","number":835,"url":"https://github.com/obi-ai-bot/obi/pull/835"},"review":"Looks right; **one** nit."}}"#
+        let notice = try Runner.decoder.decode(WatchNotice.self, from: Data(json.utf8))
+        #expect(notice.url == URL(string: "https://github.com/obi-ai-bot/obi/pull/835"))
+        #expect(notice.review == "Looks right; **one** nit." && notice.options == ["Approve", "Dismiss"])
+    }
+
     /// Only a link on slack.com or github.com over https, with nothing that ends it early, opens.
     @Test func onlySlackAndGitHubLinksOpen() {
         #expect(WatchNotice.link("https://deskree.slack.com/archives/C1/p1") != nil)

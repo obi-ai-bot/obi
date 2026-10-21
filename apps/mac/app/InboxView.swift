@@ -130,6 +130,16 @@ struct IslandInbox: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(verbatim: notice.title).font(.system(size: 13, weight: .semibold)).lineLimit(2)
             Text(verbatim: notice.text).font(.system(size: 12)).foregroundStyle(.white.opacity(0.75)).lineLimit(3)
+            // What Approve posts, exactly: the review, as plain text.
+            if let review = notice.review {
+                ScrollView {
+                    Text(verbatim: review).font(.system(size: 12)).foregroundStyle(.white.opacity(0.85))
+                        .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                }
+                .frame(maxHeight: 180)
+                .padding(8)
+                .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
             HStack(spacing: 14) {
                 ForEach(notice.options, id: \.self) { option in
                     Button(option) { settle(notice, answer: option) }
