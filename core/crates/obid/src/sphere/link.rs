@@ -297,7 +297,7 @@ fn new_uuid() -> String {
 }
 
 /// Resolves once obid is stopping.
-async fn stopped(mut stopping: watch::Receiver<bool>) {
+pub(super) async fn stopped(mut stopping: watch::Receiver<bool>) {
     while !*stopping.borrow() {
         if stopping.changed().await.is_err() {
             std::future::pending::<()>().await;
@@ -4063,6 +4063,11 @@ impl Link {
         self.config.guest_model_api.clone()
     }
 
+    /// Whether obid is stopping, for tasks that end with it.
+    pub(super) fn stopping(&self) -> watch::Receiver<bool> {
+        self.stopping.clone()
+    }
+
     pub(super) fn hosting_setup(&self) -> super::hosting::Setup {
         self.setup.clone()
     }
@@ -4474,6 +4479,7 @@ impl Link {
             super::hosting::fetch_image_soon(self);
         } else {
             self.hosting.stop(None, "sharing_off");
+            super::hosting::cancel_image_fetch(self);
         }
         self.publish_runner_soon();
         Ok(self.mac_json())

@@ -258,11 +258,18 @@ check_universal() {
 # built for the image core/obi-vm/image.json pins, and that image published where obid fetches it,
 # each file its pinned size. A dry run only warns about the image.
 check_obi_vm() {
-    local vm="$1" dry_run="$2" pin="$root/core/obi-vm/image.json" root_sha file bytes got published=published
+    local vm="$1" dry_run="$2" pin="$root/core/obi-vm/image.json" root_sha file bytes got published=published sig
     [[ -x "$vm" ]] || die "no Contents/Helpers/obi-vm"
     [[ "$(lipo -archs "$vm")" == arm64 ]] || die "obi-vm is $(lipo -archs "$vm"), not arm64"
-    codesign -d --entitlements - "$vm" 2>/dev/null | grep -q com.apple.security.virtualization \
-        || die "obi-vm isn't signed with com.apple.security.virtualization"
+    # Exactly its entitlements file's, the hardened runtime, and (but in a dry run) Developer ID.
+    diff <(codesign -d --entitlements - --xml "$vm" 2>/dev/null | plutil -convert xml1 -o - -) \
+        <(plutil -convert xml1 -o - "$root/core/obi-vm/obi-vm.entitlements") > /dev/null \
+        || die "obi-vm's entitlements aren't exactly core/obi-vm/obi-vm.entitlements"
+    sig="$(codesign -dvv "$vm" 2>&1)"
+    grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]+\(.*runtime' <<< "$sig" || die "obi-vm isn't signed with the hardened runtime"
+    if ! $dry_run; then
+        grep -q '^Authority=Developer ID Application' <<< "$sig" || die "obi-vm isn't signed with Developer ID"
+    fi
     # What obi-vm answers: every SHA-256 in the pin, and each size as "<name>.bytes".
     [[ "$("$vm" image | jq -cS .)" == "$(jq -cS '(to_entries | map(select(.value | type == "string")) | from_entries) + (.bytes | with_entries(.key += ".bytes" | .value |= tostring))' "$pin")" ]] \
         || die "obi-vm wasn't built for core/obi-vm/image.json's image"

@@ -19,6 +19,11 @@ for file in vmlinuz initrd root.img vmlinuz.zst initrd.zst root.img.zst; do
     [[ "$(shasum -a 256 "$dir/$file" | cut -d' ' -f1)" == "$(jq -r ".[\"$file\"]" "$pin")" ]] \
         || die "$dir/$file isn't the image core/obi-vm/image.json pins"
 done
+# upload_r2 tries `wrangler r2 object put` first, which takes about 315 MB at most: each file must
+# fit, or go up with `aws s3 cp` (multipart) by hand.
+for file in vmlinuz.zst initrd.zst root.img.zst; do
+    (( $(stat -f %z "$dir/$file") < 300000000 )) || die "$file is over 300 MB: upload it with aws s3 cp (docs/release.md)"
+done
 for file in vmlinuz.zst initrd.zst root.img.zst; do
     say "Uploading $file (vm/$root_sha/$file)"
     upload_r2 "$dir/$file" "vm/$root_sha/$file" application/zstd

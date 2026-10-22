@@ -63,8 +63,8 @@ struct SharingSettingsView: View {
         let size = { (bytes: Int64?) in ByteCountFormatter.string(fromByteCount: bytes ?? 0, countStyle: .file) }
         switch image.state {
         case "fetching": return "Getting the VM’s image: \(size(image.done)) of \(size(image.total))."
-        case "failed": return "\(image.error ?? "The VM’s image couldn’t be fetched.") Turn sharing off and on to try again."
-        default: return "Turning it on gets the VM’s image first (about 170 MB)."
+        case "failed": return image.error ?? "The VM’s image couldn’t be fetched."
+        default: return "Turning it on gets the VM’s image first (\(size(image.total)))."
         }
     }
 
@@ -72,9 +72,15 @@ struct SharingSettingsView: View {
         let settings = mac.settings
         return SetGroup("This Mac", footer: settings.on ? Self.onFooter : Self.offFooter(team), problem: problem) {
             SetRow("Share this Mac with \(team)", about: Self.imageAbout(mac)) {
-                Toggle("Share this Mac with \(team)", isOn: Binding(get: { settings.on }, set: { on in turn(on) }))
-                    .toggleStyle(.set)
-                    .disabled(!mac.ready && !settings.on && mac.image == nil)
+                HStack(spacing: 8) {
+                    // Fetching the VM's image failed: once more, as turning sharing on does.
+                    if settings.on && mac.image?.state == "failed" {
+                        Button("Try again") { turn(true) }.buttonStyle(.set)
+                    }
+                    Toggle("Share this Mac with \(team)", isOn: Binding(get: { settings.on }, set: { on in turn(on) }))
+                        .toggleStyle(.set)
+                        .disabled(!mac.ready && !settings.on && mac.image == nil)
+                }
             }
             if settings.on {
                 SetRow("When", about: "Away: no keyboard or mouse for 10 minutes. Never on battery, in Low Power Mode or when it’s hot.") {
