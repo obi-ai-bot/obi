@@ -116,6 +116,26 @@ struct OfflineTests {
         #expect(answer.count == 1 && answer[0].id == "i1" && answer[0].answer == "Allow")
     }
 
+    /// #776: a Confirm offline isn't queued (its signature would be stale) and says so; the card
+    /// stays. Cancel on the same item still queues.
+    @Test func aConfirmOfflineIsNotQueued() async throws {
+        let suiteName = "com.deskree.oby.confirm-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let item = InboxItem(
+            kind: "confirm", id: "c1", job: "j1", title: "Delete Vault tests", text: "", options: ["Confirm", "Cancel"],
+            created: .now, done: nil, later: nil, answer: nil, headline: nil, happened: nil, recommended: nil, why: nil)
+        let phone = Phone(offlineQueue: OfflineQueue(defaults: defaults), inbox: [item])
+
+        let error = await #expect(throws: RunnerError.self) { try await phone.settle("c1", answer: "Confirm") }
+        #expect(error?.message == Phone.confirmNeedsTheMac)
+        #expect(!phone.waitsToSend(answer: "c1") && OfflineQueue(defaults: defaults).answers.isEmpty)
+        #expect(phone.inbox.map(\.id) == ["c1"])
+
+        try await phone.settle("c1", answer: "Cancel")
+        #expect(phone.waitsToSend(answer: "c1"))
+    }
+
     @Test func messagesFlushInOrderAndKeepUnacceptedTail() async {
         let queue = OfflineQueue(defaults: UserDefaults(suiteName: "com.deskree.oby.flush-\(UUID().uuidString)")!)
         queue.messages = [

@@ -5,6 +5,10 @@
 //! that matches its key, for exactly obid's own sentence, signed within two minutes, and never
 //! used before. The API token alone can't publish by hand: agents run on the same machine.
 //!
+//! A Confirm on an inbox `confirm` item is the same proof over its own sentence (#776):
+//! `"oby-confirm\n<item id>\n<title>\n<signedAt>"`, so no publish or connection signature passes
+//! for a Confirm, and one tap confirms one item.
+//!
 //! What was used is kept in `home/approvals.json` (0600) for 10 minutes, so a restart doesn't
 //! open a replay.
 
@@ -80,6 +84,35 @@ impl Approvals {
             "oby-publish\n{job}\n{}\n{}",
             approval.action, approval.signed_at
         );
+        self.check_signed(approval, &message, action, key, now)
+    }
+
+    /// Lets `approval` through once for confirming inbox item `item`, whose title is `title`
+    /// (#776): the device signed `"oby-confirm\n<item>\n<title>\n<signedAt>"`.
+    pub fn check_confirm(
+        &self,
+        approval: &Approval,
+        item: &str,
+        title: &str,
+        key: Option<&str>,
+        now: i64,
+    ) -> Result<(), String> {
+        let message = format!(
+            "oby-confirm\n{item}\n{}\n{}",
+            approval.action, approval.signed_at
+        );
+        self.check_signed(approval, &message, title, key, now)
+    }
+
+    /// The checks every approval takes, on the exact `message` the device signed.
+    fn check_signed(
+        &self,
+        approval: &Approval,
+        message: &str,
+        action: &str,
+        key: Option<&str>,
+        now: i64,
+    ) -> Result<(), String> {
         if self.unread_until.is_some_and(|until| now < until) {
             return Err(
                 "obid couldn't read the approvals it used. Approve it again in 10 minutes.".into(),
@@ -166,6 +199,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn a_publish_signature_and_a_confirm_signature_dont_pass_for_each_other() {
+        let home = home("prefixes");
+        let approvals = Approvals::open(&home);
+        let (key, public) = device(9);
+        let title = "Delete the job \u{201c}Fix the flaky test\u{201d}?";
+        // Signed for publishing job "i1" with these words: not a Confirm of item "i1".
+        let publish = approval(&key, "i1", title, NOW);
+        assert!(
+            approvals
+                .check_confirm(&publish, "i1", title, Some(&public), NOW)
+                .unwrap_err()
+                .contains("signature")
+        );
+        // Signed as a Confirm of item "i1": not a publish of job "i1", nor a Confirm of "i2".
+        let signed_at = obi_protocol::time::format(NOW);
+        let signature: p256::ecdsa::Signature =
+            key.sign(format!("oby-confirm\ni1\n{title}\n{signed_at}").as_bytes());
+        let confirm = Approval {
+            device: "d1".into(),
+            action: title.into(),
+            signed_at,
+            signature: base64::engine::general_purpose::STANDARD.encode(signature.to_der()),
+        };
+        assert!(
+            approvals
+                .check(&confirm, "i1", title, Some(&public), NOW)
+                .unwrap_err()
+                .contains("signature")
+        );
+        assert!(
+            approvals
+                .check_confirm(&confirm, "i2", title, Some(&public), NOW)
+                .unwrap_err()
+                .contains("signature")
+        );
+        assert_eq!(
+            approvals.check_confirm(&confirm, "i1", title, Some(&public), NOW),
+            Ok(())
+        );
+        assert!(
+            approvals
+                .check_confirm(&confirm, "i1", title, Some(&public), NOW + 1)
+                .unwrap_err()
+                .contains("already used")
+        );
     }
 
     #[test]

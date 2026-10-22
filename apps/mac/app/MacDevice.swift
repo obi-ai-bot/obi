@@ -13,6 +13,8 @@ nonisolated protocol PublishingKey: Sendable {
     func approve(job: String, action: String, device: String) async throws -> Approval
     /// The same for a change to the runner's connections (`Approval.connectionMessage`).
     func approveConnection(action: String, device: String) async throws -> Approval
+    /// The same for the owner's Confirm of an inbox item, its title the reason (`Approval.confirmMessage`, #776).
+    func approveConfirm(item: String, title: String, device: String) async throws -> Approval
 }
 
 /// The Mac's Secure Enclave key, behind Touch ID.
@@ -41,6 +43,17 @@ nonisolated struct TouchIDKey: PublishingKey {
                 throw RunnerError(message: "Nothing changed: Touch ID didn't approve it.")
             }
             return try DeviceKey.approveConnection(action: action, device: device, context: context)
+        }.value
+    }
+
+    func approveConfirm(item: String, title: String, device: String) async throws -> Approval {
+        let reason = Self.reason(title)
+        return try await Task.detached {
+            let context = LAContext()
+            guard (try? await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)) == true else {
+                throw ConfirmCancelled()
+            }
+            return try DeviceKey.approveConfirm(item: item, title: title, device: device, context: context)
         }.value
     }
 
@@ -150,8 +163,24 @@ final class MacDevice {
         try await runner.disconnect(name, approval: approval)
     }
 
+    /// The owner's Confirm of inbox item `item` (#776): Touch ID with its title as the reason, then
+    /// the runner checks the signature and carries it out. A cancelled Touch ID throws
+    /// `ConfirmCancelled` before anything is sent; a Mac with no Touch ID can't confirm.
+    func confirm(_ item: String, title: String, with runner: Runner) async throws -> InboxItem {
+        guard key.isAvailable else { throw RunnerError(message: Self.noTouchID) }
+        let device = try await register(with: runner, again: false)
+        let approval = try await key.approveConfirm(item: item, title: title, device: device)
+        return try await runner.settle(item, answer: "Confirm", approval: approval)
+    }
+
+    /// What a Confirm says on a Mac that has no Touch ID (#776).
+    nonisolated static let noTouchID = "Confirm it on your iPhone: this Mac has no Touch ID."
+
     /// The runner's sentence for removing connection `name` (Runner/Connections.swift, `Connection.removal`).
     nonisolated static func removal(_ name: String) -> String { "Disconnect \(name)." }
 
     private static func idKey(_ runner: Runner) -> String { "device.\(runner.base.host() ?? runner.base.absoluteString)" }
 }
+
+/// Touch ID was cancelled on a Confirm: nothing was signed or sent, and the card stays as it was.
+nonisolated struct ConfirmCancelled: Error {}

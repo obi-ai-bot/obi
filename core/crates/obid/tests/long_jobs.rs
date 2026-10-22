@@ -387,12 +387,7 @@ fn the_token_budget_stalls_and_only_the_owners_confirm_carries_on() {
         .iter()
         .find(|i| i["title"].as_str().unwrap().starts_with("Try "))
         .expect("Try again's item");
-    let answer = call(
-        &obid,
-        "POST",
-        &format!("/v1/inbox/{}/answer", retry["id"].as_str().unwrap()),
-        Some(&json!({"answer": "Confirm"})),
-    );
+    let answer = confirm(&obid, retry["id"].as_str().unwrap());
     assert_eq!(answer.status, 200, "{}", answer.text);
     let job = wait(&obid, &id);
     assert_eq!(job["status"], "done", "{job}");

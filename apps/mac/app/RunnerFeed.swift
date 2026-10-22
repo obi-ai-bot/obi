@@ -729,6 +729,17 @@ final class RunnerFeed {
     /// Settles one of the runner's inbox items: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
         let runner = try acting("Set the runner's URL in Settings to answer it.")
+        // Only the owner's tap confirms (#776): a Confirm on a confirm item is signed with Touch ID,
+        // its title the reason. A cancelled Touch ID sends nothing and the card stays.
+        // On the Mac a confirm item reads as Engine's `start`; its words say it's a confirm.
+        if answer == "Confirm", inboxWords[id]?.confirm != nil, let item = inbox.first(where: { $0.id == id }) {
+            do {
+                apply(try await device.confirm(id, title: item.title, with: runner))
+            } catch is ConfirmCancelled {
+                return
+            }
+            return
+        }
         apply(try await runner.settle(id, answer: answer, done: done, later: later))
     }
 
