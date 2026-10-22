@@ -132,16 +132,8 @@ pub fn clear_partial(dir: &Path) {
     }
 }
 
-/// Stops a fetch (sharing turned off): its task, and what it left.
-pub fn cancel(task: Option<tokio::task::AbortHandle>, dir: &Path) {
-    if let Some(task) = task {
-        task.abort();
-    }
-    clear_partial(dir);
-}
-
-/// [`fetch`], unless `stop` comes first (obid stopping): then what it left goes, and it answers
-/// none.
+/// [`fetch`], unless `stop` comes first (obid stopping): then what it left goes (as for any fetch
+/// dropped part way), and it answers none.
 pub async fn fetch_unless(
     base: &str,
     dir: &Path,
@@ -152,20 +144,19 @@ pub async fn fetch_unless(
 ) -> Option<Result<(), String>> {
     tokio::select! {
         fetched = fetch(base, dir, pin, progress, stall) => Some(fetched),
-        () = stop => {
-            clear_partial(dir);
-            None
-        }
+        () = stop => None,
     }
 }
 
-/// Set when a fetch is dropped (cancelled, or obid stopping): its unpacking, which runs on a
-/// thread of its own, stops too and takes out what it wrote.
-struct Stopped(Arc<AtomicBool>);
+/// When a fetch ends, however it ends (done, failed, its task aborted, obid stopping): its flag is
+/// set, so the hashing and unpacking it runs on threads of their own stop too (the unpacking takes
+/// out what it wrote), and what it left part way goes, after the fetch's own last write.
+struct Stopped(Arc<AtomicBool>, std::path::PathBuf);
 
 impl Drop for Stopped {
     fn drop(&mut self) {
         self.0.store(true, Ordering::SeqCst);
+        clear_partial(&self.1);
     }
 }
 
@@ -217,13 +208,13 @@ pub async fn fetch(
     // The record goes first: a half-fetched image is never taken for a whole one.
     let _ = std::fs::remove_file(dir.join("image.json"));
     let stopped = Arc::new(AtomicBool::new(false));
-    let _dropped = Stopped(stopped.clone());
+    let _dropped = Stopped(stopped.clone(), dir.to_owned());
     for name in FILES {
         let zst = format!("{name}.zst");
         let size = size_of(pin, &zst).unwrap_or(0);
         let path = dir.join(name);
-        let reading = path.clone();
-        let there = tokio::task::spawn_blocking(move || sha256_of(&reading))
+        let (reading, stop) = (path.clone(), stopped.clone());
+        let there = tokio::task::spawn_blocking(move || sha256_of(&reading, &stop))
             .await
             .ok()
             .flatten();
@@ -368,13 +359,16 @@ fn unzstd_into(
     Ok((hex::encode(hash.finish().as_ref()), got))
 }
 
-/// A file's SHA-256, when it's there.
-fn sha256_of(path: &Path) -> Option<String> {
+/// A file's SHA-256, when it's there; none once `stop` is set part way.
+fn sha256_of(path: &Path, stop: &AtomicBool) -> Option<String> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).ok()?;
     let mut hash = digest::Context::new(&digest::SHA256);
     let mut buf = vec![0u8; 1 << 20];
     loop {
+        if stop.load(Ordering::SeqCst) {
+            return None;
+        }
         let n = file.read(&mut buf).ok()?;
         if n == 0 {
             break;
@@ -666,7 +660,8 @@ mod tests {
         while !dir.join("root.img.zst.part").exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        cancel(Some(task.abort_handle()), &dir);
+        // Its task aborted: what it left goes as it's dropped.
+        task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(!dir.join("root.img.zst.part").exists());
         assert!(!holds(&dir, &pin));
@@ -674,17 +669,21 @@ mod tests {
     }
 
     #[test]
-    fn unpacking_stops_when_the_fetch_does_and_takes_out_what_it_wrote() {
+    fn hashing_and_unpacking_stop_when_the_fetch_does() {
         let dir = dir();
         std::fs::create_dir_all(&dir).unwrap();
         let (from, to) = (dir.join("root.img.zst"), dir.join("root.img.unpack"));
         std::fs::write(&from, zst(&bodies()["root.img"])).unwrap();
-        // A fetch dropped part way sets its flag.
+        // A fetch dropped part way sets its flag and takes out what it was downloading.
         let stop = Arc::new(AtomicBool::new(false));
-        drop(Stopped(stop.clone()));
+        std::fs::write(dir.join("root.img.zst.part"), b"half").unwrap();
+        drop(Stopped(stop.clone(), dir.clone()));
+        assert!(!dir.join("root.img.zst.part").exists());
         let why = unzstd(&from, &to, 1 << 20, &stop).unwrap_err();
         assert!(why.contains("was stopped"), "{why}");
         assert!(!to.exists());
+        assert!(sha256_of(&from, &stop).is_none());
+        assert!(sha256_of(&from, &AtomicBool::new(false)).is_some());
         let go = AtomicBool::new(false);
         assert_eq!(unzstd(&from, &to, 1 << 20, &go).unwrap().1, 300_000);
         let _ = std::fs::remove_dir_all(dir);

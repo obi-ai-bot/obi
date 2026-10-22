@@ -214,7 +214,9 @@ pub struct Hosting {
     shown_free: Mutex<Blurred>,
     /// Fetching the guest image (super::vm_image), and the task doing it.
     pub image: Mutex<super::vm_image::Progress>,
-    fetch: Mutex<Option<tokio::task::AbortHandle>>,
+    fetch: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// A fetch sharing turned off stopped: the next one waits until it has, and has cleared up.
+    stopped_fetch: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// How long the `free` a runner status says holds at least, and the most added to it at random.
@@ -282,7 +284,11 @@ pub fn fetch_image_soon(link: &Arc<Link>) {
         ..super::vm_image::Progress::none()
     };
     let (link, stopping) = (link.clone(), link.stopping());
+    let stopped = link.hosting.stopped_fetch.lock().unwrap().take();
     let task = tokio::spawn(async move {
+        if let Some(stopped) = stopped {
+            let _ = stopped.await;
+        }
         let progress = &link.hosting.image;
         let asking = setup.clone();
         let pin = tokio::task::spawn_blocking(move || asking.refresh_pin())
@@ -314,13 +320,16 @@ pub fn fetch_image_soon(link: &Arc<Link>) {
         }
         link.publish_runner_soon();
     });
-    *fetch = Some(task.abort_handle());
+    *fetch = Some(task);
 }
 
 /// Stops fetching the guest image, when sharing is turned off: what it downloaded so far goes.
 pub fn cancel_image_fetch(link: &Link) {
-    let task = link.hosting.fetch.lock().unwrap().take();
-    super::vm_image::cancel(task, &link.hosting_setup().image.dir);
+    // Its task, once aborted, clears what it left as it's dropped (vm_image::fetch).
+    if let Some(task) = link.hosting.fetch.lock().unwrap().take() {
+        task.abort();
+        *link.hosting.stopped_fetch.lock().unwrap() = Some(task);
+    }
     *link.hosting.image.lock().unwrap() = super::vm_image::Progress::none();
 }
 
@@ -1522,9 +1531,12 @@ async fn watch_job(
             () = shared.done_notify.notified() => {
                 // What it used, once more before it powers off; and whatever it said already,
                 // even when it's gone before it's asked (its last words are still to be read).
+                // Every usage it sends until it stops (an older one may be queued before the
+                // answer), each within 2 seconds of the last.
                 let _ = vm.command("usage").await;
                 while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(2), vm.next()).await {
-                    if note_usage(shared, &event) || event["event"] == "stopped" {
+                    note_usage(shared, &event);
+                    if event["event"] == "stopped" {
                         break;
                     }
                 }
