@@ -220,7 +220,7 @@ pub fn result_problems(body: &Value) -> Vec<String> {
         Some("changes_requested") if all_met => {
             problems.push("changes_requested needs an acceptance condition not met".into())
         }
-        Some("done") if !all_met => {
+        Some("done") if body.get("for").and_then(Value::as_str) == Some("handoff") && !all_met => {
             problems.push("done needs every acceptance condition met".into())
         }
         _ => {}

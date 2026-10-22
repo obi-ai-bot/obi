@@ -81,6 +81,10 @@
           }
         }
       }
+    },
+    "runner": {
+      "$ref": "../runner-status.schema.json",
+      "description": "The member's runner status, only when it is offered to the caller's owner and hasn't expired (sphere-api.md section 6.4)."
     }
   }
 }

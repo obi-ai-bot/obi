@@ -117,6 +117,8 @@ pub struct Link {
     inbox: Inbox,
     decisions: Decisions,
     sharing: sharing::Kept,
+    /// The owner keys this Obi trusts, pinned the first time it saw each (crate::sphere::pins).
+    pins: super::pins::Pins,
     /// What the model that answers a question by itself runs in: the job sandbox.
     sandbox: Result<Sandbox, String>,
     /// At most this many of those runs at once, whoever asked.
@@ -274,6 +276,7 @@ impl Link {
         let inbox = Inbox::open(&config.home)?;
         let decisions = Decisions::open(&config.home);
         let sharing = sharing::Kept::open(&config.home);
+        let pins = super::pins::Pins::open(&config.home);
         let sandbox = std::env::current_exe()
             .map_err(|e| format!("obid can't find its own executable: {e}"))
             .and_then(|obid| Sandbox::detect(&obid));
@@ -328,6 +331,7 @@ impl Link {
             inbox,
             decisions,
             sharing,
+            pins,
             sandbox,
             answering: tokio::sync::Semaphore::new(ANSWER_RUNS),
             jobs,
@@ -867,6 +871,29 @@ impl Link {
         Ok(json!({"keyId": key.key_id(), "publicKey": key.public_key()}))
     }
 
+    /// `GET /v1/obid/sphere/pins`: the owner keys this Obi trusts, each with the fingerprint owners
+    /// compare, and any changed key waiting for this owner's OK.
+    pub fn pins_json(&self) -> Value {
+        self.pins.to_json()
+    }
+
+    /// `POST /v1/obid/sphere/pins/{owner}` with `{"fingerprint"}`: the owner compared `owner`'s new
+    /// key with them and trusts it. The directory is read again.
+    pub async fn accept_pin(&self, owner: &str, body: &[u8]) -> Result<Value, ApiError> {
+        let map = object(body, &["fingerprint"])?;
+        let seen = text_field(&map, "fingerprint")?;
+        let pinned = self
+            .pins
+            .accept(owner, seen, time::now())
+            .map_err(|m| api(StatusCode::UNPROCESSABLE_ENTITY, m))?;
+        if self.lock().membership.is_some()
+            && let Err(e) = self.read_directory().await
+        {
+            self.note_error(&e);
+        }
+        Ok(pinned)
+    }
+
     /// `POST /v1/obid/sphere/card`: the card the owner is to sign, around obid's own key.
     pub async fn card(&self, body: &[u8]) -> Result<Value, ApiError> {
         let _one = self.joining.lock().await;
@@ -1200,12 +1227,56 @@ impl Link {
                 tracing::warn!("sphere: {obi}'s card names another Obi or owner: not trusted");
                 continue;
             }
-            for key in member["keys"].as_array().into_iter().flatten() {
+            // Only a card signed with the owner key pinned here, whatever the Sphere bound.
+            let owner_key = params.and_then(|p| p["owner_key"].as_str()).unwrap_or("");
+            if !self.pins.check(owner, owner_key, now) {
+                continue;
+            }
+            // Never an older card than one trusted before (a key rotated away coming back).
+            let card_seq = params.and_then(|p| p["card_seq"].as_u64()).unwrap_or(0);
+            if !self.pins.check_card(obi, card_seq) {
+                continue;
+            }
+            // The Obi key is the one the card signs: a current key the Sphere lists must be it.
+            // Older keys (with `valid_until_seq`) only check entries signed before they ended.
+            let (card_id, card_key) = (
+                params.and_then(|p| p["key_id"].as_str()).unwrap_or(""),
+                params.and_then(|p| p["public_key"].as_str()).unwrap_or(""),
+            );
+            let keys: Vec<&Value> = member["keys"].as_array().into_iter().flatten().collect();
+            let current: Vec<&&Value> = keys
+                .iter()
+                .filter(|k| k["valid_until_seq"].as_u64().is_none())
+                .collect();
+            if current.len() != 1
+                || current[0]["key_id"] != card_id
+                || current[0]["public_key"] != card_key
+            {
+                tracing::warn!(
+                    "sphere: the Sphere lists a key for {obi} that its card doesn't sign ({}): not trusted",
+                    current
+                        .iter()
+                        .filter_map(|k| k["key_id"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                continue;
+            }
+            self.pins.keep_key(obi, card_id, card_key);
+            for key in keys {
                 let (Some(id), Some(public_key)) =
                     (key["key_id"].as_str(), key["public_key"].as_str())
                 else {
                     continue;
                 };
+                let older = key["valid_until_seq"].as_u64().is_some();
+                if older && (id == card_id || !self.pins.knows_key(obi, id, public_key)) {
+                    // Only a key a card obid trusted signed: the Sphere can't add one of its own.
+                    tracing::warn!(
+                        "sphere: the Sphere lists an older key for {obi} no card obid trusted signed: not used"
+                    );
+                    continue;
+                }
                 directory.keys.insert(
                     id.to_owned(),
                     DirectoryKey {
@@ -1336,7 +1407,15 @@ impl Link {
             now: Some(time::now()),
             sphere: state.membership.as_ref().map(|m| m.sphere.clone()),
             receiver: state.membership.as_ref().map(|m| m.obi_id.clone()),
-            keys: state.directory.keys.clone(),
+            // A live message is signed with its sender's current key, the one its card signs;
+            // older keys only check old chain entries.
+            keys: state
+                .directory
+                .keys
+                .iter()
+                .filter(|(_, k)| k.valid_until_seq.is_none())
+                .map(|(id, k)| (id.clone(), k.clone()))
+                .collect(),
             seq: Some(delivery.seq),
             seen_ids: Vec::new(),
         };

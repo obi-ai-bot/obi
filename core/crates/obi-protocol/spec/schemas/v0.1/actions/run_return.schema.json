@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/obi-ai-bot/obi-sphere/raw/main/spec/schemas/v0.1/actions/run_return.schema.json",
+  "title": "run_return body",
+  "description": "A run_request's job stopped before it finished and comes back to its owner with what it did (its commits travel on the job channel). Ends the exchange.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reason",
+    "minutes"
+  ],
+  "properties": {
+    "reason": {
+      "enum": [
+        "owner_back",
+        "time_limit",
+        "stopped",
+        "sharing_off",
+        "shutdown"
+      ]
+    },
+    "minutes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 43200
+    },
+    "commits": {
+      "$ref": "../common.schema.json#/$defs/bundle"
+    },
+    "head_sha": {
+      "$ref": "../common.schema.json#/$defs/sha"
+    },
+    "host": {
+      "$ref": "../common.schema.json#/$defs/host_use"
+    },
+    "note": {
+      "$ref": "../common.schema.json#/$defs/line_text",
+      "x-obi-text": "data",
+      "minLength": 1,
+      "maxLength": 200
+    }
+  }
+}

@@ -36,11 +36,22 @@ pub const CLOCK_SKEW_SECONDS: i64 = 300;
 /// `prev` of the first audit entry.
 pub const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 /// The action types that start an exchange.
-pub const REQUEST_TYPES: [&str; 3] = ["review_request", "question", "handoff"];
-/// The action types that answer one.
-pub const REPLY_TYPES: [&str; 5] = ["status", "accept", "decline", "result", "answer"];
+pub const REQUEST_TYPES: [&str; 4] = ["review_request", "question", "handoff", "run_request"];
+/// The action types that answer one. `run_cancel` is the one its request's own sender sends.
+pub const REPLY_TYPES: [&str; 8] = [
+    "status",
+    "accept",
+    "decline",
+    "result",
+    "answer",
+    "run_progress",
+    "run_return",
+    "run_cancel",
+];
 /// The replies that end an exchange.
-pub const TERMINAL_TYPES: [&str; 3] = ["decline", "result", "answer"];
+pub const TERMINAL_TYPES: [&str; 5] = ["decline", "result", "answer", "run_return", "run_cancel"];
+/// The replies that belong only to a `run_request`'s exchange (protocol.md section 4, rule 7).
+pub const RUN_REPLY_TYPES: [&str; 3] = ["run_progress", "run_return", "run_cancel"];
 
 /// How much a finding matters: nit 1, minor 2, major 3, blocker 4.
 pub fn severity_rank(severity: &str) -> Option<u8> {

@@ -102,7 +102,10 @@
               "accept",
               "decline",
               "result",
-              "answer"
+              "answer",
+              "run_progress",
+              "run_return",
+              "run_cancel"
             ]
           }
         }
@@ -261,6 +264,82 @@
         "properties": {
           "body": {
             "$ref": "actions/answer.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "run_request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "actions/run_request.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "run_progress"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "actions/run_progress.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "run_return"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "actions/run_return.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "run_cancel"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "actions/run_cancel.schema.json"
           }
         }
       }

@@ -23,6 +23,7 @@ nix.workspace = true
 p256.workspace = true
 reqwest.workspace = true
 tokio-stream.workspace = true
+tokio-tungstenite.workspace = true
 getrandom.workspace = true
 gethostname.workspace = true
 hex.workspace = true
@@ -43,7 +44,6 @@ tower = { version = "0.5.3", default-features = false, features = ["util"] }
 uuid.workspace = true
 # Slack's Socket Mode (src/listen.rs): one WebSocket, over the rustls that reqwest already builds,
 # with the platform's own roots as reqwest has them.
-tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "__rustls-tls"] }
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-platform-verifier = "0.7.1"
 
@@ -54,3 +54,7 @@ security-framework = "3.7.0"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The channel's tests relay it through a WebSocket server of their own.
+axum = { workspace = true, features = ["ws"] }

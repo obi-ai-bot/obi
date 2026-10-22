@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/obi-ai-bot/obi-sphere/raw/main/spec/schemas/v0.1/actions/run_request.schema.json",
+  "title": "run_request body",
+  "description": "Ask another Obi to run one of this Obi's owner's jobs on its Mac, in a VM of its own, with this owner's own agent account (protocol.md 5.10). The code travels as a git bundle on the job channel; the model's calls go back to this Obi through it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "request",
+    "agent",
+    "repo",
+    "base_branch",
+    "base_sha",
+    "branch",
+    "bundle",
+    "size",
+    "max_minutes"
+  ],
+  "properties": {
+    "title": {
+      "$ref": "../common.schema.json#/$defs/line_text",
+      "x-obi-text": "data",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "request": {
+      "$ref": "../common.schema.json#/$defs/block_text",
+      "x-obi-text": "data",
+      "minLength": 1,
+      "maxLength": 20000
+    },
+    "agent": {
+      "$ref": "../common.schema.json#/$defs/agent"
+    },
+    "model": {
+      "$ref": "../common.schema.json#/$defs/model_id"
+    },
+    "repo": {
+      "$ref": "../common.schema.json#/$defs/repo"
+    },
+    "base_branch": {
+      "$ref": "../common.schema.json#/$defs/branch"
+    },
+    "base_sha": {
+      "$ref": "../common.schema.json#/$defs/sha"
+    },
+    "branch": {
+      "$ref": "../common.schema.json#/$defs/branch"
+    },
+    "bundle": {
+      "$ref": "../common.schema.json#/$defs/bundle"
+    },
+    "size": {
+      "$ref": "../common.schema.json#/$defs/box_size"
+    },
+    "max_minutes": {
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 480
+    }
+  }
+}

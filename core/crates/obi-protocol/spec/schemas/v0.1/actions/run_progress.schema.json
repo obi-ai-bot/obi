@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/obi-ai-bot/obi-sphere/raw/main/spec/schemas/v0.1/actions/run_progress.schema.json",
+  "title": "run_progress body",
+  "description": "Where a run_request's job is on the receiver's Mac, without finishing it. Only in a run_request's exchange.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "state"
+  ],
+  "properties": {
+    "state": {
+      "enum": [
+        "queued",
+        "starting",
+        "running",
+        "paused",
+        "resumed"
+      ]
+    },
+    "note": {
+      "$ref": "../common.schema.json#/$defs/line_text",
+      "x-obi-text": "data",
+      "minLength": 1,
+      "maxLength": 200
+    }
+  }
+}

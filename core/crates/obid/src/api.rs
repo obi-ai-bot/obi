@@ -253,6 +253,11 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/failures/{id}/fix", post(crate::failures::fix_route))
         .route("/v1/inbox/{id}/answer", post(crate::sphere::routes::answer))
         .route("/v1/obid/sphere", get(crate::sphere::routes::membership))
+        .route("/v1/obid/sphere/pins", get(crate::sphere::routes::pins))
+        .route(
+            "/v1/obid/sphere/pins/{owner}",
+            post(crate::sphere::routes::accept_pin),
+        )
         .route("/v1/obid/sphere/key", post(crate::sphere::routes::key))
         .route("/v1/obid/sphere/card", post(crate::sphere::routes::card))
         .route("/v1/obid/sphere/join", post(crate::sphere::routes::join))

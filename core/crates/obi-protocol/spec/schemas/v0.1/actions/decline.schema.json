@@ -7,7 +7,7 @@
   "additionalProperties": false,
   "required": ["reason"],
   "properties": {
-    "reason": { "enum": ["policy", "owner_declined", "busy", "expired", "out_of_scope", "other"] },
+    "reason": { "enum": ["policy", "owner_declined", "busy", "expired", "out_of_scope", "other", "not_free"] },
     "by_rule": { "$ref": "../common.schema.json#/$defs/rule_id", "description": "The remembered decision that declined it, when the owner was not asked." },
     "note": { "$ref": "../common.schema.json#/$defs/line_text", "x-obi-text": "data", "minLength": 1, "maxLength": 200 }
   }
