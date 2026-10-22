@@ -502,6 +502,36 @@ async fn stop_sends_the_job_back_with_its_commit_and_it_needs_its_owner() {
     });
 }
 
+/// "Only people I choose" offers the Mac to those who have joined; someone chosen who hasn't is
+/// "waiting to join", and never keeps the status from going out (the Sphere refuses a `for` with a
+/// name it doesn't know).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_mac_is_offered_only_to_chosen_people_who_have_joined() {
+    let (hf, gf) = (Folder::new("people-host"), Folder::new("people-guest"));
+    let p = pair(
+        &hf,
+        &gf,
+        json!({"who": "people", "people": ["sangam", "bob"]}),
+        json!({}),
+    )
+    .await;
+    tokio::task::block_in_place(|| {
+        let offered = within(60, "the runner status", || {
+            p.sphere
+                .state
+                .lock()
+                .unwrap()
+                .runners
+                .get("obi-wellington")
+                .map(|r| r["for"].clone())
+        });
+        assert_eq!(offered, json!(["sangam"]));
+        let mac = get(&p.host, "/v1/obid/sharing/mac");
+        assert_eq!(mac["waiting"], json!(["bob"]), "{mac}");
+        assert_eq!(mac["settings"]["people"], json!(["sangam", "bob"]));
+    });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn with_sharing_off_or_the_mac_busy_a_job_is_declined_with_the_reason() {
     let (hf, gf) = (

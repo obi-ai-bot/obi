@@ -43,9 +43,11 @@ ARG CLAUDE_VERSION=2.1.306
 ARG CLAUDE_SHA256=77d257d5e8b8730ec61d5a4992a8eb65550aaf9589f464988aa1a9684338d801
 RUN curl -fsSL -o /usr/local/bin/claude "https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/linux-arm64/claude" \
  && echo "${CLAUDE_SHA256}  /usr/local/bin/claude" | sha256sum -c - && chmod 755 /usr/local/bin/claude
-# Codex isn't here until Codex guest jobs work (obid refuses them: "the guest VM has no Codex yet").
-# To add it back, its release binary, pinned like Claude Code's (+246 MB), and `"codex"` in the
-# runner status's agents (core/crates/obid/src/sphere/hosting.rs):
+# Codex isn't here until Codex guest jobs work. obid refuses them: `GUEST_ONLY_CLAUDE`, checked for
+# the owner's jobs placed on a teammate's Mac (Jobs::create, place and change in
+# core/crates/obid/src/jobs.rs) and for a guest's job arriving here (core/crates/obid/src/sphere/
+# guest.rs). To add it back: its release binary, pinned like Claude Code's (+246 MB), `"codex"` in the
+# runner status's agents (core/crates/obid/src/sphere/hosting.rs), and those guards taken out:
 #   ARG CODEX_VERSION=rust-v0.163.0
 #   ARG CODEX_SHA256=a7261e65f4a96d8f4ca65a069c6cf2dc2c33defc341e48078acefda9461fffe4
 #   RUN curl -fsSL -o /tmp/codex.tar.gz "https://github.com/openai/codex/releases/download/${CODEX_VERSION}/codex-aarch64-unknown-linux-musl.tar.gz" \

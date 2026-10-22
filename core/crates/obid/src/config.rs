@@ -452,9 +452,17 @@ impl Config {
             ));
         }
         // The guest image comes over https; plain http only from this machine (a test's server).
+        // Parsed, never matched as text: `http://127.0.0.1:1@evil.example/vm` is evil.example's.
         if let Some(url) = &file.vm_image_url {
-            let local = ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"];
-            if !url.starts_with("https://") && !local.iter().any(|l| url.starts_with(l)) {
+            let fine = reqwest::Url::parse(url)
+                .ok()
+                .filter(|u| u.username().is_empty() && u.password().is_none())
+                .is_some_and(|u| match (u.scheme(), u.host_str()) {
+                    ("https", Some(host)) => !host.is_empty(),
+                    ("http", Some(host)) => matches!(host, "127.0.0.1" | "localhost" | "[::1]"),
+                    _ => false,
+                });
+            if !fine {
                 return invalid(format!(
                     "vmImageUrl is {url:?}: it must be https:// (plain http:// only on this machine)."
                 ));
@@ -1271,12 +1279,18 @@ mod tests {
                 .contains("guestRequestEvery is -1")
         );
         assert!(Config::parse(&with(serde_json::json!({"guestRequestEvery": 0}))).is_ok());
-        assert!(
-            problem(&with(
-                serde_json::json!({"vmImageUrl": "http://downloads.example.com/vm"})
-            ))
-            .contains("it must be https://")
-        );
+        for bad in [
+            "http://downloads.example.com/vm",
+            "http://127.0.0.1:1@evil.example/vm",
+            "https://user:pass@downloads.example.com/vm",
+            "ftp://127.0.0.1/vm",
+        ] {
+            assert!(
+                problem(&with(serde_json::json!({"vmImageUrl": bad})))
+                    .contains("it must be https://"),
+                "{bad}"
+            );
+        }
         for ok in [
             "https://downloads.oby.deskree.com/vm",
             "http://127.0.0.1:8080/vm",

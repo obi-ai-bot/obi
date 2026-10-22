@@ -2119,6 +2119,9 @@ nonisolated struct RunnerSharingMac: Codable, Equatable, Sendable {
     var image: Image? = nil
     var jobs: [Guest]
     var week: Week? = nil
+    /// The people chosen ("Only people I choose") who haven't joined the Obysphere yet: the Mac
+    /// isn't offered to them until they do. Nil from an obid before it.
+    var waiting: [String]? = nil
 }
 
 /// A teammate's Mac a job can run on (`GET /v1/obid/sharing/macs`).

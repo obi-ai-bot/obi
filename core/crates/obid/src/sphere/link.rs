@@ -4370,11 +4370,41 @@ impl Link {
             .map(|m| m.owner.clone())
     }
 
-    /// `GET /v1/obid/sharing/mac`: this Mac's sharing, whether it can run guests, and what runs
-    /// here now.
+    /// Of `people`, who has joined this Sphere (an Obi of theirs is in the directory, active or
+    /// revoked: their owner id is bound) and who is still waiting to join. The runner status names
+    /// only the first: the Sphere refuses one that names anyone else (sphere-api.md section 6.4).
+    pub fn joined(&self, people: &[String]) -> (Vec<String>, Vec<String>) {
+        let state = self.lock();
+        people
+            .iter()
+            .cloned()
+            .partition(|p| state.directory.members.values().any(|m| m.owner == *p))
+    }
+
+    /// [`Link::joined`], reading the directory again first (at most every 15 seconds) while someone
+    /// chosen isn't in it: they may have joined since.
+    pub(super) async fn joined_now(&self, people: &[String]) -> (Vec<String>, Vec<String>) {
+        if !self.joined(people).1.is_empty()
+            && time::now() - self.lock().directory_read > 15
+            && self.lock().membership.is_some()
+            && let Err(e) = self.read_directory().await
+        {
+            self.note_error(&e);
+        }
+        self.joined(people)
+    }
+
+    /// `GET /v1/obid/sharing/mac`: this Mac's sharing, whether it can run guests, what runs here
+    /// now, and the people chosen who haven't joined yet (`waiting`).
     pub fn mac_json(&self) -> Value {
-        json!({"settings": self.mac().to_json(), "ready": self.setup.ready(), "image": super::hosting::image_json(self), "jobs": self.hosting.jobs_json(),
-               "week": super::hosting::week(self.home(), time::now())})
+        let mac = self.mac();
+        let waiting = if mac.who == "people" {
+            self.joined(&mac.people).1
+        } else {
+            Vec::new()
+        };
+        json!({"settings": mac.to_json(), "ready": self.setup.ready(), "image": super::hosting::image_json(self), "jobs": self.hosting.jobs_json(),
+               "week": super::hosting::week(self.home(), time::now()), "waiting": waiting})
     }
 
     /// `GET /v1/obid/sphere/audit`: the Sphere's audit chain, checked here end to end against the

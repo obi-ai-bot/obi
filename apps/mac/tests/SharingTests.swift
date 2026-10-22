@@ -12,7 +12,8 @@ struct SharingTests {
                   "size": "small", "work": "any", "maxMinutes": 120},
      "ready": true,
      "jobs": [{"correlationId": "c-1", "fromOwner": "sangam", "title": "Fix the login retry", "repo": "deskree-inc/tetrix-ee",
-               "agent": "claude", "started": "2026-10-21T16:00:00Z", "state": "paused"}]}
+               "agent": "claude", "started": "2026-10-21T16:00:00Z", "state": "paused"}],
+     "waiting": ["bob"]}
     """#
 
     @Test func readsAndChangesThisMacsSharingAndStopsAJob() async throws {
@@ -26,6 +27,7 @@ struct SharingTests {
         let mac = try #require(try await obid.runner.sharingMac())
         #expect(mac.settings.on && mac.ready)
         #expect(mac.jobs.first?.state == "paused")
+        #expect(mac.waiting == ["bob"])
         var settings = mac.settings
         settings.jobsAtOnce = 2
         _ = try await obid.runner.setSharingMac(settings)
@@ -84,8 +86,9 @@ struct SharingTests {
             return try Runner.decoder.decode(RunnerSharingMac.self, from: Data(json.utf8))
         }
         #expect(SharingSettingsView.imageAbout(try mac(nil)) == "This Mac needs Oby’s VM before it can run anyone’s jobs.")
-        #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "none", "done": 0, "total": 171310123}"#)) == "Turning it on gets the VM’s image first (171.3 MB).")
-        #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "fetching", "done": 60000000, "total": 171310123}"#))?.hasPrefix("Getting the VM’s image: 60 MB of 171.3 MB") == true)
+        #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "none", "done": 0, "total": 171310128}"#)) == "Turning it on gets the VM’s image first (171.3 MB).")
+        #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "none", "done": 0, "total": 0}"#)) == "The VM isn’t bundled in this build of Oby.")
+        #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "fetching", "done": 60000000, "total": 171310128}"#))?.hasPrefix("Getting the VM’s image: 60 MB of 171.3 MB") == true)
         #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "failed", "error": "The guest image for this Oby isn’t published (404)."}"#)) == "The guest image for this Oby isn’t published (404).")
         var ready = try mac(#"{"state": "ready"}"#)
         ready.ready = true

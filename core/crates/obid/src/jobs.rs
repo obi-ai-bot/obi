@@ -623,6 +623,12 @@ pub struct Jobs {
     pub usage_changed: Notify,
 }
 
+/// Why a Codex job can't go to a teammate's Mac: the guest VM's image carries Claude Code only
+/// (core/obi-vm/image/Dockerfile). Every way a job gets there checks it: made with `runsOn`
+/// (the API or the brain, whatever agent it names or defaults to), moved there, or moved to Codex
+/// while it's there; sphere::guest refuses its turn too.
+pub const GUEST_ONLY_CLAUDE: &str = "Only Claude Code jobs run on a teammate's Mac so far: the guest VM has no Codex yet. Run this job here.";
+
 impl Jobs {
     /// Opens the jobs kept in `home/jobs`. Those that were queued or running when obid stopped
     /// carry on once [`Jobs::resume`] runs, as after any restart.
@@ -2135,6 +2141,10 @@ impl Jobs {
 
     pub fn create(self: &Arc<Self>, new: NewJob) -> Result<Job, Refused> {
         let (repo, tool, account, files) = self.vetted(&new)?;
+        // Whoever asks (the API, the brain), whatever agent was named or is the default.
+        if new.runs_on.is_some() && tool != Tool::Claude {
+            return Err(Refused(GUEST_ONLY_CLAUDE.into()));
+        }
         let id = self.new_id();
         let mut job = Job::new(
             id.clone(),
@@ -3228,6 +3238,9 @@ impl Jobs {
         if job.status.is_active() {
             return Some(Err(Refused("The job is running: stop it first.".into())));
         }
+        if runs_on.is_some() && job.agent != Tool::Claude.id() {
+            return Some(Err(Refused(GUEST_ONLY_CLAUDE.into())));
+        }
         let said = match &runs_on {
             Some(on) => format!(
                 "Moved to {}'s Mac by you",
@@ -3321,6 +3334,9 @@ impl Jobs {
             Ok(picked) => picked,
             Err(refused) => return Some(Err(refused)),
         };
+        if job.runs_on.is_some() && tool != Tool::Claude {
+            return Some(Err(Refused(GUEST_ONLY_CLAUDE.into())));
+        }
         if tool.id() == job.agent && chosen.id == job.account {
             return Some(Err(Refused(format!(
                 "It's on {} · {} already.",
@@ -10373,6 +10389,88 @@ mod tests {
         .unwrap();
         let jobs = Jobs::open(config, crate::events::Events::new(), sandbox).unwrap();
         (root, clone, base, jobs)
+    }
+
+    /// No Codex job goes to a teammate's Mac, however it would: started with Codex named or as
+    /// the only agent there is (the API's and the brain's way), moved there, or moved to Codex there.
+    #[tokio::test]
+    async fn a_codex_job_never_runs_on_a_teammates_mac() {
+        let root = std::env::temp_dir().join(format!("obid-guest-codex-{}", uuid::Uuid::new_v4()));
+        let jobs_with = |agents: serde_json::Value| {
+            let config = crate::config::Config::parse(
+                &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                    "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}],
+                    "agents": agents})
+                .to_string(),
+            )
+            .unwrap();
+            Jobs::open(
+                config,
+                crate::events::Events::new(),
+                Err("no sandbox".into()),
+            )
+            .unwrap()
+        };
+        let teammate = crate::job::RunsOn {
+            obi: "obi-t".into(),
+            owner: "t".into(),
+            grant: None,
+        };
+        let new = |agent: Option<&str>| NewJob {
+            repo: "o/r".into(),
+            kind: "fix".into(),
+            task: "Fix it".into(),
+            agent: agent.map(Into::into),
+            runs_on: Some(teammate.clone()),
+            ..NewJob::default()
+        };
+        let refused = |r: Result<Job, Refused>| r.unwrap_err().0;
+
+        // Codex is the only agent: the default.
+        let codex =
+            serde_json::json!({"bin": "/usr/bin/true", "accounts": [{"id": "c", "name": "C"}]});
+        let only = jobs_with(serde_json::json!({"codex": codex}));
+        assert_eq!(refused(only.create(new(None))), GUEST_ONLY_CLAUDE);
+        drop(only);
+
+        let both = jobs_with(serde_json::json!({"codex": codex,
+            "claude": {"bin": "/usr/bin/true", "accounts": [{"id": "a", "name": "A"}]}}));
+        assert_eq!(refused(both.create(new(Some("codex")))), GUEST_ONLY_CLAUDE);
+
+        // A Codex job that ended here, moved there.
+        let mut here = Job::new(
+            "j1".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "codex".into(),
+            "c".into(),
+        );
+        here.status = Status::Done;
+        both.insert(here);
+        assert_eq!(
+            refused(both.place("j1", Some(teammate.clone())).unwrap()),
+            GUEST_ONLY_CLAUDE
+        );
+        assert!(both.place("j1", None).unwrap().is_ok());
+
+        // A Claude Code job that came back from there, moved to Codex.
+        let mut there = Job::new(
+            "j2".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        there.status = Status::Done;
+        there.runs_on = Some(teammate.clone());
+        both.insert(there);
+        assert_eq!(
+            refused(both.change("j2", Some("codex"), None, "you").unwrap()),
+            GUEST_ONLY_CLAUDE
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn cleanup_git(dir: &Path, args: &[&str]) -> String {

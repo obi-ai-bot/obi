@@ -214,7 +214,9 @@ pub struct Hosting {
     shown_free: Mutex<Blurred>,
     /// Fetching the guest image (super::vm_image), and the task doing it.
     pub image: Mutex<super::vm_image::Progress>,
-    fetch: Mutex<Option<tokio::task::AbortHandle>>,
+    fetch: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// A fetch sharing turned off stopped: the next one waits until it has, and has cleared up.
+    stopped_fetch: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// How long the `free` a runner status says holds at least, and the most added to it at random.
@@ -282,7 +284,11 @@ pub fn fetch_image_soon(link: &Arc<Link>) {
         ..super::vm_image::Progress::none()
     };
     let (link, stopping) = (link.clone(), link.stopping());
+    let stopped = link.hosting.stopped_fetch.lock().unwrap().take();
     let task = tokio::spawn(async move {
+        if let Some(stopped) = stopped {
+            let _ = stopped.await;
+        }
         let progress = &link.hosting.image;
         let asking = setup.clone();
         let pin = tokio::task::spawn_blocking(move || asking.refresh_pin())
@@ -295,13 +301,18 @@ pub fn fetch_image_soon(link: &Arc<Link>) {
             );
             return;
         };
-        let dir = &setup.image.dir;
-        let fetched = tokio::select! {
-            fetched = super::vm_image::fetch(&url, dir, &pin, progress, super::vm_image::STALL) => fetched,
-            () = super::link::stopped(stopping) => {
-                super::vm_image::clear_partial(dir);
-                return;
-            }
+        let stop = super::link::stopped(stopping);
+        let Some(fetched) = super::vm_image::fetch_unless(
+            &url,
+            &setup.image.dir,
+            &pin,
+            progress,
+            super::vm_image::STALL,
+            stop,
+        )
+        .await
+        else {
+            return;
         };
         if let Err(why) = fetched {
             tracing::warn!("sphere: the guest image wasn't fetched: {why}");
@@ -309,15 +320,16 @@ pub fn fetch_image_soon(link: &Arc<Link>) {
         }
         link.publish_runner_soon();
     });
-    *fetch = Some(task.abort_handle());
+    *fetch = Some(task);
 }
 
 /// Stops fetching the guest image, when sharing is turned off: what it downloaded so far goes.
 pub fn cancel_image_fetch(link: &Link) {
+    // Its task, once aborted, clears what it left as it's dropped (vm_image::fetch).
     if let Some(task) = link.hosting.fetch.lock().unwrap().take() {
         task.abort();
+        *link.hosting.stopped_fetch.lock().unwrap() = Some(task);
     }
-    super::vm_image::clear_partial(&link.hosting_setup().image.dir);
     *link.hosting.image.lock().unwrap() = super::vm_image::Progress::none();
 }
 
@@ -1517,12 +1529,15 @@ async fn watch_job(
     loop {
         tokio::select! {
             () = shared.done_notify.notified() => {
-                // What it used, once more before it powers off.
-                if vm.command("usage").await {
-                    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(2), vm.next()).await {
-                        if note_usage(shared, &event) || event["event"] == "stopped" {
-                            break;
-                        }
+                // What it used, once more before it powers off; and whatever it said already,
+                // even when it's gone before it's asked (its last words are still to be read).
+                // Every usage it sends until it stops (an older one may be queued before the
+                // answer), each within 2 seconds of the last.
+                let _ = vm.command("usage").await;
+                while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(2), vm.next()).await {
+                    note_usage(shared, &event);
+                    if event["event"] == "stopped" {
+                        break;
                     }
                 }
                 return ended(coming_back);
@@ -1701,6 +1716,17 @@ pub async fn status_now(link: &Arc<Link>) -> Option<Value> {
     if !mac.on {
         return None;
     }
+    // Offered only to the people chosen who have joined: one name the Sphere doesn't know would
+    // refuse the whole status. None of them yet: offered to nobody, so nothing is published.
+    let offered: Value = if mac.who == "people" {
+        let (joined, _) = link.joined_now(&mac.people).await;
+        if joined.is_empty() {
+            return None;
+        }
+        json!(joined)
+    } else {
+        json!("*")
+    };
     let setup = link.hosting_setup();
     let slots_free = link.hosting.count() < usize::from(mac.jobs_at_once);
     let signals = vm::signals(&setup.helper).await.ok();
@@ -1711,11 +1737,6 @@ pub async fn status_now(link: &Arc<Link>) -> Option<Value> {
             .lock()
             .unwrap()
             .show(actually_free, time::now(), jitter());
-    let offered: Value = if mac.who == "people" {
-        json!(mac.people)
-    } else {
-        json!("*")
-    };
     Some(
         json!({"free": is_free, "slots": mac.jobs_at_once, "size": mac.size, "agents": ["claude"],
                 "kinds": ["job"], "for": offered}),

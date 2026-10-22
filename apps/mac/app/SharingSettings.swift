@@ -64,7 +64,8 @@ struct SharingSettingsView: View {
         switch image.state {
         case "fetching": return "Getting the VM’s image: \(size(image.done)) of \(size(image.total))."
         case "failed": return image.error ?? "The VM’s image couldn’t be fetched."
-        default: return "Turning it on gets the VM’s image first (\(size(image.total)))."
+        // No size: obid knows no image (obi-vm isn't in this build).
+        default: return (image.total ?? 0) > 0 ? "Turning it on gets the VM’s image first (\(size(image.total)))." : "The VM isn’t bundled in this build of Oby."
         }
     }
 
@@ -99,6 +100,15 @@ struct SharingSettingsView: View {
                             Toggle("Share with \(RunnerMac.person(member.owner))", isOn: Binding(
                                 get: { settings.people.contains(member.owner) },
                                 set: { on in change { $0.people = on ? $0.people + [member.owner] : $0.people.filter { $0 != member.owner } } }))
+                                .toggleStyle(.set)
+                        }
+                    }
+                    // Chosen, not in the Obysphere yet: offered nothing until they join.
+                    ForEach((mac.waiting ?? []).filter { p in !sphere.members.contains { $0.active && $0.owner == p } }, id: \.self) { person in
+                        SetRow(RunnerMac.person(person), about: "Waiting to join") {
+                            Toggle("Share with \(RunnerMac.person(person))", isOn: Binding(
+                                get: { settings.people.contains(person) },
+                                set: { on in change { $0.people = on ? $0.people + [person] : $0.people.filter { $0 != person } } }))
                                 .toggleStyle(.set)
                         }
                     }
