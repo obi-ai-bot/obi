@@ -84,8 +84,8 @@ struct SharingTests {
             return try Runner.decoder.decode(RunnerSharingMac.self, from: Data(json.utf8))
         }
         #expect(SharingSettingsView.imageAbout(try mac(nil)) == "This Mac needs Oby’s VM before it can run anyone’s jobs.")
-        #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "none"}"#)) == "Turning it on gets the VM’s image first (1.8 GB).")
-        #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "fetching", "done": 600000000, "total": 1773531956}"#))?.hasPrefix("Getting the VM’s image: 600 MB of 1.77 GB") == true)
+        #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "none"}"#)) == "Turning it on gets the VM’s image first (about 170 MB).")
+        #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "fetching", "done": 60000000, "total": 171310123}"#))?.hasPrefix("Getting the VM’s image: 60 MB of 171.3 MB") == true)
         #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "failed", "error": "The guest image for this Oby isn’t published (404)."}"#))?.hasSuffix("Turn sharing off and on to try again.") == true)
         var ready = try mac(#"{"state": "ready"}"#)
         ready.ready = true

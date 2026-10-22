@@ -64,7 +64,7 @@ struct SharingSettingsView: View {
         switch image.state {
         case "fetching": return "Getting the VM’s image: \(size(image.done)) of \(size(image.total))."
         case "failed": return "\(image.error ?? "The VM’s image couldn’t be fetched.") Turn sharing off and on to try again."
-        default: return "Turning it on gets the VM’s image first (1.8 GB)."
+        default: return "Turning it on gets the VM’s image first (about 170 MB)."
         }
     }
 

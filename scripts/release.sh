@@ -263,10 +263,11 @@ check_obi_vm() {
     [[ "$(lipo -archs "$vm")" == arm64 ]] || die "obi-vm is $(lipo -archs "$vm"), not arm64"
     codesign -d --entitlements - "$vm" 2>/dev/null | grep -q com.apple.security.virtualization \
         || die "obi-vm isn't signed with com.apple.security.virtualization"
-    [[ "$("$vm" image)" == "$(jq -cS '{vmlinuz, initrd, "root.img": .["root.img"]}' "$pin")" ]] \
+    # What obi-vm answers: every SHA-256 in the pin, and each size as "<name>.bytes".
+    [[ "$("$vm" image | jq -cS .)" == "$(jq -cS '(to_entries | map(select(.value | type == "string")) | from_entries) + (.bytes | with_entries(.key += ".bytes" | .value |= tostring))' "$pin")" ]] \
         || die "obi-vm wasn't built for core/obi-vm/image.json's image"
     root_sha="$(jq -r '.["root.img"]' "$pin")"
-    for file in vmlinuz initrd root.img; do
+    for file in vmlinuz.zst initrd.zst root.img.zst; do
         bytes="$(jq -r ".bytes[\"$file\"]" "$pin")"
         got="$(curl -fsI --max-time 20 "$vm_images/$root_sha/$file" | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}' || true)"
         if [[ "$got" != "$bytes" ]]; then

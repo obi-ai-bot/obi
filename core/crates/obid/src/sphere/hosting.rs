@@ -1659,7 +1659,7 @@ pub async fn status_now(link: &Arc<Link>) -> Option<Value> {
         json!("*")
     };
     Some(
-        json!({"free": is_free, "slots": mac.jobs_at_once, "size": mac.size, "agents": ["claude", "codex"],
+        json!({"free": is_free, "slots": mac.jobs_at_once, "size": mac.size, "agents": ["claude"],
                 "kinds": ["job"], "for": offered}),
     )
 }

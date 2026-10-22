@@ -87,12 +87,12 @@ Then push the commit and the tag: `git push origin HEAD v0.2.0`. Shipped Obys pi
 
 ### The guest image
 
-Sharing a Mac (#797) runs teammates' jobs in a VM. `obi-vm` is built into the app by the "Bundle obi-vm" build phase (`apps/mac/app/Tools/bundle-obi-vm.sh`): arm64, the virtualization entitlement, and the SHA-256s of the image [`core/obi-vm/image.json`](../core/obi-vm/image.json) pins built in. The image itself (1.7 GB) is published once per new image, and obid fetches it when an owner turns sharing on. `release.sh` checks that `obi-vm` is arm64, has the entitlement and answers `obi-vm image` with the pinned hashes, and that the pinned image is published at `https://downloads.oby.deskree.com/vm/<root.img's SHA-256>/`, each file its pinned size (a dry run only warns).
+Sharing a Mac (#797) runs teammates' jobs in a VM. `obi-vm` is built into the app by the "Bundle obi-vm" build phase (`apps/mac/app/Tools/bundle-obi-vm.sh`): arm64, the virtualization entitlement, and the SHA-256s of the image [`core/obi-vm/image.json`](../core/obi-vm/image.json) pins built in. The image itself (a 665 MB disk, about 170 MB zstd-compressed: no docs or translations, only the kernel modules the guest loads, no Codex) is published once per new image, compressed, and obid fetches it when an owner turns sharing on. `release.sh` checks that `obi-vm` is arm64, has the entitlement and answers `obi-vm image` with the pinned hashes and sizes, and that the pinned image's `.zst` files are published at `https://downloads.oby.deskree.com/vm/<root.img's SHA-256>/`, each its pinned size (a dry run only warns).
 
 A new image (a change in `core/obi-vm/image/`):
 
 ```sh
-core/obi-vm/image/build.sh <dir>            # Docker (OrbStack); writes <dir>/image.json
+core/obi-vm/image/build.sh <dir>            # Docker (OrbStack); the files, their .zst copies and <dir>/image.json
 cp <dir>/image.json core/obi-vm/image.json  # commit it in the change's pull request
 scripts/publish-vm-image.sh <dir>           # checks the files against the pin, uploads them, reads them back
 ```
