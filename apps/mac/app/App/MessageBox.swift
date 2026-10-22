@@ -86,7 +86,7 @@ struct MessageBox: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if attachments && !tray.items.isEmpty { tags.padding(.bottom, 6) }
+            if attachments && (!tray.items.isEmpty || tray.place != nil) { tags.padding(.bottom, 6) }
             if stacked {
                 editor.padding(BoxMetrics.stackedPadding)
                 HStack(spacing: 4) {
@@ -177,6 +177,9 @@ struct MessageBox: View {
             Button("Screenshot", action: onScreenshot).disabled(tray.capturing)
             Button("Clipboard", action: tray.pasteClipboard)
             Button("File…", action: tray.chooseFile)
+            // Where the box talks to Oby: run its jobs on a teammate's Mac that's free (Sangam's
+            // "Run on another Mac", #808), with your own accounts.
+            if usage != nil && !tray.macs.isEmpty { placeMenu }
         } label: {
             BoxIcon(symbol: "plus")
         }
@@ -184,9 +187,34 @@ struct MessageBox: View {
         .accessibilityLabel("Add attachment")
     }
 
+    /// This Mac, then the teammates' Macs: free or busy (and when it's free), never whether their
+    /// owner is at them. Picking one puts its tag over the words; one at a time.
+    private var placeMenu: some View {
+        Menu("Run on another Mac") {
+            Button { tray.place = nil } label: {
+                Label("This Mac", systemImage: tray.place == nil ? "checkmark" : "laptopcomputer")
+            }
+            ForEach(tray.macs) { mac in
+                Button { tray.place = mac } label: {
+                    Label(Self.placeLine(mac), systemImage: tray.place == mac ? "checkmark" : "laptopcomputer")
+                }
+                .disabled(!mac.free)
+            }
+            Divider()
+            Text("Your job runs there with your own accounts: your logins stay on this Mac.")
+        }
+    }
+
+    /// "Wellington’s Mac · Free" or "· Busy", and "· unverified" until you've compared
+    /// Wellington's key with him (Settings › Obysphere).
+    static func placeLine(_ mac: RunnerMac) -> String {
+        let unverified = mac.verified == false ? " · unverified" : ""
+        return "\(mac.name) · \(mac.free ? "Free" : "Busy")\(unverified)"
+    }
+
     /// Always there where the box talks to Oby, even before an account reports usage (docs/mac-design.md B3).
     @ViewBuilder private var gauge: some View {
-        if let usage { UsageGauge(rows: usage) }
+        if let usage { UsageGauge(rows: usage, shares: tray.shares) }
     }
 
     /// What the end slot holds: Stop while a turn is under way, the microphone while the box is
@@ -251,6 +279,21 @@ struct MessageBox: View {
     /// What goes with the words, as tags over them.
     private var tags: some View {
         HStack(spacing: 6) {
+            if let mac = tray.place {
+                HStack(spacing: 6) {
+                    Image(systemName: "laptopcomputer").font(Tokens.font(11)).foregroundStyle(Tokens.muted)
+                    Text("On \(mac.name)").lineLimit(1)
+                    Button { tray.place = nil } label: {
+                        Image(systemName: "xmark").font(Tokens.font(9, .bold)).foregroundStyle(Tokens.muted)
+                            .frame(width: 18, height: 18).contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Run it on this Mac instead")
+                }
+                .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.item)
+                .padding(.leading, 6).padding(.trailing, 3).frame(height: 24)
+                .background(Tokens.chipHover, in: Capsule())
+            }
             ForEach(tray.items) { item in
                 HStack(spacing: 6) {
                     Image(systemName: item.icon).font(Tokens.font(11)).foregroundStyle(Tokens.muted)
@@ -329,6 +372,8 @@ extension IslandModel {
 /// is past 80% (yellow) or 90% (red); a click shows each account's week, and the way to Accounts.
 private struct UsageGauge: View {
     let rows: [UsageRow]
+    /// The shares teammates gave you (#809): Sangam's "Shared with you", under your own accounts.
+    var shares: [RunnerShares.Share] = []
     @State private var open = false
     @Environment(\.openSettingsPage) private var openSettings
 
@@ -374,6 +419,26 @@ private struct UsageGauge: View {
                             }
                             Text(row.week == nil ? "–" : Usage.percent(used)).font(Tokens.font(Tokens.textBase)).monospacedDigit()
                                 .foregroundStyle(level == .over ? Tokens.over : level == .high ? Tokens.full : Tokens.text)
+                                .frame(minWidth: 32, alignment: .trailing)
+                        }
+                        SetMeter(used: used * 100)
+                    }
+                }
+                .padding(8)
+            }
+            if !shares.isEmpty {
+                Text("Shared with you").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.label).padding(.leading, 8).padding(.top, 8)
+            }
+            ForEach(shares) { share in
+                // The bar is your share of its month, filled with what you've used of it.
+                let used = Double(share.share - share.left) / Double(max(share.share, 1))
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "person.crop.circle").font(Tokens.font(13)).frame(width: 16).foregroundStyle(Tokens.muted)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(share.name).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.ink).fadeOut()
+                            Text("Your \(share.share)% of its month").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fixedSize()
+                            Text("\(share.left)% left").font(Tokens.font(Tokens.textBase)).monospacedDigit().foregroundStyle(Tokens.text)
                                 .frame(minWidth: 32, alignment: .trailing)
                         }
                         SetMeter(used: used * 100)

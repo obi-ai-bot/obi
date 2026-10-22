@@ -11,8 +11,9 @@
 //     without them boots nothing. A guest connection to a vsock port is joined to that Unix socket,
 //     which obid serves; that is the VM's only link out, at most 16 connections a port at once.
 //     The guest's console goes to LOG, at most 1 MiB, the rest dropped. stdin takes `pause`,
-//     `resume` and `stop`, one per line; stdout says `{"event": "running" | "paused" | "resumed" |
-//     "stopped", ...}`. Past --max-seconds, or when stdin ends, the VM is stopped hard.
+//     `resume` and `stop`, one per line, and `background`, `foreground` and `usage`; stdout says
+//     `{"event": "running" | "paused" | "resumed" | "usage" | "stopped", ...}`. Past --max-seconds,
+//     or when stdin ends, the VM is stopped hard.
 //   obi-vm signals
 //     `{"idleSeconds", "onAC", "lowPower", "thermal"}`: whether the owner is at the Mac.
 
@@ -277,6 +278,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate {
     }
 
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
+        command("usage")
         say(["event": "stopped", "reason": "guest"])
         exit(0)
     }
@@ -298,7 +300,22 @@ final class Runner: NSObject, VZVirtualMachineDelegate {
                   setpriority(PRIO_DARWIN_PROCESS, id_t(pid), line == "background" ? PRIO_DARWIN_BG : 0) == 0
             else { say(["event": "error", "command": line]); return }
             say(["event": line])
+        case "usage":
+            // What the VM's process used: CPU time and the most memory it held.
+            guard let pid = process else { say(["event": "error", "command": line]); return }
+            var info = rusage_info_v4()
+            let ok = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
+            }
+            guard ok == 0 else { say(["event": "error", "command": line]); return }
+            var timebase = mach_timebase_info_data_t()
+            mach_timebase_info(&timebase)
+            let ticks = info.ri_user_time + info.ri_system_time
+            let nanos = ticks * UInt64(timebase.numer) / UInt64(timebase.denom)
+            say(["event": "usage", "cpuSeconds": Int(nanos / 1_000_000_000),
+                 "peakMemoryMB": Int(info.ri_lifetime_max_phys_footprint / 1_048_576)])
         case "stop":
+            command("usage")
             vm.stop { _ in say(["event": "stopped", "reason": "stop"]); exit(0) }
         default:
             say(["event": "error", "command": line])

@@ -47,7 +47,6 @@
           "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
           "body": {
             "title": "Write tests for average()",
-            "request": "Add tests for average() in src/average.test.js, including the empty list.\nCommit them.",
             "agent": "claude",
             "model": "sonnet",
             "repo": "obi-conf/fixture-app",
@@ -61,14 +60,14 @@
             "size": "small",
             "max_minutes": 120
           },
-          "signature": "mZfLR3GmKx5J4rzOKQawFiDxhHpF61VGJ66oQw1LVPY7ER08MYT1G-ipA9sV2MS7A1FUP0l7EjGfeacz-unFCg"
+          "signature": "zl-tYHIoHf0Wlyh0_p0ed9mq418u0tbRRfx6OmMOuv4KsV_qkPtqaAittZevv9MwJlyp337YLa8ZIEkcXDdHDg"
         },
-        "hash": "3a8ab8cc37246e96ceb114ed858daafbd65fa58d0492742c7d924dc1d1a81b25"
+        "hash": "4ec1b0cb502d367223615ce4106f340aff4c0b79d15c130f5308026695df5727"
       },
       {
         "sphere": "conf-sphere",
         "seq": 2,
-        "prev": "3a8ab8cc37246e96ceb114ed858daafbd65fa58d0492742c7d924dc1d1a81b25",
+        "prev": "4ec1b0cb502d367223615ce4106f340aff4c0b79d15c130f5308026695df5727",
         "recorded_at": "2026-10-14T11:59:02Z",
         "envelope": {
           "protocol": "obi/0.1",
@@ -85,12 +84,12 @@
           "body": {},
           "signature": "uH8lnfKvQ6R9A1Cn6NsArdyJHZFC9AWfNL7DUsDWl4E6UjRUHIoMJxCh2hNUVsuOUft1klGKgg2gupnYC7TaDQ"
         },
-        "hash": "7608b6f005be712e2318aa140aaad28dac95ed3ef5e7e28cf96c5b6217908404"
+        "hash": "076ed6132a86d025ddb504ec10cb8b58b34f5d04bc59c33d1994e1fe6c3ed53e"
       },
       {
         "sphere": "conf-sphere",
         "seq": 3,
-        "prev": "7608b6f005be712e2318aa140aaad28dac95ed3ef5e7e28cf96c5b6217908404",
+        "prev": "076ed6132a86d025ddb504ec10cb8b58b34f5d04bc59c33d1994e1fe6c3ed53e",
         "recorded_at": "2026-10-14T11:59:03Z",
         "envelope": {
           "protocol": "obi/0.1",
@@ -143,7 +142,7 @@
           },
           "signature": "YYoOoD_yK2Hm7i5hVtDsfCMagZ-ecH3gecVFrb_zR7UAl4cuG0MNgvRKsarXvUQgaO6OwXK2h6971n4G08tsDA"
         },
-        "hash": "3bcb0345e08b52d2358f9885a082b1dda2ca393106fceb37d768e310f162713c"
+        "hash": "142d590145f4dd21a3322f0097700162ef87baafb2a780171d208b0f6ef0126b"
       }
     ]
   }

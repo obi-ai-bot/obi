@@ -159,6 +159,18 @@ pub const SCHEMAS: &[(&str, &str)] = &[
         include_str!("../spec/schemas/v0.1/actions/run_cancel.schema.json"),
     ),
     (
+        "actions/share_offer",
+        include_str!("../spec/schemas/v0.1/actions/share_offer.schema.json"),
+    ),
+    (
+        "actions/share_status",
+        include_str!("../spec/schemas/v0.1/actions/share_status.schema.json"),
+    ),
+    (
+        "actions/share_revoke",
+        include_str!("../spec/schemas/v0.1/actions/share_revoke.schema.json"),
+    ),
+    (
         "runner-status",
         include_str!("../spec/schemas/v0.1/runner-status.schema.json"),
     ),

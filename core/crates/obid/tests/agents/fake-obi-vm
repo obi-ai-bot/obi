@@ -1,0 +1,147 @@
+#!/usr/bin/env node
+// A stand-in for obi-vm (core/obi-vm) in obid's sharing tests (tests/sharing.rs). It never makes a
+// VM: as `run` it plays the guest the real image runs (core/obi-vm/image/obi-guest and obi-job),
+// over the same two Unix sockets obid serves, so everything obid does around a guest job is real.
+//
+//   signals   prints $HOME/fake-signals.json, or an idle Mac on power.
+//   run …     takes the disk key once on its own socket (7002, and checks it's gone after), the job,
+//             the code bundle;
+//             makes one model call through the model socket with a placeholder key (and checks a
+//             path outside the allow-list is refused); streams a transcript; commits a file with
+//             the model's answer as the job's author; sends the commits back and says it's done.
+//             With {"mode": "wait"} in fake.json beside --kernel, it first waits until obid asks
+//             for the job back (GET /return), and commits what it has then.
+//   stdin     pause, resume, background, foreground, usage, stop, as obi-vm answers them.
+//
+// It writes what it saw to guest.log beside --kernel, for the test to read.
+
+import { execFileSync } from "node:child_process";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import http from "node:http";
+import net from "node:net";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
+
+const say = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+const args = process.argv.slice(2);
+
+if (args[0] === "signals") {
+  const file = join(process.env.HOME ?? "/nonexistent", "fake-signals.json");
+  say(existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : { idleSeconds: 900, onAC: true, lowPower: false, thermal: "nominal" });
+  process.exit(0);
+}
+if (args[0] !== "run") process.exit(2);
+
+const flag = (name) => {
+  const i = args.indexOf(name);
+  return i < 0 ? undefined : args[i + 1];
+};
+const vsock = {};
+args.forEach((a, i) => {
+  if (a === "--vsock") {
+    const [port, path] = args[i + 1].split("=");
+    vsock[port] = path;
+  }
+});
+const here = dirname(flag("--kernel"));
+const scenario = existsSync(join(here, "fake.json")) ? JSON.parse(readFileSync(join(here, "fake.json"), "utf8")) : {};
+const log = (line) => appendFileSync(join(here, "guest.log"), line + "\n");
+log(`cpus ${flag("--cpus")} memory ${flag("--memory-mib")} disk ${flag("--disk")}`);
+
+say({ event: "running" });
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const c = line.trim();
+  if (c === "stop") {
+    say({ event: "usage", cpuSeconds: 3, peakMemoryMB: 42 });
+    say({ event: "stopped", reason: "stop" });
+    process.exit(0);
+  }
+  if (c === "usage") say({ event: "usage", cpuSeconds: 3, peakMemoryMB: 42 });
+  else if (["pause", "resume", "background", "foreground"].includes(c)) {
+    log(`command ${c}`);
+    say({ event: c === "pause" ? "paused" : c === "resume" ? "resumed" : c });
+  }
+});
+
+function call(socketPath, method, path, body, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ socketPath, method, path, headers }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
+    });
+    req.on("error", reject);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
+const control = vsock["7000"];
+const keySocket = vsock["7002"];
+log(`max-seconds ${flag("--max-seconds")}`);
+// The key, as PID 1 reads it: every byte the socket sends, then it closes.
+const readKey = () =>
+  new Promise((resolve) => {
+    const got = [];
+    const c = net.connect({ path: keySocket });
+    c.on("data", (d) => got.push(d));
+    c.on("end", () => resolve(Buffer.concat(got)));
+    c.on("error", () => resolve(null));
+  });
+const model = vsock["7001"];
+const git = (cwd, ...a) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...a], { cwd, encoding: "utf8" }).trim();
+
+async function main() {
+  const key = await readKey();
+  log(`key ${key ? key.length : "none"}`);
+  log(`key-again ${(await readKey()) === null ? "refused" : "given"}`);
+  await call(control, "GET", "/hello");
+  log(`key-on-control ${(await call(control, "GET", "/key")).status}`);
+  const job = JSON.parse((await call(control, "GET", "/job")).body.toString());
+  log(`job ${job.title} on ${job.branch} by ${job.author.name}`);
+  log(`words ${job.request ?? ""}`);
+  const dir = mkdtempSync(join(tmpdir(), "fake-guest-"));
+  writeFileSync(join(dir, "in.bundle"), (await call(control, "GET", "/bundle")).body);
+  git(dir, "init", "-q", "repo");
+  const repo = join(dir, "repo");
+  git(repo, "fetch", "-q", "../in.bundle", "+refs/*:refs/obi-in/*");
+  git(repo, "checkout", "-q", "-b", job.branch, job.base_sha);
+  log(`base "${git(repo, "log", "-1", "--format=%s", job.base_sha)}" parents "${git(repo, "log", "-1", "--format=%P", job.base_sha)}" commits ${git(repo, "rev-list", "--all", "--count")}`);
+
+  const refused = await call(model, "POST", "/api/oauth/token", "{}", { "content-type": "application/json" });
+  log(`refused ${refused.status}`);
+  const asked = JSON.stringify({ model: job.model ?? "fake", max_tokens: 10, messages: [{ role: "user", content: "say hello" }] });
+  const answer = await call(model, "POST", "/v1/messages?beta=true", asked, { "content-type": "application/json", "x-api-key": "obi-relay-placeholder", "anthropic-version": "2023-06-01" });
+  const said = JSON.parse(answer.body.toString()).content?.[0]?.text ?? "";
+  log(`model ${answer.status} ${said}`);
+
+  const lines = [
+    { type: "system", subtype: "init", session_id: "on-the-other-mac" },
+    { type: "assistant", message: { content: [{ type: "text", text: said }] } },
+    { type: "result", subtype: "success", is_error: false, result: `Wrote guest.txt: ${said}`, usage: { input_tokens: 10, output_tokens: 3 } },
+  ];
+  await call(control, "PUT", "/transcript", lines.map((l) => JSON.stringify(l) + "\n").join(""), { "content-type": "application/x-ndjson" });
+
+  if (scenario.mode === "wait") {
+    const why = (await call(control, "GET", "/return")).body.toString();
+    log(`return ${why}`);
+  }
+  writeFileSync(join(repo, "guest.txt"), said + "\n");
+  git(repo, "add", "guest.txt");
+  git(repo, "-c", `user.name=${job.author.name}`, "-c", `user.email=${job.author.email}`, "-c", "commit.gpgsign=false", "commit", "-q", "-m", job.title);
+  git(repo, "bundle", "create", "-q", "../out.bundle", job.branch, `^${job.base_sha}`);
+  const sent = await call(control, "PUT", "/commits", readFileSync(join(dir, "out.bundle")));
+  log(`commits ${sent.status}`);
+  await call(control, "POST", "/done", JSON.stringify({ exit: 0, note: "" }), { "content-type": "application/json" });
+  // As obi-vm: what the VM used, then that it stopped.
+  say({ event: "usage", cpuSeconds: 3, peakMemoryMB: 42 });
+  say({ event: "stopped", reason: "guest" });
+  process.exit(0);
+}
+
+main().catch((e) => {
+  log(`failed ${e.message}`);
+  say({ event: "stopped", reason: "error", error: e.message });
+  process.exit(1);
+});

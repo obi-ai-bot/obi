@@ -54,6 +54,9 @@ struct Request {
     /// The id the app gave the user's words (a lower-case UUID): sent again with an id obid has,
     /// they're the same words, and nothing new happens.
     id: Option<String>,
+    /// The teammate's Obi whose Mac this message's jobs run on ("Run on another Mac", #808).
+    #[serde(rename = "runsOn")]
+    runs_on: Option<Value>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,6 +109,15 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
         (None, false) => Target::Latest,
     };
     let turns = validate_turns(req.turns)?;
+    let runs_on = match &req.runs_on {
+        None | Some(Value::Null) => None,
+        Some(place) => Some(
+            shared
+                .link
+                .runs_on(place)
+                .map_err(|m| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, m))?,
+        ),
+    };
     // The owner's message: after more than 30 minutes away, the answer starts with a recap (#594).
     let now = obi_protocol::time::now();
     let back = shared.presence.seen(now);
@@ -166,6 +178,7 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
             attachments: &attachments,
             conversation: &conversation,
             turn: &control.turn,
+            runs_on: runs_on.as_ref(),
         };
         // The recap is written while the brain thinks; a background call is bounded and
         // tried once, and when it fails the answer is the same as without it.

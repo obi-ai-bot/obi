@@ -277,7 +277,21 @@ final class SphereModel {
         var name: String
         var active: Bool
         var accepts: [String]
+        /// Their owner key's fingerprint as this Oby pinned it, and a different one the Obysphere
+        /// shows since, waiting for your OK (obid's `GET /v1/obid/sphere/pins`).
+        var fingerprint: String? = nil
+        var changedTo: String? = nil
+        /// Whether you compared their key with them and accepted it.
+        var verified = false
         var id: String { obi }
+    }
+
+    /// An owner key obid pinned (docs/runner-api.md, "Pinned owner keys").
+    struct Pin: Decodable, Equatable {
+        var owner: String
+        var fingerprint: String
+        var changedTo: String?
+        var verified: Bool?
     }
 
     /// An `obiRequest` inbox item (docs/runner-api.md, "Obi-to-Obi requests in the inbox"). Its
@@ -299,12 +313,17 @@ final class SphereModel {
     nonisolated static let accepts = ["review_request", "question"]
     /// What each Obi's delegation grants it (identity.md 4.2).
     nonisolated static let obiScopes = "send:review_request send:question reply receive directory:read audit:read"
+    /// The same, and sending a job to a teammate's Mac (#797): asked for only once the owner shares
+    /// or sends one, since a Sphere from before it refuses a scope it doesn't know.
+    nonisolated static let sharingScopes = "send:review_request send:question send:run_request send:share_offer reply receive directory:read audit:read"
 
     private let feed: RunnerFeed
     private(set) var membership: Membership?
     private(set) var name: String?
     private(set) var admin = false
     private(set) var members: [Member] = []
+    /// Your owner key's fingerprint, for the others to compare.
+    private(set) var ownFingerprint: String?
     private(set) var requests: [Request] = []
     var problem: String?
     var busy = false
@@ -361,6 +380,15 @@ final class SphereModel {
             return Member(obi: obi, owner: entry["owner"] as? String ?? "", name: (entry["card"] as? [String: Any])?["name"] as? String ?? obi,
                           active: entry["status"] as? String == "active", accepts: params?["accepts"] as? [String] ?? [])
         }
+        // The fingerprints to compare with each person, from the keys obid pinned.
+        let pins: [Pin] = (try? await runner.call("GET", "v1/obid/sphere/pins")) ?? []
+        for index in members.indices {
+            let pin = pins.first { $0.owner == members[index].owner }
+            members[index].fingerprint = pin?.fingerprint
+            members[index].changedTo = pin?.changedTo
+            members[index].verified = pin?.verified ?? false
+        }
+        ownFingerprint = try? OwnerKey.of(owner).keyId
         let inbox = (try JSONSerialization.jsonObject(with: try await runner.send("GET", "v1/inbox"))) as? [[String: Any]] ?? []
         requests = inbox.compactMap(Self.request)
     }
@@ -450,6 +478,27 @@ final class SphereModel {
         try await refresh()
     }
 
+    /// A new card and delegation for this Mac's Oby (docs/runner-api.md, `PUT /v1/obid/sphere/membership`):
+    /// a card that takes teammates' jobs when `sharing`, and a delegation that may send one (#808).
+    func renew(sharing: Bool) async throws {
+        let runner = try runner()
+        let membership: Membership = try await runner.call("GET", "v1/obid/sphere")
+        guard membership.state == "joined", let url = membership.url, let sphere = membership.sphere, let obi = membership.obiId else {
+            throw RunnerError(message: "This Oby isn't in an Obysphere.")
+        }
+        let key = try OwnerKey.of(membership.owner)
+        let made = try await raw(runner, "POST", "v1/obid/sphere/card", [
+            "url": url, "sphere": sphere, "obiId": obi, "name": "\(membership.owner)'s Oby",
+            "ownerKey": key.publicKey, "accepts": sharing ? Self.accepts + ["run_request", "share_offer"] : Self.accepts,
+        ])
+        guard let card = made["card"] as? [String: Any] else { throw RunnerError(message: "obid made no card.") }
+        _ = try await raw(runner, "PUT", "v1/obid/sphere/membership", [
+            "card": try key.sign(card: card),
+            "delegation": try key.assertion(owner: membership.owner, sphere: sphere, scope: Self.sharingScopes, mayAct: obi),
+        ])
+        try await refresh()
+    }
+
     /// Asks `member`'s Oby to review `job`'s pull request at the commit GitHub has as its head
     /// (docs/runner-api.md, `POST /v1/obid/sphere/requests`; the spec's review_request).
     func askForReview(_ member: Member, of job: Job) async throws {
@@ -468,6 +517,14 @@ final class SphereModel {
     }
 
     /// Answers a request with one of its options (`POST /v1/inbox/{id}/answer`).
+    /// You compared `member`'s new key with them: obid trusts it from now on.
+    /// Accepts their changed key, or verifies the one pinned: only after you compared it with them.
+    func acceptKey(_ member: Member) async throws {
+        guard let fingerprint = member.changedTo ?? member.fingerprint else { return }
+        _ = try await raw(try runner(), "POST", "v1/obid/sphere/pins/\(member.owner)", ["fingerprint": fingerprint])
+        try await refresh()
+    }
+
     func answer(_ request: Request, _ option: String) async throws {
         _ = try await raw(try runner(), "POST", "v1/inbox/\(request.id)/answer", ["answer": option])
         try await refresh()

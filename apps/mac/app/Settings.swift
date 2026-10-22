@@ -39,6 +39,7 @@ struct SettingsPane: View {
         switch page {
         case .general: GeneralSettingsView(desk: model.desk)
         case .runner: RunnerSettingsView(feed: feed, availability: model.availability, remote: model.remote)
+        case .sharing: SharingSettingsView(feed: feed)
         case .remote:
             if let remote = model.remote { RemoteAccessSettingsView(remote: remote) }
         case .accounts: AccountsSettingsView(store: store, feed: feed)

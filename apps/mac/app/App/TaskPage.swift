@@ -27,7 +27,14 @@ struct TaskActions {
     var attaches = false
     /// Puts its decision off an hour (Later on its inbox item, as the conversation's cards do), and
     /// says whether there was anything to put off; nil where nothing offers Later.
+    /// Run it here: a job that came back from a teammate's Mac moves to this one (#808); nil for
+    /// this Mac's own jobs.
+    var runHere: (() async throws -> Void)? = nil
     var later: (() async throws -> Bool)? = nil
+    /// The shares of their API accounts teammates gave you that this job's agent can run on
+    /// (#809), and moving it onto one; none for this Mac's own jobs.
+    var shares: [RunnerShares.Share] = []
+    var useShare: ((RunnerShares.Share) async throws -> Void)? = nil
 
     /// The + is there where the files can go: obid on this Mac, and a finished job, whose words
     /// start a follow-up (a job at work takes words only).
@@ -101,12 +108,17 @@ struct TaskActions {
                 return heard
             },
             attaches: attaches(job, runnerHere: feed.local),
+            runHere: { if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.place(job.id, on: nil) }) } },
             later: {
                 switch laterTarget(job.id, inbox: feed.inbox, permissions: feed.permissionHistory) {
                 case .item(let id): try await feed.settle(id, later: .now.addingTimeInterval(3600)); return true
                 case .permission(let id): feed.laterPermission(id); return true
                 case nil: return false
                 }
+            },
+            shares: feed.shares.filter { $0.agent == job.agent && $0.left > 0 },
+            useShare: { share in
+                if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.place(job.id, on: share.from, grant: share.grant) }) }
             })
     }
 
@@ -173,11 +185,69 @@ struct TaskDecision: View {
                     hint: box ? "Or answer in your own words below" : nil, onChoose: { option in run { try await actions.message(option.answer) } },
                     onLater: onLater)
                 .id(question.text)
+        } else if job.nextStepOffered != nil, let on = actions.extras?.runsOn, let runHere = actions.runHere {
+            // It came back from a teammate's Mac (Sangam's "Came back" card, #808): run it here, or
+            // send it back there once that Mac is free.
+            let wait = "Wait for \(RunnerMac.person(on.owner))’s Mac"
+            let (title, happened) = Self.cameBack(job.line)
+            AskCard(kind: "Came back", title: title, happened: happened,
+                    options: CardOption.of([Self.runHereLabel, wait], recommended: 0), busy: busy,
+                    onChoose: { option in
+                        run {
+                            if option.answer == Self.runHereLabel { try await runHere() }
+                            try await actions.message(Job.tryAgainWords)
+                        }
+                    }, onLater: onLater)
+                .id("\(job.id)-\(job.finished?.timeIntervalSince1970 ?? 0)")
+        } else if job.nextStepOffered != nil, let resumes = job.resumes, actions.extras?.runsOn == nil,
+                  let share = actions.shares.first, let useShare = actions.useShare {
+            // Its account is full (Sangam's "Your Claude is full until 4 PM", #809): run it on a
+            // teammate's share of their API account, on their Mac, or wait for the reset.
+            let use = Self.useShareLabel(share)
+            AskCard(kind: "Out of usage", title: Self.fullTitle(job, until: resumes), happened: Self.shareLine(share),
+                    options: CardOption.of([use, Self.waitLabel], recommended: 0), busy: busy,
+                    onChoose: { option in
+                        run {
+                            if option.answer == use {
+                                try await useShare(share)
+                                try await actions.message(Job.tryAgainWords)
+                            } else {
+                                _ = try await actions.later?()
+                            }
+                        }
+                    }, onLater: onLater)
+                .id("\(job.id)-share-\(job.finished?.timeIntervalSince1970 ?? 0)")
         } else if let next = job.nextStepOffered {
             AskCard(kind: job.needsYouKind, title: job.line, happened: job.resumesLine, options: CardOption.of([next], recommended: 0), busy: busy,
                     onChoose: { _ in run { try await actions.message(Job.tryAgainWords) } }, onLater: onLater)
                 .id("\(job.id)-\(job.finished?.timeIntervalSince1970 ?? 0)")
         }
+    }
+
+    static let runHereLabel = "Run it here"
+
+    /// obid's words for a job that came back, as Sangam's card shows them: the headline ("That Mac
+    /// couldn’t keep running it"), then what happened, split at the first sentence.
+    static func cameBack(_ line: String) -> (String, String?) {
+        guard let end = line.range(of: ". ") else { return (line, nil) }
+        return (String(line[..<end.lowerBound]), String(line[end.upperBound...]))
+    }
+    static let waitLabel = "Wait for the reset"
+
+    /// "Use Wellington’s share".
+    static func useShareLabel(_ share: RunnerShares.Share) -> String { "Use \(RunnerMac.person(share.owner))’s share" }
+
+    /// "Your Claude is full until 4 PM".
+    static func fullTitle(_ job: Job, until: Date) -> String {
+        let tool = job.agent == "codex" ? "Codex" : job.agent == "cursor" ? "Cursor" : "Claude"
+        return "Your \(tool) is full until \(until.formatted(date: .omitted, time: .shortened))"
+    }
+
+    /// "Wellington shares 30% of Deskree API’s month with you, and 18% is left. It would run on
+    /// Wellington’s Mac, on that account, and you get the pull request."
+    static func shareLine(_ share: RunnerShares.Share) -> String {
+        let name = RunnerMac.person(share.owner)
+        return "\(name) shares \(share.share)% of \(share.account)’s month with you, and \(share.left)% is left. It would run on \(name)’s Mac, on that account, and you get the pull request."
     }
 
     private func run(_ work: @escaping () async throws -> Void) {
@@ -298,8 +368,10 @@ struct TaskCardView: View {
 
     private func meta(_ actions: TaskActions) -> String {
         let repo = job.repo.split(separator: "/").last.map(String.init)
+        // "Claude Code · Personal · on Wellington’s Mac · oby" (Sangam's design, #808).
+        let on = item.job.local ? nil : model.feed.extras[job.id]?.runsOn.map { "on \(RunnerMac.person($0.owner))’s Mac" }
         return ([job.agentName, actions.account ?? LiveView.account(of: job, local: item.job.local, desk: model.desk, feed: model.feed)]
-            + [repo].compactMap { $0 }).filter { !$0.isEmpty }.joined(separator: " · ")
+            + [on, repo].compactMap { $0 }).filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 

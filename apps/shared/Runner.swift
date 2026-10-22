@@ -421,8 +421,20 @@ extension InboxItem {
     /// by that (`shownKind`), and the brain's briefing leaves it out (`RunnerFeed.briefingInbox`).
     nonisolated static func runner(_ json: Data) -> InboxItem? {
         if let item = try? Runner.decoder.decode(InboxItem.self, from: json) { return item }
-        guard var object = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any],
-              object["kind"] as? String == RunnerConfirm.kind, object["confirm"] is [String: Any] else { return nil }
+        guard var object = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any] else { return nil }
+        // A teammate asking to run a job on this Mac (#808): Sangam's design shows it as a "Start
+        // it?" card with its own answers (Allow, Allow … from now on, Decline), which obid takes.
+        if object["kind"] as? String == "obiRequest", (object["obi"] as? [String: Any])?["type"] as? String == "run_request" {
+            object["kind"] = Kind.start.rawValue
+            return (try? JSONSerialization.data(withJSONObject: object)).flatMap { try? Runner.decoder.decode(InboxItem.self, from: $0) }
+        }
+        // A teammate used the share of an API account you gave them (#809): Sangam's "Sangam used
+        // the share of Deskree API", an Out of usage card with its own answers.
+        if object["kind"] as? String == "obiRequest", (object["obi"] as? [String: Any])?["type"] as? String == "share_used" {
+            object["kind"] = Kind.limit.rawValue
+            return (try? JSONSerialization.data(withJSONObject: object)).flatMap { try? Runner.decoder.decode(InboxItem.self, from: $0) }
+        }
+        guard object["kind"] as? String == RunnerConfirm.kind, object["confirm"] is [String: Any] else { return nil }
         object["kind"] = Kind.start.rawValue
         return (try? JSONSerialization.data(withJSONObject: object)).flatMap { try? Runner.decoder.decode(InboxItem.self, from: $0) }
     }
@@ -1187,13 +1199,90 @@ nonisolated struct Runner: Sendable {
     /// runner with one thread).
     /// `id`: the id the app gave the words (its echo's, a lower-case UUID), which obid's turn of them
     /// takes; sent again with it (Try again after a lost answer), obid adds nothing (obid only).
+    /// `runsOn`: the teammate's Obi whose Mac the jobs these words start run on (obid only, #808).
     func planned(_ said: String, answer: (question: String, option: String)? = nil, attachments: [String] = [],
-                 conversation: String? = nil, new: Bool = false, id: String? = nil) async throws -> PlannedTurn {
+                 conversation: String? = nil, new: Bool = false, id: String? = nil, runsOn: String? = nil) async throws -> PlannedTurn {
         struct Answer: Encodable { var question: String; var option: String }
-        struct Body: Encodable { var said: String; var answer: Answer?; var attachments: [String]; var conversation: String?; var new: Bool?; var id: String? }
+        struct Body: Encodable { var said: String; var answer: Answer?; var attachments: [String]; var conversation: String?; var new: Bool?; var id: String?; var runsOn: String? }
         let body = Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }, attachments: attachments,
-                        conversation: conversation, new: new ? true : nil, id: id)
+                        conversation: conversation, new: new ? true : nil, id: id, runsOn: runsOn)
         return try await call("POST", "v1/plans", body: body, timeout: Self.planTimeout)
+    }
+
+    // MARK: Sharing a Mac (obid only, #797, #808)
+
+    /// This Mac's sharing, whether it can run guests, and the guests' jobs on it now; nil from a
+    /// runner that doesn't share (the Swift runner).
+    func sharingMac() async throws -> RunnerSharingMac? {
+        do {
+            return try await call("GET", "v1/obid/sharing/mac")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    func setSharingMac(_ settings: RunnerSharingMac.Settings) async throws -> RunnerSharingMac {
+        try await call("PUT", "v1/obid/sharing/mac", body: settings)
+    }
+
+    /// Stop (one guest job) or Stop All (nil).
+    func stopGuests(_ job: String? = nil) async throws {
+        struct Body: Encodable { var job: String? }
+        _ = try await send("POST", "v1/obid/sharing/mac/stop", body: Body(job: job))
+    }
+
+    /// The teammates' Macs this owner may send a job to: free or busy, never whether their owner is at them.
+    func macs() async throws -> [RunnerMac] {
+        do {
+            return try await call("GET", "v1/obid/sharing/macs")
+        } catch let error as RunnerError where error.status == 404 {
+            return []
+        }
+    }
+
+    /// Moves a job that isn't running to a teammate's Mac, or back to this one (nil): Run it here.
+    /// With a `grant`, on the share of their API account they gave this owner (#809).
+    func place(_ id: String, on obi: String?, grant: String? = nil) async throws -> Job {
+        struct Share: Encodable { var obi: String; var grant: String }
+        struct Body: Encodable {
+            var runsOn: String?
+            var share: Share?
+            func encode(to encoder: any Encoder) throws {
+                var keys = encoder.container(keyedBy: CodingKeys.self)
+                if let share { try keys.encode(share, forKey: .runsOn) } else { try keys.encode(runsOn, forKey: .runsOn) }
+            }
+            enum CodingKeys: String, CodingKey { case runsOn }
+        }
+        let share = obi.flatMap { obi in grant.map { Share(obi: obi, grant: $0) } }
+        return try await call("PATCH", "v1/jobs/\(id)", body: Body(runsOn: obi, share: share))
+    }
+
+    // MARK: Sharing your usage (obid only, #798, #809)
+
+    /// The owner's shares of their company API accounts, their accounts as Sharing sorts them, and
+    /// whether the key is in Oby's vault; nil from a runner that doesn't share.
+    func sharingGrants() async throws -> RunnerGrants? {
+        do {
+            return try await call("GET", "v1/obid/sharing/grants")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// A share of `account`'s month for `who` (nobody, everyone, or one owner).
+    func setGrant(account: String, who: String, share: Int, budgetCents: Int, resetsDay: Int = 1) async throws -> RunnerGrants.Grant {
+        struct Body: Encodable { var account: String; var who: String; var share: Int; var budgetCents: Int; var resetsDay: Int }
+        return try await call("PUT", "v1/obid/sharing/grants",
+                              body: Body(account: account, who: who, share: share, budgetCents: budgetCents, resetsDay: resetsDay))
+    }
+
+    /// The shares teammates gave this owner; nil from a runner that doesn't share.
+    func sharedWithMe() async throws -> RunnerShares? {
+        do {
+            return try await call("GET", "v1/obid/sharing/shared")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
     }
 
     // MARK: Routines (obid only, #395)
@@ -1985,6 +2074,114 @@ nonisolated struct RunnerMemorySuggestion: Codable, Identifiable, Equatable, Sen
     var text: String
     var from: String
     var sources: [Source]
+}
+
+/// `GET /v1/obid/sharing/mac` (docs/runner-api.md, "obid only: sharing this Mac").
+nonisolated struct RunnerSharingMac: Codable, Equatable, Sendable {
+    struct Settings: Codable, Equatable, Sendable {
+        var on: Bool
+        var when: [String]
+        var who: String
+        var people: [String]
+        var allowed: [String]
+        var jobsAtOnce: Int
+        var size: String
+        var work: String
+        var maxMinutes: Int
+    }
+    /// A teammate's job on this Mac now.
+    struct Guest: Codable, Equatable, Sendable, Identifiable {
+        var correlationId: String
+        var fromOwner: String
+        var title: String
+        var repo: String
+        var agent: String
+        var started: Date
+        var state: String
+        var id: String { correlationId }
+    }
+    /// This Mac's last 7 days of teammates' jobs (#810); nil from an obid before it.
+    struct Week: Codable, Equatable, Sendable {
+        var jobs: Int
+        var wallSeconds: Int
+        var costCents: Int
+    }
+    var settings: Settings
+    var ready: Bool
+    var jobs: [Guest]
+    var week: Week? = nil
+}
+
+/// A teammate's Mac a job can run on (`GET /v1/obid/sharing/macs`).
+nonisolated struct RunnerMac: Codable, Equatable, Sendable, Identifiable {
+    var obi: String
+    var owner: String
+    var free: Bool
+    /// Whether you compared its owner's key with them and accepted it (false: trusted on first
+    /// sight only; nil from an older obid).
+    var verified: Bool?
+    var id: String { obi }
+    /// "Wellington’s Mac".
+    var name: String { "\(RunnerMac.person(owner))’s Mac" }
+    /// An owner id as a name: `wellington` is Wellington.
+    static func person(_ owner: String) -> String { owner.prefix(1).uppercased() + owner.dropFirst() }
+}
+
+/// `GET /v1/obid/sharing/grants` (docs/runner-api.md, "obid only: sharing your usage").
+nonisolated struct RunnerGrants: Codable, Equatable, Sendable {
+    /// A share of one of the owner's company API accounts.
+    struct Grant: Codable, Equatable, Sendable, Identifiable {
+        var id: String
+        var label: String
+        var account: String?
+        var who: String
+        var share: Int
+        var extra: Int
+        var budgetCents: Int
+        var resetsDay: Int
+        var resets: Date
+        var limitCents: Int
+        /// This month's use by owner, the owner's own jobs on the account included.
+        var usedCents: [String: Int]
+        /// The vault secret its key is kept under, and whether it's there (nil from an older obid).
+        var keyName: String?
+        var keyInVault: Bool?
+    }
+    /// One of the owner's accounts: `why` is nil for one that can be shared, else why it's kept.
+    struct Account: Codable, Equatable, Sendable, Identifiable {
+        var id: String
+        var agent: String
+        var name: String
+        var plan: String
+        var why: String?
+    }
+    var grants: [Grant]
+    var accounts: [Account]
+    /// Whether the key the shares run on is in Oby's vault.
+    var key: Bool
+}
+
+/// `GET /v1/obid/sharing/shared`: the shares teammates gave this owner.
+nonisolated struct RunnerShares: Codable, Equatable, Sendable {
+    struct Share: Codable, Equatable, Sendable, Identifiable {
+        var grant: String
+        /// Their Obi, whose Mac jobs on it run on.
+        var from: String
+        var owner: String
+        var agent: String
+        var account: String
+        var share: Int
+        var limitCents: Int
+        var usedCents: Int
+        var resets: Date
+        var id: String { grant }
+        /// "Wellington’s Deskree API".
+        var name: String { "\(RunnerMac.person(owner))’s \(account)" }
+        /// Of its month, in percent: the share, and what's left of it.
+        var left: Int { limitCents == 0 ? 0 : max(0, share * (limitCents - usedCents) / limitCents) }
+    }
+    var shares: [Share]
+    var takesShares: Bool
 }
 
 nonisolated struct RunnerMemoryList: Codable, Equatable, Sendable {

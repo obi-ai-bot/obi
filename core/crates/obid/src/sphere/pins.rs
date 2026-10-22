@@ -26,6 +26,10 @@ pub struct Pin {
     /// A different key the directory showed since, waiting for this owner's OK.
     #[serde(default)]
     pub changed_to: Option<String>,
+    /// Whether this owner compared its fingerprint with that person and said so; a key pinned on
+    /// first sight isn't, until then.
+    #[serde(default)]
+    pub verified: bool,
 }
 
 /// An owner key's fingerprint, as owners compare it: its key id, `ed25519:…`.
@@ -105,6 +109,7 @@ impl Pins {
                         key: key.to_owned(),
                         first_seen: now,
                         changed_to: None,
+                        verified: false,
                     },
                 );
                 let copy = kept.clone();
@@ -159,17 +164,27 @@ impl Pins {
             .is_some_and(|k| k == public_key)
     }
 
-    /// The owner accepts `owner`'s changed key, named by its fingerprint (what they compared).
+    /// The owner accepts `owner`'s changed key, or verifies the one pinned, named by its
+    /// fingerprint (what they compared).
     pub fn accept(&self, owner: &str, fingerprint_seen: &str, now: i64) -> Result<Value, String> {
         let mut kept = self.pins.lock().unwrap();
         let pin = kept
             .owners
             .get_mut(owner)
             .ok_or_else(|| format!("No key is pinned for {owner}."))?;
-        let new = pin
-            .changed_to
-            .clone()
-            .ok_or_else(|| format!("{owner}'s key hasn't changed."))?;
+        let Some(new) = pin.changed_to.clone() else {
+            if fingerprint(&pin.key) != fingerprint_seen {
+                return Err(format!(
+                    "That isn't {owner}'s key's fingerprint: compare it with them again."
+                ));
+            }
+            pin.verified = true;
+            let answer = to_json(owner, pin);
+            let copy = kept.clone();
+            drop(kept);
+            self.save(&copy);
+            return Ok(answer);
+        };
         if fingerprint(&new) != fingerprint_seen {
             return Err(format!(
                 "That isn't {owner}'s new key's fingerprint: compare it with them again."
@@ -179,6 +194,7 @@ impl Pins {
             key: new,
             first_seen: now,
             changed_to: None,
+            verified: true,
         };
         let answer = to_json(owner, pin);
         let copy = kept.clone();
@@ -203,7 +219,19 @@ impl Pins {
 
 fn to_json(owner: &str, pin: &Pin) -> Value {
     json!({"owner": owner, "fingerprint": fingerprint(&pin.key), "firstSeen": time::format(pin.first_seen),
-           "changedTo": pin.changed_to.as_deref().map(fingerprint)})
+           "changedTo": pin.changed_to.as_deref().map(fingerprint), "verified": pin.verified})
+}
+
+impl Pins {
+    /// Whether this owner verified `owner`'s pinned key (compared and accepted it).
+    pub fn verified(&self, owner: &str) -> bool {
+        self.pins
+            .lock()
+            .unwrap()
+            .owners
+            .get(owner)
+            .is_some_and(|p| p.verified)
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +246,11 @@ mod tests {
         let pins = Pins::open(&home);
         assert!(pins.check("sangam", &a, 10));
         assert!(pins.check("sangam", &a, 20));
+        // Trusted on first sight, not verified until the owner compares it and says so.
+        assert!(!pins.verified("sangam"));
+        assert!(pins.accept("sangam", &fingerprint(&b), 25).is_err());
+        assert!(pins.accept("sangam", &fingerprint(&a), 25).is_ok());
+        assert!(pins.verified("sangam") && Pins::open(&home).verified("sangam"));
         // The Sphere shows another key: not trusted, and kept for the owner's OK, across restarts.
         assert!(!pins.check("sangam", &b, 30));
         let pins = Pins::open(&home);
@@ -225,6 +258,7 @@ mod tests {
         assert_eq!(pins.to_json()[0]["changedTo"], fingerprint(&b));
         assert!(pins.accept("sangam", &fingerprint(&a), 50).is_err());
         assert!(pins.accept("sangam", &fingerprint(&b), 50).is_ok());
+        assert!(pins.verified("sangam"));
         assert!(pins.check("sangam", &b, 60) && !pins.check("sangam", &a, 70));
         // A card older than one already trusted isn't, even after a restart.
         assert!(pins.check_card("obi-sangam", 2) && pins.check_card("obi-sangam", 2));

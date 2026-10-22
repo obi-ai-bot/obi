@@ -341,7 +341,7 @@ private struct MessageRow: View {
             ForEach(conversation.artifactRefs(of: turn), id: \.self) { artifact($0) }
             ForEach(jobs) { job in
                 let local = isLocal(job.id)
-                ThreadTask(job: job, account: account(job, local),
+                ThreadTask(job: job, account: account(job, local), on: local ? nil : feed.extras[job.id]?.runsOn.map { RunnerMac.person($0.owner) },
                            onOpen: { onOpenJob(job.id, local) }, onStop: { onStopJob(job.id, local) })
                 if !local { ForEach(feed.extras[job.id]?.artifacts ?? [], id: \.self) { artifact($0) } }
                 ForEach(followUps(job)) { next in
@@ -349,7 +349,7 @@ private struct MessageRow: View {
                     Text(ThreadTaskLine.followUp(next, account: account(next, local))).font(Tokens.font(Tokens.textMd))
                         .foregroundStyle(Tokens.muted).fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    ThreadTask(job: next, account: account(next, local),
+                    ThreadTask(job: next, account: account(next, local), on: local ? nil : feed.extras[next.id]?.runsOn.map { RunnerMac.person($0.owner) },
                                onOpen: { onOpenJob(next.id, local) }, onStop: { onStopJob(next.id, local) })
                 }
             }
@@ -378,6 +378,8 @@ private struct MessageRow: View {
 struct ThreadTask: View {
     let job: Job
     let account: String
+    /// Whose Mac it runs on, when not this one (#808).
+    var on: String? = nil
     let onOpen: () -> Void
     var onStop: (() -> Void)? = nil
     @State private var hovering = false
@@ -397,7 +399,7 @@ struct ThreadTask: View {
                     .foregroundStyle(Tokens.muted)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(job.heading).font(Tokens.font(Tokens.textMd, .medium)).foregroundStyle(Tokens.ink).fadeOut()
-                    Text(ThreadTaskLine.meta(job: job, mark: mark, account: account)).font(Tokens.font(Tokens.textSm))
+                    Text(ThreadTaskLine.meta(job: job, mark: mark, account: account, on: on)).font(Tokens.font(Tokens.textSm))
                         .foregroundStyle(Tokens.muted).fadeOut()
                     JobCardLines(job: job).padding(.top, 4)
                 }

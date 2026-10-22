@@ -16,6 +16,8 @@ struct SphereSettingsView: View {
     @State private var link: InviteLink?
     @State private var copied = false
     @State private var asked: SphereModel.Member.ID?
+    /// The member whose key you're about to accept, once you've compared it with them.
+    @State private var comparing: SphereModel.Member?
     @State private var job: Job.ID?
     @State private var sent: String?
     private let feed: RunnerFeed
@@ -98,16 +100,49 @@ struct SphereSettingsView: View {
         return String(words.joined(separator: "-").prefix(30))
     }
 
+    /// "ernesto · key ed25519:…", the fingerprint to compare with them; or, when the Obysphere shows
+    /// another key for them, what to do before your Oby trusts them again.
+    static func memberAbout(_ member: SphereModel.Member) -> String {
+        let who = member.active ? member.owner : "\(member.owner) · removed"
+        if let new = member.changedTo {
+            return "\(who) · their key changed to \(new). Your Oby doesn't trust them until you compare it with \(member.owner), in person or by phone, and accept it."
+        }
+        return member.fingerprint.map { "\(who) · key \($0)\(member.verified ? "" : " · unverified")" } ?? who
+    }
+
     // MARK: In one
 
     @ViewBuilder private var joined: some View {
         let name = sphere.name ?? sphere.membership?.sphere ?? "Obysphere"
         SetGroup(name, footer: sphere.membership?.lastError.map { "Last problem with the Obysphere: \($0)" }, problem: sphere.problem) {
-            SetRow("You", about: sphere.admin ? "Admin" : "Member") { SetCode(sphere.owner ?? "") }
+            SetRow("You", about: [sphere.admin ? "Admin" : "Member", sphere.ownFingerprint.map { "your key \($0)" }].compactMap(\.self).joined(separator: " · ")) {
+                SetCode(sphere.owner ?? "")
+            }
             if sphere.members.isEmpty { SetRow("No one else has joined yet", quiet: true) }
             ForEach(sphere.members) { member in
-                SetRow(member.name, about: member.active ? member.owner : "\(member.owner) · removed") { SetCode(member.obi) }
+                SetRow(member.name, about: Self.memberAbout(member)) {
+                    if member.changedTo != nil {
+                        Button("Accept new key") { comparing = member }.buttonStyle(.set)
+                    } else if !member.verified && member.fingerprint != nil {
+                        Button("Verify key") { comparing = member }.buttonStyle(.set)
+                    } else {
+                        SetCode(member.obi)
+                    }
+                }
             }
+        }
+        .confirmationDialog("Does \(comparing?.owner ?? "your teammate") read you this key?",
+                            isPresented: Binding(get: { comparing != nil }, set: { if !$0 { comparing = nil } }),
+                            titleVisibility: .visible) {
+            Button("It matches") {
+                if let member = comparing {
+                    comparing = nil
+                    Task { try? await sphere.acceptKey(member) }
+                }
+            }
+            Button("Cancel", role: .cancel) { comparing = nil }
+        } message: {
+            Text("\(comparing?.changedTo ?? comparing?.fingerprint ?? "")\n\nCompare it with \(comparing?.owner ?? "them") in person or by phone, every character. Your Oby trusts their Oby with this key.")
         }
         if !sphere.requests.isEmpty {
             SetGroup("Asked of your Oby") {

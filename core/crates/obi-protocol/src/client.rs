@@ -20,6 +20,8 @@ pub const JWT_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:jwt";
 
 /// How many times a `429` is retried before the client answers it.
 const RATE_LIMIT_TRIES: u32 = 5;
+/// The longest answer from a Sphere an Obi reads (an audit page of 1,000 entries is far less).
+const MAX_ANSWER: usize = 16 * 1024 * 1024;
 /// The longest the client waits on one `Retry-After`.
 const RETRY_AFTER_MAX: Duration = Duration::from_secs(30);
 
@@ -146,10 +148,21 @@ impl Client {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.trim().parse::<u64>().ok());
-            let bytes = response
-                .bytes()
+            // Read a piece at a time, never past MAX_ANSWER: a Sphere can't fill this Obi's memory.
+            let mut response = response;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
                 .await
-                .map_err(|e| ClientError::Unreachable(one_line(&e.to_string())))?;
+                .map_err(|e| ClientError::Unreachable(one_line(&e.to_string())))?
+            {
+                if bytes.len() + chunk.len() > MAX_ANSWER {
+                    return Err(ClientError::Unreachable(
+                        "the Sphere's answer is longer than an Obi reads".into(),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
             let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
             if status == 429 && tries < RATE_LIMIT_TRIES {
                 // Nothing was recorded: the same request again, once the Sphere says.
@@ -248,6 +261,56 @@ impl Client {
         let (status, body) = self.call(|| self.http.get(&url).bearer_auth(token)).await?;
         let body = Client::expect(status, body, &[200], "wire/members.response")?;
         Ok(body["members"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// A page of the audit chain from `from_seq` (sphere-api.md section 7): `{sphere, entries, head}`.
+    pub async fn audit(
+        &self,
+        token: &str,
+        from_seq: u64,
+        limit: u32,
+    ) -> Result<Value, ClientError> {
+        let url = self.sphere_path(&format!("/audit?from_seq={from_seq}&limit={limit}"));
+        let (status, body) = self.call(|| self.http.get(&url).bearer_auth(token)).await?;
+        Client::expect(status, body, &[200], "wire/audit.response")
+    }
+
+    /// Publishes this Obi's signed runner status in the directory (sphere-api.md 6.4).
+    pub async fn put_runner(
+        &self,
+        token: &str,
+        obi: &str,
+        status: &Value,
+    ) -> Result<Value, ClientError> {
+        let url = self.sphere_path(&format!("/members/{obi}/runner"));
+        let (code, body) = self
+            .call(|| self.http.put(&url).bearer_auth(token).json(status))
+            .await?;
+        Client::expect(code, body, &[200], "wire/member")
+    }
+
+    /// Takes this Obi's runner status out of the directory.
+    pub async fn delete_runner(&self, token: &str, obi: &str) -> Result<Value, ClientError> {
+        let url = self.sphere_path(&format!("/members/{obi}/runner"));
+        let (code, body) = self
+            .call(|| self.http.delete(&url).bearer_auth(token))
+            .await?;
+        Client::expect(code, body, &[200], "wire/member")
+    }
+
+    /// Replaces this Obi's card with a new one its owner signed (identity.md section 3).
+    pub async fn update_card(
+        &self,
+        token: &str,
+        obi: &str,
+        card: &Value,
+    ) -> Result<Value, ClientError> {
+        let url = self.sphere_path(&format!("/members/{obi}/card"));
+        let body = json!({"card": card});
+        let (code, answer) = self
+            .call(|| self.http.put(&url).bearer_auth(token).json(&body))
+            .await?;
+        Client::expect(code, answer, &[200], "wire/member")
     }
 
     /// Sends a signed envelope. A retry of one already recorded answers its original place (`200`).

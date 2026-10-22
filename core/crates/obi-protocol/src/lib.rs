@@ -36,9 +36,16 @@ pub const CLOCK_SKEW_SECONDS: i64 = 300;
 /// `prev` of the first audit entry.
 pub const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 /// The action types that start an exchange.
-pub const REQUEST_TYPES: [&str; 4] = ["review_request", "question", "handoff", "run_request"];
-/// The action types that answer one. `run_cancel` is the one its request's own sender sends.
-pub const REPLY_TYPES: [&str; 8] = [
+pub const REQUEST_TYPES: [&str; 5] = [
+    "review_request",
+    "question",
+    "handoff",
+    "run_request",
+    "share_offer",
+];
+/// The action types that answer one. `run_cancel`, `share_status` and `share_revoke` are the ones
+/// its request's own sender sends ([`SENDER_REPLY_TYPES`]).
+pub const REPLY_TYPES: [&str; 10] = [
     "status",
     "accept",
     "decline",
@@ -47,11 +54,24 @@ pub const REPLY_TYPES: [&str; 8] = [
     "run_progress",
     "run_return",
     "run_cancel",
+    "share_status",
+    "share_revoke",
 ];
 /// The replies that end an exchange.
-pub const TERMINAL_TYPES: [&str; 5] = ["decline", "result", "answer", "run_return", "run_cancel"];
+pub const TERMINAL_TYPES: [&str; 6] = [
+    "decline",
+    "result",
+    "answer",
+    "run_return",
+    "run_cancel",
+    "share_revoke",
+];
 /// The replies that belong only to a `run_request`'s exchange (protocol.md section 4, rule 7).
 pub const RUN_REPLY_TYPES: [&str; 3] = ["run_progress", "run_return", "run_cancel"];
+/// What a `share_offer`'s exchange takes, and nothing else (protocol.md section 4, rule 8).
+pub const SHARE_REPLY_TYPES: [&str; 3] = ["share_status", "share_revoke", "decline"];
+/// The replies a request's own sender sends, to its receiver (protocol.md section 4, rule 1).
+pub const SENDER_REPLY_TYPES: [&str; 3] = ["run_cancel", "share_status", "share_revoke"];
 
 /// How much a finding matters: nit 1, minor 2, major 3, blocker 4.
 pub fn severity_rank(severity: &str) -> Option<u8> {

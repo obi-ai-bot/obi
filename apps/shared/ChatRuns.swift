@@ -132,9 +132,11 @@ nonisolated enum ThreadTaskLine {
         }
     }
 
-    static func meta(job: Job, mark: WorkMark, account: String) -> String {
+    /// `on`: whose Mac it runs on, when not this one ("Wellington", #808).
+    static func meta(job: Job, mark: WorkMark, account: String, on: String? = nil) -> String {
         let repo = job.repo.split(separator: "/").last.map(String.init)
-        return ([status(mark), job.agentName, account] + [repo].compactMap { $0 }).filter { !$0.isEmpty }.joined(separator: " · ")
+        let place = on.map { "on \($0)’s Mac" }
+        return ([status(mark), job.agentName, account] + [place, repo].compactMap { $0 }).filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     /// What Oby says under the words that started a follow-up of a finished task (Sangam's relay):

@@ -140,13 +140,159 @@ impl Limits {
     }
 }
 
-/// The rules and the limits, as kept.
+/// Whether teammates' jobs may run on this Mac, and how (#797; docs/runner-api.md, "obid only:
+/// sharing this Mac"). Off until the owner turns it on; the rest are the defaults the owner
+/// accepted on 2026-10-20.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Mac {
+    pub on: bool,
+    /// `away` (no input for 10 minutes) and/or `schedule` (nights and weekends).
+    pub when: Vec<String>,
+    /// `ask` (everyone, asking the owner the first time for each person), `everyone`, or
+    /// `people` (only `people`).
+    pub who: String,
+    pub people: Vec<String>,
+    /// The owners the owner said "Allow … from now on" to.
+    pub allowed: Vec<String>,
+    pub jobs_at_once: u8,
+    /// `small` (4 cores, 8 GB, 30 GB) or `large` (6, 12, 60).
+    pub size: String,
+    /// `any` job in the organisation's repositories, or `reviews` and checks only.
+    pub work: String,
+    pub max_minutes: u32,
+}
+
+impl Default for Mac {
+    fn default() -> Mac {
+        Mac {
+            on: false,
+            when: vec!["away".into()],
+            who: "ask".into(),
+            people: Vec::new(),
+            allowed: Vec::new(),
+            jobs_at_once: 1,
+            size: "small".into(),
+            work: "any".into(),
+            max_minutes: 120,
+        }
+    }
+}
+
+impl Mac {
+    pub fn to_json(&self) -> Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+
+    /// Whether a job from `owner`'s Obi may run without asking: the owner said so for everyone, or
+    /// for that person once.
+    pub fn allows_without_asking(&self, owner: &str) -> bool {
+        match self.who.as_str() {
+            "everyone" => true,
+            "people" => self.people.iter().any(|p| p == owner),
+            _ => self.allowed.iter().any(|p| p == owner),
+        }
+    }
+
+    /// Whether `owner` may ask at all.
+    pub fn offered_to(&self, owner: &str) -> bool {
+        self.who != "people" || self.people.iter().any(|p| p == owner)
+    }
+}
+
+fn is_owner(text: &str) -> bool {
+    obi_protocol::schema::is_valid("common#/$defs/owner_id", &json!(text))
+}
+
+/// The Mac's settings from `PUT /v1/obid/sharing/mac`: exactly these keys, each checked.
+pub fn mac_from(body: &Value) -> Result<Mac, String> {
+    const KEYS: [&str; 9] = [
+        "on",
+        "when",
+        "who",
+        "people",
+        "allowed",
+        "jobsAtOnce",
+        "size",
+        "work",
+        "maxMinutes",
+    ];
+    let map = body.as_object().ok_or("The body is a JSON object.")?;
+    if let Some(k) = map.keys().find(|k| !KEYS.contains(&k.as_str())) {
+        return Err(format!("{k} isn't a setting of this Mac's sharing."));
+    }
+    if let Some(k) = KEYS.iter().find(|k| !map.contains_key(**k)) {
+        return Err(format!("{k} is required."));
+    }
+    let owners = |key: &str| -> Result<Vec<String>, String> {
+        let list = body[key]
+            .as_array()
+            .ok_or(format!("{key} is a list of owners."))?;
+        let names: Vec<String> = list
+            .iter()
+            .filter_map(|v| v.as_str().filter(|s| is_owner(s)).map(str::to_owned))
+            .collect();
+        if names.len() != list.len() || list.len() > 50 {
+            return Err(format!(
+                "{key} is a list of at most 50 owners from the directory."
+            ));
+        }
+        Ok(names)
+    };
+    let when: Vec<String> = body["when"]
+        .as_array()
+        .ok_or("when is a list.")?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    if when.is_empty() || when.iter().any(|w| w != "away" && w != "schedule") || when.len() > 2 {
+        return Err("when is away, schedule, or both.".into());
+    }
+    let who = body["who"]
+        .as_str()
+        .filter(|w| ["ask", "everyone", "people"].contains(w))
+        .ok_or("who is ask, everyone or people.")?;
+    let jobs = body["jobsAtOnce"]
+        .as_u64()
+        .filter(|n| (1..=3).contains(n))
+        .ok_or("jobsAtOnce is 1 to 3.")?;
+    let size = body["size"]
+        .as_str()
+        .filter(|s| *s == "small" || *s == "large")
+        .ok_or("size is small or large.")?;
+    let work = body["work"]
+        .as_str()
+        .filter(|s| *s == "any" || *s == "reviews")
+        .ok_or("work is any or reviews.")?;
+    let minutes = body["maxMinutes"]
+        .as_u64()
+        .filter(|n| (5..=480).contains(n))
+        .ok_or("maxMinutes is 5 to 480.")?;
+    Ok(Mac {
+        on: body["on"].as_bool().ok_or("on is true or false.")?,
+        when,
+        who: who.into(),
+        people: owners("people")?,
+        allowed: owners("allowed")?,
+        jobs_at_once: jobs as u8,
+        size: size.into(),
+        work: work.into(),
+        max_minutes: minutes as u32,
+    })
+}
+
+/// The rules and the limits, as kept, and this Mac's sharing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sharing {
     #[serde(default)]
     pub rules: Vec<Rule>,
     #[serde(default)]
     pub limits: Limits,
+    #[serde(default)]
+    pub mac: Mac,
+    /// Shares of the owner's company API accounts (#809, [`super::shares`]).
+    #[serde(default)]
+    pub grants: Vec<super::shares::Grant>,
 }
 
 impl Sharing {
@@ -313,6 +459,7 @@ mod tests {
                 rule(json!({"for": "*", "repos": "*", "tells": ["sharedResults"]})),
             ],
             limits: Limits::default(),
+            ..Sharing::default()
         };
         let repos = |list: &[&str]| list.iter().map(|r| (*r).to_owned()).collect::<Vec<_>>();
         let first = &sharing.rules[0].id;
@@ -344,6 +491,7 @@ mod tests {
         let narrow = Sharing {
             rules: vec![sharing.rules[0].clone()],
             limits: Limits::default(),
+            ..Sharing::default()
         };
         assert!(narrow.covering("ernesto", &[]).is_none());
         assert!(narrow.covering("giulia", &repos(&["acme/app"])).is_none());
@@ -395,6 +543,54 @@ mod tests {
         let shown = made.to_json();
         assert_eq!(shown["repos"], "*");
         assert_eq!(shown["for"], json!(["ernesto"]));
+    }
+
+    #[test]
+    fn this_macs_sharing_is_off_by_default_and_takes_only_what_it_may_be() {
+        let mac = Mac::default();
+        assert!(!mac.on);
+        assert_eq!(
+            (
+                mac.when.clone(),
+                mac.who.as_str(),
+                mac.jobs_at_once,
+                mac.size.as_str(),
+                mac.max_minutes
+            ),
+            (vec!["away".to_owned()], "ask", 1, "small", 120)
+        );
+        let mut body = mac.to_json();
+        body["on"] = json!(true);
+        assert!(mac_from(&body).unwrap().on);
+        for (key, bad) in [
+            ("when", json!(["always"])),
+            ("who", json!("anyone")),
+            ("jobsAtOnce", json!(4)),
+            ("size", json!("huge")),
+            ("maxMinutes", json!(481)),
+            ("people", json!(["Not A Slug"])),
+        ] {
+            let mut wrong = body.clone();
+            wrong[key] = bad;
+            assert!(mac_from(&wrong).is_err(), "{key}");
+        }
+        let mut extra = body.clone();
+        extra["away"] = json!(true);
+        assert!(mac_from(&extra).is_err());
+        // Asking first: allowed once by name, from then on.
+        let mut ask = Mac {
+            on: true,
+            ..Mac::default()
+        };
+        assert!(!ask.allows_without_asking("sangam"));
+        ask.allowed.push("sangam".into());
+        assert!(ask.allows_without_asking("sangam") && ask.offered_to("ernesto"));
+        let people = Mac {
+            who: "people".into(),
+            people: vec!["sangam".into()],
+            ..Mac::default()
+        };
+        assert!(people.offered_to("sangam") && !people.offered_to("ernesto"));
     }
 
     #[test]

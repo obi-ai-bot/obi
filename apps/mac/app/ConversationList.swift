@@ -18,11 +18,11 @@ nonisolated enum PlanTarget: Equatable, Sendable {
 extension Runner {
     /// `POST /v1/plans` with the words going where `target` says.
     func planned(_ said: String, answer: (question: String, option: String)? = nil, attachments: [String] = [],
-                 in target: PlanTarget, id: String? = nil) async throws -> PlannedTurn {
+                 in target: PlanTarget, id: String? = nil, runsOn: String? = nil) async throws -> PlannedTurn {
         switch target {
-        case .latest: try await planned(said, answer: answer, attachments: attachments, id: id)
-        case .conversation(let conversation): try await planned(said, answer: answer, attachments: attachments, conversation: conversation, id: id)
-        case .new: try await planned(said, answer: answer, attachments: attachments, new: true, id: id)
+        case .latest: try await planned(said, answer: answer, attachments: attachments, id: id, runsOn: runsOn)
+        case .conversation(let conversation): try await planned(said, answer: answer, attachments: attachments, conversation: conversation, id: id, runsOn: runsOn)
+        case .new: try await planned(said, answer: answer, attachments: attachments, new: true, id: id, runsOn: runsOn)
         }
     }
 }

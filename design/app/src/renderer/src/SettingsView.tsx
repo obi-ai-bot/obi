@@ -3,6 +3,8 @@ import { Check, Search } from 'lucide-react';
 import { BRANDS, BrandMark, type Brand } from './brands';
 import { useScrollThumb } from './useScrollThumb';
 import { AGENTS, type Agent } from './mock';
+import { OwnerAvatar } from './ObyFace';
+import { useSpheres } from './spheres';
 
 // how long the way out takes (the sink animation in app.css)
 const LEAVE_MS = 220;
@@ -10,11 +12,12 @@ const LEAVE_MS = 220;
 // Settings' pages, as Wellington's Mac app has them (apps/mac/app/Settings.swift
 // on his dev branch): General (with Voice and Notifications, shared with the
 // iPhone), Runner, Remote access, Accounts, Models, Vault and About; Connectors
-// is ours. Each page opens in the view, as a task's page does, from the account
+// is ours, and Sharing a preview (docs/research/sphere-sharing.md). Each page opens in the view, as a task's page does, from the account
 // menu (your picture at the icons' foot), then the side panel's Settings list.
 export const SETTINGS_PAGES = [
   { id: 'general', label: 'General' },
   { id: 'runner', label: 'Runner' },
+  { id: 'sharing', label: 'Sharing' },
   { id: 'remote', label: 'Remote access' },
   { id: 'accounts', label: 'Accounts' },
   { id: 'models', label: 'Models' },
@@ -188,13 +191,16 @@ function Remote() {
 }
 
 // Accounts: the logins Oby spreads jobs across, who pays for each, how much each has used
-export type Account = { id: string; agent: Agent; name: string; payer: string; used: number; resets: string };
+// plan: what kind of login it is, which decides whether a part of it can be
+// shared (SHARING below)
+export type Account = { id: string; agent: Agent; name: string; payer: string; used: number; resets: string; plan?: Plan };
 // how full an account (or an agent) is: past 80% yellow, past 90% red
 export const fullness = (used: number) => (used > 90 ? 'is-over' : used > 80 ? 'is-high' : '');
 const ACCOUNTS: Account[] = [
-  { id: 'a1', agent: 'claude', name: 'Deskree', payer: 'Deskree', used: 36, resets: 'Resets Thursday' },
-  { id: 'a2', agent: 'claude', name: 'Personal', payer: 'Doti', used: 82, resets: 'Resets in 2 days' },
-  { id: 'a3', agent: 'codex', name: 'Deskree', payer: 'Deskree', used: 12, resets: 'Resets Monday' },
+  { id: 'a1', agent: 'claude', name: 'Deskree', payer: 'Deskree', used: 36, resets: 'Resets Thursday', plan: 'seat' },
+  { id: 'a2', agent: 'claude', name: 'Personal', payer: 'Doti', used: 82, resets: 'Resets in 2 days', plan: 'personal' },
+  { id: 'a3', agent: 'codex', name: 'Deskree', payer: 'Deskree', used: 12, resets: 'Resets Monday', plan: 'seat' },
+  { id: 'a4', agent: 'claude', name: 'Deskree API', payer: 'Deskree', used: 8, resets: '$32 of $400 this month', plan: 'api' },
 ];
 // the accounts and their use this week: here, and in the message box's usage panel (the gauge)
 export const useAccounts = () => useSetting<Account[]>('accounts', ACCOUNTS);
@@ -238,6 +244,125 @@ function Accounts() {
           setName(''); setPayer('');
         }}>Add Account</button>
       </Row>
+    </Group>
+  </>;
+}
+
+// Sharing (a preview for Sangam): this Mac's spare time, and a part of an
+// account's usage, for the people in your Obysphere. Both off until you turn
+// them on.
+//
+// This Mac: their jobs run here in a sealed box of their own (its cores,
+// memory and disk capped), with their own AI accounts: their logins stay on
+// their Macs, and the box reaches their account only through their Oby. Only
+// when you're away or in the hours you pick, never on battery. Stop hands a
+// job back to its owner's Oby with its notes.
+//
+// Your usage: only an account the company pays by use (an API key) can be
+// shared: the providers' terms keep a personal plan, and each Team seat, to
+// one person (SHARING). A shared job runs here, on that account, and the
+// person gets the results; the key never leaves this Mac.
+type Plan = 'personal' | 'seat' | 'api';
+const SHARING: Record<Plan, string> = {
+  personal: 'A personal plan is for you alone: its terms don’t let anyone else’s work run on it.',
+  seat: 'A Team seat is one person’s. For more, Deskree’s admin can add extra usage to someone’s own seat.',
+  api: '',
+};
+type Guest = { id: string; who: string; title: string; repo: string; agent: Agent; took: string; uses: string };
+const GUESTS: Guest[] = [
+  { id: 'g1', who: 'Sangam', title: 'Fix the login retry', repo: 'deskree-inc/tetrix-ee', agent: 'claude', took: '12 min', uses: '3 cores · 5.1 GB' },
+];
+// who: nobody, everyone or one person; share: % of the account's monthly budget
+type Grant = { account: string; who: string; share: number; used: number };
+function Sharing() {
+  const members = useSpheres()[0]?.members ?? [];
+  const [accounts] = useAccounts();
+  const [mac, setMac] = useSetting('share.mac', false);
+  const [when, setWhen] = useSetting('share.when', 'away');
+  const [who, setWho] = useSetting('share.who', 'ask');
+  const [chosen, setChosen] = useSetting<string[]>('share.chosen', []);
+  const [jobs, setJobs] = useSetting('share.jobs', '1');
+  const [size, setSize] = useSetting('share.size', 'small');
+  const [work, setWork] = useSetting('share.work', 'any');
+  const [guests, setGuests] = useSetting('share.guests', GUESTS);
+  const [grants, setGrants] = useSetting<Grant[]>('share.grants', [{ account: 'a4', who: 'Sangam', share: 30, used: 9 }]);
+  const grant = (account: string, patch: Partial<Grant>) => {
+    const had = grants.some((g) => g.account === account);
+    setGrants(had ? grants.map((g) => (g.account === account ? { ...g, ...patch } : g)) : [...grants, { account, who: 'nobody', share: 20, used: 0, ...patch }]);
+  };
+  const shareable = accounts.filter((a) => a.plan === 'api');
+  const kept = accounts.filter((a) => a.plan !== 'api');
+  return <>
+    <Group i={1} title="This Mac" footer={mac
+      ? 'Their jobs run in a sealed box on this Mac, with their own AI accounts: they can’t see your files, logins, Keychain or network, and their logins never come here. When you’re back, their jobs pause, and after 10 minutes go back to their Obys with their notes.'
+      : 'Let people in Deskree run jobs on this Mac while you’re not using it, with their own AI accounts.'}>
+      <Row label="Share this Mac with Deskree"><Switch on={mac} onChange={setMac} label="Share this Mac with Deskree" /></Row>
+      {mac && <>
+        <Row label="When" about="Away: no keyboard or mouse for 10 minutes. Never on battery, in Low Power Mode or when it’s hot.">
+          <Select value={when} onChange={setWhen} label="When" options={[['away', 'When I’m away'], ['nights', 'Nights and weekends'], ['both', 'Away, nights and weekends']]} />
+        </Row>
+        <Row label="Who">
+          <Select value={who} onChange={setWho} label="Who" options={[['ask', 'Everyone, ask me first'], ['everyone', 'Everyone in Deskree'], ['chosen', 'Only people I choose']]} />
+        </Row>
+        {who === 'chosen' && members.map((m) => (
+          <div key={m} className="set-row set-member">
+            <OwnerAvatar name={m} size={28} badge={false} />
+            <span className="set-label">{m}</span>
+            <Switch on={chosen.includes(m)} onChange={(on) => setChosen(on ? [...chosen, m] : chosen.filter((x) => x !== m))} label={`Share with ${m}`} />
+          </div>
+        ))}
+        <Row label="Jobs at once"><Select value={jobs} onChange={setJobs} label="Jobs at once" options={[['1', '1'], ['2', '2'], ['3', '3']]} /></Row>
+        <Row label="Each job gets">
+          <Select value={size} onChange={setSize} label="Each job gets" options={[['small', '4 cores · 8 GB · 30 GB of disk'], ['large', '6 cores · 12 GB · 60 GB of disk']]} />
+        </Row>
+        <Row label="Work">
+          <Select value={work} onChange={setWork} label="Work" options={[['any', 'Any job in Deskree’s repositories'], ['reviews', 'Reviews and checks only']]} />
+        </Row>
+      </>}
+    </Group>
+    {mac && (
+      <Group i={2} title="On this Mac now" footer="Every job someone runs here is in Deskree’s signed log, with who ran it and for how long.">
+        {guests.length ? guests.map((g) => (
+          <div key={g.id} className="set-row set-member">
+            <OwnerAvatar name={g.who} size={28} badge={false} />
+            <span className="set-label">{g.who} · {g.title}<span className="set-about">{AGENTS[g.agent].name} on {g.who}’s account · {g.repo} · {g.took} · {g.uses}</span></span>
+            <button className="set-button is-danger set-member-action" onClick={() => setGuests(guests.filter((x) => x !== g))}>Stop</button>
+          </div>
+        )) : <Row label={<span className="set-none">Nobody right now</span>} />}
+        {guests.length > 1 && <Row label=""><button className="set-button is-danger" onClick={() => setGuests([])}>Stop All</button></Row>}
+      </Group>
+    )}
+    <Group i={3} title="Share your usage" footer="Only an account Deskree pays by use can be shared. A shared job runs on this Mac, on that account: they get the results and the pull request, and its key never leaves this Mac. Once their share is used, Oby takes no more of their jobs on it and finishes the one running.">
+      {shareable.length ? shareable.map((a) => {
+        const g = grants.find((x) => x.account === a.id) ?? { account: a.id, who: 'nobody', share: 20, used: 0 };
+        const whom = g.who === 'everyone' ? 'Everyone' : g.who;
+        return (
+          <div key={a.id} className="set-row set-usage">
+            <BrandMark brand={AGENTS[a.agent].brand} size={16} mono />
+            <span className="set-label">
+              {AGENTS[a.agent].name} · {a.name}
+              <span className="set-about">{g.who === 'nobody' ? `Not shared · ${a.resets}` : `${whom} used ${g.used}% of ${g.share}% this month`}</span>
+              {g.who !== 'nobody' && (
+                <span className="set-meter" role="meter" aria-valuenow={g.used} aria-valuemin={0} aria-valuemax={g.share} aria-label={`${g.used}% of ${g.share}% used`}>
+                  <span className={fullness((100 * g.used) / g.share)} style={{ width: `${(100 * g.used) / g.share}%` }} />
+                </span>
+              )}
+            </span>
+            <span className="set-control set-control-top set-share">
+              <Select value={g.who} onChange={(v) => grant(a.id, { who: v })} label={`Share ${a.name} with`} options={[['nobody', 'Nobody'], ['everyone', 'Everyone'], ...members.map((m) => [m, m] as const)]} />
+              {g.who !== 'nobody' && <Select value={String(g.share)} onChange={(v) => grant(a.id, { share: Number(v) })} label="How much of its month" options={[10, 20, 30, 50, 75, 100].map((n) => [String(n), `${n}% of its month`] as const)} />}
+            </span>
+          </div>
+        );
+      }) : <Row label={<span className="set-none">No account Deskree pays by use</span>} />}
+    </Group>
+    <Group i={4} title="Kept for you">
+      {kept.map((a) => (
+        <div key={a.id} className="set-row set-usage">
+          <BrandMark brand={AGENTS[a.agent].brand} size={16} mono />
+          <span className="set-label">{AGENTS[a.agent].name} · {a.name}<span className="set-about">{SHARING[a.plan ?? 'personal']}</span></span>
+        </div>
+      ))}
     </Group>
   </>;
 }
@@ -337,7 +462,7 @@ function About() {
   </>;
 }
 
-const PAGES: Record<string, () => React.ReactNode> = { general: General, runner: Runner, remote: Remote, accounts: Accounts, models: Models, connectors: Connectors, vault: Vault, about: About };
+const PAGES: Record<string, () => React.ReactNode> = { general: General, runner: Runner, sharing: Sharing, remote: Remote, accounts: Accounts, models: Models, connectors: Connectors, vault: Vault, about: About };
 
 // The services Oby reaches (placeholders until these are real)
 const CONNECTORS: { name: string; about: string; brand: Brand; connected: boolean }[] = [

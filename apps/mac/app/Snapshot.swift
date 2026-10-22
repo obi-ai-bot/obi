@@ -38,6 +38,13 @@ final class Tray {
     }
 
     private(set) var items: [Attachment] = []
+    /// The teammate's Mac the next request's jobs run on (Sangam's "Run on another Mac", #808), or
+    /// nil: this one. One at a time.
+    var place: RunnerMac?
+    /// The teammates' Macs the + offers, as the runner last listed them.
+    var macs: [RunnerMac] = []
+    /// The shares of their API accounts teammates gave you (#809), for the usage panel.
+    var shares: [RunnerShares.Share] = []
     /// Why the last capture or paste didn't work, until one does.
     var problem: Problem?
     private(set) var capturing = false
@@ -72,6 +79,7 @@ final class Tray {
     /// The request went out: the chips go, and the files stay for its jobs.
     func clear() {
         items = []
+        place = nil
         problem = nil
     }
 

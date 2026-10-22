@@ -9,7 +9,8 @@ use crate::jcs::{self, JcsError};
 use crate::keys::{self, sha256};
 use crate::{
     AUDIT_HASH_PREFIX, CLOCK_SKEW_SECONDS, Keys, REPLY_TYPES, REQUEST_TYPES, RUN_REPLY_TYPES,
-    Rejection, TERMINAL_TYPES, ZERO_HASH, envelope, schema, time,
+    Rejection, SENDER_REPLY_TYPES, SHARE_REPLY_TYPES, TERMINAL_TYPES, ZERO_HASH, envelope, schema,
+    time,
 };
 
 /// An entry's hash: SHA-256, lower-case hex, over `obi/0.1 audit\n` and the canonical JSON of
@@ -58,16 +59,27 @@ pub fn exchange_problem(
     };
     let kind = text(reply, "type");
     let asked = text(request, "type");
-    // run_cancel is the one reply the request's own sender sends, to its receiver.
-    if kind == "run_cancel" {
+    // run_cancel, share_status and share_revoke are the replies the request's own sender sends,
+    // to its receiver.
+    if SENDER_REPLY_TYPES.contains(&kind) {
         if request.get("from") != reply.get("from") || request.get("to") != reply.get("to") {
-            return Some("only the request's sender cancels it, to its receiver".into());
+            return Some(format!(
+                "only the request's sender sends a {kind}, to its receiver"
+            ));
         }
     } else if request.get("from") != reply.get("to") || request.get("to") != reply.get("from") {
         return Some("only the request's receiver replies, to its sender".into());
     }
     if RUN_REPLY_TYPES.contains(&kind) && asked != "run_request" {
         return Some(format!("a {kind} belongs to a run_request, not a {asked}"));
+    }
+    // A share_offer's exchange takes share_status, share_revoke and decline, and they belong to it
+    // alone (a decline to any request).
+    if asked == "share_offer" && !SHARE_REPLY_TYPES.contains(&kind) {
+        return Some(format!("a share_offer takes no {kind}"));
+    }
+    if asked != "share_offer" && kind != "decline" && SHARE_REPLY_TYPES.contains(&kind) {
+        return Some(format!("a {kind} belongs to a share_offer, not a {asked}"));
     }
     if earlier
         .iter()
@@ -97,6 +109,35 @@ pub fn exchange_problem(
     // An answer answers a question, and nothing else; an accept before it is allowed, not needed.
     if kind == "answer" && asked != "question" {
         return Some(format!("an answer answers a question, not a {asked}"));
+    }
+    // No words in a guest job's or a share's exchange: a decline there has no note, and a guest
+    // job's takes no status, whose states and note would say when its host's owner is there (rule 9).
+    if kind == "status" && asked == "run_request" {
+        return Some("a run_request takes no status".into());
+    }
+    if kind == "decline"
+        && (asked == "run_request" || asked == "share_offer")
+        && reply["body"].get("note").is_some()
+    {
+        return Some(format!("a decline of a {asked} has no note"));
+    }
+    // Nor why its host declined, which would say when its owner is at the Mac or what its rules
+    // are: only the guest's own doing keeps its reason.
+    if kind == "decline"
+        && asked == "run_request"
+        && (!matches!(
+            reply["body"]["reason"].as_str(),
+            Some("unavailable" | "expired" | "out_of_scope" | "share_used")
+        ))
+    {
+        return Some(
+            "a decline of a run_request says only unavailable, expired, out_of_scope or share_used"
+                .into(),
+        );
+    }
+    // Nor whether a rule or its owner in person answered.
+    if asked == "run_request" && reply["body"].get("by_rule").is_some() {
+        return Some("no reply to a run_request names a rule (by_rule)".into());
     }
     None
 }

@@ -105,7 +105,9 @@
               "answer",
               "run_progress",
               "run_return",
-              "run_cancel"
+              "run_cancel",
+              "share_status",
+              "share_revoke"
             ]
           }
         }
@@ -340,6 +342,63 @@
         "properties": {
           "body": {
             "$ref": "actions/run_cancel.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "share_offer"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "actions/share_offer.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "share_status"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "actions/share_status.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "share_revoke"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "actions/share_revoke.schema.json"
           }
         }
       }

@@ -578,6 +578,42 @@ pub fn join_a_accepting(
     joined.body
 }
 
+/// Makes an obid's key and card (`obi`, accepting `accepts`) and joins it with `scopes`.
+pub fn join_as(
+    obid: &Obid,
+    sphere: &FakeSphere,
+    owner: &Owner,
+    obi: &str,
+    accepts: &[&str],
+    scopes: &str,
+) -> Value {
+    let key = call(obid, "POST", "/v1/obid/sphere/key", None);
+    assert_eq!(key.status, 200, "{}", key.text);
+    let made = call(
+        obid,
+        "POST",
+        "/v1/obid/sphere/card",
+        Some(
+            &json!({"url": sphere.url, "sphere": SPHERE, "obiId": obi, "name": format!("{}'s Obi", owner.id),
+                     "ownerKey": owner.key.public_key(), "accepts": accepts}),
+        ),
+    );
+    assert_eq!(made.status, 200, "{}", made.text);
+    let signed = card::sign(made.body["card"].as_object().unwrap(), &owner.key).unwrap();
+    let invitation = sphere.invite(&owner.id, obi);
+    let joined = call(
+        obid,
+        "POST",
+        "/v1/obid/sphere/join",
+        Some(
+            &json!({"url": sphere.url, "sphere": SPHERE, "invitation": {"id": invitation.0, "secret": invitation.1},
+                     "card": signed, "delegation": owner.delegation(obi, scopes)}),
+        ),
+    );
+    assert_eq!(joined.status, 200, "{}", joined.text);
+    joined.body
+}
+
 /// An Obi the test plays, through the fake Sphere's HTTP API like any Obi.
 pub struct TestObi {
     pub id: String,
@@ -764,6 +800,17 @@ pub struct SphereState {
     /// The next send of this type is recorded and delivered, and its answer waits until the test
     /// lets it go: a slow way back to the sender (`FakeSphere::hold_next`).
     pub hold: Option<(String, Arc<tokio::sync::Notify>)>,
+    /// Job channels: each side's sender, by exchange and Obi (sphere-api.md 6.3).
+    pub channels: HashMap<
+        String,
+        HashMap<String, tokio::sync::mpsc::UnboundedSender<axum::extract::ws::Message>>,
+    >,
+    /// The bytes the relay forwarded, every frame together: what a packet capture would see.
+    pub relayed: Vec<u8>,
+    /// Runner statuses, by Obi, as put.
+    pub runners: HashMap<String, Value>,
+    /// A head the audit chain names in place of its last entry's.
+    pub head: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -799,6 +846,12 @@ impl FakeSphere {
             .route("/v0.1/spheres/{sphere}/messages", post(send))
             .route("/v0.1/spheres/{sphere}/deliveries", get(deliveries))
             .route("/v0.1/spheres/{sphere}/deliveries/ack", post(ack))
+            .route("/v0.1/spheres/{sphere}/channels/{cid}", get(channel))
+            .route("/v0.1/spheres/{sphere}/audit", get(audit))
+            .route(
+                "/v0.1/spheres/{sphere}/members/{obi}/runner",
+                axum::routing::put(put_runner).delete(delete_runner),
+            )
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1012,7 +1065,164 @@ async fn members(State(state): State<Arc<Mutex<SphereState>>>, headers: HeaderMa
     if bearer(&state, &headers).is_none() {
         return sphere_error(StatusCode::UNAUTHORIZED, "unauthorized", "no token");
     }
-    axum::Json(json!({"sphere": SPHERE, "members": state.members})).into_response()
+    let members: Vec<Value> = state
+        .members
+        .iter()
+        .map(|m| {
+            let mut m = m.clone();
+            if let Some(runner) = state.runners.get(m["obi"].as_str().unwrap_or("")) {
+                m["runner"] = runner.clone();
+            }
+            m
+        })
+        .collect();
+    axum::Json(json!({"sphere": SPHERE, "members": members})).into_response()
+}
+
+/// `GET …/audit?from_seq=&limit=`: the chain as recorded (sphere-api.md section 7).
+async fn audit(
+    State(state): State<Arc<Mutex<SphereState>>>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    let state = state.lock().unwrap();
+    if bearer(&state, &headers).is_none() {
+        return sphere_error(StatusCode::UNAUTHORIZED, "unauthorized", "no token");
+    }
+    let from: usize = query
+        .get("from_seq")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    let limit: usize = query
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(500);
+    let entries: Vec<Value> = state
+        .entries
+        .iter()
+        .skip(from - 1)
+        .take(limit)
+        .cloned()
+        .collect();
+    let head = state.head.clone().unwrap_or_else(|| {
+        state.entries.last().map_or(
+            json!({"seq": 0, "hash": obi_protocol::ZERO_HASH}),
+            |e| json!({"seq": e["seq"], "hash": e["hash"]}),
+        )
+    });
+    axum::Json(json!({"sphere": SPHERE, "entries": entries, "head": head})).into_response()
+}
+
+/// `PUT …/members/{obi}/runner`: kept as put, shown to every member (the Sphere's own tests check
+/// who sees it).
+async fn put_runner(
+    State(state): State<Arc<Mutex<SphereState>>>,
+    UrlPath((_, obi)): UrlPath<(String, String)>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let mut state = state.lock().unwrap();
+    if bearer(&state, &headers).as_deref() != Some(obi.as_str()) {
+        return sphere_error(StatusCode::FORBIDDEN, "forbidden", "not this Obi");
+    }
+    if !obi_protocol::schema::is_valid("runner-status", &body) {
+        return sphere_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "not a runner status",
+        );
+    }
+    state.runners.insert(obi.clone(), body);
+    let member = state
+        .members
+        .iter()
+        .find(|m| m["obi"] == obi.as_str())
+        .cloned()
+        .unwrap_or_default();
+    axum::Json(member).into_response()
+}
+
+async fn delete_runner(
+    State(state): State<Arc<Mutex<SphereState>>>,
+    UrlPath((_, obi)): UrlPath<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let mut state = state.lock().unwrap();
+    if bearer(&state, &headers).as_deref() != Some(obi.as_str()) {
+        return sphere_error(StatusCode::FORBIDDEN, "forbidden", "not this Obi");
+    }
+    state.runners.remove(&obi);
+    let member = state
+        .members
+        .iter()
+        .find(|m| m["obi"] == obi.as_str())
+        .cloned()
+        .unwrap_or_default();
+    axum::Json(member).into_response()
+}
+
+/// `GET …/channels/{cid}` (WebSocket): pairs the two Obis of an exchange and forwards their binary
+/// frames, keeping a copy of every byte it saw.
+async fn channel(
+    State(state): State<Arc<Mutex<SphereState>>>,
+    UrlPath((_, cid)): UrlPath<(String, String)>,
+    headers: HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let Some(obi) = bearer(&state.lock().unwrap(), &headers) else {
+        return sphere_error(StatusCode::UNAUTHORIZED, "unauthorized", "no token");
+    };
+    ws.on_upgrade(move |socket| channel_side(state, cid, obi, socket))
+}
+
+async fn channel_side(
+    state: Arc<Mutex<SphereState>>,
+    cid: String,
+    obi: String,
+    socket: axum::extract::ws::WebSocket,
+) {
+    use axum::extract::ws::Message;
+    use futures_util::{SinkExt, StreamExt};
+    let (mut sink, mut stream) = socket.split();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let mut s = state.lock().unwrap();
+        let sides = s.channels.entry(cid.clone()).or_default();
+        sides.insert(obi.clone(), tx);
+        if sides.len() == 2 {
+            for tx in sides.values() {
+                let _ = tx.send(Message::Text(r#"{"peer":"joined"}"#.into()));
+            }
+        }
+    }
+    tokio::spawn(async move {
+        while let Some(m) = rx.recv().await {
+            if sink.send(m).await.is_err() {
+                break;
+            }
+        }
+    });
+    while let Some(Ok(m)) = stream.next().await {
+        if let Message::Binary(bytes) = m {
+            let mut s = state.lock().unwrap();
+            s.relayed.extend_from_slice(&bytes);
+            if let Some(sides) = s.channels.get(&cid) {
+                for (other, tx) in sides {
+                    if *other != obi {
+                        let _ = tx.send(Message::Binary(bytes.clone()));
+                    }
+                }
+            }
+        }
+    }
+    let mut s = state.lock().unwrap();
+    if let Some(sides) = s.channels.get_mut(&cid) {
+        sides.remove(&obi);
+        for tx in sides.values() {
+            let _ = tx.send(Message::Text(r#"{"peer":"left"}"#.into()));
+        }
+    }
 }
 
 /// An answer the Sphere holds until the test lets it go.

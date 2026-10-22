@@ -22,7 +22,7 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "1d0a8f3f-2d97-82ca-8e02-2f67e83c86b1",
+    "id": "67b56cec-2e57-8092-835e-fa2215de5083",
     "type": "run_return",
     "from": "obi-a",
     "to": "obi-b",
@@ -33,9 +33,8 @@
     "expires_at": "2026-10-14T13:00:00Z",
     "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
     "body": {
-      "reason": "owner_away",
-      "minutes": 3
+      "reason": "owner_away"
     },
-    "signature": "zEAblnTlqqHou6j1B7-Fa6jCeLFRmEWwg2tCs-BZ_ymYVQzAZPF4Q6eI3RxpNqRyEmLui7qKowh1QoMmsPFGCA"
+    "signature": "--rr8xA0i6qgO8MrltuWxDj6BEpv9OM-4jv5Xz0VxtOjIpYnErP3howvBdwg-Y8romxsVa3tefQgMp8SRT4zBA"
   }
 }

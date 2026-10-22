@@ -136,6 +136,17 @@ pub struct Stalled {
     pub note_by: String,
 }
 
+/// A teammate's Mac a job's agent runs on: their Obi, and its owner as the directory says.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunsOn {
+    pub obi: String,
+    pub owner: String,
+    /// On a share of that teammate's API account (#809): its grant. The job's model calls are
+    /// theirs, on their Mac.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<String>,
+}
+
 /// A job as obid keeps it (`home/jobs/<id>.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,6 +216,9 @@ pub struct Job {
     /// The job's worktree, an absolute path, once it exists.
     pub worktree: Option<String>,
     pub obi: Option<ObiRef>,
+    /// The teammate's Mac its agent runs on (crate::sphere::guest), or none: this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_on: Option<RunsOn>,
     /// The conversation whose plan started it, or none (#493). It keeps the id when that
     /// conversation is deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -475,6 +489,7 @@ impl Job {
             dismissed: None,
             worktree: None,
             obi: None,
+            runs_on: None,
             conversation: None,
             turn: None,
             review_result: None,
@@ -804,6 +819,14 @@ impl Job {
         // Why it stopped and its one next step (#725), out of the literal above: json!'s recursion
         // limit.
         value["reason"] = json!(self.reason);
+        // "on Wellington's Mac" on its card (Sangam's design, #808).
+        value["runsOn"] = json!(self.runs_on.as_ref().map(|r| {
+            let mut place = json!({"obi": r.obi, "owner": r.owner});
+            if let Some(grant) = &r.grant {
+                place["grant"] = json!(grant);
+            }
+            place
+        }));
         value["nextStep"] = json!(self.next_step);
         value["resumesAt"] = json!(date(self.resumes_at));
         if let Some(step) = self.publish_step {
@@ -1254,12 +1277,13 @@ mod tests {
             "nextStep",
             "resumesAt",
             "routine",
+            "runsOn",
             "teammates",
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, obid's seventeen, and `supervised`.
-        assert_eq!(object.len(), 83);
+        // The Swift runner's 65 keys, obid's eighteen, and `supervised`.
+        assert_eq!(object.len(), 84);
         assert_eq!(value["supervised"], json!([]));
         assert_eq!(value["archived"], Value::Null);
         assert_eq!(value["changes"], json!([]));
