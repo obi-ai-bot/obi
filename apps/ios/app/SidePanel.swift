@@ -164,8 +164,12 @@ private struct TasksColumn: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if groups.isEmpty {
-                    Text(phone.loaded ? "Nothing yet. Ask Oby for something on Home." : "Reaching your Mac…")
-                        .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.horizontal, 12)
+                    if !phone.loaded && phone.connection == .connecting {
+                        RowBones()
+                    } else {
+                        Text(phone.loaded ? "Nothing yet. Ask Oby for something on Home." : "Reaching your Mac…")
+                            .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.horizontal, 12)
+                    }
                 }
                 ForEach(groups) { group in
                     let folded = phone.panelFolded.contains(group.id)

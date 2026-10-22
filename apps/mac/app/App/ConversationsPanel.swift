@@ -37,9 +37,13 @@ struct ConversationsPanel: View {
             if !found.pinned.isEmpty && !found.recent.isEmpty { head("Recent").padding(.top, 8) }
             ForEach(found.recent) { row($0) }
             if found.pinned.isEmpty && found.recent.isEmpty {
-                Text(search.isEmpty ? "Nothing here yet. Ask Oby for something and it shows up here." : "No conversations match “\(search)”")
-                    .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
+                if search.isEmpty && list.items.isEmpty && model.feed.connection == .connecting && !model.feed.showingKept {
+                    RowBones(rows: 4)
+                } else {
+                    Text(search.isEmpty ? "Nothing here yet. Ask Oby for something and it shows up here." : "No conversations match “\(search)”")
+                        .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                }
             }
         }
         .task(id: search) {

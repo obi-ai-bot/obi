@@ -243,8 +243,12 @@ struct ConversationPage: View {
                                 .padding(.bottom, 12)
                         }
                         if turns.isEmpty, !thinking {
-                            Text(phone.loaded ? "Ask Oby anything." : "Reaching the runner…").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
-                                .frame(maxWidth: .infinity).padding(.top, 40)
+                            if !phone.startingNew, phone.conversation.problem == nil, !phone.conversation.loaded, !phone.connection.isOffline {
+                                ThreadBones()
+                            } else {
+                                Text(phone.loaded ? "Ask Oby anything." : "Reaching the runner…").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
+                                    .frame(maxWidth: .infinity).padding(.top, 40)
+                            }
                         }
                         ForEach(Array(rows.enumerated()), id: \.element.turn.id) { index, row in
                             MessageRow(row: row, first: index == 0, now: context.date,

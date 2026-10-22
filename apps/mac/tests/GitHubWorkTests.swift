@@ -65,6 +65,40 @@ struct GitHubWorkTests {
         #expect(older.toDo(.issues, later: ["b"]).isEmpty)
     }
 
+    /// A tap keeps one project, another tap adds one, and the last tap on brings every project back.
+    /// A saved name that is no longer on the list shows everything.
+    @Test func projectFilterKeepsTheOnesPicked() {
+        let columns = [
+            GitHubWork.Column(name: "Todo", project: "Oby Gap Map", items: []),
+            GitHubWork.Column(name: "Todo", project: "Paga.eu Backend", items: []),
+            GitHubWork.Column(name: nil, project: nil, items: []),
+        ]
+        let names = GitHubWork.projectNames(columns)
+        #expect(names == ["Oby Gap Map", "Paga.eu Backend", GitHubWork.offBoard])
+        var picked: Set<String> = []
+        GitHubWork.toggle("Oby Gap Map", picked: &picked, among: names)
+        #expect(picked == ["Oby Gap Map"])
+        #expect(GitHubWork.columns(columns, picked: picked).map(\.project) == ["Oby Gap Map"])
+        GitHubWork.toggle(GitHubWork.offBoard, picked: &picked, among: names)
+        #expect(picked == ["Oby Gap Map", GitHubWork.offBoard])
+        #expect(GitHubWork.columns(columns, picked: picked).map { $0.project ?? GitHubWork.offBoard } == ["Oby Gap Map", GitHubWork.offBoard])
+        GitHubWork.toggle("Oby Gap Map", picked: &picked, among: names)
+        GitHubWork.toggle(GitHubWork.offBoard, picked: &picked, among: names)
+        #expect(picked.isEmpty)
+        #expect(GitHubWork.columns(columns, picked: ["gone"]).count == 3)
+        #expect(GitHubWork.projectSet(GitHubWork.projectRaw(["b", "a"])) == ["a", "b"])
+        let oby = GitHubWork.Item(id: "a", list: .assigned, repo: "obi-ai-bot/obi", number: 60, title: "t", url: "", milestone: "F17 · Secrets")
+        let blok = GitHubWork.Item(id: "b", list: .assigned, repo: "deskree-inc/blok", number: 61, title: "t", url: "", milestone: "M1")
+        let filled = [GitHubWork.Column(name: nil, project: nil, items: [oby, blok])]
+        #expect(GitHubWork.repoNames(filled) == ["obi-ai-bot/obi", "deskree-inc/blok"])
+        #expect(GitHubWork.milestoneNames(filled) == ["F17 · Secrets", "M1"])
+        #expect(GitHubWork.columns(filled, picked: [], repos: ["obi-ai-bot/obi"]).flatMap { $0.items.map(\.id) } == ["a"])
+        #expect(GitHubWork.columns(filled, picked: [], milestones: ["M1"]).flatMap { $0.items.map(\.id) } == ["b"])
+        #expect(GitHubWork.filterLabel("Repositories", raw: "", among: GitHubWork.repoNames(filled)) == "Repositories")
+        #expect(GitHubWork.matching(["obi-ai-bot/obi", "deskree-inc/blok"], "blok") == ["deskree-inc/blok"])
+        #expect(GitHubWork.matching(["obi-ai-bot/obi"], "  ") == ["obi-ai-bot/obi"])
+    }
+
     @Test func groupsByKindLeavingStartedAndPutOffOnesOut() throws {
         let work = try Runner.decoder.decode(GitHubWork.self, from: Data(json.utf8))
         // Your own pull requests go under Review PR; "d" has a job on it, which is listed instead.

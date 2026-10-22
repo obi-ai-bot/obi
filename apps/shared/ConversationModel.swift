@@ -16,6 +16,8 @@ final class ConversationModel {
     /// Whether the runner has turns older than the oldest loaded.
     private(set) var hasOlder = false
     private(set) var loading = false
+    /// The latest page has been read once since the last [`forget`]. A new conversation forgets on purpose and stays empty.
+    private(set) var loaded = false
     /// Why the last page couldn't be read, or nil.
     private(set) var problem: String?
     /// One page before the turn `before` names (nil for the latest), at most `limit` turns, oldest
@@ -64,7 +66,7 @@ final class ConversationModel {
         generation += 1
         let mine = generation
         loading = true
-        defer { if mine == generation { loading = false } }
+        defer { if mine == generation { loading = false; loaded = true } }
         do {
             let latest = try await page(nil, Self.pageSize)
             guard mine == generation else { return }
@@ -222,6 +224,7 @@ final class ConversationModel {
         runnerTurns = []
         hasOlder = false
         loading = false
+        loaded = false
         problem = nil
     }
 

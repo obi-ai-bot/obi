@@ -111,8 +111,12 @@ struct ConversationPage: View {
                                     .padding(.bottom, 12)
                             }
                             if turns.isEmpty, !thinking {
-                                Text("Ask Oby anything. Hold fn to talk.").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
-                                    .frame(maxWidth: .infinity).padding(.top, 40)
+                                if conversation.problem == nil, !feed.conversations.starting, !conversation.loaded, !feed.down {
+                                    ThreadBones()
+                                } else {
+                                    Text("Ask Oby anything. Hold fn to talk.").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
+                                        .frame(maxWidth: .infinity).padding(.top, 40)
+                                }
                             }
                             ForEach(notices) { notice in
                                 InlineNotice(notice: notice, feed: feed, keyboardEnabled: oldest == "notice/\(notice.id)", focusRequest: decisionFocus,

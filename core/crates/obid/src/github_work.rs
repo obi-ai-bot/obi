@@ -46,8 +46,8 @@ reviews: search(query: $reviews, type: ISSUE, first: 100) { issueCount nodes { .
 mine: search(query: $mine, type: ISSUE, first: 100) { issueCount nodes { ...work } } \
 rateLimit { cost remaining resetAt } viewer { login } } \
 fragment work on SearchResultItem { \
-... on Issue { number title updatedAt state author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } BOARD } \
-... on PullRequest { number title updatedAt state isDraft reviewDecision author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } BOARD \
+... on Issue { number title updatedAt state author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } milestone { title } BOARD } \
+... on PullRequest { number title updatedAt state isDraft reviewDecision author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } milestone { title } BOARD \
 commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }";
 
 /// Each item's boards, but those it's archived from, and their Status column: needs gh's
@@ -81,6 +81,9 @@ pub struct Item {
     pub checks: Option<String>,
     /// Its board column, or null: on no board, or on none with a Status.
     pub board: Option<Board>,
+    /// The milestone's title, or none.
+    #[serde(default)]
+    pub milestone: Option<String>,
 }
 
 /// The board an item is on and its Status column there.
@@ -277,6 +280,7 @@ fn item(list: &str, node: &Value) -> Option<Item> {
             None
         },
         board: board(node),
+        milestone: text(&node["milestone"]["title"]),
     })
 }
 

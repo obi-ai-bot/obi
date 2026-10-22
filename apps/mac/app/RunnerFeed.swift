@@ -152,6 +152,8 @@ final class RunnerFeed {
     private(set) var checkRuns: String?
     /// Your work on GitHub as obid's gh finds it (Review PR and Issues), nil from a runner that doesn't list it.
     private(set) var gitHubWork: GitHubWork?
+    /// The first GitHub read since [`forget`] has finished, feed or not. Until then Issues and Review PR show skeletons.
+    private(set) var gitHubListed = false
     /// The GitHub items put off with Later, until Oby quits.
     var gitHubLater: Set<String> = []
 
@@ -173,6 +175,7 @@ final class RunnerFeed {
         let answer = await GitHubWork.ask(ask)
         guard runnerChanges == asked else { return }
         gitHubWork = answer.applied(to: gitHubWork)
+        gitHubListed = true
     }
 
     /// One click on a GitHub item: Oby's job on it, which joins the list as the runner's job.
@@ -338,6 +341,7 @@ final class RunnerFeed {
         github = nil
         checkRuns = nil
         gitHubWork = nil
+        gitHubListed = false
         gitHubLater = []
         clearedAt = nil
         notified = nil
@@ -364,12 +368,12 @@ final class RunnerFeed {
                 for try await event in runner.events() {
                     switch event {
                     case .connected:
-                        // Side by side, not one after another: none of these waits for another.
-                        // Status every time: a Clear done while the connection was down is in it.
+                        // Side by side. The window goes live once status, jobs and the inbox are in.
+                        // GitHub, chat history and the rest fill in after: a slow read must not
+                        // leave the window on "the runner hasn't started".
                         async let statusAnswer = runner.status()
                         async let jobsAnswer = runner.jobsAnswer()
                         async let inboxAnswer = runner.inboxAnswer()
-                        // History is an enhancement: an older runner or failed history request must not take chat offline.
                         async let historyAnswer = try? runner.inboxWithWords(state: "done")
                         async let tetrixAnswer = try? runner.tetrix()
                         async let routinesAnswer = try? runner.routines()
@@ -381,20 +385,40 @@ final class RunnerFeed {
                         let inboxData = try await inboxAnswer
                         let (items, words) = try inboxData.map(Runner.inboxWithWords) ?? ([], [:])
                         let fetchedNotices = inboxData.map(WatchNotice.list) ?? []
-                        let conversationsData = try await conversationsAnswer
+                        try Task.checkCancellation()
+                        host = status.runner.host
+                        version = status.runner.version
+                        clearedAt = status.clearedAt
+                        accounts = status.accounts
+                        models = status.models
+                        cleanup = status.cleanup
+                        github = status.github
+                        checkRuns = status.checks
+                        defaultMode = RunnerMode(status.permissions?.mode)
+                        self.extras = extras
+                        await take(list, from: runner)
+                        try Task.checkCancellation()
+                        inbox = items
+                        let stillOpen = fetchedNotices.filter { $0.done == nil }.sorted { $0.created < $1.created }
+                        let gone = Self.settledWhileAway(before: notices, after: stillOpen)
+                        if !gone.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: gone) }
+                        notices = stillOpen
+                        inboxWords.merge(words, uniquingKeysWith: { _, fresh in fresh })
+                        connection = .live
+                        showingKept = false
+                        wait = 1
+                        Self.ask()
+                        checks.look(runner)
+                        register(runner)
+                        let conversationsData = try? await conversationsAnswer
                         let history = await historyAnswer
                         let tetrix = await tetrixAnswer
                         let routines = await routinesAnswer
                         await gitHubRead
-                        // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
-                        host = status.runner.host
-                        version = status.runner.version
                         if let routines { self.routines = routines ?? [] }
                         macs = (try? await runner.macs()) ?? []
                         shares = (try? await runner.sharedWithMe())?.shares ?? []
-                        // A teammate's Mac goes free or busy, and a share's use changes, without an
-                        // event here: read again each minute.
                         macsTask?.cancel()
                         macsTask = Task { [weak self] in
                             while !Task.isCancelled {
@@ -404,45 +428,23 @@ final class RunnerFeed {
                                 if let shared = try? await runner.sharedWithMe() { self.shares = shared.shares }
                             }
                         }
-                        clearedAt = status.clearedAt
-                        accounts = status.accounts
                         self.tetrix = tetrix
-                        models = status.models
-                        cleanup = status.cleanup
-                        github = status.github
-                        checkRuns = status.checks
                         #if DEBUG
                         if let sample = GitHubWork.sample { gitHubWork = sample }
                         #endif
-                        defaultMode = RunnerMode(status.permissions?.mode)
-                        self.extras = extras
-                        await take(list, from: runner)
-                        // Settings › Runner changed while the open jobs were fetched again.
-                        try Task.checkCancellation()
-                        inbox = items
-                        let stillOpen = fetchedNotices.filter { $0.done == nil }.sorted { $0.created < $1.created }
-                        // Settled while the Mac was away: their notifications go too.
-                        let gone = Self.settledWhileAway(before: notices, after: stillOpen)
-                        if !gone.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: gone) }
-                        notices = stillOpen
                         if let (past, pastWords) = history {
                             inboxHistory = past.filter { !$0.isOpen }
                             inboxWords = pastWords.merging(words, uniquingKeysWith: { _, fresh in fresh })
-                        } else { inboxWords.merge(words, uniquingKeysWith: { _, fresh in fresh }) }
-                        // obid's conversations before the thread, which reads the one shown.
-                        conversations.take(try conversationsData.map(Runner.conversations))
-                        // The thread's latest page every time too: what was said from the iPhone
-                        // while the connection was down is in it.
+                        }
+                        if let conversationsData, let parsed = try? Runner.conversations(conversationsData) {
+                            conversations.take(parsed)
+                        }
+                        // A failed conversation read keeps the last saved list. Writing nil here would drop it.
+                        if !local || conversationsData != nil {
+                            keep(Kept(url: url ?? "", jobs: jobsData, inbox: inboxData, conversations: conversationsData))
+                        }
                         await conversation.reload()
-                        try Task.checkCancellation()
                         if let liveSession { Task { await liveSession.catchUp() } }
-                        connection = .live
-                        showingKept = false
-                        wait = 1
-                        keep(Kept(url: url ?? "", jobs: jobsData, inbox: inboxData, conversations: conversationsData))
-                        Self.ask()
-                        checks.look(runner)
-                        register(runner)
                     case .job(let job, let extras): apply(job, extras: extras)
                     case .jobDeleted(let id): gone(id, 404)
                     case .cleared(let date): clearedAt = date

@@ -11,6 +11,15 @@ import Testing
 struct WindowTests {
     // MARK: Tokens
 
+    /// The splash stays up until Oby has drawn, and never longer than its cap. A ready character still waits the short minimum.
+    @Test func theSplashStaysUntilObyIsDrawn() {
+        #expect(!SplashGate.open(elapsed: 0, ready: true))
+        #expect(!SplashGate.open(elapsed: SplashGate.least - 0.01, ready: true))
+        #expect(SplashGate.open(elapsed: SplashGate.least, ready: true))
+        #expect(!SplashGate.open(elapsed: SplashGate.most - 0.01, ready: false))
+        #expect(SplashGate.open(elapsed: SplashGate.most, ready: false))
+    }
+
     /// Every colour tokens.css names has its twin in Tokens.swift, the same value.
     @Test func tokensAreTokensCSS() throws {
         let css = try String(contentsOf: URL(fileURLWithPath: #filePath)

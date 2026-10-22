@@ -5921,6 +5921,7 @@ impl Jobs {
                 self.end_done(id, commits, job.pushed, |job| {
                     job.reason = Some(crate::publish::REVIEW_COMMITTED.into());
                 });
+                self.offer_owner_review(id).await;
                 return Ok(());
             }
             // Carrying only commits whose pull request was closed unmerged: Publish is the owner's.
@@ -5951,6 +5952,9 @@ impl Jobs {
                         job.publish_error = None;
                     }
                 });
+                if job.kind == "review" {
+                    self.offer_owner_review(id).await;
+                }
                 return Ok(());
             }
             // Before it goes out: what it changes against earlier sessions' decisions. One round
@@ -6353,6 +6357,36 @@ impl Jobs {
             }
         });
         conflicts
+    }
+
+    /// The owner's own review, once it has ended done: an inbox item with the summary, which is the
+    /// review. Approve posts that text on the pull request; a scan that flags it or can't run
+    /// offers only Dismiss, and nothing is posted. Another Oby's review is not this.
+    async fn offer_owner_review(&self, id: &str) {
+        let Some(job) = self.get(id) else { return };
+        if job.obi.is_some() || job.kind != "review" || job.status != Status::Done {
+            return;
+        }
+        let Some(number) = job.pr else { return };
+        let Some(sha) = job.start_commit.clone().filter(|sha| git::is_sha(sha)) else {
+            return;
+        };
+        let summary = job.summary.trim().to_owned();
+        if summary.is_empty() {
+            return;
+        }
+        let Some(link) = self.link.get().and_then(std::sync::Weak::upgrade) else {
+            return;
+        };
+        let scratch = self.config.home.join("tmp");
+        let _ = crate::store::make_private_dir(&scratch);
+        let clean = matches!(
+            crate::scan::scan(&[("review.md".into(), summary.clone())], &scratch).await,
+            crate::scan::Verdict::Clean
+        );
+        link.add_items(vec![owner_review_item(
+            id, &job.repo, number, &sha, &summary, clean,
+        )]);
     }
 
     /// Ends the job `id` done with `commits` (and `pushed` of them on its pull request), then
@@ -8842,8 +8876,83 @@ fn tail_chars(text: &str, limit: usize) -> String {
     chars[chars.len().saturating_sub(limit)..].iter().collect()
 }
 
+/// The inbox item for the owner's finished review. `clean` keeps the summary, which is what
+/// Approve posts; otherwise the item shows nothing and only Dismiss.
+fn owner_review_item(
+    job_id: &str,
+    repo: &str,
+    number: u64,
+    sha: &str,
+    summary: &str,
+    clean: bool,
+) -> crate::sphere::inbox::Item {
+    let name = repo.rsplit('/').next().unwrap_or(repo);
+    let (text, options, details) = if clean {
+        (
+            format!("Post this review on pull request #{number} in {repo} as you? Approve posts the review shown here, as a comment from your GitHub login."),
+            vec![
+                crate::listen::APPROVE.to_owned(),
+                crate::sphere::inbox::DISMISS.to_owned(),
+            ],
+            vec![
+                "Posts this review on the pull request, as a comment from your GitHub login."
+                    .to_owned(),
+                "Leaves it in Oby. Nothing is posted.".to_owned(),
+            ],
+        )
+    } else {
+        (
+            format!("Oby reviewed pull request #{number} in {repo}, but it isn't shown or posted from here. Open the job to read it."),
+            vec![crate::sphere::inbox::DISMISS.to_owned()],
+            vec!["Leaves it in Oby. Nothing is posted.".to_owned()],
+        )
+    };
+    crate::sphere::inbox::Item {
+        id: format!("feed-review-{job_id}"),
+        kind: "listen".into(),
+        job: job_id.into(),
+        title: format!("Review ready: {name} #{number}"),
+        text,
+        options,
+        details: Some(details),
+        recommended: None,
+        created: obi_protocol::time::now(),
+        done: None,
+        later: None,
+        answer: None,
+        obi: None,
+        plugin: None,
+        arrived: Some(crate::sphere::inbox::arrival()),
+        confirm: None,
+        start: None,
+        github: None,
+        watch: Some(Box::new(serde_json::json!({
+            "source": "github",
+            "url": format!("https://github.com/{repo}/pull/{number}"),
+            "pr": {
+                "repo": repo,
+                "number": number,
+                "sha": sha,
+                "url": format!("https://github.com/{repo}/pull/{number}"),
+            },
+            "review": clean.then_some(summary),
+        }))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_finished_review_offers_approve_only_when_the_scan_is_clean() {
+        let clean = super::owner_review_item("j1", "obi-ai-bot/obi", 702, "a".repeat(40).as_str(), "Looks right.", true);
+        assert_eq!(clean.id, "feed-review-j1");
+        assert_eq!(clean.options, ["Approve", "Dismiss"]);
+        assert_eq!(clean.watch.as_ref().unwrap()["review"], "Looks right.");
+        assert_eq!(clean.watch.as_ref().unwrap()["pr"]["sha"], "a".repeat(40));
+        let held = super::owner_review_item("j1", "obi-ai-bot/obi", 702, "a".repeat(40).as_str(), "secret", false);
+        assert_eq!(held.options, ["Dismiss"]);
+        assert!(held.watch.as_ref().unwrap()["review"].is_null());
+    }
 
     /// The same failing call 5 times is a loop, whatever is read in between or however its
     /// numbers change; that call succeeding, or an edit, starts it over.

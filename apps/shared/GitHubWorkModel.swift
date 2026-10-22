@@ -52,6 +52,8 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
         var job: String?
         /// Where it sits on a GitHub project board, when it's on one (a newer obid's; older ones leave it out).
         var board: Board?
+        /// Its milestone's title, when it has one.
+        var milestone: String?
 
         nonisolated struct Board: Decodable, Equatable, Sendable {
             /// The project's name, "Oby — Roadmap".
@@ -71,11 +73,12 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
             }
         }
 
-        private enum Keys: String, CodingKey { case id, list, repo, number, title, url, author, updated, draft, reviewDecision, checks, known, job, board }
+        private enum Keys: String, CodingKey { case id, list, repo, number, title, url, author, updated, draft, reviewDecision, checks, known, job, board, milestone }
 
         init(id: String, list: List, repo: String, number: Int, title: String, url: String, author: String? = nil, updated: Date? = nil,
-             draft: Bool = false, reviewDecision: String? = nil, checks: String? = nil, known: Bool = true, job: String? = nil, board: Board? = nil) {
+             draft: Bool = false, reviewDecision: String? = nil, checks: String? = nil, known: Bool = true, job: String? = nil, board: Board? = nil, milestone: String? = nil) {
             (self.id, self.list, self.repo, self.number, self.title, self.url, self.author, self.updated) = (id, list, repo, number, title, url, author, updated)
+            self.milestone = milestone
             self.draft = draft
             (self.reviewDecision, self.checks, self.known, self.job, self.board) = (reviewDecision, checks, known, job, board)
         }
@@ -97,6 +100,7 @@ nonisolated struct GitHubWork: Decodable, Equatable, Sendable {
             job = try c.decodeIfPresent(String.self, forKey: .job)
             // A board this app can't read is no board: the item still shows, under To do.
             board = (try? c.decodeIfPresent(Board.self, forKey: .board)) ?? nil
+            milestone = (try? c.decodeIfPresent(String.self, forKey: .milestone)) ?? nil
         }
     }
 
@@ -280,6 +284,116 @@ extension GitHubWork {
         return columns.sorted {
             (Column.rank($0.name), $0.name?.lowercased() ?? "", $0.project ?? "") < (Column.rank($1.name), $1.name?.lowercased() ?? "", $1.project ?? "")
         }
+    }
+
+    /// A column with no board, and the filter chip for those items.
+    static let offBoard = "Not on a board"
+
+    /// Project names on `columns`, in the order the columns appear. Items on no board share one name.
+    static func projectNames(_ columns: [Column]) -> [String] {
+        var names: [String] = []
+        for column in columns {
+            let name = column.project ?? offBoard
+            if !names.contains(name) { names.append(name) }
+        }
+        return names
+    }
+
+    /// What a saved filter shows. An empty pick, or one that names nothing still on the list, shows every project.
+    static func shown(_ picked: Set<String>, among names: [String]) -> Set<String> {
+        let all = Set(names)
+        let on = picked.intersection(all)
+        return on.isEmpty ? all : on
+    }
+
+    /// Repository names on `columns`, full `owner/name`, in the order they appear.
+    static func repoNames(_ columns: [Column]) -> [String] {
+        var names: [String] = []
+        for column in columns {
+            for item in column.items where !names.contains(item.repo) { names.append(item.repo) }
+        }
+        return names
+    }
+
+    /// Milestone titles on `columns`, in the order they appear.
+    static func milestoneNames(_ columns: [Column]) -> [String] {
+        var names: [String] = []
+        for column in columns {
+            for item in column.items {
+                guard let name = item.milestone.map(plain), !name.isEmpty, !names.contains(name) else { continue }
+                names.append(name)
+            }
+        }
+        return names
+    }
+
+    /// Names a dropdown's search leaves. A blank query leaves the list as it is.
+    static func matching(_ names: [String], _ query: String) -> [String] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return names }
+        return names.filter { $0.localizedStandardContains(q) }
+    }
+
+    /// What a closed filter menu says: its title while everything shows, the one name, or how many.
+    static func filterLabel(_ title: String, raw: String, among names: [String]) -> String {
+        let picked = projectSet(raw)
+        let on = shown(picked, among: names)
+        if picked.isEmpty || on == Set(names) { return title }
+        if on.count == 1, let name = names.first(where: on.contains) { return name }
+        return "\(on.count) \(title.lowercased())"
+    }
+
+    /// The columns still showing: a project, repository or milestone pick narrows them, and a column
+    /// with nothing left is left out. An empty pick shows every one.
+    static func columns(_ columns: [Column], picked: Set<String>, repos: Set<String> = [], milestones: Set<String> = []) -> [Column] {
+        let projects = projectNames(columns)
+        let projectOn = shown(picked, among: projects)
+        let repoList = repoNames(columns)
+        let repoOn = shown(repos, among: repoList)
+        let miles = milestoneNames(columns)
+        let mileOn = shown(milestones, among: miles)
+        let narrowingProjects = projectOn != Set(projects)
+        let narrowingRepos = repoOn != Set(repoList)
+        let narrowingMiles = mileOn != Set(miles)
+        return columns.compactMap { column in
+            if narrowingProjects, !projectOn.contains(column.project ?? offBoard) { return nil }
+            var copy = column
+            copy.items = column.items.filter { item in
+                let repoOk = !narrowingRepos || repoOn.contains(item.repo)
+                let mile = item.milestone.map(plain) ?? ""
+                let mileOk = !narrowingMiles || mileOn.contains(mile)
+                return repoOk && mileOk
+            }
+            // A column that still has its items, or never had any, stays. One a filter emptied goes.
+            return copy.items.isEmpty && !column.items.isEmpty ? nil : copy
+        }
+    }
+
+    /// A tap on a project chip. Everything starts on. The first tap keeps that project; another tap adds it;
+    /// tapping the last one on brings everything back.
+    static func toggle(_ name: String, picked: inout Set<String>, among names: [String]) {
+        let all = Set(names)
+        var on = shown(picked, among: names)
+        if on == all {
+            on = [name]
+        } else if on.contains(name) {
+            on.remove(name)
+            if on.isEmpty { on = all }
+        } else {
+            on.insert(name)
+        }
+        picked = on == all ? [] : on
+    }
+
+    /// The saved filter: a JSON list of project names, or empty when every project shows.
+    static func projectSet(_ raw: String) -> Set<String> {
+        guard let data = raw.data(using: .utf8), let list = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return Set(list)
+    }
+
+    static func projectRaw(_ picked: Set<String>) -> String {
+        guard !picked.isEmpty, let data = try? JSONEncoder().encode(picked.sorted()), let raw = String(data: data, encoding: .utf8) else { return "" }
+        return raw
     }
 
     /// A GitHub page to open: `https://github.com/…` and nothing else (no other host, no login in

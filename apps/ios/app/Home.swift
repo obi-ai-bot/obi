@@ -297,6 +297,13 @@ struct KindPage: View {
     let kind: WorkType
     /// The tab picked, or nil for the one it opens on.
     @State private var picked: WorkList.Tab?
+    /// Issues and Review PR each remember which projects, repositories and milestones to show. Empty shows every one.
+    @AppStorage("githubProjects.issues") private var issuesProjects = ""
+    @AppStorage("githubProjects.review") private var reviewProjects = ""
+    @AppStorage("githubRepos.issues") private var issuesRepos = ""
+    @AppStorage("githubRepos.review") private var reviewRepos = ""
+    @AppStorage("githubMilestones.issues") private var issuesMilestones = ""
+    @AppStorage("githubMilestones.review") private var reviewMilestones = ""
 
     /// GitHub's part of the page: only Review PR and Issues have one.
     private var gitHub: Bool { kind == .review || kind == .issues }
@@ -314,7 +321,7 @@ struct KindPage: View {
     var body: some View {
         let items = WorkList.ranked(phone.work.filter { $0.type == kind })
         let tab = picked ?? WorkList.firstTab(items, toDo: opensOnToDo)
-        let columns = toDo
+        let columns = GitHubWork.columns(toDo, picked: GitHubWork.projectSet(projectRaw.wrappedValue), repos: GitHubWork.projectSet(repoRaw.wrappedValue), milestones: GitHubWork.projectSet(milestoneRaw.wrappedValue))
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
                 Text(kind.label).font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink)
@@ -322,19 +329,27 @@ struct KindPage: View {
                 LineTabs(tab: tab, counts: WorkList.counts(items, toDo: gitHub ? columns.reduce(0) { $0 + $1.items.count } : nil, upcoming: upcoming.count)) {
                     picked = $0
                 }
-                .padding(.bottom, 12)
+                .padding(.bottom, 8)
+                if gitHub && tab == .todo {
+                    WorkFilters(columns: toDo, projects: projectRaw, repos: repoRaw, milestones: milestoneRaw)
+                }
                 let cards = WorkList.items(items, in: tab)
                 if tab == .todo {
                     GitHubToDo(kind: kind, work: phone.gitHubWork, columns: columns,
                                connect: connect == .signedOut ? ConnectGitHubCard(line: Self.connectLine, connect: nil) : nil,
+                               loading: !phone.loaded && phone.connection == .connecting,
                                start: { try await phone.startGitHubWork($0.id) }, later: { phone.gitHubLater.insert($0.id) })
                 }
                 // A routine waiting for its next run says when (Sangam's tasks.ts).
                 if tab == .running { ForEach(upcoming) { UpcomingRoutineCard(routine: $0) } }
                 ForEach(cards) { TaskCard(item: $0) }
                 if tab != .todo && cards.isEmpty && (tab == .done || upcoming.isEmpty) {
-                    Text(tab == .done ? "Nothing completed yet" : "Nothing running")
-                        .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
+                    if !phone.loaded && phone.connection == .connecting {
+                        CardBones(rows: 2)
+                    } else {
+                        Text(tab == .done ? "Nothing completed yet" : "Nothing running")
+                            .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
+                    }
                 }
                 if tab == .done {
                     Button("Older ones are in Archived") { push(.archived) }
@@ -354,6 +369,18 @@ struct KindPage: View {
         // Opening Review PR or Issues looks at GitHub again; the list arrives as an event.
         .task { if gitHub { await phone.refreshGitHubWork() } }
     }
+
+    private var projectRaw: Binding<String> { stored($issuesProjects, $reviewProjects) }
+    private var repoRaw: Binding<String> { stored($issuesRepos, $reviewRepos) }
+    private var milestoneRaw: Binding<String> { stored($issuesMilestones, $reviewMilestones) }
+
+    private func stored(_ issues: Binding<String>, _ review: Binding<String>) -> Binding<String> {
+        switch kind {
+        case .issues: issues
+        case .review: review
+        default: .constant("")
+        }
+    }
 }
 
 /// Every task Home lists (Sangam's side panel): by kind of work or by status, each group's done
@@ -369,9 +396,13 @@ struct AllTasksPage: View {
         let groups = WorkList.groups(phone.work, by: groupBy)
         List {
             if groups.isEmpty {
-                Text(phone.loaded ? "Nothing yet. Ask Oby for something on Home." : "Reaching the runner…")
-                    .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
-                    .listRowBackground(Color.clear)
+                if !phone.loaded && phone.connection == .connecting {
+                    RowBones().listRowBackground(Color.clear)
+                } else {
+                    Text(phone.loaded ? "Nothing yet. Ask Oby for something on Home." : "Reaching the runner…")
+                        .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted)
+                        .listRowBackground(Color.clear)
+                }
             }
             ForEach(groups) { group in
                 let shown = WorkList.shown(group, more: more.contains(group.id))

@@ -18,6 +18,13 @@ struct GroupPane: View {
     let onClose: () -> Void
     /// The tab picked, or nil for the one it opens on (`WorkList.firstTab`).
     @State private var picked: WorkList.Tab?
+    /// Issues and Review PR each remember which projects, repositories and milestones to show. Empty shows every one.
+    @AppStorage("githubProjects.issues") private var issuesProjects = ""
+    @AppStorage("githubProjects.review") private var reviewProjects = ""
+    @AppStorage("githubRepos.issues") private var issuesRepos = ""
+    @AppStorage("githubRepos.review") private var reviewRepos = ""
+    @AppStorage("githubMilestones.issues") private var issuesMilestones = ""
+    @AppStorage("githubMilestones.review") private var reviewMilestones = ""
     /// The page's height, so the empty space under a short list closes it too.
     @State private var height: CGFloat = 0
 
@@ -43,16 +50,21 @@ struct GroupPane: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(kind.label).font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink)
                     .padding(.bottom, 16).accessibilityAddTraits(.isHeader)
-                let columns = toDo
+                let columns = GitHubWork.columns(toDo, picked: GitHubWork.projectSet(projectRaw.wrappedValue), repos: GitHubWork.projectSet(repoRaw.wrappedValue), milestones: GitHubWork.projectSet(milestoneRaw.wrappedValue))
                 LineTabs(tab: tab, counts: WorkList.counts(items, toDo: gitHub ? columns.reduce(0) { $0 + $1.items.count } : nil, upcoming: upcoming.count)) {
                     picked = $0
                 }
                 .contentShape(Rectangle())
-                .padding(.bottom, 16)
+                .padding(.bottom, 8)
+                if gitHub && tab == .todo {
+                    WorkFilters(columns: toDo, projects: projectRaw, repos: repoRaw, milestones: milestoneRaw)
+                        .padding(.bottom, 8)
+                }
                 let cards = WorkList.items(ranked, in: tab)
                 if tab == .todo {
                     GitHubToDo(kind: kind, work: feed.gitHubWork, columns: columns,
                                connect: connect == .signedOut ? ConnectGitHubCard(line: Self.connectLine, connect: onConnectGitHub) : nil,
+                               loading: gitHub && feed.gitHubWork == nil && !feed.gitHubListed && !feed.down,
                                start: { try await feed.startGitHubWork($0.id) }, later: { feed.gitHubLater.insert($0.id) })
                 }
                 // A routine waiting for its next run says when (Sangam's tasks.ts).
@@ -61,8 +73,12 @@ struct GroupPane: View {
                     TaskCardView(item: item, model: model, state: state) { onOpenJob(item.job.job.id, item.job.local) }
                 }
                 if tab != .todo && cards.isEmpty && (tab == .done || upcoming.isEmpty) {
-                    Text(tab == .done ? "Nothing completed yet" : "Nothing running")
-                        .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
+                    if feed.connection == .connecting && !feed.showingKept {
+                        CardBones(rows: 2)
+                    } else {
+                        Text(tab == .done ? "Nothing completed yet" : "Nothing running")
+                            .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
+                    }
                 }
                 // Completed ones leave Home after a while (Archive completed, in Home's ⋮).
                 if tab == .done {
@@ -88,12 +104,25 @@ struct GroupPane: View {
         // Opening Review PR or Issues looks at GitHub again; the list arrives as an event.
         .task { if gitHub { await feed.refreshGitHubWork() } }
     }
+
+    private var projectRaw: Binding<String> { stored($issuesProjects, $reviewProjects) }
+    private var repoRaw: Binding<String> { stored($issuesRepos, $reviewRepos) }
+    private var milestoneRaw: Binding<String> { stored($issuesMilestones, $reviewMilestones) }
+
+    private func stored(_ issues: Binding<String>, _ review: Binding<String>) -> Binding<String> {
+        switch kind {
+        case .issues: issues
+        case .review: review
+        default: .constant("")
+        }
+    }
 }
 
 /// Archived (Sangam's ArchiveView): every done task that left Home, most recently done first, with
 /// a search over them at the top. A row opens its page.
 struct ArchivePane: View {
     let items: [WorkList.Item<SidebarSections.JobRow>]
+    var loading = false
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
     @State private var query = ""
     @FocusState private var searching: Bool
@@ -121,8 +150,12 @@ struct ArchivePane: View {
                     ForEach(shown) { item in ArchiveRow(item: item) { onOpenJob(item.job.job.id, item.job.local) } }
                 }
                 if shown.isEmpty {
-                    Text(items.isEmpty ? "Nothing archived yet" : "Nothing archived matches “\(query.trimmingCharacters(in: .whitespaces))”")
-                        .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
+                    if loading && query.trimmingCharacters(in: .whitespaces).isEmpty {
+                        RowBones(rows: 4)
+                    } else {
+                        Text(items.isEmpty ? "Nothing archived yet" : "Nothing archived matches “\(query.trimmingCharacters(in: .whitespaces))”")
+                            .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
+                    }
                 }
             }
             .frame(maxWidth: Tokens.column, alignment: .leading)

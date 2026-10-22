@@ -39,6 +39,8 @@ final class ChatWindow: NSObject, NSWindowDelegate {
     private let state = ChatState()
     /// Oby on Home's stage: its own page, paused while out of sight.
     private lazy var character = ObyCharacter(query: "embed&size=1.23")
+    /// In front while the window's character is still drawing. Nil once the window is showing.
+    private var splash: NSPanel?
 
     init(island: IslandController) { self.island = island }
 
@@ -67,6 +69,8 @@ final class ChatWindow: NSObject, NSWindowDelegate {
     private func present() {
         NSApp.activate()
         if let window {
+            window.alphaValue = 1
+            endSplash(reveal: false)
             window.makeKeyAndOrderFront(nil)
             return
         }
@@ -74,9 +78,51 @@ final class ChatWindow: NSObject, NSWindowDelegate {
         window.delegate = self
         window.setFrameAutosaveName("ObyChat")
         if !window.setFrameUsingName("ObyChat") { window.center() }
-        window.makeKeyAndOrderFront(nil)
         self.window = window
         Self.measureLights(window, into: state)
+        // The character only starts once its page is in a window. Keep that window invisible
+        // behind a small splash until the first frame, so Home doesn't open blank.
+        guard !character.ready else {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        window.alphaValue = 0
+        window.orderFront(nil)
+        showSplash()
+    }
+
+    private func showSplash() {
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 220, height: 188),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.contentView = NSHostingView(rootView: SplashMark(character: character) { [weak self] reduce in
+            self?.endSplash(reveal: true, reduce: reduce)
+        })
+        panel.center()
+        panel.orderFrontRegardless()
+        splash = panel
+    }
+
+    private func endSplash(reveal: Bool, reduce: Bool = true) {
+        let panel = splash
+        splash = nil
+        panel?.orderOut(nil)
+        guard reveal, panel != nil, let window else { return }
+        if reduce {
+            window.alphaValue = 1
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.22
+                window.animator().alphaValue = 1
+            }
+        }
+        window.makeKeyAndOrderFront(nil)
     }
 
     /// The window around `view`, as Sangam's: a toolbar's title bar, so the traffic lights sit in
@@ -119,6 +165,8 @@ final class ChatWindow: NSObject, NSWindowDelegate {
     func windowDidEnterFullScreen(_ notification: Notification) { measureLights() }
     func windowDidExitFullScreen(_ notification: Notification) { measureLights() }
     func windowWillClose(_ notification: Notification) {
+        window?.alphaValue = 1
+        endSplash(reveal: false)
         island.model.chatWindowVisible = false
         state.visible = false
     }
@@ -441,7 +489,9 @@ private struct HomeView: View {
                       onConnectGitHub: { state.openSettings(.connectors) }, onClose: back)
                 .takesKeys()
         case .archived:
-            ArchivePane(items: model.archive(state), onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })
+            ArchivePane(items: model.archive(state),
+                        loading: model.feed.connection == .connecting && !model.feed.showingKept,
+                        onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })
                 .takesKeys()
         case .settings(let page):
             SettingsPane(model: model, page: page)
@@ -825,7 +875,8 @@ private struct JobPane: View {
                 Text(problem).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.danger)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+                CardBones(rows: 1).frame(maxWidth: Tokens.column).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.horizontal, Tokens.gutter).padding(.top, 24)
             }
         }
         .onChange(of: id, initial: true) { old, new in

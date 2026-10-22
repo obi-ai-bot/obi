@@ -110,7 +110,7 @@ struct SidebarView: View {
             query.isEmpty || $0.job.job.heading.localizedCaseInsensitiveContains(query)
                 || $0.job.job.agentName.localizedCaseInsensitiveContains(query)
         }
-        return WorkList.groups(items, by: groupBy)
+        return WorkList.panel(items, by: groupBy, searching: !query.isEmpty)
     }
 
     var body: some View {
@@ -163,9 +163,13 @@ struct SidebarView: View {
                         PanelRow(symbol: "plus", title: "New task", action: onNewTask).padding(.bottom, 8)
                         ForEach(groups) { group($0) }
                         if groups.isEmpty {
-                            Text(search.isEmpty ? "Nothing here yet. Ask Oby for something and it shows up here." : "No tasks match “\(search)”")
-                                .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
-                                .padding(.horizontal, 10).padding(.vertical, 6)
+                            if search.isEmpty && model.feed.connection == .connecting && !model.feed.showingKept {
+                                RowBones()
+                            } else {
+                                Text(search.isEmpty ? "Nothing here yet. Ask Oby for something and it shows up here." : "No tasks match “\(search)”")
+                                    .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                                    .padding(.horizontal, 10).padding(.vertical, 6)
+                            }
                         }
                     }
                 }

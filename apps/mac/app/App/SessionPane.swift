@@ -31,7 +31,8 @@ struct SessionPane: View {
                     .disabled(sending)
                     .frame(maxWidth: Tokens.column).padding(.horizontal, Tokens.gutter).padding(.top, 8).padding(.bottom, 20)
             } else {
-                ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+                CardBones(rows: 2).frame(maxWidth: Tokens.column).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.horizontal, Tokens.gutter).padding(.top, 24)
             }
         }
         .onAppear {

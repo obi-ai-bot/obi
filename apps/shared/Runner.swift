@@ -1013,6 +1013,8 @@ nonisolated enum RunnerConnection: Equatable, Sendable {
     case live
     case offline(String)
 
+    var isOffline: Bool { if case .offline = self { true } else { false } }
+
     /// "Connected to tetrix-lab", "Connecting…", or why it's offline.
     func status(host: String) -> String {
         switch self {

@@ -80,6 +80,8 @@ struct GitHubToDo: View {
     let work: GitHubWork?
     let columns: [GitHubWork.Column]
     let connect: ConnectGitHubCard?
+    /// GitHub hasn't answered yet: cards are placeholders, not "Nothing to do".
+    var loading = false
     let start: (GitHubWork.Item) async throws -> Void
     let later: (GitHubWork.Item) -> Void
 
@@ -90,7 +92,7 @@ struct GitHubToDo: View {
         let projects = Set(columns.compactMap(\.project)).count > 1
         ForEach(columns) { column in
             if named {
-                Text(verbatim: column.name.map { name in projects ? column.project.map { "\(name) · \($0)" } ?? name : name } ?? "Not on a board").font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.muted)
+                Text(verbatim: column.name.map { name in projects ? column.project.map { "\(name) · \($0)" } ?? name : name } ?? GitHubWork.offBoard).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.muted)
                     .padding(.horizontal, 4).padding(.top, 8).accessibilityAddTraits(.isHeader)
             }
             ForEach(column.items) { item in
@@ -104,7 +106,11 @@ struct GitHubToDo: View {
             Text(verbatim: GitHubWork.plain(problem)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.horizontal, 4)
         }
         if columns.isEmpty && connect == nil {
-            Text("Nothing to do").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
+            if loading {
+                CardBones()
+            } else {
+                Text("Nothing to do").font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.vertical, 8).padding(.horizontal, 4)
+            }
         }
     }
 }
@@ -131,6 +137,163 @@ struct ConnectGitHubCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.cardRadius, style: .continuous))
         .accessibilityElement(children: .contain)
+    }
+}
+
+/// Projects, milestones and repositories on a To do list, each one menu. Everything starts on.
+/// Choosing one keeps it; another adds it; clearing the last one shows every one again.
+struct WorkFilters: View {
+    let columns: [GitHubWork.Column]
+    @Binding var projects: String
+    @Binding var repos: String
+    @Binding var milestones: String
+
+    var body: some View {
+        let projectNames = GitHubWork.projectNames(columns)
+        let repoNames = GitHubWork.repoNames(columns)
+        let mileNames = GitHubWork.milestoneNames(columns)
+        if projectNames.count > 1 || repoNames.count > 1 || mileNames.count > 1 {
+            HStack(spacing: 8) {
+                if projectNames.count > 1 { menu("Projects", names: projectNames, raw: $projects) }
+                if mileNames.count > 1 { menu("Milestones", names: mileNames, raw: $milestones) }
+                if repoNames.count > 1 { RepoMenu(names: repoNames, raw: $repos) }
+            }
+        }
+    }
+
+    private func menu(_ title: String, names: [String], raw: Binding<String>) -> some View {
+        let picked = GitHubWork.projectSet(raw.wrappedValue)
+        let on = GitHubWork.shown(picked, among: names)
+        let all = picked.isEmpty || on == Set(names)
+        return Menu {
+            Button {
+                raw.wrappedValue = ""
+            } label: {
+                if all { Image(systemName: "checkmark") }
+                Text("All")
+            }
+            Divider()
+            ForEach(names, id: \.self) { name in
+                Button {
+                    var next = picked
+                    GitHubWork.toggle(name, picked: &next, among: names)
+                    raw.wrappedValue = GitHubWork.projectRaw(next)
+                } label: {
+                    if !all && on.contains(name) { Image(systemName: "checkmark") }
+                    Text(verbatim: name)
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(verbatim: GitHubWork.filterLabel(title, raw: raw.wrappedValue, among: names))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+            }
+            .font(Tokens.font(Tokens.textSm))
+            .foregroundStyle(all ? Tokens.muted : Tokens.ink)
+            .padding(.horizontal, 10).frame(height: 26)
+            .background(all ? Color.clear : Tokens.pill, in: Capsule())
+            .overlay { Capsule().strokeBorder(all ? Tokens.line : Color.clear) }
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(title)
+    }
+}
+
+/// Repositories, as one dropdown: a search field and a checkbox for each match, and it stays open
+/// so several can be chosen. Everything starts on.
+private struct RepoMenu: View {
+    let names: [String]
+    @Binding var raw: String
+    @State private var open = false
+    @State private var query = ""
+    @FocusState private var search: Bool
+
+    var body: some View {
+        let picked = GitHubWork.projectSet(raw)
+        let on = GitHubWork.shown(picked, among: names)
+        let all = picked.isEmpty || on == Set(names)
+        Button { open.toggle() } label: {
+            HStack(spacing: 6) {
+                Text(verbatim: GitHubWork.filterLabel("Repositories", raw: raw, among: names))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+            }
+            .font(Tokens.font(Tokens.textSm))
+            .foregroundStyle(all ? Tokens.muted : Tokens.ink)
+            .padding(.horizontal, 10).frame(height: 26)
+            .background(all ? Color.clear : Tokens.pill, in: Capsule())
+            .overlay { Capsule().strokeBorder(all ? Tokens.line : Color.clear) }
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel("Repositories")
+        .popover(isPresented: $open, arrowEdge: .bottom) {
+            panel(picked: picked, on: on, all: all)
+                .presentationCompactAdaptation(.popover)
+        }
+        .onChange(of: open) { _, shown in if !shown { query = "" } }
+    }
+
+    private func panel(picked: Set<String>, on: Set<String>, all: Bool) -> some View {
+        let shown = GitHubWork.matching(names, query)
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                TextField("Filter repositories", text: $query)
+                    .textFieldStyle(.plain)
+                    .font(Tokens.font(Tokens.textSm))
+                    .focused($search)
+                    .accessibilityLabel("Filter repositories")
+            }
+            .padding(.horizontal, 8).frame(height: 28)
+            .background(Tokens.field, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Tokens.line) }
+            .padding(8)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        row("All repositories", chosen: all) { raw = "" }
+                    }
+                    if shown.isEmpty {
+                        Text("No repositories").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                            .padding(.horizontal, 8).frame(height: 28, alignment: .leading)
+                    }
+                    ForEach(shown, id: \.self) { name in
+                        row(name, chosen: !all && on.contains(name)) {
+                            var next = picked
+                            GitHubWork.toggle(name, picked: &next, among: names)
+                            raw = GitHubWork.projectRaw(next)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 240)
+        }
+        .frame(width: 280)
+        .padding(.bottom, 6)
+        .onAppear { search = true }
+    }
+
+    private func row(_ name: String, chosen: Bool, choose: @escaping () -> Void) -> some View {
+        Button(action: choose) {
+            HStack(spacing: 8) {
+                Image(systemName: chosen ? "checkmark.square.fill" : "square")
+                    .font(Tokens.font(Tokens.textSm))
+                    .foregroundStyle(chosen ? Tokens.ink : Tokens.muted)
+                    .frame(width: 14)
+                Text(verbatim: name).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.ink).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8).frame(height: 28)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(verbatim: name))
+        .accessibilityAddTraits(chosen ? .isSelected : [])
     }
 }
 #endif

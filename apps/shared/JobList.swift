@@ -275,6 +275,13 @@ nonisolated enum WorkList {
     /// Running every job not done, what needs you included; Completed the rest.
     enum Tab: String, CaseIterable, Sendable { case todo = "To do", running = "Running", done = "Completed" }
 
+    /// The side panel's list. By kind, with nothing typed in search, every kind is there even when it
+    /// holds no job, so Issues and Review PR open onto GitHub's list (Sangam's Sidebar.tsx). A search,
+    /// or grouping by status, leaves out the empty ones.
+    static func panel<J>(_ items: [Item<J>], by: GroupBy, searching: Bool) -> [Group<J>] {
+        by == .type && !searching ? kinds(items) : groups(items, by: by)
+    }
+
     /// `items` (newest first) in their groups, empty ones left out.
     static func groups<J>(_ items: [Item<J>], by: GroupBy) -> [Group<J>] {
         switch by {
