@@ -1,0 +1,17 @@
+# The kernel modules the guest keeps (core/obi-vm/image/Dockerfile), with what they depend on: what
+# /proc/modules listed in a booted guest after the job disk was opened, made and mounted
+# (2026-10-22). The rest of /usr/lib/modules goes.
+# The virtio devices.
+virtio_pci
+virtio_blk
+virtio_console
+# The vsock link to obid.
+vmw_vsock_virtio_transport
+# The job disk: dm-crypt, its aes-xts-plain64 cipher (the kernel loads these by name), and ext4.
+dm_crypt
+aes_ce_blk
+aes_ce_cipher
+aes_neon_blk
+aes_neon_bs
+ext4
+crc32c_generic

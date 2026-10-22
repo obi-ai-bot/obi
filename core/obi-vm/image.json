@@ -1,0 +1,9 @@
+{
+  "vmlinuz": "cbc7dcd22b574dee70d2ebe575a525ed7dfeb04aaccc2da67c0b1a776d971098",
+  "vmlinuz.zst": "395b41d86ed318452976f882214767b17e5a76869f4ef0ce8f5d50a5b40f76b4",
+  "initrd": "6f82157ec90bd529208407ba93fcfbcaf0e65b45d5d0a8ab260cb82d9185879e",
+  "initrd.zst": "4939988455e1769cd99e6222fcc02659d763e9d3a4098af28f30d15c131cdb8f",
+  "root.img": "a0b9461606ee45ee6e3a5bdb073705138ae58bac4df500b922325e4699ed3773",
+  "root.img.zst": "af3957c9b731c0e4fad9bc665d81d21a0d8ec46bb61f700c97f34e164fef00d9",
+  "bytes": {"vmlinuz": 32956352, "vmlinuz.zst": 9315761, "initrd": 5814842, "initrd.zst": 5769768, "root.img": 627048448, "root.img.zst": 156224599}
+}

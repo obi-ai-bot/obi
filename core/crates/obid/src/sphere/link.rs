@@ -297,7 +297,7 @@ fn new_uuid() -> String {
 }
 
 /// Resolves once obid is stopping.
-async fn stopped(mut stopping: watch::Receiver<bool>) {
+pub(super) async fn stopped(mut stopping: watch::Receiver<bool>) {
     while !*stopping.borrow() {
         if stopping.changed().await.is_err() {
             std::future::pending::<()>().await;
@@ -533,6 +533,9 @@ impl Link {
             .is_some_and(|m| m.state == "joined");
         if joined {
             self.follow();
+        }
+        if self.mac().on {
+            super::hosting::fetch_image_soon(self);
         }
         let link = self.clone();
         tokio::spawn(async move {
@@ -4060,6 +4063,11 @@ impl Link {
         self.config.guest_model_api.clone()
     }
 
+    /// Whether obid is stopping, for tasks that end with it.
+    pub(super) fn stopping(&self) -> watch::Receiver<bool> {
+        self.stopping.clone()
+    }
+
     pub(super) fn hosting_setup(&self) -> super::hosting::Setup {
         self.setup.clone()
     }
@@ -4365,7 +4373,7 @@ impl Link {
     /// `GET /v1/obid/sharing/mac`: this Mac's sharing, whether it can run guests, and what runs
     /// here now.
     pub fn mac_json(&self) -> Value {
-        json!({"settings": self.mac().to_json(), "ready": self.setup.ready(), "jobs": self.hosting.jobs_json(),
+        json!({"settings": self.mac().to_json(), "ready": self.setup.ready(), "image": super::hosting::image_json(self), "jobs": self.hosting.jobs_json(),
                "week": super::hosting::week(self.home(), time::now())})
     }
 
@@ -4467,8 +4475,11 @@ impl Link {
             state.sharing.clone()
         };
         self.save_sharing(&sharing);
-        if !mac.on {
+        if mac.on {
+            super::hosting::fetch_image_soon(self);
+        } else {
             self.hosting.stop(None, "sharing_off");
+            super::hosting::cancel_image_fetch(self);
         }
         self.publish_runner_soon();
         Ok(self.mac_json())

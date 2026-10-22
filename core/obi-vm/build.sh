@@ -10,10 +10,12 @@ mkdir -p "$(dirname "$out")"
 # OBI_VM_DEBUG=1: the smoke test's build (smoke.sh), which may boot its own init; never released.
 hashes=$(mktemp -d)/image-hashes.swift
 if [ -n "${2:-}" ]; then
-  jq -r '"let bakedImage: [String: String] = [\"vmlinuz\": \"\(.vmlinuz)\", \"initrd\": \"\(.initrd)\", \"root.img\": \"\(.["root.img"])\"]"' "$2" > "$hashes"
+  # Every SHA-256 (the files and their .zst copies) and each size as "<name>.bytes".
+  jq -r '"let bakedImage: [String: String] = [" + ([to_entries[] | select(.value | type == "string") | "\"\(.key)\": \"\(.value)\""] + [(.bytes // {}) | to_entries[] | "\"\(.key).bytes\": \"\(.value)\""] | join(", ")) + "]"' "$2" > "$hashes"
 else
   echo 'let bakedImage: [String: String] = [:]' > "$hashes"
 fi
-xcrun swiftc -O -swift-version 5 ${OBI_VM_DEBUG:+-D OBI_VM_DEBUG} -o "$out" "$here/main.swift" "$hashes"
+# OBI_VM_TARGET: the target triple (the app's build phase asks for arm64-apple-macos26.0).
+xcrun swiftc -O -swift-version 5 ${OBI_VM_TARGET:+-target "$OBI_VM_TARGET"} ${OBI_VM_DEBUG:+-D OBI_VM_DEBUG} -o "$out" "$here/main.swift" "$hashes"
 rm -f "$hashes"
 codesign --force --sign "${OBI_VM_SIGN:--}" --options runtime --entitlements "$here/obi-vm.entitlements" "$out"

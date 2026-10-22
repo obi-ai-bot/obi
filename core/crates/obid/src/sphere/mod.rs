@@ -17,5 +17,6 @@ mod sealed;
 pub mod shares;
 pub mod sharing;
 pub mod vm;
+pub mod vm_image;
 
 pub use link::Link;

@@ -2106,8 +2106,17 @@ nonisolated struct RunnerSharingMac: Codable, Equatable, Sendable {
         var wallSeconds: Int
         var costCents: Int
     }
+    /// The guest image obid fetches when sharing is turned on (`none`, `fetching`, `ready`,
+    /// `failed`); nil from an obid before it.
+    struct Image: Codable, Equatable, Sendable {
+        var state: String
+        var done: Int64?
+        var total: Int64?
+        var error: String?
+    }
     var settings: Settings
     var ready: Bool
+    var image: Image? = nil
     var jobs: [Guest]
     var week: Week? = nil
 }

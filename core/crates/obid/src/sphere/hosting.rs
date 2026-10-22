@@ -99,41 +99,91 @@ pub struct Setup {
     pub image: Image,
     /// The least time between two run_requests taken from one teammate's owner.
     pub request_every: i64,
+    /// Where obid fetches the guest image from (super::vm_image), when it keeps it itself: none
+    /// when `vmImage` names a folder of the owner's.
+    pub image_url: Option<String>,
+    /// What `obi-vm image` named, asked when obid starts and again when fetching while it named
+    /// nothing; never asked from a request.
+    pin: Arc<Mutex<Option<super::vm_image::Pin>>>,
 }
 
 impl Setup {
-    /// `obi-vm` beside obid (Oby.app's `Contents/Helpers`), else the repository's build of it;
-    /// the image in `home/vm`.
+    /// `obi-vm` beside obid (Oby.app's `Contents/Helpers`); the image obid fetches into `home/vm`.
     pub fn from(config: &crate::config::Config) -> Setup {
         let default = Setup::default_for(&config.home);
-        Setup {
+        let setup = Setup {
             helper: config.vm_helper.clone().unwrap_or(default.helper),
             image: Image {
                 dir: config.vm_image.clone().unwrap_or(default.image.dir),
             },
             request_every: config.guest_request_every.unwrap_or(REQUEST_EVERY),
+            image_url: match config.vm_image {
+                Some(_) => None,
+                None => Some(
+                    config
+                        .vm_image_url
+                        .clone()
+                        .unwrap_or_else(|| super::vm_image::DEFAULT_URL.to_owned()),
+                ),
+            },
+            pin: Arc::default(),
+        };
+        if setup.image_url.is_some() {
+            setup.refresh_pin();
         }
+        setup
     }
 
     pub fn default_for(home: &Path) -> Setup {
         let beside = std::env::current_exe()
             .ok()
-            .and_then(|exe| exe.parent().map(|d| d.join("obi-vm")))
-            .filter(|p| p.is_file());
-        let helper = beside.unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../obi-vm/build/obi-vm")
+            .and_then(|exe| exe.parent().map(|d| d.join("obi-vm")));
+        // A release looks beside itself only, never on the machine it was built on.
+        #[cfg(debug_assertions)]
+        let beside = beside.filter(|p| p.is_file()).or_else(|| {
+            Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../obi-vm/build/obi-vm"))
         });
         Setup {
-            helper,
+            helper: beside.unwrap_or_default(),
             image: Image {
                 dir: home.join("vm"),
             },
             request_every: REQUEST_EVERY,
+            image_url: Some(super::vm_image::DEFAULT_URL.to_owned()),
+            pin: Arc::default(),
         }
     }
 
+    /// Asks obi-vm which image it boots, when it hasn't said yet (it runs obi-vm: not from a
+    /// request's handler); what it says now.
+    fn refresh_pin(&self) -> Option<super::vm_image::Pin> {
+        if let Some(pin) = self.pin.lock().unwrap().clone() {
+            return Some(pin);
+        }
+        let asked = super::vm_image::ask(&self.helper);
+        if asked.is_some() {
+            self.pin.lock().unwrap().clone_from(&asked);
+        }
+        asked
+    }
+
+    /// The image obi-vm boots, when obid keeps it itself (`home/vm`): what `obi-vm image` names.
+    pub fn wanted(&self) -> Option<super::vm_image::Pin> {
+        self.image_url.as_ref()?;
+        self.pin.lock().unwrap().clone()
+    }
+
+    /// Whether a guest job can run here: Apple silicon (the image is arm64), `obi-vm`, and the
+    /// image: the one obi-vm boots, fetched whole, or the owner's own folder's.
     pub fn ready(&self) -> bool {
-        self.helper.is_file() && self.image.present()
+        cfg!(target_arch = "aarch64")
+            && self.helper.is_file()
+            && match self.image_url {
+                None => self.image.present(),
+                Some(_) => self
+                    .wanted()
+                    .is_some_and(|w| super::vm_image::holds(&self.image.dir, &w)),
+            }
     }
 }
 
@@ -162,6 +212,9 @@ pub struct Hosting {
     asked_at: Mutex<HashMap<String, i64>>,
     /// The `free` the runner status says.
     shown_free: Mutex<Blurred>,
+    /// Fetching the guest image (super::vm_image), and the task doing it.
+    pub image: Mutex<super::vm_image::Progress>,
+    fetch: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 /// How long the `free` a runner status says holds at least, and the most added to it at random.
@@ -197,6 +250,91 @@ fn jitter() -> i64 {
 
 /// The most calls on one share at once, whichever jobs make them.
 const SHARE_CALLS_AT_ONCE: usize = 2;
+
+/// Fetches the guest image in the background when obid keeps it itself and hasn't the one obi-vm
+/// boots: when the owner turns sharing on, and when obid starts with it on. One fetch at a time;
+/// how it goes is in `GET /v1/obid/sharing/mac`'s `image`.
+pub fn fetch_image_soon(link: &Arc<Link>) {
+    let setup = link.hosting_setup();
+    let Some(url) = setup.image_url.clone() else {
+        return;
+    };
+    if setup.ready() {
+        return;
+    }
+    let mut fetch = link.hosting.fetch.lock().unwrap();
+    if fetch.as_ref().is_some_and(|task| !task.is_finished()) {
+        return;
+    }
+    let progress = &link.hosting.image;
+    if !cfg!(target_arch = "aarch64") {
+        *progress.lock().unwrap() = super::vm_image::Progress::failed(
+            "Sharing this Mac needs a Mac with Apple silicon.".into(),
+        );
+        return;
+    }
+    // Said at once, so the answer to turning sharing on says it.
+    *progress.lock().unwrap() = super::vm_image::Progress {
+        state: "fetching",
+        total: setup
+            .wanted()
+            .map_or(0, |pin| super::vm_image::download_size(&pin)),
+        ..super::vm_image::Progress::none()
+    };
+    let (link, stopping) = (link.clone(), link.stopping());
+    let task = tokio::spawn(async move {
+        let progress = &link.hosting.image;
+        let asking = setup.clone();
+        let pin = tokio::task::spawn_blocking(move || asking.refresh_pin())
+            .await
+            .ok()
+            .flatten();
+        let Some(pin) = pin else {
+            *progress.lock().unwrap() = super::vm_image::Progress::failed(
+                "This Oby has no obi-vm to run teammates' jobs with: install Oby again.".into(),
+            );
+            return;
+        };
+        let dir = &setup.image.dir;
+        let fetched = tokio::select! {
+            fetched = super::vm_image::fetch(&url, dir, &pin, progress, super::vm_image::STALL) => fetched,
+            () = super::link::stopped(stopping) => {
+                super::vm_image::clear_partial(dir);
+                return;
+            }
+        };
+        if let Err(why) = fetched {
+            tracing::warn!("sphere: the guest image wasn't fetched: {why}");
+            *progress.lock().unwrap() = super::vm_image::Progress::failed(why);
+        }
+        link.publish_runner_soon();
+    });
+    *fetch = Some(task.abort_handle());
+}
+
+/// Stops fetching the guest image, when sharing is turned off: what it downloaded so far goes.
+pub fn cancel_image_fetch(link: &Link) {
+    if let Some(task) = link.hosting.fetch.lock().unwrap().take() {
+        task.abort();
+    }
+    super::vm_image::clear_partial(&link.hosting_setup().image.dir);
+    *link.hosting.image.lock().unwrap() = super::vm_image::Progress::none();
+}
+
+/// `GET /v1/obid/sharing/mac`'s `image`: `ready`, or how fetching it goes, its size from the pin.
+pub fn image_json(link: &Link) -> Value {
+    let setup = link.hosting_setup();
+    if setup.ready() {
+        return json!({"state": "ready"});
+    }
+    let mut progress = link.hosting.image.lock().unwrap().clone();
+    if progress.total == 0 {
+        progress.total = setup
+            .wanted()
+            .map_or(0, |pin| super::vm_image::download_size(&pin));
+    }
+    json!(progress)
+}
 
 /// Whether now is inside "Nights and weekends": 19:00 to 7:00 on weekdays, and all weekend.
 fn in_schedule() -> bool {
@@ -1579,7 +1717,7 @@ pub async fn status_now(link: &Arc<Link>) -> Option<Value> {
         json!("*")
     };
     Some(
-        json!({"free": is_free, "slots": mac.jobs_at_once, "size": mac.size, "agents": ["claude", "codex"],
+        json!({"free": is_free, "slots": mac.jobs_at_once, "size": mac.size, "agents": ["claude"],
                 "kinds": ["job"], "for": offered}),
     )
 }

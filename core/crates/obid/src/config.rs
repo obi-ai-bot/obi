@@ -99,6 +99,8 @@ struct File {
     vm_helper: Option<PathBuf>,
     #[serde(default)]
     vm_image: Option<PathBuf>,
+    #[serde(default)]
+    vm_image_url: Option<String>,
     /// The least seconds between two run_requests taken from one teammate's owner (900 when left
     /// out; 0 turns it off, for tests or an owner who wants that).
     #[serde(default)]
@@ -266,6 +268,9 @@ pub struct Config {
     /// (crate::sphere::hosting::Setup).
     pub vm_helper: Option<PathBuf>,
     pub vm_image: Option<PathBuf>,
+    /// `vmImageUrl`: where obid fetches the guest image from when sharing is turned on and it keeps
+    /// the image itself (no `vmImage`); https://downloads.oby.deskree.com/vm when left out.
+    pub vm_image_url: Option<String>,
     /// `guestRequestEvery`: the least seconds between two run_requests taken from one teammate's
     /// owner; 900 when left out, 0 for off (crate::sphere::hosting). Never negative.
     pub guest_request_every: Option<i64>,
@@ -446,6 +451,15 @@ impl Config {
                 "bundledPlugins is {dir:?}: it must be an absolute path, the folder of the plug-ins obid ships."
             ));
         }
+        // The guest image comes over https; plain http only from this machine (a test's server).
+        if let Some(url) = &file.vm_image_url {
+            let local = ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"];
+            if !url.starts_with("https://") && !local.iter().any(|l| url.starts_with(l)) {
+                return invalid(format!(
+                    "vmImageUrl is {url:?}: it must be https:// (plain http:// only on this machine)."
+                ));
+            }
+        }
         if let Some(every) = file.guest_request_every
             && every < 0
         {
@@ -586,6 +600,7 @@ impl Config {
             claude_keychain: file.claude_keychain,
             vm_helper: file.vm_helper,
             vm_image: file.vm_image,
+            vm_image_url: file.vm_image_url,
             guest_request_every: file.guest_request_every,
             guest_model_api: file.guest_model_api,
             conversation: Conversation {
@@ -1256,5 +1271,17 @@ mod tests {
                 .contains("guestRequestEvery is -1")
         );
         assert!(Config::parse(&with(serde_json::json!({"guestRequestEvery": 0}))).is_ok());
+        assert!(
+            problem(&with(
+                serde_json::json!({"vmImageUrl": "http://downloads.example.com/vm"})
+            ))
+            .contains("it must be https://")
+        );
+        for ok in [
+            "https://downloads.oby.deskree.com/vm",
+            "http://127.0.0.1:8080/vm",
+        ] {
+            assert!(Config::parse(&with(serde_json::json!({"vmImageUrl": ok}))).is_ok());
+        }
     }
 }
