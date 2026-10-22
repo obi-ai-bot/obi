@@ -22,20 +22,26 @@ tested_caches="$HOME/Library/Caches/Oby-release"
 
 # The paths a suite's result depends on; empty is the whole tree. swift-test builds only the Swift
 # package: Package.swift, Package.resolved and every target's `path:` (plus SwiftPM's default
-# Sources/ and Tests/, for a target without one), read from HEAD's Package.swift.
+# Sources/ and Tests/, for a target without one), read from HEAD's Package.swift with its lines
+# joined, so a `path:` whose value is on the next line counts too.
 tested_paths() {
     case "$1" in
         swift-test)
             printf '%s\n' Package.swift Package.resolved Sources Tests
-            git -C "$tested_root" show HEAD:Package.swift | sed -nE 's/.*(^|[^[:alnum:]_])path:[[:space:]]*"([^"]*)".*/\2/p'
+            git -C "$tested_root" show HEAD:Package.swift | tr '\n' ' ' \
+                | grep -oE '(^|[^[:alnum:]_])path:[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]*)"/\1/'
             ;;
     esac
 }
 
-# Xcode, Swift and the Rust that builds obid (~/.cargo/bin first, as bundle-obid.sh): a result only
-# counts with the same tools. Also keys the build caches.
+# The suites and their toolchain run with only HOME and a fixed PATH (as bundle-obid.sh), so a
+# `swift` or `xcodebuild` earlier on the caller's PATH can't fake a pass.
+tested_env=(env -i HOME="$HOME" PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+
+# Xcode, Swift and the Rust that builds obid: a result only counts with the same tools. Also keys
+# the build caches.
 tested_toolchain() {
-    { xcodebuild -version; swift --version 2>&1; PATH="$HOME/.cargo/bin:$PATH" rustc -vV; } | shasum -a 256 | cut -c1-16
+    "${tested_env[@]}" sh -c 'xcodebuild -version; swift --version 2>&1; rustc -vV' | shasum -a 256 | cut -c1-16
 }
 
 # HEAD's files for a suite, by content: `git ls-tree` with project.pbxproj's version lines
@@ -75,8 +81,8 @@ tested_command() {
     local cache
     cache="$tested_caches/$(tested_toolchain)"
     case "$1" in
-        swift-test) (cd "$tested_root" && swift test) ;;
-        mac-tests) (cd "$tested_root" && xcodebuild -project apps/Oby.xcodeproj -scheme Oby -destination 'platform=macOS' \
+        swift-test) (cd "$tested_root" && "${tested_env[@]}" swift test) ;;
+        mac-tests) (cd "$tested_root" && "${tested_env[@]}" xcodebuild -project apps/Oby.xcodeproj -scheme Oby -destination 'platform=macOS' \
             -derivedDataPath "$cache/DerivedData" OBY_CARGO_TARGET_DIR="$cache/cargo" test) ;;
     esac
 }
