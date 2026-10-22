@@ -18,6 +18,10 @@
 //   A stand-in model API on this Mac answers (one Bash call, then "Done"), and Sangam's Claude Code
 //   login is a stand-in one in Sangam's account folder.
 //   OBI_E2E_KEEP=1   keep the run folder.
+//   OBI_SPHERE_URL   run against a deployed Sphere (https://…) instead of starting one; needs its
+//                    SPHERE_OPERATOR_TOKEN. It makes a fresh Sphere `e2e-<hex>` there with two test
+//                    Obis, obi-test-host and obi-test-guest, and revokes both at the end (v0.1 can't
+//                    delete a Sphere, so it stays, empty of active members).
 //
 // This Mac's own signals (idle time, power) decide whether a guest job may run, and the person
 // running this is at it: so obi-vm's `signals` is read from a file this script writes (the Mac
@@ -45,6 +49,11 @@ const SPHERE_DIR = resolve(process.env.OBI_SPHERE_DIR ?? join(OBI, "..", "obi-sp
 const OBID = resolve(process.env.OBID_BIN ?? join(OBI, "core/target/debug/obid"));
 const OBI_VM = resolve(process.env.OBI_VM_BIN ?? join(OBI, "core/obi-vm/build/obi-vm"));
 const R = mkdtempSync(join(tmpdir(), "obi-sharing-"));
+const LIVE = process.env.OBI_SPHERE_URL;
+// The test Obis and their owners: in a deployed Sphere, test names of their own.
+const [HOST_OWNER, GUEST_OWNER] = LIVE ? ["test-host", "test-guest"] : ["wellington", "sangam"];
+const [HOST_OBI, GUEST_OBI] = [`obi-${HOST_OWNER}`, `obi-${GUEST_OWNER}`];
+const person = (owner) => owner.charAt(0).toUpperCase() + owner.slice(1);
 const spec = await import(pathToFileURL(join(SPHERE_DIR, "spec/conformance/lib/obi.mjs")).href);
 
 const children = [];
@@ -143,35 +152,45 @@ function fakeModel(port) {
 
 async function main() {
   console.log(`Obi e2e: a job on a teammate's Mac (run folder ${R})`);
-  for (const [what, path] of [["obid", OBID], ["obi-vm", OBI_VM], ["the image", join(IMAGE, "root.img")], ["obi-sphere", join(SPHERE_DIR, "server/src/channel.ts")]]) {
+  for (const [what, path] of [["obid", OBID], ["obi-vm", OBI_VM], ["the image", join(IMAGE, "root.img")], ["obi-sphere", join(SPHERE_DIR, LIVE ? "spec/conformance/lib/obi.mjs" : "server/src/channel.ts")]]) {
     if (!existsSync(path)) fail(`${what} isn't at ${path}`);
   }
 
   step("1. The Sphere, its policy, and two invitations");
-  const spherePort = await freePort();
-  const sphereUrl = `http://127.0.0.1:${spherePort}`;
-  const operator = randomBytes(32).toString("base64url");
   for (const d of ["state", "home", "tmp"]) mkdirSync(join(R, "sphere", d), { recursive: true });
-  start("sphere", process.execPath, ["scripts/local.mjs", "--port", String(spherePort), "--persist-to", join(R, "sphere/state")], {
-    cwd: join(SPHERE_DIR, "server"),
-    env: { SPHERE_OPERATOR_TOKEN: operator, HOME: join(R, "sphere/home"), TMPDIR: join(R, "sphere/tmp"), WRANGLER_SEND_METRICS: "false", PATH: process.env.PATH },
-  });
+  let sphereUrl;
+  let operator;
+  if (LIVE) {
+    sphereUrl = LIVE.replace(/\/+$/, "");
+    operator = process.env.SPHERE_OPERATOR_TOKEN;
+    if (!operator) fail("OBI_SPHERE_URL needs SPHERE_OPERATOR_TOKEN");
+  } else {
+    const spherePort = await freePort();
+    sphereUrl = `http://127.0.0.1:${spherePort}`;
+    operator = randomBytes(32).toString("base64url");
+    start("sphere", process.execPath, ["scripts/local.mjs", "--port", String(spherePort), "--persist-to", join(R, "sphere/state")], {
+      cwd: join(SPHERE_DIR, "server"),
+      env: { SPHERE_OPERATOR_TOKEN: operator, HOME: join(R, "sphere/home"), TMPDIR: join(R, "sphere/tmp"), WRANGLER_SEND_METRICS: "false", PATH: process.env.PATH },
+    });
+  }
   await within(90, "the Sphere answering", async () => (await call(`${sphereUrl}/v0.1/health`)).status === 200);
   const owner = (id) => {
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
     const pub = publicKey.export({ format: "jwk" }).x;
     return { id, privateKey, publicKey: pub, keyId: spec.keyIdOf(pub) };
   };
-  const W = owner("wellington");
-  const S = owner("sangam");
-  const SPHERE = "deskree-e2e";
+  const W = owner(HOST_OWNER);
+  const S = owner(GUEST_OWNER);
+  const SPHERE = LIVE ? `e2e-${randomBytes(4).toString("hex")}` : "deskree-e2e";
+  sphereMade = { sphereUrl, SPHERE, W, jwt: null };
   const jwt = (o, scope, mayAct, lifetime = 300) => {
     const iat = now();
     const claims = { iss: o.id, sub: o.id, aud: `obi-sphere:${SPHERE}`, iat, exp: iat + lifetime, jti: randomUUID(), scope };
     if (mayAct) claims.may_act = { sub: mayAct };
     return spec.signJwt(claims, o.privateKey, o.keyId);
   };
-  expect(await call(`${sphereUrl}/v0.1/spheres`, { method: "POST", token: operator, body: { sphere: SPHERE, name: "Deskree (e2e)", admin: { owner: "wellington", owner_key: W.publicKey } } }), 201, "the Sphere");
+  expect(await call(`${sphereUrl}/v0.1/spheres`, { method: "POST", token: operator, body: { sphere: SPHERE, name: "Deskree (e2e)", admin: { owner: HOST_OWNER, owner_key: W.publicKey } } }), 201, "the Sphere");
+  sphereMade.jwt = jwt;
   const admin = async () =>
     expect(await call(`${sphereUrl}/v0.1/oauth/token`, { method: "POST", form: { grant_type: "urn:ietf:params:oauth:grant-type:token-exchange", subject_token: jwt(W, "admin directory:read audit:read"), subject_token_type: "urn:ietf:params:oauth:token-type:jwt" } }), 200, "the admin token").access_token;
   const invite = async (o, obi) => {
@@ -200,7 +219,7 @@ async function main() {
   writeFileSync(wrapper, `#!/bin/sh\nif [ "$1" = signals ]; then cat '${signals}'; exit 0; fi\nexec '${OBI_VM}' "$@"\n`);
   chmodSync(wrapper, 0o755);
   const obids = {};
-  for (const [who, o, obi, accepts] of [["host", W, "obi-wellington", ["review_request", "run_request"]], ["guest", S, "obi-sangam", ["review_request", "share_offer"]]]) {
+  for (const [who, o, obi, accepts] of [["host", W, HOST_OBI, ["review_request", "run_request"]], ["guest", S, GUEST_OBI, ["review_request", "share_offer"]]]) {
     const dir = join(R, who);
     const home = join(dir, "home");
     for (const d of ["env-home", "tmp"]) mkdirSync(join(dir, d), { recursive: true });
@@ -242,14 +261,14 @@ async function main() {
   step("3. Sangam sends a job to Wellington's Mac");
   const macs = await within(60, "Wellington's Mac in Sangam's list", async () => {
     const list = expect(await obids.guest.api("/obid/sharing/macs"), 200, "the Macs");
-    return list.find((m) => m.obi === "obi-wellington" && m.free) && list;
+    return list.find((m) => m.obi === HOST_OBI && m.free) && list;
   });
   pass(`Sangam sees ${JSON.stringify(macs)}`);
-  const job = expect(await obids.guest.api("/jobs", { method: "POST", body: { job: { repo: "obi-e2e/fixture-app", kind: "build", title: "Say hello from the VM", task: "Write guest.txt saying hello.", runsOn: "obi-wellington" } } }), 201, "the job");
-  if (job.runsOn?.owner !== "wellington") fail(`the job's runsOn is ${JSON.stringify(job.runsOn)}`);
+  const job = expect(await obids.guest.api("/jobs", { method: "POST", body: { job: { repo: "obi-e2e/fixture-app", kind: "build", title: "Say hello from the VM", task: "Write guest.txt saying hello.", runsOn: HOST_OBI } } }), 201, "the job");
+  if (job.runsOn?.owner !== HOST_OWNER) fail(`the job's runsOn is ${JSON.stringify(job.runsOn)}`);
   const ask = await within(60, "the ask in Wellington's inbox", async () => (expect(await obids.host.api("/inbox"), 200, "the inbox")).find((i) => i.obi?.type === "run_request"));
   pass(`Wellington's inbox: "${ask.title}" [${ask.options.join(" | ")}]`);
-  expect(await obids.host.api(`/inbox/${ask.id}/answer`, { method: "POST", body: { answer: "Allow Sangam from now on" } }), 200, "Allow");
+  expect(await obids.host.api(`/inbox/${ask.id}/answer`, { method: "POST", body: { answer: `Allow ${person(GUEST_OWNER)} from now on` } }), 200, "Allow");
 
   step("4. It runs in a VM on this Mac; the owner comes back, and leaves again");
   await within(120, "the job running in the VM", async () => (expect(await obids.host.api("/obid/sharing/mac"), 200, "")).jobs.find((j) => j.state === "running"));
@@ -306,11 +325,11 @@ async function main() {
   step("7. Wellington shares half of his company API account's month with Sangam");
   // Wellington is away again: his Mac is free for the next job.
   writeFileSync(signals, JSON.stringify(away));
-  const grant = expect(await obids.host.api("/obid/sharing/grants", { method: "PUT", body: { account: "stub", who: "sangam", share: 50, budgetCents: 1000, resetsDay: 1 } }), 200, "the share");
+  const grant = expect(await obids.host.api("/obid/sharing/grants", { method: "PUT", body: { account: "stub", who: GUEST_OWNER, share: 50, budgetCents: 1000, resetsDay: 1 } }), 200, "the share");
   const offered = await within(60, "the share on Sangam's Oby", async () => (expect(await obids.guest.api("/obid/sharing/shared"), 200, "")).shares.find((s) => s.grant === grant.id));
   pass(`Sangam sees ${offered.share}% of ${offered.account}'s month (${offered.limitCents} cents)`);
   const before = existsSync(join(R, "model-calls.log")) ? readFileSync(join(R, "model-calls.log"), "utf8").trim().split("\n").length : 0;
-  const onShare = expect(await obids.guest.api("/jobs", { method: "POST", body: { job: { repo: "obi-e2e/fixture-app", kind: "build", title: "Hello on a share", task: "Write guest.txt saying hello.", runsOn: { obi: "obi-wellington", grant: grant.id } } } }), 201, "the job on the share");
+  const onShare = expect(await obids.guest.api("/jobs", { method: "POST", body: { job: { repo: "obi-e2e/fixture-app", kind: "build", title: "Hello on a share", task: "Write guest.txt saying hello.", runsOn: { obi: HOST_OBI, grant: grant.id } } } }), 201, "the job on the share");
   const ended = await within(600, "the job on the share done", async () => {
     const j = expect(await obids.guest.api(`/jobs/${onShare.id}`), 200, "the job");
     return ["done", "failed", "interrupted"].includes(j.status) && j;
@@ -319,7 +338,7 @@ async function main() {
   const after = readFileSync(join(R, "model-calls.log"), "utf8").trim().split("\n").slice(before);
   if (!after.length || after.some((c) => !c.includes("with=the host's key"))) fail(`the share's model calls: ${after.join("; ")}`);
   pass(`${after.length} model calls on the share, each from Wellington's obid with Wellington's key`);
-  const used = (expect(await obids.host.api("/obid/sharing/grants"), 200, "")).grants[0].usedCents.sangam;
+  const used = (expect(await obids.host.api("/obid/sharing/grants"), 200, "")).grants[0].usedCents[GUEST_OWNER];
   const seen = await within(60, "Sangam's meter", async () => {
     const s = (expect(await obids.guest.api("/obid/sharing/shared"), 200, "")).shares[0];
     return s.usedCents === used && s;
@@ -333,6 +352,20 @@ async function main() {
   pass("Wellington's key is nowhere on Sangam's side or in the Sphere's state");
 }
 
+// What the run made in a deployed Sphere, to revoke its members at the end.
+let sphereMade = null;
+async function revokeTestMembers() {
+  if (!LIVE || !sphereMade?.jwt) return;
+  const { sphereUrl, SPHERE, W, jwt } = sphereMade;
+  const res = await call(`${sphereUrl}/v0.1/oauth/token`, { method: "POST", form: { grant_type: "urn:ietf:params:oauth:grant-type:token-exchange", subject_token: jwt(W, "admin directory:read audit:read"), subject_token_type: "urn:ietf:params:oauth:token-type:jwt" } });
+  const token = res.body?.access_token;
+  for (const obi of [GUEST_OBI, HOST_OBI]) {
+    const r = token ? await call(`${sphereUrl}/v0.1/spheres/${SPHERE}/members/${obi}`, { method: "DELETE", token }) : { status: res.status };
+    console.log(`  cleanup: revoke ${obi} in ${SPHERE}: ${r.status} ${r.body?.status ?? r.body?.error?.code ?? ""}`);
+  }
+  console.log(`  cleanup: the Sphere ${SPHERE} stays (v0.1 can't delete a Sphere), its members revoked`);
+}
+
 let ok = false;
 try {
   await main();
@@ -341,6 +374,7 @@ try {
 } catch (e) {
   console.log(`\nFAIL: ${e.message}\n(logs in ${R})`);
 } finally {
+  await revokeTestMembers().catch((e) => console.log(`  cleanup: revoking failed: ${e.message}`));
   for (const c of children) {
     try {
       process.kill(-c.pid, "SIGTERM");
