@@ -11,7 +11,7 @@ import Testing
 struct WindowTests {
     // MARK: Tokens
 
-    /// The splash stays up until Oby has drawn, and never longer than its cap. A ready character still waits the short minimum.
+    /// The splash stays up until Oby has drawn, and never longer than its cap. A ready character still waits two seconds.
     @Test func theSplashStaysUntilObyIsDrawn() {
         #expect(!SplashGate.open(elapsed: 0, ready: true))
         #expect(!SplashGate.open(elapsed: SplashGate.least - 0.01, ready: true))

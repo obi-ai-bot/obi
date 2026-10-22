@@ -34,11 +34,8 @@ struct WorkGroupsTests {
         #expect(WorkType.of(review: true, issue: 12, requester: nil, routine: true) == .routines)
         #expect(WorkType.routines.label == "Routines")
         #expect([WorkType.review, .issues, .teammate("Wellington"), .tasks].map(\.label) == ["Review PR", "Issues", "Wellington", "Tasks"])
-        // No job running: the side panel still lists Issues, so GitHub's list is one click away.
-        let idle = WorkList.panel([item("t")], by: .type, searching: false)
-        #expect(idle.map(\.label) == ["Review PR", "Issues", "Tasks", "Routines"])
-        #expect(idle.first { $0.type == .issues }?.items.isEmpty == true)
-        #expect(WorkList.panel([item("t")], by: .type, searching: true).map(\.label) == ["Tasks"])
+        // A kind with nothing under it stays off the side panel.
+        #expect(WorkList.groups([item("t")], by: .type).map(\.label) == ["Tasks"])
     }
 
     /// The Mac's own and the runner's jobs: a review, an issue fix and a typed task land in three

@@ -1,9 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// How long the splash stays: long enough to be seen, and until Oby's first frame, never past `most`.
+/// How long the splash stays: at least two seconds, and until Oby's first frame, never past `most`.
 enum SplashGate {
-    static let least = 0.4
+    static let least = 2.0
     static let most = 4.5
 
     static func open(elapsed: TimeInterval, ready: Bool) -> Bool {
@@ -20,13 +20,13 @@ struct SplashMark: View {
 
     var body: some View {
         let ready = character.ready
-        VStack(spacing: 16) {
-            ObyFace(size: 64)
+        VStack(spacing: 18) {
+            ObyMark(size: 200)
             Text("Oby").font(Tokens.font(22, .semibold)).foregroundStyle(Tokens.ink)
             Bone(width: 56, height: 3, radius: 2)
         }
-        .padding(.horizontal, 36).padding(.vertical, 28)
-        .frame(width: 220)
+        .padding(.horizontal, 48).padding(.vertical, 36)
+        .frame(width: 340)
         .background(Tokens.bg, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Tokens.surfaceEdge) }
         .preferredColorScheme(.dark)

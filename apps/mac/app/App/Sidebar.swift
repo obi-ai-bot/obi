@@ -110,7 +110,7 @@ struct SidebarView: View {
             query.isEmpty || $0.job.job.heading.localizedCaseInsensitiveContains(query)
                 || $0.job.job.agentName.localizedCaseInsensitiveContains(query)
         }
-        return WorkList.panel(items, by: groupBy, searching: !query.isEmpty)
+        return WorkList.groups(items, by: groupBy)
     }
 
     var body: some View {

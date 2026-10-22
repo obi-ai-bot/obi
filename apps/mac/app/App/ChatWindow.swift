@@ -81,7 +81,7 @@ final class ChatWindow: NSObject, NSWindowDelegate {
         self.window = window
         Self.measureLights(window, into: state)
         // The character only starts once its page is in a window. Keep that window invisible
-        // behind a small splash until the first frame, so Home doesn't open blank.
+        // behind the splash until the first frame, so Home doesn't open blank.
         guard !character.ready else {
             window.makeKeyAndOrderFront(nil)
             return
@@ -92,7 +92,7 @@ final class ChatWindow: NSObject, NSWindowDelegate {
     }
 
     private func showSplash() {
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 220, height: 188),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 340, height: 360),
                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isFloatingPanel = true
         panel.level = .floating
