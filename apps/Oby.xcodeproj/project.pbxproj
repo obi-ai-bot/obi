@@ -359,6 +359,7 @@
 				0B1E0C0A00000000000000F2 /* Bundle cloudflared */,
 				0B1E0C0A00000000000000F4 /* Bundle gh */,
 				0B1E0C0A00000000000000F3 /* Bundle obid */,
+				0B1E0C0A0000000000000AF4 /* Bundle obi-vm */,
 			);
 			buildRules = (
 			);
@@ -673,6 +674,29 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
 			shellScript = "set -e\n# Build the clean copy of the character (no playground) and bundle it as Resources/Character.\nzsh \"$SRCROOT/../character/package/build.sh\" > /dev/null\ndest=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/Character\"\nrm -rf \"$dest\"\nmkdir -p \"$dest/vendor\"\ncp \"$SRCROOT/../dist/oby/oby.html\" \"$dest/\"\ncp \"$SRCROOT/../dist/oby/vendor/three.module.js\" \"$dest/vendor/\"\n";
+		};
+		0B1E0C0A0000000000000AF4 /* Bundle obi-vm */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/mac/app/Tools/bundle-obi-vm.sh",
+				"$(SRCROOT)/../core/obi-vm/main.swift",
+				"$(SRCROOT)/../core/obi-vm/image.json",
+			);
+			name = "Bundle obi-vm";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/obi-vm",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/zsh;
+			shellScript = "set -e\n# obi-vm, the box for a teammate's job on this Mac: apps/mac/app/Tools/bundle-obi-vm.sh.\nzsh \"$SRCROOT/mac/app/Tools/bundle-obi-vm.sh\"\n";
 		};
 		0B1E0C0A00000000000000F3 /* Bundle obid */ = {
 			isa = PBXShellScriptBuildPhase;

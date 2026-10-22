@@ -73,7 +73,7 @@ In order, it:
 
 0. **Runs the checks**, `swift test` and the Mac app's `MacTests`, side by side through [`scripts/tested.sh`](../scripts/tested.sh), skipping each one that already passed on this Mac on the same files (see "Tests a release skips"). `--full` runs both whatever the records say. Nothing is built unless they pass.
 1. **Bumps the version**, once it has checked that the checkout is still clean and `HEAD` hasn't moved since it started. `MARKETING_VERSION` becomes `0.2.0` and `CURRENT_PROJECT_VERSION` the git commit count including the bump commit, so build numbers only grow; both in `apps/Oby.xcodeproj`, committed as `chore(release): Oby 0.2.0 (N)`.
-2. **Archives the `Oby` scheme** (Release) and exports it with Developer ID ([`apps/ExportOptions-DeveloperID.plist`](../apps/ExportOptions-DeveloperID.plist), `teamID` filled from `OBY_TEAM_ID`), on warm caches (see "Warm builds"). Then it checks that the checkout is still clean at the bump commit, the version, that the app and obid hold arm64 and x86_64 (`lipo`), and every signature (`codesign --deep --strict`), and scans the app with gitleaks before anything leaves the Mac.
+2. **Archives the `Oby` scheme** (Release) and exports it with Developer ID ([`apps/ExportOptions-DeveloperID.plist`](../apps/ExportOptions-DeveloperID.plist), `teamID` filled from `OBY_TEAM_ID`), on warm caches (see "Warm builds"). Then it checks that the checkout is still clean at the bump commit, the version, that the app and obid hold arm64 and x86_64 (`lipo`), every signature (`codesign --deep --strict`), and `obi-vm` (see "The guest image"), and scans the app with gitleaks before anything leaves the Mac.
 3. **Notarizes the app** (`xcrun notarytool submit --keychain-profile oby-notary --wait`), staples the ticket, validates it and checks it with `spctl`. While Apple works, it scans the commits since the last `v*` tag with gitleaks, and gathers the release notes and the published appcast.
 4. **Builds `Oby-0.2.0.dmg`** from the stapled app, checks the app in it with `codesign`, signs the DMG with the Developer ID, notarizes and staples it too, then checks the DMG (`stapler validate`, `hdiutil verify`, `spctl`), the app in it (`spctl`) and a copy of the app with a quarantine flag (`spctl`, `stapler validate`).
 5. **Signs it for Sparkle** with `sign_update` and the EdDSA key in the keychain.
@@ -84,6 +84,18 @@ In order, it:
 Each step prints how long the release has run (`==> [m:ss]`). Everything lands in `build/release/` (gitignored), with `swift-test.log`, `mac-tests.log`, `archive.log`, `export.log`, `notarize-app.log` and `notarize-dmg.log` when something fails. If the release stops part way, it stops what it started in the background (the checks, a notarization) and detaches any DMG it mounted. The script prints no credential and never runs with `set -x`.
 
 Then push the commit and the tag: `git push origin HEAD v0.2.0`. Shipped Obys pick the update up within 6 hours; **Check for Updates…** gets it now.
+
+### The guest image
+
+Sharing a Mac (#797) runs teammates' jobs in a VM. `obi-vm` is built into the app by the "Bundle obi-vm" build phase (`apps/mac/app/Tools/bundle-obi-vm.sh`): arm64, the virtualization entitlement, and the SHA-256s of the image [`core/obi-vm/image.json`](../core/obi-vm/image.json) pins built in. The image itself (1.7 GB) is published once per new image, and obid fetches it when an owner turns sharing on. `release.sh` checks that `obi-vm` is arm64, has the entitlement and answers `obi-vm image` with the pinned hashes, and that the pinned image is published at `https://downloads.oby.deskree.com/vm/<root.img's SHA-256>/`, each file its pinned size (a dry run only warns).
+
+A new image (a change in `core/obi-vm/image/`):
+
+```sh
+core/obi-vm/image/build.sh <dir>            # Docker (OrbStack); writes <dir>/image.json
+cp <dir>/image.json core/obi-vm/image.json  # commit it in the change's pull request
+scripts/publish-vm-image.sh <dir>           # checks the files against the pin, uploads them, reads them back
+```
 
 ### Tests a release skips
 

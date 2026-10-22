@@ -534,6 +534,9 @@ impl Link {
         if joined {
             self.follow();
         }
+        if self.mac().on {
+            super::hosting::fetch_image_soon(self);
+        }
         let link = self.clone();
         tokio::spawn(async move {
             tokio::select! {
@@ -4365,7 +4368,7 @@ impl Link {
     /// `GET /v1/obid/sharing/mac`: this Mac's sharing, whether it can run guests, and what runs
     /// here now.
     pub fn mac_json(&self) -> Value {
-        json!({"settings": self.mac().to_json(), "ready": self.setup.ready(), "jobs": self.hosting.jobs_json(),
+        json!({"settings": self.mac().to_json(), "ready": self.setup.ready(), "image": super::hosting::image_json(self), "jobs": self.hosting.jobs_json(),
                "week": super::hosting::week(self.home(), time::now())})
     }
 
@@ -4467,7 +4470,9 @@ impl Link {
             state.sharing.clone()
         };
         self.save_sharing(&sharing);
-        if !mac.on {
+        if mac.on {
+            super::hosting::fetch_image_soon(self);
+        } else {
             self.hosting.stop(None, "sharing_off");
         }
         self.publish_runner_soon();

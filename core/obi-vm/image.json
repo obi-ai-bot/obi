@@ -1,0 +1,10 @@
+{
+  "vmlinuz": "cbc7dcd22b574dee70d2ebe575a525ed7dfeb04aaccc2da67c0b1a776d971098",
+  "initrd": "88b1d6cf08d12e9cc18aedf0b6d64b43ad0ff699451e17c6e5689b4d0a803824",
+  "root.img": "fd86b6817f831ad63da6e2f14134b6b7a101b576f5cfe560b468aa0d6e97c01c",
+  "bytes": {
+    "vmlinuz": 32956352,
+    "initrd": 35591028,
+    "root.img": 1704984576
+  }
+}

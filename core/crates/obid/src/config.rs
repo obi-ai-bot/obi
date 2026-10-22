@@ -99,6 +99,8 @@ struct File {
     vm_helper: Option<PathBuf>,
     #[serde(default)]
     vm_image: Option<PathBuf>,
+    #[serde(default)]
+    vm_image_url: Option<String>,
     /// The least seconds between two run_requests taken from one teammate's owner (900 when left
     /// out; 0 turns it off, for tests or an owner who wants that).
     #[serde(default)]
@@ -266,6 +268,9 @@ pub struct Config {
     /// (crate::sphere::hosting::Setup).
     pub vm_helper: Option<PathBuf>,
     pub vm_image: Option<PathBuf>,
+    /// `vmImageUrl`: where obid fetches the guest image from when sharing is turned on and it keeps
+    /// the image itself (no `vmImage`); https://downloads.oby.deskree.com/vm when left out.
+    pub vm_image_url: Option<String>,
     /// `guestRequestEvery`: the least seconds between two run_requests taken from one teammate's
     /// owner; 900 when left out, 0 for off (crate::sphere::hosting). Never negative.
     pub guest_request_every: Option<i64>,
@@ -586,6 +591,7 @@ impl Config {
             claude_keychain: file.claude_keychain,
             vm_helper: file.vm_helper,
             vm_image: file.vm_image,
+            vm_image_url: file.vm_image_url,
             guest_request_every: file.guest_request_every,
             guest_model_api: file.guest_model_api,
             conversation: Conversation {

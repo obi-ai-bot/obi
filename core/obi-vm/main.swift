@@ -16,6 +16,9 @@
 //     or when stdin ends, the VM is stopped hard.
 //   obi-vm signals
 //     `{"idleSeconds", "onAC", "lowPower", "thermal"}`: whether the owner is at the Mac.
+//   obi-vm image
+//     `{"vmlinuz", "initrd", "root.img"}`: the SHA-256s of the image this obi-vm boots, `{}` when
+//     it was built without them. obid fetches that image (core/obi-vm/image.json pins it).
 
 import CryptoKit
 import Foundation
@@ -327,6 +330,8 @@ let args = CommandLine.arguments
 switch args.count > 1 ? args[1] : "" {
 case "signals":
     say(signals())
+case "image":
+    say(bakedImage)
 case "run":
     let options = parse(args.dropFirst(2))
     verifyImage(options)

@@ -14,6 +14,7 @@ if [ -n "${2:-}" ]; then
 else
   echo 'let bakedImage: [String: String] = [:]' > "$hashes"
 fi
-xcrun swiftc -O -swift-version 5 ${OBI_VM_DEBUG:+-D OBI_VM_DEBUG} -o "$out" "$here/main.swift" "$hashes"
+# OBI_VM_TARGET: the target triple (the app's build phase asks for arm64-apple-macos26.0).
+xcrun swiftc -O -swift-version 5 ${OBI_VM_TARGET:+-target "$OBI_VM_TARGET"} ${OBI_VM_DEBUG:+-D OBI_VM_DEBUG} -o "$out" "$here/main.swift" "$hashes"
 rm -f "$hashes"
 codesign --force --sign "${OBI_VM_SIGN:--}" --options runtime --entitlements "$here/obi-vm.entitlements" "$out"

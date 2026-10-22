@@ -78,6 +78,20 @@ struct SharingTests {
         #expect(String(data: obid.requests.last?.body ?? Data(), encoding: .utf8) == #"{"runsOn":null}"#)
     }
 
+    @Test func theVMsImageSaysHowFarItGot() throws {
+        func mac(_ image: String?) throws -> RunnerSharingMac {
+            let json = #"{"settings": {"on": true, "when": ["away"], "who": "ask", "people": [], "allowed": [], "jobsAtOnce": 1, "size": "small", "work": "any", "maxMinutes": 120}, "ready": false, "jobs": []"# + (image.map { #", "image": "# + $0 } ?? "") + "}"
+            return try Runner.decoder.decode(RunnerSharingMac.self, from: Data(json.utf8))
+        }
+        #expect(SharingSettingsView.imageAbout(try mac(nil)) == "This Mac needs Oby’s VM before it can run anyone’s jobs.")
+        #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "none"}"#)) == "Turning it on gets the VM’s image first (1.8 GB).")
+        #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "fetching", "done": 600000000, "total": 1773531956}"#))?.hasPrefix("Getting the VM’s image: 600 MB of 1.77 GB") == true)
+        #expect(SharingSettingsView.imageAbout(try mac(#"{"state": "failed", "error": "The guest image for this Oby isn’t published (404)."}"#))?.hasSuffix("Turn sharing off and on to try again.") == true)
+        var ready = try mac(#"{"state": "ready"}"#)
+        ready.ready = true
+        #expect(SharingSettingsView.imageAbout(ready) == nil)
+    }
+
     @Test func aJobThatCameBackShowsSangamsCardWordForWord() {
         let line = "That Mac couldn’t keep running it. Your job ran there for 18 minutes and came back with its notes and its 2 commits. Run the rest on this Mac, or wait until that Mac is free again?"
         let (title, happened) = TaskDecision.cameBack(line)

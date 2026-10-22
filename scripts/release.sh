@@ -41,6 +41,9 @@ out="$root/build/release"
 notary_profile="${OBY_NOTARY_PROFILE:-oby-notary}"
 # The R2 bucket the appcast and the DMGs live in (docs/release.md).
 bucket="${OBY_R2_BUCKET:-oby-downloads}"
+# Where obid fetches the guest image obi-vm boots (core/obi-vm/image.json pins it;
+# scripts/publish-vm-image.sh puts it there): the same bucket, under vm/<root.img's SHA-256>/.
+vm_images="https://downloads.oby.deskree.com/vm"
 minimum_system="26.0"
 # What apps/config/Signing.xcconfig holds for OBY_SPARKLE_PUBLIC_KEY until the key is generated.
 placeholder_public_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
@@ -251,6 +254,29 @@ check_universal() {
     [[ "$archs" == *" arm64 "* && "$archs" == *" x86_64 "* ]] || die "${1#"$out/"} is${archs% } only, not arm64 and x86_64"
 }
 
+# obi-vm, the box for teammates' jobs (#797): arm64, signed with the virtualization entitlement,
+# built for the image core/obi-vm/image.json pins, and that image published where obid fetches it,
+# each file its pinned size. A dry run only warns about the image.
+check_obi_vm() {
+    local vm="$1" dry_run="$2" pin="$root/core/obi-vm/image.json" root_sha file bytes got published=published
+    [[ -x "$vm" ]] || die "no Contents/Helpers/obi-vm"
+    [[ "$(lipo -archs "$vm")" == arm64 ]] || die "obi-vm is $(lipo -archs "$vm"), not arm64"
+    codesign -d --entitlements - "$vm" 2>/dev/null | grep -q com.apple.security.virtualization \
+        || die "obi-vm isn't signed with com.apple.security.virtualization"
+    [[ "$("$vm" image)" == "$(jq -cS '{vmlinuz, initrd, "root.img": .["root.img"]}' "$pin")" ]] \
+        || die "obi-vm wasn't built for core/obi-vm/image.json's image"
+    root_sha="$(jq -r '.["root.img"]' "$pin")"
+    for file in vmlinuz initrd root.img; do
+        bytes="$(jq -r ".bytes[\"$file\"]" "$pin")"
+        got="$(curl -fsI --max-time 20 "$vm_images/$root_sha/$file" | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}' || true)"
+        if [[ "$got" != "$bytes" ]]; then
+            local why="the guest image's $file isn't published at $vm_images/$root_sha/ (${got:-nothing} bytes, not $bytes): scripts/publish-vm-image.sh"
+            if $dry_run; then note "warning: $why"; published="NOT published"; else die "$why"; fi
+        fi
+    done
+    note "obi-vm: arm64, its entitlement, the image ${root_sha:0:12}… $published"
+}
+
 upload_r2() {
     local file="$1" name="$2" type="$3"
     if command -v wrangler >/dev/null 2>&1; then
@@ -288,7 +314,7 @@ main() {
     [[ -n "$version" ]] || die "usage: scripts/release.sh <version> [--dry-run] [--full] [--notes <file>]"
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "the version is X.Y.Z, like 1.2.3"
     [[ "$(uname)" == "Darwin" ]] || die "runs on a Mac with Xcode"
-    for tool in xcodebuild xcrun swift hdiutil codesign xmllint plutil git; do
+    for tool in xcodebuild xcrun swift hdiutil codesign xmllint plutil git jq curl; do
         command -v "$tool" >/dev/null 2>&1 || die "$tool isn't installed"
     done
 
@@ -433,6 +459,7 @@ main() {
     [[ "$built" == "$version ($build)" ]] || die "the app says $built, not $version ($build)"
     check_universal "$app/Contents/MacOS/$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")"
     check_universal "$app/Contents/Helpers/obid"
+    check_obi_vm "$app/Contents/Helpers/obi-vm" "$dry_run"
     codesign --verify --deep --strict "$app" || die "Oby.app doesn't verify"
     note "Oby $built, arm64 and x86_64, feed $(plutil -extract SUFeedURL raw -o - "$app/Contents/Info.plist")"
 

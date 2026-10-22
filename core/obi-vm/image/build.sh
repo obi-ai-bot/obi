@@ -24,6 +24,10 @@ docker run --rm --platform linux/arm64 -v "$out:/out" debian:bookworm@sha256:854
   mb=$(( $(du -sm /r | cut -f1) * 13 / 10 + 64 ))
   rm -f /out/root.img; mke2fs -q -t ext4 -L obi-root -d /r /out/root.img ${mb}M'
 cd "$out"
-printf '{"vmlinuz": "%s", "initrd": "%s", "root.img": "%s"}\n' \
-  "$(shasum -a 256 vmlinuz | cut -d" " -f1)" "$(shasum -a 256 initrd | cut -d" " -f1)" "$(shasum -a 256 root.img | cut -d" " -f1)" > image.json
+# Their SHA-256s and sizes: copied to core/obi-vm/image.json, it pins the image obi-vm is built for
+# and the one obid fetches (scripts/publish-vm-image.sh).
+sum() { shasum -a 256 "$1" | cut -d" " -f1; }
+size() { stat -f %z "$1"; }
+printf '{\n  "vmlinuz": "%s",\n  "initrd": "%s",\n  "root.img": "%s",\n  "bytes": {"vmlinuz": %s, "initrd": %s, "root.img": %s}\n}\n' \
+  "$(sum vmlinuz)" "$(sum initrd)" "$(sum root.img)" "$(size vmlinuz)" "$(size initrd)" "$(size root.img)" > image.json
 ls -la "$out"
