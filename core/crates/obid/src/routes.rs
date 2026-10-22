@@ -394,13 +394,6 @@ pub async fn dispatch(
             ));
         }
     }
-    // The guest VM's image carries Claude Code only (core/obi-vm/image/Dockerfile).
-    if new.runs_on.is_some() && new.agent.as_deref().is_some_and(|a| a != "claude") {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "Only Claude Code jobs run on a teammate's Mac so far: the guest VM has no Codex yet. Run this job here.",
-        ));
-    }
     let job = shared
         .jobs
         .create(new)

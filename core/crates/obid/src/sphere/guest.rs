@@ -160,7 +160,7 @@ pub async fn run_turn(
     mut on_event: impl FnMut(AgentEvent),
 ) -> Result<Turn, String> {
     if ask.agent != "claude" {
-        return Err("Only Claude Code jobs run on a teammate's Mac so far: the guest VM has no Codex yet. Run this job here.".into());
+        return Err(crate::jobs::GUEST_ONLY_CLAUDE.into());
     }
     // The job's model calls use this owner's own Claude Code login, from this Mac: it must be there,
     // and good for a while (Claude Code refreshes it when it runs here). On a share of a teammate's

@@ -16,14 +16,16 @@
 // It writes what it saw to guest.log beside --kernel, for the test to read.
 
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
-const say = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+// Written at once, as obi-vm's are: a pipe's writes are otherwise left for later, and lost to an
+// exit right after them.
+const say = (o) => writeSync(1, JSON.stringify(o) + "\n");
 const args = process.argv.slice(2);
 
 if (args[0] === "signals") {

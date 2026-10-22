@@ -10,7 +10,8 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aws_lc_rs::digest;
@@ -122,11 +123,49 @@ pub fn holds(dir: &Path, pin: &Pin) -> bool {
             .is_some_and(|kept| &kept == pin)
 }
 
-/// Takes out what a fetch that was stopped left: its downloads and unpacked files.
+/// Takes out what a fetch that was stopped left: the file it was downloading or unpacking (the
+/// files it fetched whole stay, and aren't fetched again).
 pub fn clear_partial(dir: &Path) {
     for name in FILES {
         let _ = std::fs::remove_file(dir.join(format!("{name}.zst.part")));
         let _ = std::fs::remove_file(dir.join(format!("{name}.unpack")));
+    }
+}
+
+/// Stops a fetch (sharing turned off): its task, and what it left.
+pub fn cancel(task: Option<tokio::task::AbortHandle>, dir: &Path) {
+    if let Some(task) = task {
+        task.abort();
+    }
+    clear_partial(dir);
+}
+
+/// [`fetch`], unless `stop` comes first (obid stopping): then what it left goes, and it answers
+/// none.
+pub async fn fetch_unless(
+    base: &str,
+    dir: &Path,
+    pin: &Pin,
+    progress: &Mutex<Progress>,
+    stall: Duration,
+    stop: impl std::future::Future<Output = ()>,
+) -> Option<Result<(), String>> {
+    tokio::select! {
+        fetched = fetch(base, dir, pin, progress, stall) => Some(fetched),
+        () = stop => {
+            clear_partial(dir);
+            None
+        }
+    }
+}
+
+/// Set when a fetch is dropped (cancelled, or obid stopping): its unpacking, which runs on a
+/// thread of its own, stops too and takes out what it wrote.
+struct Stopped(Arc<AtomicBool>);
+
+impl Drop for Stopped {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
     }
 }
 
@@ -177,11 +216,18 @@ pub async fn fetch(
     };
     // The record goes first: a half-fetched image is never taken for a whole one.
     let _ = std::fs::remove_file(dir.join("image.json"));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let _dropped = Stopped(stopped.clone());
     for name in FILES {
         let zst = format!("{name}.zst");
         let size = size_of(pin, &zst).unwrap_or(0);
         let path = dir.join(name);
-        if sha256_of(&path).as_deref() == Some(pin[name].as_str()) {
+        let reading = path.clone();
+        let there = tokio::task::spawn_blocking(move || sha256_of(&reading))
+            .await
+            .ok()
+            .flatten();
+        if there.as_deref() == Some(pin[name].as_str()) {
             progress.lock().unwrap().done += size;
             continue;
         }
@@ -203,8 +249,8 @@ pub async fn fetch(
         // Unpacked to a file of its own, and moved into place only when it's the pinned one.
         let unpack = dir.join(format!("{name}.unpack"));
         let most = size_of(pin, name).unwrap_or(0);
-        let (from, to) = (part.clone(), unpack.clone());
-        let unpacked = tokio::task::spawn_blocking(move || unzstd(&from, &to, most))
+        let (from, to, stop) = (part.clone(), unpack.clone(), stopped.clone());
+        let unpacked = tokio::task::spawn_blocking(move || unzstd(&from, &to, most, &stop))
             .await
             .map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(&part);
@@ -277,8 +323,21 @@ async fn download(
 }
 
 /// Unpacks the zstd file `from` (one frame or more) into `to`, at most `most` bytes: its SHA-256
-/// and size.
-fn unzstd(from: &Path, to: &Path, most: u64) -> Result<(String, u64), String> {
+/// and size. When `stop` is set part way, `to` goes and it answers why.
+fn unzstd(from: &Path, to: &Path, most: u64, stop: &AtomicBool) -> Result<(String, u64), String> {
+    let unpacked = unzstd_into(from, to, most, stop);
+    if unpacked.is_err() {
+        let _ = std::fs::remove_file(to);
+    }
+    unpacked
+}
+
+fn unzstd_into(
+    from: &Path,
+    to: &Path,
+    most: u64,
+    stop: &AtomicBool,
+) -> Result<(String, u64), String> {
     use std::io::{BufRead, Read, Write};
     let broken = |_| "The guest image didn't unpack.".to_owned();
     let mut source = std::io::BufReader::new(std::fs::File::open(from).map_err(|e| e.to_string())?);
@@ -290,6 +349,9 @@ fn unzstd(from: &Path, to: &Path, most: u64) -> Result<(String, u64), String> {
         let mut frame = ruzstd::decoding::StreamingDecoder::new(&mut source)
             .map_err(|_| "The guest image didn't unpack.".to_owned())?;
         loop {
+            if stop.load(Ordering::SeqCst) {
+                return Err("Fetching the guest image was stopped.".into());
+            }
             let n = frame.read(&mut buf).map_err(broken)?;
             if n == 0 {
                 break;
@@ -526,6 +588,13 @@ mod tests {
         assert!(why.contains("larger than this Oby pins it"), "{why}");
         let _ = std::fs::remove_dir_all(d);
 
+        // Unpacks to more than the pin says: stopped at the pinned size, not unpacked whole.
+        let mut small = pin.clone();
+        small.insert("root.img.bytes".into(), "1000".into());
+        let (why, d) = refused(&serve(served(&pin, &bodies)).await, &small).await;
+        assert!(why.contains("unpacks to more than it should"), "{why}");
+        let _ = std::fs::remove_dir_all(d);
+
         // Cut off part way.
         let mut paths = served(&pin, &bodies);
         let Serve::Body(packed) = paths[&root].clone() else {
@@ -576,19 +645,48 @@ mod tests {
             Serve::Stall,
         );
         let base = serve(paths).await;
+
+        // obid stopping, while root.img's download hangs.
         let dir = dir();
         let progress = Mutex::new(Progress::none());
-        // Stopped while root.img's download hangs, as turning sharing off or obid stopping does.
-        let stopped = tokio::time::timeout(
-            Duration::from_millis(800),
-            fetch(&base, &dir, &pin, &progress, STALL),
-        )
-        .await;
-        assert!(stopped.is_err(), "it was still fetching");
-        assert!(dir.join("root.img.zst.part").exists());
-        clear_partial(&dir);
+        let stop = tokio::time::sleep(Duration::from_millis(800));
+        let stopped = fetch_unless(&base, &dir, &pin, &progress, STALL, stop).await;
+        assert!(stopped.is_none(), "it wasn't stopped: {stopped:?}");
         assert!(!dir.join("root.img.zst.part").exists());
         assert!(!holds(&dir, &pin));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Sharing turned off, at the same point.
+        let dir = Arc::new(super::tests::dir());
+        let (d, b, p) = (dir.clone(), base.clone(), pin.clone());
+        let task = tokio::spawn(async move {
+            let progress = Mutex::new(Progress::none());
+            fetch(&b, &d, &p, &progress, STALL).await
+        });
+        while !dir.join("root.img.zst.part").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        cancel(Some(task.abort_handle()), &dir);
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(!dir.join("root.img.zst.part").exists());
+        assert!(!holds(&dir, &pin));
+        let _ = std::fs::remove_dir_all(&*dir);
+    }
+
+    #[test]
+    fn unpacking_stops_when_the_fetch_does_and_takes_out_what_it_wrote() {
+        let dir = dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (from, to) = (dir.join("root.img.zst"), dir.join("root.img.unpack"));
+        std::fs::write(&from, zst(&bodies()["root.img"])).unwrap();
+        // A fetch dropped part way sets its flag.
+        let stop = Arc::new(AtomicBool::new(false));
+        drop(Stopped(stop.clone()));
+        let why = unzstd(&from, &to, 1 << 20, &stop).unwrap_err();
+        assert!(why.contains("was stopped"), "{why}");
+        assert!(!to.exists());
+        let go = AtomicBool::new(false);
+        assert_eq!(unzstd(&from, &to, 1 << 20, &go).unwrap().1, 300_000);
         let _ = std::fs::remove_dir_all(dir);
     }
 

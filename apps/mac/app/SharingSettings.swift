@@ -64,7 +64,8 @@ struct SharingSettingsView: View {
         switch image.state {
         case "fetching": return "Getting the VM’s image: \(size(image.done)) of \(size(image.total))."
         case "failed": return image.error ?? "The VM’s image couldn’t be fetched."
-        default: return "Turning it on gets the VM’s image first (\(size(image.total)))."
+        // No size: obid knows no image (obi-vm isn't in this build).
+        default: return (image.total ?? 0) > 0 ? "Turning it on gets the VM’s image first (\(size(image.total)))." : "The VM isn’t bundled in this build of Oby."
         }
     }
 

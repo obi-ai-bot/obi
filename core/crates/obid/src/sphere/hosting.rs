@@ -295,13 +295,18 @@ pub fn fetch_image_soon(link: &Arc<Link>) {
             );
             return;
         };
-        let dir = &setup.image.dir;
-        let fetched = tokio::select! {
-            fetched = super::vm_image::fetch(&url, dir, &pin, progress, super::vm_image::STALL) => fetched,
-            () = super::link::stopped(stopping) => {
-                super::vm_image::clear_partial(dir);
-                return;
-            }
+        let stop = super::link::stopped(stopping);
+        let Some(fetched) = super::vm_image::fetch_unless(
+            &url,
+            &setup.image.dir,
+            &pin,
+            progress,
+            super::vm_image::STALL,
+            stop,
+        )
+        .await
+        else {
+            return;
         };
         if let Err(why) = fetched {
             tracing::warn!("sphere: the guest image wasn't fetched: {why}");
@@ -314,10 +319,8 @@ pub fn fetch_image_soon(link: &Arc<Link>) {
 
 /// Stops fetching the guest image, when sharing is turned off: what it downloaded so far goes.
 pub fn cancel_image_fetch(link: &Link) {
-    if let Some(task) = link.hosting.fetch.lock().unwrap().take() {
-        task.abort();
-    }
-    super::vm_image::clear_partial(&link.hosting_setup().image.dir);
+    let task = link.hosting.fetch.lock().unwrap().take();
+    super::vm_image::cancel(task, &link.hosting_setup().image.dir);
     *link.hosting.image.lock().unwrap() = super::vm_image::Progress::none();
 }
 
@@ -1517,12 +1520,12 @@ async fn watch_job(
     loop {
         tokio::select! {
             () = shared.done_notify.notified() => {
-                // What it used, once more before it powers off.
-                if vm.command("usage").await {
-                    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(2), vm.next()).await {
-                        if note_usage(shared, &event) || event["event"] == "stopped" {
-                            break;
-                        }
+                // What it used, once more before it powers off; and whatever it said already,
+                // even when it's gone before it's asked (its last words are still to be read).
+                let _ = vm.command("usage").await;
+                while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(2), vm.next()).await {
+                    if note_usage(shared, &event) || event["event"] == "stopped" {
+                        break;
                     }
                 }
                 return ended(coming_back);
