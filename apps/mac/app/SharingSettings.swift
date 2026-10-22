@@ -103,6 +103,15 @@ struct SharingSettingsView: View {
                                 .toggleStyle(.set)
                         }
                     }
+                    // Chosen, not in the Obysphere yet: offered nothing until they join.
+                    ForEach((mac.waiting ?? []).filter { p in !sphere.members.contains { $0.active && $0.owner == p } }, id: \.self) { person in
+                        SetRow(RunnerMac.person(person), about: "Waiting to join") {
+                            Toggle("Share with \(RunnerMac.person(person))", isOn: Binding(
+                                get: { settings.people.contains(person) },
+                                set: { on in change { $0.people = on ? $0.people + [person] : $0.people.filter { $0 != person } } }))
+                                .toggleStyle(.set)
+                        }
+                    }
                 }
                 SetRow("Jobs at once") {
                     SetSelect("Jobs at once", selection: binding(\.jobsAtOnce, { $0 }, { $0 }), options: [(1, "1"), (2, "2"), (3, "3")])

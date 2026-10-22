@@ -12,7 +12,8 @@ struct SharingTests {
                   "size": "small", "work": "any", "maxMinutes": 120},
      "ready": true,
      "jobs": [{"correlationId": "c-1", "fromOwner": "sangam", "title": "Fix the login retry", "repo": "deskree-inc/tetrix-ee",
-               "agent": "claude", "started": "2026-10-21T16:00:00Z", "state": "paused"}]}
+               "agent": "claude", "started": "2026-10-21T16:00:00Z", "state": "paused"}],
+     "waiting": ["bob"]}
     """#
 
     @Test func readsAndChangesThisMacsSharingAndStopsAJob() async throws {
@@ -26,6 +27,7 @@ struct SharingTests {
         let mac = try #require(try await obid.runner.sharingMac())
         #expect(mac.settings.on && mac.ready)
         #expect(mac.jobs.first?.state == "paused")
+        #expect(mac.waiting == ["bob"])
         var settings = mac.settings
         settings.jobsAtOnce = 2
         _ = try await obid.runner.setSharingMac(settings)

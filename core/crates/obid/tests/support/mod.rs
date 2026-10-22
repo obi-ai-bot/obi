@@ -1133,6 +1133,18 @@ async fn put_runner(
             "not a runner status",
         );
     }
+    // As the Sphere does: `for` names only owners who have joined.
+    if let Some(named) = body["for"].as_array()
+        && let Some(unknown) = named
+            .iter()
+            .find(|o| !state.members.iter().any(|m| m["owner"] == **o))
+    {
+        return sphere_error(
+            StatusCode::CONFLICT,
+            "conflict",
+            &format!("the status's for names {unknown}, who hasn't joined this Sphere"),
+        );
+    }
     state.runners.insert(obi.clone(), body);
     let member = state
         .members

@@ -1704,6 +1704,17 @@ pub async fn status_now(link: &Arc<Link>) -> Option<Value> {
     if !mac.on {
         return None;
     }
+    // Offered only to the people chosen who have joined: one name the Sphere doesn't know would
+    // refuse the whole status. None of them yet: offered to nobody, so nothing is published.
+    let offered: Value = if mac.who == "people" {
+        let (joined, _) = link.joined_now(&mac.people).await;
+        if joined.is_empty() {
+            return None;
+        }
+        json!(joined)
+    } else {
+        json!("*")
+    };
     let setup = link.hosting_setup();
     let slots_free = link.hosting.count() < usize::from(mac.jobs_at_once);
     let signals = vm::signals(&setup.helper).await.ok();
@@ -1714,11 +1725,6 @@ pub async fn status_now(link: &Arc<Link>) -> Option<Value> {
             .lock()
             .unwrap()
             .show(actually_free, time::now(), jitter());
-    let offered: Value = if mac.who == "people" {
-        json!(mac.people)
-    } else {
-        json!("*")
-    };
     Some(
         json!({"free": is_free, "slots": mac.jobs_at_once, "size": mac.size, "agents": ["claude"],
                 "kinds": ["job"], "for": offered}),
