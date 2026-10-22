@@ -1,0 +1,41 @@
+#!/bin/sh
+# PID 1 in a teammate's job VM (#797). The VM has no network device: its only link is vsock to
+# obid on the host: 7002 for the job disk's key, read here once as root before anything else runs;
+# 7000 for the job (its request, code, transcript and result) and 7001 for the model's API, which
+# obid relays to the member's Oby. 7000 and 7001 are reached from inside on 127.0.0.1 through socat.
+# The job's disk is encrypted with a key that lives only in obid's memory and this kernel's: when
+# the VM ends, the disk can't be read again.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sys /sys 2>/dev/null
+mount -t devtmpfs dev /dev 2>/dev/null
+mkdir -p /dev/pts /dev/shm && mount -t devpts devpts /dev/pts 2>/dev/null
+mount -t tmpfs -o mode=1777 tmpfs /tmp
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm
+mount -t tmpfs tmpfs /run
+ip link set lo up
+modprobe vmw_vsock_virtio_transport
+modprobe dm_crypt
+hostname obi-guest
+
+# Powers off, and never goes on: if the power-off fails, it waits forever (the host's limit ends it).
+off() {
+  sync; umount /work 2>/dev/null; cryptsetup close work 2>/dev/null
+  echo o > /proc/sysrq-trigger
+  while :; do sleep 3600; done
+}
+
+# The disk's key first, as root, straight from obid on its own port (64 bytes, given once).
+socat -u VSOCK-CONNECT:2:7002 STDOUT 2>/dev/null | head -c 64 \
+  | cryptsetup open --type plain --cipher aes-xts-plain64 --key-size 512 --key-file - /dev/vdb work \
+  || { echo "obi-guest: no disk key"; off; }
+
+socat TCP-LISTEN:7000,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:7000 2>/dev/null &
+socat TCP-LISTEN:7001,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:7001 2>/dev/null &
+for i in 1 2 3 4 5 6 7 8 9 10; do curl -fsS -o /dev/null http://127.0.0.1:7000/hello && break; sleep 0.1; done
+
+mkfs.ext4 -q -E lazy_itable_init=1,lazy_journal_init=1 /dev/mapper/work && mount /dev/mapper/work /work \
+  || { echo "obi-guest: no job disk"; off; }
+mkdir -p /work/home && chown -R obi:obi /work
+setpriv --reuid=obi --regid=obi --init-groups --reset-env /usr/local/bin/obi-job
+off

@@ -1,0 +1,59 @@
+#!/bin/sh
+# The job, as the unprivileged `obi` in its VM (#797). Everything here is the member's own work:
+# their request, their code, their agent. It gets the code as a git bundle, runs the agent, and
+# sends back the transcript as it goes, then a bundle of its commits.
+set -u
+export HOME=/work/home TMPDIR=/tmp PATH=/usr/local/bin:/usr/bin:/bin
+export DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DO_NOT_TRACK=1
+C=http://127.0.0.1:7000
+cd /work
+done_() { jq -nc --argjson exit "$1" --arg note "$2" '{exit: $exit, note: $note}' | curl -fsS -H 'content-type: application/json' --data-binary @- $C/done >/dev/null; exit 0; }
+
+curl -fsS $C/job -o job.json || done_ 1 "no job"
+curl -fsS $C/bundle -o in.bundle || done_ 1 "no code"
+branch=$(jq -r .branch job.json); agent=$(jq -r .agent job.json); model=$(jq -r '.model // empty' job.json)
+title=$(jq -r .title job.json)
+git config --global user.name "$(jq -r .author.name job.json)"
+git config --global user.email "$(jq -r .author.email job.json)"
+git config --global init.defaultBranch main
+git clone -q -b obi-base in.bundle repo || done_ 1 "the code bundle didn't clone"
+cd repo && git checkout -q -b "$branch" || done_ 1 "no branch"
+
+# obid asks for the job back (the owner came back and stayed, the time limit, Stop): the agent
+# stops, and what it did so far is committed and sent back with a note.
+( curl -fsS $C/return -o /work/return 2>/dev/null && { pkill -TERM -x claude; pkill -TERM -x codex; } ) &
+
+case "$agent" in
+claude)
+  export ANTHROPIC_BASE_URL=http://127.0.0.1:7001 ANTHROPIC_API_KEY=obi-relay-placeholder
+  jq -r .request ../job.json \
+    | claude -p --output-format stream-json --verbose --permission-mode bypassPermissions ${model:+--model "$model"} \
+    | curl -sS -T - -H 'content-type: application/x-ndjson' $C/transcript >/dev/null
+  ;;
+codex)
+  mkdir -p "$HOME/.codex"
+  cat > "$HOME/.codex/config.toml" <<TOML
+model_provider = "obi"
+[model_providers.obi]
+name = "Oby relay"
+base_url = "http://127.0.0.1:7001/v1"
+env_key = "OBI_RELAY_KEY"
+wire_api = "responses"
+TOML
+  export OBI_RELAY_KEY=obi-relay-placeholder
+  jq -r .request ../job.json \
+    | codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${model:+-m "$model"} - \
+    | curl -sS -T - -H 'content-type: application/x-ndjson' $C/transcript >/dev/null
+  ;;
+*) done_ 1 "unknown agent" ;;
+esac
+status=$?
+note=""
+[ -s /work/return ] && note=$(head -c 200 /work/return) && title="$title (stopped: $note)"
+
+git add -A && git -c commit.gpgsign=false commit -qm "$title" 2>/dev/null
+if [ "$(git rev-list --count obi-base..HEAD)" -gt 0 ]; then
+  git bundle create -q ../out.bundle obi-base..HEAD "$branch" && curl -fsS -T ../out.bundle $C/commits >/dev/null \
+    || done_ 1 "the commits didn't go back"
+fi
+done_ $status "$note"
