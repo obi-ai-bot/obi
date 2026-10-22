@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="apps/icon/exports/oby-1024.png" width="128" alt="Oby">
+  <img src="docs/images/oby-logo.png" width="128" alt="Oby">
 </p>
 
 <h1 align="center">Oby</h1>
