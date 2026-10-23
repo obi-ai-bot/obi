@@ -1862,7 +1862,7 @@ Outside systems reach obid through a hook (#1128): an address on Oby's control p
 
 **Datadog monitors** (`datadog`, #1313). Datadog sends whatever payload it's given, so the Mac's sheet gives the owner Oby's, and obid reads nothing else: `{"oby": 1, "id": "$ID", "monitor": "$ALERT_ID", "cycle": "$ALERT_CYCLE_KEY", "transition": "$ALERT_TRANSITION", "type": "$ALERT_TYPE", "priority": "$ALERT_PRIORITY", "service": "$TAGS[service]", "title": "$EVENT_TITLE", "link": "$LINK", "date": "$DATE"}`. A body that isn't it (no `"oby": 1`, or a typed field out of its form: digits for `id`, `monitor` and `date`, the cycle's letters, digits, `-` and `_`, Datadog's lists for the transition and type, `P1` to `P5` or nothing for the priority) is `202`, makes nothing, and is recorded as `unreadable`.
 
-- `Triggered` (and `Re-Triggered`, `Renotify`) becomes one offer per cycle, keyed `<hook name>:<cycle>`: title `Alert: <service> (<severity>)`, `critical` for `P1` and `error` otherwise, text `Datadog says monitor <monitor> triggered on <service>.`; the project is the `service` tag when it's a plain name, else the hook's name. Quoted: the title and the link.
+- `Triggered` (and `Re-Triggered`, and `Renotify` of an alert: a renotified Warn or No Data is none) becomes one offer per cycle, keyed `<hook name>:<cycle>`: title `Alert: <service> (<severity>)`, `critical` for `P1` and `error` otherwise, text `Datadog says monitor <monitor> triggered on <service>.`; the project is the `service` tag when it's a plain name, else the hook's name. Quoted: the title and the link.
 - `Recovered` settles the cycle's open offer. `Warn`, `Re-Warn`, `No Data` and `Re-No Data` make nothing.
 
 The body is never logged, and nothing here writes it anywhere.

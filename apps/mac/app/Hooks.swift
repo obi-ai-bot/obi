@@ -53,7 +53,7 @@ extension Runner {
     struct HookRow: Decodable, Equatable, Sendable {
         struct Delivery: Decodable, Equatable, Sendable {
             var at: Date
-            /// `accepted`, `duplicate`, `bad signature`, `too large` or `too many`.
+            /// `accepted`, `duplicate`, `bad signature`, `too large`, `too many` or `unreadable`.
             var result: String
         }
         var id: String

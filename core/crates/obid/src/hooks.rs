@@ -649,15 +649,18 @@ pub fn monitor(hook: &Hook, body: &[u8]) -> Option<Monitor> {
         return None;
     }
     let transition = text("transition");
+    let kind = text("type");
+    if !matches!(kind, "error" | "warning" | "success" | "info") {
+        return None;
+    }
     let (triggered, recovered) = match transition {
-        "Triggered" | "Re-Triggered" | "Renotify" => (true, false),
+        "Triggered" | "Re-Triggered" => (true, false),
+        // Datadog renotifies a monitor in Warn or No Data too: only an alert's renotification counts.
+        "Renotify" => (kind == "error", false),
         "Recovered" => (false, true),
         "Warn" | "Re-Warn" | "No Data" | "Re-No Data" => (false, false),
         _ => return None,
     };
-    if !matches!(text("type"), "error" | "warning" | "success" | "info") {
-        return None;
-    }
     let severity = match text("priority") {
         "P1" => "critical",
         "" | "P2" | "P3" | "P4" | "P5" => "error",
@@ -1631,6 +1634,18 @@ mod tests {
         );
         let warn = monitor(&hook("datadog", None), &datadog("Warn", "P1")).unwrap();
         assert!(!warn.triggered && !warn.recovered);
+        // Another cycle is another card; a renotification of a monitor in Warn is none.
+        let mut next: Value = serde_json::from_slice(&datadog("Triggered", "P1")).unwrap();
+        next["cycle"] = json!("7421139999-cd34");
+        let other = monitor(&hook("datadog", None), next.to_string().as_bytes()).unwrap();
+        assert_ne!(other.key, found.key);
+        next["transition"] = json!("Renotify");
+        next["type"] = json!("warning");
+        assert!(
+            !monitor(&hook("datadog", None), next.to_string().as_bytes())
+                .unwrap()
+                .triggered
+        );
         // Not Oby's payload, or a field out of its form: nothing.
         assert!(monitor(&hook("datadog", None), br#"{"title":"hi"}"#).is_none());
         let mut odd: Value = serde_json::from_slice(&datadog("Triggered", "P1")).unwrap();

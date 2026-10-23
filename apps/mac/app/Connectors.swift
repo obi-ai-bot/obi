@@ -355,7 +355,7 @@ nonisolated enum Connectors {
     /// there, saying what its last delivery came to. Only obid on this Mac gets buttons: the hook's
     /// address is made with this Mac's key, and deliveries come through its tunnel.
     static func alerting(_ tool: AlertingTool, hook: Runner.HookRow?, place: String, local: Bool) -> Connector {
-        let refused = ["bad signature", "too many"].contains(hook?.lastDelivery?.result ?? "")
+        let refused = ["bad signature", "too many", "unreadable"].contains(hook?.lastDelivery?.result ?? "")
         var last = hook?.lastDelivery.map { "Last delivery: \($0.result)." } ?? "No delivery yet."
         // PagerDuty turns a webhook off after it keeps failing (#1312).
         if refused && tool.secretFromTool { last += " \(tool.name) may have turned this webhook off: check its secret." }

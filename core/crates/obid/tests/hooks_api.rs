@@ -565,6 +565,22 @@ fn datadog_monitors_become_offers_per_cycle_and_settle() {
         .cloned()
         .collect();
     assert_eq!(open.len(), 1, "{open:#?}");
+    // Another cycle is another card; Recovered settles only its own cycle's.
+    assert_eq!(
+        deliver(&obid, &id, &datadog_event("Triggered", "c-3"), &headers).0,
+        202
+    );
+    let open_events = || {
+        call(&obid, "GET", "/v1/inbox", None)
+            .body
+            .as_array()
+            .map_or(0, |items| {
+                items.iter().filter(|i| i["kind"] == "pluginEvent").count()
+            })
+    };
+    within(10, "the next cycle's offer", || {
+        (open_events() == 2).then_some(())
+    });
     assert_eq!(
         deliver(&obid, &id, &datadog_event("Recovered", "c-1"), &headers).0,
         202
@@ -572,6 +588,7 @@ fn datadog_monitors_become_offers_per_cycle_and_settle() {
     within(10, "the settled monitor", || {
         inbox_item(&obid, "Alert: api (critical)", "done")
     });
+    assert_eq!(open_events(), 1, "the next cycle's card stays open");
     assert_eq!(
         deliver(&obid, &id, br#"{"text":"Datadog's own payload"}"#, &headers).0,
         202
