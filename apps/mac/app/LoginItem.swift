@@ -117,7 +117,7 @@ final class RunnerLoginItem {
             case .nothing: break
             case .register: register()
             case .reregister(let why): reregister(because: why)
-            case .restart: Self.restart()
+            case .restart: await Self.restartWhenIdle()
             }
         }
     }
@@ -151,15 +151,25 @@ final class RunnerLoginItem {
     /// old endpoints) until it starts again, while the new app asks it for new ones ("There's no
     /// such endpoint", seen 2026-10-23 on the MacBook Air after updating to 0.3.0). The file's
     /// status-change time is when it was written on this disk, which an archive can't set.
-    nonisolated static func outdated(_ printed: String? = launchd(label)) -> Bool {
-        guard let printed else { return false }
+    /// Never in a Debug build: Xcode writes `Helpers/obid` again at every build, changed or not.
+    nonisolated static func outdated(_ printed: String? = launchd(label), debug: Bool = isDebug) -> Bool {
+        guard !debug, let printed, let found = running(printed), let started = started(found.pid),
+              let replaced = changed(found.program) else { return false }
+        return stale(started: started, replaced: replaced)
+    }
+
+    /// obid's executable and pid in launchctl's `print`. An SMAppService job names its program
+    /// relative to the app that registered it, `program identifier = Contents/Helpers/obid (mode: 1)`
+    /// (#692's check); a plain launch agent prints `program = <path>`.
+    nonisolated static func running(_ printed: String, bundle: String = Bundle.main.bundlePath) -> (program: String, pid: Int32)? {
         let value = { (key: String) in
             printed.split(separator: "\n").lazy.map { $0.trimmingCharacters(in: .whitespaces) }
                 .first { $0.hasPrefix("\(key) = ") }.map { String($0.dropFirst(key.count + 3)) }
         }
-        guard let program = value("program"), let pid = value("pid").flatMap(Int32.init),
-              let started = started(pid), let replaced = changed(program) else { return false }
-        return stale(started: started, replaced: replaced)
+        guard let pid = value("pid").flatMap(Int32.init) else { return nil }
+        if let program = value("program") { return (program, pid) }
+        guard let relative = value("program identifier")?.components(separatedBy: " (mode:")[0] else { return nil }
+        return (URL(filePath: bundle).appending(path: relative).path, pid)
     }
 
     /// Started before the executable was replaced, with a second's slack for clocks' rounding.
@@ -180,6 +190,21 @@ final class RunnerLoginItem {
         var info = stat()
         guard stat(path, &info) == 0 else { return nil }
         return Date(timeIntervalSince1970: TimeInterval(info.st_ctimespec.tv_sec) + TimeInterval(info.st_ctimespec.tv_nsec) / 1_000_000_000)
+    }
+
+    /// Restarts obid once it runs no job, so no agent loses the turn it's in (obid drains before its
+    /// own updates the same way). An obid that doesn't say restarts at once: the new app can't use it.
+    /// ponytail: stops waiting after 10 minutes, so a job that runs for hours doesn't leave the new
+    /// app on the old engine; that job then loses its turn, as at any restart.
+    nonisolated static func restartWhenIdle() async {
+        struct Busy: Decodable { let running: Int }
+        for _ in 0..<20 {
+            guard let token = LocalRunner.token(),
+                  let busy: Busy = try? await Runner(base: LocalRunner.url, token: token).call("GET", "v1/status"),
+                  busy.running > 0 else { break }
+            try? await Task.sleep(for: .seconds(30))
+        }
+        restart()
     }
 
     /// Restarts obid with the executable now in the app (`launchctl kickstart -k`). Its jobs carry

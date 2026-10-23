@@ -143,17 +143,22 @@ struct LoginItemTests {
         #expect(RunnerLoginItem.stale(started: now.addingTimeInterval(-3600), replaced: now))
         #expect(!RunnerLoginItem.stale(started: now, replaced: now.addingTimeInterval(-3600)))
         #expect(!RunnerLoginItem.stale(started: now, replaced: now), "the same moment is not stale")
-        // Read from launchctl's own words: this test process, started before a file written now, is outdated.
+        // launchctl's own words for obid (#692): an SMAppService job names its program relative to the app.
+        let printed = "gui/501/com.deskree.oby.obid = {\n\tstate = running\n\tprogram identifier = Contents/Helpers/obid (mode: 1)\n\tpid = 4242\n}"
+        let found = try #require(RunnerLoginItem.running(printed, bundle: "/Applications/Oby.app"))
+        #expect(found.program == "/Applications/Oby.app/Contents/Helpers/obid" && found.pid == 4242)
+        #expect(RunnerLoginItem.running("program = /usr/local/bin/obid\npid = 7")?.program == "/usr/local/bin/obid")
+        #expect(RunnerLoginItem.running(printed.replacingOccurrences(of: "pid = 4242", with: "")) == nil, "no pid, no restart")
+        // This test process and a file written now: outdated exactly when it started before the file, and never in Debug.
         let file = FileManager.default.temporaryDirectory.appending(path: "obid-\(UUID().uuidString)")
         try Data().write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
         let pid = ProcessInfo.processInfo.processIdentifier
-        let printed = "gui/501/com.deskree.oby.obid = {\n\tstate = running\n\tprogram = \(file.path)\n\tpid = \(pid)\n}"
-        if try #require(RunnerLoginItem.started(pid)) < Date().addingTimeInterval(-1.5) {
-            #expect(RunnerLoginItem.outdated(printed))
-        }
-        #expect(!RunnerLoginItem.outdated(printed.replacingOccurrences(of: "pid = \(pid)", with: "")), "no pid, no restart")
-        #expect(!RunnerLoginItem.outdated(nil))
+        let mine = "program = \(file.path)\npid = \(pid)"
+        let stale = RunnerLoginItem.stale(started: try #require(RunnerLoginItem.started(pid)), replaced: try #require(RunnerLoginItem.changed(file.path)))
+        #expect(RunnerLoginItem.outdated(mine, debug: false) == stale)
+        #expect(!RunnerLoginItem.outdated(mine, debug: true))
+        #expect(!RunnerLoginItem.outdated(nil, debug: false))
     }
 
     /// A team or kind of certificate is recorded at every launch; only a change from one on record counts.
