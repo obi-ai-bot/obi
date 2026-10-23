@@ -606,7 +606,7 @@ pub async fn run(
     // The agent the configuration names: Claude Code, or Codex (super::harness_codex).
     let tool = shared.config.conversation.agent;
     let why = match shared.jobs.signed_in_account(tool) {
-        None => format!("no {} account is signed in for conversations", tool.name()),
+        None => shared.jobs.none_signed_in(tool),
         Some(account) => match session(shared, &account, said, given, asked, control, None).await {
             Ok(answered) => return answered,
             Err(why) => why,

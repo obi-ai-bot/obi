@@ -1986,6 +1986,16 @@ impl Jobs {
             .find(|a| signed_in(tool, a, home.as_deref()))
     }
 
+    /// Why `tool` has no [`signed_in`] account for conversations: a login that's there but can't
+    /// run says what to do about it ([`login_problem`]: Codex's, run codex once), else that none is.
+    pub fn none_signed_in(&self, tool: Tool) -> String {
+        let home = login_home();
+        self.accounts(tool)
+            .iter()
+            .find_map(|a| login_problem(tool, a, home.as_deref()))
+            .unwrap_or_else(|| format!("no {} account is signed in for conversations", tool.name()))
+    }
+
     /// The tool and account a job runs on: the tool named (`claude`, `codex`, `cursor`; `auto` or
     /// none for any), and the account named (by id or name), or the first [`signed_in`] account
     /// of the tools in order (Claude Code, then Codex, then Cursor), else the first account.
@@ -7156,15 +7166,26 @@ pub(crate) fn signed_in(tool: Tool, account: &crate::config::Account, home: Opti
         }
 }
 
-/// What the apps show beside an account whose login is there but can't run: Codex's access token
-/// ends within 5 minutes, and only Codex itself refreshes it.
+/// Why a login that's there can't run, as a run would say it: Codex's access token ends within 5
+/// minutes, and only Codex itself refreshes it ([`codex_copy_ready`]).
+fn login_problem(
+    tool: Tool,
+    account: &crate::config::Account,
+    home: Option<&Path>,
+) -> Option<String> {
+    let file = login_file(tool, account, home)?;
+    (tool == Tool::Codex && has_login(tool, account, home))
+        .then(|| codex_copy_ready(&file, &account.name).err())
+        .flatten()
+}
+
+/// What the apps show beside an account whose login is there but can't run ([`login_problem`]).
 pub(crate) fn login_note(
     tool: Tool,
     account: &crate::config::Account,
     home: Option<&Path>,
 ) -> Option<&'static str> {
-    (tool == Tool::Codex && has_login(tool, account, home) && !signed_in(tool, account, home))
-        .then_some("Run codex once")
+    login_problem(tool, account, home).map(|_| "Run codex once")
 }
 
 /// Whether Cursor's login file holds what a run's copy keeps ([`cursor_without_refresh`]): an
