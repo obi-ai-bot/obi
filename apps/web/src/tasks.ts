@@ -55,7 +55,7 @@ export const ASK_LABEL: Record<string, string> = {
 };
 // obid's own alerting sources, by their tools' names (#1127, #1311, #1312)
 export const SOURCE_LABEL: Record<string, string> = {
-  sentry: 'Sentry', alertmanager: 'Prometheus', grafana: 'Grafana', pagerduty: 'PagerDuty',
+  sentry: 'Sentry', alertmanager: 'Prometheus', grafana: 'Grafana', pagerduty: 'PagerDuty', datadog: 'Datadog',
 };
 // A decision's label: a plug-in's event says where it came from
 export const askLabel = (ask: Pick<Ask, 'kind' | 'source'>): string =>

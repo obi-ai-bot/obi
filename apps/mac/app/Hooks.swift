@@ -105,19 +105,35 @@ nonisolated struct AlertingTool: Equatable, Sendable {
         AlertingTool(id: "prometheus", name: "Prometheus", about: "Alerts from Alertmanager", source: "alertmanager", symbol: "flame"),
         AlertingTool(id: "grafana", name: "Grafana", about: "Alerts from Grafana", source: "grafana", symbol: "chart.xyaxis.line"),
         AlertingTool(id: "pagerduty", name: "PagerDuty", about: "Incidents from PagerDuty", source: "pagerduty", symbol: "bell.badge"),
+        AlertingTool(id: "datadog", name: "Datadog", about: "Monitors from Datadog", source: "datadog", symbol: "pawprint"),
     ]
 
     /// PagerDuty makes the signing secret itself, once its webhook has Oby's address: the address
     /// comes first, then the secret it shows is pasted back (#1312).
     var secretFromTool: Bool { source == "pagerduty" }
 
-    /// The project's label: PagerDuty's is always the incident's service.
-    var asksLabel: Bool { source != "pagerduty" }
+    /// The project's label: PagerDuty's is always the incident's service, Datadog's its `service` tag.
+    var asksLabel: Bool { !["pagerduty", "datadog"].contains(source) }
 
     /// What to paste where, for `url` and `secret` (shown once, then only in obid's vault; PagerDuty's
     /// is its own, so `secret` is empty there); `label` is the one that names the project.
     func steps(url: String, secret: String, label: String = "service") -> String {
         switch source {
+        case "datadog":
+            return """
+            In Datadog: Integrations › Webhooks › New Webhook, named oby.
+            URL: \(url)
+            Payload, exactly:
+            {"oby": 1, "id": "$ID", "monitor": "$ALERT_ID", "cycle": "$ALERT_CYCLE_KEY",
+             "transition": "$ALERT_TRANSITION", "type": "$ALERT_TYPE", "priority": "$ALERT_PRIORITY",
+             "service": "$TAGS[service]", "title": "$EVENT_TITLE", "link": "$LINK", "date": "$DATE"}
+            Custom headers: {"X-Oby-Token": "$OBY_TOKEN"}
+            Then Integrations › Webhooks › Variables › New: OBY_TOKEN, hidden from view, the value:
+            \(secret)
+
+            Add @webhook-oby to the monitors Oby should hear about. A triggered monitor comes once per
+            cycle, P1 as critical, the rest as error; Warn and No Data don't. The project is the service tag.
+            """
         case "pagerduty":
             return """
             In PagerDuty: Integrations › Generic Webhooks (v3) › New Webhook.

@@ -88,6 +88,7 @@ pub async fn start(
             "alertmanager" => "Alertmanager".to_owned(),
             "grafana" => "Grafana".to_owned(),
             "pagerduty" => "PagerDuty".to_owned(),
+            "datadog" => "Datadog".to_owned(),
             other => format!("the {other} plug-in"),
         };
         let (kind, task, title) = match text("kind") {

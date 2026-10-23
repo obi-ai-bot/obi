@@ -494,3 +494,92 @@ fn pagerduty_incidents_become_offers_and_settle() {
     assert!(!obid.log().contains(&secret));
     assert!(obid.stop().success());
 }
+
+fn datadog_event(transition: &str, cycle: &str) -> Vec<u8> {
+    json!({"oby": 1, "id": "7421130561", "monitor": "123456", "cycle": cycle, "transition": transition,
+           "type": "error", "priority": "P1", "service": "api", "title": "[Triggered] High latency",
+           "link": "https://app.datadoghq.com/event/1", "date": "1792725120000"})
+    .to_string()
+    .into_bytes()
+}
+
+/// Datadog (#1313): the token, as Alertmanager's; a triggered monitor is one offer per cycle,
+/// Recovered settles it, Warn makes nothing, and a body that isn't Oby's payload is 202 and
+/// recorded as unreadable.
+#[test]
+fn datadog_monitors_become_offers_per_cycle_and_settle() {
+    let folder = Folder::new("hooks-datadog");
+    let mut obid = started(&folder);
+    let id = "e".repeat(32);
+    let token = secret();
+    assert_eq!(
+        call(
+            &obid,
+            "POST",
+            "/v1/hooks",
+            Some(
+                &json!({"id": id, "url": format!("https://oby-control.tetrix.pro/h/{id}"),
+        "name": "datadog", "source": "datadog", "secret": token, "repo": "obi-e2e/fixture-app"})
+            )
+        )
+        .status,
+        201
+    );
+    let headers = [("X-Oby-Token", token.as_str())];
+    assert_eq!(
+        deliver(
+            &obid,
+            &id,
+            &datadog_event("Triggered", "c-1"),
+            &[("X-Oby-Token", "wrong")]
+        )
+        .0,
+        401
+    );
+    assert_eq!(
+        deliver(&obid, &id, &datadog_event("Triggered", "c-1"), &headers).0,
+        202
+    );
+    let offer = within(10, "the monitor's offer", || {
+        inbox_item(&obid, "Alert: api (critical)", "open")
+    });
+    assert_eq!(
+        offer["text"],
+        "Datadog says monitor 123456 triggered on api."
+    );
+    assert_eq!(
+        deliver(&obid, &id, &datadog_event("Renotify", "c-1"), &headers).0,
+        202
+    );
+    assert_eq!(
+        deliver(&obid, &id, &datadog_event("Warn", "c-2"), &headers).0,
+        202
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let open: Vec<Value> = call(&obid, "GET", "/v1/inbox", None)
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == "pluginEvent")
+        .cloned()
+        .collect();
+    assert_eq!(open.len(), 1, "{open:#?}");
+    assert_eq!(
+        deliver(&obid, &id, &datadog_event("Recovered", "c-1"), &headers).0,
+        202
+    );
+    within(10, "the settled monitor", || {
+        inbox_item(&obid, "Alert: api (critical)", "done")
+    });
+    assert_eq!(
+        deliver(&obid, &id, br#"{"text":"Datadog's own payload"}"#, &headers).0,
+        202
+    );
+    assert_eq!(
+        call(&obid, "GET", "/v1/hooks", None).body[0]["lastDelivery"]["result"],
+        "unreadable"
+    );
+    assert!(!obid.log().contains(&token));
+    assert!(obid.stop().success());
+}

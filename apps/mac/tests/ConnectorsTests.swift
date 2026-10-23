@@ -450,6 +450,12 @@ struct ConnectorsTests {
         #expect(pagerDuty.secretFromTool && !pagerDuty.asksLabel && !AlertingTool.all[0].secretFromTool)
         #expect(pagerDuty.steps(url: "https://oby-control.test/h/x", secret: "").contains("incident.triggered, incident.reopened and incident.resolved"))
         #expect(list.first { $0.id == "pagerduty" }?.way == .button("Connect…", .connectAlerts("pagerduty")))
+        // Datadog (#1313): Oby's payload and the token in a hidden variable; the project is the service tag.
+        let datadog = try #require(AlertingTool.all.first { $0.id == "datadog" })
+        #expect(!datadog.secretFromTool && !datadog.asksLabel)
+        let dd = datadog.steps(url: "https://oby-control.test/h/x", secret: "s3cret")
+        #expect(dd.contains(#""oby": 1"#) && dd.contains(#"{"X-Oby-Token": "$OBY_TOKEN"}"#) && dd.contains("s3cret"))
+        #expect(list.first { $0.id == "datadog" }?.way == .button("Connect…", .connectAlerts("datadog")))
     }
 
     /// The Mac reads obid's Sentry, connects it and follows a project as obid answers; a repository
