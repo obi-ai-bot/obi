@@ -587,14 +587,17 @@ fn revoking_a_device_drops_its_iphone_relay_registration() {
         json!({"apns": {"pushId": "push-id-1", "pushKey": signs, "sealKey": public,
                         "relay": relay}})
     };
-    let refused = through(
-        &obid,
-        Some(&token),
-        "POST",
-        "/v1/notifications",
-        Some(&apns("http://relay.example")),
-    );
-    assert_eq!(refused.status, 422, "{}", refused.text);
+    // Only the control plane obid pushes through (pushRelay, Deskree's by default).
+    for relay in ["http://relay.example", "https://evil.example"] {
+        let refused = through(
+            &obid,
+            Some(&token),
+            "POST",
+            "/v1/notifications",
+            Some(&apns(relay)),
+        );
+        assert_eq!(refused.status, 422, "{relay}: {}", refused.text);
+    }
     let answer = through(
         &obid,
         Some(&token),

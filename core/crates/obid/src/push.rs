@@ -66,6 +66,14 @@ const ID: usize = 64;
 const BODY: usize = 200;
 /// The longest `sealed` the relay takes, in base64url characters: Apple's payload stays under 4 KB.
 const SEALED: usize = 3072;
+/// The control plane obid pushes through when `pushRelay` doesn't say (crate::config).
+pub const RELAY: &str = "https://oby-control.deskree.com";
+/// How long one push waits for the relay's answer.
+const RELAY_WAIT: Duration = Duration::from_secs(10);
+/// The longest a push waits before it's tried again.
+const RETRY_MOST: Duration = Duration::from_secs(10);
+/// The `401`s in a row that drop a registration: the relay doesn't know it, or never will.
+const UNAUTHORIZED: u32 = 3;
 /// Oby's message within this long of the owner's own words in its conversation answers them while
 /// they're there: it isn't pushed (a turn takes at most 110 seconds).
 const ANSWERING: Duration = Duration::from_secs(120);
@@ -443,8 +451,9 @@ pub enum Registration {
     Relay(Relayed),
 }
 
-/// Why `body` isn't a registration obid takes (`422`), or what it hands over.
-pub fn registration(body: &[u8]) -> Result<Registration, &'static str> {
+/// Why `body` isn't a registration obid takes (`422`), or what it hands over. An iPhone's must be
+/// with `relay`, the control plane obid pushes through (an origin).
+pub fn registration(body: &[u8], relay: &str) -> Result<Registration, &'static str> {
     const SHAPE: &str = "The body is {\"token\": …, \"platform\": \"fcm\", \"topic\": …}, or {\"apns\": {\"pushId\", \"pushKey\", \"sealKey\", \"relay\"}}.";
     #[derive(Deserialize)]
     struct Token {
@@ -472,15 +481,16 @@ pub fn registration(body: &[u8]) -> Result<Registration, &'static str> {
         if push_key_bytes(&given.push_key).is_none() {
             return Err("pushKey is 32 bytes in base64url.");
         }
-        let relay = origin(&given.relay)
-            .ok_or("relay is an https:// origin, like https://oby-control.deskree.com.")?;
+        if origin(&given.relay).as_deref() != Some(relay) {
+            return Err("relay isn't the control plane this obid pushes through.");
+        }
         seal(&given.seal_key, b"{}")
             .map_err(|_| "sealKey isn't an X25519 public key in base64url.")?;
         return Ok(Registration::Relay(Relayed {
             push_id: given.push_id,
             push_key: given.push_key,
             seal_key: given.seal_key,
-            relay,
+            relay: relay.to_owned(),
             device: None,
         }));
     }
@@ -501,17 +511,12 @@ pub fn registration(body: &[u8]) -> Result<Registration, &'static str> {
     }
 }
 
-/// `url` as the relay's origin (`https://host[:port]`), or none: `https` only, or `http` to this
-/// machine (a relay of the tests' own), with no login, path, query or fragment.
-fn origin(url: &str) -> Option<String> {
+/// `url` as a control plane's origin (`https://host[:port]`), or none: `https` only, with no
+/// login, path, query or fragment.
+pub fn origin(url: &str) -> Option<String> {
     let url = reqwest::Url::parse(url).ok()?;
-    let host = url.host_str()?;
-    let local = host == "localhost"
-        || host
-            .trim_matches(['[', ']'])
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback());
-    let fits = (url.scheme() == "https" || (url.scheme() == "http" && local))
+    let fits = url.scheme() == "https"
+        && url.host_str().is_some_and(|h| !h.is_empty())
         && url.username().is_empty()
         && url.password().is_none()
         && url.path() == "/"
@@ -695,6 +700,10 @@ pub struct Push {
     talk: Mutex<Talk>,
     /// The event streams paired devices follow now: a phone with Oby open.
     following: Arc<AtomicUsize>,
+    /// The control plane's origin obid pushes through (`pushRelay`).
+    relay: String,
+    /// The relay's `401`s in a row, by push id.
+    unauthorized: Mutex<HashMap<String, u32>>,
     /// The access token, the service account it's for, and until when it's used.
     access: tokio::sync::Mutex<Option<(String, String, Instant)>>,
     http: reqwest::Client,
@@ -722,7 +731,8 @@ impl Drop for Following {
 }
 
 impl Push {
-    pub fn open(home: &Path) -> Push {
+    /// The pushes kept in `home/push`, through the control plane at `relay` (an origin).
+    pub fn open(home: &Path, relay: &str) -> Push {
         let folder = home.join("push");
         let read = |name: &str| std::fs::read(folder.join(name)).ok();
         let relayed: Vec<Relayed> = read("relay.json")
@@ -742,6 +752,8 @@ impl Push {
             told: Mutex::new(read("said.json").and_then(|b| serde_json::from_slice(&b).ok())),
             talk: Mutex::new(Talk::default()),
             following: Arc::new(AtomicUsize::new(0)),
+            relay: relay.to_owned(),
+            unauthorized: Mutex::new(HashMap::new()),
             folder,
             access: tokio::sync::Mutex::new(None),
             http: reqwest::Client::builder()
@@ -807,8 +819,9 @@ impl Push {
     pub fn keep_relayed(&self, relayed: Relayed) -> std::io::Result<()> {
         relayed.learn();
         let mut list = self.relayed.lock().unwrap_or_else(|e| e.into_inner());
+        // Only its own device's: a push id handed over again by another device replaces nothing.
         let next = newest(list.clone(), relayed, |old, new| {
-            old.push_id == new.push_id || (new.device.is_some() && old.device == new.device)
+            old.device == new.device && (new.device.is_some() || old.push_id == new.push_id)
         });
         self.write("relay.json", &next)?;
         *list = next;
@@ -911,49 +924,73 @@ impl Push {
         paired: &HashSet<String>,
         scratch: &Path,
     ) {
-        let mut send = {
-            let mut told = self.told.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut send, before, mut now) = {
+            let told = self.told.lock().unwrap_or_else(|e| e.into_inner());
             let before = told.clone().unwrap_or_default();
             let (send, now) = self::told(wanted(jobs, inbox), &before);
-            let first = told.is_none();
-            if (first || now != before)
-                && let Err(e) = self.write("said.json", &now)
-            {
-                tracing::error!("can't keep what the relay said: {e}");
-            }
-            *told = Some(now);
-            if first { Vec::new() } else { send }
+            // The first look: what's there already isn't news.
+            let send = if told.is_none() { Vec::new() } else { send };
+            (send, before, now)
         };
         let messages =
             std::mem::take(&mut self.talk.lock().unwrap_or_else(|e| e.into_inner()).messages);
         if self.following.load(Ordering::Relaxed) == 0 {
             send.extend(messages.into_values());
         }
+        // Only registrations made with the control plane obid pushes through now.
         let to: Vec<Relayed> = self
             .relayed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
+            .filter(|r| r.relay == self.relay)
             .filter(|r| r.device.as_ref().is_none_or(|d| paired.contains(d)))
             .cloned()
             .collect();
-        if send.is_empty() || to.is_empty() {
-            return;
-        }
-        for alert in send {
-            if let Err(why) = scanned(&alert.title, &alert.body, scratch).await {
-                tracing::warn!(alert = %alert.collapse, "no iPhone push for it: {why}");
-                continue;
+        if !to.is_empty() {
+            let mut clean = Vec::new();
+            for alert in send {
+                // One the scan stops is never sent, nor tried again.
+                match scanned(&alert.title, &alert.body, scratch).await {
+                    Ok(()) => clean.push(alert),
+                    Err(why) => {
+                        tracing::warn!(alert = %alert.collapse, "no iPhone push for it: {why}")
+                    }
+                }
             }
-            for relayed in &to {
-                self.relay(relayed, &alert).await;
+            // Every alert to every phone at once: a slow relay holds up none of the others.
+            let took = futures_util::future::join_all(clean.iter().map(|alert| async {
+                futures_util::future::join_all(to.iter().map(|r| self.relay(r, alert)))
+                    .await
+                    .contains(&true)
+            }))
+            .await;
+            // An ask, or its "Settled", that no phone took is said again at the next look.
+            for (alert, took) in clean.iter().zip(took) {
+                if took || !(alert.urgent || alert.category == "settled") {
+                    continue;
+                }
+                match before.get(&alert.collapse) {
+                    Some(was) => now.insert(alert.collapse.clone(), was.clone()),
+                    None => now.remove(&alert.collapse),
+                };
             }
         }
+        let mut told = self.told.lock().unwrap_or_else(|e| e.into_inner());
+        if told.as_ref() != Some(&now)
+            && let Err(e) = self.write("said.json", &now)
+        {
+            tracing::error!("can't keep what the relay said: {e}");
+        }
+        *told = Some(now);
     }
 
-    /// Seals `alert` to the iPhone of `to` and hands it to its relay; logs a failure with the
-    /// relay's status and error code only, and drops a registration the relay answers `410`.
-    async fn relay(&self, to: &Relayed, alert: &Alert) {
+    /// Seals `alert` to the iPhone of `to` and hands it to the relay: whether the relay took it.
+    /// A `429`, a `5xx` or no answer within [`RELAY_WAIT`] is tried once more, the same send,
+    /// after the relay's `Retry-After` (at most [`RETRY_MOST`]). `410` drops the registration,
+    /// and so does the [`UNAUTHORIZED`]th `401` in a row. A failure is logged with the relay's
+    /// status only; its body isn't read.
+    async fn relay(&self, to: &Relayed, alert: &Alert) -> bool {
         let at = obi_protocol::time::now();
         let sealed = seal(&to.seal_key, sealed_alert(alert, at).to_string().as_bytes())
             .and_then(|sealed| {
@@ -970,39 +1007,75 @@ impl Push {
             Ok(sealed) => sealed,
             Err(why) => {
                 tracing::warn!(alert = %alert.collapse, "no iPhone push for it: {why}");
-                return;
+                return false;
             }
         };
         let body = json!({"pushId": to.push_id, "sealed": sealed, "collapse": alert.collapse,
                           "urgent": alert.urgent, "at": at})
         .to_string();
-        let response = match self
-            .http
-            .post(format!("{}/v1/push", to.relay))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header("Oby-Push-Mac", mac(&key, body.as_bytes()))
-            .body(body)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(e) => {
-                tracing::warn!("the push relay couldn't be reached ({})", e.without_url());
-                return;
+        let signed = mac(&key, body.as_bytes());
+        let this = |r: &Relayed| r.push_id == to.push_id && r.device == to.device;
+        for again in [false, true] {
+            let answer = self
+                .http
+                .post(format!("{}/v1/push", self.relay))
+                .timeout(RELAY_WAIT)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header("Oby-Push-Mac", &signed)
+                .body(body.clone())
+                .send()
+                .await;
+            let wait = match answer {
+                Ok(answer) if answer.status().is_success() => {
+                    self.unauthorized
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&to.push_id);
+                    return true;
+                }
+                Ok(answer) if answer.status() == StatusCode::GONE => {
+                    tracing::warn!("the push relay answered 410: an iPhone's registration is gone");
+                    self.drop_relayed(this);
+                    return false;
+                }
+                Ok(answer) if answer.status() == StatusCode::UNAUTHORIZED => {
+                    let mut counts = self.unauthorized.lock().unwrap_or_else(|e| e.into_inner());
+                    let count = counts.entry(to.push_id.clone()).or_insert(0);
+                    *count += 1;
+                    tracing::warn!("the push relay answered 401 ({count} in a row)");
+                    if *count >= UNAUTHORIZED {
+                        counts.remove(&to.push_id);
+                        drop(counts);
+                        self.drop_relayed(this);
+                    }
+                    return false;
+                }
+                Ok(answer)
+                    if answer.status() == StatusCode::TOO_MANY_REQUESTS
+                        || answer.status().is_server_error() =>
+                {
+                    tracing::warn!("the push relay answered {}", answer.status());
+                    answer
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok()?.trim().parse().ok())
+                        .map_or(Duration::from_secs(1), Duration::from_secs)
+                }
+                Ok(answer) => {
+                    tracing::warn!("the push relay answered {}", answer.status());
+                    return false;
+                }
+                Err(e) => {
+                    tracing::warn!("the push relay couldn't be reached ({})", e.without_url());
+                    Duration::from_secs(1)
+                }
+            };
+            if again {
+                break;
             }
-        };
-        let status = response.status();
-        if status.is_success() {
-            return;
+            tokio::time::sleep(wait.min(RETRY_MOST)).await;
         }
-        let answer: Value = response.json().await.unwrap_or(Value::Null);
-        tracing::warn!(
-            "the push relay answered {status} ({})",
-            code_of(&answer["error"])
-        );
-        if status == StatusCode::GONE {
-            self.drop_relayed(|r| r.push_id == to.push_id);
-        }
+        false
     }
 
     /// The FCM part of [`Push::look`]: each job whose need changed.
@@ -1163,8 +1236,8 @@ pub async fn register(
     device: Option<axum::Extension<crate::gateway::PairedDevice>>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let given =
-        registration(&body).map_err(|why| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, why))?;
+    let given = registration(&body, &shared.push.relay)
+        .map_err(|why| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, why))?;
     let device = device.map(|axum::Extension(d)| d.0);
     let kept = match given {
         Registration::Fcm(token) if shared.push.account().is_some() => {
@@ -1261,7 +1334,7 @@ mod tests {
 
     #[test]
     fn registrations_are_checked() {
-        let fcm = |body: Value| registration(body.to_string().as_bytes());
+        let fcm = |body: Value| registration(body.to_string().as_bytes(), RELAY);
         assert_eq!(
             fcm(json!({"token": "abc:DEF-1_2", "platform": "fcm", "topic": TOPIC})),
             Ok(Registration::Fcm("abc:DEF-1_2".into()))
@@ -1293,7 +1366,7 @@ mod tests {
         ] {
             assert!(fcm(bad.clone()).is_err(), "{bad}");
         }
-        assert!(registration(b"not json").is_err());
+        assert!(registration(b"not json", RELAY).is_err());
     }
 
     #[test]
@@ -1529,7 +1602,7 @@ mod tests {
     #[test]
     fn tokens_and_notices_are_kept_private() {
         let home = std::env::temp_dir().join(format!("obid-push-{}", std::process::id()));
-        let push = Push::open(&home);
+        let push = Push::open(&home, RELAY);
         push.keep("tok-1".into(), None).unwrap();
         push.keep("tok-2".into(), Some("phone".into())).unwrap();
         push.keep("tok-3".into(), Some("lost".into())).unwrap();
@@ -1549,7 +1622,7 @@ mod tests {
             std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert_eq!(*Push::open(&home).tokens.lock().unwrap(), saved);
+        assert_eq!(*Push::open(&home, RELAY).tokens.lock().unwrap(), saved);
         std::fs::remove_dir_all(&home).unwrap();
     }
 
@@ -1558,7 +1631,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("obid-push-look-{}", std::process::id()));
         let mut failed = job("f1");
         failed.status = Status::Failed;
-        let push = Push::open(&home);
+        let push = Push::open(&home, RELAY);
         push.look(
             std::slice::from_ref(&failed),
             &[],
@@ -1570,7 +1643,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(home.join("push/notices.json")).unwrap())
                 .unwrap();
         assert_eq!(said.get("f1"), Some(&Notice::Failed));
-        let again = Push::open(&home);
+        let again = Push::open(&home, RELAY);
         assert_eq!(again.said.lock().unwrap().as_ref(), Some(&said));
         std::fs::remove_dir_all(&home).unwrap();
     }
@@ -1632,47 +1705,38 @@ mod tests {
                 json!({"apns": {"pushId": id, "pushKey": signs, "sealKey": key, "relay": relay}})
                     .to_string()
                     .as_bytes(),
+                RELAY,
             )
         };
         let good = |relay: &str| apns("p-1", &signs, &key, relay);
-        assert_eq!(
-            good("https://oby-control.deskree.com"),
-            Ok(Registration::Relay(Relayed {
-                push_id: "p-1".into(),
-                push_key: signs.clone(),
-                seal_key: key.clone(),
-                relay: "https://oby-control.deskree.com".into(),
-                device: None,
-            }))
-        );
-        // The relay is kept as its origin; a padded key is the same key.
-        let relay_of = |given: Result<Registration, &str>| match given {
-            Ok(Registration::Relay(r)) => r.relay,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(
-            relay_of(good("https://Oby-Control.deskree.com:8443/")),
-            "https://oby-control.deskree.com:8443"
-        );
-        assert_eq!(
-            relay_of(good("http://127.0.0.1:8787")),
-            "http://127.0.0.1:8787"
-        );
-        assert_eq!(relay_of(good("http://[::1]:9")), "http://[::1]:9");
-        assert_eq!(relay_of(good("http://localhost:9")), "http://localhost:9");
-        assert!(apns("p-1", &signs, &format!("{key}="), "https://r.example").is_ok());
+        let kept = Ok(Registration::Relay(Relayed {
+            push_id: "p-1".into(),
+            push_key: signs.clone(),
+            seal_key: key.clone(),
+            relay: RELAY.into(),
+            device: None,
+        }));
+        // Only the control plane obid pushes through, however it's written.
+        assert_eq!(good("https://oby-control.deskree.com"), kept);
+        assert_eq!(good("https://Oby-Control.deskree.com:443/"), kept);
         for relay in [
+            "https://evil.example",
+            "https://oby-control.deskree.com:8443",
             "http://oby-control.deskree.com",
-            "http://10.0.0.1",
+            "http://127.0.0.1:8787",
             "https://oby-control.deskree.com/v1",
             "https://user:pass@oby-control.deskree.com",
             "https://oby-control.deskree.com/?x=1",
-            "https://oby-control.deskree.com/#x",
-            "ftp://oby-control.deskree.com",
             "oby-control.deskree.com",
         ] {
             assert!(good(relay).is_err(), "{relay}");
         }
+        assert_eq!(
+            origin("https://Push.Example.com:8443/").as_deref(),
+            Some("https://push.example.com:8443")
+        );
+        assert_eq!(origin("http://127.0.0.1:8787"), None);
+        assert!(apns("p-1", &signs, &format!("{key}="), RELAY).is_ok());
         let zeros = b64().encode([0_u8; 32]);
         for bad_key in [
             String::new(),
@@ -1682,15 +1746,12 @@ mod tests {
             // A low-order point: its shared secret would be all zeros.
             zeros,
         ] {
-            assert!(
-                apns("p-1", &signs, &bad_key, "https://r.example").is_err(),
-                "{bad_key}"
-            );
+            assert!(apns("p-1", &signs, &bad_key, RELAY).is_err(), "{bad_key}");
         }
-        assert!(apns("", &signs, &key, "https://r.example").is_err());
-        assert!(apns("p 1", &signs, &key, "https://r.example").is_err());
+        assert!(apns("", &signs, &key, RELAY).is_err());
+        assert!(apns("p 1", &signs, &key, RELAY).is_err());
         // The pushKey is 32 bytes in base64url (padded or not), never the phone's pushSecret.
-        assert!(apns("p-1", &format!("{signs}="), &key, "https://r.example").is_ok());
+        assert!(apns("p-1", &format!("{signs}="), &key, RELAY).is_ok());
         for bad in [
             String::new(),
             "short".into(),
@@ -1699,16 +1760,13 @@ mod tests {
             format!("{} ", signs),
             signs.replace(&signs[..2], "+/"),
         ] {
-            assert!(
-                apns("p-1", &bad, &key, "https://r.example").is_err(),
-                "{bad}"
-            );
+            assert!(apns("p-1", &bad, &key, RELAY).is_err(), "{bad}");
         }
         let secret_only = json!({"apns": {"pushId": "p-1", "pushSecret": signs, "sealKey": key,
-                                          "relay": "https://r.example"}});
-        assert!(registration(secret_only.to_string().as_bytes()).is_err());
-        assert!(registration(br#"{"apns": {"pushId": "p-1"}}"#).is_err());
-        assert!(registration(br#"{"apns": "p-1"}"#).is_err());
+                                          "relay": RELAY}});
+        assert!(registration(secret_only.to_string().as_bytes(), RELAY).is_err());
+        assert!(registration(br#"{"apns": {"pushId": "p-1"}}"#, RELAY).is_err());
+        assert!(registration(br#"{"apns": "p-1"}"#, RELAY).is_err());
     }
 
     /// RFC 4231's test case 2, then the relay's own shape: the MAC is over the raw body as sent.
@@ -2011,7 +2069,7 @@ mod tests {
     fn relay_registrations_are_private_and_go_with_their_device() {
         let home = std::env::temp_dir().join(format!("obid-push-relay-{}", std::process::id()));
         let (_, key) = iphone();
-        let push = Push::open(&home);
+        let push = Push::open(&home, RELAY);
         let phone = relayed("a", Some("phone"), &key, "https://r.example");
         let lost = relayed("b", Some("lost"), &key, "https://r.example");
         push.keep_relayed(phone.clone()).unwrap();
@@ -2023,9 +2081,12 @@ mod tests {
             !said.contains(&phone.push_key) && !said.contains(&lost.push_key),
             "{said}"
         );
-        // The phone's new registration replaces its old one.
+        // The phone's new registration replaces its old one; another device handing over the
+        // same push id replaces nothing of the phone's.
         let newer = relayed("c", Some("phone"), &key, "https://r.example");
         push.keep_relayed(newer.clone()).unwrap();
+        push.keep_relayed(relayed("c", Some("lost"), &key, "https://r.example"))
+            .unwrap();
         push.forget("lost");
         let file = home.join("push/relay.json");
         let saved: Vec<Relayed> = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -2035,10 +2096,10 @@ mod tests {
             std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert_eq!(*Push::open(&home).relayed.lock().unwrap(), saved);
+        assert_eq!(*Push::open(&home, RELAY).relayed.lock().unwrap(), saved);
         // Learned again when obid starts; never in Debug.
         crate::secrets::known().forget(&newer.secret_name());
-        Push::open(&home);
+        Push::open(&home, RELAY);
         let said = crate::secrets::known().redact(&format!("x {} y", newer.push_key));
         assert!(!said.contains(&newer.push_key), "{said}");
         assert!(!format!("{newer:?}").contains(&newer.push_key));
@@ -2048,33 +2109,40 @@ mod tests {
     /// What the test relay heard: each push's MAC and raw body.
     type Heard = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
-    /// A relay of the test's own: each push's MAC and body, and `410` for the push id `gone`.
-    async fn relay_stub() -> (String, Heard) {
+    /// What the test relay answers next, oldest first; `202` once it's empty.
+    type Answers = Arc<Mutex<std::collections::VecDeque<u16>>>;
+
+    /// A relay of the test's own: each push's MAC and body; `410` for the push id `gone`, else
+    /// the next of its answers (with `Retry-After: 0`).
+    async fn relay_stub() -> (String, Heard, Answers) {
         let heard: Heard = Arc::default();
-        let kept = heard.clone();
+        let answers: Answers = Arc::default();
+        let (kept, next) = (heard.clone(), answers.clone());
         let app = axum::Router::new().route(
             "/v1/push",
             axum::routing::post(move |headers: axum::http::HeaderMap, body: Bytes| {
-                let kept = kept.clone();
+                let (kept, next) = (kept.clone(), next.clone());
                 async move {
                     let given: Value = serde_json::from_slice(&body).unwrap();
                     let mac = headers["oby-push-mac"].to_str().unwrap().to_owned();
                     kept.lock().unwrap().push((mac, body.to_vec()));
-                    if given["pushId"] == "gone" {
-                        (
-                            StatusCode::GONE,
-                            axum::Json(json!({"error": "unregistered"})),
-                        )
+                    let status = if given["pushId"] == "gone" {
+                        410
                     } else {
-                        (StatusCode::ACCEPTED, axum::Json(json!({})))
-                    }
+                        next.lock().unwrap().pop_front().unwrap_or(202)
+                    };
+                    (
+                        StatusCode::from_u16(status).unwrap(),
+                        [("retry-after", "0")],
+                        axum::Json(json!({"error": "a body obid doesn't read"})),
+                    )
                 }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let relay = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (relay, heard)
+        (relay, heard, answers)
     }
 
     fn turn(conversation: &str, id: &str, who: &str, text: &str) -> Event {
@@ -2089,9 +2157,9 @@ mod tests {
     async fn each_lean_case_is_one_sealed_relay_call() {
         let home = std::env::temp_dir().join(format!("obid-push-relayed-{}", std::process::id()));
         let scratch = home.join("tmp");
-        let (relay, heard) = relay_stub().await;
+        let (relay, heard, _) = relay_stub().await;
         let (secret, key) = iphone();
-        let push = Push::open(&home);
+        let push = Push::open(&home, &relay);
         let phone = relayed("phone", Some("iphone"), &key, &relay);
         push.keep_relayed(phone.clone()).unwrap();
         let paired: HashSet<String> = ["iphone".to_owned()].into();
@@ -2254,9 +2322,9 @@ mod tests {
     #[tokio::test]
     async fn a_secret_in_an_alert_sends_nothing() {
         let home = std::env::temp_dir().join(format!("obid-push-secret-{}", std::process::id()));
-        let (relay, heard) = relay_stub().await;
+        let (relay, heard, _) = relay_stub().await;
         let (_, key) = iphone();
-        let push = Push::open(&home);
+        let push = Push::open(&home, &relay);
         push.keep_relayed(relayed("phone", None, &key, &relay))
             .unwrap();
         let mut j = job("j1");
@@ -2270,6 +2338,80 @@ mod tests {
         push.look(std::slice::from_ref(&j), &[], &HashSet::new(), &scratch)
             .await;
         assert!(heard.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// What the relay does with a push decides what obid says next: `5xx` and `429` are tried
+    /// once more, an ask no phone took is said again at the next look, and the third `401` in a
+    /// row drops the registration. A registration made with another control plane is skipped.
+    #[tokio::test]
+    async fn an_ask_the_relay_didnt_take_is_said_again() {
+        let home = std::env::temp_dir().join(format!("obid-push-retry-{}", std::process::id()));
+        let scratch = home.join("tmp");
+        let (relay, heard, answers) = relay_stub().await;
+        let (_, key) = iphone();
+        let push = Push::open(&home, &relay);
+        push.keep_relayed(relayed("phone", None, &key, &relay))
+            .unwrap();
+        push.keep_relayed(relayed("old", None, &key, "https://old.example"))
+            .unwrap();
+        let mut j = job("j1");
+        j.status = Status::Running;
+        let none = HashSet::new();
+        let look = |job: Job| {
+            let (push, none, scratch) = (&push, &none, &scratch);
+            async move { push.look(&[job], &[], none, scratch).await }
+        };
+        let calls = |heard: &Heard| -> Vec<Value> {
+            heard
+                .lock()
+                .unwrap()
+                .drain(..)
+                .map(|(_, body)| serde_json::from_slice(&body).unwrap())
+                .collect()
+        };
+        let answer = |codes: &[u16]| answers.lock().unwrap().extend(codes);
+        look(j.clone()).await;
+        // Down twice: tried once more, the same send, then not taken.
+        j.permission = Some(permission());
+        answer(&[503, 503]);
+        look(j.clone()).await;
+        let got = calls(&heard);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], got[1]);
+        assert!(got.iter().all(|c| c["pushId"] == "phone"));
+        // So the next look says it again, and then it's said.
+        look(j.clone()).await;
+        assert_eq!(calls(&heard).len(), 1);
+        look(j.clone()).await;
+        assert!(calls(&heard).is_empty());
+        // Too many: tried once more, and taken.
+        j.permission = None;
+        answer(&[429]);
+        look(j.clone()).await;
+        let got = calls(&heard);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], got[1]);
+        look(j.clone()).await;
+        assert!(calls(&heard).is_empty());
+        // 401 isn't tried again; the third in a row drops the registration.
+        j.permission = Some(crate::permissions::Permission {
+            id: "p2".into(),
+            ..permission()
+        });
+        answer(&[401, 401, 401]);
+        for _ in 0..3 {
+            look(j.clone()).await;
+            assert_eq!(calls(&heard).len(), 1);
+        }
+        let kept: Vec<Relayed> =
+            serde_json::from_slice(&std::fs::read(home.join("push/relay.json")).unwrap()).unwrap();
+        assert_eq!(
+            kept.iter().map(|r| r.push_id.as_str()).collect::<Vec<_>>(),
+            ["old"]
+        );
+        look(j.clone()).await;
+        assert!(calls(&heard).is_empty());
         std::fs::remove_dir_all(&home).unwrap();
     }
 }
