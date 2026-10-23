@@ -45,6 +45,12 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
         case disconnectSlack
         /// `PATCH /v1/watch`: the watcher's Slack message on, or back to a dry run.
         case setWatchLive(Bool)
+        /// Asks for Sentry's address, the organization and a token, and gives them to obid (`PUT /v1/sentry`).
+        case connectSentry
+        /// `DELETE /v1/sentry`: obid forgets the Sentry token.
+        case disconnectSentry
+        /// Which projects are followed, and the repository each is looked into in (`PATCH /v1/sentry/projects/{slug}`).
+        case sentryProjects
     }
 
     /// How to disconnect a connected one, or connect an available one.
@@ -131,6 +137,8 @@ nonisolated enum Connectors {
         /// obid's Slack (`GET /v1/slack`) and its watcher (`GET /v1/watch`); nil from a runner without them.
         var slack: SlackStatus? = nil
         var watch: WatchStatus? = nil
+        /// obid's Sentry (`GET /v1/sentry`); nil from a runner without it.
+        var sentry: SentryStatus? = nil
     }
 
     /// One of the page's groups, with its title.
@@ -150,6 +158,8 @@ nonisolated enum Connectors {
         /// obid's Slack and its watcher; nil from a runner without them.
         var slack: SlackStatus?
         var watch: WatchStatus?
+        /// obid's Sentry; nil from a runner without it.
+        var sentry: SentryStatus?
         /// Why a list couldn't be read: a timeout, a 500, a 401. Only a 404 means the runner has
         /// none to list; anything else is said, never shown as an empty list.
         var problems: [String] = []
@@ -185,6 +195,11 @@ nonisolated enum Connectors {
             lists.watch = try await runner.watch()
         } catch {
             lists.problems.append("Couldn't read the watcher on \(name): \(error.localizedDescription)")
+        }
+        do {
+            lists.sentry = try await runner.sentry()
+        } catch {
+            lists.problems.append("Couldn't read Sentry on \(name): \(error.localizedDescription)")
         }
         return lists
     }
@@ -222,6 +237,8 @@ nonisolated enum Connectors {
             guard coming.id == "slack", let runner, let status = runner.slack else { return coming }
             return slack(status, watch: runner.watch, place: runner.name, local: runner.local)
         }
+        // Not in the design's list: the owner's decision of 2026-10-23 (#1117), monitoring tools as rows of their own.
+        if let runner, let status = runner.sentry { list.append(sentry(status, place: runner.name, local: runner.local)) }
         if let runner {
             list += (runner.plugins ?? []).filter { $0.id != "tetrix" }.map { plugin($0, place: runner.name) }
             list += (runner.connections ?? []).map { connection($0, place: runner.name) }
@@ -298,6 +315,22 @@ nonisolated enum Connectors {
             return row(.connected, .button("Disconnect…", .disconnectSlack), live)
         }
         return row(status.error == nil ? .available : .broken, .button("Connect…", .connectSlack), nil)
+    }
+
+    /// Sentry, held by obid with a token that only reads, pasted once. Only obid on this Mac gets
+    /// buttons, as for Slack. Connected, Projects… picks what's followed and where it's looked into.
+    static func sentry(_ status: SentryStatus, place: String, local: Bool) -> Connector {
+        let row = { (state: Connector.State, way: Connector.Way?, also: Connector.Way?) in
+            Connector(id: "sentry", name: "Sentry", about: SentryStatus.about, place: place, how: status.how, state: state,
+                      way: way, also: also, symbol: "exclamationmark.triangle")
+        }
+        guard local else {
+            return row(status.connected ? .connected : .available, .steps("Connect or disconnect it on \(place) itself, with Oby there."), nil)
+        }
+        if status.connected {
+            return row(.connected, .button("Disconnect…", .disconnectSentry), .button("Projects…", .sentryProjects))
+        }
+        return row(status.error == nil ? .available : .broken, .button("Connect…", .connectSentry), nil)
     }
 
     /// A plug-in obid found (docs/ARCHITECTURE.md, "Plug-ins"). Ready is connected, failed needs

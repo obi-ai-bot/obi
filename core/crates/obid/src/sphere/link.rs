@@ -277,6 +277,8 @@ pub struct Link {
     /// Teammates' jobs on this Mac (crate::sphere::hosting).
     pub(super) hosting: super::hosting::Hosting,
     setup: super::hosting::Setup,
+    /// Sentry, when obid has it (crate::sentry): what a Sentry offer's start reads.
+    sentry: std::sync::OnceLock<Arc<crate::sentry::Sentry>>,
 }
 
 fn api(status: StatusCode, message: impl Into<String>) -> ApiError {
@@ -490,6 +492,7 @@ impl Link {
             stopping,
             hosting: super::hosting::Hosting::default(),
             setup: super::hosting::Setup::from(&setup_config),
+            sentry: std::sync::OnceLock::new(),
         });
         // The inbox hears of the permissions jobs wait on. Jobs tells it with none of its own
         // locks held, and never while this Link's state is locked (only `start_obi_review` is
@@ -649,17 +652,30 @@ impl Link {
     /// work by itself and no remembered decision applies to it: a failed deploy, an alert or a
     /// ticket about one of obid's repositories is an offer, started only on an answer (#1124).
     pub fn plugin_event(&self, event: obi_plugin_api::PluginEvent) {
-        let now = time::now();
         let repo = &event.event.subject.repo;
         let known = self.config.repos.iter().any(|r| &r.repo == repo);
-        let item = inbox::plugin_event_item(&event, known, now);
+        self.add_event_item(inbox::plugin_event_item(&event, known, time::now()));
+    }
+
+    /// A `pluginEvent` item from a plug-in or from one of obid's own sources (crate::sentry): kept
+    /// unless an item with its id is there already, open or done; past
+    /// [`inbox::MAX_OPEN_EVENTS`] open items of its source (`plugin.id`), the oldest open one is
+    /// settled by itself, with no answer.
+    pub fn add_event_item(&self, item: Item) {
+        let now = time::now();
         let mut changed = Vec::new();
         {
             let mut state = self.lock();
             if state.inbox.contains_key(&item.id) {
                 return;
             }
-            let plugin = event.plugin.as_str();
+            let source = item
+                .plugin
+                .as_ref()
+                .and_then(|p| p["id"].as_str())
+                .unwrap_or_default()
+                .to_owned();
+            let plugin = source.as_str();
             // Oldest first, in the order they arrived (not by id: ids are hashes).
             let mut open: Vec<(u64, String)> = state
                 .inbox
@@ -685,6 +701,11 @@ impl Link {
         for item in &changed {
             self.save_item(item);
         }
+    }
+
+    /// Sentry's offers start with what it reads then (crate::sentry::Sentry::quote).
+    pub fn use_sentry(&self, sentry: Arc<crate::sentry::Sentry>) {
+        let _ = self.sentry.set(sentry);
     }
 
     /// What a read of the owner's GitHub work found (crate::github_work): a `github` item for each
@@ -834,7 +855,8 @@ impl Link {
     /// `Fix it`), which `answer` claimed: starts the work (crate::event_work); what couldn't start
     /// leaves the item open again. Nothing is sent anywhere.
     async fn answer_plugin_offer(&self, mut item: Item, answer: String) -> Result<Value, ApiError> {
-        match crate::event_work::start(&self.jobs, &self.config, &item).await {
+        let sentry = self.sentry.get().map(Arc::as_ref);
+        match crate::event_work::start(&self.jobs, &self.config, sentry, &item).await {
             Ok(job) => item.job = job.id,
             Err(why) => {
                 self.lock().inbox.insert(item.id.clone(), item.clone());

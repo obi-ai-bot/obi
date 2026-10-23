@@ -776,6 +776,52 @@ struct AccountUsageRow<Buttons: View>: View {
     }
 }
 
+/// Sentry's projects (#1127): a switch each to follow it, and the repository its errors are looked
+/// into in. A project with no repository still offers its errors, with only Dismiss.
+struct SentryProjectsSheet: View {
+    let status: SentryStatus
+    var problem: String?
+    let change: (_ slug: String, _ follow: Bool, _ repo: String?) -> Void
+    let done: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Sentry projects").font(Tokens.font(Tokens.textLg, .semibold))
+            Text("Oby reads the projects you follow every 5 minutes. A new error, or one that escalates or comes back, arrives in your inbox; Look into it starts an investigate job in the project's repository, with the stack trace and never your users' data.")
+                .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fixedSize(horizontal: false, vertical: true)
+            if status.projects.isEmpty {
+                Text("Sentry lists no project in \(status.org ?? "this organization").").foregroundStyle(Tokens.muted)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(status.projects) { project in
+                        HStack(spacing: 12) {
+                            Toggle(project.name, isOn: Binding(get: { project.follow }, set: { change(project.slug, $0, project.repo) }))
+                                .toggleStyle(.switch)
+                            Spacer()
+                            Picker("Repository", selection: Binding(get: { project.repo ?? "" },
+                                                                   set: { change(project.slug, project.follow, $0.isEmpty ? nil : $0) })) {
+                                Text("No repository").tag("")
+                                ForEach(status.repos, id: \.self) { Text($0).tag($0) }
+                            }
+                            .labelsHidden()
+                            .frame(maxWidth: 240)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 320)
+            if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger) }
+            HStack {
+                Spacer()
+                Button("Done", action: done).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+    }
+}
+
 /// Settings › Connectors (#498), as Sangam's SettingsView.tsx `Connectors`: a search, then Connected and
 /// Available, one row per service with its brand's mark, its name and a line on it, and at the right
 /// "Connected" or its button (apps/mac/app/Connectors.swift). How it's signed in is the row's tooltip;
@@ -806,6 +852,13 @@ struct ConnectorsSettingsView: View {
     @State private var botToken = ""
     /// The app-level token, for live channels (Socket Mode): optional.
     @State private var appToken = ""
+    /// Connect… on Sentry asks for its address, the organization and a token, cleared once sent.
+    @State private var askingSentry = false
+    @State private var sentryURL = SentryStatus.defaultURL
+    @State private var sentryOrg = ""
+    @State private var sentryToken = ""
+    /// Projects… on Sentry: which are followed, and where each is looked into.
+    @State private var showingSentryProjects = false
 
     var body: some View {
         let groups = Connectors.groups(list, query: query)
@@ -877,6 +930,21 @@ struct ConnectorsSettingsView: View {
         } message: {
             Text("Your workspace's Oby app's tokens, from api.slack.com/apps › OAuth & Permissions › OAuth Tokens, and its app-level token (Basic Information) for live channels. obid checks them with Slack and keeps them in its vault; this Mac doesn't keep them.")
         }
+        .alert("Connect Sentry", isPresented: $askingSentry) {
+            TextField("Sentry's address", text: $sentryURL, prompt: Text(SentryStatus.defaultURL))
+            TextField("Organization", text: $sentryOrg, prompt: Text("your-org"))
+            SecureField("Token", text: $sentryToken, prompt: Text("sntryu_…"))
+            Button("Connect") { connectSentry(row: "sentry") }
+                .disabled(!SentryStatus.isURL(sentryURL) || !SentryStatus.isOrg(sentryOrg) || !SentryStatus.isToken(sentryToken))
+            Button("Cancel", role: .cancel) { sentryToken = "" }
+        } message: {
+            Text("Sentry's address (https://sentry.io, or https://de.sentry.io in the EU), your organization's slug, and a token with only org:read, project:read and event:read (Sentry › Settings › Account › API › Personal Tokens). obid checks it only reads and keeps it in its vault; this Mac doesn't keep it.")
+        }
+        .sheet(isPresented: $showingSentryProjects) {
+            SentryProjectsSheet(status: lists.sentry ?? SentryStatus(), problem: problems["sentry-projects"],
+                                change: { slug, follow, repo in setSentryProject(slug, follow: follow, repo: repo) },
+                                done: { showingSentryProjects = false })
+        }
         .alert("Connect Tetrix", isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } })) {
             TextField("MCP URL", text: $url, prompt: Text("https://"))
             Button("Connect") {
@@ -899,7 +967,7 @@ struct ConnectorsSettingsView: View {
         let runner = (feed.runner == nil && !staged) || feed.connection != .live ? nil : Connectors.RunnerState(
             name: feed.name, local: feed.local, accounts: feed.accounts, github: feed.github, checks: feed.checkRuns,
             gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: feed.tetrix,
-            slack: feed.slack, watch: feed.watch)
+            slack: feed.slack, watch: feed.watch, sentry: lists.sentry)
         let accounts = Connectors.accounts(mac: store.accounts, runner: runner?.accounts, local: feed.local,
                                            hasRunner: feed.runner != nil || staged)
         return Connectors.list(accounts: accounts, runner: runner)
@@ -991,7 +1059,13 @@ struct ConnectorsSettingsView: View {
     /// A button: what takes something away asks first; signing in or out opens Terminal.
     private func perform(_ action: Connector.Action, _ connector: Connector) {
         switch action {
-        case .disablePlugin, .disconnect, .disconnectTetrix, .disconnectSlack: confirming = connector
+        case .disablePlugin, .disconnect, .disconnectTetrix, .disconnectSlack, .disconnectSentry: confirming = connector
+        case .connectSentry:
+            (sentryURL, sentryOrg, sentryToken) = (lists.sentry?.url ?? SentryStatus.defaultURL, lists.sentry?.org ?? "", "")
+            askingSentry = true
+        case .sentryProjects:
+            problems["sentry-projects"] = nil
+            showingSentryProjects = true
         case .connectSlack:
             (userToken, botToken, appToken) = ("", "", "")
             askingSlack = true
@@ -1045,6 +1119,20 @@ struct ConnectorsSettingsView: View {
                 if let status = try? await runner.tetrix() { feed.tetrix = status }
             }
         case .disconnectSlack: disconnectSlack(row: connector.id)
+        case .disconnectSentry:
+            guard feed.local, let runner = feed.runner else { return }
+            Task {
+                busy = true
+                defer { busy = false }
+                do {
+                    try await runner.disconnectSentry()
+                    lists.sentry?.connected = false
+                    problems[connector.id] = nil
+                } catch {
+                    problems[connector.id] = error.localizedDescription
+                }
+                if let status = try? await runner.sentry() { lists.sentry = status }
+            }
         case .disconnect(let name):
             guard let runner = feed.runner else { return }
             Task {
@@ -1074,6 +1162,8 @@ struct ConnectorsSettingsView: View {
             return "\(feed.local ? "obid" : feed.name) forgets its Tetrix login, and agents on every account stop getting Tetrix's tools."
         case .disconnectSlack:
             return "obid forgets its Slack login, and the watcher reads only GitHub until you connect Slack again."
+        case .disconnectSentry:
+            return "obid forgets its Sentry token, and Sentry's errors stop reaching your inbox until you connect it again."
         default:
             return ""
         }
@@ -1193,6 +1283,40 @@ struct ConnectorsSettingsView: View {
                 problems[row] = error.localizedDescription
             }
             if let watch = try? await runner.watch() { feed.watch = watch }
+        }
+    }
+
+    /// Gives obid Sentry's address, the organization and the token typed, then forgets the token
+    /// here: obid checks it only reads and says why when it doesn't take it. Connected, Projects… opens.
+    private func connectSentry(row: String) {
+        let (url, org, token) = (sentryURL.trimmingCharacters(in: .whitespacesAndNewlines),
+                                 sentryOrg.trimmingCharacters(in: .whitespacesAndNewlines),
+                                 sentryToken.trimmingCharacters(in: .whitespacesAndNewlines))
+        sentryToken = ""
+        guard feed.local, let runner = feed.runner else { return }
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                lists.sentry = try await runner.connectSentry(url: url, org: org, token: token)
+                problems[row] = nil
+                showingSentryProjects = true
+            } catch {
+                problems[row] = error.localizedDescription
+            }
+        }
+    }
+
+    /// Follows a Sentry project or not, and where it's looked into: shown as obid answers.
+    private func setSentryProject(_ slug: String, follow: Bool, repo: String?) {
+        guard let runner = feed.runner else { return }
+        Task {
+            do {
+                lists.sentry = try await runner.setSentryProject(slug, follow: follow, repo: repo)
+                problems["sentry-projects"] = nil
+            } catch {
+                problems["sentry-projects"] = error.localizedDescription
+            }
         }
     }
 

@@ -15,8 +15,9 @@ use crate::PluginError;
 pub struct PluginId(String);
 
 /// Ids no plug-in may take: `oby` is the server name of obid's connected-app broker in an agent's
-/// MCP config, and a plug-in's tools are `mcp__<plugin id>__<tool>` there too.
-pub const RESERVED: &[&str] = &["oby"];
+/// MCP config, and a plug-in's tools are `mcp__<plugin id>__<tool>` there too; `sentry` is the
+/// source of obid's own Sentry offers (its inbox items' `plugin.id`).
+pub const RESERVED: &[&str] = &["oby", "sentry"];
 
 impl PluginId {
     pub fn new(id: impl Into<String>) -> Result<PluginId, PluginError> {

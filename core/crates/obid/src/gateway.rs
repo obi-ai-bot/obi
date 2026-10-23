@@ -639,9 +639,9 @@ async fn scrubbed(
     out
 }
 
-/// Events about logins and the watcher, which only the Mac's own Settings uses: Tetrix's and
-/// Slack's sign-ins, and the watcher's rules and runs (what people wrote, quoted).
-const MAC_ONLY_EVENTS: &[&str] = &["tetrix", "slack", "watch", "listen"];
+/// Events about logins and the watcher, which only the Mac's own Settings uses: Tetrix's,
+/// Slack's and Sentry's sign-ins, and the watcher's rules and runs (what people wrote, quoted).
+const MAC_ONLY_EVENTS: &[&str] = &["tetrix", "slack", "sentry", "watch", "listen"];
 
 /// `text`, a piece of the event stream, without the frames of [`MAC_ONLY_EVENTS`]. The stream
 /// comes a frame at a time, each ending with a blank line.
@@ -771,6 +771,10 @@ mod tests {
             "event: job\ndata: {\"id\":\"j1\"}\n\nevent: inbox\ndata: {\"id\":\"i1\"}\n\n"
         );
         assert!(!allows(&Method::GET, "/v1/slack"));
+        // Sentry's login and its projects are the Mac's alone (crate::sentry).
+        assert!(!allows(&Method::GET, "/v1/sentry"));
+        assert!(!allows(&Method::PUT, "/v1/sentry"));
+        assert!(!allows(&Method::PATCH, "/v1/sentry/projects/api"));
         assert!(!allows(&Method::POST, "/v1/slack/sign-in"));
         assert!(!allows(&Method::PATCH, "/v1/watch"));
         assert!(!allows(&Method::POST, "/v1/watch/run"));

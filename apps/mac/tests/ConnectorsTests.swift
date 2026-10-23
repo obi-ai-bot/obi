@@ -383,7 +383,69 @@ struct ConnectorsTests {
                                    "Couldn't read the connections on tetrix-lab: The runner couldn't read connections.json.",
                                    "Couldn't read Tetrix on tetrix-lab: The runner didn't let this device in.",
                                    "Couldn't read Slack on tetrix-lab: The runner didn't let this device in.",
-                                   "Couldn't read the watcher on tetrix-lab: The runner didn't let this device in."])
+                                   "Couldn't read the watcher on tetrix-lab: The runner didn't let this device in.",
+                                   "Couldn't read Sentry on tetrix-lab: The runner didn't let this device in."])
+    }
+
+    /// Sentry is a row of its own once obid has it (the owner's decision of 2026-10-23, #1117):
+    /// Connect… asks for its address, the organization and a token; connected, Disconnect… and
+    /// Projects…; a remote runner's is done there.
+    @Test func sentryOnceObidHoldsIt() throws {
+        var runner = Connectors.RunnerState(name: "This Mac", local: true, accounts: [])
+        #expect(!Connectors.list(accounts: [], runner: runner).contains { $0.id == "sentry" }, "no row until obid says")
+        runner.sentry = SentryStatus()
+        let first = try #require(Connectors.list(accounts: [], runner: runner).first { $0.id == "sentry" })
+        #expect(first.state == .available && first.way == .button("Connect…", .connectSentry) && first.brand == nil)
+        #expect(first.about == "Errors in your projects")
+        let refused = Connectors.sentry(SentryStatus(error: "Sentry refused Oby's token: paste a new one in Settings › Connectors › Sentry."),
+                                        place: "This Mac", local: true)
+        #expect(refused.state == .broken && refused.how.hasPrefix("Sentry refused"))
+        let on = Connectors.sentry(SentryStatus(connected: true, org: "acme",
+                                                projects: [.init(slug: "api", name: "API", follow: true, repo: "obi-ai-bot/obi"),
+                                                           .init(slug: "web", name: "Web", follow: false, repo: nil)]),
+                                   place: "This Mac", local: true)
+        #expect(on.state == .connected && on.way == .button("Disconnect…", .disconnectSentry) && on.also == .button("Projects…", .sentryProjects))
+        #expect(on.how.contains("Following API (obi-ai-bot/obi).") && !on.how.contains("Web"))
+        let remote = Connectors.sentry(SentryStatus(), place: "tetrix-lab", local: false)
+        #expect(remote.way == .steps("Connect or disconnect it on tetrix-lab itself, with Oby there.") && remote.also == nil)
+        // Connect… takes only what looks like Sentry's address, an organization's slug and a token.
+        #expect(SentryStatus.isURL("https://sentry.io") && SentryStatus.isURL("https://de.sentry.io/"))
+        #expect(!SentryStatus.isURL("http://sentry.io") && !SentryStatus.isURL("https://sentry.io/acme") && !SentryStatus.isURL("https://me@sentry.io"))
+        #expect(SentryStatus.isOrg("acme-1") && !SentryStatus.isOrg("Acme") && !SentryStatus.isOrg(""))
+        #expect(SentryStatus.isToken("sntryu_" + "4f1c9a7e2b8d4c6fa0e3b5d7") && !SentryStatus.isToken("short"))
+        #expect(!SentryStatus.isToken("has a space in it and is long enough"))
+    }
+
+    /// The Mac reads obid's Sentry, connects it and follows a project as obid answers; a repository
+    /// taken off is sent as null.
+    @Test func sentryConnectsAndListsItsProjects() async throws {
+        let obid = RunnerStub { request in
+            switch (request.method, request.path) {
+            case ("GET", "/v1/sentry"):
+                (200, #"{"connected": false, "projects": [], "repos": ["obi-ai-bot/obi"], "error": null}"#)
+            case ("PUT", "/v1/sentry"):
+                (200, #"{"connected": true, "url": "https://sentry.io", "org": "acme", "user": "me@example.com", "projects": [{"slug": "api", "name": "API", "follow": false, "repo": null}], "repos": ["obi-ai-bot/obi"], "error": null}"#)
+            case ("PATCH", "/v1/sentry/projects/api"):
+                (200, #"{"connected": true, "org": "acme", "projects": [{"slug": "api", "name": "API", "follow": true, "repo": "obi-ai-bot/obi"}], "repos": ["obi-ai-bot/obi"]}"#)
+            default: (404, "")
+            }
+        }
+        let lists = await Connectors.lists(from: obid.runner, name: "This Mac")
+        #expect(lists.sentry?.connected == false && lists.sentry?.repos == ["obi-ai-bot/obi"] && lists.problems.isEmpty)
+        let connected = try await obid.runner.connectSentry(url: "https://sentry.io", org: "acme", token: "sntryu_test")
+        #expect(connected.connected && connected.projects.map(\.slug) == ["api"] && connected.org == "acme")
+        let put = try #require(obid.requests.last?.json)
+        #expect(put["url"] as? String == "https://sentry.io" && put["org"] as? String == "acme" && put["token"] as? String == "sntryu_test")
+        let followed = try await obid.runner.setSentryProject("api", follow: true, repo: "obi-ai-bot/obi")
+        #expect(followed.projects.first?.follow == true && followed.projects.first?.repo == "obi-ai-bot/obi")
+        #expect(obid.requests.last?.json?["follow"] as? Bool == true)
+        _ = try await obid.runner.setSentryProject("api", follow: true, repo: nil)
+        let off = try #require(obid.requests.last?.json)
+        #expect(off.keys.sorted() == ["follow", "repo"] && off["repo"] is NSNull, "a repository taken off is sent as null")
+        // A runner without Sentry (404) has no row, and says nothing's wrong.
+        let old = RunnerStub { _ in (404, "") }
+        let oldLists = await Connectors.lists(from: old.runner, name: "tetrix-lab")
+        #expect(oldLists.sentry == nil && !oldLists.problems.contains { $0.contains("Sentry") })
     }
 
     /// Disconnecting a runner's connection signs the runner's own sentence, under the connection

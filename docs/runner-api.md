@@ -1690,6 +1690,32 @@ No redirect URL, no PKCE and no client secret. Without the listener, no events a
 
 **What obid does with them.** The watcher and the channel listener (below): `search.messages`, `conversations.history`, `conversations.info` and `users.info` with the user token; with the bot token, `conversations.open` with the owner's user id, then `chat.postMessage` in that direct message; with the app-level token, `apps.connections.open` and the Socket Mode connection it opens. Every message obid sends passes the secret scan first: a finding, or a scan that can't run, sends nothing. Nothing ever goes to anyone else.
 
+### obid only: Sentry
+
+Errors in the owner's Sentry projects, offered as work (#1127). The owner connects Sentry once, in Settings › Connectors › Sentry, with a token that only reads; follows projects; and maps each to one of obid's `repos`. Loopback only: nothing here is on the gateway, and the `sentry` event is held back from paired phones' streams.
+
+**`PUT /v1/sentry`** with `{"url": "https://sentry.io", "org": "<org slug>", "token": "…"}`:
+
+- `url` is Sentry's address alone: `https://sentry.io`, a region (`https://us.sentry.io`, `https://de.sentry.io`) or a self-hosted Sentry's, `https://` (plain `http://` only on this machine), with no login, path, query or fragment. obid's client follows no redirect, so the token goes only to that host.
+- The token is a user auth token or an internal integration's. obid asks Sentry what it may do (`GET /api/0/`, `auth.scopes`): every scope must only read (`…:read`, or `openid`, `profile`, `email`), and `org:read` and `event:read` are needed; otherwise `422`, `That token can change Sentry: make one with only org:read, project:read and event:read.` A token Sentry refuses is `422`; Sentry out of reach, or a redirect, `502`.
+- obid then lists the organization's projects (`GET /api/0/organizations/<org>/projects/`, one page of 100), keeps the token in the vault as `oby.sentry.token`, and keeps the URL, the organization, who (the user's email, or `null` for an organization's token) and the projects, never the token, in `home/sentry.json` (0600). Connecting again to the same organization keeps what was followed and mapped.
+
+**`GET /v1/sentry`** answers `{"connected", "url", "org", "user", "projects": [{"slug", "name", "follow", "repo"}], "checkedAt", "nextCheck", "error", "repos"}`; a project's `repo` is one of obid's `repos` or `null`, and `repos` lists obid's, the ones a project may be mapped to (so do `PUT`'s and `PATCH`'s answers; the `sentry` event leaves it out). **`PATCH /v1/sentry/projects/{slug}`** with `{"follow": true|false, "repo": "owner/name"|null}`, either or both: `404` for a project Sentry didn't list, `422` for a repository obid doesn't work in, `409` when Sentry isn't connected. **`DELETE /v1/sentry`** forgets the token: `204`. A `sentry` event carries `GET`'s body when it changes.
+
+**Reading.** Every 5 minutes, and at once after connecting or a change to a project, one search over the followed projects: `GET /api/0/organizations/<org>/issues/?query=is:unresolved level:[error,fatal] substatus:[new,escalating,regressed]&sort=new&limit=100&project=<id>…`. Only GETs, ever.
+
+- The first read only notes what's there. After that, each issue not offered before in its substatus (`<issue id>:<substatus>`) becomes one offer, so an issue is offered when it's new, and once more if it escalates or comes back. At most 5 a read, newest first; the rest wait for the next read.
+- An issue whose fields aren't of their form (digits for its id, its short id's letters, a project slug, `error` or `fatal`, one of the three substatuses, times) is left out.
+- A refused token signs Sentry out (`error`: `Sentry refused Oby's token: paste a new one in Settings › Connectors › Sentry.`). Rate limited (`429`), obid waits for `X-Sentry-Rate-Limit-Reset`, at most 30 minutes. Any other failure is in `error`, and the next read is as usual.
+
+**The offer** is a `pluginEvent` item whose source (`plugin.id`) is `sentry`, a name no plug-in may take:
+
+- `title` `Sentry: <short id>`; `text` `Sentry says <short id> in <project> is new: <count> events since <firstSeen>.` (`is escalating`, `came back`);
+- `Look into it` and `Dismiss` when the project has a repository; else `Dismiss` only, and the text adds `Pick a repository for <project> in Settings › Connectors › Sentry to look into these.`;
+- `plugin` has `kind` `alert.fired`, `project`, `severity` (`critical` for `fatal`, else `error`), `repo`, `sentry` (`issueId`, `shortId`, `level`, `substatus`, `count`, `firstSeen`, `lastSeen`) and `quoted` (the issue's title, culprit and link). Sentry resolving the issue doesn't settle it: resolved isn't fixed.
+
+**Look into it** reads the issue and its latest event again (`GET /api/0/organizations/<org>/issues/<id>/` and `…/events/latest/`) and starts an ordinary `investigate` job in the mapped repository, as plug-in offers start (obid only: plug-ins): task `Look into Sentry issue <short id> in <project>. What Sentry reported is quoted in .obi/inputs/sentry-<short id>.md.`, title `Sentry: <short id>`. The file has, fenced as data, the issue's title, culprit, level, count, first and last seen, the event's release and environment, and each exception's type, message and frames (file, function, line, in-app, context lines), at most 64 KiB. **Never the product's users' data:** the event's user, request, contexts, breadcrumbs, other tags, extra data and frames' variables don't reach the file, the inbox or a log. Sentry out of reach is `502` and starts nothing; the offer stays open.
+
 ### obid only: the watcher
 
 What one person says on Slack and does on GitHub about what the owner watches for, told to the owner: the owner's "Dmitry watcher", which ran as a Claude scheduled task, now runs in obid. Every 15 minutes on weekdays it reads, sorts, and tells; it never acts on anything anyone wrote, and nothing it reads starts, changes or answers anything.

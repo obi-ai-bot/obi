@@ -51,6 +51,7 @@ pub mod routines;
 pub mod sandbox;
 pub mod scan;
 pub mod secrets;
+pub mod sentry;
 pub mod settings;
 pub mod slack;
 pub mod sphere;
@@ -338,6 +339,12 @@ pub async fn serve(
         vault::shared().expect("the vault is installed first"),
         events.clone(),
     );
+    let sentry = sentry::Sentry::open(
+        &config.home,
+        vault::shared().expect("the vault is installed first"),
+        events.clone(),
+    );
+    link.use_sentry(sentry.clone());
     let watch = watch::Watch::open(&config.home, events.clone());
     let listen = listen::Listen::open(&config.home, events.clone());
     let tunnel = tunnel::Tunnel::open(
@@ -370,6 +377,7 @@ pub async fn serve(
         pages: web::Sessions::default(),
         github_work: github.clone(),
         slack,
+        sentry,
         watch,
         listen,
         push: pushes,
@@ -444,6 +452,8 @@ pub async fn serve(
     // Routines run on their schedules (#395).
     shared.routines.attach(&shared);
     routines::spawn(shared.clone());
+    // Sentry's followed projects, every 5 minutes (crate::sentry).
+    sentry::spawn(shared.clone());
     // The watcher, every 15 minutes on weekdays (crate::watch).
     watch::spawn(shared.clone());
     // The Slack channels the owner picked, live and caught up every 15 minutes (crate::listen).

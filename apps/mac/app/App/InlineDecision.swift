@@ -155,15 +155,30 @@ struct InlineNotice: View {
     @State private var busy = false
     @State private var problem: String?
 
-    /// Slack's or GitHub's mark, by where obid says it came from (`watch.source`).
-    static func brand(_ notice: WatchNotice) -> String {
-        notice.source == "github" ? "github" : "slack"
+    /// Slack's or GitHub's mark, by where obid says it came from (`watch.source`); none for Sentry
+    /// or a plug-in, which have no mark in the design.
+    static func brand(_ notice: WatchNotice) -> String? {
+        switch notice.source {
+        case "github", "slack": notice.source
+        default: notice.kind == "pluginEvent" ? nil : "slack"
+        }
+    }
+
+    /// The card's kind: where it came from.
+    static func kind(_ notice: WatchNotice) -> String {
+        switch notice.source {
+        case "github": "GitHub"
+        case "slack": "Slack"
+        case "sentry": "Sentry"
+        default: notice.kind == "pluginEvent" ? "From the \(notice.source) plug-in" : "Slack"
+        }
     }
 
     /// What its link's button says, by where the link goes (a listener's review, from Slack, links
     /// its pull request on GitHub).
     static func linkLabel(_ url: URL) -> String {
         let host = url.host()?.lowercased() ?? ""
+        if host == "sentry.io" || host.hasSuffix(".sentry.io") { return "Open in Sentry" }
         return host == "github.com" || host.hasSuffix(".github.com") ? "Open on GitHub" : "Open in Slack"
     }
 
@@ -183,7 +198,7 @@ struct InlineNotice: View {
     var body: some View {
         let brand = Self.brand(notice)
         VStack(alignment: .leading, spacing: 0) {
-            AskCard(kind: brand == "github" ? "GitHub" : "Slack", brand: brand,
+            AskCard(kind: Self.kind(notice), brand: brand,
                     shown: notice.review, title: notice.title, happened: notice.text,
                     options: Self.options(notice), busy: busy, keyboardEnabled: keyboardEnabled, focusRequest: focusRequest,
                     hint: notice.url.map(Self.linkLabel),

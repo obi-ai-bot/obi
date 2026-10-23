@@ -70,6 +70,8 @@ pub struct Shared {
     pub github_work: Arc<crate::github_work::Feed>,
     /// Oby's Slack login (crate::slack).
     pub slack: Arc<crate::slack::Slack>,
+    /// Oby's Sentry login (crate::sentry).
+    pub sentry: Arc<crate::sentry::Sentry>,
     /// The watcher: one person's words about what the owner watches, told to them (crate::watch).
     pub watch: Arc<crate::watch::Watch>,
     /// The Slack channels the owner picked, heard through Socket Mode (crate::listen).
@@ -198,6 +200,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .merge(crate::connections::router())
         .merge(crate::tetrix::router())
         .merge(crate::slack::router())
+        .merge(crate::sentry::router())
         .merge(crate::watch::router())
         .merge(crate::listen::router())
         .route("/v1/checks/next", get(crate::routes::next_check))

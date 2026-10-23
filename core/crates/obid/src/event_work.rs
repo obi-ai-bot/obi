@@ -1,6 +1,6 @@
-//! Work from a plug-in's event (#1124; docs/runner-api.md, "obid only: plug-ins"): the owner's
-//! `Look into it` on a failed deploy or an alert starts an `investigate` job, and `Fix it` on a
-//! ticket a `fix` job, in the event's repository. The job's task and title are obid's own words
+//! Work from a plug-in's event (#1124; docs/runner-api.md, "obid only: plug-ins"), or from one of
+//! obid's own sources (Sentry, #1127): the owner's `Look into it` on a failed deploy or an alert
+//! starts an `investigate` job, and `Fix it` on a ticket a `fix` job, in the event's repository. The job's task and title are obid's own words
 //! from the event's typed fields; what the plug-in wrote reaches the agent only quoted, in a file
 //! kept as the job's attachment (`.obi/inputs/`), with the secrets obid knows taken out and any
 //! line the secret scan flags left out.
@@ -17,8 +17,14 @@ use crate::jobs::{Jobs, NewJob};
 use crate::sphere::inbox::Item;
 
 /// Starts the work a `pluginEvent` offer (`item`) proposes. Fails, starting nothing, when the
-/// event isn't an offer, its repository isn't one of obid's, or the vault can't be read.
-pub async fn start(jobs: &Arc<Jobs>, config: &Config, item: &Item) -> Result<Job, ApiError> {
+/// event isn't an offer, its repository isn't one of obid's, the vault can't be read, or (for a
+/// Sentry issue, read again now through `sentry`) Sentry can't be read.
+pub async fn start(
+    jobs: &Arc<Jobs>,
+    config: &Config,
+    sentry: Option<&crate::sentry::Sentry>,
+    item: &Item,
+) -> Result<Job, ApiError> {
     let refused = |status: StatusCode, why: String| ApiError::new(status, why);
     let event = item.plugin.as_ref().ok_or_else(|| {
         refused(
@@ -34,41 +40,69 @@ pub async fn start(jobs: &Arc<Jobs>, config: &Config, item: &Item) -> Result<Job
             format!("obid doesn't work in {repo:?}: there's nothing to start."),
         ));
     }
-    let file = format!(
-        "event-{}.md",
-        item.id.strip_prefix("ev-").unwrap_or(&item.id)
-    );
-    let quoted = format!("What it sent is quoted in .obi/inputs/{file}.");
     let (project, environment) = (text("project"), text("environment"));
     let (severity, ticket) = (text("severity"), text("ticket"));
-    let (kind, task, title) = match text("kind") {
-        "deploy.failed" => (
-            "investigate",
-            format!(
-                "Look into the failed deploy of {project} to {environment} that the {plugin} plug-in reported. {quoted}"
-            ),
-            format!("Deploy failed: {project}"),
-        ),
-        "alert.fired" => (
-            "investigate",
-            format!(
-                "Look into the alert on {project} ({severity}) that the {plugin} plug-in reported. {quoted}"
-            ),
-            format!("Alert: {project}"),
-        ),
-        "ticket.assigned" => (
-            "fix",
-            format!("Fix ticket {ticket} that the {plugin} plug-in reported. {quoted}"),
-            format!("Ticket {ticket}"),
-        ),
-        other => {
-            return Err(refused(
+    let (kind, task, title, file, rendered) = if plugin == crate::sentry::SOURCE {
+        let found = &event["sentry"];
+        let short = found["shortId"].as_str().unwrap_or_default();
+        let sentry = sentry.ok_or_else(|| {
+            refused(
                 StatusCode::CONFLICT,
-                format!("A {other} event only says something: there's nothing to start."),
-            ));
-        }
+                "Oby isn't connected to Sentry.".into(),
+            )
+        })?;
+        let quoted = sentry
+            .quote(found["issueId"].as_str().unwrap_or_default())
+            .await
+            .map_err(|why| {
+                refused(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Nothing was started: {why}"),
+                )
+            })?;
+        let file = format!("sentry-{short}.md");
+        (
+            "investigate",
+            format!(
+                "Look into Sentry issue {short} in {project}. What Sentry reported is quoted in .obi/inputs/{file}."
+            ),
+            format!("Sentry: {short}"),
+            file,
+            quoted,
+        )
+    } else {
+        let file = format!("event-{}.md", item.id.strip_prefix("ev-").unwrap_or(&item.id));
+        let quoted = format!("What it sent is quoted in .obi/inputs/{file}.");
+        let (kind, task, title) = match text("kind") {
+            "deploy.failed" => (
+                "investigate",
+                format!(
+                    "Look into the failed deploy of {project} to {environment} that the {plugin} plug-in reported. {quoted}"
+                ),
+                format!("Deploy failed: {project}"),
+            ),
+            "alert.fired" => (
+                "investigate",
+                format!(
+                    "Look into the alert on {project} ({severity}) that the {plugin} plug-in reported. {quoted}"
+                ),
+                format!("Alert: {project}"),
+            ),
+            "ticket.assigned" => (
+                "fix",
+                format!("Fix ticket {ticket} that the {plugin} plug-in reported. {quoted}"),
+                format!("Ticket {ticket}"),
+            ),
+            other => {
+                return Err(refused(
+                    StatusCode::CONFLICT,
+                    format!("A {other} event only says something: there's nothing to start."),
+                ));
+            }
+        };
+        let rendered = render(event, &crate::brain::briefing::nonce());
+        (kind, task, title, file, rendered)
     };
-    let rendered = render(event, &crate::brain::briefing::nonce());
     let clean = for_agent(&rendered).map_err(|why| {
         refused(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -79,7 +113,7 @@ pub async fn start(jobs: &Arc<Jobs>, config: &Config, item: &Item) -> Result<Job
         crate::github_work::keep_attachment(config, "events", &file, &clean).map_err(|e| {
             refused(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("obid couldn't keep what the {plugin} plug-in sent: {e}"),
+                format!("obid couldn't keep what {plugin} sent: {e}"),
             )
         })?;
     let new = NewJob {
