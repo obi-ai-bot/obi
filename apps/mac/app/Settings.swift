@@ -138,21 +138,27 @@ struct RunnerSettingsView: View {
     @AppStorage(MacChecks.appleSetting) private var runAppleChecks = true
     @State private var watches: [PairedWatch] = []
     @State private var watchProblem: String?
-    /// The launch build (`Launch`) hides a remote runner and Apple Watch without iPhone. A Mac already
-    /// on a remote runner still has the switch, to come back to This Mac.
+    /// The launch build (`Launch`) hides a remote runner and Apple Watch without iPhone.
     @AppStorage(Launch.everythingKey) private var everything = false
+
+    /// This Mac or a remote runner, and its URL: in the launch build, only on a Mac that already
+    /// has a remote runner's address, so it can come back to This Mac. Otherwise one This Mac switch.
+    private var choosesRemote: Bool { everything || !runnerURL.isEmpty }
 
     var body: some View {
         // Sangam's words, but "the window" where his say "the island", which is gone.
         SetGroup("Runner", footer: onThisMac
                  ? (loginItem.byScript ? "Oby’s engine on this Mac was installed with install.sh. Move it into Oby and the app keeps it running and up to date, with the same settings, jobs and token."
                                        : "Oby’s engine is the app’s login item on this Mac, and Oby follows it on 127.0.0.1.")
-                 : "Oby follows the runner at this address: the window lists its jobs.",
+                 : choosesRemote ? "Oby follows the runner at this address: the window lists its jobs."
+                                 : "Turn on This Mac and Oby’s engine runs here, as the app’s login item.",
                  problem: onThisMac ? loginItem.problem : nil) {
-            if everything || !onThisMac {
+            if choosesRemote {
                 SetRow("Runner") {
                     SetSegmented("Runner", selection: $onThisMac, options: [(true, "This Mac"), (false, "Remote")])
                 }
+            } else {
+                SetRow("This Mac") { Toggle("This Mac", isOn: $onThisMac).toggleStyle(.set) }
             }
             if onThisMac {
                 SetRow("Login item") {
@@ -164,7 +170,7 @@ struct RunnerSettingsView: View {
                         Button("Move into Oby…") { confirmingMove = true }.buttonStyle(.set)
                     }
                 }
-            } else {
+            } else if choosesRemote {
                 SetRow("URL") { SetField("Runner URL", text: $runnerURL, prompt: "http://tetrix-lab:8790") }
             }
             SetRow("Status") {
@@ -1140,8 +1146,7 @@ struct ConnectorsSettingsView: View {
             slack: feed.slack, watch: feed.watch, sentry: lists.sentry, hooks: lists.hooks)
         let accounts = Connectors.accounts(mac: store.accounts, runner: runner?.accounts, local: feed.local,
                                            hasRunner: feed.runner != nil || staged)
-        let all = Connectors.list(accounts: accounts, runner: runner)
-        return everything ? all : all.filter { Launch.connectors.contains($0.id) }
+        return Connectors.shown(Connectors.list(accounts: accounts, runner: runner), everything: everything)
     }
 
     private var typedURL: String { url.trimmingCharacters(in: .whitespaces) }

@@ -320,6 +320,32 @@ struct RemoteAccessTests {
         #expect(host.handed.count == 1)
     }
 
+    /// The launch build hides Remote access (`Launch`): a Mac with a hostname and remote access off
+    /// doesn't call the control plane at launch; on, or with `showEverything`, it checks in.
+    @Test(arguments: [(false, false, false), (true, false, true), (false, true, true)])
+    @MainActor func aMacChecksInOnlyWhileRemoteIsOn(on: Bool, everything: Bool, checksIn: Bool) async throws {
+        let hostname = "oby-abcdefghij0123456789.oby-devices.test"
+        let exchange = Exchange([(200, #"{"installation": {"id": "i1", "name": "MacBook", "platform": "macos", "createdAt": "2026-10-12T12:00:00.000Z", "lastSeenAt": null, "endpoint": {"hostname": "\#(hostname)", "tunnelId": "t1", "createdAt": "2026-10-12T12:00:01.000Z"}}}"#)])
+        let folder = FileManager.default.temporaryDirectory.appending(path: "oby-remote-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let secrets = FileVault(folder: folder)
+        try secrets.save(try MacKey.make(), as: RemoteAccess.keyKey)
+        let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
+        defaults.set(hostname, forKey: "remote.hostname")
+        defaults.set(on, forKey: "remote.enabled")
+        defaults.set(everything, forKey: Launch.everythingKey)
+        let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
+                                  secrets: secrets, defaults: defaults, host: FakeHost(),
+                                  authenticate: { _ in Issue.record("no sign-in sheet at a check-in"); return URL(string: "oby-signin://failed")! })
+        defer { remote.stop() }
+        await remote.start()
+        let asked = { exchange.lock.withLock { exchange.requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } } }
+        for _ in 0..<20 where asked().isEmpty { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(asked() == (checksIn ? ["GET /v1/installations/self"] : []))
+        #expect(remote.hostname == hostname)
+    }
+
     /// Quitting the app stops its check-ins, never obid's tunnel (#896).
     @Test @MainActor func quittingTheAppStopsNoTunnel() async throws {
         let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))

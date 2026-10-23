@@ -268,6 +268,11 @@ nonisolated enum Connectors {
         return list
     }
 
+    /// What the page lists: the launch build has GitHub and Slack only (`Launch`).
+    static func shown(_ list: [Connector], everything: Bool) -> [Connector] {
+        everything ? list : list.filter { ["github", "slack"].contains($0.id) }
+    }
+
     /// The page's groups, as the design has them: Connected, then Available (everything else, what it
     /// needs said on its row), each in `list`'s order, with only what matches `query`; empty ones are left out.
     static func groups(_ list: [Connector], query: String) -> [Group] {

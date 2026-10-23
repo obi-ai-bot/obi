@@ -318,13 +318,15 @@ struct WindowScreens {
         try await save("mac-settings-components", window: window)
     }
 
-    /// Each Settings page the launch build shows in the window (docs/mac-design.md A1), with the side panel on Settings.
+    /// Each Settings page in the window (docs/mac-design.md A1), with the side panel on Settings; the
+    /// pages the launch build hides with `showEverything` on.
     /// Nothing of this Mac's own shows: run it with `TEST_RUNNER_OBY_HOME` set to an empty folder (the
     /// desk's accounts and rules), and the pages read a defaults suite of their own, a made-up
     /// hostname and a vault in a temporary folder.
-    @Test(arguments: SettingsPage.shown(everything: false))
+    @Test(arguments: SettingsPage.allCases)
     func settings(_ page: SettingsPage) async throws {
         let suite = try #require(UserDefaults(suiteName: "oby-screens-\(UUID().uuidString)"))
+        if !SettingsPage.shown(everything: false).contains(page) { suite.set(true, forKey: Launch.everythingKey) }
         suite.set(true, forKey: "ObySidebarOpen")
         suite.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
         suite.set(true, forKey: RunnerFeed.thisMacKey)
@@ -395,6 +397,8 @@ struct WindowScreens {
     @Test(arguments: ["connectors-ready", "connectors-on", "accounts", "task"])
     func tetrix(_ screen: String) async throws {
         let suite = try #require(UserDefaults(suiteName: "oby-screens-\(UUID().uuidString)"))
+        // The launch build hides Tetrix (`Launch`).
+        suite.set(true, forKey: Launch.everythingKey)
         suite.set(true, forKey: "ObySidebarOpen")
         suite.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
         let dogfood = TetrixStatus.Server(preset: "dogfood", name: "Tetrix Dogfood", url: URL(string: "https://mcp.tetrix.dev/mcp")!)
@@ -438,6 +442,8 @@ struct WindowScreens {
     /// accounts.json names the same logins under other ids; Tetrix and GitHub connected. Made up, no runner asked.
     @Test func connectors() async throws {
         let suite = try #require(UserDefaults(suiteName: "oby-screens-\(UUID().uuidString)"))
+        // Every row, as the launch build hides all but GitHub and Slack (`Launch`).
+        suite.set(true, forKey: Launch.everythingKey)
         suite.set(true, forKey: "ObySidebarOpen")
         suite.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
         let root = FileManager.default.temporaryDirectory.appending(path: "oby-screens-\(UUID().uuidString)")
