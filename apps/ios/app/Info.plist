@@ -11,6 +11,11 @@
 	<string>Oby looks for your Mac on the local network, to reach it directly when you're home.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Oby uses the camera to scan your Mac's pairing QR code.</string>
+	<!-- Deskree's push relay (apps/ios/app/Notifications.swift, PushRelay) and the Keychain group the push extension shares (apps/ios/push). -->
+	<key>ObyControlPlaneURL</key>
+	<string>$(OBY_CONTROL_PLANE_URL)</string>
+	<key>ObyPushKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)$(OBY_IPHONE_BUNDLE_ID).push</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

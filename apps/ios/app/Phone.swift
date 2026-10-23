@@ -215,6 +215,8 @@ final class Phone {
     var link: MacLink? {
         didSet {
             if oldValue?.hostname != link?.hostname {
+                // What the last Mac pushes with reaches nothing any more (Notifications.swift).
+                PushRelay.forget()
                 conversation.forget()
                 forgetConversations()
                 forgetGitHub()
@@ -918,6 +920,12 @@ final class Phone {
         publishing = publish ? id : nil
     }
 
+    /// A notification about a conversation was tapped: its thread opens on Home.
+    func open(conversation id: String) {
+        panel = nil
+        homePath = [.conversation(id)]
+    }
+
     func stop(_ id: String) async throws {
         apply(.job(try await runner.stop(id)))
     }
@@ -1042,6 +1050,12 @@ final class Phone {
     func answer(_ job: Job, _ decision: RunnerPermission.Decision, message: String? = nil) async throws {
         guard let permission = job.permission else { return }
         apply(.job(try await runner.answer(job.id, permission: permission.id, decision, message: message)))
+    }
+
+    /// An alert's answer (#865, Notifications.swift) to the inbox item it showed, which obid refuses
+    /// with 409 when it was answered already. Never queued: the alert says when it didn't go.
+    func answer(alert item: String, _ answer: String) async throws {
+        apply(.inbox(try await runner.settle(item, answer: answer)))
     }
 
     /// Settings › Permissions: the mode new jobs get.

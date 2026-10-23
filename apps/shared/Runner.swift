@@ -1667,13 +1667,13 @@ nonisolated struct Runner: Sendable {
         return answer.push
     }
 
-    /// Hands the runner the app's device token, for alerts when a job needs the user. Answers
-    /// whether the runner pushes.
-    func registerNotifications(token: Data) async throws -> Bool {
-        struct Body: Encodable { var token: String; var topic: String; var environment: String }
+    /// Hands the runner what it pushes alerts with, through Deskree's relay: the relay's `pushId` and
+    /// `pushSecret`, and the public key it seals each alert to (apps/ios/push/SealedPush.swift).
+    /// Never the device token, which only the relay has. Answers whether the runner pushes.
+    func registerNotifications(_ apns: PushRelay.HandOver) async throws -> Bool {
+        struct Body: Encodable { var apns: PushRelay.HandOver }
         struct Answer: Decodable { var push: Bool }
-        let body = Body(token: Self.hex(token), topic: Bundle.main.bundleIdentifier ?? "", environment: Self.environment)
-        let answer: Answer = try await call("POST", "v1/notifications", body: body)
+        let answer: Answer = try await call("POST", "v1/notifications", body: Body(apns: apns))
         return answer.push
     }
 
