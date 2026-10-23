@@ -21,6 +21,13 @@ nonisolated struct Approval: Encodable, Equatable, Sendable {
     static func connectionMessage(action: String, signedAt: String) -> Data {
         Data("oby-connection\n\(action)\n\(signedAt)".utf8)
     }
+
+    /// What a device signs to Confirm inbox item `item`, whose title is `title` (docs/runner-api.md,
+    /// "POST /v1/inbox/{id}/answer", #776): its own prefix, so no publish or connection signature
+    /// passes for a Confirm, and the item's id, so one tap confirms one item.
+    static func confirmMessage(item: String, title: String, signedAt: String) -> Data {
+        Data("oby-confirm\n\(item)\n\(title)\n\(signedAt)".utf8)
+    }
 }
 
 /// The device's publishing key: the iPhone's behind Face ID, the Mac's behind Touch ID. It lives in
@@ -55,6 +62,22 @@ nonisolated enum DeviceKey {
         let signedAt = ISO8601DateFormatter().string(from: .now)
         let signature = try sign(Approval.connectionMessage(action: action, signedAt: signedAt), context: context)
         return Approval(device: device, action: action, signedAt: signedAt, signature: signature)
+    }
+
+    /// Signs the owner's Confirm of inbox item `item`: this asks for Face ID, with its title as the
+    /// reason. It blocks until the user answers, so call it off the main actor.
+    static func approveConfirm(item: String, title: String, device: String) throws -> Approval {
+        let context = LAContext()
+        context.localizedReason = title
+        return try approveConfirm(item: item, title: title, device: device, context: context)
+    }
+
+    /// Signs the owner's Confirm of inbox item `item` with `context`, as `approve` signs a publish:
+    /// `action` is the item's title, word for word (#776).
+    static func approveConfirm(item: String, title: String, device: String, context: LAContext) throws -> Approval {
+        let signedAt = ISO8601DateFormatter().string(from: .now)
+        let signature = try sign(Approval.confirmMessage(item: item, title: title, signedAt: signedAt), context: context)
+        return Approval(device: device, action: title, signedAt: signedAt, signature: signature)
     }
 
     /// ECDSA P-256 with SHA-256, DER, base64: what the runner checks.

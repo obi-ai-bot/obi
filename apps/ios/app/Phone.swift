@@ -950,6 +950,22 @@ final class Phone {
 
     /// Settles an inbox item: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
+        // Only the owner's tap confirms (#776): Face ID signs the item's title. A Confirm is never
+        // queued offline (its signature is stale after two minutes); Cancel and Later still are.
+        if answer == "Confirm", let item = inbox.first(where: { $0.id == id && $0.kind == "confirm" }) {
+            guard connection == .live else { throw RunnerError(message: Self.confirmNeedsTheMac) }
+            guard DeviceKey.isAvailable else { throw RunnerError(message: "Confirming needs Face ID on your iPhone.") }
+            let device = try await registerDevice()
+            let title = item.title
+            let approval: Approval
+            do {
+                approval = try await Task.detached { try DeviceKey.approveConfirm(item: id, title: title, device: device) }.value
+            } catch {
+                throw RunnerError(message: "Nothing was confirmed: Face ID didn't approve it.")
+            }
+            apply(.inbox(try await runner.settle(id, answer: "Confirm", approval: approval)))
+            return
+        }
         guard connection == .live else {
             // The decision stays where it is, marked, until obid takes the answer (or says it was
             // settled meanwhile: then the inbox fetched on connecting no longer has it).
@@ -1041,6 +1057,9 @@ final class Phone {
     }
 
     // MARK: This phone's publishing key
+
+    /// What a Confirm says without a connection to the Mac: it isn't queued (#776).
+    nonisolated static let confirmNeedsTheMac = "Confirm needs a connection to your Mac."
 
     /// By the linked Mac's hostname, the same at home and away, or by the runner's.
     private var deviceKey: String { "device.\(link?.hostname ?? runnerURL?.host() ?? runnerURL?.absoluteString ?? "")" }
