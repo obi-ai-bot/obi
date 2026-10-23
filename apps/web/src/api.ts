@@ -74,6 +74,9 @@ export type InboxItem = {
   // obid only (#546): on a `confirm` item, what its Confirm carries out: a typed action, what it
   // acts on and what else it needs (docs/runner-api.md, "Inbox item")
   confirm?: { action: string; target: string; payload: unknown } | null;
+  // obid only (#1124): on a `pluginEvent`, where it came from: a plug-in's id, or obid's own
+  // source (sentry, alertmanager, grafana, pagerduty)
+  plugin?: { id?: string } | null;
 };
 
 // "GET /v1/conversation"

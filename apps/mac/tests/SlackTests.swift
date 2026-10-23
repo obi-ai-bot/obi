@@ -46,6 +46,20 @@ struct SlackTests {
         }
     }
 
+    /// Issues' To do lists the open offers to look into, never one that only says something, one
+    /// put off or one settled; no other kind of work lists them.
+    @Test func issuesToDoListsTheOffersToLookInto() {
+        let now = Date(timeIntervalSince1970: 1_792_725_120)
+        let offer = WatchNotice(kind: "pluginEvent", id: "ev-sentry-1", title: "Sentry: API-7", text: "x", options: ["Look into it", "Dismiss"], created: now, source: "sentry")
+        let note = WatchNotice(kind: "pluginEvent", id: "ev-x-2", title: "Mentioned", text: "x", options: ["Dismiss"], created: now, source: "notes")
+        let later = WatchNotice(kind: "pluginEvent", id: "ev-x-3", title: "Alert", text: "x", options: ["Look into it", "Dismiss"], created: now,
+                                later: now.addingTimeInterval(3600), source: "grafana")
+        let watch = WatchNotice(id: "w1", title: "t", text: "x", options: ["Look into it"], created: now)
+        let all = [offer, note, later, watch]
+        #expect(GroupPane.offers(all, kind: .issues, now: now).map(\.id) == ["ev-sentry-1"])
+        #expect(GroupPane.offers(all, kind: .tasks, now: now).isEmpty && GroupPane.offers(all, kind: .review, now: now).isEmpty)
+    }
+
     /// A listener's finished review: the pull request's page, and the review Approve posts.
     @Test func aReviewReadyShowsWhatApprovePosts() throws {
         let json = #"{"id":"listen-review-1","kind":"listen","job":"j1","title":"Review ready: obi #835","text":"Oby reviewed pull request #835.","options":["Approve","Dismiss"],"created":"2026-10-21T15:00:00Z","done":null,"later":null,"watch":{"source":"slack","url":"https://slack.com/archives/C1/p1","pr":{"repo":"obi-ai-bot/obi","number":835,"url":"https://github.com/obi-ai-bot/obi/pull/835"},"review":"Looks right; **one** nit."}}"#
