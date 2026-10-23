@@ -204,7 +204,7 @@ pub fn render(event: &Value, nonce: &str) -> String {
 /// `text` as an agent may get it: the secrets obid knows and the vault's taken out (one vault read
 /// for the whole text), then, line by line, a line the secret scan still flags left out. Fails
 /// when the vault can't be read.
-fn for_agent(text: &str) -> Result<String, String> {
+pub(crate) fn for_agent(text: &str) -> Result<String, String> {
     let clean = crate::vault::for_agent(&crate::secrets::known().redact(text))?;
     let mut kept = Vec::new();
     for line in clean.lines() {
