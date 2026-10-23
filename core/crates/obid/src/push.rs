@@ -9,8 +9,8 @@
 //!   (one token per device: a new one replaces it). Revoking the device drops its tokens, and a
 //!   device that is no longer paired is sent nothing. FCM's `UNREGISTERED`, or an
 //!   `INVALID_ARGUMENT` about the token, drops one. The iPhones' relay registrations follow the
-//!   same rules in `home/push/relay.json`, their `pushSecret` learned as obid's own secret; the
-//!   relay's `410` drops one.
+//!   same rules in `home/push/relay.json`, their `pushKey` learned as obid's own secret (obid never
+//!   gets the phone's `pushSecret`); the relay's `410` drops one.
 //! - **The service account.** The owner's vault secret [`SERVICE_ACCOUNT`] (`obid vault add`), so it
 //!   is in no file an agent could read, and every answer, log line and push has it taken out. Its
 //!   private key and the access tokens it gets are learned as obid's own secrets too.
@@ -64,6 +64,8 @@ pub const INFO: &[u8] = b"oby push v1";
 const ID: usize = 64;
 /// The longest alert body, in characters.
 const BODY: usize = 200;
+/// The longest `sealed` the relay takes, in base64url characters: Apple's payload stays under 4 KB.
+const SEALED: usize = 3072;
 /// Oby's message within this long of the owner's own words in its conversation answers them while
 /// they're there: it isn't pushed (a turn takes at most 110 seconds).
 const ANSWERING: Duration = Duration::from_secs(120);
@@ -181,11 +183,13 @@ pub fn message(token: &str, job: &str, data: Value, alert: bool) -> Value {
     }})
 }
 
-/// One alert for an iPhone, sealed as it's serialized (docs/runner-api.md): what it says, and
-/// what a tap opens. `id` is what a newer alert for the same thing replaces it by.
+/// One alert for an iPhone (docs/runner-api.md): what it says, what a tap opens, and the thing
+/// it's about. Sealed as [`sealed_alert`] says.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Alert {
-    pub id: String,
+    /// The thing it's about, a job's, an inbox item's or a conversation's id: a newer alert for
+    /// it replaces this one (the relay's `collapse`, never sealed).
+    pub collapse: String,
     pub title: String,
     pub body: String,
     pub thread: String,
@@ -201,24 +205,41 @@ pub struct Alert {
     pub urgent: bool,
 }
 
-/// An alert id of at most [`ID`] bytes, APNs' collapse id's limit: `id`, or a digest of a longer
-/// one.
-fn alert_id(id: &str) -> String {
-    if id.len() <= ID {
+/// The relay's `collapse` for the thing `id`: `id` itself when it's at most [`ID`] printable ASCII
+/// characters (APNs' collapse id), else a digest of it.
+fn collapse_id(id: &str) -> String {
+    if !id.is_empty() && id.len() <= ID && id.bytes().all(|b| b.is_ascii_graphic()) {
         return id.to_owned();
     }
     let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, id.as_bytes());
     format!("h-{}", hex::encode(&digest.as_ref()[..16]))
 }
 
-/// `text` on one line, at most `most` characters.
+/// `text` on one line, without control characters, at most `most` characters.
 fn clipped(text: &str, most: usize) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .chars()
+        .filter(|c| !c.is_control())
         .take(most)
         .collect()
+}
+
+/// What's sealed for `alert`: its words and what a tap opens, with an `id` of this send alone
+/// (the phone shows an id once) and `at`, when it was sealed in seconds since the epoch (the phone
+/// drops one more than a day old). The thing's id stays outside, as the relay's `collapse`.
+pub fn sealed_alert(alert: &Alert, at: i64) -> Value {
+    let mut sealed = serde_json::to_value(alert).unwrap_or_default();
+    if let Some(fields) = sealed.as_object_mut() {
+        fields.remove("collapse");
+        fields.insert(
+            "id".into(),
+            json!(uuid::Uuid::new_v4().simple().to_string()),
+        );
+        fields.insert("at".into(), json!(at));
+    }
+    sealed
 }
 
 /// What the relay should be saying now, by the owner's lean rule, each with what it says (an alert
@@ -235,7 +256,7 @@ pub fn wanted(jobs: &[Job], inbox: &[Value]) -> Vec<(String, Alert)> {
         .filter(|j| j.obi.is_none() && j.dismissed.is_none())
     {
         let alert = |(title, body, category): (String, String, &str), urgent| Alert {
-            id: alert_id(&job.id),
+            collapse: collapse_id(&job.id),
             title: clipped(&title, 100),
             body: clipped(&body, BODY),
             thread: "jobs".into(),
@@ -301,7 +322,7 @@ pub fn wanted(jobs: &[Job], inbox: &[Value]) -> Vec<(String, Alert)> {
         wanted.push((
             "open".into(),
             Alert {
-                id: alert_id(id),
+                collapse: collapse_id(id),
                 title: clipped(title, 100),
                 body: clipped(first_line(text).unwrap_or(""), BODY),
                 thread: conversation.clone().unwrap_or_else(|| "inbox".into()),
@@ -334,11 +355,11 @@ pub fn told(
     let mut send = Vec::new();
     let mut now = BTreeMap::new();
     for (what, alert) in wanted {
-        if said.get(&alert.id).is_none_or(|s| s.what != what) {
+        if said.get(&alert.collapse).is_none_or(|s| s.what != what) {
             send.push(alert.clone());
         }
         let settles = alert.urgent.then(|| alert.clone());
-        now.insert(alert.id.clone(), Said { what, settles });
+        now.insert(alert.collapse.clone(), Said { what, settles });
     }
     for (id, gone) in said {
         if let Some(alert) = gone.settles.as_ref().filter(|_| !now.contains_key(id)) {
@@ -357,7 +378,7 @@ pub fn told(
 /// Oby's message in `conversation`, as its alert: its words on one line.
 fn message_alert(conversation: &str, text: &str) -> Alert {
     Alert {
-        id: alert_id(conversation),
+        collapse: collapse_id(conversation),
         title: "Oby".into(),
         body: clipped(text, BODY),
         thread: conversation.into(),
@@ -395,10 +416,18 @@ pub fn seal(key: &str, plaintext: &[u8]) -> Result<String, &'static str> {
     Ok(b64.encode(sealed))
 }
 
-/// The relay's `Oby-Push-Mac` for `body`: HMAC-SHA256 keyed by the `pushSecret`'s bytes as
-/// registered, base64url, unpadded.
-pub fn mac(secret: &str, body: &[u8]) -> String {
-    let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, secret.as_bytes());
+/// The raw 32 bytes of a `pushKey` (base64url, padding optional), or none.
+fn push_key_bytes(push_key: &str) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(push_key.trim_end_matches('='))
+        .ok()
+        .filter(|k| k.len() == 32)
+}
+
+/// The relay's `Oby-Push-Mac` for `body`: HMAC-SHA256 keyed by the `pushKey`'s raw bytes (never
+/// its base64url text), base64url, unpadded.
+pub fn mac(key: &[u8], body: &[u8]) -> String {
+    let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, key);
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(aws_lc_rs::hmac::sign(&key, body).as_ref())
 }
@@ -416,7 +445,7 @@ pub enum Registration {
 
 /// Why `body` isn't a registration obid takes (`422`), or what it hands over.
 pub fn registration(body: &[u8]) -> Result<Registration, &'static str> {
-    const SHAPE: &str = "The body is {\"token\": …, \"platform\": \"fcm\", \"topic\": …}, or {\"apns\": {\"pushId\", \"pushSecret\", \"sealKey\", \"relay\"}}.";
+    const SHAPE: &str = "The body is {\"token\": …, \"platform\": \"fcm\", \"topic\": …}, or {\"apns\": {\"pushId\", \"pushKey\", \"sealKey\", \"relay\"}}.";
     #[derive(Deserialize)]
     struct Token {
         token: String,
@@ -427,7 +456,7 @@ pub fn registration(body: &[u8]) -> Result<Registration, &'static str> {
     #[serde(rename_all = "camelCase")]
     struct Apns {
         push_id: String,
-        push_secret: String,
+        push_key: String,
         seal_key: String,
         relay: String,
     }
@@ -440,8 +469,8 @@ pub fn registration(body: &[u8]) -> Result<Registration, &'static str> {
         if !printable(&given.push_id, 1) {
             return Err("pushId isn't a push id.");
         }
-        if !printable(&given.push_secret, 16) {
-            return Err("pushSecret is 16 to 512 printable characters.");
+        if push_key_bytes(&given.push_key).is_none() {
+            return Err("pushKey is 32 bytes in base64url.");
         }
         let relay = origin(&given.relay)
             .ok_or("relay is an https:// origin, like https://oby-control.deskree.com.")?;
@@ -449,7 +478,7 @@ pub fn registration(body: &[u8]) -> Result<Registration, &'static str> {
             .map_err(|_| "sealKey isn't an X25519 public key in base64url.")?;
         return Ok(Registration::Relay(Relayed {
             push_id: given.push_id,
-            push_secret: given.push_secret,
+            push_key: given.push_key,
             seal_key: given.seal_key,
             relay,
             device: None,
@@ -505,8 +534,9 @@ pub struct Kept {
 #[serde(rename_all = "camelCase")]
 pub struct Relayed {
     pub push_id: String,
-    /// obid's own secret once kept: taken out of every answer, log line and push.
-    pub push_secret: String,
+    /// What obid signs its pushes with (the phone derives it from its `pushSecret`, which obid
+    /// never gets). obid's own secret once kept: taken out of every answer, log line and push.
+    pub push_key: String,
     pub seal_key: String,
     pub relay: String,
     pub device: Option<String>,
@@ -522,16 +552,17 @@ impl std::fmt::Debug for Relayed {
 }
 
 impl Relayed {
-    /// The name its `pushSecret` is learned under: its own, so each device's stays learned, and a
+    /// The name its `pushKey` is learned under: its own, so each device's stays learned, and a
     /// digest of its push id, so a redaction marker shows neither.
     fn secret_name(&self) -> String {
         let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, self.push_id.as_bytes());
-        format!("push secret {}", hex::encode(&digest.as_ref()[..4]))
+        format!("push key {}", hex::encode(&digest.as_ref()[..4]))
     }
 
-    /// Learns its `pushSecret` as obid's own.
+    /// Learns its `pushKey` as obid's own, as written and as its raw bytes.
     fn learn(&self) {
-        crate::secrets::known().learn(&self.secret_name(), &self.push_secret);
+        let raw = push_key_bytes(&self.push_key).unwrap_or_default();
+        crate::secrets::known().learn_forms(&self.secret_name(), &[self.push_key.as_bytes(), &raw]);
     }
 }
 
@@ -772,7 +803,7 @@ impl Push {
     }
 
     /// Keeps an iPhone's relay registration, from the paired device it names, as the newest; its
-    /// `pushSecret` is obid's own secret from now on.
+    /// `pushKey` is obid's own secret from now on.
     pub fn keep_relayed(&self, relayed: Relayed) -> std::io::Result<()> {
         relayed.learn();
         let mut list = self.relayed.lock().unwrap_or_else(|e| e.into_inner());
@@ -911,7 +942,7 @@ impl Push {
         }
         for alert in send {
             if let Err(why) = scanned(&alert.title, &alert.body, scratch).await {
-                tracing::warn!(alert = %alert.id, "no iPhone push for it: {why}");
+                tracing::warn!(alert = %alert.collapse, "no iPhone push for it: {why}");
                 continue;
             }
             for relayed in &to {
@@ -923,24 +954,33 @@ impl Push {
     /// Seals `alert` to the iPhone of `to` and hands it to its relay; logs a failure with the
     /// relay's status and error code only, and drops a registration the relay answers `410`.
     async fn relay(&self, to: &Relayed, alert: &Alert) {
-        let sealed = match serde_json::to_vec(alert)
-            .map_err(|_| "it isn't JSON")
-            .and_then(|plain| seal(&to.seal_key, &plain))
-        {
+        let at = obi_protocol::time::now();
+        let sealed = seal(&to.seal_key, sealed_alert(alert, at).to_string().as_bytes())
+            .and_then(|sealed| {
+                (sealed.len() <= SEALED)
+                    .then_some(sealed)
+                    .ok_or("it's longer than the relay takes")
+            })
+            .and_then(|sealed| {
+                push_key_bytes(&to.push_key)
+                    .map(|key| (sealed, key))
+                    .ok_or("its pushKey isn't 32 bytes")
+            });
+        let (sealed, key) = match sealed {
             Ok(sealed) => sealed,
             Err(why) => {
-                tracing::warn!(alert = %alert.id, "no iPhone push for it: {why}");
+                tracing::warn!(alert = %alert.collapse, "no iPhone push for it: {why}");
                 return;
             }
         };
-        let body = json!({"pushId": to.push_id, "sealed": sealed, "collapse": alert.id,
-                          "urgent": alert.urgent})
+        let body = json!({"pushId": to.push_id, "sealed": sealed, "collapse": alert.collapse,
+                          "urgent": alert.urgent, "at": at})
         .to_string();
         let response = match self
             .http
             .post(format!("{}/v1/push", to.relay))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header("Oby-Push-Mac", mac(&to.push_secret, body.as_bytes()))
+            .header("Oby-Push-Mac", mac(&key, body.as_bytes()))
             .body(body)
             .send()
             .await
@@ -1565,10 +1605,18 @@ mod tests {
         serde_json::from_slice(&plain).unwrap()
     }
 
+    /// A test phone's `pushKey`: 32 bytes made from its push id, base64url.
+    fn key_of(push_id: &str) -> String {
+        b64().encode(aws_lc_rs::digest::digest(
+            &aws_lc_rs::digest::SHA256,
+            push_id.as_bytes(),
+        ))
+    }
+
     fn relayed(push_id: &str, device: Option<&str>, seal_key: &str, relay: &str) -> Relayed {
         Relayed {
             push_id: push_id.into(),
-            push_secret: format!("push-secret-of-{push_id}-0123456789"),
+            push_key: key_of(push_id),
             seal_key: seal_key.into(),
             relay: relay.into(),
             device: device.map(Into::into),
@@ -1577,21 +1625,21 @@ mod tests {
 
     #[test]
     fn relay_registrations_are_checked() {
-        const SIXTEEN: &str = "0123456789abcdef";
         let (_, key) = iphone();
-        let apns = |id: &str, secret: &str, key: &str, relay: &str| {
+        let signs = key_of("p-1");
+        let apns = |id: &str, signs: &str, key: &str, relay: &str| {
             registration(
-                json!({"apns": {"pushId": id, "pushSecret": secret, "sealKey": key, "relay": relay}})
+                json!({"apns": {"pushId": id, "pushKey": signs, "sealKey": key, "relay": relay}})
                     .to_string()
                     .as_bytes(),
             )
         };
-        let good = |relay: &str| apns("p-1", SIXTEEN, &key, relay);
+        let good = |relay: &str| apns("p-1", &signs, &key, relay);
         assert_eq!(
             good("https://oby-control.deskree.com"),
             Ok(Registration::Relay(Relayed {
                 push_id: "p-1".into(),
-                push_secret: SIXTEEN.into(),
+                push_key: signs.clone(),
                 seal_key: key.clone(),
                 relay: "https://oby-control.deskree.com".into(),
                 device: None,
@@ -1612,7 +1660,7 @@ mod tests {
         );
         assert_eq!(relay_of(good("http://[::1]:9")), "http://[::1]:9");
         assert_eq!(relay_of(good("http://localhost:9")), "http://localhost:9");
-        assert!(apns("p-1", SIXTEEN, &format!("{key}="), "https://r.example").is_ok());
+        assert!(apns("p-1", &signs, &format!("{key}="), "https://r.example").is_ok());
         for relay in [
             "http://oby-control.deskree.com",
             "http://10.0.0.1",
@@ -1635,15 +1683,30 @@ mod tests {
             zeros,
         ] {
             assert!(
-                apns("p-1", SIXTEEN, &bad_key, "https://r.example").is_err(),
+                apns("p-1", &signs, &bad_key, "https://r.example").is_err(),
                 "{bad_key}"
             );
         }
-        assert!(apns("", SIXTEEN, &key, "https://r.example").is_err());
-        assert!(apns("p 1", SIXTEEN, &key, "https://r.example").is_err());
-        assert!(apns("p-1", "short", &key, "https://r.example").is_err());
-        assert!(apns("p-1", "0123456789 abcdef", &key, "https://r.example").is_err());
-        assert!(apns("p-1", &"s".repeat(513), &key, "https://r.example").is_err());
+        assert!(apns("", &signs, &key, "https://r.example").is_err());
+        assert!(apns("p 1", &signs, &key, "https://r.example").is_err());
+        // The pushKey is 32 bytes in base64url (padded or not), never the phone's pushSecret.
+        assert!(apns("p-1", &format!("{signs}="), &key, "https://r.example").is_ok());
+        for bad in [
+            String::new(),
+            "short".into(),
+            b64().encode([7_u8; 31]),
+            b64().encode([7_u8; 33]),
+            format!("{} ", signs),
+            signs.replace(&signs[..2], "+/"),
+        ] {
+            assert!(
+                apns("p-1", &bad, &key, "https://r.example").is_err(),
+                "{bad}"
+            );
+        }
+        let secret_only = json!({"apns": {"pushId": "p-1", "pushSecret": signs, "sealKey": key,
+                                          "relay": "https://r.example"}});
+        assert!(registration(secret_only.to_string().as_bytes()).is_err());
         assert!(registration(br#"{"apns": {"pushId": "p-1"}}"#).is_err());
         assert!(registration(br#"{"apns": "p-1"}"#).is_err());
     }
@@ -1655,18 +1718,21 @@ mod tests {
             hex::decode("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
                 .unwrap();
         assert_eq!(
-            mac("Jefe", b"what do ya want for nothing?"),
+            mac(b"Jefe", b"what do ya want for nothing?"),
             b64().encode(expected)
         );
-        let body = br#"{"pushId":"p-1","sealed":"AAAA","collapse":"j1","urgent":true}"#;
+        // Keyed by the pushKey's raw 32 bytes, never its base64url text.
+        let signs = key_of("p-1");
+        let raw = push_key_bytes(&signs).unwrap();
+        assert_eq!(raw.len(), 32);
+        let body =
+            br#"{"at":1800000000,"collapse":"j1","pushId":"p-1","sealed":"AAAA","urgent":true}"#;
+        assert_ne!(mac(&raw, body), mac(signs.as_bytes(), body));
         assert_ne!(
-            mac("one-push-secret-0", body),
-            mac("two-push-secret-0", body)
+            mac(&raw, body),
+            mac(&push_key_bytes(&key_of("p-2")).unwrap(), body)
         );
-        assert_ne!(
-            mac("one-push-secret-0", body),
-            mac("one-push-secret-0", &body[1..])
-        );
+        assert_ne!(mac(&raw, body), mac(&raw, &body[1..]));
     }
 
     #[test]
@@ -1698,6 +1764,38 @@ mod tests {
         );
     }
 
+    /// The longest alert obid makes, four-byte characters and quotes throughout, still fits the
+    /// relay's `sealed`.
+    #[test]
+    fn the_longest_alert_fits_the_relay() {
+        let (_, key) = iphone();
+        let wide = "\u{1F600}\"\u{1}".repeat(400);
+        let long_id = "x".repeat(200);
+        let alert = Alert {
+            collapse: collapse_id(&long_id),
+            title: clipped(&wide, 100),
+            body: clipped(&wide, BODY),
+            thread: uuid::Uuid::new_v4().to_string(),
+            category: "permissionRule".into(),
+            job: Some("9f08fd10".into()),
+            conversation: Some(uuid::Uuid::new_v4().to_string()),
+            item: Some(format!(
+                "shell-{}-{}",
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4()
+            )),
+            urgent: true,
+        };
+        let sealed = seal(
+            &key,
+            sealed_alert(&alert, 1_800_000_000).to_string().as_bytes(),
+        )
+        .unwrap();
+        assert!(sealed.len() <= SEALED, "{}", sealed.len());
+        assert!(!alert.body.contains('\u{1}'));
+        assert!(alert.collapse.len() <= ID);
+    }
+
     /// The iPhone's check (docs/runner-api.md has these): `SEALED` is what obid sealed, opened on
     /// macOS 26 by CryptoKit's `HPKE.Recipient(privateKey:ciphersuite: .Curve25519_SHA256_ChachaPoly,
     /// info: "oby push v1", encapsulatedKey: first 32 bytes)` with `open(the rest)` to `ALERT`;
@@ -1707,8 +1805,8 @@ mod tests {
         // The test iPhone's X25519 private half (CryptoKit's rawRepresentation), base64url.
         const RECIPIENT: &str = "H8N3pC2swtsoc14zwnS2w5bHYEEqREpOIxv21rPygBw";
         const SEAL_KEY: &str = "IWlFcnjzHXlyLYTNMzTi8Jn5yrH6_QwEDMtloT3gQiY";
-        const SEALED: &str = "IslSF4EeX1qFjKGhEE-Ak7s1ol-lz1czJtqklgSPkT0M-rtgmAoFzjgF92N2FWipbKpP44rc4aTEyQFJzmgNSl5q7NDtqkNfOttqBfBjrUnFwvFAnRspL-RCt-aiIvAFPQpDnMWQv7HlIYTRJhZBxYNoK_MdvT9BWloJ47U46wpgynhs4-bbQsDddUpU3aL55KH-KVzyS_3V2rbBgwx5HdhTKUDwonvE6XL2bu1sWnjj_uOVQrdccjVGxzHBS9Udf1bN_jF0ktTZ25PRskc1q_9PoWo-DZhmOsY4IeNt1EiXhZ65";
-        const ALERT: &str = r#"{"id":"9f08fd10","title":"Run swift test?","body":"Android push: swift test --filter Push","thread":"jobs","category":"permission","job":"9f08fd10","item":"9f08fd10-permission-p1"}"#;
+        const SEALED: &str = "yzzv3v2wiQKi22XvBmKaLVyZO7zv5rCO6ZKfOlkR2Ai6Tb_STHPyEjKJHTAkfAlwJmSBr2lqRetbeoz-6-nTUGP7YXs3rhK0cN2kVe4CY1AUJ9MJW1i6cjK4jQWwviFU3Y0neRoWsi6XkAMCQGGLYIL1ckm2uUr6FQfeZ2MAuHeq1pqlxHNPljCZ-XGpRQ73kif34Iw9guoNKB7djZSq9LpFtSbgQFNGBX3m5BCrSvUusYbbn5ELJTRPiXcGYwYdv9Dr5QCHQdPYaOzFbF3jFB98tZnDElz4R-68B5ZJZ0yAW_-sTqG-RsfPQd4z8r_NQfkoublPG-GL67p61NVyCJIpq4XJO_KWG0QVfQ";
+        const ALERT: &str = r#"{"at":1800000000,"body":"Android push: swift test --filter Push","category":"permission","id":"5f0e8c1a3b2d4e6f8a9b0c1d2e3f4a5b","item":"9f08fd10-permission-p1","job":"9f08fd10","thread":"jobs","title":"Run swift test?"}"#;
         const FROM_CRYPTOKIT: &str =
             "5Cn_OepvWRMzD8YqLv_qFLzGHf9CXrCWM4XQ0HhPckgWAA_Y5Lh_AM-SZgzotrqXWko063ENCeZtOWw";
         let secret = SecretKey::from_bytes(&b64().decode(RECIPIENT).unwrap()).unwrap();
@@ -1743,7 +1841,7 @@ mod tests {
         let ids = |wanted: &[(String, Alert)]| -> Vec<(String, String, bool)> {
             wanted
                 .iter()
-                .map(|(_, a)| (a.id.clone(), a.category.clone(), a.urgent))
+                .map(|(_, a)| (a.collapse.clone(), a.category.clone(), a.urgent))
                 .collect()
         };
         let mut asking = job("asks");
@@ -1804,6 +1902,8 @@ mod tests {
             shell_rule,
             inbox_item("asks-permission-p1", "permission", "asks", None),
             inbox_item("watch-fyi", "watch", "", Some("fyi")),
+            // Waiting for the model to sort it: not yet.
+            inbox_item("watch-pending", "watch", "", Some("pending")),
             inbox_item("watch-unsorted", "watch", "", None),
             inbox_item("listen-1", "listen", "", Some("needs_you")),
             later,
@@ -1814,7 +1914,7 @@ mod tests {
             ],
             &inbox,
         );
-        let digest = alert_id(&long);
+        let digest = collapse_id(&long);
         assert!(digest.starts_with("h-") && digest.len() <= ID);
         assert_eq!(
             ids(&wanted),
@@ -1833,11 +1933,11 @@ mod tests {
             ]
             .map(|(id, category, urgent)| (id.to_owned(), category.to_owned(), urgent))
         );
-        let by_id = |id: &str| &wanted.iter().find(|(_, a)| a.id == id).unwrap().1;
+        let by_id = |id: &str| &wanted.iter().find(|(_, a)| a.collapse == id).unwrap().1;
         assert_eq!(
             *by_id("asks"),
             Alert {
-                id: "asks".into(),
+                collapse: "asks".into(),
                 title: "Run swift test?".into(),
                 body: "Android push: swift test --filter Push".into(),
                 thread: "jobs".into(),
@@ -1865,7 +1965,7 @@ mod tests {
         assert!(told(wanted.clone(), &said).0.is_empty());
         let rest: Vec<(String, Alert)> = wanted
             .iter()
-            .filter(|(_, a)| a.id != "asks" && a.id != "done")
+            .filter(|(_, a)| a.collapse != "asks" && a.collapse != "done")
             .cloned()
             .collect();
         let (send, now) = told(rest.clone(), &said);
@@ -1901,11 +2001,11 @@ mod tests {
         let lost = relayed("b", Some("lost"), &key, "https://r.example");
         push.keep_relayed(phone.clone()).unwrap();
         push.keep_relayed(lost.clone()).unwrap();
-        // Each device's push secret is obid's own: out of every answer and log line.
-        let said = crate::secrets::known()
-            .redact(&format!("x {} y {} z", phone.push_secret, lost.push_secret));
+        // Each device's push key is obid's own: out of every answer and log line.
+        let said =
+            crate::secrets::known().redact(&format!("x {} y {} z", phone.push_key, lost.push_key));
         assert!(
-            !said.contains(&phone.push_secret) && !said.contains(&lost.push_secret),
+            !said.contains(&phone.push_key) && !said.contains(&lost.push_key),
             "{said}"
         );
         // The phone's new registration replaces its old one.
@@ -1924,9 +2024,9 @@ mod tests {
         // Learned again when obid starts; never in Debug.
         crate::secrets::known().forget(&newer.secret_name());
         Push::open(&home);
-        let said = crate::secrets::known().redact(&format!("x {} y", newer.push_secret));
-        assert!(!said.contains(&newer.push_secret), "{said}");
-        assert!(!format!("{newer:?}").contains(&newer.push_secret));
+        let said = crate::secrets::known().redact(&format!("x {} y", newer.push_key));
+        assert!(!said.contains(&newer.push_key), "{said}");
+        assert!(!format!("{newer:?}").contains(&newer.push_key));
         std::fs::remove_dir_all(&home).unwrap();
     }
 
@@ -1980,7 +2080,9 @@ mod tests {
         let phone = relayed("phone", Some("iphone"), &key, &relay);
         push.keep_relayed(phone.clone()).unwrap();
         let paired: HashSet<String> = ["iphone".to_owned()].into();
-        // The alerts each look sent, opened, after checking each call's MAC and body.
+        // The alerts each look sent, opened, after checking each call's MAC, body, `at` and
+        // one-send `id`; each with the call's `collapse` in place of those two.
+        let ids = Mutex::new(HashSet::new());
         let sent = |heard: &Heard| -> Vec<(Value, bool)> {
             heard
                 .lock()
@@ -1988,20 +2090,27 @@ mod tests {
                 .drain(..)
                 .map(|(given_mac, body)| {
                     let given: Value = serde_json::from_slice(&body).unwrap();
-                    let secret_of = format!(
-                        "push-secret-of-{}-0123456789",
-                        given["pushId"].as_str().unwrap()
-                    );
-                    assert_eq!(given_mac, mac(&secret_of, &body));
+                    let signs = key_of(given["pushId"].as_str().unwrap());
+                    assert_eq!(given_mac, mac(&push_key_bytes(&signs).unwrap(), &body));
                     let keys: Vec<&str> = given
                         .as_object()
                         .unwrap()
                         .keys()
                         .map(String::as_str)
                         .collect();
-                    assert_eq!(keys, ["collapse", "pushId", "sealed", "urgent"]);
-                    let alert = opened(&secret, given["sealed"].as_str().unwrap());
-                    assert_eq!(given["collapse"], alert["id"]);
+                    assert_eq!(keys, ["at", "collapse", "pushId", "sealed", "urgent"]);
+                    let now = obi_protocol::time::now();
+                    let at = given["at"].as_i64().unwrap();
+                    assert!((now - 60..=now).contains(&at), "{at}");
+                    let mut alert = opened(&secret, given["sealed"].as_str().unwrap());
+                    assert_eq!(alert["at"], at);
+                    let id = alert["id"].as_str().unwrap().to_owned();
+                    assert!(id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()));
+                    assert!(ids.lock().unwrap().insert(id), "an id sent twice");
+                    let fields = alert.as_object_mut().unwrap();
+                    fields.remove("id");
+                    fields.remove("at");
+                    fields.insert("collapse".into(), given["collapse"].clone());
                     (alert, given["urgent"].as_bool().unwrap())
                 })
                 .collect()
@@ -2046,21 +2155,23 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(
             got[0].0,
-            json!({"id": "j1", "title": "Done: Android push", "body": "Fixed the push.",
+            json!({"collapse": "j1", "title": "Done: Android push", "body": "Fixed the push.",
                                      "thread": "jobs", "category": "job", "job": "j1"})
         );
         assert!(!got[0].1);
         look(vec![j.clone()], vec![], paired.clone()).await;
         assert!(sent(&heard).is_empty());
-        // The inbox: FYI and unsorted say nothing; needs_you once.
+        // The inbox: FYI, unsorted and still being sorted (`pending`) say nothing; once sorted
+        // needs_you, it says so once.
         let fyi = vec![
             inbox_item("w1", "watch", "", Some("fyi")),
             inbox_item("w2", "watch", "", None),
+            inbox_item("w3", "watch", "", Some("pending")),
         ];
         look(vec![j.clone()], fyi.clone(), paired.clone()).await;
         assert!(sent(&heard).is_empty());
         let mut needs = fyi.clone();
-        needs.push(inbox_item("w3", "watch", "", Some("needs_you")));
+        needs[2]["triage"] = json!("needs_you");
         look(vec![j.clone()], needs.clone(), paired.clone()).await;
         let got = sent(&heard);
         assert_eq!(got.len(), 1);
@@ -2077,7 +2188,7 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(
             got[0].0,
-            json!({"id": "c1", "title": "Oby", "body": "Morning. Two jobs need you.",
+            json!({"collapse": "c1", "title": "Oby", "body": "Morning. Two jobs need you.",
                                      "thread": "c1", "category": "message", "conversation": "c1"})
         );
         // The same turn sent again (its jobs changed) isn't news, nor an older one.

@@ -572,17 +572,19 @@ fn revoking_a_device_drops_its_push_token() {
 }
 
 /// An iPhone's registration with Deskree's push relay is kept with the paired device that handed
-/// it over, its push secret out of obid's log, and goes when the device is revoked.
+/// it over, its push key out of obid's log, and goes when the device is revoked.
 #[test]
 fn revoking_a_device_drops_its_iphone_relay_registration() {
     let folder = Folder::new("gateway-relay");
     let obid = started(&folder);
     let token = paired(&obid);
-    let secret = "relay-push-secret-of-this-iphone-0123";
+    use base64::Engine as _;
+    // What the phone derives from its pushSecret (which obid never gets): 32 bytes, base64url.
+    let signs = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 32]);
     // The test iPhone's X25519 public half (the one crate::push's CryptoKit vector uses).
     let public = "IWlFcnjzHXlyLYTNMzTi8Jn5yrH6_QwEDMtloT3gQiY";
     let apns = |relay: &str| {
-        json!({"apns": {"pushId": "push-id-1", "pushSecret": secret, "sealKey": public,
+        json!({"apns": {"pushId": "push-id-1", "pushKey": signs, "sealKey": public,
                         "relay": relay}})
     };
     let refused = through(
@@ -610,7 +612,7 @@ fn revoking_a_device_drops_its_iphone_relay_registration() {
     let kept: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     assert_eq!(
         kept,
-        json!([{"pushId": "push-id-1", "pushSecret": secret, "sealKey": public,
+        json!([{"pushId": "push-id-1", "pushKey": signs, "sealKey": public,
                 "relay": "https://oby-control.deskree.com", "device": id}])
     );
     use std::os::unix::fs::PermissionsExt;
@@ -623,7 +625,7 @@ fn revoking_a_device_drops_its_iphone_relay_registration() {
     assert_eq!(revoked.status, 204, "{}", revoked.text);
     let kept: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     assert_eq!(kept, json!([]));
-    assert!(!obid.log().contains(secret), "{}", obid.log());
+    assert!(!obid.log().contains(&signs), "{}", obid.log());
 }
 
 /// A channel listener's review waiting for Approve, in obid's home before it starts.
