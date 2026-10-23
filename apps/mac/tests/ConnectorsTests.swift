@@ -444,6 +444,7 @@ struct ConnectorsTests {
         let steps = AlertingTool.all[0].steps(url: "https://oby-control.test/h/x", secret: "s3cret")
         #expect(steps.contains("url: https://oby-control.test/h/x") && steps.contains("X-Oby-Token:") && steps.contains(#"secrets: ["s3cret"]"#))
         #expect(AlertingTool.all[1].steps(url: "u", secret: "s").contains("X-Grafana-Alerting-Timestamp"))
+        #expect(AlertingTool.all[0].steps(url: "u", secret: "s", label: "job").contains("the alert's job label"))
     }
 
     /// The Mac reads obid's Sentry, connects it and follows a project as obid answers; a repository

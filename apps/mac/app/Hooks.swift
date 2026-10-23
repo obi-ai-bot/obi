@@ -106,8 +106,9 @@ nonisolated struct AlertingTool: Equatable, Sendable {
         AlertingTool(id: "grafana", name: "Grafana", about: "Alerts from Grafana", source: "grafana", symbol: "chart.xyaxis.line"),
     ]
 
-    /// What to paste where, for `url` and `secret` (shown once, then only in obid's vault).
-    func steps(url: String, secret: String) -> String {
+    /// What to paste where, for `url` and `secret` (shown once, then only in obid's vault); `label`
+    /// is the one that names the project.
+    func steps(url: String, secret: String, label: String = "service") -> String {
         switch source {
         case "alertmanager":
             return """
@@ -122,7 +123,7 @@ nonisolated struct AlertingTool: Equatable, Sendable {
                         X-Oby-Token:
                           secrets: ["\(secret)"]
 
-            Critical and error alerts come to Oby; warnings don't. The project is the alert's service label.
+            Critical and error alerts come to Oby; warnings don't. The project is the alert's \(label) label.
             """
         default:
             return """
@@ -131,7 +132,7 @@ nonisolated struct AlertingTool: Equatable, Sendable {
             Optional settings › HMAC signature: Secret \(secret), Timestamp header X-Grafana-Alerting-Timestamp.
             Then send your alerts' notification policy to that contact point.
 
-            Critical and error alerts come to Oby; warnings don't. The project is the alert's service label.
+            Critical and error alerts come to Oby; warnings don't. The project is the alert's \(label) label.
             """
         }
     }

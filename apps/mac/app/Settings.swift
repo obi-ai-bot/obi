@@ -794,7 +794,7 @@ struct AlertHookSheet: View {
     let done: () -> Void
     @State private var repo = ""
     @State private var label = "service"
-    @State private var made: (url: String, secret: String)?
+    @State private var made: (url: String, secret: String, label: String)?
     @State private var busy = false
     @State private var problem: String?
 
@@ -805,7 +805,7 @@ struct AlertHookSheet: View {
                 Text("Paste these into \(tool.name) now: Oby shows the secret only this once, and keeps it only in obid's vault.")
                     .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fixedSize(horizontal: false, vertical: true)
                 ScrollView {
-                    Text(tool.steps(url: made.url, secret: made.secret))
+                    Text(tool.steps(url: made.url, secret: made.secret, label: made.label))
                         .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -835,14 +835,16 @@ struct AlertHookSheet: View {
                 if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger) }
                 HStack {
                     Spacer()
-                    Button("Cancel", role: .cancel, action: done)
+                    // Not while Connect runs: the hook it makes would be left with a secret nobody saw.
+                    Button("Cancel", role: .cancel, action: done).disabled(busy)
                     Button("Connect") {
                         busy = true
                         Task {
                             defer { busy = false }
                             do {
-                                let (row, secret) = try await make(repo, label.trimmingCharacters(in: .whitespaces))
-                                made = (row.url, secret)
+                                let named = label.trimmingCharacters(in: .whitespaces)
+                                let (row, secret) = try await make(repo, named)
+                                made = (row.url, secret, named)
                                 problem = nil
                             } catch {
                                 problem = error.localizedDescription
@@ -856,6 +858,7 @@ struct AlertHookSheet: View {
         }
         .padding(24)
         .frame(width: 560)
+        .interactiveDismissDisabled(busy)
     }
 
     private func copy(_ text: String) {
