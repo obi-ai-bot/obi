@@ -555,8 +555,9 @@ fn a_fresh_obid_works_in_the_github_repositories_gh_can_push_to() {
     std::fs::write(
         bin.join("gh"),
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1 $2\" in\n  \"api user/repos\"*) printf 'obi-e2e/fixture-app\\tmain\\nobi-e2e/other\\tdev\\n' ;;\n  *) exit 1 ;;\nesac\n",
-            folder.0.join("gh-calls").display()
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\ncase \"$1 $2\" in\n  \"auth status\") if [ -f '{out}' ]; then echo '{{\"hosts\":{{}}}}'; else echo '{{\"hosts\":{{\"github.com\":[{{\"state\":\"success\",\"active\":true,\"login\":\"octo-cat\"}}]}}}}'; fi ;;\n  \"api user/repos\"*) printf 'obi-e2e/fixture-app\\tmain\\nobi-e2e/other\\tdev\\n' ;;\n  *) exit 1 ;;\nesac\n",
+            calls = folder.0.join("gh-calls").display(),
+            out = folder.0.join("signed-out").display()
         ),
     )
     .unwrap();
@@ -631,6 +632,20 @@ fn a_fresh_obid_works_in_the_github_repositories_gh_can_push_to() {
         request(&obid, "GET", "/v1/repos", None).body["repos"][0],
         json!({"repo": "obi-e2e/fixture-app", "defaultBranch": "main", "listed": true})
     );
+
+    // gh signed out: GitHub's list goes with its account, the listed repository stays.
+    std::fs::write(folder.0.join("signed-out"), "").unwrap();
+    let github = request(&obid, "GET", "/v1/github", None);
+    assert_eq!(github.body["signedIn"], false, "{}", github.text);
+    assert_eq!(
+        request(&obid, "GET", "/v1/repos", None).body,
+        json!({"repos": [{"repo": "obi-e2e/fixture-app", "defaultBranch": "main", "listed": true}]})
+    );
+    let gone = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/other", "kind": "fix", "task": "Look around"}),
+    );
+    assert_eq!(gone.status, 422, "{}", gone.text);
 }
 
 /// A fix that commits nothing is done, as Claude Code is when its model stops: the agent's summary

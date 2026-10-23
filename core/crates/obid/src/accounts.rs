@@ -73,6 +73,8 @@ struct Inner {
     /// Why `home/accounts.json` can't be used: nothing is changed while it can't.
     broken: Option<String>,
     agents: Agents,
+    /// The tools whose own login obid found on this Mac at start ([`adopt_own_logins`]).
+    found: Vec<Tool>,
 }
 
 /// What the API changed: the accounts it added, and the configuration's accounts it renamed or
@@ -135,6 +137,7 @@ impl Live {
             saved: Saved::default(),
             file: None,
             broken: None,
+            found: Vec::new(),
         })))
     }
 
@@ -187,26 +190,16 @@ impl Live {
         inner.file = Some(file);
     }
 
-    /// Lists each of `found`'s own login (crate::serve, at every start, for each tool whose CLI and
-    /// login obid found on this Mac), unless the tool's own login is listed already (by the
-    /// configuration too), was listed by obid before (once removed, it stays removed until
-    /// `POST /v1/accounts` `{"default": true}` brings it back), or its name is another account's.
-    /// The tools it listed.
-    pub fn adopt(&self, found: &[Tool]) -> Vec<Tool> {
+    /// On a fresh obid (crate::serve, [`adopt_own_logins`]): lists the own login of each of
+    /// `found` that has no account at all (none configured, added or implied) and wasn't listed by
+    /// obid before, within [`MOST_ACCOUNTS`]. The tools it listed.
+    fn adopt(&self, found: &[Tool]) -> Vec<Tool> {
         let fresh = |agents: &Agents, saved: &Saved, tool: Tool| {
-            let own = own_login(tool);
-            // An empty list is the tool's own login already (but Cursor's), and so is an account
-            // without a folder, whatever its id.
-            let implied = agent_of(agents, tool).as_ref().is_some_and(|a| {
-                (a.accounts.is_empty() && !implicit(tool).is_empty())
-                    || a.accounts.iter().any(|a| a.config_dir.is_none())
-            });
-            !saved.own.iter().any(|t| t == tool.id())
-                && !saved.removed.contains(&own.id)
-                && !implied
-                && find(agents, &own.id).is_none()
-                && name(agents, tool, &own.name, None).is_ok()
-                && all(agents).len() < MOST_ACCOUNTS
+            let none = agent_of(agents, tool)
+                .as_ref()
+                .is_none_or(|a| a.accounts.is_empty() && implicit(tool).is_empty());
+            none && !saved.own.iter().any(|t| t == tool.id())
+                && !saved.removed.contains(&own_login(tool).id)
         };
         {
             let inner = self.read();
@@ -218,11 +211,13 @@ impl Live {
             }
         }
         let listed = self.change(|agents, saved| {
-            let listed: Vec<Tool> = found
-                .iter()
-                .copied()
-                .filter(|tool| fresh(agents, saved, *tool))
-                .collect();
+            let mut listed: Vec<Tool> = Vec::new();
+            for tool in found {
+                // Those listed in this pass count too.
+                if fresh(agents, saved, *tool) && all(agents).len() + listed.len() < MOST_ACCOUNTS {
+                    listed.push(*tool);
+                }
+            }
             saved
                 .own
                 .extend(listed.iter().map(|tool| tool.id().to_owned()));
@@ -232,6 +227,18 @@ impl Live {
             tracing::warn!("the tools' own logins weren't listed: {}", e.message);
             Vec::new()
         })
+    }
+
+    /// The tools' own logins obid found on this Mac that aren't listed: `POST /v1/accounts`
+    /// `{"agent", "default": true}` lists one on the owner's word ([`restore_default`]).
+    pub fn available(&self) -> Vec<(Tool, Account)> {
+        let inner = self.read();
+        inner
+            .found
+            .iter()
+            .filter(|tool| addable(&inner.seed, &inner.agents, **tool))
+            .map(|tool| (*tool, own_login(*tool)))
+            .collect()
     }
 
     /// Changes what's saved with `change`, keeps it, and only then uses it. `change` answers what
@@ -445,10 +452,15 @@ fn merged(seed: &Agents, saved: &Saved) -> Agents {
     agents
 }
 
-/// At every start (crate::serve): each tool whose CLI is on this Mac with its own login there
-/// (Claude Code's, Codex's `~/.codex/auth.json`, Cursor's login file) gets that login listed as an
-/// account ([`Live::adopt`]), so a Mac set up before Oby needs nothing more.
-pub fn adopt_own_logins(agents: &Live) {
+/// At every start (crate::serve): the tools whose CLI is on this Mac with their own login there
+/// (Claude Code's, Codex's `~/.codex/auth.json`, Cursor's login file). On a fresh obid (no
+/// `home/accounts.json` and no `home/jobs` yet: its first start), each such tool without an account
+/// gets its own login listed ([`Live::adopt`]), so a new Mac needs nothing more. An obid that ran
+/// before keeps its accounts as they are: what it finds is only offered ([`Live::available`]).
+pub fn adopt_own_logins(agents: &Live, obid_home: &Path) {
+    let first = [FILE, "jobs"]
+        .iter()
+        .all(|name| std::fs::symlink_metadata(obid_home.join(name)).is_err());
     let home = crate::jobs::login_home();
     let now = agents.get();
     let found: Vec<Tool> = Tool::ALL
@@ -461,12 +473,32 @@ pub fn adopt_own_logins(agents: &Live) {
                 && crate::jobs::has_login(*tool, &own_login(*tool), home.as_deref())
         })
         .collect();
+    agents.write().found = found.clone();
+    if !first {
+        return;
+    }
     for tool in agents.adopt(&found) {
         tracing::info!(
             "{}'s own login on this Mac is listed as an account",
             tool.name()
         );
     }
+}
+
+/// Whether `tool`'s own login can be listed: it isn't (by its id, as an empty list stands for it,
+/// or as any account without a folder), the configuration gives no account its id with a folder of
+/// its own, its name is free, and there's room.
+fn addable(seed: &Agents, agents: &Agents, tool: Tool) -> bool {
+    let own = own_login(tool);
+    let listed = agent_of(agents, tool).as_ref().is_some_and(|a| {
+        (a.accounts.is_empty() && !implicit(tool).is_empty())
+            || a.accounts.iter().any(|a| a.config_dir.is_none())
+    });
+    !listed
+        && find(agents, &own.id).is_none()
+        && find(seed, &own.id).is_none_or(|(_, a)| a.config_dir.is_none())
+        && name(agents, tool, &own.name, None).is_ok()
+        && all(agents).len() < MOST_ACCOUNTS
 }
 
 /// Every account, with its tool.
@@ -679,9 +711,9 @@ pub async fn add(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Respo
 }
 
 /// `POST /v1/accounts` `{"agent", "default": true}`: the tool's own login (`default`, `codex`,
-/// `cursor`), removed earlier, listed again, as it was before: no folder, signed in with the tool
-/// itself.
-/// `201` with the Account; `409` while it's listed, or when it was never one of the tool's.
+/// `cursor`), removed earlier or found on this Mac ([`Live::available`]), listed: no folder,
+/// signed in with the tool itself. `201` with the Account; `409` while it's listed, or when it was
+/// neither removed nor found.
 async fn restore_default(shared: Arc<Shared>, tool: Tool) -> Result<Response, ApiError> {
     let own = own_login(tool);
     // The configuration may name an account with that id and a folder of its own: that one isn't
@@ -697,6 +729,10 @@ async fn restore_default(shared: Arc<Shared>, tool: Tool) -> Result<Response, Ap
             ),
         ));
     }
+    let (seed, found) = {
+        let inner = shared.config.agents.read();
+        (inner.seed.clone(), inner.found.contains(&tool))
+    };
     shared.config.agents.change(|agents, saved| {
         if find(agents, &own.id).is_some() {
             return Err(ApiError::new(
@@ -709,14 +745,19 @@ async fn restore_default(shared: Arc<Shared>, tool: Tool) -> Result<Response, Ap
                 "obid keeps at most {MOST_ACCOUNTS} accounts: remove one first."
             )));
         }
-        if !saved.removed.contains(&own.id) {
+        // Removed here, or found on this Mac at start and not listed (Live::available).
+        let removed = saved.removed.contains(&own.id);
+        if !removed && !(found && addable(&seed, agents, tool)) {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
                 format!(
-                    "{}'s own login wasn't removed here: obid's configuration names the tool's accounts.",
+                    "{}'s own login wasn't removed here, and obid didn't find it on this Mac.",
                     tool.name()
                 ),
             ));
+        }
+        if !removed && !saved.own.iter().any(|t| t == tool.id()) {
+            saved.own.push(tool.id().into());
         }
         saved.removed.retain(|id| id != &own.id);
         saved.changed.remove(&own.id);
@@ -1642,6 +1683,30 @@ mod tests {
         assert_eq!(codex.bin, "codex");
         assert_eq!(codex.accounts[0].id, "a1b2c3d4");
         assert!(agents.cursor.is_none());
+    }
+
+    /// A fresh obid lists the own login only of a tool with no account, and never past the most
+    /// accounts obid keeps, those it lists in the same pass counted.
+    #[test]
+    fn own_logins_are_listed_only_for_tools_without_an_account_within_the_most() {
+        let many: Vec<Account> = (0..MOST_ACCOUNTS - 1)
+            .map(|n| account(&format!("w{n}"), &format!("W{n}"), Some("/srv/w")))
+            .collect();
+        let live = Live::new(agents(Some(many)));
+        assert_eq!(
+            live.adopt(&[Tool::Claude, Tool::Codex, Tool::Cursor]),
+            [Tool::Codex]
+        );
+        assert_eq!(all(&live.get()).len(), MOST_ACCOUNTS);
+        assert!(live.adopt(&Tool::ALL).is_empty());
+        // Claude Code has accounts: its own login isn't listed by itself.
+        let live = Live::new(agents(Some(vec![account(
+            "work",
+            "Work",
+            Some("/srv/work"),
+        )])));
+        assert!(live.adopt(&[Tool::Claude]).is_empty());
+        assert_eq!(ids(&live.get()), ["work"]);
     }
 
     #[test]

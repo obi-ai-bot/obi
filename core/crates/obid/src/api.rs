@@ -588,6 +588,9 @@ async fn method_not_allowed() -> ApiError {
 pub struct Status {
     pub runner: RunnerJson,
     pub accounts: Vec<AccountJson>,
+    /// The tools' own logins obid found on this Mac that aren't accounts: `{agent, id, name}`, each
+    /// listed on the owner's word (`POST /v1/accounts` `{"agent", "default": true}`).
+    pub available_logins: Vec<serde_json::Value>,
     pub models: Models,
     pub max_running: u32,
     pub running: u32,
@@ -783,6 +786,13 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
             engine: "obid",
         },
         accounts,
+        available_logins: shared
+            .config
+            .agents
+            .available()
+            .into_iter()
+            .map(|(tool, own)| serde_json::json!({"agent": tool.id(), "id": own.id, "name": own.name}))
+            .collect(),
         models: Models::defaults(),
         max_running: shared.jobs.max_running() as u32,
         running: shared.jobs.running() as u32,

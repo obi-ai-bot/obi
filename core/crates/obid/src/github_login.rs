@@ -117,7 +117,7 @@ impl GitHubLogin {
 }
 
 /// `gh auth status` for github.com, as `{signed_in, user}`; signed out when gh says nothing usable.
-async fn read_status(gh: &Path) -> Status {
+pub(crate) async fn read_status(gh: &Path) -> Status {
     let said = crate::github::run(
         gh,
         &[
@@ -164,6 +164,11 @@ pub fn decode_status(said: &str) -> Status {
 pub async fn get(State(shared): State<Arc<Shared>>) -> Result<Response, ApiError> {
     let gh = crate::github::gh();
     let status = shared.github.status(gh.as_deref()).await;
+    // GitHub's repositories stay only the signed-in account's (crate::repos): another one's are
+    // read now.
+    if shared.config.repos.follow(status.user.as_deref()) && status.signed_in {
+        shared.config.repos.nudge();
+    }
     let sign_in = shared.github.running().map(|s| s.to_json());
     Ok(
         axum::Json(json!({"gh": gh.is_some(), "signedIn": status.signed_in,

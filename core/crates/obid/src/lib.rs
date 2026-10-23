@@ -258,7 +258,7 @@ pub async fn serve(
     config.agents.open(&config.home);
     accounts::sweep(&config.home);
     // The tools' own logins on this Mac, listed as accounts unless the owner removed them.
-    accounts::adopt_own_logins(&config.agents);
+    accounts::adopt_own_logins(&config.agents, &config.home);
     github_login::sweep(&config.home);
     // What an older obid's boxes could have left in the accounts' folders (#655), said once.
     jobs::check_account_folders(&config.agents.get());

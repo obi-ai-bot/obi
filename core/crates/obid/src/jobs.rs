@@ -8160,8 +8160,8 @@ fn copy_cursor(from: &Path, settings: &Path, account: &Path, login: &Path) -> st
 
 /// The tool's own login, copied from `home` into the job's `login` folder, for an account with no
 /// `configDir`: Claude Code's `~/.claude/.credentials.json` and `~/.claude.json`, Codex's
-/// `~/.codex/auth.json` and `config.toml`. Nothing else of those folders (no settings, hooks,
-/// commands or sessions of the person's). The credentials are copied again before every start (the
+/// `~/.codex/auth.json`. Nothing else of those folders (no settings, hooks, commands or sessions of
+/// the person's; never Codex's `config.toml`, whose MCP servers and `notify` start programs). The credentials are copied again before every start (the
 /// person may have signed in again) and removed when the job's run ends
 /// ([`forget_login_secrets`]); the rest is copied once, then the job's own. Answers the names to
 /// show in the job's `HOME`. On macOS a login that lives only in the Keychain is copied from there
@@ -8173,7 +8173,7 @@ pub(crate) fn copy_login(
     keychain: bool,
 ) -> std::io::Result<Copied> {
     let (shown, secret, once): (&[&'static str], &[&str], &[&str]) = match tool {
-        Tool::Codex => (&[".codex"], &[".codex/auth.json"], &[".codex/config.toml"]),
+        Tool::Codex => (&[".codex"], &[".codex/auth.json"], &[]),
         _ => (
             &[".claude", ".claude.json"],
             &[".claude/.credentials.json"],
@@ -10097,7 +10097,14 @@ mod tests {
         let login = json!({"auth_mode": "chatgpt", "OPENAI_API_KEY": null, "last_refresh": "2026-10-12T23:13:02Z",
                            "tokens": {"access_token": access, "refresh_token": refresh, "id_token": "i", "account_id": "a"}});
         std::fs::write(home.join(".codex/auth.json"), login.to_string()).unwrap();
+        // Its config.toml starts programs (`notify`, MCP servers): never a run's.
+        std::fs::write(
+            home.join(".codex/config.toml"),
+            "notify = [\"touch\", \"x\"]\n",
+        )
+        .unwrap();
         copy_login(Some(&home), &root.join("job"), Tool::Codex, true).unwrap();
+        assert!(!root.join("job/.codex/config.toml").exists());
         copy_account_login(
             Tool::Codex,
             &home.join(".codex"),

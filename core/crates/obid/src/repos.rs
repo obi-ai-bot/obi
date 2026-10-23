@@ -34,6 +34,8 @@ pub struct Repos(Arc<Inner>);
 #[derive(Default)]
 struct Inner {
     lists: RwLock<Lists>,
+    /// One write of the configuration file at a time, never under `lists`' lock.
+    writing: std::sync::Mutex<()>,
     /// Wakes the reader early: a GitHub sign-in ended.
     nudge: tokio::sync::Notify,
 }
@@ -47,6 +49,14 @@ struct Lists {
     file: Option<PathBuf>,
     /// GitHub's that gh can push to, as it last listed them, newest push first.
     github: Vec<Repo>,
+    /// The gh account `github` is for: none while gh isn't signed in.
+    user: Option<String>,
+}
+
+/// Two names of one repository: GitHub ignores letter case, and so does the Mac's disk, where both
+/// would be one clone.
+fn same(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
 }
 
 impl Repos {
@@ -80,7 +90,7 @@ impl Repos {
         state
             .github
             .iter()
-            .filter(|g| !state.listed.iter().any(|r| r.repo == g.repo))
+            .filter(|g| !state.listed.iter().any(|r| same(&r.repo, &g.repo)))
             .cloned()
             .collect()
     }
@@ -94,35 +104,54 @@ impl Repos {
             .collect()
     }
 
-    /// The repository `name`: a listed one, else one of GitHub's (named as GitHub does, letter
-    /// case aside, as GitHub takes it).
+    /// The repository `name`, letter case aside: a listed one (with its settings), else one of
+    /// GitHub's. Its own name is the one to use.
     pub fn find(&self, name: &str) -> Option<Repo> {
         let state = self.read();
-        state
-            .listed
-            .iter()
-            .find(|r| r.repo == name)
-            .cloned()
-            .or_else(|| {
-                state
-                    .github
-                    .iter()
-                    .find(|r| r.repo.eq_ignore_ascii_case(name))
-                    .cloned()
-            })
+        let found = |list: &[Repo]| list.iter().find(|r| same(&r.repo, name)).cloned();
+        found(&state.listed).or_else(|| found(&state.github))
     }
 
     /// Lists `repo` from now on, and adds it to the configuration file's `repos`, the file's other
     /// keys and entries as they are. Listed even when the file can't be written: the error says why.
     pub fn keep(&self, repo: &Repo) -> Result<(), String> {
-        let mut state = self.write();
-        if state.listed.iter().any(|r| r.repo == repo.repo) {
-            return Ok(());
-        }
-        state.listed.push(repo.clone());
-        match &state.file {
-            Some(file) => add_to_file(file, repo),
+        let file = {
+            let mut state = self.write();
+            if state.listed.iter().any(|r| same(&r.repo, &repo.repo)) {
+                return Ok(());
+            }
+            state.listed.push(repo.clone());
+            state.file.clone()
+        };
+        // Outside the lists' lock: find, get and names never wait on the disk.
+        let _writing = self.0.writing.lock().unwrap_or_else(|e| e.into_inner());
+        match file {
+            Some(file) => add_to_file(&file, repo),
             None => Ok(()),
+        }
+    }
+
+    /// Keeps GitHub's list only while it's `user`'s, the gh account signed in now: with none, or
+    /// another, it's dropped at once, so no job starts in (or adds) a repository of an account gh
+    /// no longer uses. True when it was dropped.
+    pub fn follow(&self, user: Option<&str>) -> bool {
+        let mut state = self.write();
+        if state.user.as_deref() == user {
+            return false;
+        }
+        if !state.github.is_empty() {
+            tracing::info!("GitHub's repositories dropped: gh's login changed");
+        }
+        state.github.clear();
+        state.user = user.map(str::to_owned);
+        true
+    }
+
+    /// GitHub's list as gh just read it for `user`, unless gh's login changed meanwhile.
+    fn read_for(&self, user: &str, github: Vec<Repo>) {
+        let mut state = self.write();
+        if state.user.as_deref() == Some(user) {
+            state.github = github;
         }
     }
 
@@ -164,7 +193,10 @@ fn add_to_file(file: &Path, repo: &Repo) -> Result<(), String> {
     else {
         return Err(unkept(&"its repos isn't a list"));
     };
-    if !repos.iter().any(|r| r["repo"] == repo.repo.as_str()) {
+    if !repos
+        .iter()
+        .any(|r| r["repo"].as_str().is_some_and(|n| same(n, &repo.repo)))
+    {
         repos.push(json!({"repo": repo.repo, "remote": repo.remote,
                           "defaultBranch": repo.default_branch}));
     }
@@ -208,18 +240,27 @@ async fn list_github(gh: &Path) -> Result<Vec<Repo>, String> {
     Ok(parse(&said))
 }
 
-/// Reads gh's list at start, then every hour and whenever [`Repos::nudge`]d, until obid stops. A
-/// read that fails (no gh, signed out) keeps the list it had.
+/// Reads gh's list at start, then every hour and whenever [`Repos::nudge`]d, until obid stops: gh
+/// signed out (or as someone else) drops the list it had ([`Repos::follow`]); a read that fails
+/// while the same account is signed in keeps it.
 pub fn spawn(shared: Arc<Shared>) {
     let mut stopping = shared.stopping.clone();
     tokio::spawn(async move {
         let repos = shared.config.repos.clone();
         loop {
-            if let Some(gh) = crate::github::gh() {
+            let user = match crate::github::gh() {
+                Some(gh) => crate::github_login::read_status(&gh)
+                    .await
+                    .user
+                    .map(|u| (gh, u)),
+                None => None,
+            };
+            repos.follow(user.as_ref().map(|(_, u)| u.as_str()));
+            if let Some((gh, user)) = user {
                 match list_github(&gh).await {
                     Ok(github) => {
                         tracing::info!("gh can push to {} repositories on GitHub", github.len());
-                        repos.write().github = github;
+                        repos.read_for(&user, github);
                     }
                     Err(e) => tracing::info!("GitHub's repositories weren't listed: {e}"),
                 }
@@ -299,5 +340,55 @@ mod tests {
         );
         assert_eq!(after["repos"].as_array().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A configured repository and GitHub's name for it differing only in letter case are one: the
+    /// configured one, with its check, is what a job gets, and nothing is added twice.
+    #[test]
+    fn letter_case_never_makes_a_second_repository() {
+        let dir = std::env::temp_dir().join(format!("obid-repos-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.json");
+        let configured = Repo {
+            check: Some("make test".into()),
+            ..repo("acme/App")
+        };
+        let before = json!({"repos": [{"repo": "acme/App", "remote": "https://github.com/acme/App.git", "check": "make test"}]});
+        std::fs::write(&file, before.to_string()).unwrap();
+        let repos = Repos::new(vec![configured.clone()]);
+        repos.open(&file);
+        repos.write().github = vec![repo("acme/app"), repo("acme/lib")];
+        assert_eq!(repos.find("acme/app"), Some(configured.clone()));
+        assert_eq!(repos.names(), ["acme/App", "acme/lib"]);
+        repos.keep(&repo("acme/app")).unwrap();
+        assert_eq!(repos.get(), [configured]);
+        // One written in the file with other letters isn't written again either.
+        let other = Repos::new(vec![]);
+        other.open(&file);
+        other.keep(&repo("ACME/APP")).unwrap();
+        let after: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(after, before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GitHub's list is the signed-in gh account's only: signed out, or another account, and it's
+    /// gone, so no job starts in one of its repositories; a read for the account that left is
+    /// dropped.
+    #[test]
+    fn githubs_list_goes_with_its_account() {
+        let repos = Repos::new(vec![]);
+        assert!(repos.follow(Some("octo")));
+        repos.read_for("octo", vec![repo("octo/app")]);
+        assert!(!repos.follow(Some("octo")));
+        assert!(repos.find("octo/app").is_some());
+        assert!(repos.follow(None));
+        assert!(repos.find("octo/app").is_none());
+        repos.read_for("octo", vec![repo("octo/app")]);
+        assert!(repos.github().is_empty());
+        repos.follow(Some("octo"));
+        repos.read_for("octo", vec![repo("octo/app")]);
+        assert!(repos.follow(Some("someone-else")));
+        assert!(repos.github().is_empty());
     }
 }
