@@ -35,7 +35,7 @@ The same for every agent. obid checks every call against the same rules the plan
 | `oby_dispatch` | `{repo, task, kind?, agent?, account?, mode?, issue?, title?}` | Starts a job from this conversation (`conversation` set on the job, its card on the turn). Same validation as the plan loop's dispatch. |
 | `oby_tell_job` | `{id, words}` | The owner's words to a job (#542), the agent's quoted after them: running, at its next turn; ended, a follow-up with the same kind, agent, account, repository and conversation, the owner's words its request and what the first job did quoted in its first prompt, its card on the turn (Sangam's design, the owner's decision of 2026-10-18, which replaced #644's one more round). After the turn read something untrusted, the follow-up is a `start` item for the owner's Start. A follow-up counts against the turn's ten jobs, at most one per job a turn. |
 | `oby_stop_job` | `{id}` | Stops a running job. |
-| `oby_inbox` | `{}` | What waits for the owner. |
+| `oby_inbox` | `{}` | What waits for the owner, what needs them first, each item with its `triage`. |
 | `oby_answer` | `{item, answer}` | Answers an inbox item the plan loop may answer; the owner's own decisions (permissions, confirms, publishing) are refused with why. |
 | `oby_conversations` | `{query}` | Finds past conversations by what was said (#593). |
 | `oby_artifact` | `{title, path, kind?, artifact?}` | Publishes a file or folder from the room as an artifact, or a new version of `artifact` (section 4). |

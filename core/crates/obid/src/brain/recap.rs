@@ -344,6 +344,25 @@ pub fn lead(talk: Talk, recap: Option<&str>) -> Talk {
     }
 }
 
+/// The items waiting for the owner at `now` that a recap or a check-in tells: not those sorted
+/// `ignore` (crate::triage: about what an open one is about already), so a duplicate alert never
+/// makes a quiet day news.
+fn worth_telling(shared: &Shared, now: i64) -> Vec<Item> {
+    // ponytail: one sort of the inbox per item; a waiting_items that answers the sorts too, if
+    // the inbox ever holds hundreds.
+    told(shared.link.waiting_items(now), |item| {
+        shared.link.triage_of(item)
+    })
+}
+
+/// `items` but those `triage` sorts `ignore`.
+fn told(items: Vec<Item>, triage: impl Fn(&Item) -> &'static str) -> Vec<Item> {
+    items
+        .into_iter()
+        .filter(|item| triage(item) != crate::triage::IGNORE)
+        .collect()
+}
+
 /// The recap for an owner back at `now` after being seen last at `since` (none: they weren't
 /// away), written with the first Claude account's quick model and sent as a `recap` event.
 /// Without Claude there's no recap: a background call never goes to Codex (#537).
@@ -351,7 +370,7 @@ pub async fn back(shared: &Shared, since: Option<i64>, now: i64) -> Option<Strin
     let since = since?;
     let facts = facts(
         &shared.jobs.list(usize::MAX),
-        &shared.link.waiting_items(now),
+        &worth_telling(shared, now),
         since,
     );
     if !facts.happened() {
@@ -488,7 +507,7 @@ pub async fn check_in(shared: &Shared, now: i64) {
     let post = step(&mut check_in, &mut sent, &shared.presence, now, |since| {
         facts(
             &shared.jobs.list(usize::MAX),
-            &shared.link.waiting_items(now),
+            &worth_telling(shared, now),
             since,
         )
         .happened()
@@ -527,7 +546,7 @@ pub async fn check_in(shared: &Shared, now: i64) {
 async fn write_post(shared: &Shared, check_in: &CheckIn, since: i64, now: i64) {
     let facts = facts(
         &shared.jobs.list(usize::MAX),
-        &shared.link.waiting_items(now),
+        &worth_telling(shared, now),
         since,
     );
     let text = quick(shared, CHECK_IN, &facts, since, now)
@@ -1188,5 +1207,37 @@ mod tests {
             facts.count(),
             "Since you last looked: 2 jobs done, 1 pull request merged, 2 jobs need you and 1 job failed or stopped."
         );
+    }
+
+    /// Two alerts on one project, the second while the first is open: the second is `ignore`
+    /// (crate::triage), and alone it's no news.
+    #[test]
+    fn a_duplicate_alert_is_no_news() {
+        let alert = |id: &str, created: i64| -> Item {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "kind": "pluginEvent", "job": "", "title": "api: error rate over 5%",
+                "text": "Critical alert on api.", "options": ["Look into it", "Dismiss"],
+                "details": null, "recommended": 0, "created": created, "done": null,
+                "later": null, "answer": null, "obi": null,
+                "plugin": {"id": "alerts", "kind": "alert.fired", "project": "api",
+                           "severity": "critical"},
+            }))
+            .unwrap()
+        };
+        let home = std::env::temp_dir().join(format!("obid-recap-triage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let kept = crate::triage::Kept::open(&home);
+        let inbox = [alert("a1", T0 - HOUR), alert("a2", T0 + 10 * MIN)];
+        let sorts = crate::triage::Sorts::of(&kept, inbox.iter(), T0 + 20 * MIN);
+        assert_eq!(sorts.get(&inbox[1]), crate::triage::IGNORE);
+        let told = told(inbox.to_vec(), |item| sorts.get(item));
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].id, "a1");
+        let quiet = facts(&[], &told, T0);
+        assert!(!quiet.happened(), "{quiet:?}");
+        // Without the sort, the duplicate would have been news.
+        assert!(facts(&[], &inbox, T0).happened());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

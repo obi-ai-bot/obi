@@ -750,6 +750,15 @@ fn owner_only_answers_become_confirm_items() {
         "{}",
         listed.text
     );
+    // Each item says how it's sorted (crate::triage): a confirm needs the owner.
+    assert!(
+        listed.body["text"]
+            .as_str()
+            .unwrap()
+            .contains(r#""triage": "needs_you""#),
+        "{}",
+        listed.text
+    );
     let answered = said(
         &obid,
         json!({"said": format!(r#"OBY oby_answer {{"item": "{item}", "answer": "Confirm"}}"#),
