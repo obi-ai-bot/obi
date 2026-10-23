@@ -1735,6 +1735,21 @@ mod tests {
         assert_ne!(mac(&raw, body), mac(&raw, &body[1..]));
     }
 
+    /// The relay's own vector (cloud/control-plane, docs/remote-access.md "Pushes", #1356): what
+    /// obid signs is what the relay checks.
+    #[test]
+    fn the_mac_matches_the_relays_vector() {
+        const SIGNS: &str = "vx_9SyYw9p7qPCxR8xHlDF8WlTOsR_LRA67SHhzpTHM";
+        const BODY: &str = r#"{"pushId":"b2J5LXRlc3QtdmVjdG9yLTAx","sealed":"c2VhbGVkLWZvci10aGUtcGhvbmU","collapse":"9f08fd10","urgent":true,"at":1791806400}"#;
+        const CHECKED: &str = "EK3ocbR_NCA7i3gJQAGEnXJe2mGFd74zqt190mk1a7s";
+        assert_eq!(
+            mac(&push_key_bytes(SIGNS).unwrap(), BODY.as_bytes()),
+            CHECKED
+        );
+        // Signed with the key's text, the relay answers 401.
+        assert_ne!(mac(SIGNS.as_bytes(), BODY.as_bytes()), CHECKED);
+    }
+
     #[test]
     fn sealed_alerts_open_only_with_the_iphones_key() {
         let (secret, key) = iphone();
