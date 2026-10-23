@@ -4,5 +4,5 @@
 # A Cloudflare API token with Cloudflare Tunnel: Edit on the account and DNS: Edit on the zone.
 CF_API_TOKEN=paste-the-api-token-here
 CF_ACCOUNT_ID=paste-the-account-id-here
-CF_ZONE_ID=paste-the-tetrix.pro-zone-id-here
+CF_ZONE_ID=paste-the-device-domain-zone-id-here
 

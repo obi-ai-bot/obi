@@ -18,7 +18,7 @@ nonisolated struct ControlPlane: Sendable {
     /// The clock the calls' timestamps come from.
     var now: @Sendable () -> Date = { Date() }
 
-    static let defaultURL = URL(string: "https://oby-control.tetrix.pro")!
+    static let defaultURL = URL(string: "https://oby-control.deskree.com")!
     /// What's signed before the method, the path, the timestamp, the nonce and the body.
     static let signedPrefix = "oby-control-v1"
 

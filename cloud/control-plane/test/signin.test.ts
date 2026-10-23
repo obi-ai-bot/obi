@@ -116,7 +116,7 @@ describe("Sign in with Google", () => {
     expect(`${url.origin}${url.pathname}`).toBe("https://accounts.google.com/o/oauth2/v2/auth");
     expect(Object.fromEntries(url.searchParams)).toEqual({
       client_id: "1234-oby.apps.googleusercontent.com",
-      redirect_uri: "https://oby-control.tetrix.pro/v1/auth/google/callback",
+      redirect_uri: "https://oby-control.deskree.com/v1/auth/google/callback",
       response_type: "id_token",
       scope: "openid email",
       prompt: "select_account",

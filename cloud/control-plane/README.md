@@ -1,6 +1,6 @@
 # Oby's control plane
 
-A Cloudflare Worker with a D1 database (#285): no accounts: one installation per Mac, known by the P-256 key the Mac made and signing every call with it, and one Cloudflare Tunnel per installation behind an opaque hostname, `oby-<opaque>.tetrix.pro`, routed only to the gateway on the Mac.
+A Cloudflare Worker with a D1 database (#285): no accounts: one installation per Mac, known by the P-256 key the Mac made and signing every call with it, and one Cloudflare Tunnel per installation behind an opaque hostname, `oby-<opaque>.deskree.com`, routed only to the gateway on the Mac.
 
 - How it's deployed, its API, and how the Mac and the iPhone use it: [docs/remote-access.md](../../docs/remote-access.md).
 - `pnpm install`, then `pnpm test` (inside workerd, with the Cloudflare API mocked), `pnpm check` (TypeScript), `pnpm dev` (`wrangler dev` with `.dev.vars`).
