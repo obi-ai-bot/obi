@@ -83,8 +83,9 @@ struct NotificationTests {
 
     /// The relay checks obid's pushes with it; obid never gets the pushSecret itself.
     @Test func thePushKeyIsAnHMACOfThePushSecret() throws {
-        // The pushSecret's 32 bytes are 0 to 31; Python: hmac.new(bytes(range(32)), b"oby push key v1", "sha256").
-        #expect(try PushRelay.pushKey("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8") == "4OgUBy1cq0BmL6wBQqGNuJIR03CTAHndwEvtSkp7la4")
+        // The relay's fixed vector (docs/remote-access.md, "the keys"): the key is the pushSecret's 32 raw bytes.
+        #expect(try PushRelay.pushKey("7x-XJBtltDkgComjTzh2aougWSW5C4fOPr7MutSocH4") == "vx_9SyYw9p7qPCxR8xHlDF8WlTOsR_LRA67SHhzpTHM")
+        #expect(throws: (any Error).self) { try PushRelay.pushKey("c2hvcnQ") }
     }
 
     @Test func allowAndAlwaysAllowNeedAnUnlockedPhone() throws {

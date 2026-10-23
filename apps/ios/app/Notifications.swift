@@ -233,9 +233,11 @@ enum PushRelay {
                         sealKey: try SealedPush.publicKey(), relay: url.absoluteString)
     }
 
-    /// base64url(HMAC-SHA256 of "oby push key v1" under the `pushSecret`'s 32 bytes).
+    /// base64url(HMAC-SHA256 of "oby push key v1" under the `pushSecret`'s 32 raw bytes, never its text).
     nonisolated static func pushKey(_ pushSecret: String) throws -> String {
-        guard let secret = Data(base64url: pushSecret) else { throw RunnerError(message: "The push relay's pushSecret isn't base64url.") }
+        guard let secret = Data(base64url: pushSecret), secret.count == 32 else {
+            throw RunnerError(message: "The push relay's pushSecret isn't 32 bytes in base64url.")
+        }
         return Data(HMAC<SHA256>.authenticationCode(for: Data("oby push key v1".utf8), using: SymmetricKey(data: secret))).base64url
     }
 
