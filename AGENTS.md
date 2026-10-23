@@ -15,6 +15,17 @@ Oby is a native macOS app (SwiftUI, macOS 26 and later) that lives in a window a
 - The rules below still hold, as how Sangam's design is built, never as a reason to change what the user sees: keep his experience exactly, and put the protection underneath it. When a rule truly can't be kept without changing his design, ask the owner; don't weaken the design or the rule on your own.
 - Where his design and an earlier decision differed, his wins: a message to a finished task starts a follow-up task with the same kind, agent, account and repository (replacing #644's extra round); Oby on Home follows the pointer anywhere on screen while its window is visible; the window's voice button listens on a click.
 
+## The launch build (the owner's decision of 2026-10-23)
+
+Oby launches lean, and where this differs from Sangam's design, this wins until the owner says otherwise. The plan, its workstreams and its checklist: https://claude.ai/artifact/GUdcsv2sLN3CqviHVDSYCE.
+
+- What launches: Home, conversations, tasks, the sidebar and fn to talk. Mac share (Settings › Sharing), Runner share (Run on another Mac, Shared with you, Use X's share) and Remote access are hidden on the Mac and the iPhone, not deleted: their code still builds, its tests still pass, and Sangam's screens for them stay the target when they come back. A `showEverything` default, with no UI, shows them on Deskree's own Macs.
+- Connectors show GitHub and Slack only.
+- Oby answers in text, never aloud, and the user's words show as they talk, in the window and in the talk pill.
+- The iPhone reaches the Mac through the user's own Obysphere, sealed end to end with the Mac's key pinned from the QR: the Sphere passes sealed frames and never sees a body, a device token or a login.
+- Anyone hosts an Obysphere from a Deploy to Cloudflare button (obi-ai-bot/obi-sphere, public once its `dev` is in `main`), with a workers.dev address or their own domain.
+- A new user goes from download to a first task in about 5 minutes: obid on by default, the agent logins already on the Mac picked up without a click, and every repository their GitHub login can push to usable without editing `config.json`.
+
 ## Rules Oby never breaks
 
 - How work merges is learned, not fixed (the owner's decision of 2026-10-18): Oby learns each person's and each repository's workflow (where a PR merges, rebasing first, who reviews) from what they say or do, saves it as memory only after asking "Can I remember that?" and hearing yes, and follows it, saying so ("Merged into dev, as you like"; docs/onboarding.md, "Learned workflow: memory"). Until it has learned a repository's, it takes the safe default: it opens the PR, asks before any merge, and never pushes to, merges into or force-pushes the default branch or `main` on its own. It never force-pushes a branch it didn't create. This repository's remembered workflow: squash-merge a PR into `dev` after the review approves and the checks on the user's Mac pass on the same commit with a clean secret scan (GitHub Actions doesn't run for this repository; docs/runner-api.md, "Mac check"), and merge `dev` into `main` only when a feature's "Test it when it's done" list passes (the user confirms the real-Mac items) and CI is green on `dev`.
