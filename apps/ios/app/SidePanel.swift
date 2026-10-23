@@ -163,8 +163,8 @@ private struct TasksColumn: View {
                     if !phone.loaded && phone.connection == .connecting {
                         RowBones()
                     } else {
-                        Text(phone.loaded ? "Nothing yet. Ask Oby for something on Home." : "Reaching your Mac…")
-                            .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.horizontal, 12)
+                        Text(phone.loaded ? "Nothing here yet. Ask Oby for something and it shows up here." : "Reaching your Mac…")
+                            .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.horizontal, 12)
                     }
                 }
                 ForEach(groups) { group in
@@ -203,30 +203,54 @@ private struct TasksColumn: View {
                         }
                     }
                 }
-                // What needs you with no task on Home, always reachable here too.
-                Button { open(.inbox) } label: {
-                    HStack {
-                        Text("Inbox")
-                        Spacer()
-                        if !phone.loose.isEmpty { Text("\(phone.loose.count)").monospacedDigit().foregroundStyle(Tokens.needsInk) }
+                // What needs you with no task on Home, and every task: only when there's some.
+                if !phone.loose.isEmpty {
+                    Button { open(.inbox) } label: {
+                        HStack {
+                            Text("Inbox")
+                            Spacer()
+                            Text("\(phone.loose.count)").monospacedDigit().foregroundStyle(Tokens.needsInk)
+                        }
                     }
+                    .padding(.horizontal, 12).padding(.top, 16)
                 }
-                .padding(.horizontal, 12).padding(.top, 16)
-                Button("Every task") { open(.all) }.padding(.horizontal, 12).padding(.top, 8)
-                Button { open(.archived) } label: {
-                    HStack {
-                        Text("Archived")
-                        Spacer()
-                        if !phone.archived.isEmpty { Text("\(phone.archived.count)").monospacedDigit().foregroundStyle(Tokens.label) }
-                    }
+                if !groups.isEmpty {
+                    Button("Every task") { open(.all) }.padding(.horizontal, 12).padding(.top, phone.loose.isEmpty ? 16 : 8)
                 }
-                .padding(.horizontal, 12).padding(.top, 8)
             }
             .font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.item)
             .buttonStyle(.plain)
             .padding(.bottom, 24)
         }
         .refreshable { await phone.reload() }
+        // Home's foot, as on the Mac: the done tasks that left Home, once there are some.
+        if !phone.archived.isEmpty {
+            ArchivedFoot(count: phone.archived.count) { open(.archived) }
+        }
+    }
+}
+
+/// Archived and its count at the panel's foot, under a line, 44 tall (the Mac's ArchivedRow,
+/// Sangam's `.sidebar-archived`).
+private struct ArchivedFoot: View {
+    let count: Int
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                Text("Archived").font(Tokens.font(Tokens.textBase))
+                Spacer(minLength: 4)
+                Text("\(count)").font(Tokens.font(Tokens.textSm)).monospacedDigit()
+            }
+            .foregroundStyle(Tokens.label)
+            .padding(.horizontal, 12).frame(height: 44)
+            .overlay(alignment: .top) { Tokens.line.frame(height: 1) }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.bottom, 2)
+        .accessibilityLabel("Archived, \(count) task\(count == 1 ? "" : "s")")
     }
 }
 
