@@ -21,12 +21,8 @@ struct PhoneRoot: View {
 
     var body: some View {
         if phone.needsPairing {
-            // A fresh iPhone, or one the Mac stopped taking: Connect first, the line saying why.
-            VStack(spacing: 0) {
-                if let notice = phone.notice { ReachLine(notice: notice) }
-                NavigationStack { ConnectScreen() }
-            }
-            .background(Tokens.bg)
+            // A fresh iPhone, or one the Mac stopped taking: Oby, why, and Connect.
+            UnpairedScreen(character: character)
         } else {
             panelled
         }
