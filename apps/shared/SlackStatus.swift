@@ -96,8 +96,8 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
     /// On a listener's finished review (`watch.review`): exactly what Approve posts on GitHub, the
     /// review an agent wrote, after obid's secret scan. Shown as plain text, never as Markdown.
     var review: String?
-    /// How obid sorted it: `needs_you`, `fyi` or `ignore`; nil before it's sorted. Only what needs the
-    /// owner, or isn't sorted yet, alerts.
+    /// How obid sorted it (#1123): `needs_you`, `fyi`, `ignore`, or `pending` while its model sorts it;
+    /// nil from a runner that doesn't sort. Only what needs the owner alerts.
     var triage: String?
 
     private enum Keys: String, CodingKey { case kind, id, job, title, text, options, created, done, later, watch, plugin, triage }
@@ -163,8 +163,9 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
         notice.waiting(at: now) && notice.created > now.addingTimeInterval(-3600) && !told.contains(notice.id) && notice.needsYou
     }
 
-    /// Not sorted away by obid: `needs_you`, not sorted yet, or a sort this app doesn't know.
-    var needsYou: Bool { triage != "fyi" && triage != "ignore" }
+    /// It needs the owner: obid sorted it so, or doesn't sort (nil). Not while it's `pending` (it alerts
+    /// once sorted `needs_you`), and not for a sort this app doesn't know.
+    var needsYou: Bool { triage == nil || triage == "needs_you" }
 }
 
 #if os(macOS)

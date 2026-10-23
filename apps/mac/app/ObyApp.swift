@@ -168,7 +168,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 island.model.publishing = job
                 return open(.job(job))
             case .permission(let job, let ask, let decision, let message): try await feed.answer(job, decision, message: message, ask: ask)
-            case .tell(let job, let words): feed.apply(try await feed.about(job) { try await $0.tell(job, words) })
+            case .tell(let job, let words, let said):
+                // Waiting on something the alert didn't show now: words would answer that instead.
+                guard feed.said(job) == said else { throw RunnerError(message: "It needs something else now.") }
+                feed.apply(try await feed.about(job) { try await $0.tell(job, words) })
             case .settle(let item, let words): try await feed.settle(item, answer: words)
             case .say(let conversation, let words): try await feed.say(words, in: conversation)
             case .pick(let conversation?, let said, let question, let option):
@@ -176,7 +179,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             case .pick(nil, let said, let question, let option): island.desk.answer(option, said: said, question: question)
             }
         } catch {
-            open(Alerts.place(info))
+            // The words typed wait in the box there.
+            let words = typed.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Alerts.mostWords)) }
+            open(Alerts.place(info), draft: words?.isEmpty == false ? words : nil)
         }
     }
 
@@ -190,7 +195,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         case .conversation(let id):
             if let draft { Drafts.keep(draft, as: Drafts.conversation(id)) }
             chat.show(conversation: id)
-        case .window: chat.show()
+        case .window:
+            if let draft { Drafts.keep(draft, as: Drafts.home) }
+            chat.show()
         }
     }
 

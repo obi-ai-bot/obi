@@ -272,6 +272,14 @@ final class RunnerFeed {
         connection = .live
     }
 
+    /// Following `runner`, past its first lists: what changes from here alerts (the alert tests).
+    func stageAlerts(following runner: Runner) {
+        url = runner.base.absoluteString
+        local = false
+        inboxListed = true
+        notified = [:]
+    }
+
     /// Settings › Connectors' lists and obid's Tetrix, and jobs' extras, for the pictures of them.
     @ObservationIgnored var stagedLists: Connectors.Lists?
     func stage(tetrix: TetrixStatus?, lists: Connectors.Lists = .init(), extras: [String: RunnerJobExtras] = [:]) {
@@ -356,6 +364,7 @@ final class RunnerFeed {
         inboxListed = false
         asked = [:]
         answered = [:]
+        askedAt = [:]
         conversation.forget()
         conversations.reset()
         echoes = []
@@ -409,15 +418,21 @@ final class RunnerFeed {
                         self.extras = extras
                         await take(list, from: runner)
                         try Task.checkCancellation()
-                        let settled = Alerts.settled(before: inbox, after: items, now: .now)
-                        if !settled.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: settled) }
+                        // Alerts of items that don't wait any more, from before a drop or before Oby last quit,
+                        // against the inbox as it is by then (an item may have come meanwhile).
+                        Task { [weak self] in
+                            guard let self else { return }
+                            let delivered = await deliveredInbox()
+                            let stale = Alerts.stale(delivered, waiting: Set(inbox.filter { $0.waiting() }.map(\.id)))
+                            if !stale.isEmpty { withdraw(stale) }
+                        }
                         // What waits when Oby starts isn't news; after a drop, what came meanwhile is.
                         if !inboxListed { told.formUnion(items.map(\.id)) }
                         inboxListed = true
                         inbox = items
                         let stillOpen = fetchedNotices.filter { $0.done == nil }.sorted { $0.created < $1.created }
                         let gone = Self.settledWhileAway(before: notices, after: stillOpen)
-                        if !gone.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: gone) }
+                        if !gone.isEmpty { withdraw(gone) }
                         notices = stillOpen
                         inboxWords.merge(words, uniquingKeysWith: { _, fresh in fresh })
                         alertInbox()
@@ -698,7 +713,8 @@ final class RunnerFeed {
             let target = conversation.map(PlanTarget.conversation) ?? conversations.target(said)
             planned = try await runner.planned(said, answer: answer, attachments: attachments, in: target, id: echo, runsOn: runsOn)
         } catch {
-            conversations.failed()
+            // An alert's words went to a conversation of their own: the window's new one isn't theirs.
+            if conversation == nil { conversations.failed() }
             // Given up (Stop, or other words in their place): they leave the thread. Else they stay, failed.
             if Task.isCancelled || (error as? URLError)?.code == .cancelled { dropEcho(echo) }
             else if let at = echoes.firstIndex(where: { $0.turn.id == echo }) { echoes[at].problem = error.localizedDescription }
@@ -706,7 +722,7 @@ final class RunnerFeed {
         }
         // obid listed them before it answered: whatever its event missed, they're its now.
         dropEcho(echo)
-        await conversations.joined(planned.conversation)
+        if conversation == nil { await conversations.joined(planned.conversation) }
         switch planned.result {
         case .question(let said, let question):
             let asked = Plan.Question(text: question.text, options: question.options, details: question.details,
@@ -849,7 +865,7 @@ final class RunnerFeed {
             inboxHistory.removeAll { $0.id == item.id }
             inboxHistory.append(item)
         }
-        if !item.waiting() { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [item.id]) }
+        if !item.waiting() { withdraw([item.id]) }
         alertInbox()
     }
 
@@ -923,7 +939,7 @@ final class RunnerFeed {
         extras[id] = nil
         onScreen.remove(id)
         notified?[id] = nil
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
+        withdraw([id])
     }
 
     /// A job's screen opened or closed in the window: while it's open, new lists keep its job.
@@ -968,29 +984,72 @@ final class RunnerFeed {
         noticeChanges()
         // Alerts left in Notification Center, from before a drop or a restart, whose job needs nothing now.
         let gone = jobs.filter { Self.notice(for: $0, routine: extras[$0.id]?.routine != nil) == nil }.map(\.id)
-        if !gone.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: gone) }
+        if !gone.isEmpty { withdraw(gone) }
     }
 
     private func noticeChanges() {
         let (changes, now) = Self.notices(jobs, after: notified ?? [:], routines: Set(extras.filter { $0.value.routine != nil }.keys))
         var kept = now
         defer { notified = kept }
-        guard notified != nil else { return }
+        guard let before = notified else {
+            // What the jobs already need when Oby starts isn't news, and the jobs done by then have ended.
+            tellDone(changes.filter { $0.1 == .done }.map(\.0.id))
+            return
+        }
         for (job, notice) in changes {
-            if let notice {
+            let step = Self.step(notice, before: before[job.id], active: job.isActive, toldDone: doneTold.contains(job.id))
+            if notice == .done { tellDone([job.id]) }
+            switch step {
+            case .keep: continue
+            // Published, from the iPhone or by the runner, dismissed, or running again: its alert goes.
+            case .clear: withdraw([job.id])
+            case .post:
+                guard let notice else { continue }
                 // On screen: nothing. What needs the owner alerts once the window goes (`windowLeft`).
                 let conversation = extras[job.id]?.conversation
                 if windowShows(.job(job.id)) || conversation.map({ windowShows(.conversation($0)) }) == true {
                     if notice != .done { kept[job.id] = nil }
                     continue
                 }
-                Self.post(Alerts.alert(notice, for: job, conversation: conversation))
+                show(Alerts.alert(notice, for: job, conversation: conversation))
                 onNotice(job, notice)
-            } else {
-                // Published, from the iPhone or by the runner, dismissed, or running again: its alert goes.
-                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [job.id])
             }
         }
+    }
+
+    /// What a job's alert does when what it needs changes (`notices`).
+    nonisolated enum NoticeStep: Equatable, Sendable { case post, clear, keep }
+
+    /// Done alerts once per job, ever (`toldDone`): a round Oby runs by itself after it (a review, a
+    /// rebase, a Mac check) keeps it, and ending again says nothing. A job that leaves Ready to publish,
+    /// Changes requested or Not merged for done (published, reviewed or merged elsewhere) only loses
+    /// that alert. Anything else that needs the owner alerts each time it changes; nothing needed: gone.
+    nonisolated static func step(_ notice: Notice?, before: String?, active: Bool, toldDone: Bool) -> NoticeStep {
+        let done = Notice.done.rawValue
+        switch notice {
+        case nil: return before == done && active ? .keep : .clear
+        case .done?:
+            let leaves = before.map { [Notice.ready, .review, .merge].map(\.rawValue).contains($0) } ?? false
+            if !leaves, !toldDone { return .post }
+            return before == nil || before == done ? .keep : .clear
+        default: return .post
+        }
+    }
+
+    /// The jobs whose end alerted (or ended before Oby started, or while the window showed them), the
+    /// latest 500, kept across launches.
+    // ponytail: the app's defaults; a few days of jobs at most, older ones are long settled.
+    @ObservationIgnored private lazy var doneTold = Set(doneDefaults.stringArray(forKey: Self.doneKey) ?? [])
+    /// Where they're kept: the app's defaults, or a test's.
+    @ObservationIgnored var doneDefaults = UserDefaults.standard
+    static let doneKey = "alertedDone"
+
+    private func tellDone(_ ids: [String]) {
+        let new = ids.filter { !doneTold.contains($0) }
+        guard !new.isEmpty else { return }
+        doneTold.formUnion(new)
+        let kept = (doneDefaults.stringArray(forKey: Self.doneKey) ?? []) + new
+        doneDefaults.set(Array(kept.suffix(500)), forKey: Self.doneKey)
     }
 
     // MARK: Notices, as the runner decides them (Runner/Push.swift)
@@ -1021,11 +1080,23 @@ final class RunnerFeed {
         var now: [String: String] = [:]
         for job in jobs {
             let notice = Self.notice(for: job, routine: routines.contains(job.id))
-            let said = notice.map { $0 == .permission ? "permission:\(job.permission?.id ?? "")" : $0.rawValue }
+            let said = notice.map { Self.said($0, for: job) }
             now[job.id] = said
             if said != notified[job.id] { changes.append((job, notice)) }
         }
         return (changes, now)
+    }
+
+    /// What a job's alert says, as `notices` remembers it: the notice, and for an OK its ask's id.
+    static func said(_ notice: Notice, for job: Job) -> String {
+        notice == .permission ? "permission:\(job.permission?.id ?? "")" : notice.rawValue
+    }
+
+    /// What the job's alert would say now, or nil when it needs nothing.
+    func said(_ id: String) -> String? {
+        jobs.first { $0.id == id }.flatMap { job in
+            Self.notice(for: job, routine: extras[id]?.routine != nil).map { Self.said($0, for: job) }
+        }
     }
 
     /// "Couldn't publish: Fix oby #42", as the iPhone's alert says it. A ready job whose publish
@@ -1142,7 +1213,7 @@ final class RunnerFeed {
         notices.removeAll { $0.id == notice.id }
         if notice.done == nil { notices.append(notice) }
         if notice.done != nil || !notice.waiting() || !notice.needsYou {
-            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notice.id])
+            withdraw([notice.id])
         }
         tell(notice)
     }
@@ -1181,6 +1252,17 @@ final class RunnerFeed {
 
     /// Whether the window is in front on that page now (the app sets it): nothing alerts for what it shows.
     @ObservationIgnored var windowShows: (AlertPlace) -> Bool = { _ in false }
+    /// Shows an alert, takes alerts away, and lists the delivered alerts of inbox items: Notification
+    /// Center's, or a test's.
+    @ObservationIgnored var show: (Alert) -> Void = { RunnerFeed.post($0) }
+    @ObservationIgnored var withdraw: ([String]) -> Void = { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: $0) }
+    @ObservationIgnored var deliveredInbox: () async -> [(id: String, item: String)] = {
+        await UNUserNotificationCenter.current().deliveredNotifications().compactMap { delivered in
+            (delivered.request.content.userInfo[Alerts.inboxKey] as? String).map { (id: delivered.request.identifier, item: $0) }
+        }
+    }
+    /// When an inbox ask of each conversation (its own, or one of its jobs') last alerted.
+    @ObservationIgnored private var askedAt: [String: Date] = [:]
     /// The first inbox list from this runner is in: what waited before isn't news.
     @ObservationIgnored private var inboxListed = false
     /// Oby's questions to this Mac's words, by conversation, until their turn's alert takes them.
@@ -1197,29 +1279,43 @@ final class RunnerFeed {
             let kind = kind(of: item)
             guard Alerts.alerts(item, kind: kind, jobAlerts: asking.contains(item.job), told: told, now: .now) else { continue }
             let conversation = inboxWords[item.id]?.conversation
-            guard !windowShows(Alerts.place(of: item, conversation: conversation)) else { continue }
+            let place = Alerts.place(of: item, conversation: conversation)
+            guard !windowShows(place) else { continue }
             told.insert(item.id)
-            Self.post(Alerts.alert(for: item, kind: kind, conversation: conversation))
+            show(Alerts.alert(for: item, kind: kind, conversation: conversation))
+            // One thing, one alert: Oby's words beside the ask ("It waits for your Start") give way to it.
+            let about: String? = switch place {
+            case .conversation(let id): id
+            case .job(let id): extras[id]?.conversation
+            default: nil
+            }
+            if let about {
+                askedAt[about] = .now
+                if let (_, at) = answered[about], at > .now.addingTimeInterval(-60) {
+                    answered[about] = nil
+                    withdraw([Alerts.answerID(about)])
+                }
+            }
         }
     }
 
     /// A turn of any conversation. The owner's words, from any app, settle the alert of Oby's answer
     /// there; Oby's answer alerts unless the window shows that conversation.
-    private func heard(_ turn: Turn, _ extras: TurnExtras) {
+    func heard(_ turn: Turn, _ extras: TurnExtras) {
         guard let conversation = turn.conversation else { return }
         if let settled = Alerts.settled(by: turn) {
             asked[conversation] = nil
             answered[conversation] = nil
-            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [settled])
+            withdraw([settled])
             return
         }
         let known = conversations.items.contains { $0.id == conversation }
-        guard Alerts.answers(turn, extras: extras, known: known, told: told, now: .now) else { return }
+        guard Alerts.answers(turn, extras: extras, known: known, told: told, asked: askedAt[conversation], now: .now) else { return }
         told.insert(turn.id)
         let question = asked.removeValue(forKey: conversation).flatMap { $0.at > .now.addingTimeInterval(-60) ? ($0.said, $0.question) : nil }
         guard !windowShows(.conversation(conversation)) else { return }
         answered[conversation] = (turn, .now)
-        Self.post(Alerts.answer(turn.text, in: conversation, title: title(of: conversation), question: question))
+        show(Alerts.answer(turn.text, in: conversation, title: title(of: conversation), question: question))
     }
 
     /// Oby asked something back about this Mac's words: its answer's alert gets the options, at once
@@ -1233,7 +1329,7 @@ final class RunnerFeed {
         answered[conversation] = nil
         var alert = Alerts.answer(turn.text, in: conversation, title: title(of: conversation), question: (said, question))
         alert.sound = false
-        Self.post(alert)
+        show(alert)
     }
 
     private func title(of conversation: String) -> String {
@@ -1256,7 +1352,7 @@ final class RunnerFeed {
             [Alerts.answerID(id)] + inbox.filter { Alerts.place(of: $0, conversation: inboxWords[$0.id]?.conversation) == place }.map(\.id)
         case .window: []
         }
-        if !ids.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids) }
+        if !ids.isEmpty { withdraw(ids) }
     }
 }
 

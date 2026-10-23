@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// Where an alert opens the window, and what the window may be showing already.
 nonisolated enum AlertPlace: Equatable, Sendable {
@@ -66,6 +66,8 @@ enum Alerts {
     static let saidKey = "said"
     static let questionKey = "question"
     static let optionsKey = "options"
+    /// What a job's alert said (`RunnerFeed.said`): its Reply goes only while the job still needs that.
+    static let noticeKey = "notice"
 
     static let openButton = Alert.Button(id: "open", title: "Open", opens: true)
     static let replyButton = "reply"
@@ -76,15 +78,36 @@ enum Alerts {
 
     /// Words an answer takes, as obid's `POST /v1/inbox/{id}/answer` and a deny's `message` do.
     static let mostWords = 2000
-    /// The most an alert shows of an ask to answer it from outside the window: one that's longer
-    /// (a command, a planned task) offers only what can't do harm (Deny, Open), so nothing is allowed
-    /// or started that the owner couldn't read whole.
-    // ponytail: a guess at what an expanded macOS alert shows; raise it if it shows more.
-    static let shownWhole = 300
+    /// What a collapsed alert shows of its body, where its buttons are pressed: three lines of the
+    /// system font at 13 points, 269 points wide (measured on macOS 27, 2026-10-23), taken a little
+    /// smaller here.
+    // ponytail: the banner as measured; measure it again if macOS draws it differently.
+    static let shownLines = 3
+    static let shownWidth: CGFloat = 260
+    static let shownFont = NSFont.systemFont(ofSize: 13.5)
 
-    /// The ask fits the alert whole.
-    static func whole(_ text: String) -> Bool {
-        text.count <= shownWhole && text.split(separator: "\n", omittingEmptySubsequences: false).count <= 6
+    /// An ask shows whole in a collapsed alert: plain text (no control character but a newline or a
+    /// tab, no format character such as a bidi override or a zero-width space, no other line or
+    /// paragraph separator, which could hide or reorder what's shown), at most `shownLines` lines as
+    /// macOS wraps them. Only then may the alert allow or start it: nothing is allowed or started
+    /// that the owner couldn't read.
+    static func fits(_ text: String) -> Bool {
+        let plain = text.unicodeScalars.allSatisfy { scalar in
+            switch scalar.properties.generalCategory {
+            case .control: scalar == "\n" || scalar == "\t"
+            case .format, .lineSeparator, .paragraphSeparator: false
+            default: true
+            }
+        }
+        guard plain else { return false }
+        let size = NSSize(width: shownWidth, height: .greatestFiniteMagnitude)
+        let height = (text as NSString).boundingRect(with: size, options: .usesLineFragmentOrigin, attributes: [.font: shownFont]).height
+        return Int((height / NSLayoutManager().defaultLineHeight(for: shownFont)).rounded()) <= shownLines
+    }
+
+    /// The lines with something on them: an alert shows no blank ones.
+    static func compact(_ text: String) -> String {
+        text.split(whereSeparator: \.isNewline).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.joined(separator: "\n")
     }
 
     /// The first lines of `text`, at most `most` characters.
@@ -111,11 +134,11 @@ enum Alerts {
         }
     }
 
-    /// The alerts an inbox list settles: the items that waited before and don't now (answered,
-    /// done or put off, on any app, while this Mac was away too).
-    static func settled(before: [InboxItem], after: [InboxItem], now: Date) -> [String] {
-        let waiting = Set(after.filter { $0.waiting(at: now) }.map(\.id))
-        return before.map(\.id).filter { !waiting.contains($0) }
+    /// The delivered alerts an inbox list settles: those of items that don't wait any more (answered,
+    /// done or put off on any app, while this Mac was away, or before Oby last quit). `delivered`: each
+    /// alert's identifier and its item's id.
+    static func stale(_ delivered: [(id: String, item: String)], waiting: Set<String>) -> [String] {
+        delivered.filter { !waiting.contains($0.item) }.map(\.id)
     }
 
     /// The conversation a shell ask is about: its id is `shell-<conversation>-<permission>`.
@@ -130,21 +153,24 @@ enum Alerts {
         return (conversation ?? shellConversation(item.id)).map(AlertPlace.conversation) ?? .window
     }
 
-    /// The item's alert: its title, its text (whole when it fits), and its answers. A Confirm only
-    /// opens its card, so the owner reads all of what it does and confirms it with Touch ID there (#776).
+    /// The item's alert: its title, its text, and its answers. Allow and Start only when the text shows
+    /// whole (`fits`). The shell's Always allow stays in the window: the item doesn't say which rule it
+    /// saves. A Confirm only opens its card, so the owner reads all of what it does and confirms it with
+    /// Touch ID there (#776).
     static func alert(for item: InboxItem, kind: String, conversation: String?) -> Alert {
         let place = Self.place(of: item, conversation: conversation)
-        let whole = Self.whole(item.text)
-        var alert = Alert(id: item.id, title: item.title, body: whole ? item.text : lines(item.text),
+        let text = compact(item.text)
+        let whole = fits(text)
+        var alert = Alert(id: item.id, title: item.title, body: whole ? text : lines(text),
                           category: Alert.Category(id: "inbox.open", buttons: [openButton]), thread: thread(place))
         alert.info = info(place)
         alert.info[inboxKey] = item.id
         switch kind {
         case "permission" where whole:
-            var buttons = [Alert.Button(id: RunnerFeed.allowButton, title: Inbox.allow)]
-            if item.options.contains(Inbox.alwaysAllow) { buttons.append(Alert.Button(id: alwaysButton, title: Inbox.alwaysAllow)) }
-            buttons += [Alert.Button(id: RunnerFeed.denyButton, title: Inbox.deny, destructive: true), openButton]
-            alert.category = Alert.Category(id: buttons.count == 4 ? "inbox.permissionRule" : "inbox.permission", buttons: buttons)
+            alert.category = Alert.Category(id: "inbox.permission", buttons: [
+                Alert.Button(id: RunnerFeed.allowButton, title: Inbox.allow),
+                Alert.Button(id: RunnerFeed.denyButton, title: Inbox.deny, destructive: true), openButton,
+            ])
         case "permission":
             alert.category = Alert.Category(id: "inbox.deny", buttons: [Alert.Button(id: RunnerFeed.denyButton, title: Inbox.deny, destructive: true), openButton])
         case "start" where whole:
@@ -161,10 +187,13 @@ enum Alerts {
 
     /// Oby answered in a conversation the window isn't showing: a turn of Oby's in a conversation obid
     /// listed (`known`), not the one a job adds when it ends (its own alert says so), nor a routine's
-    /// (a run started: progress), recent (an old one changed: a job dispatched from it), not told yet.
-    static func answers(_ turn: Turn, extras: TurnExtras, known: Bool, told: Set<String>, now: Date) -> Bool {
+    /// (a run started: progress), recent (an old one changed: a job dispatched from it), not told yet,
+    /// and not the words beside an ask of that conversation's that alerted in the last minute
+    /// (`asked`: a Start it?, a Confirm, a stalled job's question say it already).
+    static func answers(_ turn: Turn, extras: TurnExtras, known: Bool, told: Set<String>, asked: Date?, now: Date) -> Bool {
         turn.who == .oby && known && !extras.ended && !extras.routine && !told.contains(turn.id)
             && !turn.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && turn.date > now.addingTimeInterval(-600)
+            && !(asked.map { $0 > now.addingTimeInterval(-60) } ?? false)
     }
 
     /// The alert the owner's words settle: Oby's answer in that conversation, read wherever they
@@ -198,9 +227,10 @@ enum Alerts {
     // MARK: Jobs (#613, #863)
 
     /// A job's alert: the notice's words, and its answers. A permission offers Allow only when the
-    /// whole ask fits (`whole`), Always allow only when a rule can be saved (its sentence then says
-    /// what is saved), and never for a plan (Plan mode's plan is read on its page). Ready keeps Publish
-    /// with Touch ID, in the window. Everything else takes a reply.
+    /// whole ask shows (`fits`), Always allow only when a rule can be saved and the sentence saying
+    /// which shows with it, and neither for a plan (Plan mode's plan is read on its page). Ready keeps
+    /// Publish with Touch ID, in the window. Everything else takes a reply, for as long as the job
+    /// still needs what the alert said (`noticeKey`).
     static func alert(_ notice: RunnerFeed.Notice, for job: Job, conversation: String?) -> Alert {
         let place = AlertPlace.job(job.id)
         let agent = Job.agentNames[job.agent] ?? job.agent
@@ -209,6 +239,7 @@ enum Alerts {
         var alert = Alert(id: job.id, title: RunnerFeed.title(notice, for: job), body: RunnerFeed.body(notice, for: job),
                           category: Alert.Category(id: ended ? "job.ended" : "job.\(job.agent)", buttons: [openButton], reply: tell),
                           thread: thread(conversation.map(AlertPlace.conversation) ?? place), info: info(place))
+        alert.info[noticeKey] = RunnerFeed.said(notice, for: job)
         switch notice {
         case .ready:
             alert.category = Alert.Category(id: "ready", buttons: [
@@ -217,11 +248,13 @@ enum Alerts {
         case .permission:
             guard let permission = job.permission else { break }
             alert.info[RunnerFeed.permissionKey] = permission.id
-            let shown = permission.detail.isEmpty || permission.title.contains(permission.detail) ? permission.title : "\(permission.title)\n\(permission.detail)"
-            let allows = permission.tool != "ExitPlanMode" && whole(shown)
-            let rule = allows ? InboxWords.plain(permission.rule) : nil
-            alert.body = lines(shown, most: shownWhole)
-            if let rule { alert.body += "\n" + (permission.always ?? "Always allow \(rule)") }
+            let shown = compact(permission.detail.isEmpty || permission.title.contains(permission.detail)
+                                ? permission.title : "\(permission.title)\n\(permission.detail)")
+            let allows = permission.tool != "ExitPlanMode" && fits(shown)
+            let saves = InboxWords.plain(permission.rule).map { permission.always ?? "Always allow \($0)" }
+            let rule = allows ? saves.flatMap { fits(shown + "\n" + $0) ? $0 : nil } : nil
+            alert.body = allows ? shown : lines(shown)
+            if let rule { alert.body += "\n" + rule }
             var buttons = allows ? [Alert.Button(id: RunnerFeed.allowButton, title: Inbox.allow)] : []
             if rule != nil { buttons.append(Alert.Button(id: alwaysButton, title: Inbox.alwaysAllow)) }
             buttons += [Alert.Button(id: RunnerFeed.denyButton, title: Inbox.deny, destructive: true), openButton]
@@ -258,7 +291,8 @@ enum Alerts {
         if action == RunnerFeed.publishButton, let job { return .publish(job: job) }
         if let (decision, answer) = decisions[action] {
             if let job, let ask { return .permission(job: job, ask: ask, decision, message: nil) }
-            if let item { return .settle(item: item, answer: answer) }
+            // The shell's Always allow is the window's (`alert(for:)`).
+            if let item, decision != .always { return .settle(item: item, answer: answer) }
         }
         if action == startButton, let item { return .settle(item: item, answer: Inbox.start) }
         if action.hasPrefix("option."), let index = Int(action.dropFirst(7)), options.indices.contains(index) {
@@ -267,7 +301,7 @@ enum Alerts {
         if action == replyButton, let typed = typed?.trimmingCharacters(in: .whitespacesAndNewlines), !typed.isEmpty {
             guard typed.count <= mostWords else { return .open(place, draft: String(typed.prefix(mostWords))) }
             if let job, let ask { return .permission(job: job, ask: ask, .deny, message: typed) }
-            if let job, item == nil { return .tell(job: job, words: typed) }
+            if let job, item == nil { return .tell(job: job, words: typed, said: info[noticeKey] as? String) }
             return words(typed, item: item, question: question, conversation: conversation, place: place)
         }
         return .open(place)
@@ -319,8 +353,10 @@ nonisolated enum AlertAnswer: Equatable, Sendable {
     case publish(job: String)
     /// Allow, Always allow or Deny on the very ask the alert showed; words go with a deny.
     case permission(job: String, ask: String, RunnerPermission.Decision, message: String?)
-    /// Words to a job (`POST /v1/jobs/{id}/messages`): to one that ended, a follow-up task.
-    case tell(job: String, words: String)
+    /// Words to a job (`POST /v1/jobs/{id}/messages`): to one that ended, a follow-up task. Only while
+    /// the job still needs what its alert `said`: to a job waiting on an ask the alert didn't show, words
+    /// would deny it.
+    case tell(job: String, words: String, said: String?)
     /// An inbox item's option, or the owner's words (`POST /v1/inbox/{id}/answer`).
     case settle(item: String, answer: String)
     /// Words to Oby in that conversation, as typed in its box.

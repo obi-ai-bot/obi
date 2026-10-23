@@ -61,17 +61,15 @@ struct ConversationAlertTests {
         #expect(!Alerts.alerts(later, kind: "permission", jobAlerts: false, told: [], now: now))
     }
 
-    /// Answered, done or put off anywhere, an item's alert goes; on reconnecting, those settled meanwhile go.
+    /// Answered, done or put off anywhere, an item's alert goes: by its event, and on every full list
+    /// (a reconnect, a launch) for the alerts still delivered, from before Oby last quit too.
     @Test func aSettledItemTakesItsAlertAway() {
-        let a = item("shell-c-p1", .permission)
         var b = item("confirm-1", .start, options: ["Confirm", "Cancel"])
-        var c = item("start-1", .start, options: ["Start", "Cancel"])
-        #expect(Alerts.settled(before: [a, b, c], after: [a, b, c], now: now).isEmpty)
         b.done = now
-        c.later = now.addingTimeInterval(600)
-        #expect(Alerts.settled(before: [a, b, c], after: [a, b, c], now: now) == ["confirm-1", "start-1"])
-        #expect(Alerts.settled(before: [a], after: [], now: now) == ["shell-c-p1"], "gone from the list")
         #expect(!Alerts.alerts(b, kind: RunnerConfirm.kind, jobAlerts: false, told: [], now: now))
+        let delivered = [(id: "shell-c-p1", item: "shell-c-p1"), (id: "confirm-1", item: "confirm-1"), (id: "start-1", item: "start-1")]
+        #expect(Alerts.stale(delivered, waiting: ["shell-c-p1"]) == ["confirm-1", "start-1"])
+        #expect(Alerts.stale(delivered, waiting: ["shell-c-p1", "confirm-1", "start-1"]).isEmpty)
     }
 
     /// Only obid's own words reach an alert: what was written is quoted on the item, never shown.
@@ -89,8 +87,8 @@ struct ConversationAlertTests {
     /// Oby's answer in a conversation the window doesn't show alerts once, with its first lines.
     @Test func anAnswerWhileTheWindowIsClosedAlertsOnce() {
         let turn = Turn(id: "t1", date: now, who: .oby, text: "The vault tests pass on dev.\nTwo were slow.", conversation: "c1")
-        #expect(Alerts.answers(turn, extras: TurnExtras(), known: true, told: [], now: now))
-        #expect(!Alerts.answers(turn, extras: TurnExtras(), known: true, told: ["t1"], now: now), "a job dispatched from it sends it again")
+        #expect(Alerts.answers(turn, extras: TurnExtras(), known: true, told: [], asked: nil, now: now))
+        #expect(!Alerts.answers(turn, extras: TurnExtras(), known: true, told: ["t1"], asked: nil, now: now), "a job dispatched from it sends it again")
         let alert = Alerts.answer(turn.text, in: "c1", title: "Vault tests")
         #expect(alert.id == "turn-c1" && alert.title == "Oby answered" && alert.subtitle == "Vault tests")
         #expect(alert.body == "The vault tests pass on dev.\nTwo were slow.")
@@ -98,15 +96,18 @@ struct ConversationAlertTests {
     }
 
     /// What isn't an answer to the owner doesn't alert: their own words, a job's end (its job alerts),
-    /// a routine's run starting, a conversation obid doesn't list (the orchestrator's), an old turn.
+    /// a routine's run starting, a conversation obid doesn't list (the orchestrator's), an old turn,
+    /// the words beside an ask of the conversation that just alerted.
     @Test func anAnswerTheWindowShowsDoesntAlert() {
         let turn = Turn(id: "t1", date: now, who: .oby, text: "Done.", conversation: "c1")
-        #expect(!Alerts.answers(Turn(id: "u1", date: now, who: .user, text: "hi", conversation: "c1"), extras: TurnExtras(), known: true, told: [], now: now))
-        #expect(!Alerts.answers(turn, extras: TurnExtras(ended: true), known: true, told: [], now: now))
-        #expect(!Alerts.answers(turn, extras: TurnExtras(routine: true), known: true, told: [], now: now))
-        #expect(!Alerts.answers(turn, extras: TurnExtras(), known: false, told: [], now: now))
+        #expect(!Alerts.answers(Turn(id: "u1", date: now, who: .user, text: "hi", conversation: "c1"), extras: TurnExtras(), known: true, told: [], asked: nil, now: now))
+        #expect(!Alerts.answers(turn, extras: TurnExtras(ended: true), known: true, told: [], asked: nil, now: now))
+        #expect(!Alerts.answers(turn, extras: TurnExtras(routine: true), known: true, told: [], asked: nil, now: now))
+        #expect(!Alerts.answers(turn, extras: TurnExtras(), known: false, told: [], asked: nil, now: now))
+        #expect(!Alerts.answers(turn, extras: TurnExtras(), known: true, told: [], asked: now.addingTimeInterval(-20), now: now), "its Start it? says it")
+        #expect(Alerts.answers(turn, extras: TurnExtras(), known: true, told: [], asked: now.addingTimeInterval(-120), now: now))
         let old = Turn(id: "t0", date: now.addingTimeInterval(-3600), who: .oby, text: "Done.", conversation: "c1")
-        #expect(!Alerts.answers(old, extras: TurnExtras(), known: true, told: [], now: now))
+        #expect(!Alerts.answers(old, extras: TurnExtras(), known: true, told: [], asked: nil, now: now))
         // The window in front on that conversation shows it already; on another page, or a job's, it doesn't.
         #expect(AlertPlace.shown(.talk, conversation: "c1") == .conversation("c1"))
         #expect(AlertPlace.shown(.talk, conversation: "c2") != .conversation("c1"))
@@ -125,11 +126,12 @@ struct ConversationAlertTests {
         #expect(try Runner.decoder.decode(RunnerTurn.self, from: Data(plain.utf8)).extras.routine == false)
     }
 
-    /// An outside item obid sorted as FYI or to ignore never alerts; one that needs you, or isn't sorted yet, does.
+    /// An outside item alerts when obid sorted it as needing you, or doesn't sort (an older obid); never
+    /// as FYI, to ignore, while its sort is pending, or for a sort this app doesn't know.
     @Test func onlyAnOutsideItemThatNeedsYouAlerts() throws {
         let fresh = WatchNotice(id: "w1", title: "Dmitry on Slack", text: "x", created: now.addingTimeInterval(-60))
-        #expect(WatchNotice.shows(fresh, told: [], now: now), "not sorted yet: as before")
-        for (triage, shows) in [("needs_you", true), ("fyi", false), ("ignore", false)] {
+        #expect(WatchNotice.shows(fresh, told: [], now: now), "a runner that doesn't sort: as before")
+        for (triage, shows) in [("needs_you", true), ("fyi", false), ("ignore", false), ("pending", false), ("later", false)] {
             var sorted = fresh
             sorted.triage = triage
             #expect(WatchNotice.shows(sorted, told: [], now: now) == shows, "\(triage)")
@@ -162,16 +164,124 @@ struct ConversationAlertTests {
         #expect(RunnerFeed.notices([job], after: seen).changes.first.map { $0.1 == nil } == true)
     }
 
-    /// Following the pull request changes the job again and again: the done alert doesn't come back.
+    /// Following the pull request changes the job again and again, and Oby's own rounds after it (a
+    /// review, a rebase, a Mac check) put it back to running: Done alerts once. A job that leaves Ready
+    /// to publish for done (published elsewhere) only loses that alert.
     @Test func followingThePullRequestDoesntAlertAgain() {
-        var job = Job(id: "j", request: "Fix", agent: "codex", account: "default", repo: "deskree-inc/oby",
+        #expect(RunnerFeed.step(.done, before: nil, active: false, toldDone: false) == .post)
+        #expect(RunnerFeed.step(nil, before: "done", active: true, toldDone: true) == .keep, "a round of Oby's own: Done stays")
+        #expect(RunnerFeed.step(.done, before: nil, active: false, toldDone: true) == .keep, "ending again says nothing")
+        #expect(RunnerFeed.step(.done, before: "ready", active: false, toldDone: false) == .clear, "published elsewhere")
+        #expect(RunnerFeed.step(.done, before: "failed", active: false, toldDone: true) == .clear, "its Failed is stale")
+        #expect(RunnerFeed.step(nil, before: "done", active: false, toldDone: true) == .clear, "dismissed or archived")
+        #expect(RunnerFeed.step(nil, before: "permission:p1", active: true, toldDone: false) == .clear, "answered elsewhere")
+        #expect(RunnerFeed.step(.failed, before: "done", active: false, toldDone: true) == .post)
+
+        let (feed, shown, withdrawn) = Self.following()
+        var job = Job(id: "j-\(UUID().uuidString)", request: "Fix", agent: "codex", account: "default", repo: "deskree-inc/oby",
                       branch: "oby/fix-2", base: "dev", pr: nil, kind: .fix, task: "Fix")
+        job.status = .running
+        feed.apply(job)
         job.status = .done
+        job.summary = "Fixed it."
         job.published = "https://github.com/deskree-inc/oby/pull/8"
-        let (_, seen) = RunnerFeed.notices([job], after: [:])
-        for step in ["Checks running", "Checks passed", "Review approved", "Merged", "Branch deleted"] {
-            job.step = step
-            #expect(RunnerFeed.notices([job], after: seen).changes.isEmpty, "\(step)")
+        feed.apply(job)
+        #expect(shown.list.map(\.title) == ["Done: \(job.heading)"])
+        for status in [Job.Status.running, .done, .running, .done] {
+            job.status = status
+            job.step = "Oby's review, round 2"
+            feed.apply(job)
         }
+        #expect(shown.list.count == 1 && !withdrawn.list.contains(job.id))
+
+        var ready = job
+        ready.id = "r-\(UUID().uuidString)"
+        ready.commits = 2
+        ready.published = nil
+        feed.apply(ready)
+        #expect(shown.list.last?.title.hasPrefix("Ready to publish") == true)
+        ready.published = "https://github.com/deskree-inc/oby/pull/9"
+        feed.apply(ready)
+        #expect(shown.list.count == 2 && withdrawn.list.contains(ready.id), "published on the iPhone: its alert goes, no Done")
+    }
+
+    // MARK: The feed
+
+    /// A feed past its first lists, with what it shows and takes away kept here, not in Notification Center.
+    static func following(answer: @escaping @Sendable (RunnerStub.Request) -> (Int, String))
+        -> (RunnerFeed, Box<Alert>, Box<String>, RunnerStub) {
+        let feed = RunnerFeed()
+        let stub = RunnerStub(answer: answer)
+        let shown = Box<Alert>(), withdrawn = Box<String>()
+        feed.show = { shown.list.append($0) }
+        feed.withdraw = { withdrawn.list += $0 }
+        feed.deliveredInbox = { [] }
+        feed.doneDefaults = stub.defaults
+        feed.stageAlerts(following: stub.runner)
+        return (feed, shown, withdrawn, stub)
+    }
+
+    static func following() -> (RunnerFeed, Box<Alert>, Box<String>) {
+        let (feed, shown, withdrawn, _) = following(answer: { _ in (500, "{}") })
+        return (feed, shown, withdrawn)
+    }
+
+    final class Box<T> { var list: [T] = [] }
+
+    /// An ask the window shows waits, untold, and alerts once the window goes; once.
+    @Test func whatTheWindowShowsAlertsWhenItGoes() {
+        let (feed, shown, withdrawn) = Self.following()
+        var showing = true
+        feed.windowShows = { showing && $0 == .conversation("c1") }
+        feed.apply(item("shell-c1-p1", .permission, created: .now), words: nil)
+        #expect(shown.list.isEmpty)
+        showing = false
+        feed.windowLeft()
+        feed.windowLeft()
+        #expect(shown.list.map(\.id) == ["shell-c1-p1"])
+        // Answered on the iPhone: its alert goes.
+        var done = item("shell-c1-p1", .permission, created: .now)
+        done.done = .now
+        feed.apply(done, words: nil)
+        #expect(withdrawn.list == ["shell-c1-p1"])
+    }
+
+    /// Oby's answer alerts once; the owner's words anywhere take it away; beside an ask, the ask says it.
+    @Test func oneThingOneAlert() {
+        let (feed, shown, withdrawn) = Self.following()
+        feed.conversations.take([RunnerConversation(id: "c1", title: "Vault tests")])
+        let answer = Turn(id: "t-\(UUID().uuidString)", date: .now, who: .oby, text: "The tests pass.", conversation: "c1")
+        feed.heard(answer, TurnExtras())
+        feed.heard(answer, TurnExtras())
+        #expect(shown.list.map(\.id) == ["turn-c1"] && shown.list.first?.subtitle == "Vault tests")
+        feed.heard(Turn(date: .now, who: .user, text: "thanks", conversation: "c1"), TurnExtras())
+        #expect(withdrawn.list == ["turn-c1"])
+        // "It waits for your Start" then its Start it?: the ask takes the answer's place.
+        feed.heard(Turn(date: .now, who: .oby, text: "Oby looked into it: it waits for your Start.", conversation: "c1"), TurnExtras())
+        feed.apply(item("start-1", .start, title: "Greeting fix", text: "Start it?", options: ["Start", "Cancel"], created: .now),
+                   words: InboxWords(conversation: "c1"))
+        #expect(shown.list.map(\.id) == ["turn-c1", "turn-c1", "start-1"] && withdrawn.list == ["turn-c1", "turn-c1"])
+        // And the other way round: the ask first, Oby's words beside it say nothing more.
+        feed.heard(Turn(date: .now, who: .oby, text: "It waits for your Start.", conversation: "c1"), TurnExtras())
+        #expect(shown.list.count == 3)
+    }
+
+    /// Words from an alert go to its conversation; the window's own new conversation isn't touched.
+    @Test func wordsFromAnAlertGoToTheirConversation() async throws {
+        let (feed, shown, _, stub) = Self.following { request in
+            request.path.hasSuffix("/plans")
+                ? (200, #"{"kind":"question","said":"Which one?","question":{"text":"Which one?","options":["A","B"]},"conversation":"c2"}"#)
+                : (404, "{}")
+        }
+        feed.conversations.take([RunnerConversation(id: "c1", title: "One"), RunnerConversation(id: "c2", title: "Two")])
+        feed.conversations.startNew()
+        _ = feed.conversations.target("words typed in the window")
+        try await feed.say("the web one", in: "c2")
+        let sent = try #require(stub.requests.first { $0.path.hasSuffix("/plans") }?.json)
+        #expect(sent["conversation"] as? String == "c2" && sent["said"] as? String == "the web one")
+        #expect(feed.conversations.creating && feed.conversations.shown == nil, "the window's new conversation is still its own")
+        // Oby asked back: its turn's alert carries the options.
+        feed.heard(Turn(date: .now, who: .oby, text: "Which one?", conversation: "c2"), TurnExtras())
+        #expect(shown.list.last?.options == ["A", "B"] && shown.list.last?.title == "Oby asks")
     }
 }
