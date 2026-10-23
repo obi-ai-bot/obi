@@ -5,7 +5,7 @@
 //! repository, the severity or environment), never what the source wrote. A rule's job publishes
 //! only when the owner does, one job per rule runs at a time, and a rule starts at most [`DAILY`]
 //! a day. Rules are remembered decisions (crate::sphere::decisions), saved only on the owner's own
-//! answer or Confirm, listed and forgotten with the rest.
+//! signed Confirm (#776), listed and forgotten with the rest.
 
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ use obi_protocol::time;
 use serde_json::Value;
 
 use crate::api::Shared;
-use crate::job::RuleMark;
+use crate::job::{RuleMark, Status};
 use crate::sphere::decisions::{self, Decision};
 use crate::sphere::inbox::{self, Item};
 
@@ -21,6 +21,21 @@ use crate::sphere::inbox::{self, Item};
 pub const FROM_NOW_ON: &str = "Look into it, and from now on for";
 /// At most this many starts per rule per UTC day; past it, the offer as usual.
 pub const DAILY: usize = 5;
+
+/// The answer a rule's claimed offer has until its job exists: one a restart cut short opens again.
+pub const STARTING_ANSWER: &str = "Starting by your rule";
+
+/// Per rule: a start that's been checked and claimed but whose job doesn't exist yet.
+// ponytail: one obid process, so a static; per Shared if obid ever runs two.
+static STARTING: std::sync::Mutex<std::collections::BTreeMap<String, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn release(rule: &str) {
+    STARTING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(rule);
+}
 
 /// What the kind of event is, in words: "alerts", "failed deploys".
 fn what(kind: &str) -> &'static str {
@@ -46,52 +61,69 @@ pub fn offer(shared: &Arc<Shared>, mut item: Item) {
         return;
     }
     let project = text("project");
-    let from = crate::event_work::source_name(&text("id"));
-    item.options.insert(1, format!("{FROM_NOW_ON} {project}"));
-    if let Some(details) = item.details.as_mut() {
-        details.insert(
-            1,
-            format!(
-                "Looks into this one, and saves a standing rule: from now on Oby looks into {from}'s {} on {project} by itself, publishing only when you do.",
-                what(&kind)
-            ),
-        );
-    }
     let Some(rule) = shared.link.rule_for(&plugin) else {
+        // No rule covers it: the answer that asks for one.
+        let from = crate::event_work::source_name(&text("id"));
+        item.options.insert(1, format!("{FROM_NOW_ON} {project}"));
+        if let Some(details) = item.details.as_mut() {
+            details.insert(
+                1,
+                format!(
+                    "Looks into this one, and asks you to confirm a standing rule: from now on Oby looks into {from}'s {} on {project} by itself, publishing only when you do.",
+                    what(&kind)
+                ),
+            );
+        }
         shared.link.add_event_item(item);
         return;
     };
-    let jobs = shared.jobs.list(1000);
-    let ours = |job: &&crate::job::Job| job.rule.as_ref().is_some_and(|r| r.id == rule.id);
-    if let Some(running) = jobs.iter().filter(ours).find(|j| j.status.is_active()) {
-        item.text.push_str(&format!(
-            " Your rule is already looking into {project}: {}.",
-            running.short_title()
-        ));
-        shared.link.add_event_item(item);
-        return;
-    }
-    let today = time::now().div_euclid(86_400);
-    if jobs
-        .iter()
-        .filter(ours)
-        .filter(|j| j.created.div_euclid(86_400) == today)
-        .count()
-        >= DAILY
-    {
-        item.text.push_str(&format!(
-            " Your rule started {DAILY} today: start this one yourself."
-        ));
+    // Checked and reserved under one lock, so alerts arriving together can't all pass.
+    let refused = {
+        let mut starting = STARTING.lock().unwrap_or_else(|e| e.into_inner());
+        let reserved = starting.get(&rule.id).copied().unwrap_or(0);
+        let jobs = shared.jobs.list(1000);
+        let ours = |job: &&crate::job::Job| job.rule.as_ref().is_some_and(|r| r.id == rule.id);
+        // A job paused at a usage limit resumes by itself: it's still running.
+        let running = jobs.iter().filter(ours).find(|j| {
+            j.status.is_active() || (j.status == Status::Interrupted && j.resumes_at.is_some())
+        });
+        let today = time::now().div_euclid(86_400);
+        let started = jobs
+            .iter()
+            .filter(ours)
+            .filter(|j| j.created.div_euclid(86_400) == today)
+            .count();
+        if let Some(running) = running {
+            Some(format!(
+                " Your rule is already looking into {project}: {}.",
+                running.short_title()
+            ))
+        } else if reserved > 0 {
+            Some(format!(" Your rule is already looking into {project}."))
+        } else if started >= DAILY {
+            Some(format!(
+                " Your rule started {DAILY} today: start this one yourself."
+            ))
+        } else {
+            starting.insert(rule.id.clone(), 1);
+            None
+        }
+    };
+    if let Some(why) = refused {
+        item.text.push_str(&why);
         shared.link.add_event_item(item);
         return;
     }
     if !shared.link.add_event_item(item.clone()) {
+        release(&rule.id);
         return;
     }
-    // Claimed at once, so no answer starts it a second time meanwhile.
-    shared
-        .link
-        .change_item(&item.id, |kept| kept.done = Some(time::now()));
+    // Claimed at once, so no answer starts it a second time meanwhile; a restart before it
+    // starts opens it again (`reopen_claims`).
+    shared.link.change_item(&item.id, |kept| {
+        kept.done = Some(time::now());
+        kept.answer = Some(STARTING_ANSWER.into());
+    });
     let shared = shared.clone();
     tokio::spawn(async move { start(&shared, item, rule).await });
 }
@@ -112,6 +144,7 @@ async fn start(shared: &Arc<Shared>, item: Item, rule: Decision) {
         Some(mark),
     )
     .await;
+    release(&rule.id);
     match started {
         Ok(job) => {
             shared.link.change_item(&item.id, |kept| {
@@ -138,13 +171,14 @@ async fn start(shared: &Arc<Shared>, item: Item, rule: Decision) {
         }
         Err(why) => shared.link.change_item(&item.id, |kept| {
             kept.done = None;
+            kept.answer = None;
             kept.text
                 .push_str(&format!(" Your rule couldn't start it: {}", why.message));
         }),
     }
 }
 
-/// The standing rule an event offer's "from now on" saves (`conversation`: where it reports):
+/// The standing rule an event offer's "from now on" asks for (`conversation`: where it reports):
 /// its source, project and repository, and the alert's severity (it covers that one and worse)
 /// or the deploy's environment. `None` for an offer that isn't one.
 pub fn rule_from(item: &Item, conversation: Option<String>) -> Option<Decision> {

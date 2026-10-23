@@ -608,10 +608,11 @@ fn datadog_monitors_become_offers_per_cycle_and_settle() {
     assert!(obid.stop().success());
 }
 
-/// Standing rules (#1314): "Look into it, and from now on for <project>" looks into this alert and
-/// saves a rule; the next critical one starts by itself, marked with its rule, said in "Your
-/// standing rules"; one more while the rule's job runs is an offer saying so; a warning makes
-/// nothing; forgotten, the offers come back.
+/// Standing rules (#1314): "Look into it, and from now on for <project>" looks into this alert, and
+/// the rule is saved only on the owner's signed tap (#776); then the next critical one starts by
+/// itself, marked with its rule, said in "Your standing rules", and of a burst only one starts;
+/// one more while the rule's job runs is an offer saying so; a follow-up of the rule's job is the
+/// rule's too; forgotten, the offers come back.
 #[test]
 fn from_now_on_saves_a_rule_that_starts_the_next_alert_itself() {
     let folder = Folder::new("hooks-rules");
@@ -631,15 +632,20 @@ fn from_now_on_saves_a_rule_that_starts_the_next_alert_itself() {
     );
     let headers = [("X-Oby-Token", token.as_str())];
     // The project names the fake agent's SLEEP, so a rule's job runs until it's stopped.
-    let fire = |at: &str, severity: &str| {
+    let alert = |at: &str, severity: &str, fingerprint: &str| {
         let mut alert = firing("firing", severity);
         alert["labels"]["service"] = json!("SLEEP");
         alert["startsAt"] = json!(at);
+        alert["fingerprint"] = json!(fingerprint);
+        alert
+    };
+    let fire_all = |alerts: Vec<Value>| {
         assert_eq!(
-            deliver(&obid, ID, &alertmanager(json!([alert])), &headers).0,
+            deliver(&obid, ID, &alertmanager(json!(alerts)), &headers).0,
             202
         );
     };
+    let fire = |at: &str, severity: &str| fire_all(vec![alert(at, severity, "8a4f1c2d3e5b6a7c")]);
     let open = |at_least: usize| {
         within(10, "an open offer", || {
             let items = call(&obid, "GET", "/v1/inbox", None).body;
@@ -670,6 +676,24 @@ fn from_now_on_saves_a_rule_that_starts_the_next_alert_itself() {
     let looked = answer(&first, from_now_on);
     assert_eq!(looked.status, 200, "{}", looked.text);
     assert!(looked.body["job"].as_str().is_some_and(|j| !j.is_empty()));
+    // The rule waits for the owner's own tap: an API token alone saves none.
+    let listed = call(&obid, "GET", "/v1/obid/decisions", None).body;
+    assert!(!listed.to_string().contains("event_alert"), "{listed}");
+    let remember = within(10, "the rule's confirm", || {
+        call(&obid, "GET", "/v1/inbox", None)
+            .body
+            .as_array()?
+            .iter()
+            .find(|i| i["kind"] == "confirm")
+            .cloned()
+    });
+    assert_eq!(
+        remember["title"],
+        "From now on, look into Alertmanager's critical alerts on SLEEP in obi-e2e/fixture-app"
+    );
+    let id = remember["id"].as_str().unwrap();
+    assert_eq!(answer(&remember, "Confirm").status, 403, "no tap, no rule");
+    assert_eq!(confirm(&obid, id).status, 200);
     let rules = call(&obid, "GET", "/v1/obid/decisions", None).body;
     let rule = rules
         .as_array()
@@ -688,8 +712,25 @@ fn from_now_on_saves_a_rule_that_starts_the_next_alert_itself() {
         (&json!("alertmanager"), &json!("SLEEP"), &json!("critical"))
     );
 
-    // The next one starts with no tap, marked with its rule, and says so.
-    fire("2026-10-23T04:00:00Z", "critical");
+    // The next one starts with no tap, marked with its rule, and says so; of two at once, one.
+    fire_all(vec![
+        alert("2026-10-23T04:00:00Z", "critical", "1111aaaa2222bbbb"),
+        alert("2026-10-23T04:00:00Z", "critical", "3333cccc4444dddd"),
+    ]);
+    let burst = open(1);
+    assert!(
+        burst["text"]
+            .as_str()
+            .unwrap()
+            .contains("Your rule is already looking into SLEEP"),
+        "{burst}"
+    );
+    assert_eq!(
+        burst["options"],
+        json!(["Look into it", "Dismiss"]),
+        "a rule covers it"
+    );
+    assert_eq!(answer(&burst, "Dismiss").status, 200);
     let by_rule = within(15, "the rule's start", || {
         let done = call(&obid, "GET", "/v1/inbox?state=done", None).body;
         done.as_array()?
@@ -744,6 +785,41 @@ fn from_now_on_saves_a_rule_that_starts_the_next_alert_itself() {
     );
     assert_eq!(answer(&waiting, "Dismiss").status, 200);
     assert!(inbox_item(&obid, "Alert: SLEEP (warning)", "open").is_none());
+    let started = call(&obid, "GET", "/v1/jobs", None).body;
+    let ours = started
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|j| j["rule"]["id"] == rule["id"])
+        .count();
+    assert_eq!(ours, 1, "one job per rule at a time");
+
+    // Its follow-up is the rule's too: it publishes only by hand.
+    let job_id = job["id"].as_str().unwrap();
+    assert_eq!(
+        call(&obid, "POST", &format!("/v1/jobs/{job_id}/stop"), None).status,
+        200
+    );
+    within(15, "the rule's job stopped", || {
+        let status = call(&obid, "GET", &format!("/v1/jobs/{job_id}"), None).body["status"].clone();
+        (status != "running" && status != "queued").then_some(())
+    });
+    let asked = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{job_id}/messages"),
+        Some(&json!({"text": "What did you find?"})),
+    );
+    assert_eq!(asked.status, 201, "a follow-up: {}", asked.text);
+    let follow = within(10, "the follow-up", || {
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()?
+            .iter()
+            .find(|j| j["followUpOf"] == job_id)
+            .cloned()
+    });
+    assert_eq!(follow["rule"], job["rule"], "{follow}");
 
     // Forgotten, the next one is an offer again.
     let forgot = call(

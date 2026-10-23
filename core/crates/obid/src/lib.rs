@@ -299,6 +299,8 @@ pub async fn serve(
         path: config.home.join("exchanges"),
         source,
     })?;
+    // A rule's start that a stop cut short is an offer again (#1314).
+    link.reopen_claims();
     // The plug-ins obid ships, installed where missing (disabled), then the host, which starts
     // the ones the owner enabled without waiting for them.
     stopwatch.lap("sphere");

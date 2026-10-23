@@ -967,12 +967,8 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
         }
         // "…, and from now on for <project>" saves a standing rule (#1314): it widens what Oby
         // does with no tap, so only the owner's Confirm carries it out.
-        "pluginEvent" if words.starts_with(crate::rules::FROM_NOW_ON) => Owners::Confirm(
-            format!("{words}: {about}"),
-            format!(
-                "Oby's brain planned to look into {about} and save a standing rule for its project: from now on Oby looks into them by itself, publishing only when you do. It happens only if you confirm."
-            ),
-            on_item(action::ANSWER_ITEM, serde_json::json!({"answer": words})),
+        "pluginEvent" if words.starts_with(crate::rules::FROM_NOW_ON) => Owners::Refuse(
+            "a standing rule is the owner's to ask for: answer Look into it, and propose the rule with oby_rule.".into(),
         ),
         "permission" => Owners::No,
         // Dismissing an event is one-off; starting its work (Look into it, Fix it) is the owner's
@@ -1438,6 +1434,21 @@ mod tests {
         }
         let event = item("pluginEvent", "ev-x-1", "Build failed", &["Dismiss"]);
         assert_eq!(owners_call(&event, "Dismiss", None), Owners::No);
+        // A standing rule is never the brain's to ask for (#1314): it proposes one with oby_rule.
+        let rule = item(
+            "pluginEvent",
+            "ev-x-3",
+            "Alert: api (critical)",
+            &[
+                "Look into it",
+                "Look into it, and from now on for api",
+                "Dismiss",
+            ],
+        );
+        assert!(matches!(
+            owners_call(&rule, "Look into it, and from now on for api", None),
+            Owners::Refuse(_)
+        ));
         // Starting an event's work is never one-off: the owner confirms it.
         let offer = item(
             "pluginEvent",

@@ -2186,12 +2186,26 @@ impl Jobs {
         job.follow_up_of = new.follow_up_of;
         job.runs_on = new.runs_on;
         job.routine = new.routine;
-        job.rule = new.rule;
+        // A follow-up of a rule's job is the rule's too (#1314): it publishes only when the owner
+        // does. A Start item's job never carries `rule` (it's never from the API): found here.
+        job.rule = new.rule.or_else(|| {
+            job.follow_up_of
+                .as_deref()
+                .and_then(|of| self.get(of))
+                .and_then(|of| of.rule)
+        });
         job.mode = Some(if job.read_only() {
             Mode::Plan.as_str().to_owned()
         } else {
-            new.mode
-                .unwrap_or_else(|| self.default_mode().as_str().to_owned())
+            let mode = new
+                .mode
+                .unwrap_or_else(|| self.default_mode().as_str().to_owned());
+            // An alert's text led a rule's job, with no tap: never Bypass, whatever the default.
+            if job.rule.is_some() && mode == Mode::Bypass.as_str() {
+                Mode::Sandbox.as_str().to_owned()
+            } else {
+                mode
+            }
         });
         job.base = Some(new.base.unwrap_or_else(|| repo.default_branch.clone()));
         job.branch = match new

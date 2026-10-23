@@ -900,18 +900,55 @@ impl Link {
                 return Err(why);
             }
         }
-        // "…, and from now on for <project>": the owner's own answer saves the standing rule
-        // (#1314). The brain's pick of it waits for their Confirm first (`owners_call`).
+        // "…, and from now on for <project>" (#1314): this one is looked into now; the standing
+        // rule waits for the owner's own tap on a `confirm` item (#776), since it starts work with
+        // none. An API token alone (an agent, an MCP client) never saves one.
         if answer.starts_with(crate::rules::FROM_NOW_ON)
             && let Some(rule) = crate::rules::rule_from(&item, None)
         {
-            self.remember_rule(rule);
+            let words = crate::rules::words(&rule);
+            self.add_confirm(inbox::confirm_item(
+                &item.job,
+                format!("From now on, {words}"),
+                format!(
+                    "You asked Oby to look into these from now on, with no tap: an investigate job each time, which publishes only when you do, one at a time and at most {} a day. It's saved only if you confirm.",
+                    crate::rules::DAILY
+                ),
+                inbox::Confirmed {
+                    action: inbox::action::REMEMBER_RULE.into(),
+                    target: item.id.clone(),
+                    payload: json!({ "rule": rule }),
+                },
+                time::now(),
+            ));
         }
         item.done = Some(time::now());
         item.answer = Some(answer);
         self.lock().inbox.insert(item.id.clone(), item.clone());
         self.save_item(&item);
         Ok(item.to_json())
+    }
+
+    /// At startup: a rule's claimed offer whose job never started (obid stopped in between) is an
+    /// offer again (#1314).
+    pub fn reopen_claims(&self) {
+        let claimed: Vec<String> = self
+            .lock()
+            .inbox
+            .values()
+            .filter(|i| {
+                i.kind == "pluginEvent"
+                    && i.job.is_empty()
+                    && i.answer.as_deref() == Some(crate::rules::STARTING_ANSWER)
+            })
+            .map(|i| i.id.clone())
+            .collect();
+        for id in claimed {
+            self.change_item(&id, |item| {
+                item.done = None;
+                item.answer = None;
+            });
+        }
     }
 
     /// The standing rule (#1314) that covers an event offer's `plugin`, if one does.
