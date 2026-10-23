@@ -18,6 +18,10 @@ pub struct Settings {
     /// The owner's check-in, when they turned it on in a conversation (crate::brain::recap).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_in: Option<CheckIn>,
+    /// The due time of the last summary a check-in posted, kept while they're off: never two on
+    /// one day, even off and on again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_in_sent: Option<i64>,
 }
 
 /// When Oby checks in by itself, and where (#1116): set, changed and turned off only by the
@@ -32,9 +36,6 @@ pub struct CheckIn {
     pub conversation: String,
     /// What its next time counts from: when it was set, or the latest time it was due.
     pub from: i64,
-    /// When it last posted a summary: never two on one day.
-    #[serde(default)]
-    pub sent: Option<i64>,
 }
 
 impl CheckIn {
@@ -53,6 +54,7 @@ impl Default for Settings {
         Settings {
             max_running: default_max_running(),
             check_in: None,
+            check_in_sent: None,
         }
     }
 }

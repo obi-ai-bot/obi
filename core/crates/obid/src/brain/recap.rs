@@ -432,83 +432,116 @@ fn same_day(check_in: &CheckIn, a: i64, b: i64) -> bool {
     day(a) == day(b)
 }
 
-/// The owner's check-in at `now`, once a minute (crate::routines' loop): at its time, the summary
-/// of what happened since the owner last looked, at most once a day; else, in its [`AWAKE`]
-/// hours, the recap once while the owner is away. Off, nothing.
-pub async fn check_in(shared: &Shared, now: i64) {
-    let home = &shared.config.home;
-    let Some(check_in) = crate::settings::load(home).check_in else {
-        return;
-    };
-    let Some(at) = due(&check_in, now) else {
-        if awake(&check_in, now)
-            && let Some(since) = shared.presence.away(now)
-        {
-            post(shared, &check_in, since, now).await;
-        }
-        return;
-    };
-    // The time it acts on is kept before it posts: never twice for one time. Changed meanwhile,
-    // it waits for the next minute.
-    let kept = crate::settings::update(home, |s| match &mut s.check_in {
-        Some(kept) if *kept == check_in => {
-            kept.from = at;
-            true
-        }
-        _ => false,
-    });
-    if !matches!(kept, Ok(true))
-        || check_in
-            .sent
-            .is_some_and(|sent| same_day(&check_in, sent, at))
-    {
-        return;
-    }
-    let since = shared
-        .presence
-        .since()
-        .map_or(check_in.from, |seen| seen.max(check_in.from));
-    if post(shared, &check_in, since, now).await {
-        let sent = crate::settings::update(home, |s| {
-            if let Some(kept) = &mut s.check_in {
-                kept.sent = Some(now);
-            }
-        });
-        if let Err(e) = sent {
-            tracing::warn!("check-in: can't keep when it posted: {e}");
-        }
-    }
+/// What a check posts.
+#[derive(Debug, PartialEq)]
+pub enum Post {
+    /// The summary for its time `at`, of what happened since `since`.
+    Summary { at: i64, since: i64 },
+    /// The away recap, of what happened since the owner was last seen.
+    Recap { since: i64 },
 }
 
-/// Posts a check-in in its conversation when something happened since `since`: the quick model's
-/// one to three sentences, else obid's own count, with the jobs' cards. Whether it posted.
-async fn post(shared: &Shared, check_in: &CheckIn, since: i64, now: i64) -> bool {
+/// One check at `now` of `check_in` and `sent`, the due time of the last summary (kept while
+/// check-ins are off): what to post, if anything, with `check_in.from`, `sent` and `presence` left
+/// as posting it leaves them. At its time, the summary of what happened since the owner last
+/// looked, never two on one day; else, in its [`AWAKE`] hours, the away recap once a stretch.
+/// `happened` says whether anything happened since a time: nothing did, nothing posts.
+pub fn step(
+    check_in: &mut CheckIn,
+    sent: &mut Option<i64>,
+    presence: &Presence,
+    now: i64,
+    happened: impl FnOnce(i64) -> bool,
+) -> Option<Post> {
+    if let Some(at) = due(check_in, now) {
+        // The time it acts on is kept, posted or not: never twice for one time.
+        let from = std::mem::replace(&mut check_in.from, at).min(at);
+        if sent.is_some_and(|sent| same_day(check_in, sent, at)) {
+            return None;
+        }
+        let since = presence.since().map_or(from, |seen| seen.max(from));
+        if !happened(since) {
+            return None;
+        }
+        *sent = Some(at);
+        presence.post(now);
+        return Some(Post::Summary { at, since });
+    }
+    let since = presence.away(now).filter(|_| awake(check_in, now))?;
+    if !happened(since) {
+        return None;
+    }
+    // One a stretch away, whatever the call does: it's tried once (#537).
+    presence.post(now);
+    Some(Post::Recap { since })
+}
+
+/// The owner's check-in at `now`, once a minute (crate::routines' loop): [`step`] on what
+/// `settings.json` keeps, kept before anything posts, then posted. Off, nothing.
+pub async fn check_in(shared: &Shared, now: i64) {
+    let home = &shared.config.home;
+    let settings = crate::settings::load(home);
+    let Some(kept) = settings.check_in else {
+        return;
+    };
+    let (mut check_in, mut sent) = (kept.clone(), settings.check_in_sent);
+    let post = step(&mut check_in, &mut sent, &shared.presence, now, |since| {
+        facts(
+            &shared.jobs.list(usize::MAX),
+            &shared.link.waiting_items(now),
+            since,
+        )
+        .happened()
+    });
+    if check_in != kept || sent != settings.check_in_sent {
+        // ponytail: changed meanwhile, this minute posts nothing, and its stretch away has had
+        // its one.
+        let saved = crate::settings::update(home, |s| {
+            let unchanged = s.check_in.as_ref() == Some(&kept);
+            if unchanged {
+                s.check_in = Some(check_in.clone());
+                s.check_in_sent = sent;
+            }
+            unchanged
+        });
+        match saved {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                tracing::warn!("check-in: can't keep its time, so nothing posts: {e}");
+                return;
+            }
+        }
+    }
+    let Some(post) = post else {
+        return;
+    };
+    let since = match post {
+        Post::Summary { since, .. } | Post::Recap { since } => since,
+    };
+    write_post(shared, &check_in, since, now).await;
+}
+
+/// Posts a check-in in its conversation, of what happened since `since`: the quick model's one to
+/// three sentences, else obid's own count, with the jobs' cards.
+async fn write_post(shared: &Shared, check_in: &CheckIn, since: i64, now: i64) {
     let facts = facts(
         &shared.jobs.list(usize::MAX),
         &shared.link.waiting_items(now),
         since,
     );
-    if !facts.happened() {
-        return false;
-    }
-    // One a stretch away, whatever the call does: it's tried once (#537).
-    shared.presence.post(now);
     let text = quick(shared, CHECK_IN, &facts, since, now)
         .await
         .unwrap_or_else(|| facts.count());
     let jobs = facts.jobs.iter().rev().take(CARDS).rev().cloned().collect();
     let Some(conversation) = place(shared, check_in) else {
-        return false;
+        return;
     };
-    match shared
+    if let Err(e) = shared
         .conversations
         .append(&conversation, "oby", text, jobs)
     {
-        Ok(_) => true,
-        Err(e) => {
-            tracing::warn!("check-in: conversation {conversation} wasn't told: {e:?}");
-            false
-        }
+        tracing::warn!("check-in: conversation {conversation} wasn't told: {e:?}");
     }
 }
 
@@ -818,13 +851,56 @@ mod tests {
     const MONDAY: i64 = 1_792_378_800;
     const HOUR: i64 = 60 * MIN;
 
-    fn weekdays_at_9(from: i64, sent: Option<i64>) -> CheckIn {
+    /// Mon 9:00 in São Paulo.
+    const NINE: i64 = MONDAY + 9 * HOUR;
+    const DAY: i64 = 24 * HOUR;
+
+    fn kept(schedule: crate::routines::Schedule, from: i64) -> CheckIn {
         CheckIn {
-            schedule: crate::routines::Schedule::Weekdays { at: "09:00".into() },
+            schedule,
             zone: "America/Sao_Paulo".into(),
             conversation: "c1".into(),
             from,
-            sent,
+        }
+    }
+
+    fn weekdays_at_9(from: i64) -> CheckIn {
+        kept(
+            crate::routines::Schedule::Weekdays { at: "09:00".into() },
+            from,
+        )
+    }
+
+    fn daily_at(at: &str, from: i64) -> CheckIn {
+        kept(crate::routines::Schedule::Daily { at: at.into() }, from)
+    }
+
+    /// What `settings.json` and obid's memory keep from one check to the next, as the tick
+    /// keeps them.
+    struct Kept {
+        check_in: CheckIn,
+        sent: Option<i64>,
+        presence: Presence,
+    }
+
+    impl Kept {
+        fn new(check_in: CheckIn, sent: Option<i64>) -> Kept {
+            Kept {
+                check_in,
+                sent,
+                presence: Presence::default(),
+            }
+        }
+
+        /// One check at `now`, things having happened at `happened` (a job ended, an item came).
+        fn check(&mut self, now: i64, happened: &[i64]) -> Option<Post> {
+            step(
+                &mut self.check_in,
+                &mut self.sent,
+                &self.presence,
+                now,
+                |since| happened.iter().any(|t| *t > since && *t <= now),
+            )
         }
     }
 
@@ -832,7 +908,7 @@ mod tests {
     fn a_check_in_is_due_at_its_time_once_and_a_long_missed_one_waits_for_the_next() {
         let nine = MONDAY + 9 * HOUR;
         // Set Monday at 8:00: due at 9:00, not a minute before.
-        let set = weekdays_at_9(MONDAY + 8 * HOUR, None);
+        let set = weekdays_at_9(MONDAY + 8 * HOUR);
         assert_eq!(due(&set, nine - MIN), None);
         assert_eq!(due(&set, nine), Some(nine));
         assert_eq!(
@@ -841,38 +917,182 @@ mod tests {
             "late, still that morning"
         );
         // Acted on: nothing more until Tuesday 9:00.
-        let acted = weekdays_at_9(nine, None);
+        let acted = weekdays_at_9(nine);
         assert_eq!(due(&acted, nine + MIN), None);
         assert_eq!(due(&acted, nine + 24 * HOUR - MIN), None);
         assert_eq!(due(&acted, nine + 24 * HOUR), Some(nine + 24 * HOUR));
         // Saturday and Sunday have none: Friday's acted on, Monday's next.
         let friday = acted.from + 4 * 24 * HOUR;
-        let weekend = weekdays_at_9(friday, None);
+        let weekend = weekdays_at_9(friday);
         assert_eq!(due(&weekend, friday + 24 * HOUR), None);
         assert_eq!(due(&weekend, friday + 48 * HOUR), None);
         assert_eq!(due(&weekend, friday + 72 * HOUR), Some(friday + 72 * HOUR));
         // obid wasn't running Monday morning: at 22:00 it's past (13 hours), Tuesday's comes.
-        let off = weekdays_at_9(MONDAY - 3 * 24 * HOUR, None);
+        let off = weekdays_at_9(MONDAY - 3 * 24 * HOUR);
         assert_eq!(due(&off, MONDAY + 22 * HOUR), None);
         assert_eq!(due(&off, nine + 24 * HOUR), Some(nine + 24 * HOUR));
         // A clock set back before what it counts from still finds the morning's.
-        let ahead = weekdays_at_9(nine + 30 * 24 * HOUR, None);
+        let ahead = weekdays_at_9(nine + 30 * 24 * HOUR);
         assert_eq!(due(&ahead, nine + 30 * MIN), Some(nine));
     }
 
     #[test]
-    fn one_summary_a_day_even_when_its_time_changes() {
-        let nine = MONDAY + 9 * HOUR;
-        let sent = weekdays_at_9(nine, Some(nine + MIN));
-        assert!(same_day(&sent, nine + MIN, MONDAY + 15 * HOUR));
-        assert!(!same_day(&sent, nine + MIN, nine + 24 * HOUR));
+    fn days_are_the_zones() {
+        let check_in = weekdays_at_9(NINE);
+        assert!(same_day(&check_in, NINE, MONDAY + 15 * HOUR));
+        assert!(!same_day(&check_in, NINE, NINE + DAY));
         // 23:30 in São Paulo is the next day in UTC: the zone's day counts.
-        assert!(same_day(&sent, nine, MONDAY + 23 * HOUR + 30 * MIN));
+        assert!(same_day(&check_in, NINE, MONDAY + 23 * HOUR + 30 * MIN));
+    }
+
+    #[test]
+    fn asleep_at_9_the_summary_comes_at_11_once_and_a_restart_sends_no_second() {
+        let friday = NINE - 3 * DAY;
+        let mut kept = Kept::new(weekdays_at_9(friday), Some(friday));
+        let overnight = MONDAY + 3 * HOUR;
+        // The Mac slept through 9:00: the first check, at 11:00, posts it.
+        assert_eq!(
+            kept.check(MONDAY + 11 * HOUR, &[overnight]),
+            Some(Post::Summary {
+                at: NINE,
+                since: friday
+            })
+        );
+        assert_eq!(kept.sent, Some(NINE), "the due time, not when it posted");
+        assert_eq!(kept.check_in.from, NINE);
+        assert_eq!(kept.check(MONDAY + 11 * HOUR + MIN, &[overnight]), None);
+        // obid restarts: settings.json keeps the time and the day's summary, memory nothing.
+        let mut kept = Kept::new(kept.check_in, kept.sent);
+        assert_eq!(kept.check(MONDAY + 11 * HOUR + 5 * MIN, &[overnight]), None);
+        let tuesday = MONDAY + DAY + 2 * HOUR;
+        assert_eq!(
+            kept.check(NINE + DAY, &[overnight, tuesday]),
+            Some(Post::Summary {
+                at: NINE + DAY,
+                since: NINE
+            })
+        );
+    }
+
+    #[test]
+    fn a_late_summary_across_midnight_leaves_the_next_days() {
+        let mut kept = Kept::new(daily_at("23:30", MONDAY + 23 * HOUR), None);
+        let monday_night = MONDAY + 23 * HOUR + 10 * MIN;
+        let tuesday_noon = MONDAY + DAY + 12 * HOUR;
+        let happened = [monday_night, tuesday_noon];
+        let late = MONDAY + DAY + 10 * MIN;
+        assert_eq!(
+            kept.check(late, &happened),
+            Some(Post::Summary {
+                at: MONDAY + 23 * HOUR + 30 * MIN,
+                since: MONDAY + 23 * HOUR
+            })
+        );
+        assert_eq!(kept.sent, Some(MONDAY + 23 * HOUR + 30 * MIN));
+        // Tuesday's comes at its time: Monday's, posted after midnight, isn't Tuesday's.
+        assert_eq!(kept.check(late + HOUR, &happened), None);
+        assert_eq!(
+            kept.check(MONDAY + DAY + 23 * HOUR + 30 * MIN, &happened),
+            Some(Post::Summary {
+                at: MONDAY + DAY + 23 * HOUR + 30 * MIN,
+                since: late
+            })
+        );
+    }
+
+    #[test]
+    fn off_and_on_again_or_a_new_time_never_sends_a_second_summary_that_day() {
+        let mut kept = Kept::new(weekdays_at_9(NINE - 3 * DAY), None);
+        let overnight = MONDAY + 3 * HOUR;
+        assert!(matches!(
+            kept.check(NINE, &[overnight]),
+            Some(Post::Summary { .. })
+        ));
+        // Turned off at 10:00 (`checkInSent` stays) and on again, every day at 15:00.
+        let mut kept = Kept::new(daily_at("15:00", MONDAY + 10 * HOUR), kept.sent);
+        let noon = MONDAY + 12 * HOUR;
+        assert_eq!(kept.check(MONDAY + 15 * HOUR, &[overnight, noon]), None);
+        assert_eq!(kept.check_in.from, MONDAY + 15 * HOUR, "its time is kept");
+        let tuesday = MONDAY + DAY + 10 * HOUR;
+        assert_eq!(
+            kept.check(MONDAY + DAY + 15 * HOUR, &[overnight, noon, tuesday]),
+            Some(Post::Summary {
+                at: MONDAY + DAY + 15 * HOUR,
+                since: MONDAY + 15 * HOUR
+            })
+        );
+    }
+
+    #[test]
+    fn an_away_recap_posts_once_a_stretch_only_in_its_hours() {
+        let mut kept = Kept::new(weekdays_at_9(NINE), Some(NINE));
+        kept.presence.seen(MONDAY + 10 * HOUR);
+        let happened = [
+            MONDAY + 10 * HOUR + 20 * MIN,
+            MONDAY + 11 * HOUR + 10 * MIN,
+            MONDAY + 21 * HOUR + 30 * MIN,
+        ];
+        assert_eq!(kept.check(MONDAY + 10 * HOUR + 29 * MIN, &happened), None);
+        assert_eq!(
+            kept.check(MONDAY + 10 * HOUR + 31 * MIN, &happened),
+            Some(Post::Recap {
+                since: MONDAY + 10 * HOUR
+            })
+        );
+        assert_eq!(kept.check(MONDAY + 10 * HOUR + 45 * MIN, &happened), None);
+        // Back at 11:00: the return's recap covers only what came after Oby's.
+        assert_eq!(
+            kept.presence.seen(MONDAY + 11 * HOUR),
+            Some(MONDAY + 10 * HOUR + 31 * MIN)
+        );
+        // Away again: a new stretch, a new one.
+        assert_eq!(
+            kept.check(MONDAY + 11 * HOUR + 31 * MIN, &happened),
+            Some(Post::Recap {
+                since: MONDAY + 11 * HOUR
+            })
+        );
+        // Away from 12:00 with nothing new, then something at 21:30: quiet hours by then.
+        kept.presence.seen(MONDAY + 12 * HOUR);
+        assert_eq!(kept.check(MONDAY + 12 * HOUR + 31 * MIN, &happened), None);
+        assert_eq!(kept.check(MONDAY + 21 * HOUR + 31 * MIN, &happened), None);
+    }
+
+    #[test]
+    fn the_summary_is_its_stretchs_one_and_a_quiet_morning_posts_nothing() {
+        let mut kept = Kept::new(weekdays_at_9(NINE - 3 * DAY), Some(NINE - 3 * DAY));
+        kept.presence.seen(MONDAY + 8 * HOUR);
+        let early = [MONDAY + 8 * HOUR + 10 * MIN];
+        assert_eq!(
+            kept.check(NINE, &early),
+            Some(Post::Summary {
+                at: NINE,
+                since: MONDAY + 8 * HOUR
+            })
+        );
+        assert_eq!(
+            kept.check(NINE + MIN, &early),
+            None,
+            "away, but posted since"
+        );
+        // Tuesday: nothing by 9:00, so nothing posts. The owner never came back, so the stretch
+        // had its one: what comes at 9:30 waits for Wednesday's summary.
+        let later = [MONDAY + 8 * HOUR + 10 * MIN, NINE + DAY + 30 * MIN];
+        assert_eq!(kept.check(NINE + DAY, &later), None);
+        assert_eq!(kept.sent, Some(NINE));
+        assert_eq!(kept.check(NINE + DAY + 31 * MIN, &later), None);
+        assert_eq!(
+            kept.check(NINE + 2 * DAY, &later),
+            Some(Post::Summary {
+                at: NINE + 2 * DAY,
+                since: NINE + DAY
+            })
+        );
     }
 
     #[test]
     fn the_away_recap_keeps_quiet_hours() {
-        let check_in = weekdays_at_9(MONDAY, None);
+        let check_in = weekdays_at_9(MONDAY);
         assert!(!awake(&check_in, MONDAY + 8 * HOUR + 59 * MIN));
         assert!(awake(&check_in, MONDAY + 9 * HOUR));
         assert!(awake(&check_in, MONDAY + 20 * HOUR + 59 * MIN));

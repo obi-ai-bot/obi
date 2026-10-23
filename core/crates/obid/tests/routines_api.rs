@@ -292,9 +292,13 @@ fn say(obid: &Obid, words: &str, conversation: Option<&str>) -> Value {
     answer.body
 }
 
-fn check_in_kept(obid: &Obid) -> Value {
+fn settings_kept(obid: &Obid) -> Value {
     let text = std::fs::read_to_string(obid.home.join("settings.json")).unwrap_or_default();
-    serde_json::from_str::<Value>(&text).unwrap_or_default()["checkIn"].clone()
+    serde_json::from_str::<Value>(&text).unwrap_or_default()
+}
+
+fn check_in_kept(obid: &Obid) -> Value {
+    settings_kept(obid)["checkIn"].clone()
 }
 
 fn turns_in(obid: &Obid, conversation: &str) -> Vec<Value> {
@@ -386,7 +390,7 @@ fn oby_checks_in_by_itself_an_opt_in_morning_summary_and_the_away_recap_as_a_not
         json!({"every": "weekdays", "at": "09:00"})
     );
     assert_eq!(kept["conversation"], conversation.as_str());
-    assert_eq!(kept["sent"], Value::Null);
+    assert_eq!(settings_kept(&obid)["checkInSent"], Value::Null);
     // Asked how they are, in any conversation.
     let how = say(&obid, "OBY oby_check_in {}", None);
     assert!(
@@ -431,8 +435,11 @@ fn oby_checks_in_by_itself_an_opt_in_morning_summary_and_the_away_recap_as_a_not
             .find(|t| t["who"] == "oby" && t["text"] == summary)
     });
     assert_eq!(turn["jobs"], json!([job]), "{turn}");
-    let kept = check_in_kept(&obid);
-    assert!(kept["sent"].is_i64(), "{kept}");
+    // The day's summary is kept by its due time: a minute ago, to the minute.
+    let kept = settings_kept(&obid);
+    let at = kept["checkIn"]["from"].as_i64().unwrap();
+    assert_eq!(kept["checkInSent"], at, "{kept}");
+    assert_eq!(at % 60, 0, "{kept}");
     // What the model read: obid's own records, fenced as data, with the check-in's own prompt.
     let inputs = background_inputs(&folder);
     assert_eq!(inputs.len(), before + 1, "one call: {inputs:?}");
@@ -491,6 +498,7 @@ fn a_check_in_turned_off_posts_nothing_and_a_failed_call_still_says_what_happene
         "{off}"
     );
     assert_eq!(check_in_kept(&obid), Value::Null);
+    assert_eq!(settings_kept(&obid)["checkInSent"], Value::Null);
     a_job_ends(&obid);
     let turns = turns_in(&obid, &conversation).len();
     obid.stop();

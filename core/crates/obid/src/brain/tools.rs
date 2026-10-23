@@ -1228,20 +1228,14 @@ fn check_in(shared: &Shared, session: &Session, args: Value) -> Result<String, S
             .to_owned()
     });
     jiff::tz::TimeZone::get(&zone).map_err(|_| format!("{zone} isn't a time zone Oby knows."))?;
-    let kept = crate::settings::update(home, |s| {
-        // Today's summary stays sent: a new time never sends a second one today.
-        let sent = s.check_in.as_ref().and_then(|kept| kept.sent);
-        let kept = crate::settings::CheckIn {
-            schedule,
-            zone,
-            conversation: session.conversation.clone(),
-            from: now,
-            sent,
-        };
-        s.check_in = Some(kept.clone());
-        kept
-    })
-    .map_err(unkept)?;
+    // Today's summary stays sent (`checkInSent`): a new time never sends a second one today.
+    let kept = crate::settings::CheckIn {
+        schedule,
+        zone,
+        conversation: session.conversation.clone(),
+        from: now,
+    };
+    crate::settings::update(home, |s| s.check_in = Some(kept.clone())).map_err(unkept)?;
     Ok(format!(
         "Saved: check-ins are on. {} Say it back to the owner in a sentence: they change it or turn it off by asking.",
         check_in_words(&kept, session, now)

@@ -946,7 +946,8 @@ pub fn spawn(shared: Arc<Shared>) {
                 tokio::task::spawn_blocking(move || tick(&tick_shared, obi_protocol::time::now()))
                     .await;
             // The owner's check-in, on the same minute (#1116). ponytail: its one background
-            // call holds the next routine check up to its timeout, once a day at most.
+            // call holds the next routine check up to its timeout, once a summary or a stretch
+            // away at most.
             crate::brain::recap::check_in(&shared, obi_protocol::time::now()).await;
             tokio::select! {
                 () = tokio::time::sleep(EVERY) => {}
