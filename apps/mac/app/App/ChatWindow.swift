@@ -57,6 +57,12 @@ final class ChatWindow: NSObject, NSWindowDelegate {
         present()
     }
 
+    /// Shows the window on one of obid's conversations, where its cards wait (an alert's click, #862).
+    func show(conversation id: String) {
+        show()
+        Task { await island.feed.conversations.open(id) }
+    }
+
     /// Shows the window on Settings (⌘, and the menu bar's Settings…): General, unless one of its
     /// pages shows already.
     func showSettings() {
@@ -169,10 +175,17 @@ final class ChatWindow: NSObject, NSWindowDelegate {
         endSplash(reveal: false)
         island.model.chatWindowVisible = false
         state.visible = false
+        // Once it's gone: what waited for the owner while it showed it alerts.
+        Task { [island] in island.feed.windowLeft() }
     }
     func windowDidMiniaturize(_ notification: Notification) {
         island.model.chatWindowVisible = false
         state.visible = false
+        island.feed.windowLeft()
+    }
+    /// In front again: the alerts for what it shows go.
+    func windowDidBecomeKey(_ notification: Notification) {
+        if let place = shownPlace { island.feed.seen(place) }
     }
     func windowDidDeminiaturize(_ notification: Notification) {
         island.model.chatWindowVisible = true
@@ -181,6 +194,15 @@ final class ChatWindow: NSObject, NSWindowDelegate {
     }
 
     var isOpen: Bool { window?.isVisible ?? false }
+
+    /// What the window's top page is about, for alerts (#862).
+    private var shownPlace: AlertPlace? { AlertPlace.shown(state.trail.top, conversation: island.feed.conversations.shown) }
+
+    /// The window is in front, on `place`'s page: an alert for it would only repeat what's on screen.
+    func shows(_ place: AlertPlace) -> Bool {
+        guard NSApp.isActive, let window, window.isVisible, !window.isMiniaturized else { return false }
+        return shownPlace == place
+    }
 
     /// The window is in front on the conversation page: the talk key's words carry on in it (#493).
     var showsConversation: Bool { NSApp.isActive && window?.isVisible == true && state.trail.top == .talk }
@@ -329,6 +351,10 @@ struct ChatView: View {
         .onChange(of: state.trail.top, initial: true) { _, top in
             if case .job(let id, let local) = top { state.seen.insert(SidebarSections.JobRow.id(id, local: local)) }
             if top == .talk { model.markChatRead() }
+        }
+        // What the page shows needs no alert any more (#862).
+        .onChange(of: AlertPlace.shown(state.trail.top, conversation: model.feed.conversations.shown), initial: true) { _, place in
+            if let place { model.feed.seen(place) }
         }
         // A job that left every list: its page goes too.
         .onChange(of: model.desk.jobs.map(\.id) + model.feed.jobs.map(\.id)) {

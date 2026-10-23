@@ -110,6 +110,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         island.windowShowsConversation = { [weak self] in self?.chat.showsConversation ?? false }
         // A dropped runner is tried again within seconds while the window shows.
         island.feed.windowOpen = { [weak self] in self?.chat.isOpen ?? false }
+        // Nothing alerts for what the window shows in front (#862).
+        island.feed.windowShows = { [weak self] place in self?.chat.shows(place) ?? false }
         island.start()
         // obid as This Mac's engine: the Swift runner an older build registered goes, and the
         // engine is registered when nothing else serves this Mac (apps/mac/app/LoginItem.swift).
@@ -147,24 +149,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             && event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
     }
 
-    /// A click on an alert opens the window on its job (the runner's, or one of this Mac's); the runner's
-    /// Publish starts publishing there. An alert about nothing in particular opens the window.
+    /// A click on an alert opens the window on its job (the runner's, or one of this Mac's) or its
+    /// conversation; an alert about nothing in particular opens the window. Its buttons and its Reply
+    /// answer right there (#863), with the alert's own ids (`Alerts.answer`): the very ask it showed,
+    /// never a newer one. Publish and a Confirm open the window, where Touch ID signs them. An answer
+    /// that doesn't go through (asked elsewhere meanwhile, obid unreachable) opens the window on it.
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
-        if let id = info[RunnerFeed.jobKey] as? String {
-            // Allow or Deny right in the alert, on the very ask it showed; otherwise the job opens.
-            if let ask = info[RunnerFeed.permissionKey] as? String,
-               [RunnerFeed.allowButton, RunnerFeed.denyButton].contains(response.actionIdentifier) {
-                let decision: RunnerPermission.Decision = response.actionIdentifier == RunnerFeed.allowButton ? .allow : .deny
-                if (try? await island.model.feed.answer(id, decision, ask: ask)) != nil { return }
+        let typed = (response as? UNTextInputNotificationResponse)?.userText
+        let answer = Alerts.answer(response.actionIdentifier, typed: typed, info: info)
+        let feed = island.model.feed
+        do {
+            switch answer {
+            case .open(let place, let draft):
+                island.model.publishing = nil
+                return open(place, draft: draft)
+            case .publish(let job):
+                island.model.publishing = job
+                return open(.job(job))
+            case .permission(let job, let ask, let decision, let message): try await feed.answer(job, decision, message: message, ask: ask)
+            case .tell(let job, let words): feed.apply(try await feed.about(job) { try await $0.tell(job, words) })
+            case .settle(let item, let words): try await feed.settle(item, answer: words)
+            case .say(let conversation, let words): try await feed.say(words, in: conversation)
+            case .pick(let conversation?, let said, let question, let option):
+                try await feed.say(Desk.answered(said, question: question, option: option), in: conversation)
+            case .pick(nil, let said, let question, let option): island.desk.answer(option, said: said, question: question)
             }
-            island.model.publishing = response.actionIdentifier == RunnerFeed.publishButton ? id : nil
-            chat.show(job: (id: id, local: false))
-        } else if let id = info[IslandController.localJobKey] as? String {
-            chat.show(job: (id: id, local: true))
-        } else {
-            chat.show()
+        } catch {
+            open(Alerts.place(info))
         }
+    }
+
+    /// The window on `place`, with `draft` in its box when an alert's words couldn't go from there.
+    private func open(_ place: AlertPlace, draft: String? = nil) {
+        switch place {
+        case .job(let id):
+            if let draft { Drafts.keep(draft, as: Drafts.task(id)) }
+            chat.show(job: (id: id, local: false))
+        case .localJob(let id): chat.show(job: (id: id, local: true))
+        case .conversation(let id):
+            if let draft { Drafts.keep(draft, as: Drafts.conversation(id)) }
+            chat.show(conversation: id)
+        case .window: chat.show()
+        }
+    }
+
+    /// Oby went behind another app: what waited for the owner while the window showed it alerts now.
+    func applicationDidResignActive(_ notification: Notification) {
+        island.feed.windowLeft()
     }
 
     /// Clicking Oby's Dock icon, or opening it again (Spotlight, Finder, `open`), while it runs opens its window.

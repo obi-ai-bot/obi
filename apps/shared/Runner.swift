@@ -799,10 +799,12 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
     var artifacts: [ArtifactRef]?
     /// obid only (#351): the turn a job adds to its conversation when it ends, not an answer.
     var ended: Bool?
+    /// obid only (#395): the routine whose run the turn tells of.
+    var routine: RoutineMark?
 
-    var extras: TurnExtras { TurnExtras(artifacts: artifacts ?? [], ended: ended == true) }
+    var extras: TurnExtras { TurnExtras(artifacts: artifacts ?? [], ended: ended == true, routine: routine != nil) }
 
-    private enum CodingKeys: String, CodingKey { case id, who, text, at, jobs, details, conversation, artifacts, ended }
+    private enum CodingKeys: String, CodingKey { case id, who, text, at, jobs, details, conversation, artifacts, ended, routine }
 
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -816,6 +818,7 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
         // Tolerant: a list this app can't read leaves the turn without cards, not unread.
         artifacts = try? c.decodeIfPresent([ArtifactRef].self, forKey: .artifacts)
         ended = try? c.decodeIfPresent(Bool.self, forKey: .ended)
+        routine = try? c.decodeIfPresent(RoutineMark.self, forKey: .routine)
     }
 
     var turn: Turn {
