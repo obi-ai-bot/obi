@@ -116,11 +116,11 @@ struct WindowInputTests {
                 }
                 try await Task.sleep(for: .milliseconds(400))
             }
-            // The first card's Later: the clicks reach the page's buttons.
-            try await click(NSPoint(x: size.width / 2 - 21, y: size.height - 373))
+            // The first card's Later, under the filters row: the clicks reach the page's buttons.
+            try await click(NSPoint(x: size.width / 2 - 21, y: size.height - 407))
             #expect(model.feed.gitHubLater.contains("is0"), "Later didn't get the click")
             // The first card's right half, between its column chip and its headline: still on the page.
-            try await click(NSPoint(x: size.width / 2 + 160, y: size.height - 300))
+            try await click(NSPoint(x: size.width / 2 + 160, y: size.height - 334))
             #expect(state.trail.top == .group(.issues), "a click on a card closed the page")
             // Left of the column, halfway down: nothing there, so back Home.
             try await click(NSPoint(x: 40, y: size.height / 2))
@@ -150,8 +150,8 @@ struct WindowInputTests {
             ChatWindow.measureLights(window, into: state)
             try await Task.sleep(for: .milliseconds(800))
             let size = try #require(window.contentView?.bounds.size)
-            // Two done cards, then the link's row 424 points down; its words are centred, this is 200 left of them.
-            let at = NSPoint(x: size.width / 2 - 200, y: size.height - 424)
+            // Two done cards, then the link's row 416 points down; its words are centred, this is 200 left of them.
+            let at = NSPoint(x: size.width / 2 - 200, y: size.height - 416)
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                 let event = try #require(NSEvent.mouseEvent(with: type, location: at, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                                                             windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
@@ -201,3 +201,4 @@ struct WindowInputTests {
         }
     }
 }
+// Temporary: finds where the two cards' targets moved. Not committed.
