@@ -436,12 +436,12 @@ struct ConnectorsTests {
         #expect(connected.connected && connected.projects.map(\.slug) == ["api"] && connected.org == "acme")
         let put = try #require(obid.requests.last?.json)
         #expect(put["url"] as? String == "https://sentry.io" && put["org"] as? String == "acme" && put["token"] as? String == "sntryu_test")
-        let followed = try await obid.runner.setSentryProject("api", follow: true, repo: "obi-ai-bot/obi")
+        let followed = try await obid.runner.setSentryProject("api", .follow(true))
         #expect(followed.projects.first?.follow == true && followed.projects.first?.repo == "obi-ai-bot/obi")
-        #expect(obid.requests.last?.json?["follow"] as? Bool == true)
-        _ = try await obid.runner.setSentryProject("api", follow: true, repo: nil)
+        #expect(obid.requests.last?.json?.keys.sorted() == ["follow"], "only the field that changed")
+        _ = try await obid.runner.setSentryProject("api", .repo(nil))
         let off = try #require(obid.requests.last?.json)
-        #expect(off.keys.sorted() == ["follow", "repo"] && off["repo"] is NSNull, "a repository taken off is sent as null")
+        #expect(off.keys.sorted() == ["repo"] && off["repo"] is NSNull, "a repository taken off is sent as null")
         // A runner without Sentry (404) has no row, and says nothing's wrong.
         let old = RunnerStub { _ in (404, "") }
         let oldLists = await Connectors.lists(from: old.runner, name: "tetrix-lab")

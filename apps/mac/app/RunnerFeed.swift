@@ -66,6 +66,8 @@ final class RunnerFeed {
     var tetrix: TetrixStatus?
     /// obid's Slack and its watcher (Settings › Connectors), read there and kept by their events.
     var slack: SlackStatus?
+    /// obid's Sentry as its last `sentry` event said (Settings › Connectors keeps the repositories).
+    var sentry: SentryStatus?
     var watch: WatchStatus?
     /// The watcher's and the channel listener's items waiting in the inbox (Engine's inbox doesn't
     /// know their kinds), oldest first.
@@ -455,6 +457,7 @@ final class RunnerFeed {
                     case .tetrix(let status): tetrix = status
                     case .watchNotice(let notice): take(notice)
                     case .slack(let status): slack = status
+                    case .sentry(let status): sentry = status
                     case .watch(let status): watch = status
                     case .cleanup(let measured): cleanup = measured
                     // obid names each turn's, step's and word's conversation: the window shows one (#493).

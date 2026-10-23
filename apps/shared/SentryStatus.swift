@@ -97,20 +97,27 @@ extension Runner {
         try await send("DELETE", "v1/sentry")
     }
 
-    /// Follows a project or not, and maps it to one of obid's repositories (nil: none).
-    func setSentryProject(_ slug: String, follow: Bool, repo: String?) async throws -> SentryStatus {
+    /// One change to a project: follow it or not, or map it to one of obid's repositories (nil: none).
+    /// Only that field is sent, so a change made meanwhile isn't undone by a stale value.
+    enum SentryProjectChange: Sendable {
+        case follow(Bool)
+        case repo(String?)
+    }
+
+    func setSentryProject(_ slug: String, _ change: SentryProjectChange) async throws -> SentryStatus {
         struct Body: Encodable {
-            var follow: Bool
-            var repo: String?
+            var change: SentryProjectChange
             func encode(to encoder: any Encoder) throws {
                 var keys = encoder.container(keyedBy: Keys.self)
-                try keys.encode(follow, forKey: .follow)
-                try keys.encode(repo, forKey: .repo)
+                switch change {
+                case .follow(let follow): try keys.encode(follow, forKey: .follow)
+                case .repo(let repo): try keys.encode(repo, forKey: .repo)
+                }
             }
             enum Keys: String, CodingKey { case follow, repo }
         }
         let path = slug.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? slug
-        return try await call("PATCH", "v1/sentry/projects/\(path)", body: Body(follow: follow, repo: repo))
+        return try await call("PATCH", "v1/sentry/projects/\(path)", body: Body(change: change))
     }
 }
 #endif

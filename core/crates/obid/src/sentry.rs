@@ -70,9 +70,12 @@ struct Saved {
     checked_at: Option<String>,
     next_check: Option<String>,
     error: Option<String>,
-    /// Whether the first read noted what was there (it offers nothing).
-    seeded: bool,
+    /// The followed projects (ids) a read has noted: a project's first read after it's followed
+    /// only notes what's there, so following it doesn't offer its backlog.
+    seeded_projects: Vec<String>,
     offered: Vec<String>,
+    /// Sentry asked obid to wait until then (seconds since the epoch): no read before it.
+    wait_until: Option<i64>,
 }
 
 pub struct Sentry {
@@ -92,6 +95,8 @@ pub struct Sentry {
 #[derive(Debug)]
 enum Failed {
     Refused,
+    /// 403: the token can't see that (a scope, or a project's access): it isn't forgotten.
+    Forbidden,
     Wait(i64),
     Other(String),
 }
@@ -479,8 +484,11 @@ impl Sentry {
                 Failed::Other(format!("Sentry couldn't be reached: {}", e.without_url()))
             })?;
         let status = response.status();
-        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        if status == StatusCode::UNAUTHORIZED {
             return Err(Failed::Refused);
+        }
+        if status == StatusCode::FORBIDDEN {
+            return Err(Failed::Forbidden);
         }
         if status == StatusCode::TOO_MANY_REQUESTS {
             let now = time::now();
@@ -520,7 +528,9 @@ impl Sentry {
     async fn connect(&self, url: &str, org: &str, token: &str) -> Result<(), ApiError> {
         let bad = |text: &str| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, text);
         let failed = |e: Failed, what: &str| match e {
-            Failed::Refused => bad(&format!("Sentry refused that token{what}.")),
+            Failed::Refused | Failed::Forbidden => {
+                bad(&format!("Sentry refused that token{what}."))
+            }
             Failed::Wait(_) => ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "Sentry asked Oby to wait: try again in a minute.",
@@ -612,7 +622,11 @@ impl Sentry {
             user,
             projects,
             connected_at: Some(time::format(time::now())),
-            seeded: same && before.seeded,
+            seeded_projects: if same {
+                before.seeded_projects
+            } else {
+                Vec::new()
+            },
             offered: if same { before.offered } else { Vec::new() },
             ..Saved::default()
         };
@@ -624,12 +638,19 @@ impl Sentry {
         Ok(())
     }
 
-    /// Forgets the token; `error` says why, when the owner didn't ask.
+    /// Forgets the token; `error` says why, when the owner didn't ask. Where and what was followed
+    /// stay, so connecting to the same organization again keeps them.
     fn forget(&self, error: Option<String>) {
         if let Err(e) = self.vault.remove(TOKEN) {
             tracing::warn!("obid couldn't remove {TOKEN} from the vault: {e}");
         }
+        let before = self.saved();
         if let Err(e) = self.save(Saved {
+            url: before.url,
+            org: before.org,
+            projects: before.projects,
+            seeded_projects: before.seeded_projects,
+            offered: before.offered,
             error,
             ..Saved::default()
         }) {
@@ -699,6 +720,10 @@ impl Sentry {
         if saved.connected_at.is_none() || followed.is_empty() {
             return next;
         }
+        // A wake (a project followed, a reconnect) doesn't cut short the wait Sentry asked for.
+        if let Some(until) = saved.wait_until.filter(|until| now < *until) {
+            return until;
+        }
         let token = match self.vault.value(TOKEN) {
             Ok(Some(token)) => token,
             Ok(None) => {
@@ -729,7 +754,20 @@ impl Sentry {
                     Some("Sentry asked Oby to wait; it reads again then.".into()),
                     until,
                 );
+                let mut waiting = self.saved();
+                waiting.wait_until = Some(until);
+                if let Err(e) = self.save(waiting) {
+                    tracing::warn!("{e}");
+                }
                 return until;
+            }
+            Err(Failed::Forbidden) => {
+                self.note(
+                    None,
+                    Some("Sentry refused to show a followed project's issues: check the token's access to it.".into()),
+                    next,
+                );
+                return next;
             }
             Err(Failed::Other(why)) => {
                 self.note(None, Some(why), next);
@@ -741,46 +779,51 @@ impl Sentry {
             .iter()
             .map(|i| format!("{}:{}", i.id, i.substatus))
             .collect();
-        if saved.seeded {
-            let mut made = 0;
-            for (issue, key) in found.iter().zip(&keys) {
-                if made == OFFERS_PER_READ {
-                    break;
-                }
-                if offered.contains(key) {
-                    continue;
-                }
-                let repo = followed
-                    .iter()
-                    .find(|p| p.slug == issue.project)
-                    .and_then(|p| p.repo.as_deref());
-                add(item(issue, repo, now));
-                offered.push(key.clone());
-                made += 1;
+        let mut made = 0;
+        for (issue, key) in found.iter().zip(&keys) {
+            if offered.contains(key) {
+                continue;
             }
-        } else {
-            offered.extend(
-                keys.iter()
-                    .filter(|k| !offered.contains(k))
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            );
+            let project = followed.iter().find(|p| p.slug == issue.project);
+            // A project's first read only notes what's there.
+            if !project.is_some_and(|p| saved.seeded_projects.contains(&p.id)) {
+                offered.push(key.clone());
+                continue;
+            }
+            if made == OFFERS_PER_READ {
+                continue;
+            }
+            add(item(issue, project.and_then(|p| p.repo.as_deref()), now));
+            offered.push(key.clone());
+            made += 1;
         }
         let over = offered.len().saturating_sub(OFFERED_KEPT);
         offered.drain(..over);
-        self.note(Some(offered), None, next);
+        let seeded = followed.iter().map(|p| p.id.clone()).collect();
+        self.note(Some((offered, seeded)), None, next);
         next
     }
 
-    /// Notes a read: what's offered now (left out: as it was), its error, and the next one.
-    fn note(&self, offered: Option<Vec<String>>, error: Option<String>, next: i64) {
+    /// The repository a project's issues are looked into now (`None`: none picked).
+    pub fn repo_for(&self, slug: &str) -> Option<String> {
+        self.saved()
+            .projects
+            .into_iter()
+            .find(|p| p.slug == slug)
+            .and_then(|p| p.repo)
+    }
+
+    /// Notes a read: what's offered now and the projects it noted (left out: as it was), its error,
+    /// and the next one.
+    fn note(&self, read: Option<(Vec<String>, Vec<String>)>, error: Option<String>, next: i64) {
         let mut saved = self.saved();
         if saved.connected_at.is_none() {
             return;
         }
-        if let Some(offered) = offered {
+        if let Some((offered, seeded)) = read {
             saved.offered = offered;
-            saved.seeded = true;
+            saved.seeded_projects = seeded;
+            saved.wait_until = None;
         }
         saved.checked_at = Some(time::format(time::now()));
         saved.next_check = Some(time::format(next));
@@ -808,6 +851,7 @@ impl Sentry {
             async move {
                 self.get(&url, &token, &path).await.map_err(|e| match e {
                     Failed::Refused => REFUSED.to_owned(),
+                    Failed::Forbidden => "Sentry refused to show that issue: check the token's access to its project.".to_owned(),
                     Failed::Wait(_) => {
                         "Sentry asked Oby to wait: try again in a minute.".to_owned()
                     }
@@ -1220,6 +1264,72 @@ mod tests {
         sentry.saved.lock().unwrap().url = Some(url4);
         assert_eq!(read(&sentry).await.len(), 5);
         assert_eq!(read(&sentry).await.len(), 2);
+    }
+
+    /// A project followed later doesn't offer its backlog: its first read only notes it (#1320's
+    /// review).
+    #[tokio::test]
+    async fn following_another_project_offers_none_of_its_backlog() {
+        let web = |id: &str, short: &str| {
+            let mut found = issue(id, short, "error", "new");
+            found["project"] = json!({"id": "12", "slug": "web", "name": "Web"});
+            found
+        };
+        let mut given = answers(json!([web("30", "WEB-1")]));
+        let (url, _) = stub(given.clone()).await;
+        let home = scratch("second");
+        let sentry = connected(&home, &url).await;
+        assert!(read(&sentry).await.is_empty());
+        let repos = ["obi-e2e/fixture-app".to_owned()];
+        assert!(
+            sentry
+                .set_project("web", Some(true), None, &repos)
+                .await
+                .is_ok()
+        );
+        assert!(
+            read(&sentry).await.is_empty(),
+            "web's backlog is only noted"
+        );
+        given.insert(
+            "/api/0/organizations/acme/issues/".into(),
+            (200, json!([web("31", "WEB-2"), web("30", "WEB-1")])),
+        );
+        let (newer, _) = stub(given).await;
+        sentry.saved.lock().unwrap().url = Some(newer);
+        let made = read(&sentry).await;
+        assert_eq!(
+            made.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(),
+            ["Sentry: WEB-2"]
+        );
+    }
+
+    /// A 403 (a project's access, a scope) says why and keeps Sentry connected; a refused token signs
+    /// out but keeps what was followed, for connecting again.
+    #[tokio::test]
+    async fn a_403_keeps_sentry_connected_and_a_refusal_keeps_the_follows() {
+        let mut given = answers(json!([]));
+        let (url, _) = stub(given.clone()).await;
+        let home = scratch("forbidden");
+        let sentry = connected(&home, &url).await;
+        given.insert(
+            "/api/0/organizations/acme/issues/".into(),
+            (403, json!({"detail": "You do not have permission"})),
+        );
+        let (forbidding, _) = stub(given).await;
+        sentry.saved.lock().unwrap().url = Some(forbidding.clone());
+        read(&sentry).await;
+        assert_eq!(sentry.status_json()["connected"], true);
+        assert!(
+            sentry.status_json()["error"]
+                .as_str()
+                .unwrap()
+                .contains("access")
+        );
+        sentry.forget(Some(REFUSED.into()));
+        let kept = sentry.saved();
+        assert_eq!(kept.org.as_deref(), Some("acme"));
+        assert!(kept.projects.iter().any(|p| p.slug == "api" && p.follow));
     }
 
     #[tokio::test]

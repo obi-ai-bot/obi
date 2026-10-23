@@ -781,7 +781,7 @@ struct AccountUsageRow<Buttons: View>: View {
 struct SentryProjectsSheet: View {
     let status: SentryStatus
     var problem: String?
-    let change: (_ slug: String, _ follow: Bool, _ repo: String?) -> Void
+    let change: (_ slug: String, _ change: Runner.SentryProjectChange) -> Void
     let done: () -> Void
 
     var body: some View {
@@ -796,11 +796,11 @@ struct SentryProjectsSheet: View {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(status.projects) { project in
                         HStack(spacing: 12) {
-                            Toggle(project.name, isOn: Binding(get: { project.follow }, set: { change(project.slug, $0, project.repo) }))
+                            Toggle(project.name, isOn: Binding(get: { project.follow }, set: { change(project.slug, .follow($0)) }))
                                 .toggleStyle(.switch)
                             Spacer()
                             Picker("Repository", selection: Binding(get: { project.repo ?? "" },
-                                                                   set: { change(project.slug, project.follow, $0.isEmpty ? nil : $0) })) {
+                                                                   set: { change(project.slug, .repo($0.isEmpty ? nil : $0)) })) {
                                 Text("No repository").tag("")
                                 ForEach(status.repos, id: \.self) { Text($0).tag($0) }
                             }
@@ -942,8 +942,14 @@ struct ConnectorsSettingsView: View {
         }
         .sheet(isPresented: $showingSentryProjects) {
             SentryProjectsSheet(status: lists.sentry ?? SentryStatus(), problem: problems["sentry-projects"],
-                                change: { slug, follow, repo in setSentryProject(slug, follow: follow, repo: repo) },
+                                change: { slug, change in setSentryProject(slug, change) },
                                 done: { showingSentryProjects = false })
+        }
+        // obid signed Sentry out, or a read went wrong: the row says so; the event leaves out `repos`.
+        .onChange(of: feed.sentry) { _, told in
+            guard var told, lists.sentry != nil else { return }
+            told.repos = lists.sentry?.repos ?? []
+            lists.sentry = told
         }
         .alert("Connect Tetrix", isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } })) {
             TextField("MCP URL", text: $url, prompt: Text("https://"))
@@ -1308,11 +1314,11 @@ struct ConnectorsSettingsView: View {
     }
 
     /// Follows a Sentry project or not, and where it's looked into: shown as obid answers.
-    private func setSentryProject(_ slug: String, follow: Bool, repo: String?) {
+    private func setSentryProject(_ slug: String, _ change: Runner.SentryProjectChange) {
         guard let runner = feed.runner else { return }
         Task {
             do {
-                lists.sentry = try await runner.setSentryProject(slug, follow: follow, repo: repo)
+                lists.sentry = try await runner.setSentryProject(slug, change)
                 problems["sentry-projects"] = nil
             } catch {
                 problems["sentry-projects"] = error.localizedDescription

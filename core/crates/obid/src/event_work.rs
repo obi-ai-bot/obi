@@ -33,7 +33,14 @@ pub async fn start(
         )
     })?;
     let text = |key: &str| event[key].as_str().unwrap_or_default();
-    let (plugin, repo) = (text("id"), text("repo"));
+    let plugin = text("id");
+    // A Sentry issue is looked into where its project maps now, not where it did when offered.
+    let mapped = (plugin == crate::sentry::SOURCE).then(|| {
+        sentry
+            .and_then(|s| s.repo_for(text("project")))
+            .unwrap_or_default()
+    });
+    let repo = mapped.as_deref().unwrap_or(text("repo"));
     if !config.repos.iter().any(|r| r.repo == repo) {
         return Err(refused(
             StatusCode::CONFLICT,
@@ -71,7 +78,10 @@ pub async fn start(
             quoted,
         )
     } else {
-        let file = format!("event-{}.md", item.id.strip_prefix("ev-").unwrap_or(&item.id));
+        let file = format!(
+            "event-{}.md",
+            item.id.strip_prefix("ev-").unwrap_or(&item.id)
+        );
         let quoted = format!("What it sent is quoted in .obi/inputs/{file}.");
         let (kind, task, title) = match text("kind") {
             "deploy.failed" => (

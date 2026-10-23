@@ -120,17 +120,19 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
         let plugin = try? keys.decodeIfPresent(Plugin.self, forKey: .plugin)
         source = place?.source ?? plugin?.id ?? "slack"
         let sentry = source == "sentry"
-        url = (place?.pr?.url ?? place?.url ?? plugin?.quoted?.url).flatMap { Self.link($0, also: sentry ? ["sentry.io"] : []) }
+        // What a plug-in wrote never opens; only Sentry's own offer links to its issue, on sentry.io.
+        let issue = sentry ? plugin?.quoted?.url.flatMap { Self.link($0, on: ["sentry.io"]) } : nil
+        url = (place?.pr?.url ?? place?.url).flatMap { Self.link($0) } ?? issue
         review = place?.review
     }
 
-    /// `text` as a link the card may open: https, no login, on slack.com or github.com (or `also`'s
-    /// hosts), or a subdomain, with nothing that could end it early.
-    static func link(_ text: String, also: [String] = []) -> URL? {
+    /// `text` as a link the card may open: https, no login, on one of `hosts` (slack.com or github.com)
+    /// or a subdomain, with nothing that could end it early.
+    static func link(_ text: String, on hosts: [String] = ["slack.com", "github.com"]) -> URL? {
         guard !text.contains(where: { $0.isWhitespace || $0.isNewline || "<>|\"".contains($0) }),
               let url = URL(string: text), url.scheme == "https", url.user() == nil, url.password() == nil,
               let host = url.host()?.lowercased() else { return nil }
-        let allowed = (["slack.com", "github.com"] + also).contains { host == $0 || host.hasSuffix("." + $0) }
+        let allowed = hosts.contains { host == $0 || host.hasSuffix("." + $0) }
         return allowed ? url : nil
     }
 
