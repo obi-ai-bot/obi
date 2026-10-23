@@ -85,9 +85,12 @@ struct HomeView: View {
                     .keepsDraft($text, as: Drafts.home)
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button { typing = false; phone.panel = .home } label: { Image(systemName: "sidebar.left") }
-                        .accessibilityLabel("Show sidebar")
+                // One panel button, as Sangam's: while the panel is open, its own puts it away.
+                if phone.panel == nil {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { typing = false; phone.panel = .home } label: { Image(systemName: "sidebar.left") }
+                            .accessibilityLabel("Show sidebar")
+                    }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { phone.homePath.append(.settings) } label: { OwnerPicture(name: HomeLine.owner(ofMac: phone.link?.name)) }
