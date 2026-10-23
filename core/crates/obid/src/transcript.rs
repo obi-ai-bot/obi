@@ -343,6 +343,17 @@ impl Transcripts {
         self.note(job, |live| said(live, "you", words))
     }
 
+    /// What the job was asked, once, as the session's first words from you (its `request`);
+    /// nothing when a `you` entry is there already (a job tried again).
+    pub fn asked(&self, job: &str, request: &str) -> Vec<Entry> {
+        self.note(job, |live| {
+            if live.now.values().any(|entry| entry.kind == "you") {
+                return vec![];
+            }
+            said(live, "you", request)
+        })
+    }
+
     /// A round began: `summary` says which, on which tool.
     pub fn start(&self, job: &str, summary: &str) -> Vec<Entry> {
         self.note(job, |live| {
@@ -1259,6 +1270,19 @@ mod tests {
         );
         assert_eq!(updated[0].summary, "1 of 1 done");
         assert_eq!(updated[0].n, 2);
+    }
+
+    #[test]
+    fn the_request_is_the_first_words_from_you_once() {
+        let t = transcripts("asked");
+        t.start("j", "Started on Claude Code");
+        let asked = t.asked("j", "Review pull request #350.");
+        assert_eq!(asked.len(), 1);
+        assert_eq!((asked[0].kind.as_str(), asked[0].n), ("you", 2));
+        assert_eq!(asked[0].text.as_deref(), Some("Review pull request #350."));
+        // Tried again: the request isn't said twice.
+        t.start("j", "Started on Claude Code");
+        assert!(t.asked("j", "Review pull request #350.").is_empty());
     }
 
     #[test]
