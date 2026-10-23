@@ -384,7 +384,8 @@ struct ConnectorsTests {
                                    "Couldn't read Tetrix on tetrix-lab: The runner didn't let this device in.",
                                    "Couldn't read Slack on tetrix-lab: The runner didn't let this device in.",
                                    "Couldn't read the watcher on tetrix-lab: The runner didn't let this device in.",
-                                   "Couldn't read Sentry on tetrix-lab: The runner didn't let this device in."])
+                                   "Couldn't read Sentry on tetrix-lab: The runner didn't let this device in.",
+                                   "Couldn't read the alerting hooks on tetrix-lab: The runner didn't let this device in."])
     }
 
     /// Sentry is a row of its own once obid has it (the owner's decision of 2026-10-23, #1117):
@@ -414,6 +415,35 @@ struct ConnectorsTests {
         #expect(SentryStatus.isOrg("acme-1") && !SentryStatus.isOrg("Acme") && !SentryStatus.isOrg(""))
         #expect(SentryStatus.isToken("sntryu_" + "4f1c9a7e2b8d4c6fa0e3b5d7") && !SentryStatus.isToken("short"))
         #expect(!SentryStatus.isToken("has a space in it and is long enough"))
+    }
+
+    /// Prometheus and Grafana are rows of their own once obid has hooks (#1311): Connect… makes the
+    /// hook; connected, Disconnect… removes it, and a refused delivery needs attention.
+    @Test func alertingToolsOnceObidHasHooks() throws {
+        var runner = Connectors.RunnerState(name: "This Mac", local: true, accounts: [])
+        #expect(!Connectors.list(accounts: [], runner: runner).contains { $0.id == "prometheus" }, "no rows until obid has hooks")
+        runner.hooks = []
+        let list = Connectors.list(accounts: [], runner: runner)
+        let prometheus = try #require(list.first { $0.id == "prometheus" })
+        #expect(prometheus.name == "Prometheus" && prometheus.about == "Alerts from Alertmanager" && prometheus.way == .button("Connect…", .connectAlerts("alertmanager")))
+        #expect(prometheus.brand == nil && prometheus.symbol == "flame" && prometheus.how.contains("Remote access"))
+        #expect(list.first { $0.id == "grafana" }?.way == .button("Connect…", .connectAlerts("grafana")))
+        let hook = Runner.HookRow(id: "abcdefghij0123456789abcdefghij01", name: "prometheus", source: "alertmanager", repo: "obi-ai-bot/obi",
+                                  url: "https://oby-control.test/h/abcdefghij0123456789abcdefghij01",
+                                  lastDelivery: .init(at: .now, result: "accepted"))
+        runner.hooks = [hook]
+        let on = try #require(Connectors.list(accounts: [], runner: runner).first { $0.id == "prometheus" })
+        #expect(on.state == .connected && on.way == .button("Disconnect…", .disconnectAlerts(hook.id)))
+        #expect(on.how.contains("obi-ai-bot/obi") && on.how.contains("Last delivery: accepted."))
+        var refused = hook
+        refused.lastDelivery?.result = "bad signature"
+        #expect(Connectors.alerting(AlertingTool.all[0], hook: refused, place: "This Mac", local: true).state == .broken)
+        let remote = Connectors.alerting(AlertingTool.all[1], hook: nil, place: "tetrix-lab", local: false)
+        #expect(remote.way == .steps("Connect or disconnect it on tetrix-lab itself, with Oby there."))
+        // What to paste where: the address and the secret, in each tool's own words.
+        let steps = AlertingTool.all[0].steps(url: "https://oby-control.test/h/x", secret: "s3cret")
+        #expect(steps.contains("url: https://oby-control.test/h/x") && steps.contains("X-Oby-Token:") && steps.contains(#"secrets: ["s3cret"]"#))
+        #expect(AlertingTool.all[1].steps(url: "u", secret: "s").contains("X-Grafana-Alerting-Timestamp"))
     }
 
     /// The Mac reads obid's Sentry, connects it and follows a project as obid answers; a repository

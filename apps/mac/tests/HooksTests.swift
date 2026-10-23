@@ -38,7 +38,7 @@ struct HooksTests {
         }
         let secret = HookSetup.newSecret()
         #expect(secret.count == 64 && secret != HookSetup.newSecret())
-        let row = try await HookSetup.make(name: "prom", source: "generic", repo: "obi-ai-bot/obi", secret: secret,
+        let row = try await HookSetup.make(name: "prom", source: "generic", repo: "obi-ai-bot/obi", secret: secret, projectLabel: "job",
                                            plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: plane.transport),
                                            signer: signer, obid: obid.runner)
         #expect(row.name == "prom" && row.lastDelivery == nil)
@@ -49,6 +49,7 @@ struct HooksTests {
         let given = try #require(obid.requests.last?.json)
         #expect(given["id"] as? String == "abcdefghij0123456789abcdefghij01" && given["secret"] as? String == secret)
         #expect(given["url"] as? String == "https://oby-control.test/h/abcdefghij0123456789abcdefghij01")
+        #expect(given["projectLabel"] as? String == "job")
     }
 
     /// Removing a hook obid no longer has (an earlier try got that far) still removes its address.

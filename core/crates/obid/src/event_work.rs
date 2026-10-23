@@ -83,24 +83,31 @@ pub async fn start(
             item.id.strip_prefix("ev-").unwrap_or(&item.id)
         );
         let quoted = format!("What it sent is quoted in .obi/inputs/{file}.");
+        // obid's own alerting sources by name (#1311, #1312); a plug-in as "the <id> plug-in".
+        let from = match plugin {
+            "alertmanager" => "Alertmanager".to_owned(),
+            "grafana" => "Grafana".to_owned(),
+            "pagerduty" => "PagerDuty".to_owned(),
+            other => format!("the {other} plug-in"),
+        };
         let (kind, task, title) = match text("kind") {
             "deploy.failed" => (
                 "investigate",
                 format!(
-                    "Look into the failed deploy of {project} to {environment} that the {plugin} plug-in reported. {quoted}"
+                    "Look into the failed deploy of {project} to {environment} that {from} reported. {quoted}"
                 ),
                 format!("Deploy failed: {project}"),
             ),
             "alert.fired" => (
                 "investigate",
                 format!(
-                    "Look into the alert on {project} ({severity}) that the {plugin} plug-in reported. {quoted}"
+                    "Look into the alert on {project} ({severity}) that {from} reported. {quoted}"
                 ),
                 format!("Alert: {project}"),
             ),
             "ticket.assigned" => (
                 "fix",
-                format!("Fix ticket {ticket} that the {plugin} plug-in reported. {quoted}"),
+                format!("Fix ticket {ticket} that {from} reported. {quoted}"),
                 format!("Ticket {ticket}"),
             ),
             other => {

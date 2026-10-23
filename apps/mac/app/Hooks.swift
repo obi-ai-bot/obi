@@ -62,6 +62,7 @@ extension Runner {
         var repo: String?
         var url: String
         var lastDelivery: Delivery?
+        var projectLabel: String?
     }
 
     func hooks() async throws -> [HookRow] {
@@ -69,13 +70,70 @@ extension Runner {
     }
 
     /// Gives obid a hook the control plane made, with its secret, which obid keeps in its vault.
-    func addHook(id: String, url: URL, name: String, source: String, secret: String, repo: String?) async throws -> HookRow {
-        struct Body: Encodable { var id: String; var url: String; var name: String; var source: String; var secret: String; var repo: String? }
-        return try await call("POST", "v1/hooks", body: Body(id: id, url: url.absoluteString, name: name, source: source, secret: secret, repo: repo))
+    func addHook(id: String, url: URL, name: String, source: String, secret: String, repo: String?, projectLabel: String? = nil) async throws -> HookRow {
+        struct Body: Encodable { var id: String; var url: String; var name: String; var source: String; var secret: String; var repo: String?; var projectLabel: String? }
+        return try await call("POST", "v1/hooks", body: Body(id: id, url: url.absoluteString, name: name, source: source, secret: secret,
+                                                           repo: repo, projectLabel: projectLabel))
+    }
+
+    /// obid's hooks, or nil from a runner without them (404).
+    func hooksIfAny() async throws -> [HookRow]? {
+        do { return try await hooks() } catch let error as RunnerError where error.status == 404 { return nil }
+    }
+
+    /// obid's repositories, the ones a hook's alerts may be about (`GET /v1/obid/repos`).
+    func repos() async throws -> [String] {
+        try await call("GET", "v1/obid/repos")
     }
 
     func removeHook(_ id: String) async throws {
         try await send("DELETE", "v1/hooks/\(id)")
+    }
+}
+
+/// The monitoring tools whose rows in Settings › Connectors make a hook (#1311, #1312): the row's id
+/// and name, its line, obid's source, and how the tool is set up to send to the hook.
+nonisolated struct AlertingTool: Equatable, Sendable {
+    var id: String
+    var name: String
+    var about: String
+    var source: String
+    /// SF Symbol: none of these has a mark in Sangam's brands.tsx.
+    var symbol: String
+
+    static let all = [
+        AlertingTool(id: "prometheus", name: "Prometheus", about: "Alerts from Alertmanager", source: "alertmanager", symbol: "flame"),
+        AlertingTool(id: "grafana", name: "Grafana", about: "Alerts from Grafana", source: "grafana", symbol: "chart.xyaxis.line"),
+    ]
+
+    /// What to paste where, for `url` and `secret` (shown once, then only in obid's vault).
+    func steps(url: String, secret: String) -> String {
+        switch source {
+        case "alertmanager":
+            return """
+            Alertmanager 0.28 or later. Add a receiver and route your alerts to it:
+
+            receivers:
+              - name: oby
+                webhook_configs:
+                  - url: \(url)
+                    http_config:
+                      http_headers:
+                        X-Oby-Token:
+                          secrets: ["\(secret)"]
+
+            Critical and error alerts come to Oby; warnings don't. The project is the alert's service label.
+            """
+        default:
+            return """
+            Grafana 12 or later: Alerting › Contact points › Add contact point › Webhook.
+            URL: \(url)
+            Optional settings › HMAC signature: Secret \(secret), Timestamp header X-Grafana-Alerting-Timestamp.
+            Then send your alerts' notification policy to that contact point.
+
+            Critical and error alerts come to Oby; warnings don't. The project is the alert's service label.
+            """
+        }
     }
 }
 
@@ -88,11 +146,12 @@ enum HookSetup {
         return (0..<32).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max, using: &generator)) }.joined()
     }
 
-    static func make(name: String, source: String, repo: String?, secret: String,
+    static func make(name: String, source: String, repo: String?, secret: String, projectLabel: String? = nil,
                      plane: ControlPlane, signer: ControlPlane.Signer, obid: Runner) async throws -> Runner.HookRow {
         let address = try await plane.createHook(signer)
         do {
-            return try await obid.addHook(id: address.id, url: address.url, name: name, source: source, secret: secret, repo: repo)
+            return try await obid.addHook(id: address.id, url: address.url, name: name, source: source, secret: secret, repo: repo,
+                                          projectLabel: projectLabel)
         } catch {
             // In a task of its own, so a cancelled caller doesn't leave the address behind.
             await Task { try? await plane.removeHook(address.id, signer) }.value

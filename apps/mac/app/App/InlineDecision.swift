@@ -170,6 +170,9 @@ struct InlineNotice: View {
         case "github": "GitHub"
         case "slack": "Slack"
         case "sentry": "Sentry"
+        case "alertmanager": "Prometheus"
+        case "grafana": "Grafana"
+        case "pagerduty": "PagerDuty"
         default: notice.kind == "pluginEvent" ? "From the \(notice.source) plug-in" : "Slack"
         }
     }

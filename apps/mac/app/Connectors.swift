@@ -51,6 +51,10 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
         case disconnectSentry
         /// Which projects are followed, and the repository each is looked into in (`PATCH /v1/sentry/projects/{slug}`).
         case sentryProjects
+        /// Makes the hook a monitoring tool sends its alerts to (#1311), for obid's `source`.
+        case connectAlerts(String)
+        /// Removes that hook, at obid and at the control plane.
+        case disconnectAlerts(String)
     }
 
     /// How to disconnect a connected one, or connect an available one.
@@ -139,6 +143,8 @@ nonisolated enum Connectors {
         var watch: WatchStatus? = nil
         /// obid's Sentry (`GET /v1/sentry`); nil from a runner without it.
         var sentry: SentryStatus? = nil
+        /// obid's hooks (`GET /v1/hooks`); nil from a runner without them.
+        var hooks: [Runner.HookRow]? = nil
     }
 
     /// One of the page's groups, with its title.
@@ -160,6 +166,9 @@ nonisolated enum Connectors {
         var watch: WatchStatus?
         /// obid's Sentry; nil from a runner without it.
         var sentry: SentryStatus?
+        /// obid's hooks, and its repositories a hook's alerts may be about; nil from a runner without them.
+        var hooks: [Runner.HookRow]?
+        var repos: [String] = []
         /// Why a list couldn't be read: a timeout, a 500, a 401. Only a 404 means the runner has
         /// none to list; anything else is said, never shown as an empty list.
         var problems: [String] = []
@@ -201,6 +210,12 @@ nonisolated enum Connectors {
         } catch {
             lists.problems.append("Couldn't read Sentry on \(name): \(error.localizedDescription)")
         }
+        do {
+            lists.hooks = try await runner.hooksIfAny()
+            if lists.hooks != nil { lists.repos = try await runner.repos() }
+        } catch {
+            lists.problems.append("Couldn't read the alerting hooks on \(name): \(error.localizedDescription)")
+        }
         return lists
     }
 
@@ -239,6 +254,9 @@ nonisolated enum Connectors {
         }
         // Not in the design's list: the owner's decision of 2026-10-23 (#1117), monitoring tools as rows of their own.
         if let runner, let status = runner.sentry { list.append(sentry(status, place: runner.name, local: runner.local)) }
+        if let runner, let hooks = runner.hooks {
+            list += AlertingTool.all.map { tool in alerting(tool, hook: hooks.first { $0.source == tool.source }, place: runner.name, local: runner.local) }
+        }
         if let runner {
             list += (runner.plugins ?? []).filter { $0.id != "tetrix" }.map { plugin($0, place: runner.name) }
             list += (runner.connections ?? []).map { connection($0, place: runner.name) }
@@ -331,6 +349,24 @@ nonisolated enum Connectors {
             return row(.connected, .button("Disconnect…", .disconnectSentry), .button("Projects…", .sentryProjects))
         }
         return row(status.error == nil ? .available : .broken, .button("Connect…", .connectSentry), nil)
+    }
+
+    /// A monitoring tool that sends alerts to a hook of obid's (#1311): connected while the hook is
+    /// there, saying what its last delivery came to. Only obid on this Mac gets buttons: the hook's
+    /// address is made with this Mac's key, and deliveries come through its tunnel.
+    static func alerting(_ tool: AlertingTool, hook: Runner.HookRow?, place: String, local: Bool) -> Connector {
+        let last = hook?.lastDelivery.map { "Last delivery: \($0.result)." } ?? "No delivery yet."
+        let how = hook.map { "Sends critical and error alerts to Oby, looked into in \($0.repo ?? "its repository"). \(last)" }
+            ?? "Sends its alerts to Oby: you paste an address and a secret into \(tool.name) once. Needs Remote access on."
+        let row = { (state: Connector.State, way: Connector.Way?) in
+            Connector(id: tool.id, name: tool.name, about: tool.about, place: place, how: how, state: state, way: way, symbol: tool.symbol)
+        }
+        guard local else { return row(hook == nil ? .available : .connected, .steps("Connect or disconnect it on \(place) itself, with Oby there.")) }
+        if let hook {
+            let refused = ["bad signature", "too many"].contains(hook.lastDelivery?.result ?? "")
+            return row(refused ? .broken : .connected, .button("Disconnect…", .disconnectAlerts(hook.id)))
+        }
+        return row(.available, .button("Connect…", .connectAlerts(tool.source)))
     }
 
     /// A plug-in obid found (docs/ARCHITECTURE.md, "Plug-ins"). Ready is connected, failed needs

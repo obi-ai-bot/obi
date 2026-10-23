@@ -1829,7 +1829,8 @@ Outside systems reach obid through a hook (#1128): an address on Oby's control p
 **The registry**, `home/hooks.json` (0600): each hook's `id`, `name`, `source`, `repo`, `url`, `createdAt` and `lastDelivery` (`{"at", "result"}`, `result` one of `accepted`, `duplicate`, `bad signature`, `too large`, `too many`), never its secret, which is in the vault as `oby.hook.<name>`. Loopback only, with obid's API token: none of these is on the gateway's allowlist. A refused delivery's `lastDelivery` is written to the file (and sent as a `hooks` event) only when its result changes, so a flood of unsigned posts is one write.
 
 - **`GET /v1/hooks`** answers the list.
-- **`POST /v1/hooks`** with `{"id", "url", "name", "source", "secret", "repo"}` keeps one: `201` and the hook, or `422` with why. `id` is the control plane's (32 lower-case letters and digits) and `url` its `https://…/h/<id>`; `name` up to 32 lower-case letters, digits or dashes, unique (`409`); `source` `github` or `generic` (#1311 and #1312 add theirs); `secret` 32 to 512 printable characters the vault accepts; `repo`, optional, one of obid's `repos`.
+- **`POST /v1/hooks`** with `{"id", "url", "name", "source", "secret", "repo", "projectLabel"}` keeps one: `201` and the hook, or `422` with why. `id` is the control plane's (32 lower-case letters and digits) and `url` its `https://…/h/<id>`; `name` up to 32 lower-case letters, digits or dashes, unique (`409`); `source` `github`, `generic`, `alertmanager` or `grafana` (#1312 adds `pagerduty`); `secret` 32 to 512 printable characters the vault accepts; `repo`, one of obid's `repos`, required for the alerting sources; `projectLabel`, for those, the label whose value is the project (`service` when left out).
+- **`GET /v1/obid/repos`** answers obid's repositories, the ones a hook's alerts may be about: `["owner/name", …]`.
 - **`DELETE /v1/hooks/{id}`** forgets the hook and its secret: `204`, `404` for no such hook.
 - A `hooks` event carries the list when it changes; it's held back from paired phones' streams.
 
@@ -1838,9 +1839,18 @@ Outside systems reach obid through a hook (#1128): an address on Oby's control p
 1. an unknown hook is `404`;
 2. a body over 1 MiB is `413`, before it's read whole;
 3. more than 120 a minute to one hook is `429`;
-4. the sender's signature, before anything in the body is read: `github` is `X-Hub-Signature-256: sha256=<hex of HMAC-SHA256(secret, body)>`, as GitHub documents it; `generic` is the same in `X-Oby-Signature-256`. Compared in constant time. Missing or wrong is `401`; a vault that can't be read is `503`;
+4. the sender's proof, before anything in the body is read, compared in constant time; missing or wrong is `401`, a vault that can't be read `503`:
+   - `github`: `X-Hub-Signature-256: sha256=<hex of HMAC-SHA256(secret, body)>`, as GitHub documents it; `generic`: the same in `X-Oby-Signature-256`;
+   - `grafana` (Grafana 12 or later): `X-Grafana-Alerting-Signature`, the hex HMAC-SHA256 of `<timestamp>:<body>`, with the timestamp (Unix seconds or milliseconds) in `X-Grafana-Alerting-Timestamp`, at most 5 minutes from obid's clock, so a captured delivery can't be sent again later;
+   - `alertmanager`: it can't sign, so the hook's secret itself in `X-Oby-Token` (Alertmanager 0.28 or later, `http_config.http_headers`). It passes through the control plane in transit, as a paired phone's token passes through the tunnel, and is never kept or logged there;
 5. a body accepted on that hook in the last 24 hours is `200` `{"duplicate": true}` and nothing more, so a captured delivery can't be replayed into work; the digests are kept in `home/hooks-seen.json` (0600), so a restart doesn't forget them;
-6. otherwise `202` `{"accepted": true}`, recorded as `accepted`, and handed to its source's handler (#1129, #1130, #1311, #1312; none yet). GitHub's `ping` is accepted.
+6. otherwise `202` `{"accepted": true}`, recorded as `accepted`, and handed to its source's handler. GitHub's `ping` is accepted; `github` and `generic` have no handler yet (#1129, #1130).
+
+**Alerts** (`alertmanager`, `grafana`, #1311). Both senders post the same shape (`alerts[]`); obid reads at most 20 alerts of a delivery and keeps only, each checked: `status` (`firing` or `resolved`), `fingerprint` (hex), `startsAt` (RFC 3339), the project (the hook's `projectLabel`'s value when it's 1 to 100 letters, digits, `.`, `_`, `-`, else the hook's name), and the severity (`labels.severity`, `critical`, `error`, `warning` or `info`; anything else is `warning`). Quoted, never in a title, text or task: `labels.alertname`, `annotations.summary` and `description`, `generatorURL`, and Grafana's `dashboardURL` and `panelURL`, at most 16 KiB. The rest is dropped unread.
+
+- A firing `critical` or `error` alert becomes one `pluginEvent` offer whose source (`plugin.id`) is the hook's (`alertmanager` or `grafana`, names no plug-in may take): title `Alert: <project> (<severity>)`, text `Alertmanager says an alert fired on <project>.` (`Grafana says`), `Look into it` then `Dismiss`. Its event id is `<hook name>:<fingerprint>-<startsAt>`, so the group sent again makes no second card, and the alert firing again after it resolved makes a new one. `warning` and `info` make nothing.
+- **Look into it** starts an `investigate` job in the hook's repository, as plug-in offers do (obid only: plug-ins): `Look into the alert on <project> (<severity>) that Alertmanager reported. What it sent is quoted in .obi/inputs/event-<…>.md.`
+- A `resolved` alert whose offer is still open settles it, `answer` `Resolved at the source at HH:MM` (this machine's time): an alert that ended by itself isn't work. One already answered is left alone.
 
 The body is never logged, and nothing here writes it anywhere.
 

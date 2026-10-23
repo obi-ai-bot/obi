@@ -38,6 +38,12 @@ struct SlackTests {
         guard case .watchNotice(let other) = events("inbox", plugin) else { Issue.record("not a notice"); return }
         #expect(other.source == "alerts" && other.url == nil && InlineNotice.kind(other) == "From the alerts plug-in")
         #expect(WatchNotice.list(Data("[\(json)]".utf8)).map(\.id) == ["ev-sentry-1"])
+        // Prometheus's and Grafana's alerts, by their tools' names (#1311).
+        for (source, kind) in [("alertmanager", "Prometheus"), ("grafana", "Grafana")] {
+            let alert = json.replacingOccurrences(of: #""id":"sentry""#, with: #""id":"\#(source)""#)
+            guard case .watchNotice(let notice) = events("inbox", alert) else { Issue.record("not a notice"); return }
+            #expect(InlineNotice.kind(notice) == kind && notice.url == nil)
+        }
     }
 
     /// A listener's finished review: the pull request's page, and the review Approve posts.

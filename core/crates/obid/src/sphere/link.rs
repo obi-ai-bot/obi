@@ -703,6 +703,21 @@ impl Link {
         }
     }
 
+    /// Settles an open `pluginEvent` item by itself, with `answer` saying why (its source said the
+    /// problem went away, #1311): one already answered, or done, is left alone.
+    pub fn settle_event(&self, id: &str, answer: &str) {
+        let settled = {
+            let mut state = self.lock();
+            let Some(item) = state.inbox.get_mut(id).filter(|i| i.done.is_none()) else {
+                return;
+            };
+            item.done = Some(time::now());
+            item.answer = Some(answer.to_owned());
+            item.clone()
+        };
+        self.save_item(&settled);
+    }
+
     /// Sentry's offers start with what it reads then (crate::sentry::Sentry::quote).
     pub fn use_sentry(&self, sentry: Arc<crate::sentry::Sentry>) {
         let _ = self.sentry.set(sentry);
