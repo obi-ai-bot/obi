@@ -447,7 +447,9 @@ private struct IconStrip: View {
         // Read when Oby's engine is up, and again once one is made.
         .task(id: "\(model.feed.runner != nil) \(creating)") {
             let read = SphereModel(feed: model.feed)
-            guard (try? await read.refresh()) != nil else { return }
+            try? await read.refresh()
+            // Joined shows its tile even when the Sphere itself doesn't answer, so the + never offers a second one.
+            guard read.membership != nil else { return }
             sphere = read.joined ? read.name ?? read.membership?.sphere : nil
         }
         .padding(.top, state.chrome.bar).padding(.bottom, 10)

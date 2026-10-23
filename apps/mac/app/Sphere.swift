@@ -129,6 +129,10 @@ nonisolated struct SphereServer: Sendable {
     /// still gets through: the TLS certificate has to match it.
     static func problem(_ url: URL) -> String? {
         guard url.scheme == "https" else { return "An Obysphere's address starts with https://." }
+        // Just the origin: obid takes no path either, and links are made from it.
+        guard url.user == nil, url.password == nil, url.query == nil, url.fragment == nil, ["", "/"].contains(url.path()) else {
+            return "An Obysphere's address is https:// and its name only, like https://sphere.example.com."
+        }
         let host = (url.host() ?? "").lowercased()
         let labels = host.split(separator: ".", omittingEmptySubsequences: false)
         let top = labels.last.map(String.init) ?? ""
@@ -464,6 +468,8 @@ final class SphereModel {
         guard let url = Self.server else { throw RunnerError(message: "Set the Obysphere server first, in Settings › Obysphere.") }
         let runner = try runner()
         let membership: Membership = try await runner.call("GET", "v1/obid/sphere")
+        // Before anything reaches the server: a joined Oby would make a Sphere it can't join.
+        guard membership.state != "joined" else { throw RunnerError(message: "This Oby is in an Obysphere already.") }
         let owner = membership.owner
         let key = try OwnerKey.of(owner)
         let server = SphereServer(base: url)
@@ -504,7 +510,8 @@ final class SphereModel {
             if let team = created.team { try? Self.teamLinks.save(team.link, as: sphere) }
         }
         if !emails.isEmpty {
-            created.mailed = try await invitation(server: server, token: token, sphere: sphere, name: name, by: owner, uses: emails.count)
+            // The Sphere is made and joined by now: a failed invite mustn't undo that in the sheet.
+            created.mailed = try? await invitation(server: server, token: token, sphere: sphere, name: name, by: owner, uses: emails.count)
         }
         try await refresh()
         return created

@@ -72,9 +72,11 @@ struct SphereTests {
         #expect(Bundle.main.object(forInfoDictionaryKey: "ObySphereURL") as? String == "https://obysphere.deskree.com")
         #expect(SphereServer.problem(URL(string: "https://obysphere.deskree.com")!) == nil)
         #expect(SphereServer.problem(URL(string: "https://deskree.obysphere.com")!) == nil)
+        #expect(SphereServer.problem(URL(string: "https://deskree.obysphere.com/")!) == nil)
         for refused in ["http://obysphere.deskree.com", "https://localhost:8787", "https://127.0.0.1", "https://169.254.169.254",
                         "https://10.0.0.5", "https://100.100.100.100", "https://[::1]:8787", "https://2130706433", "https://sphere",
-                        "https://studio.local", "https://mac.tail1234.ts.net", "https://sphere.internal", "https://a.0x7f"] {
+                        "https://studio.local", "https://mac.tail1234.ts.net", "https://sphere.internal", "https://a.0x7f",
+                        "https://x.example.com/sphere", "https://x.example.com?a=b", "https://me:pw@x.example.com", "https://x.example.com#s"] {
             #expect(SphereServer.problem(URL(string: refused)!) != nil, "\(refused)")
         }
     }

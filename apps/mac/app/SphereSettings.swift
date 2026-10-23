@@ -91,7 +91,7 @@ struct SphereSettingsView: View {
                 }
             }
         }
-        SetGroup("Server", footer: "Where your Obysphere lives: Deskree's for Deskree's people, or your own (obi-sphere's docs/run-your-own.md). Empty: the one this Oby came with.") {
+        SetGroup("Server", footer: "Where your Obysphere lives: Deskree's for Deskree's people, or your own (obi-sphere's docs/run-your-own.md). Empty: the one this Oby came with, if any.") {
             SetRow("Address") {
                 SetField("Obysphere server", text: $serverText, prompt: (Bundle.main.object(forInfoDictionaryKey: "ObySphereURL") as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "https://sphere.example.com", width: 280)
                     .onSubmit(saveServer)
@@ -192,7 +192,8 @@ struct SphereSettingsView: View {
                 SetRow("Anyone with @\(domain) can join") { Toggle("Anyone with @\(domain) can join", isOn: $anyone).toggleStyle(.set) }
             }
             if let link = sphere.teamLink {
-                SetRow { SetCode(link.link).textSelection(.enabled) } control: {
+                // The secret after the # only through Copy, which conceals it.
+                SetRow { SetCode(link.link.components(separatedBy: "#")[0] + "#…") } control: {
                     Button(copied ? "Copied" : "Copy") {
                         // Concealed: clipboard managers that honour it don't keep the secret.
                         NSPasteboard.general.clearContents()
