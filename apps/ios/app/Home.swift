@@ -86,8 +86,12 @@ struct HomeView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
+                    // Gone while the panel is open: its own button (SidePanel) puts it away, so there's one.
                     Button { typing = false; phone.panel = .home } label: { Image(systemName: "sidebar.left") }
                         .accessibilityLabel("Show sidebar")
+                        .opacity(phone.panel == nil ? 1 : 0)
+                        .disabled(phone.panel != nil)
+                        .accessibilityHidden(phone.panel != nil)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { phone.homePath.append(.settings) } label: { OwnerPicture(name: HomeLine.owner(ofMac: phone.link?.name)) }
