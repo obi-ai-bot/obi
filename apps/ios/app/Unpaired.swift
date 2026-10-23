@@ -70,18 +70,23 @@ private struct ScanSheet: View {
                 }
                 .ignoresSafeArea()
                 .accessibilityLabel("Camera")
-                VStack(spacing: 14) {
+                VStack(spacing: 4) {
                     Text(problem ?? "Point the camera at the code on your Mac.")
                         .font(Tokens.font(Tokens.textBase)).foregroundStyle(problem == nil ? Tokens.ink : Tokens.danger)
                         .multilineTextAlignment(.center)
-                    NavigationLink("Use the six-digit code instead") { ConnectScreen() }
-                        .font(Tokens.font(Tokens.textBase, .medium))
+                    NavigationLink { ConnectScreen() } label: {
+                        Text("Use the six-digit code instead").frame(minHeight: 44).contentShape(Rectangle())
+                    }
+                    .font(Tokens.font(Tokens.textBase, .medium))
                 }
-                .padding(18).frame(maxWidth: .infinity)
+                .padding(.top, 18).padding(.horizontal, 18).padding(.bottom, 6).frame(maxWidth: .infinity)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .padding(.horizontal, Tokens.gutter).padding(.bottom, 16)
             }
             .background(.black)
+            // Over the camera it's dark in both themes; Connect, pushed from here, keeps the app's.
+            .environment(\.colorScheme, .dark)
+            .toolbarColorScheme(.dark, for: .navigationBar)
             .navigationTitle("Scan the code")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
