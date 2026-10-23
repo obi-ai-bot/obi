@@ -1,9 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// Settings › Obysphere: this Mac's Oby in its Obysphere (onboarding.md section 4). Join with an
-/// invite link ("Join Deskree"), or create one on the operator's Mac; once in, who else is in it,
-/// invite links (an admin's), asking another Oby for a review, and what other Obys asked.
+/// Settings › Obysphere: this Mac's Oby in its Obysphere (onboarding.md section 4). The server it
+/// uses; join with an invite link ("Join Deskree"), or create one (the strip's +); once in, who else
+/// is in it, the team link (an admin's), asking another Oby for a review, and what other Obys asked.
 // ponytail: one page until Sangam's Obysphere screens (Sidebar.tsx, SphereSettings.tsx) are ported.
 struct SphereSettingsView: View {
     @State private var sphere: SphereModel
@@ -11,9 +11,10 @@ struct SphereSettingsView: View {
     @State private var invite: InviteLink?
     /// The owner said they trust a link's server that isn't the one Oby knows.
     @State private var trusted = false
-    @State private var newName = ""
-    @State private var person = ""
-    @State private var link: InviteLink?
+    @State private var creating = false
+    @State private var serverText = UserDefaults.standard.string(forKey: SphereModel.serverKey) ?? ""
+    @State private var email: String?
+    @State private var anyone = true
     @State private var copied = false
     @State private var asked: SphereModel.Member.ID?
     /// The member whose key you're about to accept, once you've compared it with them.
@@ -49,7 +50,11 @@ struct SphereSettingsView: View {
             // The name and who sent it are only what the link says; the server is what joining trusts.
             SetGroup("Join \(invite.name)", problem: sphere.problem) {
                 SetRow(invite.by.isEmpty ? "The link says you're invited." : "The link says \(invite.by) invited you.",
-                       about: "\(invite.name)'s Obys can ask yours for a review or a question. You decide what it answers.")
+                       about: "\(invite.name)'s Obys can ask yours for a review or a question. You decide what it answers."
+                           + (invite.members.map { " \($0 == 1 ? "1 Oby is" : "\($0) Obys are") in it." } ?? ""))
+                if let domain = invite.domain {
+                    SetRow("For @\(domain) accounts", about: "Oby asks you to sign in with Google first, so \(invite.host) can check you're at \(domain).")
+                }
                 SetRow("Server") { SetCode(invite.host).textSelection(.enabled) }
                 if let warning = invite.warning {
                     SetRow(about: warning) {
@@ -69,25 +74,50 @@ struct SphereSettingsView: View {
                 SetRow("Invite link") { SetField("Invite link", text: $pasted, prompt: "https://…/join#…", width: 320) }
                 SetRow("") {
                     Button("Open") {
-                        if let found = InviteLink(pasted) { invite = found; trusted = false; sphere.problem = nil }
-                        else { sphere.problem = "That isn't an Obysphere invite link with a public https address." }
+                        guard let found = InviteLink(pasted) else {
+                            sphere.problem = "That isn't an Obysphere invite link with a public https address."
+                            return
+                        }
+                        trusted = false
+                        // What the Sphere says of it (its name, who's in it, a Workspace limit); the link's own words if it can't say.
+                        sphere.run { invite = (try? await sphere.preview(found)) ?? found }
                     }
                     .buttonStyle(.set).disabled(pasted.isEmpty)
                 }
             }
-            if sphere.canCreate {
-                SetGroup("Create an Obysphere", footer: "You're its admin. Everyone in it can ask everyone for a review or a question; each Oby still asks its owner.") {
-                    SetRow("Name") { SetField("Obysphere name", text: $newName, prompt: "Deskree") }
-                    SetRow("") {
-                        Button("Create \(newName.isEmpty ? "Obysphere" : newName)") {
-                            let name = newName.trimmingCharacters(in: .whitespaces)
-                            sphere.run { try await sphere.create(id: Self.slug(name), name: name) }
-                        }
-                        .buttonStyle(.set).disabled(Self.slug(newName).count < 3)
-                    }
+            SetGroup("Create an Obysphere", footer: "You're its admin. Everyone in it can ask everyone for a review or a question; each Oby still asks its owner.") {
+                SetRow("", about: SphereModel.server == nil ? "Set the server below first." : nil) {
+                    Button("Create an Obysphere…") { creating = true }.buttonStyle(.set).disabled(!sphere.canCreate)
                 }
             }
         }
+        SetGroup("Server", footer: "Where your Obysphere lives: Deskree's for Deskree's people, or your own (obi-sphere's docs/run-your-own.md). Empty: the one this Oby came with.") {
+            SetRow("Address") {
+                SetField("Obysphere server", text: $serverText, prompt: (Bundle.main.object(forInfoDictionaryKey: "ObySphereURL") as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "https://sphere.example.com", width: 280)
+                    .onSubmit(saveServer)
+            }
+            SetRow("") { Button("Save", action: saveServer).buttonStyle(.set).disabled(serverText == (UserDefaults.standard.string(forKey: SphereModel.serverKey) ?? "")) }
+        }
+        .sheet(isPresented: $creating) {
+            CreateSphereSheet(feed: feed, done: { _ in
+                creating = false
+                Task { try? await sphere.refresh() }
+            }, close: { creating = false })
+        }
+    }
+
+    private func saveServer() {
+        let text = serverText.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if text.isEmpty {
+            UserDefaults.standard.removeObject(forKey: SphereModel.serverKey)
+        } else if let url = URL(string: text), let problem = SphereServer.problem(url) {
+            sphere.problem = problem
+            return
+        } else {
+            UserDefaults.standard.set(text, forKey: SphereModel.serverKey)
+        }
+        serverText = text
+        sphere.problem = nil
     }
 
     /// nspasteboard.org's marker for a secret on the clipboard.
@@ -154,9 +184,14 @@ struct SphereSettingsView: View {
     }
 
     private func inviting(_ name: String) -> some View {
-        SetGroup("Invite", footer: "A link is for one person, by the name their Oby knows them by (its owner), and works once, for 7 days.") {
-            SetRow("Who it's for") { SetField("Their Oby's owner", text: $person, prompt: "ernesto") }
-            if let link {
+        let domain = CreateSphereSheet.workDomain(email)
+        return SetGroup("Invite", footer: domain != nil && anyone
+                            ? "One link for everyone at \(domain!): \(SphereModel.server?.host() ?? "the server") has each one sign in with Google, for 30 days. A new link stops none of the old ones."
+                            : "One link for your team, up to 50 people, for 7 days. Anyone who has it can join: send it only to them.") {
+            if let domain {
+                SetRow("Anyone with @\(domain) can join") { Toggle("Anyone with @\(domain) can join", isOn: $anyone).toggleStyle(.set) }
+            }
+            if let link = sphere.teamLink {
                 SetRow { SetCode(link.link).textSelection(.enabled) } control: {
                     Button(copied ? "Copied" : "Copy") {
                         // Concealed: clipboard managers that honour it don't keep the secret.
@@ -169,13 +204,13 @@ struct SphereSettingsView: View {
                 }
             }
             SetRow("") {
-                Button("Make an invite link") {
-                    let person = person.trimmingCharacters(in: .whitespaces).lowercased()
-                    sphere.run { link = try await sphere.invite(person); copied = false }
+                Button(sphere.teamLink == nil ? "Make a link" : "Make a new link") {
+                    sphere.run { _ = try await sphere.makeTeamLink(domain: anyone ? domain : nil); copied = false }
                 }
-                .buttonStyle(.set).disabled(person.trimmingCharacters(in: .whitespaces).isEmpty)
+                .buttonStyle(.set)
             }
         }
+        .task { email = await CreateSphereSheet.ownEmail() }
     }
 
     /// Your jobs with an open pull request whose head GitHub has: what another Oby can review.

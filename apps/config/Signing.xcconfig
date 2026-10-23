@@ -19,6 +19,12 @@ OBY_APPCAST_URL = https:/$()/downloads.oby.deskree.com/appcast.xml
 // (docs/remote-access.md, "Run your own control plane")? Put its URL here or in Signing.local.xcconfig.
 OBY_CONTROL_PLANE_URL = https:/$()/oby-control.deskree.com
 
+// The Obysphere server the Mac app creates Obyspheres on and trusts invite links from
+// (apps/mac/app/Info.plist, ObySphereURL; apps/mac/app/Sphere.swift): Deskree's own instance. Running
+// your own (obi-ai-bot/obi-sphere, docs/run-your-own.md)? Put its URL here or in Signing.local.xcconfig;
+// each person can also set one in Settings › Obysphere › Server. Empty: none until they do.
+OBY_SPHERE_URL = https:/$()/obysphere.deskree.com
+
 // Sparkle's EdDSA public key (apps/mac/app/Info.plist, SUPublicEDKey): the one `generate_keys` printed on
 // 2026-10-20 (docs/release.md, Sparkle keys). Its private half is in the release Mac's login keychain;
 // every update must be signed with it, so keep an exported copy somewhere safe.

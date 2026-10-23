@@ -48,8 +48,29 @@ struct SphereTests {
         #expect(InviteLink("not a link") == nil)
     }
 
+    @Test func anOpenLinkIsForAnyoneAndMaySayItsWorkspace() throws {
+        let open = InviteLink(server: URL(string: "https://obysphere.deskree.com")!, sphere: "deskree", name: "Deskree",
+                              by: "wellington", id: "inv-2", secret: "s", domain: "deskree.com")
+        let read = try #require(InviteLink(open.link))
+        #expect(read == open && read.owner == nil && read.obi == nil && read.domain == "deskree.com")
+        #expect(read.mismatch(owner: "sangam") == nil, "an open link is for whoever has it")
+        // A named link names both its owner and its Obi.
+        #expect(InviteLink("https://obysphere.deskree.com/join#sphere=deskree&for=ernesto&id=i&secret=s") == nil)
+        #expect(InviteLink("https://obysphere.deskree.com/join#sphere=deskree&obi=obi-ernesto&id=i&secret=s") == nil)
+    }
+
+    @Test func onlyAWorkAddressOffersAnyoneThereCanJoin() {
+        #expect(CreateSphereSheet.workDomain("Doti@Deskree.com") == "deskree.com")
+        for personal in ["doti@gmail.com", "doti@icloud.com", "123+doti@users.noreply.github.com", "doti", nil] {
+            #expect(CreateSphereSheet.workDomain(personal) == nil, "\(personal ?? "nil")")
+        }
+        #expect(CreateSphereSheet.isEmail("ernesto@deskree.com") && !CreateSphereSheet.isEmail("ernesto") && !CreateSphereSheet.isEmail("a@b"))
+    }
+
     @Test func onlyAPublicHTTPSAddressGetsTheOwnersSignatures() {
-        #expect(SphereServer.problem(SphereModel.defaultServer) == nil)
+        // Deskree's builds come with Deskree's server (OBY_SPHERE_URL in apps/config/Signing.xcconfig).
+        #expect(Bundle.main.object(forInfoDictionaryKey: "ObySphereURL") as? String == "https://obysphere.deskree.com")
+        #expect(SphereServer.problem(URL(string: "https://obysphere.deskree.com")!) == nil)
         #expect(SphereServer.problem(URL(string: "https://deskree.obysphere.com")!) == nil)
         for refused in ["http://obysphere.deskree.com", "https://localhost:8787", "https://127.0.0.1", "https://169.254.169.254",
                         "https://10.0.0.5", "https://100.100.100.100", "https://[::1]:8787", "https://2130706433", "https://sphere",

@@ -2284,6 +2284,8 @@ The Obi's place in one Sphere: its key, its owner-signed agent card, its owner's
  "delegation": "<owner assertion JWT with may_act>"}
 ```
 
+For an invitation limited to a Google Workspace (obi-sphere spec `sphere-api.md` section 4, an open invitation's `domain`), `invitation` also carries the owner's sign-in with the Sphere, `"signin": {"state", "code"}`, which the Mac app gets by signing the owner in with Google for the owner key (section 3.1). obid passes it to the redeem as it is, and keeps it nowhere; anything else in its place is `422`.
+
 obid checks the card (identity.md 2.2, checks 1 to 5 and 7), that it carries obid's own `key_id` and `public_key`, `sphere` and `obiId` as given and `owner` its configured owner; and the delegation (signed by the card's `owner_key`, `iss` and `sub` the owner, `aud` `obi-sphere:<sphere>`, `may_act.sub` its `obi_id`, `exp` ahead, `scope` including `receive` and `reply`). Then it redeems the invitation (`POST /v0.1/spheres/{sphere}/invitations/{id}/redeem`), exchanges the delegation and an actor assertion of its own for a token (`POST /v0.1/oauth/token`), reads the directory, and starts following its deliveries (`GET …/deliveries?wait=25`, again as soon as each answers; a new token when less than 60 seconds are left; after an error, again after 1 second, doubling to 30). It keeps the card and the delegation in `home` (0600) and never shows the delegation again. Answers `200` with the membership, `state` `joined`.
 
 `409` when already joined; `422` with why for a card or delegation that fails a check; `502` `{"error": "The Sphere refused it: invitation_invalid: …"}` when the Sphere answers an error (its `code` and `message`, quoted); `504` when the Sphere can't be reached.

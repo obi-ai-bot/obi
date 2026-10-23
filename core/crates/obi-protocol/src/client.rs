@@ -226,16 +226,22 @@ impl Client {
         Client::expect(status, body, &[200], "wire/health.response")
     }
 
-    /// Redeems an invitation with the owner key and the owner-signed card: answers the member.
+    /// Redeems an invitation with the owner key and the owner-signed card, and the owner's sign-in
+    /// (`{"state", "code"}`) for an invitation limited to a domain (sphere-api.md section 3.1):
+    /// answers the member.
     pub async fn redeem(
         &self,
         invitation_id: &str,
         secret: &str,
         owner_key: &str,
         card: &Value,
+        signin: Option<&Value>,
     ) -> Result<Value, ClientError> {
         let url = self.sphere_path(&format!("/invitations/{invitation_id}/redeem"));
-        let body = json!({"secret": secret, "owner_key": owner_key, "card": card});
+        let mut body = json!({"secret": secret, "owner_key": owner_key, "card": card});
+        if let Some(signin) = signin {
+            body["signin"] = signin.clone();
+        }
         let (status, answer) = self.call(|| self.http.post(&url).json(&body)).await?;
         Client::expect(status, answer, &[201], "wire/member")
     }

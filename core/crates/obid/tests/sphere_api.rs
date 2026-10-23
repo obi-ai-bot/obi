@@ -818,8 +818,39 @@ async fn membership_takes_only_what_checks_out() {
             409,
             "no requests before joining"
         );
-        let joined = join(&signed, &good, &secret, &sphere.url);
+        // A sign-in for an invitation limited to a domain goes to the redeem as it is; anything
+        // else in its place is 422, and the Sphere never asked.
+        for bad in [
+            json!("a"),
+            json!({"state": "s"}),
+            json!({"state": "s", "code": "c", "x": "y"}),
+            json!({"state": "s", "code": "c d"}),
+        ] {
+            let refused = call(
+                &obid,
+                "POST",
+                "/v1/obid/sphere/join",
+                Some(&json!({
+                "url": sphere.url, "sphere": SPHERE, "invitation": {"id": id, "secret": secret, "signin": bad},
+                "card": signed, "delegation": good})),
+            );
+            assert_eq!(refused.status, 422, "{}", refused.text);
+        }
+        let signin = json!({"state": "S".repeat(43), "code": "C".repeat(43)});
+        let joined = call(
+            &obid,
+            "POST",
+            "/v1/obid/sphere/join",
+            Some(&json!({
+            "url": sphere.url, "sphere": SPHERE, "invitation": {"id": id, "secret": secret, "signin": signin},
+            "card": signed, "delegation": good})),
+        );
         assert_eq!(joined.status, 200, "{}", joined.text);
+        assert_eq!(sphere.lock().signins, vec![signin.clone()]);
+        assert!(
+            !joined.text.contains(&"C".repeat(43)),
+            "the sign-in is never shown"
+        );
         assert_eq!(joined.body["state"], "joined");
         assert_eq!(joined.body["card"], signed);
         assert!(
