@@ -235,7 +235,14 @@ fn alerting_hooks_offer_critical_alerts_and_settle_resolved_ones() {
         inbox_item(&obid, "Alert: api (critical)", "open")
     });
     assert_eq!(offer["text"], "Alertmanager says an alert fired on api.");
-    assert_eq!(offer["options"], json!(["Look into it", "Dismiss"]));
+    assert_eq!(
+        offer["options"],
+        json!([
+            "Look into it",
+            "Look into it, and from now on for api",
+            "Dismiss"
+        ])
+    );
     assert_eq!(offer["plugin"]["id"], "alertmanager");
     // Alertmanager sends the group again (here with another field, so it isn't a duplicate body).
     let mut again: Value =
@@ -598,5 +605,157 @@ fn datadog_monitors_become_offers_per_cycle_and_settle() {
         "unreadable"
     );
     assert!(!obid.log().contains(&token));
+    assert!(obid.stop().success());
+}
+
+/// Standing rules (#1314): "Look into it, and from now on for <project>" looks into this alert and
+/// saves a rule; the next critical one starts by itself, marked with its rule, said in "Your
+/// standing rules"; one more while the rule's job runs is an offer saying so; a warning makes
+/// nothing; forgotten, the offers come back.
+#[test]
+fn from_now_on_saves_a_rule_that_starts_the_next_alert_itself() {
+    let folder = Folder::new("hooks-rules");
+    let mut obid = started(&folder);
+    let token = secret();
+    assert_eq!(
+        call(
+            &obid,
+            "POST",
+            "/v1/hooks",
+            Some(&json!({"id": ID,
+        "url": format!("https://oby-control.tetrix.pro/h/{ID}"), "name": "prometheus",
+        "source": "alertmanager", "secret": token, "repo": "obi-e2e/fixture-app"}))
+        )
+        .status,
+        201
+    );
+    let headers = [("X-Oby-Token", token.as_str())];
+    // The project names the fake agent's SLEEP, so a rule's job runs until it's stopped.
+    let fire = |at: &str, severity: &str| {
+        let mut alert = firing("firing", severity);
+        alert["labels"]["service"] = json!("SLEEP");
+        alert["startsAt"] = json!(at);
+        assert_eq!(
+            deliver(&obid, ID, &alertmanager(json!([alert])), &headers).0,
+            202
+        );
+    };
+    let open = |at_least: usize| {
+        within(10, "an open offer", || {
+            let items = call(&obid, "GET", "/v1/inbox", None).body;
+            let offers: Vec<Value> = items
+                .as_array()?
+                .iter()
+                .filter(|i| i["title"] == "Alert: SLEEP (critical)")
+                .cloned()
+                .collect();
+            (offers.len() >= at_least)
+                .then(|| offers.last().cloned())
+                .flatten()
+        })
+    };
+    let answer = |item: &Value, words: &str| {
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
+            Some(&json!({"answer": words})),
+        )
+    };
+
+    fire("2026-10-23T03:12:00Z", "critical");
+    let first = open(1);
+    let from_now_on = "Look into it, and from now on for SLEEP";
+    assert_eq!(first["options"][1], from_now_on);
+    let looked = answer(&first, from_now_on);
+    assert_eq!(looked.status, 200, "{}", looked.text);
+    assert!(looked.body["job"].as_str().is_some_and(|j| !j.is_empty()));
+    let rules = call(&obid, "GET", "/v1/obid/decisions", None).body;
+    let rule = rules
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["type"] == "event_alert")
+        .cloned()
+        .unwrap_or_else(|| panic!("no rule: {rules}"));
+    assert_eq!(rule["repo"], "obi-e2e/fixture-app");
+    assert_eq!(
+        (
+            &rule["rule"]["source"],
+            &rule["rule"]["project"],
+            &rule["rule"]["severity"]
+        ),
+        (&json!("alertmanager"), &json!("SLEEP"), &json!("critical"))
+    );
+
+    // The next one starts with no tap, marked with its rule, and says so.
+    fire("2026-10-23T04:00:00Z", "critical");
+    let by_rule = within(15, "the rule's start", || {
+        let done = call(&obid, "GET", "/v1/inbox?state=done", None).body;
+        done.as_array()?
+            .iter()
+            .find(|i| i["answer"] == "Started by your rule")
+            .cloned()
+    });
+    let job = call(
+        &obid,
+        "GET",
+        &format!("/v1/jobs/{}", by_rule["job"].as_str().unwrap()),
+        None,
+    )
+    .body;
+    assert_eq!(
+        job["rule"],
+        json!({"id": rule["id"], "type": "event_alert"}),
+        "{job}"
+    );
+    let said = within(10, "the rule's conversation", || {
+        let listed = call(&obid, "GET", "/v1/conversations", None).body;
+        let id = listed
+            .as_array()?
+            .iter()
+            .find(|c| c["title"] == "Your standing rules")?["id"]
+            .clone();
+        let turns = call(
+            &obid,
+            "GET",
+            &format!("/v1/conversation?id={}", id.as_str()?),
+            None,
+        )
+        .body;
+        turns.as_array()?.last().cloned()
+    });
+    assert_eq!(
+        said["text"],
+        "Your rule started looking into this: Alert: SLEEP (critical)."
+    );
+    assert_eq!(said["jobs"], json!([job["id"]]));
+
+    // While it runs, one more is an offer that says so; a warning is nothing at all.
+    fire("2026-10-23T05:00:00Z", "warning");
+    fire("2026-10-23T06:00:00Z", "critical");
+    let waiting = open(1);
+    assert!(
+        waiting["text"]
+            .as_str()
+            .unwrap()
+            .contains("Your rule is already looking into SLEEP: "),
+        "{waiting}"
+    );
+    assert_eq!(answer(&waiting, "Dismiss").status, 200);
+    assert!(inbox_item(&obid, "Alert: SLEEP (warning)", "open").is_none());
+
+    // Forgotten, the next one is an offer again.
+    let forgot = call(
+        &obid,
+        "DELETE",
+        &format!("/v1/obid/decisions/{}", rule["id"].as_str().unwrap()),
+        None,
+    );
+    assert_eq!(forgot.status, 204);
+    fire("2026-10-23T07:00:00Z", "critical");
+    let again = open(1);
+    assert_eq!(again["text"], "Alertmanager says an alert fired on SLEEP.");
+    assert!(again["done"].is_null());
     assert!(obid.stop().success());
 }

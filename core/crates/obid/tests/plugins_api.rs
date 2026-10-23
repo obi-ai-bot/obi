@@ -1639,7 +1639,14 @@ fn a_failed_deploy_on_a_known_repository_offers_look_into_it() {
         deploy["text"],
         "The alerts plug-in says a deploy of web to production failed."
     );
-    assert_eq!(deploy["options"], json!(["Look into it", "Dismiss"]));
+    assert_eq!(
+        deploy["options"],
+        json!([
+            "Look into it",
+            "Look into it, and from now on for web",
+            "Dismiss"
+        ])
+    );
     assert_eq!(
         (
             &deploy["plugin"]["project"],

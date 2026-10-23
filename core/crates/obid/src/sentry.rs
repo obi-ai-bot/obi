@@ -874,8 +874,10 @@ pub fn spawn(shared: Arc<Shared>) {
     tokio::spawn(async move {
         let sentry = shared.sentry.clone();
         loop {
-            let link = shared.link.clone();
-            let next = sentry.read(&move |item| link.add_event_item(item)).await;
+            let offering = shared.clone();
+            let next = sentry
+                .read(&move |item| crate::rules::offer(&offering, item))
+                .await;
             let wait = Duration::from_secs((next - time::now()).clamp(1, LONGEST_WAIT) as u64);
             tokio::select! {
                 () = tokio::time::sleep(wait) => {}

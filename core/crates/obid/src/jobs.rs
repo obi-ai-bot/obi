@@ -425,6 +425,9 @@ pub struct NewJob {
     /// The routine whose run it is (crate::routines).
     #[serde(default)]
     pub routine: Option<crate::job::RoutineMark>,
+    /// The standing rule that started it (crate::rules). Never from the API.
+    #[serde(skip)]
+    pub rule: Option<crate::job::RuleMark>,
     /// One part of a stalled job's split (crate::brain::supervisor): its parts follow it up side
     /// by side, each on a branch of its own. Never from the API, never kept.
     #[serde(skip)]
@@ -2183,6 +2186,7 @@ impl Jobs {
         job.follow_up_of = new.follow_up_of;
         job.runs_on = new.runs_on;
         job.routine = new.routine;
+        job.rule = new.rule;
         job.mode = Some(if job.read_only() {
             Mode::Plan.as_str().to_owned()
         } else {
@@ -5948,12 +5952,18 @@ impl Jobs {
             // One whose own publish failed isn't tried again by itself, unless this run made new
             // commits; one a restart cut short (its publish never ran) carries on and publishes.
             let made_now = before_head.as_deref() != Some(head.as_str());
-            if !ended.can_publish() || (!made_now && job.publish_error.is_some()) {
+            // A job a standing rule started with no tap publishes only by hand (#1314): what an
+            // alert's text led its agent to write is the owner's to send.
+            let by_rule = job.rule.is_some();
+            if !ended.can_publish() || (!made_now && job.publish_error.is_some()) || by_rule {
                 // Still waiting for Publish by hand: why its own publish failed still holds.
                 let waiting = ended.can_publish();
                 self.end_done(id, commits, pushed, |job| {
                     if !waiting {
                         job.publish_error = None;
+                    }
+                    if by_rule && waiting {
+                        job.reason = Some("Your standing rule started this job, so it publishes only when you do: Publish opens its pull request.".into());
                     }
                 });
                 if job.kind == "review" {

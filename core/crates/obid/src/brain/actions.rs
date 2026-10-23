@@ -965,6 +965,15 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
                 },
             )
         }
+        // "…, and from now on for <project>" saves a standing rule (#1314): it widens what Oby
+        // does with no tap, so only the owner's Confirm carries it out.
+        "pluginEvent" if words.starts_with(crate::rules::FROM_NOW_ON) => Owners::Confirm(
+            format!("{words}: {about}"),
+            format!(
+                "Oby's brain planned to look into {about} and save a standing rule for its project: from now on Oby looks into them by itself, publishing only when you do. It happens only if you confirm."
+            ),
+            on_item(action::ANSWER_ITEM, serde_json::json!({"answer": words})),
+        ),
         "permission" => Owners::No,
         // Dismissing an event is one-off; starting its work (Look into it, Fix it) is the owner's
         // to confirm, as a GitHub offer's is (#1124).

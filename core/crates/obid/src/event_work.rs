@@ -24,6 +24,7 @@ pub async fn start(
     config: &Config,
     sentry: Option<&crate::sentry::Sentry>,
     item: &Item,
+    rule: Option<crate::job::RuleMark>,
 ) -> Result<Job, ApiError> {
     let refused = |status: StatusCode, why: String| ApiError::new(status, why);
     let event = item.plugin.as_ref().ok_or_else(|| {
@@ -83,14 +84,7 @@ pub async fn start(
             item.id.strip_prefix("ev-").unwrap_or(&item.id)
         );
         let quoted = format!("What it sent is quoted in .obi/inputs/{file}.");
-        // obid's own alerting sources by name (#1311, #1312); a plug-in as "the <id> plug-in".
-        let from = match plugin {
-            "alertmanager" => "Alertmanager".to_owned(),
-            "grafana" => "Grafana".to_owned(),
-            "pagerduty" => "PagerDuty".to_owned(),
-            "datadog" => "Datadog".to_owned(),
-            other => format!("the {other} plug-in"),
-        };
+        let from = source_name(plugin);
         let (kind, task, title) = match text("kind") {
             "deploy.failed" => (
                 "investigate",
@@ -149,10 +143,24 @@ pub async fn start(
         task,
         title: Some(crate::github_work::cut(&title, 60)),
         attachments: Some(vec![path.to_string_lossy().into_owned()]),
+        rule,
         ..NewJob::default()
     };
     jobs.create(new)
         .map_err(|refusal| refused(StatusCode::UNPROCESSABLE_ENTITY, refusal.0))
+}
+
+/// An event's source in words: obid's own by name (#1127, #1311, #1312, #1313), a plug-in as
+/// "the <id> plug-in".
+pub fn source_name(source: &str) -> String {
+    match source {
+        "sentry" => "Sentry".to_owned(),
+        "alertmanager" => "Alertmanager".to_owned(),
+        "grafana" => "Grafana".to_owned(),
+        "pagerduty" => "PagerDuty".to_owned(),
+        "datadog" => "Datadog".to_owned(),
+        other => format!("the {other} plug-in"),
+    }
 }
 
 /// The quoted file for an event (a `pluginEvent` item's `plugin`): its typed fields as obid

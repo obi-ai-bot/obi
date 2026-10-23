@@ -70,6 +70,9 @@ pub mod action {
     pub const START: &str = "start";
     /// Answer any other item: `target` the item, `payload` `{"answer": "…"}`.
     pub const ANSWER_ITEM: &str = "answer_item";
+    /// Save a standing rule the conversation proposed (crate::rules, #1314): `target` the
+    /// conversation, `payload` `{"rule": <the rule, as GET /v1/obid/decisions keeps it>}`.
+    pub const REMEMBER_RULE: &str = "remember_rule";
     /// Tell a job that ended the owner's words (#542): `target` the job, `payload` `{"words": "…"}`,
     /// already taken out of the vault's secrets. Made before 2026-10-18 for one more round; it
     /// starts a follow-up now, and obid makes none.

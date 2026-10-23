@@ -652,22 +652,28 @@ impl Link {
     /// work by itself and no remembered decision applies to it: a failed deploy, an alert or a
     /// ticket about one of obid's repositories is an offer, started only on an answer (#1124).
     pub fn plugin_event(&self, event: obi_plugin_api::PluginEvent) {
+        self.add_event_item(self.plugin_event_offer(&event));
+    }
+
+    /// The item [`Self::plugin_event`] keeps for `event`, an offer on one of obid's repositories;
+    /// crate::rules applies standing rules before it's kept.
+    pub fn plugin_event_offer(&self, event: &obi_plugin_api::PluginEvent) -> Item {
         let repo = &event.event.subject.repo;
         let known = self.config.repos.iter().any(|r| &r.repo == repo);
-        self.add_event_item(inbox::plugin_event_item(&event, known, time::now()));
+        inbox::plugin_event_item(event, known, time::now())
     }
 
     /// A `pluginEvent` item from a plug-in or from one of obid's own sources (crate::sentry): kept
     /// unless an item with its id is there already, open or done; past
     /// [`inbox::MAX_OPEN_EVENTS`] open items of its source (`plugin.id`), the oldest open one is
     /// settled by itself, with no answer.
-    pub fn add_event_item(&self, item: Item) {
+    pub fn add_event_item(&self, item: Item) -> bool {
         let now = time::now();
         let mut changed = Vec::new();
         {
             let mut state = self.lock();
             if state.inbox.contains_key(&item.id) {
-                return;
+                return false;
             }
             let source = item
                 .plugin
@@ -701,6 +707,7 @@ impl Link {
         for item in &changed {
             self.save_item(item);
         }
+        true
     }
 
     /// Settles an open `pluginEvent` item by itself, with `answer` saying why (its source said the
@@ -886,18 +893,112 @@ impl Link {
     /// leaves the item open again. Nothing is sent anywhere.
     async fn answer_plugin_offer(&self, mut item: Item, answer: String) -> Result<Value, ApiError> {
         let sentry = self.sentry.get().map(Arc::as_ref);
-        match crate::event_work::start(&self.jobs, &self.config, sentry, &item).await {
+        match crate::event_work::start(&self.jobs, &self.config, sentry, &item, None).await {
             Ok(job) => item.job = job.id,
             Err(why) => {
                 self.lock().inbox.insert(item.id.clone(), item.clone());
                 return Err(why);
             }
         }
+        // "…, and from now on for <project>": the owner's own answer saves the standing rule
+        // (#1314). The brain's pick of it waits for their Confirm first (`owners_call`).
+        if answer.starts_with(crate::rules::FROM_NOW_ON)
+            && let Some(rule) = crate::rules::rule_from(&item, None)
+        {
+            self.remember_rule(rule);
+        }
         item.done = Some(time::now());
         item.answer = Some(answer);
         self.lock().inbox.insert(item.id.clone(), item.clone());
         self.save_item(&item);
         Ok(item.to_json())
+    }
+
+    /// The standing rule (#1314) that covers an event offer's `plugin`, if one does.
+    pub fn rule_for(&self, plugin: &Value) -> Option<Decision> {
+        decisions::covering_event(&self.lock().decisions, plugin).cloned()
+    }
+
+    /// Keeps a standing rule, in place of one for the same source, project and repository.
+    pub fn remember_rule(&self, rule: Decision) {
+        let kept = {
+            let mut state = self.lock();
+            state.decisions.retain(|d| {
+                !(d.kind == rule.kind
+                    && d.source == rule.source
+                    && d.project == rule.project
+                    && d.repo == rule.repo)
+            });
+            state.decisions.push(rule);
+            state.decisions.clone()
+        };
+        self.save_decisions(&kept);
+    }
+
+    /// The standing rules for events (#1314), as `GET /v1/obid/decisions` lists them.
+    pub fn rules(&self) -> Vec<Decision> {
+        self.lock()
+            .decisions
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind.as_str(),
+                    decisions::EVENT_ALERT | decisions::EVENT_DEPLOY
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Forgets a standing rule for events; false when there's no such rule.
+    pub fn forget_event_rule(&self, id: &str) -> bool {
+        let kept = {
+            let mut state = self.lock();
+            let before = state.decisions.len();
+            state.decisions.retain(|d| {
+                !(d.id == id
+                    && matches!(
+                        d.kind.as_str(),
+                        decisions::EVENT_ALERT | decisions::EVENT_DEPLOY
+                    ))
+            });
+            if state.decisions.len() == before {
+                return false;
+            }
+            state.decisions.clone()
+        };
+        self.save_decisions(&kept);
+        true
+    }
+
+    /// Counts a rule's start, and keeps where it reports (`conversation`, once it has one).
+    pub fn rule_started(&self, id: &str, conversation: Option<String>) {
+        let kept = {
+            let mut state = self.lock();
+            let Some(rule) = state.decisions.iter_mut().find(|d| d.id == id) else {
+                return;
+            };
+            rule.uses += 1;
+            rule.last_used = Some(time::now());
+            if conversation.is_some() {
+                rule.conversation = conversation;
+            }
+            state.decisions.clone()
+        };
+        self.save_decisions(&kept);
+    }
+
+    /// Changes an inbox item as `change` does, keeps it and says so.
+    pub fn change_item(&self, id: &str, change: impl FnOnce(&mut Item)) {
+        let changed = {
+            let mut state = self.lock();
+            let Some(item) = state.inbox.get_mut(id) else {
+                return;
+            };
+            change(item);
+            item.clone()
+        };
+        self.save_item(&changed);
     }
 
     /// `POST /v1/inbox/{id}/answer` on a `pluginEvent` item: `Dismiss` or `{"done": true}` settles
@@ -3145,6 +3246,27 @@ impl Link {
                 Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
                 None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
             },
+            inbox::action::REMEMBER_RULE => {
+                let rule: Decision = serde_json::from_value(confirmed.payload["rule"].clone())
+                    .map_err(|_| api(StatusCode::CONFLICT, "That rule's plan was lost."))?;
+                let known = self.config.repos.iter().any(|r| r.repo == rule.repo);
+                if !known
+                    || !matches!(
+                        rule.kind.as_str(),
+                        decisions::EVENT_ALERT | decisions::EVENT_DEPLOY
+                    )
+                {
+                    return Err(api(StatusCode::CONFLICT, "That rule isn't one Oby keeps."));
+                }
+                self.remember_rule(Decision {
+                    id: decisions::new_id(),
+                    created: time::now(),
+                    uses: 0,
+                    last_used: None,
+                    ..rule
+                });
+                Ok(())
+            }
             inbox::action::CREATE_ROUTINE => {
                 let draft: crate::routines::Draft =
                     serde_json::from_value(confirmed.payload["routine"].clone())
@@ -3746,7 +3868,8 @@ impl Link {
                     i.done.is_none()
                         && i.kind == "pluginEvent"
                         && i.options.len() > 1
-                        && matches!(&given, Given::Answer(a) if i.options.first() == Some(a))
+                        && matches!(&given, Given::Answer(a) if i.options.first() == Some(a)
+                            || (a.starts_with(crate::rules::FROM_NOW_ON) && i.options.contains(a)))
                 })
                 .cloned();
             if item.is_some()
@@ -3931,6 +4054,7 @@ impl Link {
                     inbox_item: item.id.clone(),
                     uses: 0,
                     last_used: None,
+                    ..Decision::default()
                 };
                 state.decisions.retain(|d| {
                     !(d.kind == decision.kind
@@ -4076,6 +4200,7 @@ impl Link {
                             inbox_item: item.id.clone(),
                             uses: 0,
                             last_used: None,
+                            ..Decision::default()
                         });
                     }
                     decisions = Some(state.decisions.clone());

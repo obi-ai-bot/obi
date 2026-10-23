@@ -137,7 +137,14 @@ fn sentry_offers_a_new_error_and_look_into_it_quotes_the_trace() {
         offer["text"],
         "Sentry says API-7 in api is new: 3 events since 2026-10-23T03:12:00Z."
     );
-    assert_eq!(offer["options"], json!(["Look into it", "Dismiss"]));
+    assert_eq!(
+        offer["options"],
+        json!([
+            "Look into it",
+            "Look into it, and from now on for api",
+            "Dismiss"
+        ])
+    );
 
     let started = call(
         &obid,

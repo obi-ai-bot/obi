@@ -49,6 +49,7 @@ pub mod push;
 pub mod review;
 pub mod routes;
 pub mod routines;
+pub mod rules;
 pub mod sandbox;
 pub mod scan;
 pub mod secrets;
@@ -472,10 +473,10 @@ pub async fn serve(
     // Every event a plug-in emits becomes a `pluginEvent` inbox item. The receiver ends once
     // the host has shut down.
     if let Some(mut events) = plugins.take_events() {
-        let link = link.clone();
+        let shared = shared.clone();
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
-                link.plugin_event(event);
+                rules::offer(&shared, shared.link.plugin_event_offer(&event));
             }
         });
     }

@@ -436,7 +436,7 @@ impl Hooks {
 /// `POST /v1/hooks/{id}/deliver`, on the gateway's own router (crate::gateway): no device token,
 /// so every check is this one's.
 pub async fn deliver(
-    shared: &Shared,
+    shared: &Arc<Shared>,
     id: &str,
     headers: HeaderMap,
     body: axum::body::Body,
@@ -473,9 +473,7 @@ pub async fn deliver(
     {
         match monitor(&hook, &bytes) {
             Some(found) if found.triggered => {
-                shared
-                    .link
-                    .add_event_item(monitor_item(&hook, &found, time::now()));
+                crate::rules::offer(shared, monitor_item(&hook, &found, time::now()));
             }
             Some(found) if found.recovered => {
                 let item_id = crate::sphere::inbox::plugin_event_item_id("datadog", &found.key);
@@ -493,9 +491,7 @@ pub async fn deliver(
     {
         if let Some(incident) = incident(&hook, &bytes) {
             if incident.opened {
-                shared
-                    .link
-                    .add_event_item(incident_item(&hook, &incident, time::now()));
+                crate::rules::offer(shared, incident_item(&hook, &incident, time::now()));
             } else {
                 let answer = format!("Resolved at the source at {}", clock(time::now()));
                 shared.link.settle_events(
@@ -526,9 +522,7 @@ pub async fn deliver(
             if alert.firing {
                 if matches!(alert.severity, "critical" | "error") && offered < ALERTS_PER_DELIVERY {
                     offered += 1;
-                    shared
-                        .link
-                        .add_event_item(alert_item(&hook, &alert, time::now()));
+                    crate::rules::offer(shared, alert_item(&hook, &alert, time::now()));
                 }
             } else {
                 shared.link.settle_event(
